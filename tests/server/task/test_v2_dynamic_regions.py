@@ -1013,11 +1013,18 @@ def test_recursive_cross_level_join_release_survives_rehydration() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _scope(eng: OrchestrationEngine, region_op: str) -> str:
+    scope = eng.scope_for(region_op)
+    assert scope is not None
+    return scope
+
+
 def test_cancellation_revokes_child_init_distinct_from_seal() -> None:
     eng = _engine(_spawn_join())
     child = eng.spawn_child("S")
     scope = eng.scope_for("S")
-    eng.on_cancelled(scope)  # type: ignore[arg-type]
+    assert scope is not None
+    eng.cancel_scope(scope)
     cap = eng.capability(scope, ProgressAxis.CHILD_INIT)
     assert cap is not None and cap.status is CapabilityStatus.REVOKED
     kinds = _kinds(eng)
@@ -1032,7 +1039,7 @@ def test_cancellation_revokes_grant_distinct_from_child_init_revoke() -> None:
     eng.spawn_child("S")
     grant_before = eng.grant_for("S")
     assert grant_before is not None and not grant_before.revoked
-    eng.on_cancelled("S")
+    eng.cancel_scope(_scope(eng, "S"))
     grant_after = eng.grant_for("S")
     assert grant_after is not None and grant_after.revoked
     kinds = [k for k, _ in eng.contract_trace()]
@@ -1044,7 +1051,7 @@ def test_cancellation_revokes_grant_distinct_from_child_init_revoke() -> None:
 def test_cancellation_recorded_before_join_release() -> None:
     eng = _engine(_spawn_join())
     eng.spawn_child("S")
-    eng.on_cancelled("S")
+    eng.cancel_scope(_scope(eng, "S"))
     kinds = [k for k, _ in eng.contract_trace()]
     assert kinds.index("scope_cancelled") < kinds.index("join_released")
     pub = eng.output_publication("out:J")
@@ -1067,7 +1074,7 @@ def test_inner_scope_cancel_resolves_join_and_readies_downstream() -> None:
         )
     )
     eng.spawn_child("S")
-    advance = eng.on_cancelled("S")
+    advance = eng.cancel_scope(_scope(eng, "S"))
     assert eng.region_closed("J")
     pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
@@ -1092,7 +1099,7 @@ def test_cancellation_residual_drain_lets_materialized_children_settle() -> None
         )
     )
     child = eng.spawn_child("S")
-    eng.on_cancelled("S")
+    eng.cancel_scope(_scope(eng, "S"))
     # A drain residual policy leaves a materialized child to settle, not cancelled.
     assert _child_status(eng, child) != "cancelled"
     eng.settle_child(child)

@@ -258,7 +258,7 @@ def _ds_drive(
 
     Parents on the episode owning the wrapped call's first positional argument (a task
     id) when one resolves to a work item; falls back to the workflow when it does not
-    — ``on_cancelled`` may be called with a scope id rather than a task id, which
+    — ``cancel_scope`` is called with a scope id rather than a task id, which
     resolves no work item.
     """
 
@@ -2551,7 +2551,7 @@ class OrchestrationEngine:
 
     def cancel_instance(self) -> Advance:
         """Cancel the whole workflow instance: the root scope and every descendant."""
-        return self.on_cancelled(self._root_scope.scope_id)
+        return self.cancel_scope(self._root_scope.scope_id)
 
     def fail_instance(self, reason: str) -> Advance:
         """Fail the whole workflow instance as a recorded terminal event.
@@ -2579,20 +2579,18 @@ class OrchestrationEngine:
         return advance
 
     @_ds_drive(ControlPlaneWindow.POST_START)
-    def on_cancelled(self, scope_or_task: str) -> Advance:
+    def cancel_scope(self, scope_id: str) -> Advance:
         """Cancel a scope subtree as a durable, recorded-before-terminal event.
 
-        ``scope_or_task`` resolves to a scope by scope id, opener activation, region
-        handle, or a settled task's owning scope. Over that scope and each descendant,
-        in order: record the cancellation; revoke the child-init (and loop-time)
-        capability — a transition distinct from sealing; apply the residual-child policy
-        to materialized children; transition the remaining in-flight work items to
-        ``CANCELLED``; revoke the scope's authority grant — distinct from the child-init
-        revoke; and resolve declared outputs to their cancellation / no-winner outcome.
+        Over the scope and each descendant, in order: record the cancellation; revoke
+        the child-init (and loop-time) capability — a transition distinct from sealing;
+        apply the residual-child policy to materialized children; transition the
+        remaining in-flight work items to ``CANCELLED``; revoke the scope's authority
+        grant — distinct from the child-init revoke; and resolve declared outputs to
+        their cancellation / no-winner outcome.
         """
-        scope_id = self._resolve_scope(scope_or_task)
-        if scope_id is None:
-            raise RegionError(f"{scope_or_task!r} resolves to no cancellable scope")
+        if scope_id not in self._scopes:
+            raise RegionError(f"{scope_id!r} is no cancellable scope")
         advance = Advance()
         for sid in self._scope_subtree(scope_id):
             advance.extend(self._cancel_scope(sid))
@@ -2707,16 +2705,6 @@ class OrchestrationEngine:
         )
         self._emitter.emit_work_item(wi)
         self._emitter.emit_activation(wi.activation_id)
-
-    def _resolve_scope(self, handle: str) -> str | None:
-        if handle in self._scopes:
-            return handle
-        if handle in self._scope_by_activation:
-            return self._scope_by_activation[handle]
-        if (wi_id := self._wi_by_task.get(handle)) is not None:
-            act = self._activations.get(self._work_items[wi_id].activation_id)
-            return act.scope_id if act else None
-        return self._scope_id_for(handle)
 
     def _scope_subtree(self, root: str) -> list[str]:
         order = [root]

@@ -513,8 +513,8 @@ def test_cancelled_never_dispatched_work_item_span_is_closed() -> None:
     assert child_wi.status is WorkItemStatus.READY
     assert not child_wi.attempt_ids  # never dispatched: zero attempts
 
-    # Cancel it directly, with no attempt ever having been issued.
-    eng.on_cancelled(child_wi.legacy_task_id)
+    # Cancel its scope, with no attempt ever having been issued.
+    eng.cancel_scope(eng._activations[child_wi.activation_id].scope_id)
     assert child_wi.status is WorkItemStatus.CANCELLED
 
     episode_spans = _spans_named(exporter, SPAN_EPISODE)
