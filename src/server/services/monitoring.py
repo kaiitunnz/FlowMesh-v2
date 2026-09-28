@@ -761,7 +761,10 @@ class EventMonitor:
                     self._logger.warning(
                         "Heartbeat from unknown worker %s; ignoring", worker_id
                     )
-            case "STATUS":
+            case "STATUS" if event.origin == "worker":
+                # A server-origin event announces a write the registry already applied
+                # inline; replaying it would land that value again on top of whatever
+                # has since replaced it.
                 worker_id = (event.worker_id or "").strip()
                 status = event.status or WorkerStatus.UNKNOWN
                 success = self._worker_registry.set_worker_status(

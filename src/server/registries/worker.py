@@ -296,6 +296,7 @@ class WorkerRegistry:
             "worker_id": worker_id,
             "status": status.value,
             "ts": ts,
+            "origin": "server",
         }
         self._rds.sync.publish_telemetry(
             WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
@@ -315,6 +316,7 @@ class WorkerRegistry:
             "worker_id": worker_id,
             "status": status.value,
             "ts": ts,
+            "origin": "server",
         }
         await self._rds.asyncio.publish_telemetry(
             WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
