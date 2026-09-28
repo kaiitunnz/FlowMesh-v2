@@ -65,7 +65,7 @@ from .base_executor import (
 
 try:
     from docker import DockerClient
-    from docker.errors import NotFound
+    from docker.errors import DockerException, NotFound
     from docker.models.containers import Container
     from docker.types import DeviceRequest
 
@@ -74,7 +74,7 @@ except Exception:
     _HAS_DOCKER = False
     if TYPE_CHECKING:
         from docker import DockerClient
-        from docker.errors import NotFound
+        from docker.errors import DockerException, NotFound
         from docker.models.containers import Container
         from docker.types import DeviceRequest
     else:
@@ -928,8 +928,6 @@ class SSHExecutor(Executor):
                 return 0
             try:
                 container.reload()
-                self._enforce_output_limit(container, output_cfg, mount_plan)
-                exited = container.status not in ("running", "restarting")
             except NotFound as exc:
                 # A stop or cancel stops the container it waits on; nothing else
                 # removes it while the session runs.
@@ -941,10 +939,16 @@ class SSHExecutor(Executor):
             except Exception as exc:
                 logger.debug("Container reload error: %s", exc)
             else:
-                if exited:
+                if container.status not in ("running", "restarting"):
                     if self._signals.raise_if_cancelled():
                         return 0
                     return int(container.wait()["StatusCode"])
+                try:
+                    self._enforce_output_limit(container, output_cfg, mount_plan)
+                except (DockerException, OSError) as exc:
+                    # The container can stop, or its output change, under the size
+                    # check; the next poll sees it.
+                    logger.debug("SSH output size check failed: %s", exc)
             time.sleep(poll_interval_sec)
 
         logger.info("SSH session TTL reached; stopping container")
