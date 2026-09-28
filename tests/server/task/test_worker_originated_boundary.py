@@ -8,6 +8,7 @@ entering the ledger. If the origin worker is lost the boundary fails clean.
 
 import asyncio
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -1093,6 +1094,101 @@ def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
             ToolOutcome(
                 status=ToolOutcomeStatus.SUCCESS, value="sunny"
             ).model_dump_json()
+        ]
+
+    asyncio.run(run())
+
+
+def _frames(runtime: TaskRuntime, kind: str) -> list[tuple[str, dict[str, Any]]]:
+    frames = cast(Any, runtime._worker_registry).frames
+    return [(target, payload) for target, k, payload in frames if k == kind]
+
+
+_UNDECLARED_SEARCH = [
+    ScriptedStep(
+        op="boundary",
+        kind=BoundaryEventKind.INVOCATION,
+        call="s0",
+        interface=SEARCH_INTERFACE,
+        payload=_PAYLOAD,
+    ),
+    ScriptedStep(op="complete", value_from="s0"),
+]
+
+
+def test_a_denied_boundary_reaps_the_request_its_worker_captured() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _MODEL_WF)
+        writer = ids["writer"]
+
+        _dispatch_agent(runtime, writer, script=_UNDECLARED_SEARCH)
+
+        assert _permit_frames(runtime) == []
+        assert _frames(runtime, "reap") == [
+            ("wkr-1", {"agent_task_id": writer, "call_correlation": "s0"})
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_search_past_the_turn_cap_reaps_the_request_its_worker_captured() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        runtime._web_search = replace(runtime._web_search, max_parallel=1)
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _hold_dispatch(runtime, writer)
+        first = _search_group(writer, 0, "sha-a").members[0]
+        second = first.model_copy(
+            update={"ordinal": 1, "call_correlation": f"{writer}:0:1"}
+        )
+        group = _search_group(writer, 0, "sha-a").model_copy(
+            update={"members": (first, second)}
+        )
+        runtime.receive_worker_facade_group(writer, group)
+        completion = HarnessResult(
+            kind=HarnessResultKind.COMPLETION,
+            value="done",
+            capsule=HarnessCapsule(
+                backend=HarnessBackendKey(backend="scripted", version="v1"), blob="c"
+            ),
+        )
+
+        runtime.mark_succeeded(
+            writer, "wkr-1", {"agent_episode": completion.model_dump(mode="json")}, _TS
+        )
+
+        assert len(_permit_frames(runtime)) == 1
+        assert _frames(runtime, "reap") == [
+            ("wkr-1", {"agent_task_id": writer, "call_correlation": f"{writer}:0:1"})
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_stale_step_reaps_the_request_its_worker_captured() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _hold_dispatch(runtime, writer, worker="wkr-2")
+        stale = AgentEpisodeExecutor._capture_local_request(
+            PendingEgressRequestStore(),
+            writer,
+            ScriptedHarnessAdapter(_SCRIPT, "v1").start(
+                writer, capsule=None, outcomes=[]
+            ),
+            None,
+        )
+
+        runtime.mark_succeeded(
+            writer, "wkr-1", {"agent_episode": stale.model_dump(mode="json")}, _TS
+        )
+
+        assert _permit_frames(runtime) == []
+        assert _frames(runtime, "reap") == [
+            ("wkr-1", {"agent_task_id": writer, "call_correlation": "m0"})
         ]
 
     asyncio.run(run())

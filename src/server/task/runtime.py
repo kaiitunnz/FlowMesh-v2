@@ -1886,7 +1886,10 @@ class TaskRuntime:
             else None
         )
         handled = False
+        denied_capture: tuple[str | None, str] | None = None
         if corr is not None and env is not None and env.denial is not None:
+            if request.request_digest is not None:
+                denied_capture = (record.assigned_worker, corr)
             engine.mark_pending_outcome(task_id, corr)
             engine.deliver_boundary_outcome(task_id, corr)
             self._reenqueue_episode_locked(task_id)
@@ -1917,6 +1920,11 @@ class TaskRuntime:
                 self._reenqueue_episode_locked(task_id)
                 changed = True
         self._save_ledger_locked(record.workflow_id)
+        if denied_capture is not None:
+            worker_id, call = denied_capture
+            self._reap_captured_request_locked(
+                worker_id, task_id, call, request.interface
+            )
         if changed:
             self._cv.notify_all()
 
@@ -2037,6 +2045,16 @@ class TaskRuntime:
                 # (cancellation already terminalized and released it). This precedes the
                 # credit hook so a late success cannot win the claim's terminal reason.
                 return False
+            # A resident request's reap follows its credit release; see the resident
+            # terminal hook.
+            env = engine.pending_tool_dispatch(task_id, call_correlation)
+            captured_on = (
+                record.assigned_worker
+                if env is not None
+                and env.request_digest is not None
+                and engine.service_dependency(task_id) is None
+                else None
+            )
             if error is not None:
                 advance = engine.on_failed(
                     task_id, f"agent boundary failed: {error}", retryable=False
@@ -2049,6 +2067,7 @@ class TaskRuntime:
                 # A fenced failure terminal releases the resident credit just as a
                 # completion does; nothing else may release an accepted credit.
                 self._release_resident_credit(invocation_id, failed=True)
+                self._reap_mediated_op(captured_on, task_id, call_correlation)
                 if changed:
                     self._cv.notify_all()
                 return changed
@@ -2066,6 +2085,7 @@ class TaskRuntime:
                 self._apply_advance_locked(record.workflow_id, advance)
             self._save_ledger_locked(record.workflow_id)
             self._release_resident_credit(invocation_id, failed=False)
+            self._reap_mediated_op(captured_on, task_id, call_correlation)
             self._cv.notify_all()
             return True
 
@@ -2154,7 +2174,12 @@ class TaskRuntime:
             error = "resident-capacity control is not running"
         else:
             return
-        self._settle_episode_invocation(env.task_id, env.call_correlation, error=error)
+        with self._lock:
+            worker_id = self._assigned_worker_locked(env.task_id)
+            self._settle_episode_invocation(
+                env.task_id, env.call_correlation, error=error
+            )
+            self._relay_resident_reap(worker_id, env.task_id, env.call_correlation)
 
     def on_resident_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None:
         """Consume an origin worker's resident bootstrap-phase report."""
@@ -2277,7 +2302,6 @@ class TaskRuntime:
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error=op_credential.reason
             )
-            self._reap_mediated_op(worker_id, env.task_id, env.call_correlation)
             return
         max_results, timeout_sec, result_char_cap = self._op_permit_budget(
             env.interface
@@ -2299,7 +2323,6 @@ class TaskRuntime:
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error="could not mint a permit"
             )
-            self._reap_mediated_op(worker_id, env.task_id, env.call_correlation)
             return
         # A re-drive re-mints under a fresh permit id; keep at most one pending op per
         # occurrence.
@@ -2415,6 +2438,13 @@ class TaskRuntime:
             )
             agent_task_id = outcome.agent_task_id
             call = outcome.call_correlation
+            record = self._tasks.get(agent_task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None or not engine.boundary_settleable(agent_task_id, call):
+                # A duplicate or late report settles nothing, so nothing else reaps
+                # the request its worker still holds.
+                self._reap_mediated_op(worker_id, agent_task_id, call)
+                return
             if outcome.error is not None:
                 self._settle_episode_invocation(
                     agent_task_id, call, error=f"tool operation failed: {outcome.error}"
@@ -2431,7 +2461,6 @@ class TaskRuntime:
                 self._settle_episode_invocation(
                     agent_task_id, call, error="tool operation returned no outcome"
                 )
-            self._reap_mediated_op(worker_id, agent_task_id, call)
 
     def _assigned_worker_locked(self, agent_task_id: str) -> str | None:
         record = self._tasks.get(agent_task_id)
@@ -2452,6 +2481,40 @@ class TaskRuntime:
                 worker_id=worker_id,
                 frame_kind="reap",
                 payload={"agent_task_id": agent_task_id, "call_correlation": call},
+            ),
+        )
+
+    def _reap_captured_request_locked(
+        self, worker_id: str | None, task_id: str, call: str, interface: str | None
+    ) -> None:
+        """Relay a reap for a request the worker captured for a boundary that will
+        never run, from whichever store holds it."""
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        if (
+            interface == MODEL_INTERFACE
+            and engine is not None
+            and engine.service_dependency(task_id) is not None
+        ):
+            self._relay_resident_reap(worker_id, task_id, call)
+        else:
+            self._reap_mediated_op(worker_id, task_id, call)
+
+    def _relay_resident_reap(
+        self, worker_id: str | None, task_id: str, call: str
+    ) -> None:
+        """Relay a best-effort reap so the worker drops a captured resident request."""
+        if not worker_id:
+            return
+        worker = self._worker_registry.get_worker(worker_id)
+        if worker is None:
+            return
+        self._worker_registry.publish_mediated_op(
+            worker,
+            MediatedOpMessage(
+                worker_id=worker_id,
+                frame_kind="resident_reap",
+                payload={"task_id": task_id, "call_correlation": call},
             ),
         )
 
@@ -4857,6 +4920,7 @@ class TaskRuntime:
             ):
                 if worker_id is not None:
                     self._heal_returned_locked(task_id, worker_id, dispatch_id)
+                    self._reap_stale_captures_locked(record, worker_id, payload)
                 return SettleOutcome(EventEffect.STALE, record.status, [], [])
             effect = (
                 EventEffect.SETTLED
@@ -5346,6 +5410,37 @@ class TaskRuntime:
         if self._enqueue_ready_locked(task_id, front=front):
             self._cv.notify_all()
         self._commit_locked(*moved)
+
+    def _reap_stale_captures_locked(
+        self, record: TaskRecord, worker_id: str, payload: dict[str, Any]
+    ) -> None:
+        """Reap the requests a stale agent step captured, which control never runs.
+
+        A worker that holds the task again may have captured the same boundary anew,
+        so its requests are left to that dispatch.
+        """
+        if record.assigned_worker == worker_id:
+            return
+        captures: list[tuple[str, str | None]] = []
+        if (step := payload.get("agent_episode")) is not None:
+            request = HarnessResult.model_validate(step).request
+            if (
+                request is not None
+                and request.request_digest is not None
+                and request.call_correlation is not None
+            ):
+                captures.append((request.call_correlation, request.interface))
+        if (carried := payload.get("agent_episode_facade_group")) is not None:
+            group = FacadeTurnGroup.model_validate(carried)
+            captures.extend(
+                (member.call_correlation, SEARCH_INTERFACE)
+                for member in group.members
+                if member.request_digest is not None
+            )
+        for call, interface in captures:
+            self._reap_captured_request_locked(
+                worker_id, record.task_id, call, interface
+            )
 
     def _heal_returned_locked(
         self, task_id: str, worker_id: str, dispatch_id: str | None

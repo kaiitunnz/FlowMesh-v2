@@ -385,6 +385,9 @@ class ResidentCapacityControl:
         self._control = control if control is not None else NULL_CONTROL_TRACER
         self._transient_failures: dict[str, int] = {}
         self._attempts: dict[str, _Attempt] = {}
+        # The task and call of each workflow origination, so a terminal that ends one
+        # before any attempt still reaps the request its origin worker captured.
+        self._originations: dict[str, tuple[str, str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
@@ -546,7 +549,19 @@ class ResidentCapacityControl:
         nothing to reap.
         """
         attempt = self._attempts.pop(invocation_id, None)
-        if attempt is None or self._delivery is None:
+        origination = self._originations.pop(invocation_id, None)
+        if self._delivery is None:
+            return
+        if attempt is None:
+            if origination is not None and (
+                origin := self._delivery.origin_worker_of_task(origination[0])
+            ):
+                task_id, call_correlation = origination
+                self._delivery.relay(
+                    origin,
+                    "resident_reap",
+                    {"task_id": task_id, "call_correlation": call_correlation},
+                )
             return
         if attempt.serve is not None:
             attempt.serve.close_session(attempt.session_id)
@@ -761,6 +776,7 @@ class ResidentCapacityControl:
         raise/resume, endpoint probe) so the originating agent call always settles or
         holds instead of hanging.
         """
+        self._originations[env.invocation_id] = (env.task_id, env.call_correlation)
         try:
             await self._originate_inner(env)
         except Exception as exc:

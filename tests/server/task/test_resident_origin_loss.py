@@ -219,3 +219,22 @@ def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again() -> No
         assert [o.value for o in dispatch.delivered_outcomes] == ["done"]
 
     asyncio.run(run())
+
+
+def test_a_resident_call_control_cannot_originate_reaps_its_request() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _RESIDENT_WF)
+        writer = ids["writer"]
+
+        _capture_resident_boundary(runtime, writer)
+
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.FAILED
+        frames = cast(Any, runtime._worker_registry).frames
+        assert [(target, payload) for target, kind, payload in frames] == [
+            ("wkr-1", {"task_id": writer, "call_correlation": "m0"})
+        ]
+        assert [kind for _, kind, _ in frames] == ["resident_reap"]
+
+    asyncio.run(run())

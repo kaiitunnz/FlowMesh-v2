@@ -524,6 +524,23 @@ def test_disallowed_model_denies_without_allocation_or_credit():
     assert stores.claims.all() == []
 
 
+def test_a_denied_origination_reaps_the_request_its_worker_captured():
+    limits = ResidentPolicyLimits(allowed_models=frozenset({"approved-only"}))
+    svc, _stores, settled, delivery = _build(limits=limits)
+    asyncio.run(svc._originate(_env()))
+    assert settled and delivery.relays == []
+
+    svc.on_invocation_terminal("inv-1", failed=True)
+
+    assert delivery.relays == [
+        (
+            "wkr-origin",
+            "resident_reap",
+            {"task_id": "tsk-1", "call_correlation": "c1"},
+        )
+    ]
+
+
 def test_failed_materialize_recovers_family_and_settles():
     async def boom(family: str, replica: ReplicaIncarnation) -> str:
         raise RuntimeError("cold start failed")
