@@ -463,21 +463,34 @@ class TestCancelStop:
             make_worker_config(enable_dev_model=True), make_worker_hardware()
         )
 
-    def test_cancel_sets_event_and_shuts_down_server(self) -> None:
+    def test_cancel_signals_the_running_task_and_shuts_down_server(self) -> None:
         ex = self._make_executor()
         server = MagicMock()
         ex._server = server
-        ex.cancel("tsk-test")
-        assert ex._cancel_event.is_set()
+        with ex._signals.running("tsk-test"):
+            ex.cancel("tsk-test")
+            assert ex._signals.cancelled
         server.shutdown.assert_called_once_with()
 
-    def test_stop_sets_event_and_shuts_down_server(self) -> None:
+    def test_stop_signals_the_running_task_and_shuts_down_server(self) -> None:
         ex = self._make_executor()
         server = MagicMock()
         ex._server = server
-        ex.stop("tsk-test")
-        assert ex._stop_event.is_set()
+        with ex._signals.running("tsk-test"):
+            ex.stop("tsk-test")
+            assert ex._signals.stopped
         server.shutdown.assert_called_once_with()
+
+    def test_a_signal_for_a_task_it_is_not_running_is_a_no_op(self) -> None:
+        ex = self._make_executor()
+        server = MagicMock()
+        ex._server = server
+        ex.cancel("tsk-done")
+        ex.stop("tsk-done")
+        with ex._signals.running("tsk-next"):
+            assert not ex._signals.cancelled
+            assert not ex._signals.stopped
+        server.shutdown.assert_not_called()
 
     def test_cancel_no_server_is_safe(self) -> None:
         ex = self._make_executor()
@@ -486,16 +499,17 @@ class TestCancelStop:
 
     def test_wait_for_serve_unblocks_on_stop(self) -> None:
         ex = self._make_executor()
-        ex._stop_event.set()
         orig = mod._POLL_INTERVAL_SEC
         mod._POLL_INTERVAL_SEC = 0.01
         try:
-            ex._wait_for_serve(ttl_sec=60.0)
+            with ex._signals.running("tsk-test"):
+                ex.stop("tsk-test")
+                ex._wait_for_serve(ttl_sec=60.0)
         finally:
             mod._POLL_INTERVAL_SEC = orig
 
     def test_wait_for_serve_raises_on_cancel(self) -> None:
         ex = self._make_executor()
-        ex._cancel_event.set()
-        with pytest.raises(TaskCancelledError):
+        with ex._signals.running("tsk-test"), pytest.raises(TaskCancelledError):
+            ex.cancel("tsk-test")
             ex._wait_for_serve(ttl_sec=60.0)

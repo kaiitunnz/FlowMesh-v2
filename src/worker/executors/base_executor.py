@@ -27,7 +27,10 @@ Contract:
 """
 
 import json
+import threading
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
@@ -79,6 +82,52 @@ class ExecutionError(RuntimeError):
 
 class TaskCancelledError(RuntimeError):
     """Raised when a task is explicitly cancelled while running."""
+
+
+class RunSignals:
+    """Cancel and stop requests for the task an executor is running.
+
+    A request names its task, so one that lands after its task ended never reaches
+    the next task the executor runs.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._running: str | None = None
+        self._cancel: str | None = None
+        self._stop: str | None = None
+
+    @contextmanager
+    def running(self, task_id: str) -> Iterator[None]:
+        with self._lock:
+            self._running = task_id
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._running = self._cancel = self._stop = None
+
+    def cancel(self, task_id: str) -> bool:
+        """Request a cancel; returns whether the task is running."""
+        with self._lock:
+            self._cancel = task_id
+            return task_id == self._running
+
+    def stop(self, task_id: str) -> bool:
+        """Request a graceful stop; returns whether the task is running."""
+        with self._lock:
+            self._stop = task_id
+            return task_id == self._running
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._running is not None and self._cancel == self._running
+
+    @property
+    def stopped(self) -> bool:
+        with self._lock:
+            return self._running is not None and self._stop == self._running
 
 
 class Executor(ABC):

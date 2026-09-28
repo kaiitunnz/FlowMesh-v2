@@ -59,6 +59,7 @@ from .base_executor import (
     ExecutionError,
     Executor,
     ExecutorTask,
+    RunSignals,
     TaskCancelledError,
 )
 
@@ -418,8 +419,7 @@ class SSHExecutor(Executor):
         self._docker: DockerClient | None = None
         self._docker_gpu_runtime: str | None = config.docker_gpu_runtime
         self._ssh_network: str | None = None
-        self._cancel_event = threading.Event()
-        self._finish_event = threading.Event()
+        self._signals = RunSignals()
         self._current_container: Container | None = None
 
     @classmethod
@@ -474,6 +474,10 @@ class SSHExecutor(Executor):
     # ------------------------------------------------------------------ #
 
     def run(self, task: ExecutorTask, out_dir: Path) -> SSHResult:
+        with self._signals.running(task.task_id):
+            return self._run_session(task, out_dir)
+
+    def _run_session(self, task: ExecutorTask, out_dir: Path) -> SSHResult:
         spec = self.require_spec(task, SSHSpecStrict)
         cfg = SSHConfig.from_spec(spec, self._config, self._hardware)
         access_mode = cfg.access_mode
@@ -612,8 +616,6 @@ class SSHExecutor(Executor):
                 # the container.
                 log_thread.join(timeout=30.0)
             self._current_container = None
-            self._cancel_event.clear()
-            self._finish_event.clear()
             if container is not None:
                 self._stop_container(container, container_name, cfg.stop_timeout_sec)
             self._cleanup_mount_plan(client, mount_plan)
@@ -626,7 +628,8 @@ class SSHExecutor(Executor):
         return result
 
     def cancel(self, task_id: str) -> None:
-        self._cancel_event.set()
+        if not self._signals.cancel(task_id):
+            return
         container = self._current_container
         if container is None:
             return
@@ -638,7 +641,8 @@ class SSHExecutor(Executor):
             )
 
     def stop(self, task_id: str) -> None:
-        self._finish_event.set()
+        if not self._signals.stop(task_id):
+            return
         container = self._current_container
         if container is None:
             return
@@ -891,9 +895,9 @@ class SSHExecutor(Executor):
         # and last activity timestamp
         deadline = time.time() + ttl_sec
         while time.time() < deadline:
-            if self._cancel_event.is_set():
+            if self._signals.cancelled:
                 raise TaskCancelledError("SSH session cancelled")
-            if self._finish_event.is_set() or self._finish_requested(container):
+            if self._signals.stopped or self._finish_requested(container):
                 logger.info("SSH session finish requested; stopping container")
                 try:
                     container.stop(timeout=1)
@@ -910,7 +914,7 @@ class SSHExecutor(Executor):
                     return int(container.wait()["StatusCode"])
             except Exception as exc:
                 logger.debug("Container reload error (may have exited): %s", exc)
-                if self._finish_event.is_set():
+                if self._signals.stopped:
                     return 0
                 break
             time.sleep(poll_interval_sec)
