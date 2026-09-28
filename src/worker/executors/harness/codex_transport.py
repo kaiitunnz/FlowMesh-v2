@@ -334,7 +334,7 @@ class RealCodexAppServerTransport:
                     kind="completed", value=agent_texts[-1] if agent_texts else ""
                 )
 
-    def cancel(self, thread_id: str) -> None:
+    def cancel(self, thread_id: str | None) -> None:
         self.close()
 
     def close(self) -> None:

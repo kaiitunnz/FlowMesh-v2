@@ -8,6 +8,7 @@ persisted rollout, a re-delivered outcome injects at most once, gated by the com
 fabric idempotency key rather than a Codex-local call id.
 """
 
+import threading
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 from shared.harness import (
     REQUIRED_MEDIATED_FACADES,
     DeliveredOutcome,
+    HarnessCapsule,
     HarnessResultKind,
     OutcomeKind,
 )
@@ -71,7 +73,7 @@ class FakeCodexAppServer:
         self.cursor += 1
         return CodexEvent(kind=block["kind"], value=block.get("value"))
 
-    def cancel(self, thread_id: str) -> None:
+    def cancel(self, thread_id: str | None) -> None:
         self.cancelled += 1
 
 
@@ -117,6 +119,50 @@ def test_a_cancel_before_the_turn_starts_ends_the_step() -> None:
     assert fake.cursor == 0
     # The cancel was the step's; the next step runs.
     assert adapter.start("a", capsule=None, outcomes=[]).value == "done"
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_a_cancel_ends_a_step_still_opening_its_thread(resume: bool) -> None:
+    opening = threading.Event()
+    closed = threading.Event()
+
+    class _HungAppServer(FakeCodexAppServer):
+        def thread_start(self) -> str:
+            opening.set()
+            closed.wait(5)
+            raise RuntimeError("the Codex app-server closed")
+
+        def thread_resume(self, thread_id: str, rollout_ref: str) -> None:
+            self.thread_start()
+
+        def cancel(self, thread_id: str | None) -> None:
+            super().cancel(thread_id)
+            closed.set()
+
+    fake = _HungAppServer([{"kind": "completed", "value": "done"}])
+    adapter = CodexAppServerHarnessAdapter(fake)
+    capsule = (
+        HarnessCapsule(
+            backend=adapter.backend_key(),
+            blob='{"thread_id": "thr-1", "rollout_ref": "thr-1"}',
+        )
+        if resume
+        else None
+    )
+
+    def give_up() -> None:
+        opening.wait(5)
+        adapter.cancel("a")
+
+    canceller = threading.Thread(target=give_up)
+    canceller.start()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        adapter.start("a", capsule=capsule, outcomes=[])
+    canceller.join(5)
+
+    assert fake.cancelled == 1
+    assert fake.cursor == 0
 
 
 def test_a_delivered_outcome_injects_and_resumes_the_rollout() -> None:

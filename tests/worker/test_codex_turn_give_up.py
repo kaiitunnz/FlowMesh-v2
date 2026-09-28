@@ -112,7 +112,7 @@ class _AppServer:
             time.sleep(0.01)
         return CodexEvent(kind="completed", value="done")
 
-    def cancel(self, thread_id: str) -> None:
+    def cancel(self, thread_id: str | None) -> None:
         self.closed.set()
 
 
@@ -263,7 +263,7 @@ class _SearchingAppServer:
         turn.join(_TURN_SEC)
         return CodexEvent(kind="completed", value="done")
 
-    def cancel(self, thread_id: str) -> None:
+    def cancel(self, thread_id: str | None) -> None:
         pass
 
 
