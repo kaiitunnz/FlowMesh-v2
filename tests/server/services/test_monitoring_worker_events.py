@@ -4,6 +4,8 @@ import json
 import logging
 from unittest.mock import MagicMock
 
+import pytest
+
 from server.registries.worker import WorkerRegistry
 from server.services.monitoring import EventMonitor
 from shared.schemas.event import WorkerEvent, parse_event
@@ -31,36 +33,24 @@ def _status(worker_id: str) -> WorkerEvent:
     return WorkerEvent(type="STATUS", worker_id=worker_id, payload={})
 
 
-def test_heartbeat_from_unregistered_worker_ignored() -> None:
+@pytest.mark.parametrize(
+    ("event", "write"),
+    [
+        (_heartbeat("wkr-1"), "update_worker_hb"),
+        (_status("wkr-1"), "set_worker_status"),
+    ],
+    ids=["heartbeat", "status"],
+)
+def test_an_event_from_an_unknown_worker_is_reported_and_dropped(
+    event: WorkerEvent, write: str, caplog: pytest.LogCaptureFixture
+) -> None:
     registry = MagicMock()
-    registry.update_worker_hb.return_value = False
-    monitor = _monitor(registry)
-    monitor._handle_worker_event(_heartbeat("wkr-1"))
-    registry.update_worker_hb.assert_called_once()
+    getattr(registry, write).return_value = False
 
+    with caplog.at_level(logging.WARNING, logger="test-monitor"):
+        _monitor(registry)._handle_worker_event(event)
 
-def test_heartbeat_from_registered_worker_updates() -> None:
-    registry = MagicMock()
-    registry.update_worker_hb.return_value = True
-    monitor = _monitor(registry)
-    monitor._handle_worker_event(_heartbeat("wkr-1"))
-    registry.update_worker_hb.assert_called_once()
-
-
-def test_status_from_unregistered_worker_ignored() -> None:
-    registry = MagicMock()
-    registry.set_worker_status.return_value = False
-    monitor = _monitor(registry)
-    monitor._handle_worker_event(_status("wkr-1"))
-    registry.set_worker_status.assert_called_once()
-
-
-def test_status_from_registered_worker_updates() -> None:
-    registry = MagicMock()
-    registry.set_worker_status.return_value = True
-    monitor = _monitor(registry)
-    monitor._handle_worker_event(_status("wkr-1"))
-    registry.set_worker_status.assert_called_once()
+    assert "unknown worker wkr-1" in caplog.text
 
 
 class TestServerOriginStatusEvents:
