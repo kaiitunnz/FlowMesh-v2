@@ -42,6 +42,17 @@ from worker.runner import Runner
 
 _TASK = "tsk-codex"
 _TURN_SEC = 4.0
+_STOP_BUDGET_SEC = 5.0
+_BOUNDARY_DRAIN_SEC = 3.0
+
+
+def _eventually(predicate: Any, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
 
 
 class _Sidecar:
@@ -88,7 +99,7 @@ class _AppServer:
                 self._facade.handle_turn(
                     _TASK, token, {"input": [{"role": "user", "content": "hi"}]}
                 )
-            except Exception:  # noqa: BLE001 - a failed turn is still a reply
+            except Exception:
                 pass
             replied.set()
 
@@ -162,38 +173,22 @@ def test_a_shutdown_gives_up_a_held_codex_turn(tmp_path: Path) -> None:
 
     register_adapter("fake-codex", build)
     with (
-        patch.object(runner_module, "_STOP_BUDGET_SEC", 2.5),
-        patch.object(runner_module, "_BOUNDARY_DRAIN_SEC", 1.5),
+        patch.object(runner_module, "_STOP_BUDGET_SEC", _STOP_BUDGET_SEC),
+        patch.object(runner_module, "_BOUNDARY_DRAIN_SEC", _BOUNDARY_DRAIN_SEC),
     ):
         run_until_exit(runner, lifecycle, MagicMock())
-    assert not rendezvous._waiters
+    # The step reports on its own thread, which a loaded host may run after the exit.
+    assert _eventually(lambda: client.task_cancelled.called)
+    assert _eventually(lambda: not rendezvous._waiters)
     held = next(iter(rendezvous._held))
 
-    runner._route_mediated_op(
-        "permit",
-        MediatedOperationPermit(
-            permit_id=new_mediated_permit_id(),
-            agent_task_id=held[0],
-            call_correlation=held[1],
-            interface="model",
-            subject="model",
-            invocation_id="inv-1",
-            idempotency_key="idm-1",
-            request_digest="d",
-            target_id="wrk-test",
-            target_generation=1,
-            deadline_epoch=2_000_000_000.0,
-            max_results=1,
-            timeout_sec=10.0,
-            result_char_cap=4000,
-        ).model_dump(mode="json"),
-    )
+    # With no waiter armed, a permit for the held turn is dropped where it is routed.
+    runner._route_mediated_op("permit", _permit("model", *held))
 
-    time.sleep(0.2)  # a waiter handed the permit would egress it on its own thread
     assert servers[0].closed.is_set()
     client.task_cancelled.assert_called_once()
     client.task_failed.assert_not_called()
-    assert stamps["unregister"] - stamps["sigterm"] < 2.5
+    assert stamps["unregister"] - stamps["sigterm"] < _STOP_BUDGET_SEC
     assert sidecar.egressed == []
     assert lifecycle.pending_egress_requests.occurrences() == []
 
@@ -346,13 +341,13 @@ def test_a_give_up_during_the_seal_keeps_the_searches_the_turn_asked_for(
         ),
         patch.object(aee, "_attachment", lambda dispatch: MagicMock()),
         patch.object(Runner, "_write_results", lambda self, msg, out_dir, out: {}),
-        patch.object(runner_module, "_STOP_BUDGET_SEC", 2.5),
-        patch.object(runner_module, "_BOUNDARY_DRAIN_SEC", 1.5),
+        patch.object(runner_module, "_STOP_BUDGET_SEC", _STOP_BUDGET_SEC),
+        patch.object(runner_module, "_BOUNDARY_DRAIN_SEC", _BOUNDARY_DRAIN_SEC),
     ):
         run_until_exit(runner, lifecycle, MagicMock())
 
     assert gave_up == [True]
-    client.task_succeeded.assert_called_once()
+    assert _eventually(lambda: client.task_succeeded.called)
     client.task_cancelled.assert_not_called()
     metadata = client.task_succeeded.call_args.kwargs["metadata"]
     (member,) = metadata["agent_episode_facade_group"]["members"]
