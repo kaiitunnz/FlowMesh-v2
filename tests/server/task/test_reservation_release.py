@@ -14,6 +14,7 @@ from server.registries.worker import WorkerRegistry
 from server.task.runtime import TaskRuntime
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.server.task.test_task_merge import _Registry
 from tests.server.task.test_v2_orchestration import (
     _TS,
     LINEAR,
@@ -91,3 +92,40 @@ def test_a_failed_announcement_still_releases(
 
     assert released is True
     assert "Failed to announce worker wkr-1" in caplog.text
+
+
+@pytest.mark.parametrize("recorded_by", ["dispatcher", "first_event"])
+def test_a_redispatch_releases_the_earlier_reservation_it_ends(
+    recorded_by: str,
+) -> None:
+    registry = MagicMock()
+    workflows = _Registry()
+    runtime = TaskRuntime(
+        cast(Any, workflows),
+        cast(Any, registry),
+        OrchestrationConfig(),
+        make_result_reader(),
+        logging.getLogger("reservation-release"),
+        secret_vault=cast(Any, _NoopSecretVault()),
+    )
+    _, ids = asyncio.run(_register(runtime, LINEAR))
+    task_id = ids["a"]
+    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    # The failure's commit is lost, so its release waits for the next dispatch.
+    workflows.fail_next = True
+    with pytest.raises(ConnectionError):
+        runtime.fail_dispatch(task_id, "wkr-1", {}, _TS, "dsp-1", retryable=True)
+    registry.release_worker.reset_mock()
+    assert runtime.ready_queue_length() == 1
+    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+
+    runtime.begin_publish(
+        task_id, cast(Any, _worker("wkr-2")), "dsp-2", input_preparation=False
+    )
+    if recorded_by == "dispatcher":
+        runtime.mark_dispatched(task_id)
+    else:
+        runtime.mark_started(task_id, "wkr-2", {}, _TS, "dsp-2")
+
+    registry.release_worker.assert_called_once_with("wkr-1", "dsp-1")

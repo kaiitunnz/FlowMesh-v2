@@ -2797,18 +2797,21 @@ class TaskRuntime:
         loss between publication and the attempt bookkeeping that follows it. A pinned
         selection is kept and returned unchanged.
         """
-        with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is None or record is None:
-                return None
-            selection = engine.record_embodiment_selection(
-                task_id, alternative_id, selector, evidence
-            )
-            if selection is None:
-                return None
-            self._save_ledger_locked(record.workflow_id)
-            return selection.alternative_id
+        try:
+            with self._lock:
+                record = self._tasks.get(task_id)
+                engine = self._engines.get(record.workflow_id) if record else None
+                if engine is None or record is None:
+                    return None
+                selection = engine.record_embodiment_selection(
+                    task_id, alternative_id, selector, evidence
+                )
+                if selection is None:
+                    return None
+                self._save_ledger_locked(record.workflow_id)
+                return selection.alternative_id
+        finally:
+            self._release_ended_workers()
 
     def _synthesize_ready_children_locked(
         self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
@@ -2984,14 +2987,17 @@ class TaskRuntime:
                 "[fabric] a task reported an unreadable input resolution: %s", task_id
             )
             return
-        with self._lock:
-            record = self._tasks.get(task_id)
-            if record is None or not self._accepts_event_locked(
-                record, worker_id, dispatch_id
-            ):
-                return
-            if (engine := self._engines.get(record.workflow_id)) is not None:
-                engine.record_input_resolution(task_id, binding)
+        try:
+            with self._lock:
+                record = self._tasks.get(task_id)
+                if record is None or not self._accepts_event_locked(
+                    record, worker_id, dispatch_id
+                ):
+                    return
+                if (engine := self._engines.get(record.workflow_id)) is not None:
+                    engine.record_input_resolution(task_id, binding)
+        finally:
+            self._release_ended_workers()
 
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
         """The binding a task's recorded resolution carries, if one was recorded."""
@@ -4647,22 +4653,26 @@ class TaskRuntime:
         A dispatch an event of its worker recorded first is not recorded again, and one
         that ended before its record, or whose task already settles, records nothing.
         """
-        with self._cv:
-            publish = self._publishing.pop(task_id, None)
-            if publish is None:
-                return False
-            record = self._tasks.get(task_id)
-            if publish.recorded:
-                return (
-                    record is not None
-                    and record.dispatch_id == publish.dispatch_id
-                    and record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
-                )
-            if not record or record.status in SETTLING_TASK_STATUSES:
-                # A replayed or late dispatch must not regress a settling task.
-                return False
-            self._record_dispatch_locked(record, publish)
-            return True
+        try:
+            with self._cv:
+                publish = self._publishing.pop(task_id, None)
+                if publish is None:
+                    return False
+                record = self._tasks.get(task_id)
+                if publish.recorded:
+                    return (
+                        record is not None
+                        and record.dispatch_id == publish.dispatch_id
+                        and record.status
+                        in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
+                    )
+                if not record or record.status in SETTLING_TASK_STATUSES:
+                    # A replayed or late dispatch must not regress a settling task.
+                    return False
+                self._record_dispatch_locked(record, publish)
+                return True
+        finally:
+            self._release_ended_workers()
 
     def _record_dispatch_locked(self, record: TaskRecord, publish: _Publish) -> None:
         self._take_dispatch_locked(record, publish)
@@ -4716,26 +4726,29 @@ class TaskRuntime:
     ) -> EventEffect:
         """Record that a task's worker started it."""
         started_ts = parse_iso_ts(str(payload.get("started_at") or ts))
-        with self._cv:
-            record = self._tasks.get(task_id)
-            if not record or not self._accepts_event_locked(
-                record, worker_id, dispatch_id
-            ):
-                return EventEffect.STALE
-            if record.status in SETTLING_TASK_STATUSES:
-                # A replayed or late start must not regress a settling task.
-                return EventEffect.SETTLED
-            record.status = TaskStatus.DISPATCHED
-            record.started_ts = started_ts
-            self._workflow_registry.commit_transition(
-                record.workflow_id,
-                records=self._records_locked(task_id),
-                dispatched=[task_id],
-            )
-            if engine := self._engines.get(record.workflow_id):
-                engine.on_started(task_id)
-                self._save_ledger_locked(record.workflow_id)
-            return EventEffect.APPLIED
+        try:
+            with self._cv:
+                record = self._tasks.get(task_id)
+                if not record or not self._accepts_event_locked(
+                    record, worker_id, dispatch_id
+                ):
+                    return EventEffect.STALE
+                if record.status in SETTLING_TASK_STATUSES:
+                    # A replayed or late start must not regress a settling task.
+                    return EventEffect.SETTLED
+                record.status = TaskStatus.DISPATCHED
+                record.started_ts = started_ts
+                self._workflow_registry.commit_transition(
+                    record.workflow_id,
+                    records=self._records_locked(task_id),
+                    dispatched=[task_id],
+                )
+                if engine := self._engines.get(record.workflow_id):
+                    engine.on_started(task_id)
+                    self._save_ledger_locked(record.workflow_id)
+                return EventEffect.APPLIED
+        finally:
+            self._release_ended_workers()
 
     def mark_updated(
         self,
@@ -4745,18 +4758,21 @@ class TaskRuntime:
         dispatch_id: str | None = None,
     ) -> EventEffect:
         """Store a task's latest progress update."""
-        with self._lock:
-            record = self._tasks.get(task_id)
-            if record is None or not self._accepts_event_locked(
-                record, worker_id, dispatch_id
-            ):
-                return EventEffect.STALE
-            if record.status in TERMINAL_TASK_STATUSES:
-                # A replayed or late progress update must not touch a terminal task.
-                return EventEffect.SETTLED
-            record.latest_update = payload
-            self._persist_locked(task_id)
-            return EventEffect.APPLIED
+        try:
+            with self._lock:
+                record = self._tasks.get(task_id)
+                if record is None or not self._accepts_event_locked(
+                    record, worker_id, dispatch_id
+                ):
+                    return EventEffect.STALE
+                if record.status in TERMINAL_TASK_STATUSES:
+                    # A replayed or late progress update must not touch a terminal task.
+                    return EventEffect.SETTLED
+                record.latest_update = payload
+                self._persist_locked(task_id)
+                return EventEffect.APPLIED
+        finally:
+            self._release_ended_workers()
 
     def mark_succeeded(
         self,
