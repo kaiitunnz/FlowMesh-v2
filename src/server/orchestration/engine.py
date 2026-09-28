@@ -163,6 +163,10 @@ _DEDUP_CAPABLE = frozenset(
         BoundaryEventKind.EXTERNAL_EFFECT,
     }
 )
+# Boundary kinds an off-lane handler settles while the episode stays suspended.
+_MEDIATED_BOUNDARY_KINDS = frozenset(
+    {BoundaryEventKind.INVOCATION, BoundaryEventKind.EXTERNAL_EFFECT}
+)
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
@@ -1319,6 +1323,15 @@ class OrchestrationEngine:
                 attempt.finished_at = now_iso()
                 self._emitter.emit_attempt(attempt)
 
+    def _awaits_mediated_outcome(self, wi: WorkItem) -> bool:
+        """Whether the work item is suspended on a mediated boundary with no outcome."""
+        return any(
+            act == wi.activation_id
+            and env.kind in _MEDIATED_BOUNDARY_KINDS
+            and not self._boundary_resolved(env)
+            for (act, _), env in self._boundary_events.items()
+        )
+
     def pending_tool_dispatches(self) -> list[ToolInvocationEnvelope]:
         """Mediated boundaries suspended with no durable outcome, for a restart.
 
@@ -1330,10 +1343,7 @@ class OrchestrationEngine:
         """
         pending: list[ToolInvocationEnvelope] = []
         for (activation, corr), env in self._boundary_events.items():
-            if env.kind not in (
-                BoundaryEventKind.INVOCATION,
-                BoundaryEventKind.EXTERNAL_EFFECT,
-            ):
+            if env.kind not in _MEDIATED_BOUNDARY_KINDS:
                 continue
             if self._boundary_resolved(env):
                 continue
@@ -4246,6 +4256,10 @@ class OrchestrationEngine:
             <= {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
         ):
             wi.status = WorkItemStatus.BLOCKED
+            return False
+        if wi.status is WorkItemStatus.BLOCKED and self._awaits_mediated_outcome(wi):
+            # A crash beat the ledger save of the boundary's settle; the boundary is
+            # re-issued, and the episode resumes only with its outcome.
             return False
         if wi.status is WorkItemStatus.DISPATCHED:
             if attempt := self._latest_attempt(wi):

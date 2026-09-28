@@ -958,6 +958,48 @@ def test_an_agent_suspended_on_a_boundary_resumes_after_a_restart() -> None:
     asyncio.run(run())
 
 
+class _Crash(Exception):
+    pass
+
+
+def test_a_boundary_whose_settle_a_crash_cut_short_is_issued_again() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, writer, _, env = await _held_boundary(runtime)
+        save = registry.save_ledger_snapshot
+
+        def crash(*_: Any, **__: Any) -> None:
+            raise _Crash()
+
+        registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+        with pytest.raises(_Crash):
+            runtime.settle_episode_invocation(
+                writer, env.call_correlation, "model:draft"
+            )
+        registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+
+        restored = _runtime(registry)
+        redriven: list[ToolInvocationEnvelope] = []
+        restored.set_model_settler(redriven.append)
+        await restored.rehydrate()
+
+        engine = restored.orchestration_engine(workflow_id)
+        assert engine is not None
+        work_item = engine.work_item(writer)
+        assert work_item is not None and work_item.status is WorkItemStatus.BLOCKED
+        assert [e.call_correlation for e in redriven] == [env.call_correlation]
+        assert restored.settle_episode_invocation(
+            writer, env.call_correlation, "model:draft"
+        )
+        assert restored.next_ready(threading.Event(), timeout=0.01) == writer
+        dispatch = restored.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        assert [o.value for o in dispatch.delivered_outcomes] == ["model:draft"]
+
+    asyncio.run(run())
+
+
 def _leave(runtime, how: str, worker: str = "wkr-1") -> None:
     if how == "expired":
         runtime.recover_tasks_for_worker(worker)
@@ -1008,10 +1050,6 @@ def test_a_give_up_of_a_dispatch_that_ended_at_a_suspension_is_stale() -> None:
         )
 
     asyncio.run(run())
-
-
-class _Crash(Exception):
-    pass
 
 
 def test_a_cancel_a_crash_cut_short_settles_a_suspended_agent_at_restart(
