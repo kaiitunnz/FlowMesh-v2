@@ -903,12 +903,19 @@ class OrchestrationEngine:
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
         wi = self._work_item_for_task(task_id)
-        if (
-            wi is None
-            or wi.status in TERMINAL_WORK_ITEM_STATUSES
-            or wi.invocation_id is None
-        ):
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
+        if wi.invocation_id is None:
+            if wi.work_item_id not in self._input_preparations:
+                return Advance()
+            # An input preparation commits to no invocation and reserves nothing, so
+            # the task resolves its inputs again on another worker.
+            self._emit(
+                "input_preparation_lost",
+                work_item_id=wi.work_item_id,
+                operator_id=wi.operator_id,
+            )
+            return Advance(retry=[wi.legacy_task_id])
         if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
             # The worker that captured this boundary's request is lost, and the
             # worker-private request cannot be recovered here (a fresh permit would need

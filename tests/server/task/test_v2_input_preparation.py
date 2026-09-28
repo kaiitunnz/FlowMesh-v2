@@ -1,6 +1,7 @@
 """Tests for preparing an undeclared-envelope leaf's inputs before it is selected."""
 
 import logging
+import threading
 from typing import Any, cast
 
 import pytest
@@ -14,16 +15,18 @@ from shared.inference import (
     InputResolutionBinding,
     ResolvedInputMaterialization,
 )
+from shared.schemas.event import TaskEvent, WorkerEvent
 from shared.utils.time import now_iso
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_embodiment_fence import (
     _NoopSecretVault,
     _upstream_task,
     _WorkerRegistryStub,
     _workflow_of,
 )
-from tests.server.task.test_v2_orchestration import FakeRegistry
+from tests.server.task.test_v2_orchestration import FakeRegistry, _planned
 
 
 def _runtime(
@@ -58,6 +61,12 @@ def _materialization(
             media_type=RESOLVED_INPUT_MEDIA_TYPE,
         ),
     )
+
+
+def _next(runtime: TaskRuntime) -> str | None:
+    if runtime.ready_queue_length() == 0:
+        return None
+    return runtime.next_ready(threading.Event(), timeout=0.01)
 
 
 def _report(runtime: TaskRuntime, task_id: str, **kwargs: Any) -> SettleOutcome:
@@ -317,3 +326,45 @@ async def test_a_preparation_handled_again_after_its_save_failed_readies_the_lea
     assert runtime._tasks[task_id].status == TaskStatus.PENDING
     assert task_id in runtime._ready_index
     assert runtime.recorded_input_reference(task_id) is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("loss", ["given_up", "left_first", "crashed"])
+async def test_a_lost_preparation_dispatch_prepares_again(loss: str) -> None:
+    runtime = _runtime()
+    monitor = _monitor(runtime)
+    task_id = await _upstream_task(runtime, max_items=None)
+    source = _next(runtime)
+    assert source is not None
+    record_dispatch(runtime, source, "wkr-0", "dsp-0")
+    runtime.mark_succeeded(
+        source, "wkr-0", _planned(runtime, source, ["a", "b"]), now_iso(), "dsp-0"
+    )
+    assert _next(runtime) == task_id
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1", input_preparation=True)
+    given_up = TaskEvent(
+        type="TASK_CANCELLED",
+        task_id=task_id,
+        worker_id="wkr-1",
+        dispatch_id="dsp-1",
+        ts=now_iso(),
+    )
+    left = WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=True)
+    match loss:
+        case "given_up":
+            monitor.handle_task_event(given_up)
+            monitor._handle_worker_event(left)
+        case "left_first":
+            monitor._handle_worker_event(left)
+            monitor.handle_task_event(given_up)
+        case "crashed":
+            runtime.recover_tasks_for_worker("wkr-1")
+
+    record = runtime.get_record(task_id)
+    assert record is not None
+    assert record.status == TaskStatus.PENDING
+    assert record.assigned_worker is None
+    assert _next(runtime) == task_id
+    assert runtime.prepares_inputs(task_id) is True
+    _report(runtime, task_id)
+    assert runtime.prepares_inputs(task_id) is False
