@@ -1,12 +1,15 @@
 """An SSH task a stop reaches succeeds and one a cancel reaches is cancelled, wherever
 it lands; a session container lost for no requested reason fails the task."""
 
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from docker.errors import NotFound
 from docker.models.containers import Container
 
@@ -69,6 +72,8 @@ def _run(
     tmp_path: Path,
     container: Any,
     start: MagicMock | None = None,
+    build_mount_plan: Callable[..., Any] | None = None,
+    stream_logs: Callable[[Any], None] | None = None,
 ) -> SSHResult:
     plan = MagicMock()
     plan.copy_output_path = None
@@ -77,11 +82,15 @@ def _run(
         patch.object(ex, "prepare"),
         patch.object(ex, "_resolve_noninteractive_command", return_value=["sleep"]),
         patch.object(ex, "_resolve_inputs", return_value=[]),
-        patch.object(ex, "_build_mount_plan", return_value=plan),
+        patch.object(
+            ex,
+            "_build_mount_plan",
+            side_effect=build_mount_plan or (lambda *_: plan),
+        ),
         patch.object(ex, "_build_environment", return_value={}),
         patch.object(ex, "_build_run_kwargs", return_value={}),
         patch.object(ex, "_start_container", start),
-        patch.object(ex, "_stream_container_logs"),
+        patch.object(ex, "_stream_container_logs", side_effect=stream_logs),
         patch.object(ex, "_save_container_logs"),
         patch.object(ex, "_cleanup_mount_plan"),
         patch.object(ex, "emit_update"),
@@ -170,4 +179,96 @@ def test_a_cancel_before_the_session_starts_is_cancelled_without_a_container(
     with pytest.raises(TaskCancelledError):
         _run(executor, False, tmp_path, MagicMock(), start)
 
+    start.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["cancel", "stop"])
+def test_a_signal_before_the_container_exists_stops_it_once_it_does(
+    executor: SSHExecutor, tmp_path: Path, kind: str
+) -> None:
+    stopped = threading.Event()
+    container = _container(lambda _container: None)
+    container.stop.side_effect = lambda **_: stopped.set()
+
+    def signalled_while_staging(*_: Any) -> Any:
+        getattr(executor, kind)(_TASK_ID)
+        plan = MagicMock()
+        plan.copy_output_path = None
+        return plan
+
+    def stream_logs(_stream: Any) -> None:
+        # A log stream ends only once its container stops.
+        stopped.wait(timeout=60.0)
+
+    started = time.monotonic()
+    try:
+        _run(
+            executor,
+            False,
+            tmp_path,
+            container,
+            build_mount_plan=signalled_while_staging,
+            stream_logs=stream_logs,
+        )
+    except TaskCancelledError:
+        assert kind == "cancel"
+    else:
+        assert kind == "stop"
+
+    assert time.monotonic() - started < 5.0
+    assert container.stop.call_args_list[0].kwargs == {"timeout": 1}
+
+
+@pytest.mark.parametrize("kind", ["cancel", "stop"])
+def test_a_signal_while_staging_ends_the_staging(
+    executor: SSHExecutor, kind: str
+) -> None:
+    staging = MagicMock()
+    waits = 0
+
+    def wait(timeout: float) -> dict[str, int]:
+        nonlocal waits
+        waits += 1
+        if waits == 2:
+            getattr(executor, kind)(_TASK_ID)
+        raise requests.ReadTimeout()
+
+    staging.wait.side_effect = wait
+    client = MagicMock()
+    client.containers.create.return_value = staging
+
+    with (
+        executor._signals.running(_TASK_ID),
+        pytest.raises(ssh_module._StagingInterrupted),
+    ):
+        executor._run_staging_container(client, {"image": "busybox"}, {})
+
+    staging.remove.assert_called_once_with(force=True)
+
+
+def test_a_stop_while_staging_succeeds_and_a_cancel_is_cancelled(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    start = MagicMock()
+
+    def interrupted(kind: str) -> Callable[..., Any]:
+        def build(*_: Any) -> Any:
+            getattr(executor, kind)(_TASK_ID)
+            raise ssh_module._StagingInterrupted
+
+        return build
+
+    result = _run(
+        executor, False, tmp_path, None, start, build_mount_plan=interrupted("stop")
+    )
+    assert result.exit_code == 0
+    with pytest.raises(TaskCancelledError):
+        _run(
+            executor,
+            False,
+            tmp_path,
+            None,
+            start,
+            build_mount_plan=interrupted("cancel"),
+        )
     start.assert_not_called()

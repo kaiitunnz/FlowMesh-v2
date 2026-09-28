@@ -118,7 +118,14 @@ _SSH_RUN_SCRIPT_SOURCE = (
     Path(__file__).resolve().parent.parent / "docker" / "ssh-run.sh"
 )
 
+# How often a staging wait checks for a cancel or stop.
+_STAGING_WAIT_SEC = 1
+
 type DemuxLogStream = Iterator[tuple[bytes | None, bytes | None]]
+
+
+class _StagingInterrupted(Exception):
+    """A cancel or stop ended the staging of an SSH task's inputs."""
 
 
 @dataclass(slots=True)
@@ -509,9 +516,14 @@ class SSHExecutor(Executor):
             )
             return SSHResult(session_id=session_id, exit_code=0)
         resolved_inputs = self._resolve_inputs(task, cfg)
-        mount_plan = self._build_mount_plan(
-            client, out_dir, resolved_inputs, cfg, session_id
-        )
+        try:
+            mount_plan = self._build_mount_plan(
+                client, out_dir, resolved_inputs, cfg, session_id
+            )
+        except _StagingInterrupted:
+            self._signals.raise_if_cancelled()
+            logger.info("SSH task %s stopped while staging its inputs", task.task_id)
+            return SSHResult(session_id=session_id, exit_code=0)
 
         labels = {
             _LABEL_WORKER: worker_name,
@@ -574,6 +586,9 @@ class SSHExecutor(Executor):
 
         assert isinstance(container, Container)
         self._current_container = container
+        if self._signals.cancelled or self._signals.stopped:
+            # The request landed before the container existed, so it stopped nothing.
+            self._interrupt_container(container)
         log_thread: threading.Thread | None = None
         if not interactive:
             log_thread = threading.Thread(
@@ -616,11 +631,15 @@ class SSHExecutor(Executor):
                 )
             maybe_upload_artifacts(task, out_dir, logger=logger, skip_errors=True)
         finally:
+            self._current_container = None
+            if self._signals.cancelled or self._signals.stopped:
+                # A cancel or stop ends the task well inside the worker's own stop
+                # timeout, and a log stream ends only once its container stops.
+                self._interrupt_container(container)
             if log_thread is not None:
                 # Wait for the thread to drain remaining output before tearing down
                 # the container.
                 log_thread.join(timeout=30.0)
-            self._current_container = None
             if container is not None:
                 self._stop_container(container, container_name, cfg.stop_timeout_sec)
             self._cleanup_mount_plan(client, mount_plan)
@@ -633,30 +652,21 @@ class SSHExecutor(Executor):
         return result
 
     def cancel(self, task_id: str) -> None:
-        if not self._signals.cancel(task_id):
-            return
-        container = self._current_container
-        if container is None:
-            return
-        try:
-            container.stop(timeout=1)
-        except Exception:
-            logger.debug(
-                "Failed to stop SSH container during cancellation", exc_info=True
-            )
+        if self._signals.cancel(task_id):
+            self._interrupt_container(self._current_container)
 
     def stop(self, task_id: str) -> None:
-        if not self._signals.stop(task_id):
-            return
-        container = self._current_container
+        if self._signals.stop(task_id):
+            self._interrupt_container(self._current_container)
+
+    @staticmethod
+    def _interrupt_container(container: Container | None) -> None:
         if container is None:
             return
         try:
             container.stop(timeout=1)
         except Exception:
-            logger.debug(
-                "Failed to stop SSH container during graceful stop", exc_info=True
-            )
+            logger.debug("Failed to stop SSH container", exc_info=True)
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -1324,14 +1334,16 @@ class SSHExecutor(Executor):
             raise
         return volume_name
 
-    @staticmethod
     def _run_staging_container(
-        client: DockerClient, create_kwargs: dict[str, Any], hydrated: dict[str, bytes]
+        self,
+        client: DockerClient,
+        create_kwargs: dict[str, Any],
+        hydrated: dict[str, bytes],
     ) -> None:
         """Run the staging container with each hydrated result placed in it first.
 
         A staging failure is retryable: it is a download or a copy that may succeed on
-        another attempt.
+        another attempt. A cancel or stop ends it with `_StagingInterrupted`.
         """
         image = create_kwargs["image"]
         try:
@@ -1343,8 +1355,7 @@ class SSHExecutor(Executor):
             if hydrated:
                 container.put_archive("/", _results_archive(hydrated))
             container.start()
-            status = container.wait()
-            if (code := status.get("StatusCode", 1)) != 0:
+            if (code := self._wait_for_staging(container)) != 0:
                 logs = container.logs().decode("utf-8", errors="replace")
                 raise ExecutionError(
                     f"Staging SSH inputs failed with exit code {code}: {logs.strip()}",
@@ -1357,6 +1368,15 @@ class SSHExecutor(Executor):
                 logger.debug(
                     "Failed to remove SSH input staging container", exc_info=True
                 )
+
+    def _wait_for_staging(self, container: Container) -> int:
+        """Wait for the staging container to exit; returns its exit code."""
+        while True:
+            try:
+                return container.wait(timeout=_STAGING_WAIT_SEC).get("StatusCode", 1)
+            except (requests.ReadTimeout, requests.ConnectionError):
+                if self._signals.cancelled or self._signals.stopped:
+                    raise _StagingInterrupted from None
 
     def _build_remote_stage_command(self, task_id: str, include_results: bool) -> str:
         url = shlex.quote(self._result_bundle_url(task_id, include_results))
