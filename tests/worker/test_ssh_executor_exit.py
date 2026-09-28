@@ -258,3 +258,18 @@ def test_a_session_log_never_counts_against_its_output_limit(
 
     assert result.exit_code == 0
     assert (output / "logs" / "container_output.log").stat().st_size == 2000
+
+
+def test_output_written_during_the_stop_at_the_ttl_is_held_to_its_limit(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    output = tmp_path / "direct"
+    output.mkdir()
+    container = _container(0, output_bytes=0, polls=1_000_000)
+    # The job's SIGTERM handler flushes its output as the container stops.
+    container.stop.side_effect = lambda **_: (output / "flush.bin").write_bytes(
+        b"x" * 5000
+    )
+
+    with pytest.raises(ExecutionError, match="exceeded maxBytes"):
+        _run(executor, tmp_path, container, 1000, ttl_sec=1, direct_output=output)

@@ -651,6 +651,7 @@ class SSHExecutor(Executor):
                 cfg.ttl_sec,
                 cfg.idle_sec,
                 cfg.poll_interval_sec,
+                cfg.stop_timeout_sec,
                 cfg.output,
                 mount_plan,
             )
@@ -683,9 +684,7 @@ class SSHExecutor(Executor):
         finally:
             if container is not None:
                 # A log stream ends only once its container stops. A cancel or stop
-                # stops it at once, well inside the worker's own stop timeout, and one
-                # landing during the graceful stop of a session past its TTL still
-                # reaches the container.
+                # stops it at once, inside the worker's own stop timeout.
                 self._stop_container(
                     container,
                     1 if self._signals.interrupted else cfg.stop_timeout_sec,
@@ -979,10 +978,12 @@ class SSHExecutor(Executor):
         ttl_sec: float,
         idle_sec: float,
         poll_interval_sec: float,
+        stop_timeout_sec: float,
         output_cfg: SSHOutputConfig | None,
         mount_plan: SSHMountPlan,
     ) -> int:
-        """Block until the container exits or TTL/idle timeout fires.
+        """Block until the container exits or TTL/idle timeout fires, stopping it at
+        its TTL so nothing it writes lands after its output is collected.
 
         Returns the container exit code.
         """
@@ -1026,6 +1027,7 @@ class SSHExecutor(Executor):
             time.sleep(poll_interval_sec)
 
         logger.info("SSH session TTL reached; stopping container")
+        self._stop_container(container, stop_timeout_sec)
         return 0
 
     @staticmethod
