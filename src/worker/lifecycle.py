@@ -26,6 +26,10 @@ if TYPE_CHECKING:
     from .content import WorkerContentPlane
     from .model_turn import ResponsesFacade
 
+# The wait an unregister gets for its event stream even once the stop budget is spent;
+# the budget leaves this much before the stop kills the worker.
+_UNREGISTER_FLOOR_SEC = 2.0
+
 
 class Lifecycle:
     def __init__(
@@ -293,7 +297,11 @@ class Lifecycle:
                 uptime_sec=uptime,
                 accrued_cost_usd=accrued_cost,
                 power_summary=summary,
-                timeout=left(),
+                timeout=(
+                    None
+                    if (remaining := left()) is None
+                    else max(remaining, _UNREGISTER_FLOOR_SEC)
+                ),
             )
         except Exception:
             pass

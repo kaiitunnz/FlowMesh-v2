@@ -13,6 +13,7 @@ from shared.grpc.supervisor.v1 import supervisor_pb2
 from tests.worker.test_runner_mediated_dispatch import _permit
 from tests.worker.test_runner_shutdown import _Echo, _runner
 from tests.worker.test_supervisor_client_dispatch_id import _client
+from worker import lifecycle as lifecycle_module
 from worker import runner as runner_module
 from worker import supervisor_client as supervisor_module
 from worker.lifecycle import Lifecycle
@@ -176,7 +177,7 @@ def test_a_shutdown_bounds_its_teardown_by_the_stop_budget(tmp_path: Path) -> No
     assert 0.0 <= resident_timeout <= 0.6
     assert 0.0 <= plane_timeout <= 0.6
     unregister_timeout = client.unregister.call_args.kwargs["timeout"]
-    assert unregister_timeout is not None and unregister_timeout <= 0.6
+    assert unregister_timeout == lifecycle_module._UNREGISTER_FLOOR_SEC
     assert time.monotonic() < budget_end + 0.5
 
 
@@ -264,3 +265,20 @@ def test_a_resident_frame_after_the_boundary_drain_builds_no_lanes(
     if host is not None:
         host.stop(1.0)
     assert host is None
+
+
+def test_a_spent_stop_budget_still_gives_the_unregister_its_floor(
+    tmp_path: Path,
+) -> None:
+    client = _client()
+    client._stub = cast(Any, object())
+    client._event_ready.clear()
+    reconnect = threading.Timer(0.3, client._event_ready.set)
+    reconnect.start()
+    lifecycle = Lifecycle(client, 5, 15, tmp_path / "hb", 0.0)
+
+    with patch.object(client, "shutdown"):
+        lifecycle.shutdown(True, deadline=time.monotonic() - 1.0)
+
+    reconnect.join()
+    assert not client._event_queue.empty()
