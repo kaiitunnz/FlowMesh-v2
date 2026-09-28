@@ -361,6 +361,13 @@ class Runner:
         """Build the resident lane host once the worker id is known."""
         if self._resident_host is not None:
             return self._resident_host
+        if self._boundaries_closed.is_set():
+            # A host built now would outlive the shutdown that stops the lanes.
+            self.logger.warning(
+                "Dropping a resident frame that arrived after the shutdown's "
+                "boundary drain"
+            )
+            return None
         client = self.lifecycle.client
         try:
             client.worker_id

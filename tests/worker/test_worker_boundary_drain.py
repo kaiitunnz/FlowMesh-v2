@@ -245,3 +245,22 @@ def test_a_slow_executor_cleanup_still_unregisters_inside_the_stop_budget(
         run_until_exit(runner, runner.lifecycle, MagicMock())
 
     assert unregistered and unregistered[0] - started < 2.5
+
+
+def test_a_resident_frame_after_the_boundary_drain_builds_no_lanes(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(tmp_path, _Echo())
+    lifecycle = Lifecycle(MagicMock(), 5, 15, tmp_path / "hb", 0.0)
+    cast(MagicMock, lifecycle.client).worker_id = "wkr-1"
+    runner.lifecycle = lifecycle
+    runner._shut_down()
+
+    runner._route_mediated_op(
+        "resident_reap", {"task_id": "tsk-leaf", "call_correlation": "c"}
+    )
+
+    host = runner._resident_host
+    if host is not None:
+        host.stop(1.0)
+    assert host is None
