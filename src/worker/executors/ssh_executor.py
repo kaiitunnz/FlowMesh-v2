@@ -1401,7 +1401,7 @@ class SSHExecutor(Executor):
                     f"{volume_name}:/dst:rw",
                 ],
                 # A worker killed mid-staging leaves it mounting the input volume;
-                # the labels let the worker's cleanup remove both.
+                # the labels let the supervisor's cleanup of that worker remove both.
                 "labels": {
                     _LABEL_WORKER: self.worker_name,
                     _LABEL_SESSION: session_id,
