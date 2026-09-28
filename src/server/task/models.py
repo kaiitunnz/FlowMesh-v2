@@ -140,8 +140,7 @@ class TaskRecord(BaseModel):
     )
     residual_cancel: bool = Field(
         default=False,
-        description="Server-internal: cancelled by its region's residual policy, not "
-        "by a workflow cancel.",
+        description="Server-internal: cancelled by its region's residual policy.",
     )
     assigned_worker: str | None = Field(
         default=None, description="Assigned worker identifier."

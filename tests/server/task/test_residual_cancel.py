@@ -1,5 +1,4 @@
-"""A child its region's residual policy cancels is cancelled as a task, not only in the
-ledger."""
+"""A child its region's residual policy cancels is cancelled as a task."""
 
 import asyncio
 from typing import Any, cast

@@ -203,7 +203,7 @@ class Advance:
 
     ``ready`` work items become admissible for a new attempt, ``failed`` ones settle
     terminally and cascade, and ``retry`` reissues an existing work item as a fresh
-    attempt under its stable identity, and ``cancelled`` lists the children a residual
+    attempt under its stable identity; ``cancelled`` lists the children a residual
     policy cancelled. Control settlement and dynamic child materialization are internal
     and never appear here.
     """
@@ -335,8 +335,8 @@ class OrchestrationEngine:
             )
         self._region_aggregates = list(snapshot.region_aggregates)
         self._aggregate_by_join: dict[str, RegionJoinAggregate] = {}
-        # A ledger stored while nested levels still froze an aggregate may hold one
-        # after its root level's; the root level's is the one delivered downstream.
+        # A stored ledger may hold a nested level's aggregate after its root level's;
+        # the root level's is the one delivered downstream.
         for aggregate in self._region_aggregates:
             join_op = aggregate.join_operator_id
             if join_op not in self._aggregate_by_join or not any(
@@ -1608,7 +1608,7 @@ class OrchestrationEngine:
 
         Returns the ``invocation_id``s it terminalized so a control-plane consumer bound
         to them — a resident-capacity admission credit — releases from this fenced
-        terminal rather than being stranded.
+        terminal.
         """
         activations = (
             None
@@ -2650,8 +2650,7 @@ class OrchestrationEngine:
     def _resolve_cancelled_outputs(self, scope_id: str) -> Advance:
         """Release a cancelled scope's join as its cancellation outcome.
 
-        Only a root-level scope publishes it and delivers its record, as only a
-        root-level scope does when its join releases.
+        Only a root-level scope publishes it and delivers its record.
         """
         if scope_id in self._released_scopes:
             return Advance()
@@ -2886,7 +2885,7 @@ class OrchestrationEngine:
 
         Only a root-level scope freezes the join's aggregate, publishes it, and
         delivers its record downstream. A scope nested under a spawned child shares the
-        join operator with its sibling levels, so its release stays local to its level.
+        join operator with its sibling levels, so its release is local to its level.
         """
         self._released_scopes.add(scope_id)
         if (owner_act := self._scopes[scope_id].owner_activation_id) is not None:
@@ -3432,9 +3431,9 @@ class OrchestrationEngine:
         return cascade
 
     def _declare_failures(self, primary: WorkItem, failed: list[str]) -> None:
-        """Record why a failed work item and what its failure cascaded into failed:
-        the work item for its own reason, the rest as its dependents. A task already
-        named, behind a failure settled first, keeps its reason."""
+        """Name why a failed work item and each task its failure cascaded into failed:
+        the work item by its own reason, the rest as its dependents. A task an earlier
+        failure named keeps that reason."""
         if not failed:
             return
         self._failure_reasons.setdefault(

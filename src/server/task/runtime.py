@@ -3312,7 +3312,7 @@ class TaskRuntime:
 
     def _resolve_uncertain_locked(self, task_id: str) -> Advance:
         """Resolve an in-flight work item's uncertainty; a failure terminalizes the
-        boundary invocations it held, whose credits release once the ledger saved."""
+        boundary invocations it held, whose credits release once the ledger is saved."""
         record = self._tasks.get(task_id)
         if record is None or (engine := self._engines.get(record.workflow_id)) is None:
             return Advance()
@@ -3384,7 +3384,7 @@ class TaskRuntime:
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
         """Apply an engine advance: fail and persist what it failed, cancel what a
-        residual policy cancelled, then record the inputs its agents now accept, retire
+        residual policy cancelled, then record the inputs its agents accept, retire
         the region templates it sealed, and ready its work. Returns whether it changed
         any task.
 
