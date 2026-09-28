@@ -1215,6 +1215,12 @@ class TaskRuntime:
                 and not record.residual_cancel
             ):
                 cancelled = True
+        # A dispatch a crash recorded on its task before the ledger saved it: record it
+        # now, so its loss or give-up resolves as any other dispatch's does.
+        for persisted in tasks:
+            record = persisted.record
+            if record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
+                self._catch_up_dispatch_locked(engine, record)
         # Replay cancellation after the settled facts so a settled outcome is never
         # overwritten; a cancelled workflow is then never re-admitted below. A record
         # left CANCELLING carries the cancel just as a settled one does: a crash between
@@ -1268,6 +1274,18 @@ class TaskRuntime:
         # The replayed terminals can seal a region whose retire a crash lost.
         self._retire_sealed_region_templates_locked(workflow_id, engine)
         self._save_ledger_locked(workflow_id)
+
+    def _catch_up_dispatch_locked(
+        self, engine: OrchestrationEngine, record: TaskRecord
+    ) -> None:
+        task_id, worker_id = record.task_id, record.assigned_worker
+        if self.prepares_inputs(task_id):
+            if engine.input_preparation(task_id) is None:
+                engine.on_input_preparation_dispatched(task_id, worker_id)
+        elif (wi := engine.work_item(task_id)) is not None and (
+            wi.status is not WorkItemStatus.DISPATCHED
+        ):
+            engine.on_dispatched(task_id, worker_id)
 
     # ------------------------------------------------------------------ #
     # Durable state persistence
@@ -5799,6 +5817,11 @@ class TaskRuntime:
         if advance.retry:
             return LossOutcome(record.task_id, DispatchEnd.RETURNED, ())
         if not advance.failed:
+            self._logger.warning(
+                "Lost task %s of worker %s resolved to no outcome",
+                record.task_id,
+                record.assigned_worker,
+            )
             return LossOutcome(record.task_id, DispatchEnd.STALE, ())
         engine = self._engines.get(record.workflow_id)
         impacted = tuple(

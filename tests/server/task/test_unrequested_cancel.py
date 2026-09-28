@@ -283,3 +283,57 @@ async def test_a_drained_external_effect_fails_whichever_report_lands_first(
         assert after.error == f"Dependency {task_id} failed"
         assert rt.ready_queue_length() == 0
         assert rt.workflow_settlement(workflow_id).settled
+
+
+def _dispatched_unsaved(
+    registry: FakeRegistry, runtime: TaskRuntime, task: str
+) -> None:
+    """Dispatch a task, then lose the ledger save that recorded the dispatch."""
+    saved = dict(registry.ledger_blobs)
+    record_dispatch(runtime, task, cast(Any, _worker()), "dsp-1")
+    registry.ledger_blobs.clear()
+    registry.ledger_blobs.update(saved)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("lost", ["given_up", "crashed"])
+@pytest.mark.parametrize(
+    ("workflow", "node", "rerun"),
+    [(LINEAR, "a", True), (SSH_THEN_ECHO, "session", False)],
+    ids=["replayable", "external_effect"],
+)
+async def test_a_dispatch_its_ledger_never_saved_resolves_after_a_restart(
+    lost: str, workflow: str, node: str, rerun: bool
+) -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, workflow)
+    task_id = ids[node]
+    assert _next(runtime) == task_id
+    _dispatched_unsaved(registry, runtime, task_id)
+    restored = _runtime(registry)
+    await restored.rehydrate()
+
+    if lost == "given_up":
+        _monitor(restored).handle_task_event(
+            TaskEvent(
+                type="TASK_CANCELLED",
+                task_id=task_id,
+                worker_id="wkr-1",
+                dispatch_id="dsp-1",
+                ts=_TS,
+            )
+        )
+    else:
+        _monitor(restored).record_worker_losses(
+            "wkr-1", restored.recover_tasks_for_worker("wkr-1").resolved
+        )
+
+    record = restored.get_record(task_id)
+    assert record is not None
+    if rerun:
+        assert record.status == TaskStatus.PENDING
+        assert _drain(restored) == [ids["a"], ids["b"], ids["c"]]
+    else:
+        assert record.status == TaskStatus.FAILED
+    assert restored.workflow_settlement(workflow_id).settled

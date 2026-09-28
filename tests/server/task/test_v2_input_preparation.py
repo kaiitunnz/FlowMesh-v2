@@ -368,3 +368,46 @@ async def test_a_lost_preparation_dispatch_prepares_again(loss: str) -> None:
     assert runtime.prepares_inputs(task_id) is True
     _report(runtime, task_id)
     assert runtime.prepares_inputs(task_id) is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ledger_saved", [True, False])
+@pytest.mark.parametrize("loss", ["given_up", "crashed"])
+async def test_a_preparation_dispatch_lost_after_a_restart_prepares_again(
+    ledger_saved: bool, loss: str
+) -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry=registry)
+    task_id = await _upstream_task(runtime, max_items=None)
+    source = _next(runtime)
+    assert source is not None
+    record_dispatch(runtime, source, "wkr-0", "dsp-0")
+    runtime.mark_succeeded(
+        source, "wkr-0", _planned(runtime, source, ["a", "b"]), now_iso(), "dsp-0"
+    )
+    assert _next(runtime) == task_id
+    saved = dict(registry.ledger_blobs)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1", input_preparation=True)
+    if not ledger_saved:
+        registry.ledger_blobs.clear()
+        registry.ledger_blobs.update(saved)
+    restored = _runtime(registry=registry)
+    await restored.rehydrate()
+
+    if loss == "given_up":
+        _monitor(restored).handle_task_event(
+            TaskEvent(
+                type="TASK_CANCELLED",
+                task_id=task_id,
+                worker_id="wkr-1",
+                dispatch_id="dsp-1",
+                ts=now_iso(),
+            )
+        )
+    else:
+        restored.recover_tasks_for_worker("wkr-1")
+
+    record = restored.get_record(task_id)
+    assert record is not None and record.status == TaskStatus.PENDING
+    assert _next(restored) == task_id
+    assert restored.prepares_inputs(task_id) is True
