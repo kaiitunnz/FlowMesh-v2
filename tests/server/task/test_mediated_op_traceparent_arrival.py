@@ -75,6 +75,7 @@ def _through_task_listener(frame_kind: str, payload: dict[str, Any]) -> dict[str
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=5)
         loop.close()
+    assert rebuilt is not None
     assert rebuilt["kind"] == "mediated_op"
     assert rebuilt["frame_kind"] == frame_kind
     return rebuilt["payload"]

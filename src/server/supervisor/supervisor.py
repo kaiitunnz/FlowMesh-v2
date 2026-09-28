@@ -434,12 +434,14 @@ def _run_supervisor(
     node_id_queue.put(node_id)
 
     # --- Supervisor components (constructed with the assigned node_id) ---
-    worker_adapter_registry = WorkerAdapterRegistry()
-    relay_service = RelayService(redis=redis_client.sync, logger=logger)
-    relay_uplink = RelayUplinkService(logger=logger)
     task_listener = TaskListener(
         redis=redis_client.sync, node_id=node_id, logger=logger
     )
+    worker_adapter_registry = WorkerAdapterRegistry(
+        on_worker_id_released=task_listener.remove_worker
+    )
+    relay_service = RelayService(redis=redis_client.sync, logger=logger)
+    relay_uplink = RelayUplinkService(logger=logger)
     worker_manager = WorkerManager(
         system_principal,
         wm_cfg.config_path,

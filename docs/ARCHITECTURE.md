@@ -545,6 +545,13 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
   dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
   recreates a deleted record.
+- **Dispatch queues.** A supervisor keeps one dispatch queue per registered worker id
+  and frees it when the worker's token registers again under a new id or is removed,
+  dropping the frames still queued and ending any task stream still reading it. A new
+  `StreamTasks` on an id takes over the frames still queued, in order, and ends every
+  older stream on that id, so a half-open stream receives nothing once the worker's new
+  stream attaches. A stream that ends makes the worker reconnect and resolve its
+  current id.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side.
