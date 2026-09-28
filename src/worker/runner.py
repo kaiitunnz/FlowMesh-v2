@@ -153,6 +153,7 @@ class Runner:
         self._pending_stops: set[str] = set()
         self._cancel_lock = threading.Lock()
         self._shutdown_requested = threading.Event()
+        self._shutdown_thread: threading.Thread | None = None
 
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
@@ -205,7 +206,19 @@ class Runner:
                 self._active_executor_last_used_at = None
 
     def stop(self) -> None:
+        """Request shutdown; safe from a signal handler.
+
+        The work runs on its own thread, since the frame a signal interrupts may hold a
+        lock that cancelling the active executor takes.
+        """
         self._shutdown_requested.set()
+        thread = threading.Thread(
+            target=self._shut_down, name="worker-shutdown", daemon=True
+        )
+        self._shutdown_thread = thread
+        thread.start()
+
+    def _shut_down(self) -> None:
         self.lifecycle.stop()
         self._cancel_active_executor()
         if self._mediated_sidecar is not None:
@@ -1008,6 +1021,8 @@ class Runner:
         except KeyboardInterrupt:
             self.logger.info("Runner interrupted by user; shutting down task loop")
         finally:
+            if self._shutdown_thread is not None:
+                self._shutdown_thread.join()
             self._cleanup_active_executor()
             self._stop_interrupt_monitor()
             self._stop_idle_checker()
