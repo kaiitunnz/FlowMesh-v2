@@ -41,7 +41,8 @@ onto other eligible nodes without spending an attempt, whichever of the worker's
 reports arrives first. A v2 task that cannot safely re-run, such as an `ssh`,
 `serve`, `api` or training task, fails instead, as it does when its worker is
 lost. A worker that leaves without unregistering, such as one that crashed, is
-unregistered by its supervisor, and its tasks requeue at the cost of an attempt.
+unregistered by its supervisor. Its v1 tasks requeue at the cost of an attempt,
+and its v2 tasks resolve as on any worker loss.
 A recreated node's supervisor re-creates its configured workers, which
 re-register themselves on startup. No cordon step is required.
 
