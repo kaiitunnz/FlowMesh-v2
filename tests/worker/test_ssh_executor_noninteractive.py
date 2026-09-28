@@ -8,6 +8,7 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
+from docker.errors import NotFound
 
 import worker.executors.ssh_executor as ssh_executor_module
 from shared.tasks.specs import SSHSpecStrict
@@ -509,59 +510,28 @@ class TestNoninteractiveContainerStartup:
         container.start.assert_not_called()
         container.remove.assert_called_once_with(force=True)
 
-    def test_pulls_missing_image_and_retries_create(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("interactive", [False, True])
+    def test_pulls_a_missing_image_before_starting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interactive: bool
     ) -> None:
         executor = self._make_executor(tmp_path)
         monkeypatch.setattr(ssh_executor_module, "Container", MagicMock)
         container = MagicMock()
         client = MagicMock()
-        client.containers.create.side_effect = [
-            RuntimeError(
-                '404 Client Error: Not Found ("No such image: python:3.12-slim")'
-            ),
-            container,
-        ]
+        client.images.get.side_effect = NotFound("No such image: myimg:latest")
+        client.containers.create.return_value = container
+        client.containers.run.return_value = container
 
-        result, log_stream = executor._start_container(
-            client,
-            {"image": "python:3.12-slim", "entrypoint": [_SSH_RUN_ENTRYPOINT_PATH]},
-            interactive=False,
+        result, _ = executor._start_container(
+            client, {"image": "myimg:latest"}, interactive=interactive
         )
 
         assert result is container
-        assert log_stream is container.attach.return_value
-        client.api.pull.assert_called_once_with(
-            "python:3.12-slim", stream=True, decode=True
-        )
-        assert client.containers.create.call_count == 2
-        container.put_archive.assert_called_once()
-        container.start.assert_called_once_with()
-
-    def test_pulls_missing_image_and_retries_interactive_run(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        executor = self._make_executor(tmp_path)
-        monkeypatch.setattr(ssh_executor_module, "Container", MagicMock)
-        container = MagicMock()
-        client = MagicMock()
-        client.containers.run.side_effect = [
-            RuntimeError('404 Client Error: Not Found ("No such image: myimg:latest")'),
-            container,
-        ]
-
-        result, log_stream = executor._start_container(
-            client,
-            {"image": "myimg:latest", "command": ["sleep", "1"]},
-            interactive=True,
-        )
-
-        assert result is container
-        assert log_stream is None
         client.api.pull.assert_called_once_with(
             "myimg:latest", stream=True, decode=True
         )
-        assert client.containers.run.call_count == 2
+        started = client.containers.run if interactive else client.containers.create
+        started.assert_called_once()
 
 
 # ------------------------------------------------------------------ #

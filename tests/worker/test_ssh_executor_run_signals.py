@@ -353,6 +353,28 @@ def test_a_pull_is_abandoned_once_a_signal_lands(
     assert lines == [0, 1, 2]
 
 
+@pytest.mark.parametrize("interactive", [False, True])
+def test_a_signal_during_a_session_image_pull_starts_nothing(
+    executor: SSHExecutor, interactive: bool
+) -> None:
+    client = MagicMock()
+    client.images.get.side_effect = NotFound("No such image: cuda-ssh:latest")
+    client.api.pull.side_effect = _endless_pull(
+        lambda line: executor.cancel(_TASK_ID) if line == 2 else None
+    )
+
+    with (
+        executor._signals.running(_TASK_ID),
+        pytest.raises(ssh_module._Interrupted),
+    ):
+        executor._start_container(
+            client, {"image": "cuda-ssh:latest"}, interactive=interactive
+        )
+
+    client.containers.run.assert_not_called()
+    client.containers.create.assert_not_called()
+
+
 def test_a_pull_error_fails_the_task(executor: SSHExecutor) -> None:
     client = MagicMock()
     client.api.pull.return_value = (line for line in [{"error": "manifest unknown"}])

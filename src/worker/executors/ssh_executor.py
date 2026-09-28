@@ -1136,9 +1136,9 @@ class SSHExecutor(Executor):
     def _start_container(
         self, client: DockerClient, kwargs: dict[str, Any], interactive: bool
     ) -> tuple[Container, DemuxLogStream | None]:
-        image = kwargs.get("image")
         mode = "interactive" if interactive else "non-interactive"
         log_stream: DemuxLogStream | None = None
+        self._ensure_image(client, kwargs["image"])
         try:
             if interactive:
                 container = client.containers.run(**kwargs)
@@ -1146,30 +1146,20 @@ class SSHExecutor(Executor):
                 container, log_stream = self._run_noninteractive_container(
                     client, kwargs
                 )
+        except ExecutionError:
+            raise
         except Exception as exc:
-            if isinstance(image, str) and "No such image" in str(exc):
-                try:
-                    logger.info("Pulling missing image %s for %s SSH task", image, mode)
-                    self._pull_image(client, image)
-                    if interactive:
-                        container = client.containers.run(**kwargs)
-                    else:
-                        container, log_stream = self._run_noninteractive_container(
-                            client, kwargs
-                        )
-                except _Interrupted:
-                    raise
-                except Exception as pull_exc:
-                    raise ExecutionError(
-                        f"Failed to start {mode} container after pulling image "
-                        f"'{image}': {pull_exc}"
-                    ) from pull_exc
-            else:
-                raise ExecutionError(
-                    f"Failed to start {mode} container: {exc}"
-                ) from exc
+            raise ExecutionError(f"Failed to start {mode} container: {exc}") from exc
         assert isinstance(container, Container)
         return container, log_stream
+
+    def _ensure_image(self, client: DockerClient, image: str) -> None:
+        """Pull an image the daemon lacks."""
+        try:
+            client.images.get(image)
+        except NotFound:
+            logger.info("Pulling missing image %s", image)
+            self._pull_image(client, image)
 
     def _pull_image(self, client: DockerClient, image: str) -> None:
         """Pull an image, abandoning the pull once a cancel or stop reaches the task."""
@@ -1434,11 +1424,7 @@ class SSHExecutor(Executor):
         A staging failure is retryable: it is a download or a copy that may succeed on
         another attempt. A cancel or stop ends it with `_Interrupted`.
         """
-        image = create_kwargs["image"]
-        try:
-            client.images.get(image)
-        except NotFound:
-            self._pull_image(client, image)
+        self._ensure_image(client, create_kwargs["image"])
         container = client.containers.create(**create_kwargs)
         try:
             if hydrated:
