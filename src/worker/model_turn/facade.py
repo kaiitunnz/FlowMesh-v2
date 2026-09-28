@@ -121,6 +121,11 @@ class ResponsesFacade:
             self._episodes.pop(task_id, None)
             self._captured.pop(task_id, None)
 
+    def cancel_episode(self, task_id: str) -> None:
+        """Refuse the episode's further turns and end the ones waiting on a permit."""
+        self.unregister_episode(task_id)
+        self._held_egress.release(task_id)
+
     def take_captured_group(self, task_id: str) -> FacadeTurnGroup | None:
         """Return and clear the facade group captured on this episode's last turn."""
         with self._lock:

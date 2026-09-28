@@ -26,6 +26,7 @@ from worker.executors.harness.codex import (
     CodexAppServerHarnessAdapter,
     CodexEvent,
     CodexInjectItem,
+    CodexTurnCancelled,
     _agent_task,
 )
 
@@ -105,6 +106,17 @@ def test_a_turn_error_fails_the_episode() -> None:
     fake = FakeCodexAppServer([{"kind": "error", "value": "boom"}])
     result = CodexAppServerHarnessAdapter(fake).start("a", capsule=None, outcomes=[])
     assert result.kind is HarnessResultKind.FAILURE and result.error == "boom"
+
+
+def test_a_cancel_before_the_turn_starts_ends_the_step() -> None:
+    fake = FakeCodexAppServer([{"kind": "completed", "value": "done"}])
+    adapter = CodexAppServerHarnessAdapter(fake)
+    adapter.cancel("a")
+    with pytest.raises(CodexTurnCancelled):
+        adapter.start("a", capsule=None, outcomes=[])
+    assert fake.cursor == 0
+    # The cancel was the step's; the next step runs.
+    assert adapter.start("a", capsule=None, outcomes=[]).value == "done"
 
 
 def test_a_delivered_outcome_injects_and_resumes_the_rollout() -> None:

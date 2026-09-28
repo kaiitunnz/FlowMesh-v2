@@ -89,6 +89,18 @@ class ModelTurnRendezvous:
             (agent_task_id, call_correlation), PermitDenied(reason=reason)
         )
 
+    def release(self, agent_task_id: str, reason: str) -> None:
+        """Wake every held waiter of one episode with a terminal denial."""
+        with self._lock:
+            boxes = [
+                box for key, box in self._waiters.items() if key[0] == agent_task_id
+            ]
+        for box in boxes:
+            try:
+                box.put_nowait(PermitDenied(reason=reason))
+            except queue.Full:
+                pass
+
     def _deliver(self, key: _BoundaryKey, delivery: PermitDelivery) -> bool:
         with self._lock:
             box = self._waiters.get(key)

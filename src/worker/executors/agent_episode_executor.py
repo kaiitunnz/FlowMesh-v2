@@ -41,7 +41,13 @@ from ..egress import PendingEgressRequestStore
 from ..private_state import MaterializedState, PrivateStateHolder
 from ..resident import capture_resident_request
 from ..sandbox import AgentSandboxRuntime, SandboxRuntime, build_sandbox_runtime
-from .base_executor import ExecutionError, Executor, ExecutorTask
+from .base_executor import (
+    ExecutionError,
+    Executor,
+    ExecutorTask,
+    RunSignals,
+    TaskCancelledError,
+)
 from .episode_support import EpisodeStepResult, hydrate_delivered_outcomes
 from .harness import build_adapter
 
@@ -59,8 +65,13 @@ class AgentEpisodeExecutor(Executor):
         self._adapter: HarnessAdapter | None = None
         self._episode_task_id: str | None = None
         self._sandbox_runtime: SandboxRuntime | None = None
+        self._signals = RunSignals()
 
     def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
+        with self._signals.running(task.task_id):
+            return self._step(task)
+
+    def _step(self, task: ExecutorTask) -> EpisodeStepResult:
         dispatch = task.agent_episode
         if dispatch is None:
             raise ExecutionError(
@@ -110,7 +121,14 @@ class AgentEpisodeExecutor(Executor):
                 outcome.kind.value,
                 outcome.call_correlation,
             )
-        result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
+        try:
+            self._signals.raise_if_cancelled()
+            result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
+        except Exception as exc:
+            # A cancel ends the harness however its turn unwinds, as the step's cancel.
+            if self._signals.cancelled and not isinstance(exc, TaskCancelledError):
+                raise TaskCancelledError(f"Task {task.task_id} cancelled") from exc
+            raise
         if self._is_capturable_boundary(result, dispatch.model_binding):
             if (
                 adapter.egress_handoff_mode()
@@ -270,8 +288,14 @@ class AgentEpisodeExecutor(Executor):
         )
 
     def cancel(self, task_id: str) -> None:
-        if self._adapter is not None:
-            self._adapter.cancel(task_id)
+        if not self._signals.cancel(task_id):
+            return
+        if (adapter := self._adapter) is not None:
+            adapter.cancel(task_id)
+        # After the harness, so it cannot retry the call into a fresh held turn.
+        facade = self._lifecycle.responses_facade if self._lifecycle else None
+        if facade is not None:
+            facade.cancel_episode(task_id)
 
     def cleanup_after_run(self) -> None:
         facade = self._lifecycle.responses_facade if self._lifecycle else None

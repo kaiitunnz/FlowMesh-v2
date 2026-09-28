@@ -15,6 +15,7 @@ maps to its ``idempotency_key`` and injects at most once, so a settled effect ne
 double-applies on a resume.
 """
 
+import threading
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -41,6 +42,13 @@ from worker.private_state import MaterializedState
 
 _BACKEND = "codex"
 _CODEX_ADAPTER_VERSION = "v1"
+
+
+class CodexTurnCancelled(RuntimeError):
+    """A cancel landed before the activation's turn started."""
+
+    def __init__(self, activation_id: str) -> None:
+        super().__init__(f"the Codex turn for {activation_id} was cancelled")
 
 
 class CodexEvent(BaseModel):
@@ -97,6 +105,10 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
         self._transport = transport
         self._version = version
         self._sandbox = sandbox
+        self._lock = threading.Lock()
+        self._cancelled: set[str] = set()
+        # The thread of the turn in flight, per activation, which a cancel interrupts.
+        self._threads: dict[str, str] = {}
 
     def backend_key(self) -> HarnessBackendKey:
         return HarnessBackendKey(backend=_BACKEND, version=self._version)
@@ -120,13 +132,27 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
         else:
             state = _CodexState.model_validate_json(capsule.blob)
             self._transport.thread_resume(state.thread_id, state.rollout_ref)
-        self._inject(state, outcomes)
-        turn_id = self._transport.turn_start(state.thread_id)
-        event = self._transport.next_event(state.thread_id, turn_id)
+        with self._lock:
+            cancelled = activation_id in self._cancelled
+            self._threads[activation_id] = state.thread_id
+        try:
+            if cancelled:
+                raise CodexTurnCancelled(activation_id)
+            self._inject(state, outcomes)
+            turn_id = self._transport.turn_start(state.thread_id)
+            event = self._transport.next_event(state.thread_id, turn_id)
+        finally:
+            with self._lock:
+                self._threads.pop(activation_id, None)
+                self._cancelled.discard(activation_id)
         return self._on_event(state, event)
 
     def cancel(self, activation_id: str) -> None:
-        return None
+        with self._lock:
+            self._cancelled.add(activation_id)
+            thread_id = self._threads.get(activation_id)
+        if thread_id is not None:
+            self._transport.cancel(thread_id)
 
     def _inject(self, state: _CodexState, outcomes: Sequence[DeliveredOutcome]) -> None:
         items: list[CodexInjectItem] = []

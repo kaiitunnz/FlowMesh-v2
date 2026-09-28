@@ -49,6 +49,10 @@ class HeldModelEgress:
         self._timeout_sec = timeout_sec
         self._log = logger or logging.getLogger("held-model-egress")
 
+    def release(self, task_id: str) -> None:
+        """End every held turn of one episode still waiting on its permit."""
+        self._rendezvous.release(task_id, "the model turn was cancelled")
+
     def run(
         self, task_id: str, call_correlation: str, request: ModelRequest
     ) -> ModelCompletion | HeldEgressReject:
