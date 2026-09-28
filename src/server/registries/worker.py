@@ -174,21 +174,6 @@ class WorkerRegistry:
         )
         return bool(int(wrote))
 
-    async def update_worker_hb_async(
-        self, worker_id: str, ts: str, ttl_sec: int
-    ) -> bool:
-        wrote = await self._rds.asyncio.eval(
-            _HEARTBEAT_IF_REGISTERED,
-            3,
-            WORKERS_SET_KEY,
-            worker_hb_key(worker_id),
-            worker_key(worker_id),
-            worker_id,
-            str(ttl_sec),
-            ts,
-        )
-        return bool(int(wrote))
-
     def set_worker_status(
         self,
         worker_id: str,
@@ -200,18 +185,6 @@ class WorkerRegistry:
         if extra:
             mapping.update({f"extra_{k}": str(v) for k, v in extra.items()})
         return self._set_worker_fields(worker_id, mapping)
-
-    async def set_worker_status_async(
-        self,
-        worker_id: str,
-        status: WorkerStatus,
-        ts: str,
-        extra: dict[str, Any] | None = None,
-    ) -> bool:
-        mapping = {"status": status.value, "last_seen": ts}
-        if extra:
-            mapping.update({f"extra_{k}": str(v) for k, v in extra.items()})
-        return await self._set_worker_fields_async(worker_id, mapping)
 
     def unregister_workers(self, *worker_ids: str) -> None:
         with self._rds.sync.control_pipeline() as pipe:
@@ -299,26 +272,6 @@ class WorkerRegistry:
             "origin": "server",
         }
         self._rds.sync.publish_telemetry(
-            WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
-        )
-        return True
-
-    async def update_worker_status_async(
-        self, worker_id: str, status: WorkerStatus
-    ) -> bool:
-        ts = now_iso()
-        if not await self._set_worker_fields_async(
-            worker_id, {"status": status.value, "last_seen": ts}
-        ):
-            return False
-        payload = {
-            "type": "STATUS",
-            "worker_id": worker_id,
-            "status": status.value,
-            "ts": ts,
-            "origin": "server",
-        }
-        await self._rds.asyncio.publish_telemetry(
             WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
         )
         return True
@@ -524,19 +477,6 @@ class WorkerRegistry:
 
     def _set_worker_fields(self, worker_id: str, mapping: dict[str, str]) -> bool:
         wrote = self._rds.sync.eval(
-            _SET_FIELDS_IF_REGISTERED,
-            2,
-            WORKERS_SET_KEY,
-            worker_key(worker_id),
-            worker_id,
-            *_flatten_fields(mapping),
-        )
-        return bool(int(wrote))
-
-    async def _set_worker_fields_async(
-        self, worker_id: str, mapping: dict[str, str]
-    ) -> bool:
-        wrote = await self._rds.asyncio.eval(
             _SET_FIELDS_IF_REGISTERED,
             2,
             WORKERS_SET_KEY,
