@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from shared.grpc.supervisor.v1 import supervisor_pb2
 from tests.worker.test_runner_mediated_dispatch import _permit
 from tests.worker.test_runner_shutdown import _Echo, _runner
@@ -18,6 +20,7 @@ from worker.main import run_until_exit
 from worker.runner import Runner
 
 _HELD = ("tsk-agent", "call-1")
+_RESIDENT_HELD = ("tsk-leaf", "resident-model/tsk-leaf")
 
 
 def _mediated_op(kind: str) -> supervisor_pb2.DispatchMessage:
@@ -57,9 +60,11 @@ def _draining_runner(
     reap_after_sec: float | None,
     order: list[str],
     executor_cls: type[_Echo] = _Echo,
+    resident: bool = False,
 ) -> tuple[Runner, MagicMock]:
-    """A runner whose one task stops the worker while it holds a boundary; control
-    reaps the boundary ``reap_after_sec`` into the shutdown, or never."""
+    """A runner whose one task stops the worker while it holds a boundary, an egress
+    request or a resident one; control reaps the boundary ``reap_after_sec`` into the
+    shutdown, or never."""
     runner: Runner
 
     def stop_while_running(_task_id: str) -> None:
@@ -68,7 +73,15 @@ def _draining_runner(
     runner = _runner(tmp_path, executor_cls(on_run=stop_while_running), "tsk-1")
     lifecycle = Lifecycle(MagicMock(), 5, 15, tmp_path / "hb", 0.0)
     cast(MagicMock, lifecycle.client).worker_id = runner.lifecycle.worker_id
-    lifecycle.pending_egress_requests.put(*_HELD, cast(Any, object()))
+    if resident:
+        lifecycle.resident_requests.put(*_RESIDENT_HELD, '{"messages": []}')
+        reap = (
+            "resident_reap",
+            {"task_id": _RESIDENT_HELD[0], "call_correlation": _RESIDENT_HELD[1]},
+        )
+    else:
+        lifecycle.pending_egress_requests.put(*_HELD, cast(Any, object()))
+        reap = ("reap", {"agent_task_id": _HELD[0], "call_correlation": _HELD[1]})
     runner.lifecycle = lifecycle
     reap_at: list[float] = []
 
@@ -80,7 +93,7 @@ def _draining_runner(
         if reap_at[0] > time.monotonic() or "reaped" in order:
             return []
         order.append("reaped")
-        return [("reap", {"agent_task_id": _HELD[0], "call_correlation": _HELD[1]})]
+        return [reap]
 
     client = cast(MagicMock, lifecycle.client)
     client.iter_interrupts.return_value = []
@@ -91,11 +104,12 @@ def _draining_runner(
     return runner, client
 
 
+@pytest.mark.parametrize("resident", [False, True])
 def test_a_drained_worker_unregisters_once_its_boundaries_are_reaped(
-    tmp_path: Path,
+    tmp_path: Path, resident: bool
 ) -> None:
     order: list[str] = []
-    runner, _ = _draining_runner(tmp_path, 0.3, order)
+    runner, _ = _draining_runner(tmp_path, 0.3, order, resident=resident)
 
     with (
         patch.object(runner_module, "SearchEgress"),
