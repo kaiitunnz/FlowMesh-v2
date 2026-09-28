@@ -25,6 +25,7 @@ from shared.tasks.task_type import TaskType
 from shared.utils.parsing import parse_float_env
 from worker.config import WorkerConfig
 
+from ..utils.process import signal_process_group
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 from .utils.net import resolve_bind_port
 
@@ -292,14 +293,14 @@ class VLLMServeExecutor(Executor):
             pgid = None
         if pgid is not None:
             try:
-                os.killpg(pgid, signal.SIGTERM)
+                signal_process_group(pgid, signal.SIGTERM)
             except (ProcessLookupError, ChildProcessError, OSError):
                 pass
             try:
                 proc.wait(timeout=_STOP_TIMEOUT_SEC)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(pgid, signal.SIGKILL)
+                    signal_process_group(pgid, signal.SIGKILL)
                 except (ProcessLookupError, ChildProcessError, OSError):
                     pass
                 try:
