@@ -120,16 +120,26 @@ class WorkerAdapter(ABC):
         pass
 
     async def start(self) -> bool:
-        """Start worker. Returns whether the worker was successfully started."""
+        """Start worker. Returns whether the worker was successfully started.
+
+        ``_start`` runs on a thread, which a cancel cannot stop; a stop waits for it
+        first, so it finds whatever the start created.
+        """
         self.set_status(WorkerStatus.STARTING)
+        starting = self._starting = asyncio.ensure_future(
+            asyncio.to_thread(self._start)
+        )
         try:
-            ok = await self._run_start()
-            if not ok:
-                self.set_status(WorkerStatus.STOPPED)
-            return ok
+            ok = await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            starting.add_done_callback(self._log_abandoned_start)
+            raise
         except Exception:
             self.set_status(WorkerStatus.STOPPED)
             raise
+        if not ok:
+            self.set_status(WorkerStatus.STOPPED)
+        return ok
 
     async def prepare(self) -> None:
         """Prepare worker (e.g., collecting hardware information) without starting
@@ -137,43 +147,10 @@ class WorkerAdapter(ABC):
         pass
 
     async def stop(self) -> bool:
-        """Stop worker. Returns whether the worker was successfully stopped."""
-        return await self._run_stop()
+        """Stop worker. Returns whether the worker was successfully stopped.
 
-    @abstractmethod
-    def _start(self) -> bool:
-        """Start the worker, blocking; returns whether it started."""
-        pass
-
-    @abstractmethod
-    def _stop(self) -> bool:
-        """Stop the worker, blocking; returns whether it stopped."""
-        pass
-
-    async def _run_start(self) -> bool:
-        """Run ``_start`` on a thread, which a cancel cannot stop; a stop waits for it
-        first, so it finds whatever the start created."""
-        starting = self._starting = asyncio.ensure_future(
-            asyncio.to_thread(self._start)
-        )
-        try:
-            return await asyncio.shield(starting)
-        except asyncio.CancelledError:
-            starting.add_done_callback(self._log_abandoned_start)
-            raise
-
-    def _log_abandoned_start(self, starting: asyncio.Future[bool]) -> None:
-        if not starting.cancelled() and (exc := starting.exception()) is not None:
-            logger.warning(
-                "Worker %s failed to start after its start was cancelled: %r",
-                self.name,
-                exc,
-            )
-
-    async def _run_stop(self) -> bool:
-        """Run ``_stop`` on a thread once a start still creating the worker finishes.
-
-        A stop while another runs waits for that one and returns its result, so no
+        ``_stop`` runs on a thread once a start still creating the worker finishes. A
+        stop while another runs waits for that one and returns its result, so no
         caller sees the worker stopped before it is; a cancel of a caller never stops
         the stop.
         """
@@ -188,6 +165,24 @@ class WorkerAdapter(ABC):
                 self._stop_on_thread(prev_status)
             )
         return await asyncio.shield(stopping)
+
+    @abstractmethod
+    def _start(self) -> bool:
+        """Start the worker, blocking; returns whether it started."""
+        pass
+
+    @abstractmethod
+    def _stop(self) -> bool:
+        """Stop the worker, blocking; returns whether it stopped."""
+        pass
+
+    def _log_abandoned_start(self, starting: asyncio.Future[bool]) -> None:
+        if not starting.cancelled() and (exc := starting.exception()) is not None:
+            logger.warning(
+                "Worker %s failed to start after its start was cancelled: %r",
+                self.name,
+                exc,
+            )
 
     async def _stop_on_thread(self, prev_status: WorkerStatus) -> bool:
         try:
