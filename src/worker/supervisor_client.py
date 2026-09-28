@@ -227,24 +227,32 @@ class SupervisorClient:
         ts: str | None = None,
         metrics: dict[str, Any] | None = None,
         ttl_sec: int = 120,
+        status: WorkerStatus | None = None,
+        dispatch_id: str | None = None,
     ) -> None:
         ts = ts or now_iso()
         event = WorkerEvent(
             type="HEARTBEAT",
             worker_id=self.worker_id,
             ts=ts,
+            status=status,
+            dispatch_id=dispatch_id,
             metrics=metrics or {},
             payload={"ttl_sec": ttl_sec},
         )
         self._send_event(event)
 
     def set_status(
-        self, status: WorkerStatus, extra: dict[str, Any] | None = None
+        self,
+        status: WorkerStatus,
+        extra: dict[str, Any] | None = None,
+        dispatch_id: str | None = None,
     ) -> None:
         event = WorkerEvent(
             type="STATUS",
             worker_id=self.worker_id,
             status=status,
+            dispatch_id=dispatch_id,
             payload=extra or {},
         )
         self._send_event(event)
@@ -280,7 +288,7 @@ class SupervisorClient:
             type="TASK_UPDATE",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             payload=payload,
         )
         self._send_event(event)
@@ -298,7 +306,7 @@ class SupervisorClient:
             type="TASK_FAILED",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             error=error,
             retryable=retryable,
             failure_kind=failure_kind,
@@ -314,7 +322,7 @@ class SupervisorClient:
             type="TASK_SUCCEEDED",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             payload=metadata or {},
         )
         self._send_event(event)
@@ -337,7 +345,7 @@ class SupervisorClient:
             type="TASK_STARTED",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             payload=payload,
         )
         self._send_event(event)
@@ -349,7 +357,7 @@ class SupervisorClient:
             type="TASK_CANCELLED",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             payload=metadata or {},
         )
         self._send_event(event)
@@ -396,7 +404,8 @@ class SupervisorClient:
             )
             yield item
 
-    def _dispatch_id(self, task_id: str) -> str | None:
+    def dispatch_id(self, task_id: str) -> str | None:
+        """The dispatch running ``task_id``, if this worker is running it."""
         running = self._running_dispatch
         return running[1] if running is not None and running[0] == task_id else None
 

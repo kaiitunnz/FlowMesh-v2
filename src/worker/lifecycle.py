@@ -54,6 +54,12 @@ class Lifecycle:
         self.content_plane: WorkerContentPlane | None = None
         self._stop_event = threading.Event()
         self._started_ts: float | None = None
+        # What this worker last reported: its status and the dispatch it concerns.
+        # Heartbeats repeat it, so a report the registry missed or took out of order
+        # is restored within one heartbeat.
+        self._status_lock = threading.Lock()
+        self._status = WorkerStatus.STARTING
+        self._dispatch_id: str | None = None
 
     @property
     def worker_id(self) -> str:
@@ -114,30 +120,53 @@ class Lifecycle:
             power_metrics=initial_power,
         )
         self.client.start()
-        self.client.set_status(WorkerStatus.IDLE)
+        self._report(WorkerStatus.IDLE, None, {})
         self._touch_hb_file()
         threading.Thread(target=self._hb_loop, daemon=True).start()
 
     def _hb_loop(self):
         while not self._stop_event.is_set():
+            metrics = self._metrics()
             try:
-                self.client.heartbeat(ttl_sec=self.hb_ttl_sec, metrics=self._metrics())
+                # Under the status lock, so no heartbeat carries a status older than
+                # a report already sent.
+                with self._status_lock:
+                    self.client.heartbeat(
+                        ttl_sec=self.hb_ttl_sec,
+                        metrics=metrics,
+                        status=self._status,
+                        dispatch_id=self._dispatch_id,
+                    )
             except Exception:
                 pass
             self._touch_hb_file()
             self._stop_event.wait(self.hb_sec)
 
-    def set_busy(self, task_id: str):
-        try:
-            self.client.set_status(WorkerStatus.BUSY, {"task_id": task_id})
-        except Exception:
-            pass
+    def set_busy(self, task_id: str) -> None:
+        self._report(
+            WorkerStatus.BUSY, self.client.dispatch_id(task_id), {"task_id": task_id}
+        )
 
-    def set_idle(self, task_id: str):
-        try:
-            self.client.set_status(WorkerStatus.IDLE, {"last_task": task_id})
-        except Exception:
-            pass
+    def set_idle(self, task_id: str) -> None:
+        self._report(
+            WorkerStatus.IDLE, self.client.dispatch_id(task_id), {"last_task": task_id}
+        )
+
+    def set_draining(self) -> None:
+        """Report the worker busy, so it takes no further task while it shuts down."""
+        with self._status_lock:
+            dispatch_id = self._dispatch_id
+        self._report(WorkerStatus.BUSY, dispatch_id, {})
+
+    def _report(
+        self, status: WorkerStatus, dispatch_id: str | None, extra: dict[str, Any]
+    ) -> None:
+        with self._status_lock:
+            self._status, self._dispatch_id = status, dispatch_id
+            try:
+                self.client.set_status(status, extra, dispatch_id)
+            except Exception:
+                pass
 
     def set_failed(
         self,

@@ -226,6 +226,7 @@ class Runner:
 
     def _shut_down(self) -> None:
         self.logger.info("Shutdown requested; giving up the running task")
+        self.lifecycle.set_draining()
         self.lifecycle.stop()
         self._cancel_active_executor()
         if self._mediated_sidecar is not None:
