@@ -2,6 +2,7 @@
 
 import logging
 import os
+from collections.abc import Callable
 from unittest.mock import MagicMock
 
 from server.registries.node import NodeRegistry
@@ -54,4 +55,4 @@ class StubWorkerManager(WorkerManager):
         self._registry = registry if registry is not None else MagicMock()
         self._is_started = True
         self._default_worker_config = {}
-        self._capacity_change_callback = None
+        self._capacity_change_callback: Callable[[], None] | None = None
