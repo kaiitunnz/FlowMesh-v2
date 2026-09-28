@@ -221,23 +221,29 @@ class WorkerWatchdog:
 
     def _handle_worker_expired(self, worker_id: str) -> None:
         recovery = self._runtime.recover_tasks_for_worker(worker_id)
-        if recovery.resolved and self._record_losses is not None:
-            self._record_losses(worker_id, recovery.resolved)
-        recovered = recovery.lost
-        if not recovered:
-            if not recovery.resolved:
-                self._logger.warning(
-                    "Worker %s heartbeat expired; no dispatched tasks to recover",
-                    worker_id,
-                )
+        if not recovery.lost and not recovery.resolved:
+            self._logger.warning(
+                "Worker %s heartbeat expired; no dispatched tasks to recover",
+                worker_id,
+            )
+            return
+        if recovery.resolved:
+            self._logger.warning(
+                "Worker %s heartbeat expired; resolved %d v2 task(s) as lost",
+                worker_id,
+                len(recovery.resolved),
+            )
+            if self._record_losses is not None:
+                self._record_losses(worker_id, recovery.resolved)
+        if not recovery.lost:
             return
 
         self._logger.warning(
             "Worker %s heartbeat expired; emitting synthetic failures for %d task(s)",
             worker_id,
-            len(recovered),
+            len(recovery.lost),
         )
-        for task_id in recovered:
+        for task_id in recovery.lost:
             payload = {
                 "reason": "worker_heartbeat_expired",
                 "worker": worker_id,

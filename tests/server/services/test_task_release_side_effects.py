@@ -167,9 +167,9 @@ async def test_a_task_failing_as_given_up_closes_with_its_dependents(
 
 
 @pytest.mark.anyio
-async def test_a_task_failing_with_its_expired_worker_closes_with_its_dependents() -> (
-    None
-):
+async def test_a_task_failing_with_its_expired_worker_closes_with_its_dependents(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     harness = _Harness(_runtime(FakeRegistry()))
     _, ids = await _dispatched(harness, SSH_THEN_ECHO, "session")
     watchdog = WorkerWatchdog(
@@ -183,8 +183,10 @@ async def test_a_task_failing_with_its_expired_worker_closes_with_its_dependents
     )
     watchdog.set_loss_handler(harness.monitor.record_worker_losses)
 
-    watchdog._handle_worker_expired("wkr-1")
+    with caplog.at_level(logging.WARNING, logger="release-watchdog"):
+        watchdog._handle_worker_expired("wkr-1")
 
+    assert "Worker wkr-1 heartbeat expired" in caplog.text
     assert harness.released(ids["session"])
     assert harness.closed_as_failed(ids["session"])
     assert harness.closed_as_failed(ids["after"])
