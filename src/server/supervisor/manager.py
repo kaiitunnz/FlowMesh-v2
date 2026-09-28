@@ -344,7 +344,7 @@ class WorkerManager:
 
     async def _stop_and_destroy_worker(self, worker: WorkerAdapter) -> bool:
         worker_name = worker.name
-        was_running = worker.status in (WorkerStatus.STARTING, WorkerStatus.RUNNING)
+        was_running = worker.status is not WorkerStatus.STOPPED
         if was_running:
             self.logger.info("Stopping worker %s...", worker_name)
         else:

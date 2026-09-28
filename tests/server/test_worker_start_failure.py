@@ -152,13 +152,14 @@ class TestStopAndDestroyWorkerLog:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [WorkerStatus.RUNNING, WorkerStatus.STOPPING])
     async def test_a_running_worker_is_logged_as_stopped(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, status: WorkerStatus
     ) -> None:
         wm = StubWorkerManager()
         wm._destroy_worker = MagicMock()  # type: ignore[method-assign]
         worker = _worker(started=True)
-        worker.status = WorkerStatus.RUNNING
+        worker.status = status
         worker.stop = AsyncMock(return_value=True)
 
         with caplog.at_level(logging.INFO, logger="test.supervisor"):
