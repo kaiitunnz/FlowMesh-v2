@@ -409,7 +409,14 @@ if IS_ROOT_NODE:
         check_interval=config.watchdog.check_interval,
         grace_seconds=config.watchdog.grace_sec,
         rehydration_grace_seconds=config.watchdog.rehydration_grace_sec,
+        reap_enabled=config.watchdog.reap_enabled,
+        reap_grace_seconds=config.watchdog.reap_grace_sec,
     )
+    if config.watchdog.reap_enabled and not config.watchdog.enabled:
+        logger.warning(
+            "ENABLE_WORKER_REAPER is set but ENABLE_WORKER_WATCHDOG is false; "
+            "the reaper will not run"
+        )
 
     CONTENT_AUTHORITY: ContentHydrationAuthority | None = None
     if config.content_store.hydration_enabled and WORKER_REGISTRY is not None:

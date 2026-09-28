@@ -525,6 +525,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   up — e.g. SSH requires a reachable Docker daemon, and training or omni types
   require their (often GPU-only) dependencies — so a worker missing that executor
   isn't a candidate, rather than being handed a task it would fail.
+- **Stale worker reaping.** The watchdog deletes the registry record of a worker
+  that has been dead for `WORKER_REAP_GRACE_SEC`, so a worker that leaves without an
+  `UNREGISTER`, such as one that crashed, leaves no record behind. A late heartbeat or
+  status write never recreates a deleted record.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side.

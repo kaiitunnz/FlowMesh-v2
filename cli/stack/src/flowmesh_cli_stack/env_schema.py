@@ -79,6 +79,23 @@ def _require_peer_trust(
         )
 
 
+def _warn_reaper_without_watchdog(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """Warn when the stale-worker reaper is enabled while the watchdog is off.
+
+    The reaper runs on the watchdog thread, so it never fires without it. An
+    unset or unparsable ENABLE_WORKER_WATCHDOG keeps its own default and is
+    left alone, so only an explicit false value warns.
+    """
+    if parse_bool(env.get("ENABLE_WORKER_REAPER", "")) and (
+        parse_bool(env.get("ENABLE_WORKER_WATCHDOG", "")) is False
+    ):
+        warnings.append(
+            "ENABLE_WORKER_REAPER has no effect while ENABLE_WORKER_WATCHDOG is false"
+        )
+
+
 STACK_ENV_SCHEMA = EnvSchema(
     name="stack",
     header=[
@@ -1139,6 +1156,17 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=0,
                 ),
+                EnvVar(
+                    "ENABLE_WORKER_REAPER",
+                    "true",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "WORKER_REAP_GRACE_SEC",
+                    "900",
+                    var_type=EnvVarType.INT,
+                    min_value=0,
+                ),
             ],
         ),
         EnvSection(
@@ -1531,6 +1559,7 @@ STACK_ENV_SCHEMA = EnvSchema(
         _require_peer_trust,
         _require_network_plane_for_resident,
         _require_network_plane_for_content,
+        _warn_reaper_without_watchdog,
     ],
 )
 
