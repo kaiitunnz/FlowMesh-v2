@@ -131,6 +131,14 @@ class RunSignals:
         with self._lock:
             return self._running is not None and self._running in self._stops
 
+    @property
+    def interrupted(self) -> bool:
+        """Whether the running task is cancelled or stopped."""
+        with self._lock:
+            return self._running is not None and (
+                self._running in self._cancels or self._running in self._stops
+            )
+
     def raise_if_cancelled(self) -> bool:
         """Raise `TaskCancelledError` if the running task is cancelled; returns whether
         it is stopped."""

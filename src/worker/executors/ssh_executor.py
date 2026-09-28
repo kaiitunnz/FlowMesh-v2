@@ -586,7 +586,7 @@ class SSHExecutor(Executor):
 
         assert isinstance(container, Container)
         self._current_container = container
-        if self._signals.cancelled or self._signals.stopped:
+        if self._signals.interrupted:
             # The request landed before the container existed, so it stopped nothing.
             self._interrupt_container(container)
         log_thread: threading.Thread | None = None
@@ -632,7 +632,7 @@ class SSHExecutor(Executor):
             maybe_upload_artifacts(task, out_dir, logger=logger, skip_errors=True)
         finally:
             self._current_container = None
-            if self._signals.cancelled or self._signals.stopped:
+            if self._signals.interrupted:
                 # A cancel or stop ends the task well inside the worker's own stop
                 # timeout, and a log stream ends only once its container stops.
                 self._interrupt_container(container)
@@ -1381,8 +1381,8 @@ class SSHExecutor(Executor):
         while True:
             try:
                 return container.wait(timeout=_STAGING_WAIT_SEC).get("StatusCode", 1)
-            except (requests.ReadTimeout, requests.ConnectionError):
-                if self._signals.cancelled or self._signals.stopped:
+            except requests.ReadTimeout:
+                if self._signals.interrupted:
                     raise _StagingInterrupted from None
 
     def _build_remote_stage_command(self, task_id: str, include_results: bool) -> str:

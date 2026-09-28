@@ -272,3 +272,23 @@ def test_a_stop_while_staging_succeeds_and_a_cancel_is_cancelled(
             build_mount_plan=interrupted("cancel"),
         )
     start.assert_not_called()
+
+
+def test_a_staging_wait_that_loses_docker_fails_promptly(
+    executor: SSHExecutor,
+) -> None:
+    staging = MagicMock()
+    staging.wait.side_effect = [
+        requests.ConnectionError("docker socket gone"),
+        AssertionError("the wait was retried"),
+    ]
+    client = MagicMock()
+    client.containers.create.return_value = staging
+    started = time.monotonic()
+
+    with executor._signals.running(_TASK_ID), pytest.raises(requests.ConnectionError):
+        executor._run_staging_container(client, {"image": "busybox"}, {})
+
+    assert time.monotonic() - started < 1.0
+    assert staging.wait.call_count == 1
+    staging.remove.assert_called_once_with(force=True)
