@@ -161,8 +161,8 @@ class WorkerAdapter(ABC):
             await asyncio.wait({starting})
         if (stopping := self._stopping) is None or stopping.done():
             prev_status = self.status
-            # The status reads STOPPED whenever the worker's event stream closes, so
-            # only what the adapter started says whether there is anything to stop.
+            # The status reads STOPPED whenever the worker's event stream closes, so a
+            # worker the adapter started is stopped whatever its status reads.
             if (
                 prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED)
                 and not self.holds_worker()

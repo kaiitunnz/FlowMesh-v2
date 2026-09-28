@@ -133,7 +133,7 @@ class AgentEpisodeExecutor(Executor):
             self._signals.raise_if_cancelled()
             result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
         except Exception as exc:
-            # A cancel ends the harness however its turn unwinds, as the step's cancel.
+            # However a cancelled turn unwinds, the step ends as cancelled.
             if self._signals.cancelled and not isinstance(exc, TaskCancelledError):
                 raise TaskCancelledError(f"Task {task.task_id} cancelled") from exc
             raise
