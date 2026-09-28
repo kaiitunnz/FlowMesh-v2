@@ -1,5 +1,8 @@
+import asyncio
+import logging
 import os
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NewType
 
@@ -9,6 +12,8 @@ from ... import env
 from ...hooks import PrincipalContext
 from ..schemas import WorkerInfo, WorkerStatus
 from .utils import env_to_secret_str, to_env_str
+
+logger = logging.getLogger("supervisor")
 
 
 class WorkerConfig(BaseModel):
@@ -85,6 +90,7 @@ class WorkerAdapter(ABC):
         self.name = name
         self.config = config
         self.owner = owner
+        self._starting: asyncio.Future[bool] | None = None
 
     @property
     @abstractmethod
@@ -112,6 +118,29 @@ class WorkerAdapter(ABC):
     @abstractmethod
     def get_info(self) -> WorkerInfo:
         pass
+
+    async def _run_start(self, start: Callable[[], bool]) -> bool:
+        """Run ``start`` on a thread, which a cancel cannot stop; a stop waits for it
+        first, so it finds whatever the start created."""
+        starting = self._starting = asyncio.ensure_future(asyncio.to_thread(start))
+        try:
+            return await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            starting.add_done_callback(self._log_abandoned_start)
+            raise
+
+    def _log_abandoned_start(self, starting: "asyncio.Future[bool]") -> None:
+        if not starting.cancelled() and (exc := starting.exception()) is not None:
+            logger.warning(
+                "Worker %s failed to start after its start was cancelled: %r",
+                self.name,
+                exc,
+            )
+
+    async def _wait_for_start(self) -> None:
+        """Wait for a start still creating the worker."""
+        if (starting := self._starting) is not None and not starting.done():
+            await asyncio.wait({starting})
 
     @abstractmethod
     async def start(self) -> bool:

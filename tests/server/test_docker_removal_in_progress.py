@@ -5,7 +5,7 @@ import logging
 import threading
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from docker.errors import APIError, NotFound
@@ -302,3 +302,36 @@ class TestCancelledStart:
 
         created.stop.assert_called_once()
         created.remove.assert_called_once()
+
+
+class TestAbandonedStart:
+    @pytest.mark.asyncio
+    async def test_a_start_that_fails_after_its_cancel_is_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        creating = threading.Event()
+        release = threading.Event()
+        docker_client = MagicMock()
+        docker_client.containers.get.side_effect = NotFound("gone")
+        docker_client.containers.list.return_value = []
+        docker_client.volumes.list.return_value = []
+        adapter = _adapter(docker_client)
+
+        def start() -> bool:
+            creating.set()
+            release.wait(timeout=5.0)
+            raise RuntimeError("create failed")
+
+        with (
+            patch.object(adapter, "_start", side_effect=start),
+            caplog.at_level(logging.WARNING, logger="supervisor"),
+        ):
+            task = asyncio.ensure_future(adapter.start())
+            await asyncio.to_thread(creating.wait, 5.0)
+            task.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await adapter.stop()
+
+        assert "failed to start after its start was cancelled" in caplog.text

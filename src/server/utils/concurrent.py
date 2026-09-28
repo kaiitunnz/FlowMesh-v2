@@ -1,7 +1,7 @@
 import asyncio
 import multiprocessing as mp
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from multiprocessing.queues import Queue as MPQueue
 
 # Shared multiprocessing context for FlowMesh child processes. Spawn (not fork) because
@@ -102,19 +102,3 @@ def create_task_channel[T, R]() -> tuple[TaskSender[T, R], TaskReceiver[T, R]]:
     sender = TaskSender(send_q, recv_q)
     receiver = TaskReceiver(send_q, recv_q)
     return sender, receiver
-
-
-async def run_to_completion[T](fn: Callable[[], T]) -> T:
-    """Run ``fn`` on a thread, which a cancel cannot stop.
-
-    A cancel waits for the thread to finish before it propagates, so whatever unwinds
-    after it sees everything the thread did.
-    """
-    future = asyncio.ensure_future(asyncio.to_thread(fn))
-    try:
-        return await asyncio.shield(future)
-    except asyncio.CancelledError:
-        await asyncio.wait({future})
-        if not future.cancelled():
-            future.exception()
-        raise

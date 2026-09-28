@@ -4,6 +4,7 @@ import logging
 import os
 from collections.abc import Callable
 from unittest.mock import MagicMock
+from weakref import WeakSet
 
 from server.registries.node import NodeRegistry
 from server.supervisor.manager import WorkerManager
@@ -56,3 +57,5 @@ class StubWorkerManager(WorkerManager):
         self._is_started = True
         self._default_worker_config = {}
         self._capacity_change_callback: Callable[[], None] | None = None
+        self._destroyed = WeakSet()
+        self._providers = {}

@@ -9,7 +9,6 @@ from vastai import VastAI  # type: ignore
 
 from ... import env
 from ...hooks import PrincipalContext
-from ...utils.concurrent import run_to_completion
 from ...utils.helpers import ResourcePool
 from ..resource_manager import GpuArch
 from ..schemas import WorkerHardware, WorkerInfo, WorkerStatus
@@ -142,9 +141,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
     async def start(self) -> bool:
         self.set_status(WorkerStatus.STARTING)
         try:
-            # A start cancelled mid-create still creates the worker; the caller's
-            # unwind stops what it created once it has.
-            ok = await run_to_completion(self._start)
+            ok = await self._run_start(self._start)
             if not ok:
                 self.set_status(WorkerStatus.STOPPED)
             return ok
@@ -167,6 +164,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
             self._hardware = hardware
 
     async def stop(self) -> bool:
+        await self._wait_for_start()
         prev_status = self.status
         if prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED):
             return True

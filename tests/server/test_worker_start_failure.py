@@ -2,15 +2,20 @@
 torn down."""
 
 import asyncio
+import contextlib
 import logging
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from docker.errors import NotFound
 
-from server.supervisor.adapters.base import WorkerAdapter
+from server.supervisor.adapters.base import ProviderSpec, WorkerAdapter
+from server.supervisor.adapters.docker import DockerWorkerAdapter, DockerWorkerConfig
 from server.supervisor.manager import WorkerInitConfig
 from server.supervisor.schemas import WorkerStatus
 from tests.server.supervisor_helpers import StubWorkerManager
+from tests.server.test_docker_removal_in_progress import _adapter
 
 
 def _worker(*, started: bool) -> MagicMock:
@@ -162,3 +167,70 @@ class TestStopAndDestroyWorkerLog:
             "Stopping worker gpu_0...",
             "Worker gpu_0 stopped.",
         ]
+
+
+def _docker_creating(release: threading.Event) -> tuple[MagicMock, MagicMock]:
+    """A Docker client whose create outlives the cancel of the start awaiting it."""
+    created = MagicMock(status="running")
+    containers: list[MagicMock] = []
+    docker = MagicMock()
+
+    def get(_name: str) -> MagicMock:
+        if not containers:
+            raise NotFound("gone")
+        return containers[0]
+
+    def run(**_: object) -> MagicMock:
+        release.wait(timeout=5.0)
+        containers.append(created)
+        return created
+
+    docker.containers.get.side_effect = get
+    docker.containers.run.side_effect = run
+    docker.containers.list.return_value = []
+    docker.volumes.list.return_value = []
+    return docker, created
+
+
+class TestCancelledCreate:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("shape", ["timeout", "timeout_then_shutdown", "shutdown"])
+    async def test_a_cancelled_create_stops_what_it_created_once(
+        self, shape: str
+    ) -> None:
+        release = threading.Event()
+        docker, created = _docker_creating(release)
+        adapter = _adapter(docker)
+        registry = MagicMock()
+        wm = StubWorkerManager(registry)
+        factory = MagicMock()
+        wm._providers = {
+            "docker": ProviderSpec(
+                "docker", DockerWorkerConfig, DockerWorkerAdapter, factory
+            )
+        }
+        wm._create_worker = MagicMock(return_value=adapter)  # type: ignore[method-assign]
+        create = WorkerInitConfig(init_on_start=True)
+
+        if shape == "shutdown":
+            task = asyncio.ensure_future(wm.create_worker(create))
+        else:
+            task = asyncio.ensure_future(
+                asyncio.wait_for(wm.create_worker(create), timeout=0.1)
+            )
+        await asyncio.sleep(0.2)
+        if shape != "timeout":
+            # The supervisor's shutdown cancels the command, then stops its workers.
+            task.cancel()
+            asyncio.get_running_loop().call_later(0.2, release.set)
+            await wm._stop_and_destroy_workers([adapter])
+        else:
+            release.set()
+        with contextlib.suppress(BaseException):
+            await task
+
+        created.stop.assert_called()
+        created.remove.assert_called()
+        factory.destroy_worker.assert_called_once_with(adapter)
+        if shape != "shutdown":
+            registry.try_pop.assert_called_with(adapter.token)

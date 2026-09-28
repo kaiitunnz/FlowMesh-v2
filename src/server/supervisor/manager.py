@@ -3,6 +3,7 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from typing import Any
+from weakref import WeakSet
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -68,6 +69,9 @@ class WorkerManager:
         self._default_worker_config: dict[str, Any] | None = None
         self._is_started: bool = False
         self._capacity_change_callback = capacity_change_callback
+        # Workers already destroyed: a create's unwind and a shutdown can both reach
+        # one, and a second destroy would free its GPUs twice.
+        self._destroyed: WeakSet[WorkerAdapter] = WeakSet()
         specs: list[ProviderSpec] = []
         for label, build_spec in (
             ("Docker", docker_provider_spec),
@@ -199,8 +203,9 @@ class WorkerManager:
                 if not await self._start_worker(worker):
                     raise RuntimeError(f"Failed to start worker '{worker.name}'")
             except BaseException:
-                await self._stop_and_destroy_worker(worker)
+                # A second cancel must not cut the unwind short, so it runs on.
                 self._registry.try_pop(worker.token)
+                await asyncio.shield(self._stop_and_destroy_worker(worker))
                 raise
         self._report_capacity_change()
         return worker.get_info()
@@ -305,6 +310,9 @@ class WorkerManager:
         return True
 
     def _destroy_worker(self, worker: WorkerAdapter) -> None:
+        if worker in self._destroyed:
+            return
+        self._destroyed.add(worker)
         for spec in self._providers.values():
             if isinstance(worker, spec.adapter_cls):
                 spec.factory.destroy_worker(worker)
