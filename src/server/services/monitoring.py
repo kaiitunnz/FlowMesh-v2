@@ -848,14 +848,18 @@ class EventMonitor:
                         )
                         self._watchdog.clear_dead_mark(worker_id)
                         return
-                    self._return_lost_tasks(worker_id)
+                    self._return_lost_tasks(worker_id, graceful=event.graceful)
             case _:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
                 )
 
-    def _return_lost_tasks(self, worker_id: str) -> None:
-        """Return the tasks a departed worker held, settling any being cancelled."""
+    def _return_lost_tasks(self, worker_id: str, graceful: bool = False) -> None:
+        """Return the tasks a departed worker held, settling any being cancelled.
+
+        A worker that left on its own shutdown gave its tasks up, so they return
+        without spending an attempt; any other departure spends one.
+        """
         requeued: list[str] = []
         ts = now_iso()
         for task_id in self._runtime.recover_tasks_for_worker(worker_id):
@@ -864,6 +868,7 @@ class EventMonitor:
                 reason="worker_unregistered",
                 front=True,
                 holder=worker_id,
+                count_retry=not graceful,
                 extra_payload={"worker": worker_id},
             )
             if end is DispatchEnd.CANCELLED:

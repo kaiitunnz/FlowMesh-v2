@@ -268,6 +268,7 @@ class SupervisorClient:
         event = WorkerEvent(
             type="UNREGISTER",
             worker_id=self.worker_id,
+            graceful=True,
             payload=payload,
             actor=self.owner_principal,
         )

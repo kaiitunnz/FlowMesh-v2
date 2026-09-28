@@ -83,6 +83,9 @@ class WorkerEvent(BaseEvent):
     origin: Literal["worker", "server"] = Field(
         default="worker", description="Which side produced the event."
     )
+    graceful: bool = Field(
+        default=False, description="Whether the worker left on its own shutdown."
+    )
     tags: list[str] | None = Field(default=None, description="Worker tags.")
     metrics: dict[str, Any] = Field(
         default_factory=dict, description="Metrics reported in heartbeat."
