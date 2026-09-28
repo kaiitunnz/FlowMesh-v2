@@ -479,6 +479,10 @@ class EventMonitor:
                     event.task_id, worker_id, payload, event.dispatch_id
                 )
                 if self._unapplied(event, effect):
+                    # The dispatch ended after the check above, and its release ran
+                    # before this update registered a forward; only this thread
+                    # registers one, so the forward is this update's.
+                    self._unregister_port_forward(event.task_id)
                     return
                 self._maybe_adopt_serve(event.task_id)
             case "TASK_SUCCEEDED":

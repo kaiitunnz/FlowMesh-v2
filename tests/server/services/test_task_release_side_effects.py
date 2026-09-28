@@ -200,3 +200,37 @@ async def test_a_task_returning_with_its_lost_worker_releases_its_dispatch() -> 
     record = harness.runtime.get_record(ids["a"])
     assert record is not None and record.status == TaskStatus.PENDING
     assert harness.released(ids["a"])
+
+
+@pytest.mark.anyio
+async def test_a_forward_an_update_registers_as_its_task_fails_is_released() -> None:
+    harness = _Harness(_runtime(FakeRegistry()))
+    _, ids = await _dispatched(harness, SSH_THEN_ECHO, "session")
+    task_id = ids["session"]
+    calls: list[str] = []
+
+    def register(*args: Any) -> dict[str, Any]:
+        # The watchdog resolves the task, and releases it, before the forward lands.
+        harness.monitor.record_worker_losses(
+            "wkr-1", harness.runtime.recover_tasks_for_worker("wkr-1").resolved
+        )
+        calls.append("registered")
+        return cast(dict[str, Any], args[-1])
+
+    harness.forward.register_port_forward.side_effect = register
+    harness.forward.unregister_task.side_effect = lambda *_: calls.append("released")
+
+    harness.deliver(
+        TaskEvent(
+            type="TASK_UPDATE",
+            task_id=task_id,
+            worker_id="wkr-1",
+            dispatch_id="dsp-1",
+            payload={"ssh": {"mode": "forward", "host": "h", "port": 22}},
+            ts=_TS,
+        )
+    )
+
+    record = harness.runtime.get_record(task_id)
+    assert record is not None and record.status == TaskStatus.FAILED
+    assert calls[-1] == "released"
