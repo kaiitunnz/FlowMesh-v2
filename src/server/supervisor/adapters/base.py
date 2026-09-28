@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NewType
 
@@ -120,17 +119,50 @@ class WorkerAdapter(ABC):
     def get_info(self) -> WorkerInfo:
         pass
 
-    async def _run_start(self, start: Callable[[], bool]) -> bool:
-        """Run ``start`` on a thread, which a cancel cannot stop; a stop waits for it
+    async def start(self) -> bool:
+        """Start worker. Returns whether the worker was successfully started."""
+        self.set_status(WorkerStatus.STARTING)
+        try:
+            ok = await self._run_start()
+            if not ok:
+                self.set_status(WorkerStatus.STOPPED)
+            return ok
+        except Exception:
+            self.set_status(WorkerStatus.STOPPED)
+            raise
+
+    async def prepare(self) -> None:
+        """Prepare worker (e.g., collecting hardware information) without starting
+        it."""
+        pass
+
+    async def stop(self) -> bool:
+        """Stop worker. Returns whether the worker was successfully stopped."""
+        return await self._run_stop()
+
+    @abstractmethod
+    def _start(self) -> bool:
+        """Start the worker, blocking; returns whether it started."""
+        pass
+
+    @abstractmethod
+    def _stop(self) -> bool:
+        """Stop the worker, blocking; returns whether it stopped."""
+        pass
+
+    async def _run_start(self) -> bool:
+        """Run ``_start`` on a thread, which a cancel cannot stop; a stop waits for it
         first, so it finds whatever the start created."""
-        starting = self._starting = asyncio.ensure_future(asyncio.to_thread(start))
+        starting = self._starting = asyncio.ensure_future(
+            asyncio.to_thread(self._start)
+        )
         try:
             return await asyncio.shield(starting)
         except asyncio.CancelledError:
             starting.add_done_callback(self._log_abandoned_start)
             raise
 
-    def _log_abandoned_start(self, starting: "asyncio.Future[bool]") -> None:
+    def _log_abandoned_start(self, starting: asyncio.Future[bool]) -> None:
         if not starting.cancelled() and (exc := starting.exception()) is not None:
             logger.warning(
                 "Worker %s failed to start after its start was cancelled: %r",
@@ -138,8 +170,8 @@ class WorkerAdapter(ABC):
                 exc,
             )
 
-    async def _run_stop(self, stop: Callable[[], bool]) -> bool:
-        """Run ``stop`` on a thread once a start still creating the worker finishes.
+    async def _run_stop(self) -> bool:
+        """Run ``_stop`` on a thread once a start still creating the worker finishes.
 
         A stop while another runs waits for that one and returns its result, so no
         caller sees the worker stopped before it is; a cancel of a caller never stops
@@ -153,36 +185,19 @@ class WorkerAdapter(ABC):
                 return True
             self.set_status(WorkerStatus.STOPPING)
             stopping = self._stopping = asyncio.ensure_future(
-                self._stopped(stop, prev_status)
+                self._stop_on_thread(prev_status)
             )
         return await asyncio.shield(stopping)
 
-    async def _stopped(
-        self, stop: Callable[[], bool], prev_status: WorkerStatus
-    ) -> bool:
+    async def _stop_on_thread(self, prev_status: WorkerStatus) -> bool:
         try:
-            ok = await asyncio.to_thread(stop)
+            ok = await asyncio.to_thread(self._stop)
         except Exception:
             self.set_status(prev_status)
             raise
         if not ok:
             self.set_status(prev_status)
         return ok
-
-    @abstractmethod
-    async def start(self) -> bool:
-        """Start worker. Returns whether the worker was successfully started."""
-        pass
-
-    async def prepare(self) -> None:
-        """Prepare worker (e.g., collecting hardware information) without starting
-        it."""
-        pass
-
-    @abstractmethod
-    async def stop(self) -> bool:
-        """Stop worker. Returns whether the worker was successfully stopped."""
-        pass
 
     def _base_environment(self) -> dict[str, str]:
         config = self.config

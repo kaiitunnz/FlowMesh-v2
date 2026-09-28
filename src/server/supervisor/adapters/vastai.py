@@ -137,17 +137,6 @@ class VastAIWorkerAdapter(WorkerAdapter):
             hardware=hardware,
         )
 
-    async def start(self) -> bool:
-        self.set_status(WorkerStatus.STARTING)
-        try:
-            ok = await self._run_start(self._start)
-            if not ok:
-                self.set_status(WorkerStatus.STOPPED)
-            return ok
-        except Exception:
-            self.set_status(WorkerStatus.STOPPED)
-            raise
-
     async def prepare(self) -> None:
         if self._hardware is None:
             instance_id = self._instance_id
@@ -161,9 +150,6 @@ class VastAIWorkerAdapter(WorkerAdapter):
                     )
                 hardware = instance_info
             self._hardware = hardware
-
-    async def stop(self) -> bool:
-        return await self._run_stop(self._stop)
 
     def _base_environment(self) -> dict[str, str]:
         environment = super()._base_environment()

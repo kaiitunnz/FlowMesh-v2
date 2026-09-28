@@ -265,22 +265,8 @@ class DockerWorkerAdapter(WorkerAdapter):
             ssh_limits=self.config.ssh.to_limits() if self.config.enable_ssh else None,
         )
 
-    async def start(self) -> bool:
-        self.set_status(WorkerStatus.STARTING)
-        try:
-            ok = await self._run_start(self._start)
-            if not ok:
-                self.set_status(WorkerStatus.STOPPED)
-            return ok
-        except Exception:
-            self.set_status(WorkerStatus.STOPPED)
-            raise
-
     async def prepare(self) -> None:
         self._hardware = await asyncio.to_thread(self._probe_hardware)
-
-    async def stop(self) -> bool:
-        return await self._run_stop(self._stop)
 
     def get_image_name(self) -> str:
         return get_worker_image_name(
@@ -524,8 +510,8 @@ class DockerWorkerAdapter(WorkerAdapter):
             )
             return
 
-        # The worker has stopped, so nothing of its own will stop these; a staging
-        # container's shell ignores SIGTERM, so a graceful stop only waits it out.
+        # The worker is stopped or gone, so its SSH containers are killed outright: a
+        # staging container's shell ignores SIGTERM.
         for ssh_container in containers:
             try:
                 ssh_container.remove(force=True)
