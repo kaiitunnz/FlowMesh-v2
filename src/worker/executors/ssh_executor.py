@@ -124,8 +124,8 @@ _STAGING_WAIT_SEC = 1
 type DemuxLogStream = Iterator[tuple[bytes | None, bytes | None]]
 
 
-class _StagingInterrupted(Exception):
-    """A cancel or stop ended the staging of an SSH task's inputs."""
+class _Interrupted(Exception):
+    """A cancel or stop reached an SSH task before its session container started."""
 
 
 @dataclass(slots=True)
@@ -497,33 +497,31 @@ class SSHExecutor(Executor):
         client = self._docker
         assert client is not None
 
+        session_id = new_ssh_session_id()
         if interactive:
             ports = {"22/tcp": None}  # assign a random host port
             container_cmd = None
         else:
             ports = {}
             # Resolve the command to pass to the wrapper entrypoint.
-            container_cmd = self._resolve_noninteractive_command(client, cfg)
+            try:
+                container_cmd = self._resolve_noninteractive_command(client, cfg)
+            except _Interrupted:
+                return self._interrupted_before_start(task, session_id)
 
-        session_id = new_ssh_session_id()
         worker_name = self.worker_name
         container_name = f"{worker_name}_ssh-{task.task_id[:8]}-{session_id[:8]}"
 
         prepare_output_dir(out_dir)  # Ensure output dir exists before mounting
-        if self._signals.raise_if_cancelled():
-            logger.info(
-                "SSH task %s stopped before its container started", task.task_id
-            )
-            return SSHResult(session_id=session_id, exit_code=0)
+        if self._signals.interrupted:
+            return self._interrupted_before_start(task, session_id)
         resolved_inputs = self._resolve_inputs(task, cfg)
         try:
             mount_plan = self._build_mount_plan(
                 client, out_dir, resolved_inputs, cfg, session_id
             )
-        except _StagingInterrupted:
-            self._signals.raise_if_cancelled()
-            logger.info("SSH task %s stopped while staging its inputs", task.task_id)
-            return SSHResult(session_id=session_id, exit_code=0)
+        except _Interrupted:
+            return self._interrupted_before_start(task, session_id)
 
         labels = {
             _LABEL_WORKER: worker_name,
@@ -577,6 +575,9 @@ class SSHExecutor(Executor):
         exit_code = 0
         try:
             container, log_stream = self._start_container(client, kwargs, interactive)
+        except _Interrupted:
+            self._cleanup_mount_plan(client, mount_plan)
+            return self._interrupted_before_start(task, session_id)
         except ExecutionError:
             raise
         except Exception as exc:
@@ -650,6 +651,15 @@ class SSHExecutor(Executor):
             )
 
         return result
+
+    def _interrupted_before_start(
+        self, task: ExecutorTask, session_id: str
+    ) -> SSHResult:
+        """End a task a cancel or stop reached before its session container started:
+        a cancel raises, and a stop succeeds."""
+        self._signals.raise_if_cancelled()
+        logger.info("SSH task %s stopped before its container started", task.task_id)
+        return SSHResult(session_id=session_id, exit_code=0)
 
     def cancel(self, task_id: str) -> None:
         if self._signals.cancel(task_id):
@@ -993,8 +1003,11 @@ class SSHExecutor(Executor):
             image_config = image_obj.attrs.get("Config", {})
         except Exception:
             try:
-                image_obj = client.images.pull(cfg.image)
+                self._pull_image(client, cfg.image)
+                image_obj = client.images.get(cfg.image)
                 image_config = image_obj.attrs.get("Config", {})
+            except _Interrupted:
+                raise
             except Exception as exc:
                 raise ExecutionError(
                     f"Cannot determine default entrypoint/command for image "
@@ -1082,13 +1095,15 @@ class SSHExecutor(Executor):
             if isinstance(image, str) and "No such image" in str(exc):
                 try:
                     logger.info("Pulling missing image %s for %s SSH task", image, mode)
-                    client.images.pull(image)
+                    self._pull_image(client, image)
                     if interactive:
                         container = client.containers.run(**kwargs)
                     else:
                         container, log_stream = self._run_noninteractive_container(
                             client, kwargs
                         )
+                except _Interrupted:
+                    raise
                 except Exception as pull_exc:
                     raise ExecutionError(
                         f"Failed to start {mode} container after pulling image "
@@ -1100,6 +1115,18 @@ class SSHExecutor(Executor):
                 ) from exc
         assert isinstance(container, Container)
         return container, log_stream
+
+    def _pull_image(self, client: DockerClient, image: str) -> None:
+        """Pull an image, abandoning the pull once a cancel or stop reaches the task."""
+        progress = client.api.pull(image, stream=True, decode=True)
+        try:
+            for line in progress:
+                if self._signals.interrupted:
+                    raise _Interrupted
+                if error := line.get("error"):
+                    raise ExecutionError(f"Failed to pull image '{image}': {error}")
+        finally:
+            progress.close()
 
     def _run_noninteractive_container(
         self, client: DockerClient, kwargs: dict[str, Any]
@@ -1350,13 +1377,13 @@ class SSHExecutor(Executor):
         """Run the staging container with each hydrated result placed in it first.
 
         A staging failure is retryable: it is a download or a copy that may succeed on
-        another attempt. A cancel or stop ends it with `_StagingInterrupted`.
+        another attempt. A cancel or stop ends it with `_Interrupted`.
         """
         image = create_kwargs["image"]
         try:
             client.images.get(image)
         except NotFound:
-            client.images.pull(image)
+            self._pull_image(client, image)
         container = client.containers.create(**create_kwargs)
         try:
             if hydrated:
@@ -1383,7 +1410,7 @@ class SSHExecutor(Executor):
                 return container.wait(timeout=_STAGING_WAIT_SEC).get("StatusCode", 1)
             except requests.ReadTimeout:
                 if self._signals.interrupted:
-                    raise _StagingInterrupted from None
+                    raise _Interrupted from None
 
     def _build_remote_stage_command(self, task_id: str, include_results: bool) -> str:
         url = shlex.quote(self._result_bundle_url(task_id, include_results))
@@ -1423,6 +1450,8 @@ class SSHExecutor(Executor):
                 response.raise_for_status()
                 with tmp_path.open("wb") as sink:
                     for chunk in response.iter_content(chunk_size=64 * 1024):
+                        if self._signals.interrupted:
+                            raise _Interrupted
                         if chunk:
                             sink.write(chunk)
             self._extract_result_bundle(tmp_path, destination_dir)

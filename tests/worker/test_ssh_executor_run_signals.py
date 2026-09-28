@@ -3,9 +3,9 @@ it lands; a session container lost for no requested reason fails the task."""
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -239,7 +239,7 @@ def test_a_signal_while_staging_ends_the_staging(
 
     with (
         executor._signals.running(_TASK_ID),
-        pytest.raises(ssh_module._StagingInterrupted),
+        pytest.raises(ssh_module._Interrupted),
     ):
         executor._run_staging_container(client, {"image": "busybox"}, {})
 
@@ -254,7 +254,7 @@ def test_a_stop_while_staging_succeeds_and_a_cancel_is_cancelled(
     def interrupted(kind: str) -> Callable[..., Any]:
         def build(*_: Any) -> Any:
             getattr(executor, kind)(_TASK_ID)
-            raise ssh_module._StagingInterrupted
+            raise ssh_module._Interrupted
 
         return build
 
@@ -292,3 +292,97 @@ def test_a_staging_wait_that_loses_docker_fails_promptly(
     assert time.monotonic() - started < 1.0
     assert staging.wait.call_count == 1
     staging.remove.assert_called_once_with(force=True)
+
+
+def _endless_pull(
+    on_line: Callable[[int], None],
+) -> Callable[..., Iterator[dict[str, str]]]:
+    """A pull that streams progress until closed, running ``on_line`` per line."""
+
+    def pull(*_: Any, **__: Any) -> Iterator[dict[str, str]]:
+        line = 0
+        while True:
+            on_line(line)
+            line += 1
+            yield {"status": "Downloading"}
+
+    return pull
+
+
+@pytest.mark.parametrize("kind", ["cancel", "stop"])
+def test_a_signal_during_a_missing_image_pull_ends_it(
+    executor: SSHExecutor, tmp_path: Path, kind: str
+) -> None:
+    client = cast(Any, executor._docker)
+    client.api.pull.side_effect = _endless_pull(
+        lambda line: getattr(executor, kind)(_TASK_ID) if line == 2 else None
+    )
+    # The session container's image is missing, so its start pulls it.
+    start = MagicMock(
+        side_effect=lambda docker, *_: executor._pull_image(docker, "alpine:3")
+    )
+
+    try:
+        _run(executor, False, tmp_path, None, start)
+    except TaskCancelledError:
+        assert kind == "cancel"
+    else:
+        assert kind == "stop"
+
+
+@pytest.mark.parametrize("kind", ["cancel", "stop"])
+def test_a_pull_is_abandoned_once_a_signal_lands(
+    executor: SSHExecutor, kind: str
+) -> None:
+    client = MagicMock()
+    lines: list[int] = []
+
+    def on_line(line: int) -> None:
+        lines.append(line)
+        if line == 2:
+            getattr(executor, kind)(_TASK_ID)
+
+    client.api.pull.side_effect = _endless_pull(on_line)
+
+    with (
+        executor._signals.running(_TASK_ID),
+        pytest.raises(ssh_module._Interrupted),
+    ):
+        executor._pull_image(client, "alpine:3")
+
+    assert lines == [0, 1, 2]
+
+
+def test_a_pull_error_fails_the_task(executor: SSHExecutor) -> None:
+    client = MagicMock()
+    client.api.pull.return_value = (line for line in [{"error": "manifest unknown"}])
+
+    with executor._signals.running(_TASK_ID), pytest.raises(ExecutionError):
+        executor._pull_image(client, "alpine:404")
+
+
+def test_a_bundle_download_is_abandoned_once_a_signal_lands(
+    executor: SSHExecutor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FLOWMESH_BASE_URL", "http://flowmesh.example")
+    chunks: list[int] = []
+
+    def iter_content(**_: Any) -> Iterator[bytes]:
+        for index in range(1000):
+            chunks.append(index)
+            if index == 2:
+                executor.cancel(_TASK_ID)
+            yield b"x"
+
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.iter_content.side_effect = iter_content
+
+    with (
+        executor._signals.running(_TASK_ID),
+        patch.object(ssh_module.requests, "get", return_value=response),
+        pytest.raises(ssh_module._Interrupted),
+    ):
+        executor._download_result_bundle("tsk-up", tmp_path / "bundle", True)
+
+    assert chunks == [0, 1, 2]

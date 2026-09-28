@@ -2,6 +2,7 @@
 
 import io
 import tarfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock
@@ -303,9 +304,14 @@ class _FakeImages:
             raise NotFound(f"image not known: {name}")
         return object()
 
-    def pull(self, name: str) -> object:
-        self.pulled.append(name)
-        return object()
+
+class _FakeApi:
+    def __init__(self, client: "_FakeClient") -> None:
+        self._client = client
+
+    def pull(self, name: str, **_: object) -> Iterator[dict[str, str]]:
+        self._client.images.pulled.append(name)
+        yield {"status": "Downloaded"}
 
 
 class _FakeClient:
@@ -313,6 +319,7 @@ class _FakeClient:
         self.volumes = _FakeVolumes()
         self.containers = _FakeContainers()
         self.images = _FakeImages()
+        self.api = _FakeApi(self)
 
 
 def _archives(container: MagicMock) -> list[tuple[str, bytes]]:

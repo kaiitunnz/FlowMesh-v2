@@ -531,7 +531,9 @@ class TestNoninteractiveContainerStartup:
 
         assert result is container
         assert log_stream is container.attach.return_value
-        client.images.pull.assert_called_once_with("python:3.12-slim")
+        client.api.pull.assert_called_once_with(
+            "python:3.12-slim", stream=True, decode=True
+        )
         assert client.containers.create.call_count == 2
         container.put_archive.assert_called_once()
         container.start.assert_called_once_with()
@@ -556,7 +558,9 @@ class TestNoninteractiveContainerStartup:
 
         assert result is container
         assert log_stream is None
-        client.images.pull.assert_called_once_with("myimg:latest")
+        client.api.pull.assert_called_once_with(
+            "myimg:latest", stream=True, decode=True
+        )
         assert client.containers.run.call_count == 2
 
 
