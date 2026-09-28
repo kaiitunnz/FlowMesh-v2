@@ -203,9 +203,11 @@ class WorkerManager:
                 if not await self._start_worker(worker):
                     raise RuntimeError(f"Failed to start worker '{worker.name}'")
             except BaseException:
-                # A second cancel must not cut the unwind short, so it runs on.
-                self._registry.try_pop(worker.token)
-                await asyncio.shield(self._stop_and_destroy_worker(worker))
+                # The unwind outlives a second cancel; the worker keeps its name until
+                # it ends.
+                unwind = asyncio.ensure_future(self._stop_and_destroy_worker(worker))
+                unwind.add_done_callback(lambda _: self._registry.try_pop(worker.token))
+                await asyncio.shield(unwind)
                 raise
         self._report_capacity_change()
         return worker.get_info()

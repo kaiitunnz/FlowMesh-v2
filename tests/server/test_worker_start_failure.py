@@ -13,6 +13,7 @@ from docker.errors import NotFound
 from server.supervisor.adapters.base import ProviderSpec, WorkerAdapter
 from server.supervisor.adapters.docker import DockerWorkerAdapter, DockerWorkerConfig
 from server.supervisor.manager import WorkerInitConfig
+from server.supervisor.registry import WorkerRegistry
 from server.supervisor.schemas import WorkerStatus
 from tests.server.supervisor_helpers import StubWorkerManager
 from tests.server.test_docker_removal_in_progress import _adapter
@@ -192,6 +193,29 @@ def _docker_creating(release: threading.Event) -> tuple[MagicMock, MagicMock]:
     return docker, created
 
 
+def _creating_manager(
+    release: threading.Event,
+) -> tuple[StubWorkerManager, WorkerRegistry, WorkerAdapter, MagicMock, MagicMock]:
+    """A manager over a real registry whose create's start waits on ``release``."""
+    docker, created = _docker_creating(release)
+    adapter = _adapter(docker)
+    registry = WorkerRegistry()
+    wm = StubWorkerManager(registry)
+    factory = MagicMock()
+    wm._providers = {
+        "docker": ProviderSpec(
+            "docker", DockerWorkerConfig, DockerWorkerAdapter, factory
+        )
+    }
+
+    def create(_config: WorkerInitConfig) -> WorkerAdapter:
+        registry.add(adapter)
+        return adapter
+
+    wm._create_worker = MagicMock(side_effect=create)  # type: ignore[method-assign]
+    return wm, registry, adapter, created, factory
+
+
 class TestCancelledCreate:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("shape", ["timeout", "timeout_then_shutdown", "shutdown"])
@@ -199,17 +223,7 @@ class TestCancelledCreate:
         self, shape: str
     ) -> None:
         release = threading.Event()
-        docker, created = _docker_creating(release)
-        adapter = _adapter(docker)
-        registry = MagicMock()
-        wm = StubWorkerManager(registry)
-        factory = MagicMock()
-        wm._providers = {
-            "docker": ProviderSpec(
-                "docker", DockerWorkerConfig, DockerWorkerAdapter, factory
-            )
-        }
-        wm._create_worker = MagicMock(return_value=adapter)  # type: ignore[method-assign]
+        wm, registry, adapter, created, factory = _creating_manager(release)
         create = WorkerInitConfig(init_on_start=True)
 
         if shape == "shutdown":
@@ -223,14 +237,30 @@ class TestCancelledCreate:
             # The supervisor's shutdown cancels the command, then stops its workers.
             task.cancel()
             asyncio.get_running_loop().call_later(0.2, release.set)
-            await wm._stop_and_destroy_workers([adapter])
+            await wm.stop()
         else:
             release.set()
         with contextlib.suppress(BaseException):
             await task
 
-        created.stop.assert_called()
-        created.remove.assert_called()
+        created.stop.assert_called_once()
+        created.remove.assert_called_once()
         factory.destroy_worker.assert_called_once_with(adapter)
-        if shape != "shutdown":
-            registry.try_pop.assert_called_with(adapter.token)
+        assert registry.try_get(adapter.token) is None
+
+    @pytest.mark.asyncio
+    async def test_a_create_keeps_its_name_until_its_unwind_ends(self) -> None:
+        release = threading.Event()
+        wm, registry, adapter, created, _ = _creating_manager(release)
+        create = WorkerInitConfig(init_on_start=True)
+        task = asyncio.ensure_future(
+            asyncio.wait_for(wm.create_worker(create), timeout=0.1)
+        )
+        await asyncio.sleep(0.2)
+
+        assert registry.try_get_by_name(adapter.name) is adapter
+        release.set()
+        with contextlib.suppress(BaseException):
+            await task
+        created.stop.assert_called_once()
+        assert registry.try_get_by_name(adapter.name) is None
