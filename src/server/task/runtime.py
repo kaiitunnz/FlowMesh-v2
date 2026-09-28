@@ -5641,8 +5641,8 @@ class TaskRuntime:
         """Apply a worker's cancellation report; returns what it did to the task.
 
         A task being cancelled settles CANCELLED. A cancel nothing requested is the
-        worker giving the task up, as a draining worker does, so the task returns to
-        the head of the queue as a lost dispatch does, spending no attempt.
+        worker giving the task up, as a draining worker does, so the task returns as
+        it would on its worker's loss, spending no attempt.
         """
         try:
             return self._reported(
@@ -5694,17 +5694,28 @@ class TaskRuntime:
                 )
                 return _settle_outcome(EventEffect.SETTLED, record, [], [])
             if record.status == TaskStatus.DISPATCHED:
-                if worker_id is None or not self._return_failed_merge_locked(
-                    record, worker_id
-                ):
-                    self._return_dispatch_locked(
-                        record, increment_retry=False, front=True
-                    )
-                return _settle_outcome(EventEffect.RETURNED, record, [], [])
+                return self._return_given_up_locked(record, worker_id)
             self._settle_cancelled_locked(
                 record, finished_ts, started_ts=started_ts, usage=usage
             )
             return _settle_outcome(EventEffect.APPLIED, record, [], usages)
+
+    def _return_given_up_locked(
+        self, record: TaskRecord, worker_id: str | None
+    ) -> SettleOutcome:
+        """Return a task its worker gave up, as its worker's loss would.
+
+        A v2 task resolves through its invocation's uncertainty: a replayable one
+        retries free and a non-replayable one fails. A v1 task returns free.
+        """
+        if record.workflow_id in self._engines:
+            self._rehydrated_dispatched.pop(record.task_id, None)
+            advance = self._resolve_uncertain_locked(record.task_id)
+            effect = EventEffect.SETTLED if advance.failed else EventEffect.RETURNED
+            return _settle_outcome(effect, record, [], [])
+        if worker_id is None or not self._return_failed_merge_locked(record, worker_id):
+            self._return_dispatch_locked(record, increment_retry=False, front=True)
+        return _settle_outcome(EventEffect.RETURNED, record, [], [])
 
     def _settle_cancelled_usage_locked(
         self,

@@ -1,5 +1,5 @@
-"""A cancel its worker reports without the server having requested one returns the
-task to the queue, as a lost dispatch does."""
+"""A task its worker gives up without a requested cancel, as a draining worker does,
+returns as it would on its worker's loss."""
 
 import threading
 from typing import Any, cast
@@ -83,8 +83,12 @@ async def test_a_workflow_whose_task_its_worker_gave_up_reruns_it_and_settles() 
 
 
 @pytest.mark.anyio
-async def test_a_spawned_child_its_worker_gave_up_reruns_alone() -> None:
+@pytest.mark.parametrize("unregister_first", [False, True])
+async def test_a_spawned_child_its_worker_gave_up_reruns_alone(
+    unregister_first: bool,
+) -> None:
     runtime = _live_runtime(FakeRegistry())
+    monitor = _monitor(runtime)
     workflow_id, ids = await _register(
         runtime, _HEAD + _spawn_join(_JOINS["all_settled"])
     )
@@ -98,7 +102,19 @@ async def test_a_spawned_child_its_worker_gave_up_reruns_alone() -> None:
     assert engine is not None
     scope = engine.scope_for("fan")
 
-    assert _cancelled_by_worker(runtime, kids[0]) is EventEffect.RETURNED
+    record_dispatch(runtime, kids[0], cast(Any, _worker("wkr-9")), "dsp-9")
+    cancelled = TaskEvent(
+        type="TASK_CANCELLED",
+        task_id=kids[0],
+        worker_id="wkr-9",
+        dispatch_id="dsp-9",
+        ts=_TS,
+    )
+    unregistered = WorkerEvent(type="UNREGISTER", worker_id="wkr-9", graceful=True)
+    _deliver(
+        monitor,
+        (unregistered, cancelled) if unregister_first else (cancelled, unregistered),
+    )
 
     assert engine.scope_for("fan") == scope
     for kid in kids:
@@ -223,3 +239,65 @@ async def test_a_worker_lost_without_a_graceful_unregister_spends_an_attempt(
     record = runtime.get_record(task_id)
     assert record is not None and record.status == TaskStatus.FAILED
     assert runtime.workflow_settlement(workflow_id).settled
+
+
+SSH_THEN_ECHO = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: ssh-then-echo}
+spec:
+  graph:
+    nodes:
+      - name: session
+        spec: {taskType: ssh}
+      - name: after
+        dependsOn: [session]
+        spec: {taskType: echo, data: {type: list, items: [after]}}
+"""
+
+
+def _deliver(monitor: Any, events: tuple[Any, ...]) -> None:
+    for event in events:
+        if isinstance(event, TaskEvent):
+            monitor.handle_task_event(event)
+        else:
+            monitor._handle_worker_event(event)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("unregister_first", [False, True])
+async def test_a_drained_external_effect_fails_whichever_report_lands_first(
+    unregister_first: bool,
+) -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    workflow_id, ids = await _register(runtime, SSH_THEN_ECHO)
+    task_id = ids["session"]
+    assert _next(runtime) == task_id
+    record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
+    cancelled = TaskEvent(
+        type="TASK_CANCELLED",
+        task_id=task_id,
+        worker_id="wkr-1",
+        dispatch_id="dsp-1",
+        ts=_TS,
+    )
+    unregistered = WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=True)
+
+    _deliver(
+        monitor,
+        (unregistered, cancelled) if unregister_first else (cancelled, unregistered),
+    )
+
+    for rt in (runtime, _runtime(registry)):
+        if rt is not runtime:
+            await rt.rehydrate()
+        session = rt.get_record(task_id)
+        after = rt.get_record(ids["after"])
+        assert session is not None and session.status == TaskStatus.FAILED
+        assert session.error == "ambiguity-terminal effect"
+        assert after is not None and after.status == TaskStatus.FAILED
+        assert after.error == f"Dependency {task_id} failed"
+        assert rt.ready_queue_length() == 0
+        assert rt.workflow_settlement(workflow_id).settled
