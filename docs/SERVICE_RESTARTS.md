@@ -38,7 +38,9 @@ nodes, the same command works everywhere.
 **Worker nodes.** Draining a node tears down its workers. Each worker's
 departure produces a `WORKER_UNREGISTER` (the supervisor synthesizes one if the
 worker did not send it), so the server recovers the worker's `DISPATCHED` tasks
-and requeues them onto other eligible nodes. A recreated node's supervisor
+and requeues them onto other eligible nodes. A task the worker cancels as it
+drains, such as an SSH session or a `serve` task, requeues the same way, whichever
+of the two reports arrives first. A recreated node's supervisor
 re-creates its configured workers, which re-register themselves on startup. No
 cordon step is required.
 
@@ -109,9 +111,9 @@ root's durable state carries its in-flight workflows across its own restart.
   Updating the Redis image is a heavier, control-plane-wide outage and is out of
   scope for a brief in-place restart.
 - **Co-located root workers are recreated.** Workers running on the root host die
-  with the root's supervisor; their batch tasks requeue and re-run (cancellable
-  in-flight work such as an SSH session is cancelled instead). To avoid this,
-  prefer not to run workers on the root node.
+  with the root's supervisor; their in-flight tasks requeue and re-run, an SSH
+  session or `serve` task included. To avoid this, prefer not to run workers on the
+  root node.
 - **The no-worker grace restarts on a root restart.** The window before a task
   that no worker can satisfy is failed (`TASK_NO_WORKER_GRACE_SEC`) is tracked
   with ephemeral scheduler state that is intentionally not persisted, so it

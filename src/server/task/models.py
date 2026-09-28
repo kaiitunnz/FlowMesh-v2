@@ -89,6 +89,7 @@ class EventEffect(StrEnum):
     STALE = "stale"
     SETTLED = "settled"
     APPLIED = "applied"
+    RETURNED = "returned"
 
 
 class DispatchEnd(StrEnum):

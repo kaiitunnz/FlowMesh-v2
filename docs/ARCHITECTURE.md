@@ -84,7 +84,9 @@ after `TASK_NO_WORKER_GRACE_SEC`.
 
 Each dispatch carries a `dsp-` id that the worker echoes on the task's events;
 an event applies only while its dispatch holds the task. A cancelling task
-settles `CANCELLED` however its dispatch ends.
+settles `CANCELLED` however its dispatch ends. A worker that gives up a task no
+cancel reached, as a draining worker does, returns it to the head of the queue
+without spending an attempt.
 
 ## Directory map
 

@@ -658,6 +658,14 @@ class EventMonitor:
                 )
             case EventEffect.SETTLED:
                 self._finalizer.close_task_workflow(event.task_id)
+            case EventEffect.RETURNED:
+                self._logger.info(
+                    "Requeued task %s that worker %s gave up (dispatch %s)",
+                    event.task_id,
+                    event.worker_id,
+                    event.dispatch_id,
+                )
+                self._unregister_port_forward(event.task_id)
         return True
 
     # ------------------------------------------------------------------ # Node event

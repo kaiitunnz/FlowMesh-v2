@@ -103,7 +103,6 @@ from ..orchestration import (
 )
 from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
-from ..orchestration.state import TERMINAL_WORK_ITEM_STATUSES
 from ..orchestration.telemetry import build_span_emitter
 from ..orchestration.tool_dispatch import (
     MODEL_INTERFACE,
@@ -5639,8 +5638,12 @@ class TaskRuntime:
         ts: str,
         dispatch_id: str | None = None,
     ) -> SettleOutcome:
-        """Settle a task CANCELLED on its worker's confirmation; returns what the
-        confirmation did to the task."""
+        """Apply a worker's cancellation report; returns what it did to the task.
+
+        A task being cancelled settles CANCELLED. A cancel nothing requested is the
+        worker giving the task up, as a draining worker does, so the task returns to
+        the head of the queue as a lost dispatch does, spending no attempt.
+        """
         try:
             return self._reported(
                 "TASK_CANCELLED",
@@ -5690,6 +5693,14 @@ class TaskRuntime:
                     record.status,
                 )
                 return _settle_outcome(EventEffect.SETTLED, record, [], [])
+            if record.status == TaskStatus.DISPATCHED:
+                if worker_id is None or not self._return_failed_merge_locked(
+                    record, worker_id
+                ):
+                    self._return_dispatch_locked(
+                        record, increment_retry=False, front=True
+                    )
+                return _settle_outcome(EventEffect.RETURNED, record, [], [])
             self._settle_cancelled_locked(
                 record, finished_ts, started_ts=started_ts, usage=usage
             )
@@ -5741,18 +5752,9 @@ class TaskRuntime:
             record.started_ts = started_ts
         if usage is not None:
             record.usages.append(usage)
+        # The cancel that moved the task, of its workflow or of its region's residual
+        # children, already settled its work item.
         returned = self._mark_cancelled_locked(record, finished_ts, unmerge=unmerge)
-        # A work item a cancel already settled -- the whole instance's, or a child's
-        # its region's residual policy cancelled -- is never cancelled again, which
-        # would cancel its whole scope.
-        if (engine := self._engines.get(record.workflow_id)) is not None and (
-            (wi := engine.work_item(task_id)) is None
-            or wi.status not in TERMINAL_WORK_ITEM_STATUSES
-        ):
-            advance = engine.on_cancelled(task_id)
-            assert not (
-                advance.ready or advance.retry
-            ), "a whole-instance cancel readies no work"
         # Persist the task terminal record first and snapshot the ledger last, so the
         # ledger never leads task state.
         self._commit_locked(task_id, *returned, sched=False)
