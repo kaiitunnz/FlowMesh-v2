@@ -424,7 +424,9 @@ def canonical_result(
     return InferenceResult(
         model=request.model,
         items=[
-            InferenceItemStrict(index=index, prompt=prompt, output=output)
+            InferenceItemStrict.produce(
+                {"index": index, "prompt": prompt, "output": output}
+            )
             for index, (prompt, output) in enumerate(zip(request.prompts, outputs))
         ],
     )

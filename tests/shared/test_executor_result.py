@@ -158,12 +158,23 @@ def test_a_produced_null_output_reads_back_as_null() -> None:
     """``output`` must be reported but may be null: a structured output whose model
     returned ``null`` is produced and reads back as null."""
     result = InferenceResult(
-        items=[InferenceItemStrict(index=0, prompt="hi", output=None)]
+        items=[
+            InferenceItemStrict.produce({"index": 0, "prompt": "hi", "output": None})
+        ]
     )
     envelope = ResultEnvelope(task_id="t", result=result).model_dump_json()
     reread = ResultEnvelope.model_validate_json(envelope).result
     assert isinstance(reread, InferenceResult)
     assert reread.items[0].output is None
+
+
+@pytest.mark.parametrize("output", ["hello", None, ["a", "b"], {"answer": 1}], ids=repr)
+def test_a_produced_result_equals_its_stored_read_back(output: Any) -> None:
+    item = InferenceItemStrict.produce({"index": 0, "prompt": "hi", "output": output})
+    result = InferenceResult(model="m", items=[item])
+
+    assert type(item) is InferenceItem
+    assert InferenceResult.model_validate(result.model_dump()) == result
 
 
 # Every item shape an inference producer has stored, as stored.

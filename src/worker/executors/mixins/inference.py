@@ -52,7 +52,7 @@ class PreparedInferenceEntry:
 def produced_items(task_id: str, payloads: list[dict[str, Any]]) -> list[InferenceItem]:
     """The items a task reports, checked as a producer must emit them."""
     try:
-        return [InferenceItemStrict.model_validate(payload) for payload in payloads]
+        return [InferenceItemStrict.produce(payload) for payload in payloads]
     except ValidationError as exc:
         raise ExecutionError(
             f"task {task_id} produced an inference item it cannot report: {exc}"

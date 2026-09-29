@@ -13,6 +13,7 @@ from shared.inference import (
     canonical_source,
     resolve_contract,
 )
+from shared.schemas.result import InferenceResult
 from shared.tasks.specs import InferenceSpecStrict
 
 
@@ -117,6 +118,10 @@ class TestCanonicalResult:
             (1, "goodbye", "b"),
             (2, "again", "c"),
         ]
+
+    def test_a_result_equals_its_stored_read_back(self) -> None:
+        result = canonical_result(_request(_batch_spec()), ["a", "b", "c"])
+        assert InferenceResult.model_validate(result.model_dump()) == result
 
     def test_a_run_reporting_the_wrong_count_is_rejected(self) -> None:
         # Truncating to the shorter side would silently drop a declared prompt's output.

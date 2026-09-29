@@ -1,6 +1,7 @@
 """Typed nested payload models describing the exact shape each executor emits
 inside its result fields (items, usage, cost estimates, ...)."""
 
+from collections.abc import Mapping
 from typing import Any, Self
 
 from pydantic import ConfigDict, Field, JsonValue, model_validator
@@ -63,6 +64,12 @@ class InferenceItemStrict(InferenceItem):
         ):
             raise ValueError("a produced item reports its index, prompt and output")
         return self
+
+    @classmethod
+    def produce(cls, payload: Mapping[str, Any]) -> InferenceItem:
+        """Check a produced item and return it as the tolerant item it is stored as."""
+        cls.model_validate(payload)
+        return InferenceItem.model_validate(payload)
 
 
 class OmniImageItem(StrictModel):
