@@ -126,6 +126,10 @@ class TestNebulaPath:
                 "forwarded": "host=attacker.example.com",
                 "X-Forwarded-Host": "attacker.example.com",
                 "x-forwarded-for": "10.0.0.1",
+                "X-Host": "attacker.example.com",
+                "X-Original-Host": "attacker.example.com",
+                "X-Original-URL": "/steal",
+                "x-rewrite-url": "/steal",
                 "X-Trace": "kept",
             }
         )
@@ -137,6 +141,8 @@ class TestNebulaPath:
         assert "Forwarded" not in sent
         assert "X-Forwarded-Host" not in sent
         assert "X-Forwarded-For" not in sent
+        for name in ("X-Host", "X-Original-Host", "X-Original-URL", "X-Rewrite-URL"):
+            assert name not in sent
         assert sent["X-Trace"] == "kept"
         assert sent["Authorization"] == "Bearer nebula-token"
 
