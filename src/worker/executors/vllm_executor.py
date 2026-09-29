@@ -79,7 +79,7 @@ from shared.tasks.specs.common import ModelSpecStrict
 from shared.tasks.task_type import TaskType
 
 from .base_executor import ExecutionError, Executor, ExecutorTask
-from .mixins.data import InferenceEntry, group_diagnostics
+from .mixins.data import InferenceEntry
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry, produced_items
 from .utils.checkpoints import resolve_checkpoint_load
 
@@ -877,8 +877,6 @@ Summary:"""
             metadata = base_metadata[idx]
             if metadata:
                 payload["metadata"] = metadata
-            if diagnostics := group_diagnostics(grouped_items):
-                payload["diagnostics"] = diagnostics
             remapped.append(payload)
             cursor += group_size
         return remapped

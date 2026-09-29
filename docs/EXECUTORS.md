@@ -55,10 +55,10 @@ stored. A stored result reads through the tolerant `InferenceItem`, so a result 
 an earlier shape reads as it was stored. An omni result likewise names its loaded model
 when it is produced.
 
-A vLLM inference leaf lowers each prompt's `max_tokens` to what the model window holds
-after that prompt, and records the clamp on the prompt's item as
-`diagnostics.auto_cap` (`{max_tokens, requested}`); a grouped item records one budget
-per member. A leaf bound to a contract runs its declared `max_tokens` unchanged.
+A vLLM inference leaf lowers a text prompt's `max_tokens` to fit the model window after
+that prompt, less a small margin and down to a small floor, and records the clamp on the
+prompt's item as `diagnostics.auto_cap` (`{max_tokens, requested}`); a table item records
+one budget per row. A leaf bound to a contract runs its declared `max_tokens` unchanged.
 
 ## Agent-episode harness backends
 
