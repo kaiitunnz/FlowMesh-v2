@@ -72,6 +72,29 @@ outputs by node name and path; see
 `src/worker/executors/utils/graph_templates.py` for the templating
 contract.
 
+## API task
+
+`taskType: api` performs one HTTP request. Without `spec.api.url` it calls the
+deployment's Nebula endpoint (`NEBULA_API_BASE_URL`, with `/v1/chat/completions`
+appended) with the worker's `NEBULA_API_TOKEN`, unless `spec.api.headers` carries a
+credential header of its own; a request carrying the token drops any author header that
+reroutes it at an ingress (`Host`, `Forwarded`, `X-Forwarded-*`, `X-Host`,
+`X-Original-Host`, `X-Original-URL`, `X-Rewrite-URL`). A `spec.api.url` is called with
+the task's own headers alone. The stored result records the URL without its userinfo and
+with each credential query value masked.
+
+## Inline credentials
+
+A credential written inline in a task spec — a credential-named header, parameter, or
+field such as `Authorization`, `api_key`, `password`, or `token`, or an `http(s)` URL
+carrying userinfo or a credential query parameter — is kept in its workflow's
+credential vault. The stored task, its source, the task API, and the SDK show
+`[REDACTED]` in its place, and only the task's own dispatch carries the value to its
+worker. The credential stays available until its workflow settles, across server
+restarts; a task whose credential is no longer retained fails with
+`credential_not_retained`. Tasks carrying the same credential merge only within one
+workflow.
+
 ## v2 execution mode (experimental)
 
 `apiVersion: flowmesh/v2` selects the v2 representation track: the server

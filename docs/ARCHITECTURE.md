@@ -509,6 +509,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   keyed by child index within each spawning scope. A spawn whose input failed publishes
   one failed member. Clients list and fetch published outputs by the node names they were
   declared on.
+- **Inline task credentials.** A credential a task spec carries inline — a
+  credential-named header, parameter, or field in the fields the spec declares
+  credential-bearing, or an `http(s)` URL with userinfo or a credential query parameter —
+  moves at submission into the workflow's credential vault under an `msk-` ref, before
+  anything persists or compiles. The spec keeps a marker, and the task record keeps a
+  server-owned table of where each ref belongs, which no API serves. The dispatcher
+  restores the values into the task's own dispatch before its stage references render,
+  and writes nothing back; a ref that no longer resolves fails the task as
+  `credential_not_retained`. A merge key names a credential by its ref, so tasks merge on
+  one credential only within one workflow. A workflow's credentials stay vaulted until it
+  settles.
 - **Task merging.** Ready v1 tasks of one org whose specs share a merge key coalesce
   into one dispatch, whose executor runs every task at once and returns each merged
   child's own result; a task's spec defines its merge key. Merged children ride on
