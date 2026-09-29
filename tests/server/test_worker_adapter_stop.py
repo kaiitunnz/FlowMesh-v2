@@ -7,6 +7,7 @@ crash or a reconnect, while its container or instance still runs.
 import asyncio
 import logging
 import threading
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -218,7 +219,7 @@ async def test_a_stopped_worker_whose_event_stream_is_open_stops_at_its_close(
     world.adapter.set_worker_id("wkr-1")
     closed = asyncio.Event()
 
-    async def events() -> Any:
+    async def events() -> AsyncIterator[supervisor_pb2.EventMessage]:
         yield supervisor_pb2.EventMessage()
         await closed.wait()
 
