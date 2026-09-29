@@ -66,7 +66,7 @@ _OPTIONAL_SAMPLING_FIELDS = (
 # projection drops them from both embodiments of a leaf: a field present under one and
 # absent under the other is what would make the choice observable to a consumer, or to a
 # guard branching on the result.
-PROJECTION_DROPS = ("finish_reason", "metadata", "usage")
+PROJECTION_DROPS = ("finish_reason", "metadata", "diagnostics", "usage")
 
 InferenceSpec = InferenceSpecStrict | InferenceSpecTemplate
 

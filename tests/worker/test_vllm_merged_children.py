@@ -50,14 +50,18 @@ def _run(
     rejected: str | None = None,
     chat_template: str | None = None,
     empty: str | None = None,
+    window: int = 4096,
 ) -> tuple[InferenceResult, MagicMock]:
     """Run a merged dispatch against a stand-in engine, which aborts the whole batch
     when it rejects the ``rejected`` prompt, as vLLM does, and reports no completion
     for the ``empty`` prompt. A ``chat_template`` renders each conversation as its last
-    message's content."""
+    message's content. The tokenizer counts one token per character against the
+    engine's ``window``."""
     executor = VLLMExecutor(DEFAULT_WORKER_CONFIG, lifecycle=None)
     llm = MagicMock()
+    llm.llm_engine.model_config.max_model_len = window
     tokenizer = llm.get_tokenizer.return_value
+    tokenizer.encode.side_effect = lambda text: [0] * len(text)
     tokenizer.chat_template = chat_template
     tokenizer.apply_chat_template.side_effect = lambda messages, **_kwargs: messages[
         -1
@@ -254,3 +258,38 @@ def test_a_merged_table_child_gets_the_items_it_gets_alone(tmp_path: Path) -> No
         (0, "Q: d", ["out-Q: d"], ["stop"]),
         (1, "Q: e", ["out-Q: e", "out-Q: f"], ["stop", "stop"]),
     ]
+
+
+def test_a_merged_child_reports_its_own_max_tokens_cap(tmp_path: Path) -> None:
+    long_prompt = "x" * 600
+    merged, llm = _run(
+        _spec("parent"),
+        [_child("tsk-b", _spec(long_prompt))],
+        tmp_path / "merged",
+        window=1024,
+    )
+    child_alone, _ = _run(_spec(long_prompt), [], tmp_path / "child", window=1024)
+
+    params = llm.generate.call_args.kwargs["sampling_params"]
+    assert [p.max_tokens for p in params] == [512, 1024 - 600 - 16]
+    merged_child = merged.children["tsk-b"]
+    assert isinstance(merged_child, InferenceResult)
+    assert merged_child.items == child_alone.items
+    assert merged_child.items[0].diagnostics == {
+        "auto_cap": {"max_tokens": 408, "requested": 512}
+    }
+    assert merged.items[0].diagnostics is None
+
+
+def test_a_table_item_reports_one_cap_per_row(tmp_path: Path) -> None:
+    long_row = "y" * 600
+    result, _ = _run(
+        _table_spec(["a", long_row]), [], tmp_path, chat_template="chat", window=1024
+    )
+
+    assert result.items[0].diagnostics == {
+        "auto_cap": {
+            "max_tokens": [None, 1024 - len(f"Q: {long_row}") - 16],
+            "requested": 512,
+        }
+    }

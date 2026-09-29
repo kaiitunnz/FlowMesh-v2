@@ -80,11 +80,36 @@ from shared.tasks.specs.common import ModelSpecStrict
 from shared.tasks.task_type import TaskType
 
 from .base_executor import ExecutionError, Executor, ExecutorTask
-from .mixins.data import InferenceEntry
+from .mixins.data import InferenceEntry, group_diagnostics
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry
 from .utils.checkpoints import resolve_checkpoint_load
 
 logger = logging.getLogger(__name__)
+
+# Tokens held back from the window for the special and chat-template tokens a raw
+# tokenized prompt does not count.
+_AUTO_CAP_MARGIN = 16
+# The smallest budget a clamp lowers max_tokens to. A prompt that leaves less than this
+# already fills the window, so the engine raises its own error for it.
+_AUTO_CAP_MIN_OUTPUT = 16
+
+
+def _auto_capped_max_tokens(
+    requested: int,
+    prompt_tokens: int,
+    window: int | None,
+    margin: int = _AUTO_CAP_MARGIN,
+    floor: int = _AUTO_CAP_MIN_OUTPUT,
+) -> int:
+    """Clamp a requested max_tokens to what the model window can hold.
+
+    Returns the largest output budget that fits: at least ``floor`` and never more than
+    ``requested``. An unknown window returns ``requested`` unchanged.
+    """
+    if not window or window <= 0:
+        return requested
+    budget = window - max(0, prompt_tokens) - margin
+    return min(requested, max(budget, floor))
 
 
 def _contract_conversations(task: ExecutorTask) -> list[list[Any]] | None:
@@ -728,6 +753,73 @@ Summary:"""
             **optional_sampling_fields,
         )
 
+    def _resolve_max_model_len(self) -> int | None:
+        """The live engine's context window, or None when it cannot be read."""
+        if self._llm is None:
+            return None
+        try:
+            window = int(self._llm.llm_engine.model_config.max_model_len)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return window if window > 0 else None
+
+    def _auto_cap_sampling_params(
+        self, sampling_params: SamplingParams
+    ) -> tuple[SamplingParams | list[SamplingParams], dict[int, dict[str, int]]]:
+        """Clamp each batched prompt's max_tokens to the model window.
+
+        Returns the sampling params to generate with — the shared object, or a
+        per-prompt list once some prompt needs clamping — and a per-index record of each
+        clamp (``{index: {"max_tokens": eff, "requested": req}}``). A multimodal prompt
+        keeps the requested budget, since its raw text undercounts its image tokens.
+        """
+        window = self._resolve_max_model_len()
+        if not window:
+            return sampling_params, {}
+        tokenizer = self._get_tokenizer()
+        if tokenizer is None:
+            return sampling_params, {}
+        requested = int(sampling_params.max_tokens or 0)
+        if requested <= 0:
+            return sampling_params, {}
+
+        capped_by_index: dict[int, dict[str, int]] = {}
+        per_prompt: list[SamplingParams] = []
+        for idx, inp in enumerate(self._batched_inputs):
+            if not isinstance(inp, str):
+                per_prompt.append(sampling_params)
+                continue
+            try:
+                n_prompt = len(tokenizer.encode(inp))
+            except Exception as exc:
+                logger.debug(
+                    "auto-cap: tokenization failed for prompt %d, skipping clamp: %s",
+                    idx,
+                    exc,
+                )
+                per_prompt.append(sampling_params)
+                continue
+            eff = _auto_capped_max_tokens(requested, n_prompt, window)
+            if eff == requested:
+                per_prompt.append(sampling_params)
+                continue
+            clamped = sampling_params.clone()
+            clamped.max_tokens = eff
+            per_prompt.append(clamped)
+            capped_by_index[idx] = {"max_tokens": eff, "requested": requested}
+        if not capped_by_index:
+            return sampling_params, {}
+        logger.info(
+            "auto-capped max_tokens for %d/%d prompts (requested=%d, window=%d, "
+            "min_eff=%d)",
+            len(capped_by_index),
+            len(self._batched_inputs),
+            requested,
+            window,
+            min(cap["max_tokens"] for cap in capped_by_index.values()),
+        )
+        return per_prompt, capped_by_index
+
     def _remap_grouped_outputs(
         self,
         *,
@@ -786,6 +878,8 @@ Summary:"""
             metadata = base_metadata[idx]
             if metadata:
                 payload["metadata"] = metadata
+            if diagnostics := group_diagnostics(grouped_items):
+                payload["diagnostics"] = diagnostics
             remapped.append(payload)
             cursor += group_size
         return remapped
@@ -1107,6 +1201,14 @@ Summary:"""
         sampling_params = self._build_sampling_params(
             self._base_inference, schema=template_param_schema
         )
+        # A leaf bound to a contract issues the request the contract pins, as a
+        # resident replica would, and a replica rejects an over-window request rather
+        # than clamping it.
+        generate_params, capped_by_index = (
+            self._auto_cap_sampling_params(sampling_params)
+            if contract is None
+            else (sampling_params, {})
+        )
 
         generate_kwargs = self._build_generate_kwargs(spec, out_dir)
 
@@ -1136,7 +1238,7 @@ Summary:"""
             else:
                 outputs = self._llm.generate(
                     self._batched_inputs,
-                    sampling_params=sampling_params,
+                    sampling_params=generate_params,
                     **generate_kwargs,
                 )  # type: ignore[attr-defined]
         latency = time.time() - t0
@@ -1201,6 +1303,8 @@ Summary:"""
                 }
                 if metadata_entry:
                     payload["metadata"] = metadata_entry
+                if (auto_cap := capped_by_index.get(idx)) is not None:
+                    payload["diagnostics"] = {"auto_cap": auto_cap}
                 owner_items.append(payload)
 
                 prompt_token_ids = getattr(out, "prompt_token_ids", None) or []

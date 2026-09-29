@@ -49,6 +49,11 @@ Artifact-bearing fields use `ArtifactRef` (`{"path": rel_path}`);
 relative paths resolve against the producer's `_artifacts` context via
 `artifact_to_source` / `_render_artifact_ref`.
 
+A vLLM inference leaf lowers each prompt's `max_tokens` to what the model window holds
+after that prompt, and records the clamp on the prompt's item as
+`diagnostics.auto_cap` (`{max_tokens, requested}`); a grouped item records one budget
+per member. A leaf bound to a contract runs its declared `max_tokens` unchanged.
+
 ## Agent-episode harness backends
 
 Every agent runs through the dependency-light `AgentEpisodeExecutor`: one dispatch is one
@@ -333,7 +338,9 @@ generation by the engine it loads. Equivalence is over that request and the decl
 result, not over sampled tokens: a leaf that needs reproducible output declares greedy
 sampling. Both report one result — the pinned model, and one item per declared prompt
 carrying its index, its prompt, and its output. Fields only a local generation can report
-(`finish_reason`, `metadata`) and token accounting (`usage`) are dropped from both.
+(`finish_reason`, `metadata`, `diagnostics`) and token accounting (`usage`) are dropped
+from both. A local generation runs the declared `max_tokens` unchanged, as a replica
+does.
 
 A leaf declaring several prompts is served as one batch, whether its embodiment is chosen
 from a menu or pinned to `{mode: resident}`. It yields one resident boundary carrying
