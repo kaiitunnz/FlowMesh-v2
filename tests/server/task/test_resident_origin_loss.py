@@ -15,6 +15,7 @@ from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessCapsule
 from shared.private_state import PrivateStateSealReport
+from shared.resident.reports import ResidentBootstrapAck, ResidentBootstrapOutcome
 from shared.schemas.event import WorkerEvent
 from tests.server.resident.test_service import _build
 from tests.server.result_store import make_result_reader
@@ -260,12 +261,12 @@ def test_a_resident_call_control_cannot_originate_reaps_its_request(
     asyncio.run(run())
 
 
-def test_a_cancel_that_beats_its_resident_origination_holds_no_credit(
-    tmp_path: Path,
-) -> None:
-    runtime = _runtime()
+def _wire_resident_service(
+    runtime: TaskRuntime,
+) -> tuple[Any, Any, Any, asyncio.AbstractEventLoop, list[Any]]:
     svc, stores, _, delivery = _build()
     svc._settle = runtime.settle_episode_invocation
+    svc._redispatch = runtime.redispatch_episode_invocation
     svc._boundary_settleable = runtime.boundary_settleable
     assert svc._delivery is not None
     svc._delivery = replace(
@@ -286,6 +287,14 @@ def test_a_cancel_that_beats_its_resident_origination_holds_no_credit(
         return svc.originate(env)
 
     runtime._resident_originate = originate
+    return svc, stores, delivery, loop, originated
+
+
+def test_a_cancel_that_beats_its_resident_origination_holds_no_credit(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime()
+    svc, stores, delivery, loop, originated = _wire_resident_service(runtime)
     try:
         workflow_id, ids = loop.run_until_complete(_register(runtime, _RESIDENT_WF))
         writer = ids["writer"]
@@ -312,3 +321,56 @@ def test_a_cancel_that_beats_its_resident_origination_holds_no_credit(
         for worker, kind, payload in delivery.relays
         if kind == "resident_reap"
     ] == [("wkr-1", {"task_id": writer, "call_correlation": env.call_correlation})]
+
+
+def test_a_cancel_at_a_re_drive_s_check_reaps_after_the_credit_release(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime()
+    svc, stores, delivery, loop, originated = _wire_resident_service(runtime)
+    held_at_reap: list[int] = []
+    reclaim = svc._reclaim_adapter_slot
+
+    def reclaim_after_release(attempt: Any) -> None:
+        held_at_reap.append(stores.credit_ledger.held(attempt.replica_id))
+        reclaim(attempt)
+
+    svc._reclaim_adapter_slot = reclaim_after_release
+    try:
+        workflow_id, ids = loop.run_until_complete(_register(runtime, _RESIDENT_WF))
+        writer = ids["writer"]
+        _capture_resident_boundary(runtime, writer, seal_in=tmp_path)
+        (env,) = originated
+        loop.run_until_complete(asyncio.sleep(0.05))
+        attempt = svc._attempts[env.invocation_id]
+        loop.run_until_complete(
+            svc._on_ack(
+                ResidentBootstrapAck(
+                    task_id=writer,
+                    call_correlation=env.call_correlation,
+                    invocation_id=env.invocation_id,
+                    session_id=attempt.session_id,
+                    outcome=ResidentBootstrapOutcome.ACKED,
+                )
+            )
+        )
+        check = runtime.boundary_settleable
+
+        def cancel_then_check(task_id: str, call_correlation: str) -> bool:
+            # The cancel commits before the re-drive's check reads the boundary, and
+            # its release reaches the loop only after the check.
+            runtime.cancel_workflow(workflow_id)
+            return check(task_id, call_correlation)
+
+        svc._boundary_settleable = cancel_then_check
+        assert runtime.redispatch_episode_invocation(writer, env.call_correlation)
+        loop.run_until_complete(asyncio.sleep(0.05))
+    finally:
+        loop.close()
+
+    assert all(
+        claim.state is ClaimState.TERMINAL
+        for claim in stores.claims.by_invocation(env.invocation_id)
+    )
+    assert held_at_reap == [0]
+    assert [kind for _, kind, _ in delivery.relays].count("resident_reap") == 1
