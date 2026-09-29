@@ -38,10 +38,6 @@ from shared.resident.engine_request import (
 from shared.resident.envelope import ServeRequestEnvelope, filter_response_headers
 
 
-class NoCompletion(ValueError):
-    """An engine response that carries no choice to take a completion from."""
-
-
 def _completion(data: dict[str, Any]) -> str:
     """The assistant message text of one chat response.
 
@@ -49,7 +45,7 @@ def _completion(data: dict[str, Any]) -> str:
     to reasoning or tool calls, reads as empty text.
     """
     if not (choices := data.get("choices")):
-        raise NoCompletion("the engine response carries no choice")
+        raise ValueError("the engine response carries no choice")
     content = choices[0]["message"]["content"]
     return "" if content is None else str(content)
 
@@ -241,7 +237,9 @@ class HttpEngineDelivery:
     ) -> dict[str, Any]:
         response = await client.post(url, json=body, headers=headers)
         response.raise_for_status()
-        data: dict[str, Any] = response.json()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("the engine response is not a JSON object")
         return data
 
     @staticmethod

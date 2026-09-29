@@ -22,7 +22,6 @@ from shared.resident.contracts import ReplicaEndpoint
 from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
 from worker.resident.engine import (
     HttpEngineDelivery,
-    NoCompletion,
     RawHttpEngineDelivery,
     unload_adapter,
 )
@@ -203,13 +202,13 @@ def _chat_reply(payload: dict[str, Any]) -> tuple[int, str, bytes]:
 def test_a_response_with_no_choice_carries_no_completion() -> None:
     with _running() as server:
         server.chat_override = _chat_reply({"choices": []})
-        with pytest.raises(NoCompletion):
+        with pytest.raises(ValueError, match="no choice"):
             asyncio.run(_drain(_chat_endpoint(server), "hello"))
 
 
 def test_a_message_without_content_reads_as_empty_text() -> None:
     # An engine parser leaves the content null when the whole generation went to
-    # reasoning or tool calls; the completion is empty text, never the string "None".
+    # reasoning or tool calls; the completion is empty text.
     with _running() as server:
         server.chat_override = _chat_reply(
             {"choices": [{"message": {"role": "assistant", "content": None}}]}

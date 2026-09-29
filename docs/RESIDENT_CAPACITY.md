@@ -84,12 +84,13 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
 - **Loss and reissue.** A transient or ambiguous route loss moves a credit-bearing claim to
   `UNCERTAIN` and re-drives the boundary under the held credit — the runtime re-issues the
   same durable invocation, which resumes on the fenced replica — releasing nothing until a
-  definite outcome. Only a completion, a fence rejection, or a clean engine refusal releases;
-  a lost stream is held, never read as a completion. The hold is bounded by replica health,
-  not a timer: a path that keeps failing preempts the replica after a bounded number of
-  attempts, so the next resume finds no live incarnation and the fenced terminal releases.
-  Once a claim is terminal, a permitted reissue raises a successor with a fresh admission
-  epoch, never reopening a terminal claim or reusing its credit.
+  definite outcome. Only a completion, a fence rejection, a clean engine refusal, or an
+  engine request or response the replica cannot use releases; a lost stream is held, never
+  read as a completion. The hold is bounded by replica health, not a timer: a path that keeps
+  failing preempts the replica after a bounded number of attempts, so the next resume finds
+  no live incarnation and the fenced terminal releases. Once a claim is terminal, a permitted
+  reissue raises a successor with a fresh admission epoch, never reopening a terminal claim
+  or reusing its credit.
 
 ## Handoff and execution
 
@@ -125,13 +126,13 @@ supervisors relay them without decoding a body, cursor, or window.
 Every transition is safe under loss. Control records `ACCEPTED` and mints the fence only on
 the origin worker's acknowledgement, and the credit releases only from the fenced `DS`
 terminal consumed by `invocation_id` — never on an acknowledgement, a relay ack, or a partial
-materialization. A fence rejection or a clean engine refusal is a definite release; a lost
-acknowledgement, an ambiguous bootstrap, or a stream loss is `UNCERTAIN`, holds the credit,
-and re-drives under the same invocation identity, resuming from the origin worker's already
-materialized manifest rather than re-running the engine. A cancellation reaps both ends so a
-cancelled invocation stops promptly rather than waiting out the stream deadline. Request and
-stream emit claim-tagged load evidence, tagged latency-sensitive service traffic versus bulk
-transfer.
+materialization. A fence rejection, a clean engine refusal, or an engine request or response
+the replica cannot use is a definite release; a lost acknowledgement, an ambiguous bootstrap,
+or a stream loss is `UNCERTAIN`, holds the credit, and re-drives under the same invocation
+identity, resuming from the origin worker's already materialized manifest rather than
+re-running the engine. A cancellation reaps both ends so a cancelled invocation stops
+promptly rather than waiting out the stream deadline. Request and stream emit claim-tagged
+load evidence, tagged latency-sensitive service traffic versus bulk transfer.
 
 ## Task-ID-gated resident serve
 

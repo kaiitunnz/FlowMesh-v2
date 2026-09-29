@@ -56,7 +56,6 @@ from ..telemetry import otel
 from .engine import (
     EngineOpen,
     EngineUnload,
-    NoCompletion,
     RawEngineOpen,
     RawEngineResponse,
     unload_adapter,
@@ -379,9 +378,12 @@ class ResidentReplicaSidecar:
                 KIND_FAILED, definite=definite, reason=f"engine {status}"
             )
             return
-        except NoCompletion as exc:
+        except (KeyError, TypeError, ValueError) as exc:
+            # The request or the engine's answer is malformed, so a re-drive repeats the
+            # same outcome; every conversation has settled or none started, so the
+            # boundary fails definitely and releases its credit.
             await session.send_wire(
-                KIND_FAILED, definite=True, reason=f"engine response unusable: {exc}"
+                KIND_FAILED, definite=True, reason=f"engine exchange unusable: {exc}"
             )
             return
         try:
