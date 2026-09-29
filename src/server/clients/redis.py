@@ -100,7 +100,7 @@ def workflow_ds_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:ds"
 
 
-def workflow_model_secret_key(workflow_id: str) -> str:
+def workflow_credential_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:model_secret"
 
 

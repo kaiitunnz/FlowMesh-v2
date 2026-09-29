@@ -22,7 +22,7 @@ PREFIX_ATTEMPT = "att"
 PREFIX_INVOCATION = "inv"
 PREFIX_AUTHORITY_GRANT = "agr"
 PREFIX_IDEMPOTENCY_KEY = "idm"
-PREFIX_MODEL_SECRET = "msk"  # nosec B105 - object-id prefix, not a credential
+PREFIX_CREDENTIAL = "msk"  # nosec B105 - object-id prefix, not a credential
 PREFIX_SERVICE_CLAIM = "scl"
 PREFIX_REPLICA = "rpl"
 PREFIX_ALLOCATION_LEASE = "lse"
@@ -105,8 +105,8 @@ def new_idempotency_key() -> str:
     return f"{PREFIX_IDEMPOTENCY_KEY}-{_uuid_hex()}"
 
 
-def new_model_secret_ref() -> str:
-    return f"{PREFIX_MODEL_SECRET}-{secrets.token_hex(16)}"
+def new_credential_ref() -> str:
+    return f"{PREFIX_CREDENTIAL}-{secrets.token_hex(16)}"
 
 
 def new_service_claim_id() -> str:
@@ -168,7 +168,7 @@ __all__ = [
     "PREFIX_IDEMPOTENCY_KEY",
     "PREFIX_INVOCATION",
     "PREFIX_MEDIATED_PERMIT",
-    "PREFIX_MODEL_SECRET",
+    "PREFIX_CREDENTIAL",
     "PREFIX_NODE",
     "PREFIX_PRIVATE_STATE",
     "PREFIX_RELAY_SESSION",
@@ -196,7 +196,7 @@ __all__ = [
     "new_idempotency_key",
     "new_invocation_id",
     "new_mediated_permit_id",
-    "new_model_secret_ref",
+    "new_credential_ref",
     "new_node_id",
     "new_private_state_reference_id",
     "new_relay_session_id",

@@ -81,7 +81,7 @@ from shared.tools.contract import (
 )
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
-from shared.utils.ids import new_model_secret_ref
+from shared.utils.ids import new_credential_ref
 
 from ..config import AgentBindingConfig, N8nConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
@@ -116,7 +116,7 @@ from ..orchestration.tool_dispatch import (
 )
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
-from ..services.model_secret_vault import ModelSecretVault
+from ..services.credential_vault import CredentialVault
 from ..utils.time import now_iso, parse_iso_ts, ts_to_iso
 from .models import (
     SETTLING_TASK_STATUSES,
@@ -586,7 +586,7 @@ class TaskRuntime:
         orchestration: OrchestrationConfig,
         results: ResultReader,
         logger: logging.Logger,
-        secret_vault: ModelSecretVault,
+        secret_vault: CredentialVault,
         feasibility_check: EpisodeFeasibility | None = None,
         surface: PolicySurface | None = None,
         control: ControlPlaneTracer | None = None,
@@ -760,7 +760,7 @@ class TaskRuntime:
             return {}
         secret_refs: dict[str, str] = {}
         for task_id, secret in secrets.items():
-            ref = new_model_secret_ref()
+            ref = new_credential_ref()
             await self._secret_vault.store(workflow_id, ref, secret)
             secret_refs[task_id] = ref
         return secret_refs

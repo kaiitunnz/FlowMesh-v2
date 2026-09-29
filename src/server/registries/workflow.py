@@ -18,12 +18,12 @@ from ..clients.redis import (
     RedisClient,
     task_state_key,
     workflow_cancelled_tasks_key,
+    workflow_credential_key,
     workflow_dispatched_tasks_key,
     workflow_ds_key,
     workflow_dynamic_tasks_key,
     workflow_failed_tasks_key,
     workflow_key,
-    workflow_model_secret_key,
     workflow_sched_key,
     workflow_tasks_key,
     workflow_v2_key,
@@ -219,7 +219,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_ds_key(wid) for wid in workflow_ids))
-            pipe.delete(*(workflow_model_secret_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
             pipe.execute()
@@ -237,7 +237,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_ds_key(wid) for wid in workflow_ids))
-            pipe.delete(*(workflow_model_secret_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
             await pipe.execute()

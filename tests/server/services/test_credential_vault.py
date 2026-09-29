@@ -3,7 +3,7 @@ from typing import Any, cast
 import pytest
 from pydantic import SecretStr
 
-from server.services.model_secret_vault import ModelSecretVault
+from server.services.credential_vault import CredentialVault
 
 
 class _FakePipe:
@@ -14,8 +14,8 @@ class _FakePipe:
         self._expire_calls = expire_calls
         self._ops: list[tuple] = []
 
-    def hset(self, key: str, field: str, value: str) -> "_FakePipe":
-        self._ops.append(("hset", key, field, value))
+    def hset(self, key: str, mapping: dict[str, str]) -> "_FakePipe":
+        self._ops.append(("hset", key, mapping))
         return self
 
     def expire(self, key: str, ttl_sec: int) -> "_FakePipe":
@@ -25,8 +25,8 @@ class _FakePipe:
     async def execute(self) -> None:
         for op in self._ops:
             if op[0] == "hset":
-                _, key, field, value = op
-                self._store.setdefault(key, {})[field] = value
+                _, key, mapping = op
+                self._store.setdefault(key, {}).update(mapping)
             else:
                 _, key, ttl = op
                 self._expire_calls.append((key, ttl))
@@ -77,9 +77,9 @@ class _FakeRedis:
         self.sync = _FakeSync(self._store, self.expire_calls)
 
 
-def _vault(ttl_sec: int = 100) -> tuple[ModelSecretVault, _FakeRedis]:
+def _vault(ttl_sec: int = 100) -> tuple[CredentialVault, _FakeRedis]:
     redis = _FakeRedis()
-    return ModelSecretVault(cast(Any, redis), ttl_sec), redis
+    return CredentialVault(cast(Any, redis), ttl_sec), redis
 
 
 @pytest.mark.anyio
@@ -124,3 +124,26 @@ async def test_purge_drops_the_workflow_credentials():
     await vault.store("wfl-1", "msk-a", SecretStr("sk-user"))
     vault.purge("wfl-1")
     assert vault.resolve("wfl-1", "msk-a") is None
+
+
+@pytest.mark.anyio
+async def test_task_spec_values_round_trip_with_their_json_types():
+    vault, _ = _vault()
+    await vault.store_values(
+        "wfl-1", {"msk-h": "Bearer sk", "msk-k": ["ssh-ed25519 A"], "msk-d": {"a": 1}}
+    )
+    assert vault.resolve_values("wfl-1", ["msk-h", "msk-k", "msk-d"]) == {
+        "msk-h": "Bearer sk",
+        "msk-k": ["ssh-ed25519 A"],
+        "msk-d": {"a": 1},
+    }
+
+
+@pytest.mark.anyio
+async def test_values_resolve_only_within_their_workflow_and_omit_missing_refs():
+    vault, _ = _vault()
+    await vault.store_values("wfl-1", {"msk-h": "Bearer sk"})
+    assert vault.resolve_values("wfl-2", ["msk-h"]) == {}
+    assert vault.resolve_values("wfl-1", ["msk-h", "msk-gone"]) == {
+        "msk-h": "Bearer sk"
+    }

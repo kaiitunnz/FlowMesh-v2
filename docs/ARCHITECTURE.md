@@ -62,7 +62,7 @@ orchestration ledger adds `act-` activations, `scp-` scopes, `wki-` work items,
 idempotency keys (the fabric-assigned dedupe authority for a mediated boundary).
 Resident-capacity control adds `scl-` service claims, `rpl-` replica
 incarnations, and `lse-` allocation leases. `msk-` is an unguessable ref for a
-workflow's vaulted model credential, `hnd-` an unguessable claim-bound admission
+workflow's vaulted credential, `hnd-` an unguessable claim-bound admission
 handoff token, `chg-` an unguessable cache-to-cache content-hydration grant, and
 `csg-` an unguessable content-store access grant. Activation-private state adds
 `aps-` state references, `sbm-` sealed-generation manifests, and `psa-`
