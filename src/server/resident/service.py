@@ -780,9 +780,9 @@ class ResidentCapacityControl:
         """
         self._originations[env.invocation_id] = (env.task_id, env.call_correlation)
         if not self._boundary_settleable(env.task_id, env.call_correlation):
-            # A terminal already settled this boundary, and its release reaps what the
-            # invocation holds; a first origination has nothing for it to find, so
-            # reap the origin's request here.
+            # A terminal already settled this boundary. Its release reaps an attempt
+            # still recorded; with none, nothing will, so reap the origin's request
+            # here.
             if env.invocation_id in self._attempts:
                 self._originations.pop(env.invocation_id, None)
             else:

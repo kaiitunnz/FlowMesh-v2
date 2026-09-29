@@ -165,7 +165,7 @@ async def test_a_worker_whose_event_stream_closed_is_not_started_again(
     await world.start()
     world.adapter.set_status(WorkerStatus.STOPPED)
 
-    with pytest.raises(ValueError, match="still running or stopping"):
+    with pytest.raises(ValueError, match="starting, running or stopping"):
         await _manager(world, kind).start_worker(world.adapter.name)
 
     if kind == "vastai":
