@@ -49,10 +49,12 @@ def _run(
     out_dir: Path,
     rejected: str | None = None,
     chat_template: str | None = None,
+    empty: str | None = None,
 ) -> tuple[InferenceResult, MagicMock]:
     """Run a merged dispatch against a stand-in engine, which aborts the whole batch
-    when it rejects the ``rejected`` prompt, as vLLM does. A ``chat_template`` renders
-    each conversation as its last message's content."""
+    when it rejects the ``rejected`` prompt, as vLLM does, and reports no completion
+    for the ``empty`` prompt. A ``chat_template`` renders each conversation as its last
+    message's content."""
     executor = VLLMExecutor(DEFAULT_WORKER_CONFIG, lifecycle=None)
     llm = MagicMock()
     tokenizer = llm.get_tokenizer.return_value
@@ -66,11 +68,15 @@ def _run(
             raise ValueError("The decoder prompt is longer than max_model_len")
         return [
             SimpleNamespace(
-                outputs=[
-                    SimpleNamespace(
-                        text=f"out-{prompt}", finish_reason="stop", token_ids=[1]
-                    )
-                ],
+                outputs=(
+                    []
+                    if prompt == empty
+                    else [
+                        SimpleNamespace(
+                            text=f"out-{prompt}", finish_reason="stop", token_ids=[1]
+                        )
+                    ]
+                ),
                 prompt_token_ids=[1, 2],
             )
             for prompt in prompts
@@ -141,6 +147,16 @@ def test_a_batch_the_engine_rejects_fails_the_dispatch(tmp_path: Path) -> None:
             [_child("tsk-ok", _spec("ok")), _child("tsk-long", _spec("too-long"))],
             tmp_path,
             rejected="too-long",
+        )
+
+
+def test_an_output_with_no_completion_fails_the_dispatch(tmp_path: Path) -> None:
+    with pytest.raises(ExecutionError, match="task=tsk-b, prompt_index=0"):
+        _run(
+            _spec("parent"),
+            [_child("tsk-ok", _spec("ok")), _child("tsk-b", _spec("blank"))],
+            tmp_path,
+            empty="blank",
         )
 
 
