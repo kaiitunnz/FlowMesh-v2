@@ -19,16 +19,7 @@ _SHARED_DIR_MODE = 0o0777
 
 
 def _ensure_shared_dir(path: Path) -> None:
-    """Create ``path`` if absent and make it writable by peer UIDs.
-
-    The results volume is shared: the root's artifact-upload route, its task log
-    archiver and co-located workers all materialize the same task directory, so the
-    directory is created unconditionally with ``exist_ok=True``, which still raises if
-    ``path`` exists as a non-directory.
-
-    The ``chmod`` is best-effort: a directory another UID created cannot be re-moded by
-    this process, and its creator already set the mode.
-    """
+    """Create ``path`` if absent and make it writable by peer UIDs."""
     path.mkdir(parents=True, exist_ok=True)
     try:
         path.chmod(_SHARED_DIR_MODE)

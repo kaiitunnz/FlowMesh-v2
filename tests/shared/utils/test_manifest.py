@@ -4,6 +4,7 @@ import json
 import stat
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -69,6 +70,18 @@ class TestPrepareOutputDir:
         for d in (out, out / LOGS_DIR, out / ARTIFACTS_DIR):
             assert stat.S_IMODE(d.stat().st_mode) == 0o0777
 
+    def test_a_directory_another_writer_just_created_is_kept(
+        self, tmp_path: Path
+    ) -> None:
+        """A directory that appears after a writer checked for it is reused."""
+        out = tmp_path / "task-out"
+        for d in (out, out / LOGS_DIR, out / ARTIFACTS_DIR):
+            d.mkdir(parents=True)
+        with patch.object(Path, "exists", return_value=False):
+            prepare_output_dir(out)
+        for d in (out, out / LOGS_DIR, out / ARTIFACTS_DIR):
+            assert stat.S_IMODE(d.stat().st_mode) == 0o0777
+
     def test_rejects_non_directory_at_path(self, tmp_path: Path) -> None:
         out = tmp_path / "task-out"
         out.write_text("not a directory")
@@ -84,6 +97,14 @@ class TestScratchDir:
 
     def test_concurrent_calls_do_not_raise(self, tmp_path: Path) -> None:
         assert _race(lambda: scratch_dir(tmp_path)) == []
+
+    def test_a_directory_another_writer_just_created_is_kept(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / SCRATCH_DIR).mkdir()
+        with patch.object(Path, "exists", return_value=False):
+            path = scratch_dir(tmp_path)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o0777
         assert stat.S_IMODE((tmp_path / SCRATCH_DIR).stat().st_mode) == 0o0777
 
 

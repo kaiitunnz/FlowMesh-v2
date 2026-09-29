@@ -7,7 +7,7 @@ from threading import Event
 from typing import Any
 
 from shared.schemas.result import result_file_path
-from shared.utils.manifest import sync_manifest
+from shared.utils.manifest import LOGS_DIR, prepare_output_dir, sync_manifest
 
 from ..clients.redis import (
     TASK_LOGS_STREAM_PREFIX,
@@ -132,9 +132,8 @@ class TaskLogArchiver:
 
     def _task_logs_dir(self, task_id: str) -> Path:
         base_dir = result_file_path(self._results_dir, task_id).parent
-        logs_dir = base_dir / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        return logs_dir
+        prepare_output_dir(base_dir)
+        return base_dir / LOGS_DIR
 
     def _logs_path(self, task_id: str) -> Path:
         return self._task_logs_dir(task_id) / "logs.jsonl"

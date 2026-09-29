@@ -1,10 +1,14 @@
+import io
 import logging
+import stat
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException, status
+from fastapi import HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from fastapi.routing import APIRoute
 from lumid_hooks import PrincipalContext, ResourceRef
@@ -191,6 +195,34 @@ async def test_upload_result_file_denied_without_permission(
             task_id="t-1", principal=_principal(), logger=logger
         )
     assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.anyio
+async def test_upload_result_file_shares_the_task_directories_before_writing(
+    tmp_path: Path, logger: logging.Logger
+) -> None:
+    task_dir = tmp_path / "task-1"
+    open_path = Path.open
+    modes_at_write: dict[str, int] = {}
+
+    def _open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        for directory in (task_dir, task_dir / "artifacts", task_dir / "logs"):
+            if directory.is_dir():
+                modes_at_write[directory.name] = stat.S_IMODE(directory.stat().st_mode)
+        return open_path(path, *args, **kwargs)
+
+    with patch.object(Path, "open", autospec=True, side_effect=_open):
+        await results_router.upload_result_file(
+            task_id="task-1",
+            file=UploadFile(file=io.BytesIO(b"x"), filename="out.txt"),
+            runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+            principal=_principal(),
+            results_dir=tmp_path,
+            logger=logger,
+        )
+
+    assert modes_at_write == {"task-1": 0o777, "artifacts": 0o777, "logs": 0o777}
+    assert (task_dir / "artifacts" / "out.txt").read_bytes() == b"x"
 
 
 @pytest.mark.anyio
