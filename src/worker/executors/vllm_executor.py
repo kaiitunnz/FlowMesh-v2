@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 # tokenized prompt does not count.
 _AUTO_CAP_MARGIN = 16
 # The smallest budget a clamp lowers max_tokens to. A prompt that leaves less than this
-# already fills the window, so the engine raises its own error for it.
+# nearly fills the window, and the engine bounds or rejects it itself.
 _AUTO_CAP_MIN_OUTPUT = 16
 
 
@@ -1200,9 +1200,8 @@ Summary:"""
         sampling_params = self._build_sampling_params(
             self._base_inference, schema=template_param_schema
         )
-        # A leaf bound to a contract issues the request the contract pins, as a
-        # resident replica would, and a replica rejects an over-window request rather
-        # than clamping it.
+        # A leaf bound to a contract issues the request its contract pins, as a resident
+        # replica does, so its max_tokens is never lowered here.
         generate_params, capped_by_index = (
             self._auto_cap_sampling_params(sampling_params)
             if contract is None
