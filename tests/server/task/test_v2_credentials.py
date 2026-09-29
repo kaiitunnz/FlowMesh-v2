@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import yaml
 from pydantic import SecretStr
@@ -169,3 +170,50 @@ def test_an_n8n_header_array_is_masked():
     )
     redacted = redact_source_text(payload, "n8n")
     assert "sk-hdr" not in redacted and "sk-query" not in redacted
+
+
+_N8N_DAG = (
+    Path(__file__).resolve().parents[3]
+    / "examples"
+    / "templates"
+    / "n8n"
+    / "dag_inference.json"
+)
+
+
+def _n8n_with_runtime_fragment(json_output: str) -> str:
+    document = json.loads(_N8N_DAG.read_text())
+    for node in document["nodes"]:
+        if node["name"] == "Runtime Spec A":
+            node["parameters"]["jsonOutput"] = json_output
+    return json.dumps(document)
+
+
+def test_an_n8n_set_node_json_output_is_redacted():
+    payload = _n8n_with_runtime_fragment(
+        json.dumps({"tensor_parallel_size": 1, "hf_token": "hf-set-secret"})
+    )
+    parse_workflow(payload, "n8n")
+    redacted = redact_source_text(payload, "n8n")
+    assert "hf-set-secret" not in redacted
+    runtime = next(
+        node
+        for node in json.loads(redacted)["nodes"]
+        if node["name"] == "Runtime Spec A"
+    )
+    assert json.loads(runtime["parameters"]["jsonOutput"]) == {
+        "tensor_parallel_size": 1,
+        "hf_token": REDACTED,
+    }
+
+
+def test_an_n8n_json_output_that_is_not_json_is_masked_whole():
+    payload = _n8n_with_runtime_fragment("={{ 'hf-expr-secret' }}")
+    redacted = redact_source_text(payload, "n8n")
+    assert "hf-expr-secret" not in redacted
+    runtime = next(
+        node
+        for node in json.loads(redacted)["nodes"]
+        if node["name"] == "Runtime Spec A"
+    )
+    assert runtime["parameters"]["jsonOutput"] == REDACTED

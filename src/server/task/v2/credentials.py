@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 import yaml
 from pydantic import SecretStr
@@ -28,6 +29,31 @@ def pop_inline_model_secrets(parsed: ParsedWorkflow) -> dict[str, SecretStr]:
     return secrets
 
 
+def _redact_embedded_json(text: str) -> str:
+    try:
+        return json.dumps(redact_credential_fields(json.loads(text)))
+    except (ValueError, TypeError, RecursionError):
+        return REDACTED
+
+
+def _redact_n8n_document(document: Any) -> Any:
+    """Mask an n8n document, including the JSON each node embeds as a string.
+
+    A Set node carries its output as a JSON string in ``parameters.jsonOutput``, which
+    the parser loads into a task spec, so its credential fields are masked like any
+    other; a string that is not JSON is masked whole.
+    """
+    redacted = redact_credential_fields(document)
+    nodes = redacted.get("nodes") if isinstance(redacted, dict) else None
+    for node in nodes if isinstance(nodes, list) else []:
+        params = node.get("parameters") if isinstance(node, dict) else None
+        if isinstance(params, dict) and isinstance(
+            json_output := params.get("jsonOutput"), str
+        ):
+            params["jsonOutput"] = _redact_embedded_json(json_output)
+    return redacted
+
+
 def redact_source_text(raw_payload: str, format: str) -> str:
     """Return the submitted source with every credential value masked.
 
@@ -40,9 +66,7 @@ def redact_source_text(raw_payload: str, format: str) -> str:
     """
     try:
         if format == "n8n":
-            return json.dumps(
-                redact_credential_fields(json.loads(raw_payload)), indent=2
-            )
+            return json.dumps(_redact_n8n_document(json.loads(raw_payload)), indent=2)
         return yaml.safe_dump(
             redact_credential_fields(yaml.safe_load(raw_payload)), sort_keys=False
         )
