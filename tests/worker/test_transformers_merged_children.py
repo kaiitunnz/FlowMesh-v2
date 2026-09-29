@@ -11,6 +11,7 @@ pytest.importorskip("torch", reason="torch not installed (needs --extra inferenc
 
 import torch
 from pydantic import TypeAdapter
+from transformers import GPT2Config, GPT2LMHeadModel
 
 from shared.schemas.result import InferenceResult
 from shared.tasks import MergedChildTaskStrict, TaskSpecStrict
@@ -62,6 +63,15 @@ class _Tokenizer:
         )
 
 
+class _ChatTokenizer(_Tokenizer):
+    """Renders a conversation as its messages' contents."""
+
+    chat_template = "template"
+
+    def apply_chat_template(self, messages: Any, **_kwargs: Any) -> str:
+        return " ".join(message["content"] for message in messages)
+
+
 def _generate(input_ids: Any, attention_mask: Any, **_kwargs: Any) -> Any:
     """Answers each word of a prompt, then EOS, padding rows to the longest answer."""
     answers = [
@@ -99,11 +109,13 @@ def _run(
     results_dir: Path,
     tokenizer: Any = None,
     task_id: str = "tsk-a",
-) -> tuple[InferenceResult, MagicMock]:
+    model: Any = None,
+) -> tuple[InferenceResult, Any]:
     executor = HFTransformersExecutor(DEFAULT_WORKER_CONFIG)
     executor._tok = tokenizer or _Tokenizer()  # type: ignore[assignment]
-    model = MagicMock()
-    model.generate.side_effect = _generate
+    if model is None:
+        model = MagicMock()
+        model.generate.side_effect = _generate
     executor._model = model
     executor._device = "cpu"
     executor._model_name = "org/model"
@@ -279,12 +291,6 @@ def test_any_error_in_a_childs_own_preparation_leaves_it_out(tmp_path: Path) -> 
 
 
 def test_a_child_templated_differently_is_left_out(tmp_path: Path) -> None:
-    class _ChatTokenizer(_Tokenizer):
-        chat_template = "template"
-
-        def apply_chat_template(self, messages: Any, **_kwargs: Any) -> str:
-            return " ".join(message["content"] for message in messages)
-
     parent = _spec("alpha", inference={"apply_chat_template": False})
     child = _spec("x", inference={"apply_chat_template": False}) | {
         "data": {"type": "list", "items": [[{"role": "user", "content": "bravo"}]]}
@@ -303,8 +309,86 @@ def test_a_failed_generation_fails_the_dispatch(tmp_path: Path) -> None:
             _run(_spec("alpha"), [_child("tsk-b", _spec("bravo"))], tmp_path)
 
 
+def test_a_zero_temperature_generates_greedily(tmp_path: Path) -> None:
+    torch.manual_seed(0)
+    model = GPT2LMHeadModel(
+        GPT2Config(n_layer=1, n_head=2, n_embd=16, vocab_size=128, eos_token_id=_EOS)
+    )
+    spec = _spec("a b c", inference={"temperature": 0, "max_new_tokens": 4})
+
+    runs = [
+        _run(spec, [], tmp_path / str(run), model=model)[0].items for run in range(2)
+    ]
+
+    assert runs[0] == runs[1]
+    assert len(runs[0]) == 1
+
+
 def test_the_parents_own_failure_fails_the_dispatch(tmp_path: Path) -> None:
     empty = _spec("x") | {"data": {"type": "list", "items": []}}
 
     with pytest.raises(ExecutionError):
         _run(empty, [_child("tsk-c", _spec("charlie"))], tmp_path)
+
+
+def _table_spec(*groups: list[str]) -> dict[str, Any]:
+    return {
+        "taskType": "inference",
+        "model": _MODEL,
+        "data": {
+            "type": "dataframe",
+            "columns": [
+                {"label": "q", "data": {"type": "list", "items": list(groups)}}
+            ],
+            "messages": [{"role": "user", "content": "Q {q}"}],
+        },
+    }
+
+
+def test_a_table_leaf_reports_one_item_per_table(tmp_path: Path) -> None:
+    result, _ = _run(_table_spec(["a", "b"], ["c"]), [], tmp_path, _ChatTokenizer())
+
+    assert [
+        (item.index, item.prompt, item.output, item.finish_reason)
+        for item in result.items
+    ] == [
+        (0, "Q a", ["out-Q out-a", "out-Q out-b"], ["stop", "stop"]),
+        (1, "Q c", ["out-Q out-c"], ["stop"]),
+    ]
+
+
+def test_a_merged_table_child_gets_the_items_it_gets_alone(tmp_path: Path) -> None:
+    parent = _table_spec(["a", "b"], ["c"])
+    child = _table_spec(["d"], ["e", "f"])
+
+    merged, _ = _run(
+        parent, [_child("tsk-b", child)], tmp_path / "merged", _ChatTokenizer()
+    )
+    parent_alone, _ = _run(parent, [], tmp_path / "parent", _ChatTokenizer())
+    child_alone, _ = _run(
+        child, [], tmp_path / "child", _ChatTokenizer(), task_id="tsk-b"
+    )
+
+    merged_child = merged.children["tsk-b"]
+    assert isinstance(merged_child, InferenceResult)
+    assert merged.items == parent_alone.items
+    assert merged_child.items == child_alone.items
+    assert [item.output for item in merged_child.items] == [
+        ["out-Q out-d"],
+        ["out-Q out-e", "out-Q out-f"],
+    ]
+
+
+def test_an_item_missing_a_required_field_fails_the_task(tmp_path: Path) -> None:
+    def outputs_only(
+        items: list[dict[str, Any]], tables: list[Any]
+    ) -> list[dict[str, Any]]:
+        return [{"output": [item["output"] for item in items]}]
+
+    with (
+        patch.object(
+            HFTransformersExecutor, "_populate_table", staticmethod(outputs_only)
+        ),
+        pytest.raises(ExecutionError, match="cannot report"),
+    ):
+        _run(_table_spec(["a"]), [], tmp_path, _ChatTokenizer())

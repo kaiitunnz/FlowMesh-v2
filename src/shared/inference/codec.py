@@ -13,7 +13,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..schemas.result.catalog import InferenceResult
-from ..schemas.result.payloads import InferenceItem
+from ..schemas.result.payloads import InferenceItemStrict
 from ..tasks.specs import InferenceSpecStrict, InferenceSpecTemplate
 from .source import (
     INPUT_RESOLVER_VERSION,
@@ -424,7 +424,9 @@ def canonical_result(
     return InferenceResult(
         model=request.model,
         items=[
-            InferenceItem(index=index, prompt=prompt, output=output)
+            InferenceItemStrict.produce(
+                {"index": index, "prompt": prompt, "output": output}
+            )
             for index, (prompt, output) in enumerate(zip(request.prompts, outputs))
         ],
     )

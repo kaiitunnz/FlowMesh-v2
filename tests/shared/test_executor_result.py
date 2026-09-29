@@ -3,7 +3,8 @@
 import json
 from typing import Any
 
-from pydantic import Field
+import pytest
+from pydantic import Field, ValidationError
 
 from shared.schemas.artifact import ArtifactContext, ArtifactRef
 from shared.schemas.result import (
@@ -13,6 +14,8 @@ from shared.schemas.result import (
     DataRetrievalResult,
     EchoItem,
     EchoResult,
+    InferenceItem,
+    InferenceItemStrict,
     InferenceResult,
     OmniText2ImageResult,
     ResultEnvelope,
@@ -135,6 +138,94 @@ def test_required_nullable_fields_survive_serialization() -> None:
     assert dumped["image"] is None
     reloaded = OmniText2ImageResult.model_validate_json(result.model_dump_json())
     assert reloaded == result
+
+
+def test_a_produced_inference_item_requires_index_prompt_and_output() -> None:
+    """A producer reports ``index``, ``prompt`` and ``output`` for every item, so an
+    item omitting one is rejected; ``finish_reason`` and ``metadata`` may be absent."""
+    item = InferenceItemStrict(index=0, prompt="hi", output="hello")
+    assert item.finish_reason is None and item.metadata is None
+
+    complete = {"index": 0, "prompt": "hi", "output": "hello", "finish_reason": "stop"}
+    for missing in ("index", "prompt", "output"):
+        payload = dict(complete)
+        del payload[missing]
+        with pytest.raises(ValidationError):
+            InferenceItemStrict.model_validate(payload)
+
+
+def test_a_produced_null_output_reads_back_as_null() -> None:
+    """``output`` must be reported but may be null: a structured output whose model
+    returned ``null`` is produced and reads back as null."""
+    result = InferenceResult(
+        items=[
+            InferenceItemStrict.produce({"index": 0, "prompt": "hi", "output": None})
+        ]
+    )
+    envelope = ResultEnvelope(task_id="t", result=result).model_dump_json()
+    reread = ResultEnvelope.model_validate_json(envelope).result
+    assert isinstance(reread, InferenceResult)
+    assert reread.items[0].output is None
+
+
+@pytest.mark.parametrize("output", ["hello", None, ["a", "b"], {"answer": 1}], ids=repr)
+def test_a_produced_result_equals_its_stored_read_back(output: Any) -> None:
+    item = InferenceItemStrict.produce({"index": 0, "prompt": "hi", "output": output})
+    result = InferenceResult(model="m", items=[item])
+
+    assert type(item) is InferenceItem
+    assert InferenceResult.model_validate(result.model_dump()) == result
+
+
+# Every item shape an inference producer has stored, as stored.
+_STORED_ITEMS = {
+    "generated": {"index": 0, "prompt": "p", "output": "o", "finish_reason": "stop"},
+    "no finish reason": {"index": 0, "prompt": "p", "output": "o"},
+    "empty completion": {"index": 0, "prompt": "p", "output": "", "metadata": {"a": 1}},
+    "structured null": {"index": 0, "prompt": "p", "finish_reason": "stop"},
+    "grouped": {
+        "index": 0,
+        "prompt": "p",
+        "output": ["a", "b"],
+        "finish_reason": ["stop", None],
+    },
+    "table without row fields": {"output": ["a", "b"]},
+}
+
+
+@pytest.mark.parametrize("stored", _STORED_ITEMS.values(), ids=list(_STORED_ITEMS))
+def test_every_stored_inference_item_reads_back_unchanged(
+    stored: dict[str, Any],
+) -> None:
+    envelope = {
+        "task_id": "t",
+        "result": {
+            "task_type": "inference",
+            "items": [stored],
+            "children": {"c": {"task_type": "inference", "items": [stored]}},
+        },
+    }
+    result = ResultEnvelope.model_validate_json(json.dumps(envelope)).result
+    assert isinstance(result, InferenceResult)
+    assert isinstance(result.items[0], InferenceItem)
+    reread = json.loads(result.model_dump_json())
+    assert reread["items"] == [stored]
+    assert reread["children"]["c"]["items"] == [stored]
+
+
+def test_a_stored_omni_result_without_a_model_reads_back() -> None:
+    envelope = {
+        "task_id": "t",
+        "result": {
+            "task_type": "omni_text2image",
+            "model": None,
+            "image": None,
+            "items": [],
+        },
+    }
+    result = ResultEnvelope.model_validate_json(json.dumps(envelope)).result
+    assert isinstance(result, OmniText2ImageResult)
+    assert result.model is None
 
 
 def test_drop_none_round_trip_is_lossless() -> None:

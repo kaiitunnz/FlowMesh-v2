@@ -9,9 +9,10 @@ from typing import Any, cast
 import pandas as pd
 import torch
 from PIL import Image
+from pydantic import ValidationError
 
 from shared.schemas.governance import SpanType
-from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result import BaseExecutorResult, InferenceItem, InferenceItemStrict
 from shared.tasks.specs import InferenceSpecStrict
 from shared.utils.json import to_json_serializable
 
@@ -46,6 +47,16 @@ class PreparedInferenceEntry:
     image_embedding: torch.Tensor | None = None
     image_group_base_prompts: list[str] | None = None
     image_group_base_metadata: list[PromptMetadata] | None = None
+
+
+def produced_items(task_id: str, payloads: list[dict[str, Any]]) -> list[InferenceItem]:
+    """The items a task reports, checked as a producer must emit them."""
+    try:
+        return [InferenceItemStrict.produce(payload) for payload in payloads]
+    except ValidationError as exc:
+        raise ExecutionError(
+            f"task {task_id} produced an inference item it cannot report: {exc}"
+        ) from exc
 
 
 class InferenceMixin(DataMixin):

@@ -6,9 +6,12 @@ call; a definite engine 4xx is carried as a definite failure so the origin relea
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 import httpx
+import pytest
 
 from shared.network.relay_frame import RelayFrame
 from shared.network.session import FramedRelaySession, RelaySessionRole
@@ -26,7 +29,11 @@ from shared.resident.wire import (
     KIND_HEAD,
     KIND_REJECT,
 )
-from worker.resident.engine import EngineResponse, RawEngineResponse
+from worker.resident.engine import (
+    EngineResponse,
+    HttpEngineDelivery,
+    RawEngineResponse,
+)
 from worker.resident.replica_sidecar import ResidentReplicaSidecar
 
 _CHUNKS = ["resi", "dent ", "reply"]
@@ -101,6 +108,24 @@ async def _failing_engine(
     )
 
 
+def _http_engine(
+    reply: Callable[[httpx.Request], httpx.Response],
+) -> HttpEngineDelivery:
+    delivery = HttpEngineDelivery()
+    delivery._client = httpx.AsyncClient(transport=httpx.MockTransport(reply))
+    return delivery
+
+
+def _answer(
+    status: int = 200, **body: Any
+) -> Callable[[httpx.Request], httpx.Response]:
+    return lambda request: httpx.Response(status, **body)
+
+
+def _unreachable(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("connection refused", request=request)
+
+
 class _ToPeer:
     """Forwards each produced frame into a target coroutine."""
 
@@ -141,7 +166,7 @@ def _auth() -> dict:
 
 
 def _harness(
-    engine=_fake_engine,
+    engine=_fake_engine, interface: str = "chat"
 ) -> tuple[FramedRelaySession, ResidentReplicaSidecar]:
     origin_sink, replica_sink = _ToPeer(), _ToPeer()
     sidecar = ResidentReplicaSidecar(sink=replica_sink, engine_open=engine)
@@ -149,7 +174,9 @@ def _harness(
         replica_id="rpl-1",
         incarnation=1,
         listener_generation=1,
-        endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
+        endpoint=ReplicaEndpoint(
+            base_url="http://engine/v1", model="m", interface=interface
+        ),
     )
     origin = FramedRelaySession(
         session_id="s1",
@@ -211,6 +238,96 @@ def test_definite_engine_failure_is_carried_definite() -> None:
         await sidecar.aclose()
 
     asyncio.run(run())
+
+
+async def _stream_outcome(
+    engine: Callable[..., Awaitable[EngineResponse]],
+    request: str | None = None,
+    interface: str = "chat",
+) -> dict[str, Any] | None:
+    origin, sidecar = _harness(engine=engine, interface=interface)
+    await origin.send_wire("bootstrap", handoff=_handoff(), request=request)
+    ack = await origin.recv_wire(timeout=5.0)
+    assert ack is not None and ack["kind"] == KIND_ACK
+    await origin.send_wire("stream", auth=_auth())
+    outcome = await origin.recv_wire(timeout=1.0)
+    await sidecar.aclose()
+    return outcome
+
+
+@pytest.mark.parametrize(
+    ("reply", "interface"),
+    [
+        (_answer(json={"choices": []}), "chat"),
+        (_answer(text="not json"), "chat"),
+        (_answer(json=["not", "an", "object"]), "chat"),
+        (_answer(json={"choices": [{"text": "hi"}]}), "chat"),
+        (_answer(json={"choices": [{"message": {"role": "assistant"}}]}), "chat"),
+        (_answer(json={"choices": ["hi"]}), "chat"),
+        (_answer(json={"choices": [{"message": "hi"}]}), "chat"),
+        (_answer(json={"object": "list"}), "embedding"),
+    ],
+    ids=[
+        "no-choice",
+        "non-json-body",
+        "non-object-body",
+        "choice-without-message",
+        "message-without-content",
+        "non-object-choice",
+        "non-object-message",
+        "embeddings-without-data",
+    ],
+)
+def test_an_engine_response_the_replica_cannot_read_fails_definite(
+    reply: Callable[[httpx.Request], httpx.Response], interface: str
+) -> None:
+    # The engine answered, so the boundary settles as a definite failure and releases
+    # its credit.
+    outcome = asyncio.run(
+        _stream_outcome(_http_engine(reply), request="hi", interface=interface)
+    )
+    assert outcome is not None and outcome["kind"] == KIND_FAILED
+    assert outcome["definite"] is True
+
+
+def test_a_request_the_replica_cannot_build_fails_definite() -> None:
+    reply = _answer(json={"choices": [{"message": {"content": "hi"}}]})
+    malformed_batch = '[{"prompt": "no messages"}]'
+    outcome = asyncio.run(_stream_outcome(_http_engine(reply), malformed_batch))
+    assert outcome is not None and outcome["kind"] == KIND_FAILED
+    assert outcome["definite"] is True
+
+
+def _batch(*prompts: str) -> str:
+    return json.dumps([{"messages": [{"role": "user", "content": p}]} for p in prompts])
+
+
+def _per_conversation(request: httpx.Request) -> httpx.Response:
+    prompt = json.loads(request.content)["messages"][-1]["content"]
+    if prompt == "lost":
+        raise httpx.ReadTimeout("engine stalled", request=request)
+    if prompt == "refused":
+        return httpx.Response(400, json={"error": "bad request"})
+    return httpx.Response(200, text="not json")
+
+
+@pytest.mark.parametrize("definite", ["refused", "unreadable"])
+@pytest.mark.parametrize("lost_first", [True, False])
+def test_a_batch_with_a_lost_conversation_is_not_a_definite_failure(
+    definite: str, lost_first: bool
+) -> None:
+    # The lost conversation may still be generating, so the boundary holds its credit
+    # whichever order the conversations were declared in.
+    prompts = ("lost", definite) if lost_first else (definite, "lost")
+    outcome = asyncio.run(
+        _stream_outcome(_http_engine(_per_conversation), _batch(*prompts))
+    )
+    assert outcome is None or outcome.get("definite") is False
+
+
+def test_an_unreachable_engine_is_not_a_definite_failure() -> None:
+    outcome = asyncio.run(_stream_outcome(_http_engine(_unreachable), "hi"))
+    assert outcome is None or outcome.get("definite") is False
 
 
 def _serve_envelope(

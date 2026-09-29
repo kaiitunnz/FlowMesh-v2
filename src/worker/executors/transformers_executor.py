@@ -28,8 +28,7 @@ spec:
     top_k: 50
     max_tokens: 512                                # alias of max_new_tokens
     max_new_tokens: 512                            # takes precedence if provided
-    do_sample: true                                # optional, will be inferred from
-                                                     temperature/top_p/top_k if missing
+    do_sample: true                                # optional; default: temperature > 0
     repetition_penalty: 1.0                        # transformers-specific
     stop: ["\n\nUser:", "</s>"]                    # optional stop strings
                                                      (post-process truncation)
@@ -62,7 +61,6 @@ from shared.schemas.governance import SpanType
 from shared.schemas.result import (
     EmbeddingResult,
     GenerationUsage,
-    InferenceItem,
     InferenceResult,
 )
 from shared.tasks import MergedChildTaskStrict
@@ -75,7 +73,7 @@ from shared.tasks.task_type import TaskType
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
-from .mixins.inference import InferenceMixin, PreparedInferenceEntry
+from .mixins.inference import InferenceMixin, PreparedInferenceEntry, produced_items
 
 try:
     import torch
@@ -374,18 +372,20 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         top_k = int(inference_cfg.get("top_k", 50))
         do_sample = inference_cfg.get("do_sample")
         if do_sample is None:
-            do_sample = (temperature > 0.0) or (top_p < 1.0) or (top_k > 0)
+            # A zero temperature is greedy decoding, as vLLM reads it.
+            do_sample = temperature > 0.0
 
         config_kwargs: dict[str, Any] = {
             "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "top_k": top_k if top_k >= 0 else 0,
             "do_sample": bool(do_sample),
             "repetition_penalty": float(inference_cfg.get("repetition_penalty", 1.0)),
             "pad_token_id": self._tok.pad_token_id,
             "eos_token_id": self._tok.eos_token_id,
         }
+        if do_sample:
+            config_kwargs["temperature"] = temperature
+            config_kwargs["top_p"] = top_p
+            config_kwargs["top_k"] = top_k if top_k >= 0 else 0
 
         if "min_new_tokens" in inference_cfg or "min_tokens" in inference_cfg:
             config_kwargs["min_new_tokens"] = int(
@@ -652,8 +652,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                     )
         latency = time.time() - t0
 
-        items: list[list[InferenceItem]] = [[] for _ in entries]
-        export_items: list[list[dict[str, Any]]] = [[] for _ in entries]
+        items: list[list[dict[str, Any]]] = [[] for _ in entries]
         prompt_tokens = [0] * len(entries)
         completion_tokens = [0] * len(entries)
 
@@ -694,15 +693,6 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                 max_new_tokens=max_new_tokens,
                 stop_strings=stops,
             )
-            items[owner].append(
-                InferenceItem(
-                    index=i,
-                    prompt=prompt_text,
-                    output=text,
-                    finish_reason=finish_reason,
-                    metadata=metadata_entry or None,
-                )
-            )
             payload: dict[str, Any] = {
                 "index": i,
                 "prompt": prompt_text,
@@ -711,14 +701,18 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             }
             if metadata_entry:
                 payload["metadata"] = metadata_entry
-            export_items[owner].append(payload)
+            items[owner].append(payload)
             prompt_tokens[owner] += input_len
             completion_tokens[owner] += int(gen_part.shape[0])
+
+        for owner, entry in enumerate(entries):
+            if entry.tables:
+                items[owner] = self._populate_table(items[owner], entry.tables)
 
         results = [
             InferenceResult(
                 model=self._model_name,
-                items=items[owner],
+                items=produced_items(entry.task_id, items[owner]),
                 usage=GenerationUsage(
                     prompt_tokens=prompt_tokens[owner],
                     completion_tokens=completion_tokens[owner],
@@ -738,7 +732,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         }
 
         for (owner_id, owner_spec, owner_dir), owner_items in zip(
-            batch, export_items, strict=True
+            batch, items, strict=True
         ):
             if not isinstance(owner_spec, InferenceSpecStrict):
                 continue

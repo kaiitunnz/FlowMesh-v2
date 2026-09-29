@@ -378,6 +378,14 @@ class ResidentReplicaSidecar:
                 KIND_FAILED, definite=definite, reason=f"engine {status}"
             )
             return
+        except (KeyError, TypeError, ValueError) as exc:
+            # The request or the engine's answer is malformed, so a re-drive repeats the
+            # same outcome; every conversation has settled or none started, so the
+            # boundary fails definitely and releases its credit.
+            await session.send_wire(
+                KIND_FAILED, definite=True, reason=f"engine exchange unusable: {exc}"
+            )
+            return
         try:
             async for chunk in engine.chunks:
                 await session.send_wire(KIND_CHUNK, data=chunk)

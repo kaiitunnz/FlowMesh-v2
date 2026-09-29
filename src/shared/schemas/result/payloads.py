@@ -1,9 +1,10 @@
 """Typed nested payload models describing the exact shape each executor emits
 inside its result fields (items, usage, cost estimates, ...)."""
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Self
 
-from pydantic import ConfigDict, Field, JsonValue
+from pydantic import ConfigDict, Field, JsonValue, model_validator
 
 from ..artifact import ArtifactRef
 from ._base import DropNoneModel, StrictModel
@@ -42,6 +43,31 @@ class InferenceItem(StrictModel):
     output: JsonValue = None
     finish_reason: str | list[str | None] | None = None
     metadata: dict[str, Any] | None = None
+
+
+class InferenceItemStrict(InferenceItem):
+    """An inference item as a producer emits it.
+
+    Every producer reports ``index``, ``prompt`` and ``output``, so an item missing one
+    is rejected before it is stored; ``output`` may be null. Stored items read through
+    the tolerant ``InferenceItem``.
+    """
+
+    @model_validator(mode="after")
+    def _require_produced_fields(self) -> Self:
+        if (
+            self.index is None
+            or self.prompt is None
+            or "output" not in self.model_fields_set
+        ):
+            raise ValueError("a produced item reports its index, prompt and output")
+        return self
+
+    @classmethod
+    def produce(cls, payload: Mapping[str, Any]) -> InferenceItem:
+        """Check a produced item and return it as the tolerant item it is stored as."""
+        cls.model_validate(payload)
+        return InferenceItem.model_validate(payload)
 
 
 class OmniImageItem(StrictModel):

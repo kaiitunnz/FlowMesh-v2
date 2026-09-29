@@ -39,8 +39,15 @@ from shared.resident.envelope import ServeRequestEnvelope, filter_response_heade
 
 
 def _completion(data: dict[str, Any]) -> str:
-    """The assistant message text of one chat response."""
-    return str(data["choices"][0]["message"]["content"])
+    """The assistant message text of one chat response.
+
+    A message without content, as an engine parser leaves one whose text went wholly
+    to reasoning or tool calls, reads as empty text.
+    """
+    if not (choices := data.get("choices")):
+        raise ValueError("the engine response carries no choice")
+    content = choices[0]["message"]["content"]
+    return "" if content is None else str(content)
 
 
 # The already-loaded shapes an engine reports for an idempotent adapter re-load; matched
@@ -209,16 +216,27 @@ class HttpEngineDelivery:
         """Issue every conversation concurrently and settle them together.
 
         The invocation carrying them settles whole, so one refused conversation fails it
-        rather than leaving the rest to be abandoned mid-flight. Results keep the order
-        the conversations were declared in, whatever order the engine finishes them.
+        rather than leaving the rest to be abandoned mid-flight. A conversation lost in
+        transport may still be generating on the engine, so it decides the batch's
+        failure over any definite one. Results keep the order the conversations were
+        declared in, whatever order the engine finishes them.
         """
         settled = await asyncio.gather(
             *(cls._post(client, url, body, headers) for body in bodies),
             return_exceptions=True,
         )
-        for outcome in settled:
-            if isinstance(outcome, BaseException):
-                raise outcome
+        failures = [
+            outcome for outcome in settled if isinstance(outcome, BaseException)
+        ]
+        if failures:
+            raise next(
+                (
+                    failure
+                    for failure in failures
+                    if isinstance(failure, httpx.TransportError | OSError)
+                ),
+                failures[0],
+            )
         return cast(list[dict[str, Any]], settled)
 
     @staticmethod
@@ -230,7 +248,9 @@ class HttpEngineDelivery:
     ) -> dict[str, Any]:
         response = await client.post(url, json=body, headers=headers)
         response.raise_for_status()
-        data: dict[str, Any] = response.json()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("the engine response is not a JSON object")
         return data
 
     @staticmethod
