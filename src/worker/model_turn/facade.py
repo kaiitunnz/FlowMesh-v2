@@ -91,6 +91,10 @@ class ResponsesFacade:
         # so the completion carries it ordered-with the turn rather than on a separate
         # lossy channel that could race or drop it.
         self._captured: dict[str, FacadeTurnGroup] = {}
+        # Episodes being given up, each with the event its release sets: a turn that
+        # reaches one waits for the release, so its harness never ends the turn on the
+        # refusal while it is still up.
+        self._refused: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self._server: _FacadeHTTPServer | None = None
         self._serve_thread: threading.Thread | None = None
@@ -107,6 +111,8 @@ class ResponsesFacade:
         """Register one episode's binding and facades; return its per-episode token."""
         token = secrets.token_urlsafe(24)
         with self._lock:
+            if (released := self._refused.pop(task_id, None)) is not None:
+                released.set()
             self._episodes[task_id] = EpisodeContext(
                 url=url,
                 model=model,
@@ -123,6 +129,9 @@ class ResponsesFacade:
         with self._lock:
             self._episodes.pop(task_id, None)
             group = self._captured.pop(task_id, None)
+            released = self._refused.pop(task_id, None)
+        if released is not None:
+            released.set()
         if group is not None:
             for member in group.members:
                 self._pending.delete(task_id, member.call_correlation)
@@ -130,15 +139,22 @@ class ResponsesFacade:
     def refuse_episode(self, task_id: str) -> None:
         """Refuse the episode's further turns and model calls.
 
-        A refused call waits for the episode's release. A group a returned turn already
-        captured stays for its step to report.
+        A refused turn or call waits for the episode's release. A group a returned turn
+        already captured stays for its step to report.
         """
         with self._lock:
-            self._episodes.pop(task_id, None)
+            if task_id in self._episodes:
+                self._refused.setdefault(task_id, threading.Event())
         self._held_egress.refuse(task_id)
 
     def release_episode(self, task_id: str) -> None:
-        """End the episode's model calls waiting on a permit or its release."""
+        """End the episode's turns and model calls waiting on a permit or its
+        release."""
+        with self._lock:
+            self._episodes.pop(task_id, None)
+            released = self._refused.pop(task_id, None)
+        if released is not None:
+            released.set()
         self._held_egress.release(task_id)
 
     def take_captured_group(self, task_id: str) -> FacadeTurnGroup | None:
@@ -196,11 +212,18 @@ class ResponsesFacade:
     def _episode_for(self, task_id: str, token: str | None) -> EpisodeContext:
         with self._lock:
             ctx = self._episodes.get(task_id)
+            refused = self._refused.get(task_id)
         if ctx is None:
             raise FacadeTurnError(f"no registered episode for {task_id}")
         if token != ctx.token:
             raise FacadeTurnError("episode token mismatch")
+        if refused is not None:
+            self._await_release(task_id, refused)
         return ctx
+
+    def _await_release(self, task_id: str, released: threading.Event) -> None:
+        released.wait(self._held_egress.timeout_sec)
+        raise FacadeTurnError(f"the episode {task_id} was given up")
 
     def _run_turn(
         self,
@@ -307,13 +330,19 @@ class ResponsesFacade:
             task_id, facade_calls, list(ctx.descriptors), base
         )
         with self._lock:
-            # A turn that returns after its step ended has no step to report the group,
-            # so it stashes nothing that would outlive it.
-            if self._episodes.get(task_id) is not ctx:
-                raise FacadeTurnError(f"the episode {task_id} ended before its turn")
-            for correlation, request in capture.stashes:
-                self._pending.put(task_id, correlation, request)
-            self._captured[task_id] = capture.group
+            # A turn that returns after its step ended, or while it is being given up,
+            # has no step to report the group, so it stashes nothing that would outlive
+            # it.
+            ended = self._episodes.get(task_id) is not ctx
+            refused = self._refused.get(task_id)
+            if not ended and refused is None:
+                for correlation, request in capture.stashes:
+                    self._pending.put(task_id, correlation, request)
+                self._captured[task_id] = capture.group
+        if refused is not None:
+            self._await_release(task_id, refused)
+        if ended:
+            raise FacadeTurnError(f"the episode {task_id} ended before its turn")
         output: list[dict[str, Any]] = []
         if completion.content:
             output.append(message_output_item(completion.content))

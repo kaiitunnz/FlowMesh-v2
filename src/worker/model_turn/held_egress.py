@@ -51,6 +51,11 @@ class HeldModelEgress:
         self._timeout_sec = timeout_sec
         self._log = logger or logging.getLogger("held-model-egress")
 
+    @property
+    def timeout_sec(self) -> float:
+        """How long a held turn waits on its permit."""
+        return self._timeout_sec
+
     def refuse(self, task_id: str) -> None:
         """Refuse an episode's later held turns, which wait for its release."""
         self._rendezvous.refuse(task_id)
