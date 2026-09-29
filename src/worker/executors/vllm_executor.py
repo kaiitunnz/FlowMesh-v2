@@ -41,6 +41,7 @@ try:
     # vLLM is optional at import time; errors are raised in prepare()
     from vllm import LLM, SamplingParams, TextPrompt
     from vllm.distributed.parallel_state import destroy_distributed_environment
+    from vllm.exceptions import VLLMValidationError
     from vllm.sampling_params import StructuredOutputsParams
 
     # Ensure vLLM uses the 'spawn' multiprocessing start method when CUDA is
@@ -57,12 +58,14 @@ except Exception:
     if TYPE_CHECKING:
         from vllm import LLM, SamplingParams, TextPrompt
         from vllm.distributed.parallel_state import destroy_distributed_environment
+        from vllm.exceptions import VLLMValidationError
         from vllm.sampling_params import StructuredOutputsParams
     else:
         LLM = None  # type: ignore
         SamplingParams = None  # type: ignore
         TextPrompt = None  # type: ignore
         destroy_distributed_environment = None  # type: ignore
+        VLLMValidationError = None  # type: ignore
         _HAS_VLLM = False
         StructuredOutputsParams = None  # type: ignore
 
@@ -564,6 +567,33 @@ Summary:"""
         if self._llm is None:
             return None
         return self._llm.get_tokenizer()
+
+    def _resolve_max_model_len(self) -> int | None:
+        """The live engine's context window, or None when it cannot be read."""
+        if self._llm is None:
+            return None
+        try:
+            window = int(self._llm.llm_engine.model_config.max_model_len)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return window if window > 0 else None
+
+    def _contract_tokenization_kwargs(self, task: ExecutorTask) -> dict[str, Any]:
+        """Bound a contract's prompts to the window its ``max_tokens`` leaves.
+
+        A replica's OpenAI server rejects a request whose rendered prompt plus
+        ``max_tokens`` exceeds the model window, while the offline engine checks only
+        the prompt. Bounding the engine's own prompt check at ``window - max_tokens``
+        makes a local run refuse the same request with the same count.
+        """
+        contract = task.resolved_contract
+        if contract is None:
+            return {}
+        max_tokens = contract.params.get("max_tokens")
+        window = self._resolve_max_model_len()
+        if max_tokens is None or window is None:
+            return {}
+        return {"tokenization_kwargs": {"max_length": window - int(max_tokens)}}
 
     def _template_params_cfg(
         self, inference_cfg: dict[str, Any]
@@ -1107,7 +1137,9 @@ Summary:"""
             self._base_inference, schema=template_param_schema
         )
 
-        generate_kwargs = self._build_generate_kwargs(spec, out_dir)
+        generate_kwargs = self._build_generate_kwargs(
+            spec, out_dir
+        ) | self._contract_tokenization_kwargs(task)
 
         t0 = time.time()
         with self._span(
@@ -1127,17 +1159,23 @@ Summary:"""
                         f"task {task_id} declares {len(conversations)} conversations "
                         f"but prepared {len(self._batched_inputs)} prompts"
                     )
-                outputs = self._llm.chat(
-                    conversations,
-                    sampling_params=sampling_params,
-                    **generate_kwargs,
-                )  # type: ignore[attr-defined]
-            else:
-                outputs = self._llm.generate(
-                    self._batched_inputs,
-                    sampling_params=sampling_params,
-                    **generate_kwargs,
-                )  # type: ignore[attr-defined]
+            try:
+                if conversations is not None:
+                    outputs = self._llm.chat(
+                        conversations,
+                        sampling_params=sampling_params,
+                        **generate_kwargs,
+                    )  # type: ignore[attr-defined]
+                else:
+                    outputs = self._llm.generate(
+                        self._batched_inputs,
+                        sampling_params=sampling_params,
+                        **generate_kwargs,
+                    )  # type: ignore[attr-defined]
+            except VLLMValidationError as exc:
+                if task.resolved_contract is None:
+                    raise
+                raise ExecutionError(f"task {task_id}: {exc}") from exc
         latency = time.time() - t0
 
         with self._span(

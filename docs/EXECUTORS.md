@@ -337,7 +337,8 @@ generation by the engine it loads. Equivalence is over that request and the decl
 result, not over sampled tokens: a leaf that needs reproducible output declares greedy
 sampling. Both report one result — the pinned model, and one item per declared prompt
 carrying its index, its prompt, and its output. Fields only a local generation can report
-(`finish_reason`, `metadata`) and token accounting (`usage`) are dropped from both.
+(`finish_reason`, `metadata`) and token accounting (`usage`) are dropped from both. A
+request whose prompt and `max_tokens` exceed the model window fails on either embodiment.
 
 A leaf declaring several prompts is served as one batch, whether its embodiment is chosen
 from a menu or pinned to `{mode: resident}`. It yields one resident boundary carrying
