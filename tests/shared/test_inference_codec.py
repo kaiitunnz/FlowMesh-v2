@@ -74,6 +74,14 @@ class TestCanonicalRequest:
             ({"type": "list", "items": ["a", ""]}, "literal non-empty"),
             ({"type": "dataset", "url": "squad"}, "not projectable"),
             (
+                {
+                    "type": "dataframe",
+                    "columns": [{"label": "q", "expr": "up.items"}],
+                    "messages": [{"role": "user", "content": "{q}"}],
+                },
+                "not projectable",
+            ),
+            (
                 {"type": "list", "items": ["a"], "s3_cfg": "s3://bucket"},
                 "literal items",
             ),
