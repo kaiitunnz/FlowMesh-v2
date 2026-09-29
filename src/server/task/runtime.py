@@ -6035,7 +6035,7 @@ class TaskRuntime:
         returns, and one that cannot fails, billed for the dispatch it gave up.
         """
         if record.workflow_id in self._engines:
-            loss = self._resolve_lost_locked(record)
+            loss = self._resolve_lost_locked(record, spend_attempt=False)
             usages: list[tuple[str, TaskUsage]] = []
             if loss.end is DispatchEnd.FAILED and (
                 usage := TaskUsage.from_payload(payload, TaskStatus.FAILED)
@@ -6051,7 +6051,7 @@ class TaskRuntime:
         return _settle_outcome(EventEffect.RETURNED, record, [], [])
 
     def _resolve_lost_locked(
-        self, record: TaskRecord, spend_attempt: bool = False
+        self, record: TaskRecord, *, spend_attempt: bool
     ) -> LossOutcome:
         """Resolve a v2 task whose worker is lost or gave it up.
 
@@ -6224,7 +6224,7 @@ class TaskRuntime:
         return self._tasks
 
     def recover_tasks_for_worker(
-        self, worker_id: str, *, spend_attempt: bool = True
+        self, worker_id: str, *, spend_attempt: bool
     ) -> WorkerRecovery:
         """Recover the tasks a departed worker held.
 
@@ -6276,7 +6276,9 @@ class TaskRuntime:
                     record.status == TaskStatus.DISPATCHED
                     and record.workflow_id in self._engines
                 ):
-                    resolved.append(self._resolve_lost_locked(record, spend_attempt))
+                    resolved.append(
+                        self._resolve_lost_locked(record, spend_attempt=spend_attempt)
+                    )
                     continue
                 recovered.append(task_id)
             # A pending tool operation on the departed worker lost its private request

@@ -392,7 +392,7 @@ async def test_recover_clears_rehydrated_protection() -> None:
 
     restored = _runtime(registry)
     await restored.rehydrate()
-    assert restored.recover_tasks_for_worker("wkr-7").lost == [a]
+    assert restored.recover_tasks_for_worker("wkr-7", spend_attempt=True).lost == [a]
     assert restored.has_rehydrated_in_flight("wkr-7", 600.0) is False
 
 

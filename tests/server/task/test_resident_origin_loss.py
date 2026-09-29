@@ -114,7 +114,7 @@ def test_losing_the_origin_worker_releases_the_resident_credit_once_durable() ->
         (env,) = originated
         assert env.request_digest is not None
 
-        runtime.recover_tasks_for_worker("wkr-1")
+        runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
 
         record = runtime.get_record(writer)
         assert record is not None and record.status == TaskStatus.FAILED
@@ -150,7 +150,7 @@ def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
 
         registry.save_ledger_snapshot = down  # type: ignore[method-assign]
         with pytest.raises(RuntimeError):
-            runtime.recover_tasks_for_worker("wkr-1")
+            runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
         assert releases == []
 
         registry.save_ledger_snapshot = save  # type: ignore[method-assign]

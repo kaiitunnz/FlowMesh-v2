@@ -1005,7 +1005,7 @@ def test_a_boundary_whose_settle_a_crash_cut_short_is_issued_again() -> None:
 
 def _leave(runtime: TaskRuntime, how: str) -> None:
     if how == "expired":
-        runtime.recover_tasks_for_worker("wkr-1")
+        runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
     else:
         _monitor(runtime)._handle_worker_event(
             WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=how == "drained")

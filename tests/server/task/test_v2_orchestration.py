@@ -975,7 +975,7 @@ async def test_worker_loss_recovery_routes_through_uncertainty_fsm() -> None:
 
     # The worker departs: recovery resolves the in-flight v2 work item through the
     # uncertainty FSM itself, so it is not returned for a synthetic failure.
-    assert runtime.recover_tasks_for_worker("wkr-dead").lost == []
+    assert runtime.recover_tasks_for_worker("wkr-dead", spend_attempt=True).lost == []
     assert runtime.get_record(a).status == TaskStatus.PENDING  # type: ignore[union-attr]
     assert runtime.next_ready(stop, timeout=0.01) == a
     record_dispatch(runtime, a, cast(Any, _worker("wkr-2")))

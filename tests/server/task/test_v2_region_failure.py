@@ -556,7 +556,7 @@ def test_a_join_released_by_a_lost_last_child_readies_its_downstream(
 
         # An ssh child's effect is not replayable, so losing it fails it.
         if via == "worker_lost":
-            runtime.recover_tasks_for_worker("wkr-1")
+            runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
         else:
             runtime.mark_v2_uncertain(last)
 

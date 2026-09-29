@@ -358,7 +358,7 @@ async def test_a_lost_preparation_dispatch_prepares_again(loss: str) -> None:
             monitor._handle_worker_event(left)
             monitor.handle_task_event(given_up)
         case "crashed":
-            runtime.recover_tasks_for_worker("wkr-1")
+            runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
 
     record = runtime.get_record(task_id)
     assert record is not None
@@ -368,6 +368,33 @@ async def test_a_lost_preparation_dispatch_prepares_again(loss: str) -> None:
     assert runtime.prepares_inputs(task_id) is True
     _report(runtime, task_id)
     assert runtime.prepares_inputs(task_id) is False
+
+
+@pytest.mark.anyio
+async def test_a_preparation_whose_worker_crashes_on_every_attempt_fails() -> None:
+    runtime = _runtime()
+    task_id = await _upstream_task(runtime, max_items=None)
+    source = _next(runtime)
+    assert source is not None
+    record_dispatch(runtime, source, "wkr-0", "dsp-0")
+    runtime.mark_succeeded(
+        source, "wkr-0", _planned(runtime, source, ["a", "b"]), now_iso(), "dsp-0"
+    )
+
+    for attempt in range(1, 4):
+        assert _next(runtime) == task_id
+        worker_id = f"wkr-{attempt}"
+        record_dispatch(
+            runtime, task_id, worker_id, f"dsp-{attempt}", input_preparation=True
+        )
+        runtime.recover_tasks_for_worker(worker_id, spend_attempt=True)
+        record = runtime.get_record(task_id)
+        assert record is not None and record.attempts == attempt
+
+    record = runtime.get_record(task_id)
+    assert record is not None and record.status == TaskStatus.FAILED
+    assert record.error == "Worker wkr-3 was lost on the last of 3 attempts"
+    assert runtime.ready_queue_length() == 0
 
 
 @pytest.mark.anyio
@@ -405,7 +432,7 @@ async def test_a_preparation_dispatch_lost_after_a_restart_prepares_again(
             )
         )
     else:
-        restored.recover_tasks_for_worker("wkr-1")
+        restored.recover_tasks_for_worker("wkr-1", spend_attempt=True)
 
     record = restored.get_record(task_id)
     assert record is not None and record.status == TaskStatus.PENDING

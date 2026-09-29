@@ -215,7 +215,9 @@ async def test_a_forward_an_update_registers_as_its_task_fails_is_released() -> 
         # The watchdog resolves the task, and releases it, before the forward lands.
         harness.monitor.record_worker_losses(
             "wkr-1",
-            harness.runtime.recover_tasks_for_worker("wkr-1").resolved,
+            harness.runtime.recover_tasks_for_worker(
+                "wkr-1", spend_attempt=True
+            ).resolved,
             "worker_heartbeat_expired",
         )
         calls.append("registered")

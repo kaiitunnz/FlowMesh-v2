@@ -440,7 +440,7 @@ async def test_a_dispatch_its_ledger_never_saved_resolves_after_a_restart(
     else:
         _monitor(restored).record_worker_losses(
             "wkr-1",
-            restored.recover_tasks_for_worker("wkr-1").resolved,
+            restored.recover_tasks_for_worker("wkr-1", spend_attempt=True).resolved,
             "worker_heartbeat_expired",
         )
 

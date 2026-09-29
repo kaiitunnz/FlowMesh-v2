@@ -21,6 +21,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, Self
 
 from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
@@ -180,6 +181,19 @@ def dependency_failed(task_id: str) -> str:
 
 
 _OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
+
+
+class _LossResolution(Enum):
+    """How the loss of a work item's worker resolves it."""
+
+    NOTHING = auto()
+    PREPARE_AGAIN = auto()
+    BOUNDARY_FAILS = auto()
+    RUN_AGAIN = auto()
+    FAILS = auto()
+
+
+_RERUN_ON_LOSS = frozenset({_LossResolution.PREPARE_AGAIN, _LossResolution.RUN_AGAIN})
 
 
 class RegionError(ValueError):
@@ -907,11 +921,10 @@ class OrchestrationEngine:
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
+        resolution = self._resolve_loss(wi)
+        if wi is None or resolution is _LossResolution.NOTHING:
             return Advance()
-        if wi.invocation_id is None:
-            if wi.work_item_id not in self._input_preparations:
-                return Advance()
+        if resolution is _LossResolution.PREPARE_AGAIN:
             # An input preparation commits to no invocation and reserves nothing, so
             # the task resolves its inputs again on another worker.
             self._emit(
@@ -920,7 +933,8 @@ class OrchestrationEngine:
                 operator_id=wi.operator_id,
             )
             return Advance(retry=[wi.legacy_task_id])
-        if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
+        assert wi.invocation_id is not None
+        if resolution is _LossResolution.BOUNDARY_FAILS:
             # The worker that captured this boundary's request is lost, and the
             # worker-private request cannot be recovered here (a fresh permit would need
             # a fresh proposal on a new worker). Fail the boundary clean so the workflow
@@ -944,7 +958,7 @@ class OrchestrationEngine:
             attempt.status = AttemptStatus.LOST
             attempt.finished_at = now_iso()
             self._emitter.emit_attempt(attempt)
-        if invocation.replayable:
+        if resolution is _LossResolution.RUN_AGAIN:
             wi.status = WorkItemStatus.READY
             self._emit(
                 "invocation_uncertain_retry",
@@ -1222,14 +1236,20 @@ class OrchestrationEngine:
     def retries_on_loss(self, task_id: str) -> bool:
         """Whether the loss of the task's worker runs its work item again, as
         ``on_uncertain`` resolves it, rather than failing it."""
-        wi = self._work_item_for_task(task_id)
+        return self._resolve_loss(self._work_item_for_task(task_id)) in _RERUN_ON_LOSS
+
+    def _resolve_loss(self, wi: WorkItem | None) -> _LossResolution:
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
-            return False
+            return _LossResolution.NOTHING
         if wi.invocation_id is None:
-            return wi.work_item_id in self._input_preparations
+            if wi.work_item_id in self._input_preparations:
+                return _LossResolution.PREPARE_AGAIN
+            return _LossResolution.NOTHING
         if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
-            return False
-        return self._invocations[wi.invocation_id].replayable
+            return _LossResolution.BOUNDARY_FAILS
+        if self._invocations[wi.invocation_id].replayable:
+            return _LossResolution.RUN_AGAIN
+        return _LossResolution.FAILS
 
     def awaits_worker_held_boundary(self, task_id: str) -> bool:
         """Whether the task is suspended on an unsettled boundary whose raw request

@@ -50,7 +50,9 @@ def test_reaps_after_grace() -> None:
 
     wd._scan({"wkr-1"}, state, 60.0)
     # Declaration at t=60: recovery runs, the reap does not.
-    wd._runtime.recover_tasks_for_worker.assert_called_once_with("wkr-1")
+    wd._runtime.recover_tasks_for_worker.assert_called_once_with(
+        "wkr-1", spend_attempt=True
+    )
     registry.reap_stale_worker.assert_not_called()
 
     wd._scan({"wkr-1"}, state, 60.0 + 900.0)
@@ -145,7 +147,9 @@ def test_reap_disabled() -> None:
     wd._scan({"wkr-1"}, state, 0.0)
     wd._scan({"wkr-1"}, state, 60.0)  # declared
     wd._scan({"wkr-1"}, state, 60.0 + 900.0)
-    wd._runtime.recover_tasks_for_worker.assert_called_once_with("wkr-1")
+    wd._runtime.recover_tasks_for_worker.assert_called_once_with(
+        "wkr-1", spend_attempt=True
+    )
     registry.reap_stale_worker.assert_not_called()
 
 

@@ -688,7 +688,7 @@ def test_origin_worker_loss_fails_the_boundary_clean() -> None:
         # The origin worker departs before the op settles: the boundary fails clean and
         # the workflow errors rather than resuming the agent with no outcome, and the
         # stale pending-op mapping is dropped.
-        runtime.recover_tasks_for_worker("wkr-1")
+        runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
         assert runtime._tasks[writer].status == TaskStatus.FAILED
         assert not runtime._pending_ops
 
@@ -1071,7 +1071,7 @@ def test_an_agent_suspended_on_a_search_group_through_its_worker_leaving(
         assert engine is not None
 
         if how == "expired":
-            runtime.recover_tasks_for_worker("wkr-1")
+            runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
             record = runtime.get_record(writer)
             assert record is not None and record.status is TaskStatus.FAILED
             return

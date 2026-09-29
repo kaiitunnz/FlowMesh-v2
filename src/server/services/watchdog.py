@@ -225,7 +225,7 @@ class WorkerWatchdog:
             return False
 
     def _handle_worker_expired(self, worker_id: str) -> None:
-        recovery = self._runtime.recover_tasks_for_worker(worker_id)
+        recovery = self._runtime.recover_tasks_for_worker(worker_id, spend_attempt=True)
         if not recovery.lost and not recovery.resolved:
             self._logger.warning(
                 "Worker %s heartbeat expired; no dispatched tasks to recover",
