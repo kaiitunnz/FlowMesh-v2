@@ -48,6 +48,16 @@ from shared.utils.redact import (
         "lumid_data_token",
         "aws_secret_access_key",
         "aws_access_key_id",
+        "pwd",
+        "db_pwd",
+        "dsn",
+        "SENTRY_DSN",
+        "jwt",
+        "X-JWT-Assertion",
+        "database_url",
+        "DATABASE_URL",
+        "db_url",
+        "mongodb_url",
     ],
 )
 def test_credential_keys_match(name: str) -> None:
@@ -68,6 +78,13 @@ def test_credential_keys_match(name: str) -> None:
         "Content-Type",
         "model",
         "monkey",
+        "session_id",
+        "sessionid",
+        "signature",
+        "key",
+        "url",
+        "base_url",
+        "dns",
     ],
 )
 def test_ordinary_keys_do_not_match(name: str) -> None:

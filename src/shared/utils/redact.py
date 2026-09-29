@@ -34,8 +34,10 @@ _CREDENTIAL_SUBSTRINGS = (
     "access_token",
     "session_token",
     "refresh_token",
+    "database_url",
+    "db_url",
 )
-_CREDENTIAL_SEGMENTS = frozenset({"auth"})
+_CREDENTIAL_SEGMENTS = frozenset({"auth", "pwd", "dsn", "jwt"})
 _CREDENTIAL_LAST_SEGMENTS = frozenset({"token"})
 
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
