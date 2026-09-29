@@ -6062,18 +6062,20 @@ class TaskRuntime:
         """
         self._rehydrated_dispatched.pop(record.task_id, None)
         engine = self._engines.get(record.workflow_id)
+        spent = False
         if (
             spend_attempt
             and engine is not None
             and engine.retries_on_loss(record.task_id)
         ):
+            spent = True
             record.attempts += 1
             if 0 <= record.max_attempts <= record.attempts:
                 record.attempts = record.max_attempts
                 return self._fail_lost_on_last_attempt_locked(record, engine)
         advance = self._resolve_uncertain_locked(record.task_id)
         if advance.retry:
-            return LossOutcome(record.task_id, DispatchEnd.RETURNED, ())
+            return LossOutcome(record.task_id, DispatchEnd.RETURNED, (), spent)
         if not advance.failed:
             self._logger.warning(
                 "Lost task %s of worker %s resolved to no outcome",

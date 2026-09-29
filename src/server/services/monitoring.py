@@ -645,10 +645,13 @@ class EventMonitor:
             self._finalizer.close_task_workflow(task_id)
         self._finalizer.close_task_workflow(event.task_id)
 
-    def record_worker_losses(self, worker_id: str, losses: list[LossOutcome]) -> None:
-        """Apply the side effects of v2 tasks resolved as their worker's loss."""
+    def record_worker_losses(
+        self, worker_id: str, losses: list[LossOutcome], reason: str
+    ) -> None:
+        """Apply the side effects of v2 tasks resolved as their worker's loss, for
+        ``reason``."""
         for loss in losses:
-            self._record_loss(worker_id, loss, None)
+            self._record_loss(worker_id, loss, None, reason=reason)
 
     def _record_loss(
         self,
@@ -656,6 +659,7 @@ class EventMonitor:
         loss: LossOutcome,
         dispatch_id: str | None,
         usages: list[tuple[str, TaskUsage]] | None = None,
+        reason: str | None = None,
     ) -> None:
         """Apply the side effects of a task its worker lost or gave up."""
         match loss.end:
@@ -667,6 +671,15 @@ class EventMonitor:
                     dispatch_id,
                 )
                 self._release_task(loss.task_id)
+                if loss.spent:
+                    self._metrics.record_task_event(
+                        TaskEvent(
+                            type="TASK_REQUEUED",
+                            task_id=loss.task_id,
+                            worker_id=worker_id,
+                            payload={"reason": reason, "worker": worker_id},
+                        )
+                    )
             case DispatchEnd.FAILED:
                 record = self._runtime.get_record(loss.task_id)
                 error = record.error if record is not None else None
@@ -989,7 +1002,7 @@ class EventMonitor:
         recovery = self._runtime.recover_tasks_for_worker(
             worker_id, spend_attempt=not graceful
         )
-        self.record_worker_losses(worker_id, recovery.resolved)
+        self.record_worker_losses(worker_id, recovery.resolved, "worker_unregistered")
         for task_id in recovery.lost:
             end = self._dispatcher.requeue_task(
                 task_id,

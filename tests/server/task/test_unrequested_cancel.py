@@ -319,6 +319,42 @@ async def test_a_v2_task_whose_worker_crashes_on_every_attempt_fails_with_downst
     assert restored.ready_queue_length() == 0
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("how", "reason"),
+    [
+        ("supervisor", "worker_unregistered"),
+        ("watchdog", "worker_heartbeat_expired"),
+        ("drain", None),
+    ],
+)
+async def test_a_v2_task_requeues_once_per_attempt_its_worker_s_loss_spent(
+    how: str, reason: str | None
+) -> None:
+    runtime = _runtime(FakeRegistry())
+    monitor = _monitor(runtime)
+    _, ids = await _register(runtime, LINEAR)
+    task_id = ids["a"]
+    assert _next(runtime) == task_id
+    record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
+
+    if how == "drain":
+        monitor._handle_worker_event(
+            WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=True)
+        )
+    else:
+        _crash(runtime, monitor, "wkr-1", how)
+
+    requeued = [
+        call.args[0]
+        for call in cast(MagicMock, monitor._metrics).record_task_event.call_args_list
+        if call.args[0].type == "TASK_REQUEUED"
+    ]
+    assert [(event.task_id, event.payload.get("reason")) for event in requeued] == (
+        [(task_id, reason)] if reason else []
+    )
+
+
 SSH_THEN_ECHO = """
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -403,7 +439,9 @@ async def test_a_dispatch_its_ledger_never_saved_resolves_after_a_restart(
         )
     else:
         _monitor(restored).record_worker_losses(
-            "wkr-1", restored.recover_tasks_for_worker("wkr-1").resolved
+            "wkr-1",
+            restored.recover_tasks_for_worker("wkr-1").resolved,
+            "worker_heartbeat_expired",
         )
 
     record = restored.get_record(task_id)

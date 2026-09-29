@@ -117,11 +117,13 @@ class SettleOutcome(NamedTuple):
 
 class LossOutcome(NamedTuple):
     """What the loss of a v2 task's worker did to the task: it returned to the queue,
-    or failed along with the dependents in ``impacted``."""
+    spending an attempt when ``spent``, or failed along with the dependents in
+    ``impacted``."""
 
     task_id: str
     end: DispatchEnd
     impacted: tuple[tuple[str, str], ...]
+    spent: bool = False
 
 
 class WorkerRecovery(NamedTuple):

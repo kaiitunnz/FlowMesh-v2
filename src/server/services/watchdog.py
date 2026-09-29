@@ -51,10 +51,10 @@ class WorkerWatchdog:
         self._lock = threading.RLock()
         self._dead_marks: set[str] = set()
         self._thread: threading.Thread | None = None
-        self._record_losses: Callable[[str, list[LossOutcome]], None] | None = None
+        self._record_losses: Callable[[str, list[LossOutcome], str], None] | None = None
 
     def set_loss_handler(
-        self, record_losses: Callable[[str, list[LossOutcome]], None]
+        self, record_losses: Callable[[str, list[LossOutcome], str], None]
     ) -> None:
         """Set the handler that applies the side effects of the v2 tasks a dead
         worker's recovery resolved."""
@@ -239,7 +239,9 @@ class WorkerWatchdog:
                 len(recovery.resolved),
             )
             if self._record_losses is not None:
-                self._record_losses(worker_id, recovery.resolved)
+                self._record_losses(
+                    worker_id, recovery.resolved, "worker_heartbeat_expired"
+                )
         if not recovery.lost:
             return
 
