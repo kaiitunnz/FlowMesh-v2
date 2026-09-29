@@ -305,7 +305,7 @@ class WorkerManager:
         if not self.is_started:
             raise RuntimeError("WorkerManager not started")
         if _is_live(worker):
-            raise ValueError(f"Worker '{worker.name}' is already started")
+            raise ValueError(f"Worker '{worker.name}' is still running or stopping")
 
         started = await worker.start()
         if not started:

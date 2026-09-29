@@ -165,7 +165,7 @@ async def test_a_worker_whose_event_stream_closed_is_not_started_again(
     await world.start()
     world.adapter.set_status(WorkerStatus.STOPPED)
 
-    with pytest.raises(ValueError, match="already started"):
+    with pytest.raises(ValueError, match="still running or stopping"):
         await _manager(world, kind).start_worker(world.adapter.name)
 
     if kind == "vastai":
@@ -205,6 +205,43 @@ async def test_a_start_waits_for_the_stop_still_running() -> None:
         70
     ]
     assert world.adapter.holds_worker()
+
+
+@pytest.mark.asyncio
+async def test_two_starts_behind_a_finishing_stop_create_one_instance() -> None:
+    world = _VastAI()
+    contracts = iter([70, 80, 90])
+    world.client.create_instance.side_effect = lambda **_: {
+        "success": True,
+        "new_contract": next(contracts),
+    }
+    await world.start()
+    destroyed = threading.Event()
+    release = threading.Event()
+    stop_instance = world.adapter._stop
+
+    def stop_then_return_late() -> bool:
+        ok = stop_instance()
+        destroyed.set()
+        release.wait(5)
+        return ok
+
+    world.adapter._stop = stop_then_return_late  # type: ignore[method-assign]
+    stop = asyncio.ensure_future(world.adapter.stop())
+    await asyncio.to_thread(destroyed.wait, 5)
+    world.adapter.set_status(WorkerStatus.STOPPED)  # the stream closes mid-stop
+    wm = _manager(world, "vastai")
+    starts = [
+        asyncio.ensure_future(wm.start_worker(world.adapter.name)) for _ in range(2)
+    ]
+    await asyncio.sleep(0.05)
+
+    release.set()
+    assert await stop
+    assert await asyncio.gather(*starts) == [True, True]
+
+    assert world.client.create_instance.call_count == 2
+    assert world.adapter._instance_id == 80
 
 
 @pytest.mark.asyncio

@@ -124,14 +124,16 @@ class WorkerAdapter(ABC):
 
         ``_start`` runs on a thread, which a cancel cannot stop; a stop waits for it
         first, so it finds whatever the start created. A start waits for a stop still
-        running, so the stop never removes what the start creates.
+        running, so the stop never removes what the start creates, and a start while
+        another runs waits for that one and returns its result.
         """
         if (stopping := self._stopping) is not None and not stopping.done():
             await asyncio.wait({stopping})
-        self.set_status(WorkerStatus.STARTING)
-        starting = self._starting = asyncio.ensure_future(
-            asyncio.to_thread(self._start)
-        )
+        if (starting := self._starting) is None or starting.done():
+            self.set_status(WorkerStatus.STARTING)
+            starting = self._starting = asyncio.ensure_future(
+                asyncio.to_thread(self._start)
+            )
         try:
             ok = await asyncio.shield(starting)
         except asyncio.CancelledError:
