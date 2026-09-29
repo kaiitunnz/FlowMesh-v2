@@ -555,3 +555,17 @@ def test_a_give_up_returns_at_once_and_releases_the_turn_once_the_harness_exited
 
     assert returned_after < 1.0
     assert order == ["turn refused", "harness exited", "turn released"]
+
+
+def test_a_give_up_whose_harness_close_raises_still_releases_the_turn() -> None:
+    class _FailingClose:
+        def cancel(self, task_id: str) -> None:
+            raise RuntimeError("the app-server would not close")
+
+    facade = MagicMock()
+
+    with pytest.raises(RuntimeError, match="would not close"):
+        aee._give_up("tsk-1", cast(Any, _FailingClose()), facade)
+
+    facade.refuse_episode.assert_called_once_with("tsk-1")
+    facade.release_episode.assert_called_once_with("tsk-1")

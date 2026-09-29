@@ -330,12 +330,14 @@ def _give_up(
 ) -> None:
     if facade is not None:
         facade.refuse_episode(task_id)
-    if adapter is not None:
-        adapter.cancel(task_id)
-    # After the harness has exited, so it cannot end its turn on the released call or
-    # retry it into a fresh held turn.
-    if facade is not None:
-        facade.release_episode(task_id)
+    try:
+        if adapter is not None:
+            adapter.cancel(task_id)
+    finally:
+        # After the harness has exited, so it cannot end its turn on the released call
+        # or retry it into a fresh held turn.
+        if facade is not None:
+            facade.release_episode(task_id)
 
 
 def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:
