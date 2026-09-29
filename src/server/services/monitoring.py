@@ -986,7 +986,9 @@ class EventMonitor:
         """
         requeued: list[str] = []
         ts = now_iso()
-        recovery = self._runtime.recover_tasks_for_worker(worker_id)
+        recovery = self._runtime.recover_tasks_for_worker(
+            worker_id, spend_attempt=not graceful
+        )
         self.record_worker_losses(worker_id, recovery.resolved)
         for task_id in recovery.lost:
             end = self._dispatcher.requeue_task(

@@ -6050,14 +6050,27 @@ class TaskRuntime:
             self._return_dispatch_locked(record, increment_retry=False, front=True)
         return _settle_outcome(EventEffect.RETURNED, record, [], [])
 
-    def _resolve_lost_locked(self, record: TaskRecord) -> LossOutcome:
+    def _resolve_lost_locked(
+        self, record: TaskRecord, spend_attempt: bool = False
+    ) -> LossOutcome:
         """Resolve a v2 task whose worker is lost or gave it up.
 
-        It returns to the queue when it can safely run again; otherwise it fails, and
-        ``impacted`` names each dependent that fails with it. A task nothing resolves
-        ends STALE.
+        It returns to the queue when it can safely run again, spending an attempt when
+        ``spend_attempt`` is set, and fails once its attempts run out; a task that
+        cannot safely run again fails. ``impacted`` names each dependent that fails
+        with it. A task nothing resolves ends STALE.
         """
         self._rehydrated_dispatched.pop(record.task_id, None)
+        engine = self._engines.get(record.workflow_id)
+        if (
+            spend_attempt
+            and engine is not None
+            and engine.retries_on_loss(record.task_id)
+        ):
+            record.attempts += 1
+            if 0 <= record.max_attempts <= record.attempts:
+                record.attempts = record.max_attempts
+                return self._fail_lost_on_last_attempt_locked(record, engine)
         advance = self._resolve_uncertain_locked(record.task_id)
         if advance.retry:
             return LossOutcome(record.task_id, DispatchEnd.RETURNED, ())
@@ -6068,7 +6081,6 @@ class TaskRuntime:
                 record.assigned_worker,
             )
             return LossOutcome(record.task_id, DispatchEnd.STALE, ())
-        engine = self._engines.get(record.workflow_id)
         impacted = tuple(
             (
                 task_id,
@@ -6079,6 +6091,32 @@ class TaskRuntime:
             if task_id != record.task_id
         )
         return LossOutcome(record.task_id, DispatchEnd.FAILED, impacted)
+
+    def _fail_lost_on_last_attempt_locked(
+        self, record: TaskRecord, engine: OrchestrationEngine
+    ) -> LossOutcome:
+        """Fail a v2 task whose worker was lost on its last attempt, with the boundary
+        work it held, as a failed task."""
+        failed, _ = self._mark_failed(
+            record.task_id,
+            None,
+            {},
+            now_iso(),
+            error=(
+                f"Worker {record.assigned_worker} was lost on the last of "
+                f"{record.max_attempts} attempts"
+            ),
+        )
+        self._reap_ops_for_agents_locked(
+            [record.task_id, *(task_id for task_id, _ in failed)]
+        )
+        if invocation_ids := engine.terminalize_unsettled_invocations([record.task_id]):
+            self._hold_termination_locked(
+                record.workflow_id,
+                _Termination([], [], resident_invocation_ids=invocation_ids),
+            )
+            self._save_ledger_locked(record.workflow_id)
+        return LossOutcome(record.task_id, DispatchEnd.FAILED, tuple(failed))
 
     def _settle_cancelled_usage_locked(
         self,
@@ -6183,23 +6221,28 @@ class TaskRuntime:
     def tasks(self) -> dict[str, TaskRecord]:
         return self._tasks
 
-    def recover_tasks_for_worker(self, worker_id: str) -> WorkerRecovery:
+    def recover_tasks_for_worker(
+        self, worker_id: str, *, spend_attempt: bool = True
+    ) -> WorkerRecovery:
         """Recover the tasks a departed worker held.
 
         A dispatch to the worker published and not yet recorded is lost here: its
         tasks go back to the head of the queue, a merged batch's to run alone, spending
         no attempt, and the dispatch is never recorded. A v2 task resolves as its
-        worker's loss here; a v1 task is left for the caller to return or settle. A
-        task whose dispatch ended at a suspension holds nothing on the worker and waits
-        on its boundary, unless the worker originated that boundary and holds its
-        request.
+        worker's loss here, spending an attempt unless ``spend_attempt`` is False, as
+        for a worker that gave its tasks up; a v1 task is left for the caller to return
+        or settle. A task whose dispatch ended at a suspension holds nothing on the
+        worker and waits on its boundary, unless the worker originated that boundary
+        and holds its request.
         """
         try:
-            return self._recover_tasks_for_worker(worker_id)
+            return self._recover_tasks_for_worker(worker_id, spend_attempt)
         finally:
             self._release_pending_terminations()
 
-    def _recover_tasks_for_worker(self, worker_id: str) -> WorkerRecovery:
+    def _recover_tasks_for_worker(
+        self, worker_id: str, spend_attempt: bool
+    ) -> WorkerRecovery:
         recovered: list[str] = []
         resolved: list[LossOutcome] = []
         with self._cv:
@@ -6231,7 +6274,7 @@ class TaskRuntime:
                     record.status == TaskStatus.DISPATCHED
                     and record.workflow_id in self._engines
                 ):
-                    resolved.append(self._resolve_lost_locked(record))
+                    resolved.append(self._resolve_lost_locked(record, spend_attempt))
                     continue
                 recovered.append(task_id)
             # A pending tool operation on the departed worker lost its private request

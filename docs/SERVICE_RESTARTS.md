@@ -37,20 +37,19 @@ nodes, the same command works everywhere.
 
 **Worker nodes.** Draining a node tears down its workers. Each worker gives up
 the tasks it runs and unregisters, so the server requeues those tasks onto other
-eligible nodes without spending an attempt, whichever of the worker's reports
-arrives first. A v2 task that cannot safely re-run, such as an `ssh`, `serve`,
-`api` or training task, fails instead, as it does when its worker is lost. A
-draining worker finishes the calls it holds for suspended steps, of inference
-and embedding leaves and agents alike, within its stop window, and a call that
-cannot finish in time fails its task. A leaf whose call finished runs its next
-step on another worker. An agent runs its steps on the worker holding its sealed
-private state, so an agent whose private state only a drained or lost worker
-held fails at its next step; one given up before its first seal reruns
-elsewhere. A worker that leaves without unregistering, such as one that crashed,
-is unregistered by its supervisor. Its v1 tasks requeue at the cost of an attempt,
-and its v2 tasks retry when they can safely re-run and fail otherwise. A
-recreated node's supervisor re-creates its configured workers, which re-register
-themselves on startup. No cordon step is required.
+eligible nodes without spending an attempt. A v2 task that cannot safely re-run,
+such as an `ssh`, `serve`, `api` or training task, fails instead, as it does
+when its worker is lost. A draining worker finishes the calls it holds for
+suspended steps, of inference and embedding leaves and agents alike, within its
+stop window, and a call that cannot finish in time fails its task. A leaf whose
+call finished runs its next step on another worker. An agent runs its steps on
+the worker holding its sealed private state, so an agent whose private state
+only a drained or lost worker held fails at its next step; one given up before
+its first seal reruns elsewhere. A worker that leaves without unregistering,
+such as one that crashed, is unregistered by its supervisor, and its tasks
+requeue at the cost of an attempt when they can safely re-run and fail
+otherwise. A recreated node's supervisor re-creates its configured workers,
+which re-register themselves on startup. No cordon step is required.
 
 **Root node.** The root holds the dispatcher's scheduling state in memory, so a
 naive restart would lose every in-flight workflow. Three mechanisms make a root

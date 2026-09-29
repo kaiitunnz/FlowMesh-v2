@@ -2,13 +2,15 @@
 returns without spending an attempt, or fails as on its worker's loss when it is a v2
 task that cannot safely re-run."""
 
+import logging
 import threading
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from server.orchestration.state import WorkItemStatus
+from server.services.watchdog import WorkerWatchdog
 from server.task.models import EventEffect, TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent, WorkerEvent, parse_event
@@ -250,6 +252,71 @@ async def test_a_worker_lost_without_a_graceful_unregister_spends_an_attempt(
     record = runtime.get_record(task_id)
     assert record is not None and record.status == TaskStatus.FAILED
     assert runtime.workflow_settlement(workflow_id).settled
+
+
+def _crash(runtime: TaskRuntime, monitor: Any, worker_id: str, how: str) -> None:
+    if how == "watchdog":
+        watchdog = WorkerWatchdog(
+            MagicMock(),
+            MagicMock(),
+            runtime,
+            logging.getLogger("crash-watchdog"),
+            enabled=True,
+            check_interval=1,
+            grace_seconds=0,
+        )
+        watchdog.set_loss_handler(monitor.record_worker_losses)
+        watchdog._handle_worker_expired(worker_id)
+    else:
+        monitor._handle_worker_event(
+            WorkerEvent(type="UNREGISTER", worker_id=worker_id)
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("how", ["supervisor", "watchdog"])
+@pytest.mark.parametrize("restart", [False, True])
+async def test_a_v2_task_whose_worker_crashes_on_every_attempt_fails_with_downstream(
+    how: str, restart: bool
+) -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    workflow_id, ids = await _register(runtime, LINEAR)
+    task_id = ids["a"]
+    record = runtime.get_record(task_id)
+    assert record is not None and record.max_attempts == 3
+
+    for attempt in range(1, 4):
+        if restart and attempt == 2:
+            runtime = _runtime(registry)
+            await runtime.rehydrate()
+            monitor = _monitor(runtime)
+        assert _next(runtime) == task_id
+        worker_id = f"wkr-{attempt}"
+        record_dispatch(
+            runtime, task_id, cast(Any, _worker(worker_id)), f"dsp-{attempt}"
+        )
+        _crash(runtime, monitor, worker_id, how)
+        record = runtime.get_record(task_id)
+        assert record is not None and record.attempts == attempt
+        if attempt < 3:
+            assert record.status == TaskStatus.PENDING
+
+    assert record.status == TaskStatus.FAILED
+    assert record.error == "Worker wkr-3 was lost on the last of 3 attempts"
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    work_item = engine.work_item(task_id)
+    assert work_item is not None and work_item.status is WorkItemStatus.SETTLED
+    assert engine.failure_reason(task_id) == record.error
+    assert _statuses(runtime, [ids["b"], ids["c"]]) == {TaskStatus.FAILED}
+    assert runtime.ready_queue_length() == 0
+    assert runtime.workflow_settlement(workflow_id).settled
+    restored = _runtime(registry)
+    await restored.rehydrate()
+    assert _statuses(restored, ids.values()) == {TaskStatus.FAILED}
+    assert restored.ready_queue_length() == 0
 
 
 SSH_THEN_ECHO = """

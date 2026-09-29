@@ -668,8 +668,8 @@ async def test_a_terminal_landing_while_its_worker_unregisters_stays_settled(
     event = event.model_copy(update={"retryable": False})
     listed = runtime.recover_tasks_for_worker
 
-    def listed_then_settled(worker_id: str) -> WorkerRecovery:
-        tasks = listed(worker_id)
+    def listed_then_settled(worker_id: str, **kwargs: Any) -> WorkerRecovery:
+        tasks = listed(worker_id, **kwargs)
         monitor.handle_task_event(event)
         return tasks
 

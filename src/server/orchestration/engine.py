@@ -1219,6 +1219,18 @@ class OrchestrationEngine:
             or env.denial is not None
         )
 
+    def retries_on_loss(self, task_id: str) -> bool:
+        """Whether the loss of the task's worker runs its work item again, as
+        ``on_uncertain`` resolves it, rather than failing it."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
+            return False
+        if wi.invocation_id is None:
+            return wi.work_item_id in self._input_preparations
+        if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
+            return False
+        return self._invocations[wi.invocation_id].replayable
+
     def awaits_worker_held_boundary(self, task_id: str) -> bool:
         """Whether the task is suspended on an unsettled boundary whose raw request
         only its capturing worker holds."""
