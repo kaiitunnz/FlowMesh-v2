@@ -363,6 +363,43 @@ def test_a_turn_returning_after_its_step_raised_captures_nothing(
     assert facade._captured == {}
 
 
+def test_a_raised_step_whose_give_up_fails_still_drops_what_it_captured(
+    tmp_path: Path,
+) -> None:
+    pending = PendingEgressRequestStore()
+    held = MagicMock()
+    held.run.return_value = ModelCompletion(
+        content="searching",
+        tool_calls=(
+            ModelToolCall(call_id="c1", name="web_search", arguments='{"query": "q"}'),
+        ),
+    )
+    facade = ResponsesFacade(held_egress=held, pending=pending)
+
+    class _CancelFails(_FakeAdapter):
+        def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
+            token = facade.register_episode(
+                activation_id, "http://up/v1", "m", [_SEARCH]
+            )
+            facade.handle_turn(activation_id, token, {"input": "find it"})
+            raise RuntimeError("the reader died after the turn captured")
+
+        def cancel(self, activation_id: str) -> None:
+            raise OSError("the app-server would not close")
+
+    adapter = _CancelFails(HarnessResult(kind=HarnessResultKind.COMPLETION))
+    register_adapter("fake", lambda *_: adapter)
+    lifecycle = MagicMock()
+    lifecycle.responses_facade = facade
+    ex = AgentEpisodeExecutor(make_worker_config(), lifecycle=lifecycle)
+
+    with pytest.raises(RuntimeError, match="reader died"):
+        ex.run(_dispatch_msg(), tmp_path)
+
+    assert facade._captured == {}
+    assert pending.occurrences() == []
+
+
 class _YieldingAdapter(_FakeAdapter):
     def egress_handoff_mode(self) -> EgressHandoffMode:
         return EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD

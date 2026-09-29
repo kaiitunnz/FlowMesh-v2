@@ -75,14 +75,21 @@ class AgentEpisodeExecutor(Executor):
                 return self._step(task)
             except BaseException:
                 facade = self._lifecycle.responses_facade if self._lifecycle else None
-                if not self._signals.cancelled:
-                    # A step that raised may leave its turn running on the harness; it
-                    # is given up as a cancelled one is, which a cancel already does.
-                    _give_up(task.task_id, self._adapter, facade)
-                # Control never learns of a group a raised step captured, so the worker
-                # drops the requests it stashed for it.
-                if facade is not None:
-                    facade.unregister_episode(task.task_id)
+                try:
+                    if not self._signals.cancelled:
+                        # A step that raised may leave its turn running on the harness,
+                        # so it gives the turn up; a cancelled step's give-up is
+                        # already under way.
+                        _give_up(task.task_id, self._adapter, facade)
+                except Exception:
+                    _LOG.exception(
+                        "Failed to give up the turn of task %s", task.task_id
+                    )
+                finally:
+                    # Control never learns of a group a raised step captured, so the
+                    # worker drops the requests it stashed for it.
+                    if facade is not None:
+                        facade.unregister_episode(task.task_id)
                 raise
 
     def _step(self, task: ExecutorTask) -> EpisodeStepResult:
