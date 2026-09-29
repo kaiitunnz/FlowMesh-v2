@@ -115,6 +115,45 @@ class TestNebulaPath:
         assert transport.request is not None
         assert transport.request.headers["Authorization"] == "Bearer nebula-token"
 
+    def test_token_request_drops_author_routing_headers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEBULA_API_BASE_URL", "https://nebula.example.com")
+        monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
+        task = _task_message(
+            headers={
+                "Host": "attacker.example.com",
+                "forwarded": "host=attacker.example.com",
+                "X-Forwarded-Host": "attacker.example.com",
+                "x-forwarded-for": "10.0.0.1",
+                "X-Trace": "kept",
+            }
+        )
+        transport = _RecordingTransport()
+        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        assert transport.request is not None
+        sent = transport.request.headers
+        assert sent["Host"] == "nebula.example.com"
+        assert "Forwarded" not in sent
+        assert "X-Forwarded-Host" not in sent
+        assert "X-Forwarded-For" not in sent
+        assert sent["X-Trace"] == "kept"
+        assert sent["Authorization"] == "Bearer nebula-token"
+
+    def test_own_credential_request_keeps_author_routing_headers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEBULA_API_BASE_URL", "https://nebula.example.com")
+        monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
+        task = _task_message(
+            headers={"Authorization": "Bearer custom", "X-Forwarded-For": "10.0.0.1"}
+        )
+        transport = _RecordingTransport()
+        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        assert transport.request is not None
+        assert transport.request.headers["X-Forwarded-For"] == "10.0.0.1"
+        assert transport.request.headers["Authorization"] == "Bearer custom"
+
     def test_no_url_no_header_without_token_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

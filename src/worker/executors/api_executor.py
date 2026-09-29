@@ -19,12 +19,22 @@ logger = logging.getLogger(__name__)
 # Cache key: (base_url, timeout_seconds, verify_tls, follow_redirects)
 _ClientKey = tuple[str, float, bool, bool]
 
+_ROUTING_HEADERS = frozenset({"host", "forwarded"})
+_ROUTING_HEADER_PREFIX = "x-forwarded-"
+
+
+def _is_routing_header(name: str) -> bool:
+    lowered = name.strip().lower()
+    return lowered in _ROUTING_HEADERS or lowered.startswith(_ROUTING_HEADER_PREFIX)
+
 
 class APIExecutor(Executor):
     """Performs a single HTTP request defined by task YAML.
 
     Without ``spec.api.url`` it calls ``NEBULA_API_BASE_URL`` with ``NEBULA_API_TOKEN``,
-    unless ``spec.api.headers`` carries a credential header of its own. A
+    unless ``spec.api.headers`` carries a credential header of its own. A request
+    carrying the Nebula token drops any ``Host``, ``Forwarded`` or ``X-Forwarded-*``
+    header, so no author header routes the token past the configured Nebula host. A
     ``spec.api.url`` is called with its own headers alone; the Nebula token is never
     sent to it.
     """
@@ -122,6 +132,11 @@ class APIExecutor(Executor):
                         "no credential configured: set a credential header or "
                         "NEBULA_API_TOKEN"
                     )
+                headers = {
+                    name: value
+                    for name, value in headers.items()
+                    if not _is_routing_header(str(name))
+                }
                 headers["Authorization"] = f"Bearer {token}"
 
         params = api_cfg.get("params")
