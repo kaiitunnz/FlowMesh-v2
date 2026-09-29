@@ -60,6 +60,8 @@ from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import collection_elements, value_text
+from shared.tasks import TaskEnvelopeTemplate
+from shared.tasks.credentials import TaskSpec, set_spec_values
 from shared.tasks.result_binding import (
     ResultBinding,
     ResultElementRef,
@@ -118,6 +120,16 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.credential_vault import CredentialVault
 from ..utils.time import now_iso, parse_iso_ts, ts_to_iso
+from .credentials import (
+    InlineCredentials,
+    TaskCredentials,
+    credential_merge_key,
+    credential_scrubber,
+    mask_inline_credentials,
+    pop_inline_model_secrets,
+    redact_source_text,
+    take_inline_credentials,
+)
 from .models import (
     SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -157,7 +169,6 @@ from .v2 import (
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.compiler.facades import run_command_schema
-from .v2.credentials import pop_inline_model_secrets, redact_source_text
 from .v2.policy import PolicySurface
 from .v2.representations.admission import ResidentAdmissionBinding
 from .v2.representations.operators import (
@@ -576,6 +587,10 @@ def _captured_calls(
     return captures
 
 
+def _unscrubbed(text: str) -> str:
+    return text
+
+
 class TaskRuntime:
     """In-memory task registry with FIFO-ready queue and dependency tracking."""
 
@@ -734,6 +749,7 @@ class TaskRuntime:
         # A dry run never vaults; drop any inline credential and redact the source so
         # the inspection echoes no raw key back to the caller.
         pop_inline_model_secrets(parsed_workflow)
+        mask_inline_credentials(parsed_workflow)
         source = FrontendWorkflowSource.capture(
             redact_source_text(payload, format), format
         )
@@ -746,24 +762,24 @@ class TaskRuntime:
             surface=self._policy_surface,
         )
 
-    async def _vault_inline_secrets(
+    async def _vault_inline_credentials(
         self, workflow_id: str, parsed: ParsedWorkflow
-    ) -> dict[str, str]:
-        """Vault each agent's inline model credential, returning its generated ref.
+    ) -> tuple[dict[str, str], InlineCredentials]:
+        """Vault every inline credential a submission carries.
 
-        The credential is stripped from the parsed spec and stored under the workflow,
-        so only the opaque ref reaches the compiled binding, the persisted record, and
-        every downstream surface.
+        Each credential is taken out of the parsed specs and stored under the
+        workflow, so only an opaque ref reaches the compiled template and plan, the
+        persisted records, and every downstream surface. Returns each agent's model
+        key ref by task, and where each task's other credentials sit in its spec.
         """
-        secrets = pop_inline_model_secrets(parsed)
-        if not secrets:
-            return {}
         secret_refs: dict[str, str] = {}
-        for task_id, secret in secrets.items():
+        for task_id, secret in pop_inline_model_secrets(parsed).items():
             ref = new_credential_ref()
             await self._secret_vault.store(workflow_id, ref, secret)
             secret_refs[task_id] = ref
-        return secret_refs
+        credentials = take_inline_credentials(parsed)
+        await self._secret_vault.store_values(workflow_id, credentials.values)
+        return secret_refs, credentials
 
     async def register(
         self,
@@ -784,10 +800,12 @@ class TaskRuntime:
         candidate_ready: list[str] = []
         graph_task_ids: dict[str, str] = {}
 
+        secret_refs, credentials = await self._vault_inline_credentials(
+            workflow_id, parsed_workflow
+        )
         v2_bundle: PersistedV2Workflow | None = None
         v2_engine: OrchestrationEngine | None = None
         if ExecutionMode.is_v2(parsed_workflow.api_version):
-            secret_refs = await self._vault_inline_secrets(workflow_id, parsed_workflow)
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(
                 workflow_id,
@@ -826,6 +844,7 @@ class TaskRuntime:
             for entry in specs:
                 task_id = entry.task_id
                 task = entry.task.model_copy(deep=True)
+                task_credentials = credentials.tasks.get(task_id, TaskCredentials())
                 depends_on = entry.depends_on.copy()
                 original = set(depends_on)
                 pending = {dep for dep in depends_on if dep not in self._completed}
@@ -866,13 +885,20 @@ class TaskRuntime:
                     task_type=task_type,
                     category=category,
                     resident=resident,
+                    credential_refs=task_credentials.refs,
                 )
                 task_records.append(record)
                 record.last_queue_ts = record.submitted_ts
                 if v2_engine is None:
                     # A merged dispatch stores every result under its parent's
                     # authorization scope, so only tasks of one scope merge.
-                    merge_key = task.spec.merge_key(scope=org_id)
+                    merge_key = (
+                        None
+                        if task_credentials.renders
+                        else credential_merge_key(
+                            task.spec, task_credentials.refs, scope=org_id
+                        )
+                    )
                     record.merge_key = merge_key
                     selected_worker_hint = (
                         record.selected_worker[0]
@@ -1125,7 +1151,9 @@ class TaskRuntime:
             if record.merge_key is not None:
                 # A key persisted under an earlier rule may omit what now keeps two
                 # tasks apart, so a restored task's key comes from the task itself.
-                record.merge_key = record.task.spec.merge_key(scope=record.org_id)
+                record.merge_key = credential_merge_key(
+                    record.task.spec, record.credential_refs or {}, scope=record.org_id
+                )
             self._merge_key_by_task[task_id] = (record.merge_key, selected_worker_hint)
             if persisted.epoch_index is not None:
                 self._task_epoch_index[task_id] = persisted.epoch_index
@@ -3044,7 +3072,30 @@ class TaskRuntime:
                 spec = engine.episode_spec(task_id)
         return True if spec is None else self._feasibility_check(spec)
 
-    def declared_contract(self, task_id: str) -> CanonicalInferenceContract | None:
+    def credentialed_task(
+        self, record: TaskRecord
+    ) -> tuple[TaskEnvelopeTemplate, Callable[[str], str]] | None:
+        """A copy of a task with its vaulted credentials restored, and a scrubber for
+        any text produced from it; None when a credential is no longer retained.
+
+        The copy is what a dispatch renders and sends. Nothing writes it back, so the
+        record keeps only the refs.
+        """
+        refs = record.credential_refs
+        if not refs:
+            return record.task, _unscrubbed
+        values = self._secret_vault.resolve_values(record.workflow_id, refs.values())
+        if any(ref not in values for ref in refs.values()):
+            return None
+        task = record.task.model_copy(deep=True)
+        set_spec_values(
+            task.spec, {pointer: values[ref] for pointer, ref in refs.items()}
+        )
+        return task, credential_scrubber(values.values())
+
+    def declared_contract(
+        self, task_id: str, spec: TaskSpec | None = None
+    ) -> CanonicalInferenceContract | None:
         """The contract a leaf carries to the worker, for it to resolve and report.
 
         A leaf that admits more than one embodiment names its contract here rather than
@@ -3059,13 +3110,16 @@ class TaskRuntime:
         its prompts are literal or come from upstream: it resolves them in its own
         executor and keeps reporting the native result that embodiment has always
         reported. So does a pinned single-prompt literal leaf.
+
+        A dispatch passes the ``spec`` it sends, whose credentials are restored, so
+        the contract names the prompts the leaf declared.
         """
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if record is None or engine is None:
                 return None
-            spec = record.task.spec
+            spec = spec or record.task.spec
             if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
                 return None
             element = self._input_element_locked(task_id)

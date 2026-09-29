@@ -128,21 +128,23 @@ def _encrypted_openai_payload() -> str:
 
 @pytest.mark.anyio
 async def test_the_runtime_decrypts_n8n_credentials_with_its_configured_password():
+    vault = InMemoryCredentialVault()
     runtime = TaskRuntime(
         cast(Any, FakeWorkflowRegistry()),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("n8n-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        secret_vault=vault,
         n8n=N8nConfig(credential_password=_AES_PASSWORD),
     )
-    _, results = await runtime.register(
+    workflow_id, results = await runtime.register(
         "owner", "org", _encrypted_openai_payload(), format="n8n"
     )
     record = runtime.get_record(results[0].task_id)
-    assert record is not None
-    assert record.task.spec.api["headers"]["Authorization"] == "Bearer sk-n8n"
+    assert record is not None and record.credential_refs is not None
+    ref = record.credential_refs["/api/headers/Authorization"]
+    assert vault.resolve_values(workflow_id, [ref]) == {ref: "Bearer sk-n8n"}
 
 
 def test_n8n_config_reads_its_password_at_the_config_edge(monkeypatch):

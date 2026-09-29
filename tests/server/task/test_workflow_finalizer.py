@@ -339,13 +339,7 @@ def test_the_vault_still_purges_when_the_last_task_settles() -> None:
     async def run() -> None:
         purged: list[str] = []
 
-        class _RecordingVault:
-            async def store(self, workflow_id: str, ref: str, secret: Any) -> None:
-                return None
-
-            def resolve(self, workflow_id: str, ref: str | None) -> None:
-                return None
-
+        class _RecordingVault(InMemoryCredentialVault):
             def purge(self, workflow_id: str) -> None:
                 purged.append(workflow_id)
 

@@ -65,6 +65,8 @@ class PersistedTask(BaseModel):
         data["record"]["merged_dispatch_worker"] = self.record.merged_dispatch_worker
         # And the dispatch holding the task, which fences its worker's events.
         data["record"]["dispatch_id"] = self.record.dispatch_id
+        # And where its vaulted credentials go back into its spec at dispatch.
+        data["record"]["credential_refs"] = self.record.credential_refs
         return data
 
 

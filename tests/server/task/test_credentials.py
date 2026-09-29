@@ -4,8 +4,8 @@ from pathlib import Path
 import yaml
 from pydantic import SecretStr
 
+from server.task.credentials import pop_inline_model_secrets, redact_source_text
 from server.task.parser import parse_workflow
-from server.task.v2.credentials import pop_inline_model_secrets, redact_source_text
 from shared.utils.redact import REDACTED
 
 _WF = """

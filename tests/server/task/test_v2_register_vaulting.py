@@ -10,6 +10,7 @@ from server.task.runtime import TaskRuntime
 from server.task.v2 import PersistedV2Workflow
 from shared.harness import HarnessCapsule
 from shared.private_state import OwnerFence
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry, _WorkerRegistryStub
@@ -40,19 +41,19 @@ spec:
 """
 
 
-class _RecordingVault:
+class _RecordingVault(InMemoryCredentialVault):
     def __init__(self) -> None:
+        super().__init__()
         self.stored: dict[tuple[str, str], SecretStr] = {}
         self.purged: list[str] = []
 
     async def store(self, workflow_id: str, ref: str, secret: SecretStr) -> None:
         self.stored[(workflow_id, ref)] = secret
-
-    def resolve(self, workflow_id: str, ref: str | None) -> SecretStr | None:
-        return self.stored.get((workflow_id, ref)) if ref else None
+        await super().store(workflow_id, ref, secret)
 
     def purge(self, workflow_id: str) -> None:
         self.purged.append(workflow_id)
+        super().purge(workflow_id)
 
 
 def _runtime(vault: _RecordingVault, registry: FakeRegistry) -> TaskRuntime:
