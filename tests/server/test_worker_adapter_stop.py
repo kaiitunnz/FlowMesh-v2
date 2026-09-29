@@ -350,8 +350,8 @@ async def test_a_cancelled_start_that_then_failed_leaves_the_worker_stopped(
     with pytest.raises(asyncio.CancelledError):
         await start
     release.set()
-    assert world.adapter._starting is not None
-    await asyncio.wait({world.adapter._starting})
+    assert world.adapter._last is not None
+    await asyncio.wait({world.adapter._last.future})
     await asyncio.sleep(0)
 
     assert world.adapter.status is WorkerStatus.STOPPED
@@ -498,3 +498,128 @@ async def test_a_start_queued_behind_a_failed_stop_keeps_the_running_worker(
     assert world.adapter.holds_worker()
     if kind == "vastai":
         assert world.adapter._instance_id == 70
+
+
+class _GatedStarts:
+    """Holds each of the adapter's ``_start`` calls until it is let through."""
+
+    def __init__(self, world: Any) -> None:
+        self.entered = [threading.Event(), threading.Event()]
+        self.release = [threading.Event(), threading.Event()]
+        self._calls = 0
+        start = world.adapter._start
+        contracts = iter([70, 80])
+        world.client.create_instance.side_effect = lambda **_: {
+            "success": True,
+            "new_contract": next(contracts),
+        }
+
+        def gated() -> bool:
+            call, self._calls = self._calls, self._calls + 1
+            self.entered[call].set()
+            self.release[call].wait(5)
+            return start()
+
+        world.adapter._start = gated
+        world.adapter.set_status(WorkerStatus.STOPPED)
+
+
+def _fail_stops(world: Any) -> dict[str, bool]:
+    failing = {"on": True}
+
+    def stop_container(*_: Any, **__: Any) -> None:
+        if failing["on"]:
+            raise RuntimeError("refused")
+
+    def destroy_instance(**_: Any) -> str | None:
+        return "refused" if failing["on"] else None
+
+    if isinstance(world, _Docker):
+        world.container.stop.side_effect = stop_container
+    else:
+        world.client.destroy_instance.side_effect = destroy_instance
+    return failing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+@pytest.mark.parametrize("stop_fails", [False, True])
+@pytest.mark.parametrize("late_stop", ["before_the_start_resumes", "during_the_start"])
+async def test_a_stop_accepted_after_a_queued_start_stops_what_it_starts(
+    kind: str, stop_fails: bool, late_stop: str
+) -> None:
+    world = _world(kind)
+    starts = _GatedStarts(world)
+    failing = _fail_stops(world) if stop_fails else {"on": False}
+    adapter = world.adapter
+    late: list[asyncio.Future[bool]] = []
+
+    first = asyncio.ensure_future(adapter.start())
+    await asyncio.to_thread(starts.entered[0].wait, 5)
+    stop = asyncio.ensure_future(adapter.stop())
+    await asyncio.sleep(0.05)
+    assert adapter._last is not None
+    if late_stop == "before_the_start_resumes":
+
+        def accept_the_late_stop(_: Any) -> None:
+            failing["on"] = False
+            late.append(asyncio.ensure_future(adapter.stop()))
+
+        # Runs before the queued start below wakes on the stop.
+        adapter._last.future.add_done_callback(accept_the_late_stop)
+    second = asyncio.ensure_future(adapter.start())
+    await asyncio.sleep(0.05)
+    starts.release[0].set()
+    if late_stop == "during_the_start" and not stop_fails:
+        await asyncio.to_thread(starts.entered[1].wait, 5)
+        late.append(asyncio.ensure_future(adapter.stop()))
+    elif late_stop == "during_the_start":
+        await asyncio.wait({stop})
+        failing["on"] = False
+        late.append(asyncio.ensure_future(adapter.stop()))
+    starts.release[1].set()
+
+    assert await asyncio.gather(first, stop, second) == [True, not stop_fails, True]
+    assert await late[0]
+    assert not adapter.holds_worker()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_starts_accepted_together_start_one_worker(kind: str) -> None:
+    world = _world(kind)
+    starts = _GatedStarts(world)
+
+    first = asyncio.ensure_future(world.adapter.start())
+    await asyncio.to_thread(starts.entered[0].wait, 5)
+    second = asyncio.ensure_future(world.adapter.start())
+    await asyncio.sleep(0.05)
+    starts.release[0].set()
+
+    assert await asyncio.gather(first, second) == [True, True]
+    assert _created(world) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_stops_accepted_together_stop_once(kind: str) -> None:
+    world = _world(kind)
+    await world.start()
+    stopping = threading.Event()
+    release = threading.Event()
+    stop = world.adapter._stop
+
+    def gated_stop() -> bool:
+        stopping.set()
+        release.wait(5)
+        return stop()
+
+    world.adapter._stop = gated_stop
+    first = asyncio.ensure_future(world.adapter.stop())
+    await asyncio.to_thread(stopping.wait, 5)
+    second = asyncio.ensure_future(world.adapter.stop())
+    await asyncio.sleep(0.05)
+    release.set()
+
+    assert await asyncio.gather(first, second) == [True, True]
+    assert world.stops == 1
