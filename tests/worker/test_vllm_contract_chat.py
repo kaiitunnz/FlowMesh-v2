@@ -42,13 +42,10 @@ def _run(
     """Run one task through the executor against a stand-in engine.
 
     The stand-in tokenizer carries a chat template unless a test takes it away, which is
-    what decides whether conversations can be rendered at all. Each prompt it encodes
-    counts 100 tokens against the engine's ``window``.
+    what decides whether conversations can be rendered at all.
     """
     executor = VLLMExecutor(DEFAULT_WORKER_CONFIG, lifecycle=None)
     llm = MagicMock()
-    llm.llm_engine.model_config.max_model_len = window
-    llm.get_tokenizer.return_value.encode.return_value = [0] * 100
     llm.get_tokenizer.return_value.chat_template = chat_template
     llm.get_tokenizer.return_value.apply_chat_template.return_value = "<rendered>"
     llm.chat.return_value = [_completion(f"out-{i}") for i in range(len(prompts))]
@@ -131,38 +128,3 @@ def test_a_model_without_a_chat_template_still_stores_the_declared_shape(
 
     assert llm.generate.called
     llm.get_tokenizer.return_value.apply_chat_template.assert_not_called()
-
-
-def _sampling_params(llm: MagicMock) -> Any:
-    call = llm.chat.call_args or llm.generate.call_args
-    return call.kwargs["sampling_params"]
-
-
-def test_a_leaf_without_a_contract_caps_max_tokens_to_the_window(
-    tmp_path: Path,
-) -> None:
-    result, llm = _run(["a"], None, tmp_path, window=356)
-
-    params = _sampling_params(llm)
-    assert isinstance(params, list)
-    assert [p.max_tokens for p in params] == [356 - 100 - 16]
-    assert result.items[0].diagnostics == {
-        "auto_cap": {"max_tokens": 240, "requested": 512}
-    }
-
-
-@pytest.mark.parametrize("chat_template", ["a-chat-template", None])
-def test_a_contract_runs_its_declared_max_tokens_on_either_path(
-    tmp_path: Path, chat_template: str | None
-) -> None:
-    # A replica rejects an over-window request rather than clamping it, so a local run
-    # of a contract issues the same request, whether the engine renders conversations
-    # or generates from prompts.
-    result, llm = _run(
-        ["a"], _contract("a"), tmp_path, chat_template=chat_template, window=356
-    )
-
-    params = _sampling_params(llm)
-    assert not isinstance(params, list)
-    assert params.max_tokens == 512
-    assert result.items[0].diagnostics is None

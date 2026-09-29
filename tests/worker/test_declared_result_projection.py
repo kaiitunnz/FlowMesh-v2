@@ -94,7 +94,6 @@ def _native_local(
                 output=output,
                 finish_reason="stop",
                 metadata={"engine": "vllm"},
-                diagnostics={"auto_cap": {"max_tokens": 16, "requested": 512}},
             )
             for index, (prompt, output) in enumerate(zip(prompts, outputs))
         ],

@@ -42,24 +42,6 @@ type PromptMessage = dict[str, str]
 type PromptInput = str | Sequence[PromptMessage]
 
 
-def group_diagnostics(members: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The diagnostics of an item grouping ``members``, or None when none has any.
-
-    A table item reports one auto-cap budget per row, None where that row was not
-    capped, as it reports one finish_reason per row.
-    """
-    caps = [(member.get("diagnostics") or {}).get("auto_cap") for member in members]
-    requested = next((cap["requested"] for cap in caps if cap is not None), None)
-    if requested is None:
-        return None
-    return {
-        "auto_cap": {
-            "max_tokens": [None if cap is None else cap["max_tokens"] for cap in caps],
-            "requested": requested,
-        }
-    }
-
-
 @dataclass(slots=True)
 class InferenceEntry:
     task_id: str
@@ -765,8 +747,6 @@ class DataMixin(GovernanceMixin):
             }
             if metadata := first.get("metadata"):
                 payload["metadata"] = metadata
-            if diagnostics := group_diagnostics(group):
-                payload["diagnostics"] = diagnostics
             grouped_items.append(payload)
             cur += size
         if cur != len(items):

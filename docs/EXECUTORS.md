@@ -53,11 +53,6 @@ An inference producer reports every item with its `index`, `prompt` and `output`
 task fails before the result is stored; stored results read through the tolerant
 `InferenceItem`.
 
-A vLLM inference leaf lowers a text prompt's `max_tokens` to fit the model window after
-that prompt, less a small margin and down to a small floor, and records the clamp on the
-prompt's item as `diagnostics.auto_cap` (`{max_tokens, requested}`); a table item records
-one budget per row. A leaf bound to a contract runs its declared `max_tokens` unchanged.
-
 ## Agent-episode harness backends
 
 Every agent runs through the dependency-light `AgentEpisodeExecutor`: one dispatch is one
@@ -342,9 +337,7 @@ generation by the engine it loads. Equivalence is over that request and the decl
 result, not over sampled tokens: a leaf that needs reproducible output declares greedy
 sampling. Both report one result — the pinned model, and one item per declared prompt
 carrying its index, its prompt, and its output. Fields only a local generation can report
-(`finish_reason`, `metadata`, `diagnostics`) and token accounting (`usage`) are dropped
-from both. A local generation runs the declared `max_tokens` unchanged, as a replica
-does.
+(`finish_reason`, `metadata`) and token accounting (`usage`) are dropped from both.
 
 A leaf declaring several prompts is served as one batch, whether its embodiment is chosen
 from a menu or pinned to `{mode: resident}`. It yields one resident boundary carrying
