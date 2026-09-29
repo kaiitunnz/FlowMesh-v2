@@ -121,6 +121,16 @@ def test_a_cancel_before_the_turn_starts_ends_the_step() -> None:
     assert adapter.start("a", capsule=None, outcomes=[]).value == "done"
 
 
+def test_a_cancel_after_the_step_ended_still_closes_the_app_server() -> None:
+    fake = FakeCodexAppServer([{"kind": "completed", "value": "done"}])
+    adapter = CodexAppServerHarnessAdapter(fake)
+    assert adapter.start("a", capsule=None, outcomes=[]).value == "done"
+
+    adapter.cancel("a")
+
+    assert fake.cancelled == 1
+
+
 @pytest.mark.parametrize("resume", [False, True])
 def test_a_cancel_ends_a_step_still_opening_its_thread(resume: bool) -> None:
     opening = threading.Event()

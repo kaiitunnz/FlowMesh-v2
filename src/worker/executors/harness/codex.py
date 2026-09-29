@@ -153,12 +153,12 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
         return self._on_event(state, event)
 
     def cancel(self, activation_id: str) -> None:
+        # The app-server may still run a turn whose step already returned or raised,
+        # so the cancel ends it whether or not a step is in flight.
         with self._lock:
             self._cancelled.add(activation_id)
-            in_flight = activation_id in self._threads
             thread_id = self._threads.get(activation_id)
-        if in_flight:
-            self._transport.cancel(thread_id)
+        self._transport.cancel(thread_id)
 
     def _inject(self, state: _CodexState, outcomes: Sequence[DeliveredOutcome]) -> None:
         items: list[CodexInjectItem] = []

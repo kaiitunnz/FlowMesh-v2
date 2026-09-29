@@ -9,11 +9,13 @@ already were.
 import json
 import threading
 import time
+from pathlib import Path
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
-from shared.harness import BoundaryEventKind
+from shared.harness import BoundaryEventKind, HarnessResult, HarnessResultKind
 from shared.sandbox import (
     SANDBOX_EXECUTE_INTERFACE,
     LocalSandboxExecutor,
@@ -27,7 +29,11 @@ from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.tools.model.schema import ModelCompletion, ModelToolCall
 from shared.tools.search.schema import SEARCH_INTERFACE
 from shared.utils.ids import new_mediated_permit_id
+from tests.worker.factories import make_worker_config
+from tests.worker.test_agent_episode_executor import _dispatch_msg, _FakeAdapter
 from worker.egress import PendingEgressRequestStore
+from worker.executors.agent_episode_executor import AgentEpisodeExecutor
+from worker.executors.harness import register_adapter
 from worker.model_turn import HeldModelEgress, ResponsesFacade
 from worker.model_turn.facade import _MAX_TURN_COMMANDS, FacadeTurnError
 from worker.model_turn.rendezvous import ModelTurnRendezvous
@@ -399,6 +405,84 @@ def test_a_round_during_the_harness_close_waits_for_the_release_unproposed() -> 
 
     assert order == ["harness exited", "turn answered"]
     assert len(proposed) == 1
+    assert pending.occurrences() == []
+
+
+def test_a_step_that_raises_gives_up_the_turn_still_running(tmp_path: Path) -> None:
+    rendezvous = ModelTurnRendezvous()
+    pending = PendingEgressRequestStore()
+    step_ended = threading.Event()
+    after_the_step: list[str] = []
+
+    class _Sidecar:
+        def egress_now(self, permit: MediatedOperationPermit) -> ModelCompletion:
+            return ModelCompletion(
+                content="",
+                tool_calls=(_call("run_command", {"command": ["make"]}),),
+            )
+
+    def propose(proposal: AgentModelTurnProposal) -> None:
+        if step_ended.is_set():
+            after_the_step.append(proposal.call_correlation)
+        rendezvous.deliver_permit(
+            _permit(proposal.agent_task_id, proposal.call_correlation)
+        )
+
+    held = HeldModelEgress(
+        rendezvous=rendezvous,
+        pending=pending,
+        propose=propose,
+        sidecar=cast(Any, _Sidecar()),
+        timeout_sec=5.0,
+    )
+    facade = ResponsesFacade(held_egress=held, pending=pending)
+    commanding = threading.Event()
+
+    class _SlowSandbox(_RecordingSandbox):
+        def execute(self, command: SandboxCommand) -> SandboxCommandResult:
+            commanding.set()
+            step_ended.wait(5)
+            return super().execute(command)
+
+    turn_errors: list[BaseException] = []
+
+    class _ReaderDied(_FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__(HarnessResult(kind=HarnessResultKind.COMPLETION))
+            self.turn: threading.Thread | None = None
+
+        def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
+            token = facade.register_episode(
+                activation_id, "http://up/v1", "m", [_RUN_COMMAND], _SlowSandbox()
+            )
+
+            def turn() -> None:
+                try:
+                    facade.handle_turn(activation_id, token, {"input": "go"})
+                except FacadeTurnError as exc:
+                    turn_errors.append(exc)
+
+            self.turn = threading.Thread(target=turn, daemon=True)
+            self.turn.start()
+            assert commanding.wait(5)
+            raise RuntimeError("the Codex app-server closed its stdout")
+
+    adapter = _ReaderDied()
+    register_adapter("fake", lambda *_: adapter)
+    lifecycle = MagicMock()
+    lifecycle.responses_facade = facade
+    msg = _dispatch_msg()
+    executor = AgentEpisodeExecutor(make_worker_config(), lifecycle=lifecycle)
+
+    with pytest.raises(RuntimeError, match="closed its stdout"):
+        executor.run(msg, tmp_path)
+    step_ended.set()
+    assert adapter.turn is not None
+    adapter.turn.join(5)
+
+    assert adapter.cancelled == [msg.task_id]
+    assert after_the_step == []
+    assert len(turn_errors) == 1
     assert pending.occurrences() == []
 
 
