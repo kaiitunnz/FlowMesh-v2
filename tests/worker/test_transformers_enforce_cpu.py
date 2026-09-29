@@ -13,6 +13,7 @@ from shared.tasks.specs import InferenceSpecStrict
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import DEFAULT_WORKER_CONFIG
 from worker.executors import transformers_executor
+from worker.executors.base_executor import ExecutionError
 from worker.executors.transformers_executor import HFTransformersExecutor
 
 
@@ -37,12 +38,12 @@ class TestEnforceCpu:
     ) -> None:
         assert executor._pick_device(cfg, enforce_cpu=True) == "cpu"
 
-    def test_without_enforce_cpu_a_gpu_is_still_preferred(
+    def test_without_enforce_cpu_a_gpu_is_preferred(
         self, executor: HFTransformersExecutor
     ) -> None:
         assert executor._pick_device({}) == "cuda"
 
-    def test_device_map_still_honoured(self, executor: HFTransformersExecutor) -> None:
+    def test_device_map_is_honoured(self, executor: HFTransformersExecutor) -> None:
         assert executor._pick_device({"device_map": "auto"}) == "auto"
         assert executor._pick_device({"device_map": "cpu"}) == "cpu"
 
@@ -56,10 +57,10 @@ class TestEnforceCpuWithoutGpu:
             assert executor._pick_device({}) == "cpu"
 
 
-def _spec(enforce_cpu: bool | None) -> InferenceSpecStrict:
+def _spec(enforce_cpu: bool | None, ident: str = "org/model") -> InferenceSpecStrict:
     return InferenceSpecStrict(
         taskType=TaskType.INFERENCE,
-        model=ModelConfig(source=ModelSource(identifier="org/model")),
+        model=ModelConfig(source=ModelSource(identifier=ident)),
         data={"type": "list", "items": ["hi"]},
         enforce_cpu=enforce_cpu,
     )
@@ -69,7 +70,8 @@ def _spec(enforce_cpu: bool | None) -> InferenceSpecStrict:
 class TestEnforceCpuPlacesTheModel:
     @pytest.fixture
     def loaded(self) -> Iterator[MagicMock]:
-        """The model each load returns, recording where it was moved."""
+        """The mocked ``from_pretrained``; its return value records where the model
+        was moved."""
         with (
             patch.object(transformers_executor, "AutoTokenizer"),
             patch.object(transformers_executor, "AutoModelForCausalLM") as model_cls,
@@ -96,3 +98,28 @@ class TestEnforceCpuPlacesTheModel:
         ]
         assert loaded.call_count == 2
         assert executor._device == "cpu"
+
+    @pytest.mark.parametrize(
+        "next_spec",
+        [_spec(enforce_cpu=True), _spec(enforce_cpu=None, ident="org/other")],
+        ids=["same-model-on-cpu", "other-model"],
+    )
+    def test_a_failed_load_leaves_no_model_to_reuse(
+        self,
+        executor: HFTransformersExecutor,
+        loaded: MagicMock,
+        next_spec: InferenceSpecStrict,
+    ) -> None:
+        warm, fresh = MagicMock(name="warm"), MagicMock(name="fresh")
+        loaded.return_value = warm
+        executor._ensure_model(_spec(enforce_cpu=None))
+
+        loaded.side_effect = RuntimeError("out of memory")
+        with pytest.raises(ExecutionError):
+            executor._ensure_model(next_spec)
+        assert executor._model is None
+
+        loaded.side_effect = None
+        loaded.return_value = fresh
+        executor._ensure_model(next_spec)
+        assert executor._model is fresh
