@@ -154,14 +154,16 @@ def test_a_produced_inference_item_requires_index_prompt_and_output() -> None:
             InferenceItemStrict.model_validate(payload)
 
 
-def test_a_produced_null_output_is_stored_as_null() -> None:
-    """``output`` is required but nullable: a structured output whose model returned
-    ``null`` keeps the key on the wire."""
+def test_a_produced_null_output_reads_back_as_null() -> None:
+    """``output`` must be reported but may be null: a structured output whose model
+    returned ``null`` is produced and reads back as null."""
     result = InferenceResult(
         items=[InferenceItemStrict(index=0, prompt="hi", output=None)]
     )
-    stored = json.loads(ResultEnvelope(task_id="t", result=result).model_dump_json())
-    assert stored["result"]["items"] == [{"index": 0, "prompt": "hi", "output": None}]
+    envelope = ResultEnvelope(task_id="t", result=result).model_dump_json()
+    reread = ResultEnvelope.model_validate_json(envelope).result
+    assert isinstance(reread, InferenceResult)
+    assert reread.items[0].output is None
 
 
 # Every item shape an inference producer has stored, as stored.
