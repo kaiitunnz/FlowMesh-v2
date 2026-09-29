@@ -115,7 +115,19 @@ root node, both local Redis services are deployed alongside the server. On a
 worker node (`NODE_ROLE=worker`), Redis services are skipped — the worker
 server connects to the root node's Redis via `REDIS_CONTROL_URL` and
 `REDIS_TELEMETRY_URL`, which must be set in the worker's `.env` to reachable
-endpoints on the root node.
+endpoints on the root node, and authenticates with the root's `REDIS_USERNAME`
+and `REDIS_PASSWORD`, copied from the root's `.env`.
+
+`flowmesh stack init --role root` writes a random `REDIS_PASSWORD` and random
+co-located content store credentials (`CONTENT_STORE_ACCESS_KEY`,
+`CONTENT_STORE_SECRET_KEY`) into the `.env` it renders. `flowmesh stack up` refuses to
+start a root node whose Redis or co-located content store would run on an unset or
+well-known credential, and names the variable to set. An existing deployment sets its
+own values in `.env` and runs `flowmesh stack up`; Redis and the content store take
+the new credentials at restart, and the content store keeps its data. The content
+store console listens on `127.0.0.1` (`CONTENT_STORE_CONSOLE_BIND_HOST`), and
+`CONTENT_STORE_BIND_HOST` narrows the address the store's API listens on, which
+worker nodes reach.
 
 A root node that names no `CONTENT_STORE_ENDPOINT_URL` also runs the co-located
 content store, the `content` compose profile, which `flowmesh stack up` selects on its

@@ -11,7 +11,11 @@ from flowmesh_cli_stack.bundle import (
     _scaffold_server_assets,
     bundle_init,
 )
-from flowmesh_cli_stack.env_schema import STACK_ENV_SCHEMA, role_overrides
+from flowmesh_cli_stack.env_schema import (
+    STACK_ENV_SCHEMA,
+    credential_overrides,
+    role_overrides,
+)
 from flowmesh_stack.env_schema import render_env_example, validate_env_values
 
 
@@ -303,21 +307,29 @@ def _parse_env_body(body: str) -> dict[str, str]:
     return out
 
 
+def _root_render() -> str:
+    return render_env_example(
+        STACK_ENV_SCHEMA,
+        overrides={
+            **role_overrides(NodeRole.ROOT),
+            **credential_overrides(NodeRole.ROOT),
+        },
+    )
+
+
 def test_root_role_render_passes_schema_validation() -> None:
-    body = render_env_example(STACK_ENV_SCHEMA, overrides=role_overrides(NodeRole.ROOT))
-    errors, _ = validate_env_values(STACK_ENV_SCHEMA, _parse_env_body(body))
+    errors, _ = validate_env_values(STACK_ENV_SCHEMA, _parse_env_body(_root_render()))
     assert errors == []
 
 
-def test_worker_role_render_passes_schema_validation() -> None:
-    # Pin the contract that a scaffolded worker .env is considered valid
-    # by the schema's own validators — i.e. the blanked overrides don't
-    # trip required/min_value/conditional checks.
+def test_worker_role_render_asks_only_for_the_roots_redis_password() -> None:
+    # A scaffolded worker .env is valid once it carries the root's Redis password,
+    # which the worker cannot generate for itself.
     body = render_env_example(
         STACK_ENV_SCHEMA, overrides=role_overrides(NodeRole.WORKER)
     )
     errors, _ = validate_env_values(STACK_ENV_SCHEMA, _parse_env_body(body))
-    assert errors == []
+    assert errors == ["REDIS_PASSWORD must be set when REDIS_ACL_ENABLED=1"]
 
 
 _RESIDENT_COUPLING = "RESIDENT_CAPACITY_ENABLED requires NETWORK_PLANE_ENABLED"
@@ -345,8 +357,7 @@ _REAPER_WARNING = (
 
 
 def test_reaper_without_watchdog_warns() -> None:
-    body = render_env_example(STACK_ENV_SCHEMA, overrides=role_overrides(NodeRole.ROOT))
-    env = _parse_env_body(body)
+    env = _parse_env_body(_root_render())
     env["ENABLE_WORKER_WATCHDOG"] = "false"
     errors, warnings = validate_env_values(STACK_ENV_SCHEMA, env)
     assert errors == []
@@ -354,8 +365,7 @@ def test_reaper_without_watchdog_warns() -> None:
 
 
 def test_reaper_with_watchdog_does_not_warn() -> None:
-    body = render_env_example(STACK_ENV_SCHEMA, overrides=role_overrides(NodeRole.ROOT))
-    env = _parse_env_body(body)
+    env = _parse_env_body(_root_render())
     # An unset watchdog flag keeps its own true default and must stay quiet.
     for watchdog, reaper in (("true", "true"), ("false", "false"), ("", "true")):
         env["ENABLE_WORKER_WATCHDOG"] = watchdog

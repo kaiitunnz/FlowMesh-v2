@@ -1,5 +1,7 @@
 """Stack env schema."""
 
+import secrets
+
 from flowmesh.models.nodes import NodeRole
 from flowmesh_stack.env import parse_bool
 from flowmesh_stack.env_schema import (
@@ -10,6 +12,69 @@ from flowmesh_stack.env_schema import (
     require_all_or_none,
     require_if_true,
 )
+
+# Credentials that shipped as schema defaults; a root node never runs its own services
+# on them.
+_WELL_KNOWN_CREDENTIALS = {
+    "REDIS_PASSWORD": "very-strong-password",  # nosec B105 - a default refused
+    "CONTENT_STORE_ACCESS_KEY": "flowmesh",
+    "CONTENT_STORE_SECRET_KEY": "flowmeshcontent",  # nosec B105 - a default refused
+}
+
+
+def colocates_content_store(env: dict[str, str]) -> bool:
+    """Whether this node runs the content store itself.
+
+    The fabric's content has to live somewhere, so a root node brings up its own store
+    unless the deployment says where its store already is. Naming an endpoint — cloud
+    object storage, an external MinIO, another node's — is what turns the co-located one
+    off, so pointing at real storage costs one setting and leaves no unused container.
+    """
+    role = env.get("NODE_ROLE", "").strip().lower()
+    if role and role != NodeRole.ROOT.value:
+        return False
+    return not env.get("CONTENT_STORE_ENDPOINT_URL", "").strip()
+
+
+def credential_overrides(role: NodeRole) -> dict[str, str]:
+    """Fresh credentials for the services a root node runs itself.
+
+    A worker node reaches the root's Redis with the root's password, so it gets none.
+    """
+    if role != NodeRole.ROOT:
+        return {}
+    return {
+        "REDIS_PASSWORD": secrets.token_urlsafe(32),
+        "CONTENT_STORE_ACCESS_KEY": secrets.token_hex(12),
+        "CONTENT_STORE_SECRET_KEY": secrets.token_urlsafe(32),
+    }
+
+
+def service_credential_errors(env: dict[str, str]) -> list[str]:
+    """Why a root node's own Redis or co-located content store would run on an unset or
+    well-known credential."""
+    role = env.get("NODE_ROLE", "").strip().lower()
+    if role and role != NodeRole.ROOT.value:
+        return []
+    keys: list[str] = []
+    if parse_bool(env.get("REDIS_ACL_ENABLED", "")):
+        keys.append("REDIS_PASSWORD")
+    if colocates_content_store(env):
+        keys.extend(("CONTENT_STORE_ACCESS_KEY", "CONTENT_STORE_SECRET_KEY"))
+    errors: list[str] = []
+    for key in keys:
+        value = env.get(key, "").strip()
+        if value == _WELL_KNOWN_CREDENTIALS[key]:
+            errors.append(f"{key} is a well-known default; set a value of your own")
+        elif not value and key != "REDIS_PASSWORD":
+            errors.append(f"{key} must be set for the co-located content store")
+    return errors
+
+
+def _refuse_service_credentials(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    errors.extend(service_credential_errors(env))
 
 
 def _require_network_plane_for_resident(
@@ -658,11 +723,21 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
+                    "CONTENT_STORE_BIND_HOST",
+                    "0.0.0.0",
+                    description="Co-located content store bind address.",
+                ),
+                EnvVar(
                     "CONTENT_STORE_CONSOLE_PORT",
                     "9801",
                     description="Co-located content store console port.",
                     var_type=EnvVarType.INT,
                     min_value=1,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_CONSOLE_BIND_HOST",
+                    "127.0.0.1",
+                    description="Co-located content store console bind address.",
                 ),
                 EnvVar(
                     "CONTENT_STORE_BUCKET",
@@ -681,7 +756,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_STORE_ACCESS_KEY",
-                    "flowmesh",
+                    "",
                     description=(
                         "Co-located store key the control plane cuts access"
                         " from; set for external storage."
@@ -689,7 +764,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_STORE_SECRET_KEY",
-                    "flowmeshcontent",
+                    "",
                     description=(
                         "Co-located store secret the control plane cuts access"
                         " from; set for external storage."
@@ -921,7 +996,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             vars=[
                 EnvVar("REDIS_ACL_ENABLED", "1", var_type=EnvVarType.BOOL),
                 EnvVar("REDIS_USERNAME", "admin"),
-                EnvVar("REDIS_PASSWORD", "very-strong-password"),
+                EnvVar("REDIS_PASSWORD", ""),
             ],
         ),
         EnvSection(
@@ -1545,6 +1620,7 @@ STACK_ENV_SCHEMA = EnvSchema(
         _require_peer_trust,
         _require_network_plane_for_resident,
         _require_network_plane_for_content,
+        _refuse_service_credentials,
         _warn_reaper_without_watchdog,
     ],
 )

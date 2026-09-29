@@ -29,7 +29,14 @@ from flowmesh_stack.images import (
     get_push_platforms,
 )
 
-from .env_schema import STACK_ENV_SCHEMA, deploy_overrides, role_overrides
+from .env_schema import (
+    STACK_ENV_SCHEMA,
+    colocates_content_store,
+    credential_overrides,
+    deploy_overrides,
+    role_overrides,
+    service_credential_errors,
+)
 from .utils import (
     DEFAULT_ENV_FILE,
     STACK_PATH_KEYS,
@@ -71,20 +78,6 @@ def _stack() -> DockerComposeStack:
 CONTENT_PROFILE = "content"
 
 
-def _colocates_content_store(env: dict[str, str]) -> bool:
-    """Whether this node runs the content store itself.
-
-    The fabric's content has to live somewhere, so a root node brings up its own store
-    unless the deployment says where its store already is. Naming an endpoint — cloud
-    object storage, an external MinIO, another node's — is what turns the co-located one
-    off, so pointing at real storage costs one setting and leaves no unused container.
-    """
-    role = env.get("NODE_ROLE", "").strip().lower()
-    if role and role != NodeRole.ROOT.value:
-        return False
-    return not env.get("CONTENT_STORE_ENDPOINT_URL", "").strip()
-
-
 def _profiles(env_file: Path, profile: str | None) -> list[str]:
     """This node's own compose profile plus any the operator selected.
 
@@ -95,7 +88,7 @@ def _profiles(env_file: Path, profile: str | None) -> list[str]:
     env = parse_env_file(env_file)
     raw = env.get("COMPOSE_PROFILES", "")
     selected.extend(name for part in raw.split(",") if (name := part.strip()))
-    if _colocates_content_store(env):
+    if colocates_content_store(env):
         selected.append(CONTENT_PROFILE)
     seen: dict[str, None] = {}
     for name in selected:
@@ -521,9 +514,15 @@ def up(
     On root nodes (NODE_ROLE=root, the default), the local Redis services are
     started alongside the server. On worker nodes (NODE_ROLE=worker), Redis
     services are skipped — the worker is expected to connect to the root
-    node's Redis via REDIS_CONTROL_URL / REDIS_TELEMETRY_URL.
+    node's Redis via REDIS_CONTROL_URL / REDIS_TELEMETRY_URL. A root node whose
+    Redis or co-located content store would run on an unset or well-known
+    credential is refused.
     """
     profile = "root" if _node_role(env_file) == NodeRole.ROOT else None
+    if errors := service_credential_errors(parse_env_file(env_file)):
+        for error in errors:
+            logging.error(error)
+        raise typer.Exit(code=1)
     _compose(
         ["up", "-d", "--wait"],
         env_file=env_file,
@@ -803,6 +802,7 @@ def init(
     overrides = {
         **role_overrides(node_role),
         **deploy_overrides(deploy, deploy_version),
+        **credential_overrides(node_role),
     }
     env_file.write_text(render_env_example(STACK_ENV_SCHEMA, overrides=overrides))
     logging.success(f"Wrote {env_file} (NODE_ROLE={node_role.value}).")
