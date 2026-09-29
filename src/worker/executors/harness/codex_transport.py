@@ -350,9 +350,10 @@ class RealCodexAppServerTransport:
         self.close()
 
     def close(self) -> None:
+        # Held through the exit, so a concurrent close returns only once it happened.
         with self._lock:
             self._closed = True
             finalizer, self._finalizer = self._finalizer, None
             self._client = None
-        if finalizer is not None:
-            finalizer()
+            if finalizer is not None:
+                finalizer()

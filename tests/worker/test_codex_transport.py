@@ -5,6 +5,7 @@ process is started or signalled.
 """
 
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,10 +26,13 @@ from worker.executors.harness.codex_transport import (  # noqa: E402
 
 
 class _Proc:
+    exit_delay = 0.0
+
     def __init__(self) -> None:
         self.exited = threading.Event()
 
     def terminate(self) -> None:
+        time.sleep(self.exit_delay)
         self.exited.set()
 
 
@@ -103,3 +107,31 @@ def test_a_close_during_the_spawn_reaps_the_app_server_it_started(
     with pytest.raises(CodexTransportError):
         transport.thread_start()
     assert len(_Client.made) == 1
+
+
+def test_every_close_returns_once_the_app_server_exited(
+    transport: RealCodexAppServerTransport,
+) -> None:
+    _Client.proceed.set()
+    transport.thread_start()
+    (client,) = _Client.made
+    proc = client._proc
+    assert proc is not None
+    proc.exit_delay = 0.3
+    first = threading.Thread(target=transport.close, daemon=True)
+    first.start()
+    assert _wait_for(lambda: client._proc is None)
+
+    transport.close()
+
+    assert proc.exited.is_set()
+    first.join(5)
+
+
+def _wait_for(condition: Any) -> bool:
+    deadline = time.monotonic() + 5
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.005)
+    return True
