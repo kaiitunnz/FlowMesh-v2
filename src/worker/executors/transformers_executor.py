@@ -153,6 +153,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         self._image_processor: Any | None = None
         self._model: PreTrainedModel | None = None
         self._model_config: dict[str, Any] | None = None
+        self._model_placement: str | None = None
         self._device: str | None = None
         self._model_name: str | None = None
         self._mode: str = "text-generation"
@@ -172,7 +173,12 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             )
         configure_hf_library_logging()
 
-    def _pick_device(self, cfg: dict[str, Any]) -> str:
+    def _pick_device(self, cfg: dict[str, Any], *, enforce_cpu: bool = False) -> str:
+        # An explicit enforce_cpu outranks device_map: the spec-level flag is how a
+        # caller asks for CPU inference, and validate_dispatchable rejects pairing it
+        # with a vLLM backend.
+        if enforce_cpu:
+            return "cpu"
         # Explicit device_map overrides simple device if provided
         device_map = cfg.get("device_map")
         if device_map in {
@@ -214,7 +220,8 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         tcfg = (model_cfg and model_cfg.transformers) or {}
         self._mode = tcfg.get("mode", "text-generation")
 
-        device = self._pick_device(tcfg)
+        enforce_cpu = isinstance(spec, InferenceSpecStrict) and spec.enforce_cpu is True
+        device = self._pick_device(tcfg, enforce_cpu=enforce_cpu)
         dtype = self._to_torch_dtype(tcfg.get("dtype", "auto"))
         trust_remote_code = spec.model_trust_remote_code or bool(
             tcfg.get("trust_remote_code", False)
@@ -253,11 +260,16 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             if model_cfg is not None
             else None
         )
-        if self._model is not None and self._model_config == model_cfg_payload:
+        if (
+            self._model is not None
+            and self._model_config == model_cfg_payload
+            and self._model_placement == device
+        ):
             logger.info("Model already loaded and matches spec; reusing.")
             return
 
         self._model_config = model_cfg_payload
+        self._model_placement = device
 
         try:
             match self._mode:
