@@ -158,6 +158,25 @@ async def test_an_operator_stops_a_worker_whose_event_stream_closed(kind: str) -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_a_crashed_worker_an_operator_stopped_starts_again(kind: str) -> None:
+    world = _world(kind)
+    await world.start()
+    wm = _manager(world, kind)
+    wm._registry.set_worker_id(world.adapter.token, "wkr-1")
+    world.adapter.set_worker_id("wkr-1")
+    # The worker crashed: its event stream closed without an unregister.
+    world.adapter.clear_worker_id()
+    world.adapter.set_status(WorkerStatus.STOPPED)
+
+    assert await wm.stop_worker(world.adapter.name)
+    assert world.adapter.status is WorkerStatus.STOPPED
+
+    assert await wm.start_worker(world.adapter.name)
+    assert world.adapter.holds_worker()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
 async def test_a_worker_whose_event_stream_closed_is_not_started_again(
     kind: str,
 ) -> None:
