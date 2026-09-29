@@ -124,8 +124,9 @@ class ResponsesFacade:
         return token
 
     def unregister_episode(self, task_id: str) -> None:
-        """Forget the episode, so a turn still running captures nothing, and drop a
-        captured group no step will report with the requests it stashed."""
+        """Forget the episode, so a turn still running captures nothing, answer the
+        turns waiting on its release, and drop a captured group no step will report
+        with the requests it stashed."""
         with self._lock:
             self._episodes.pop(task_id, None)
             group = self._captured.pop(task_id, None)
