@@ -2,9 +2,12 @@
 
 import threading
 
+import pytest
+
 from shared.tools.contract import MediatedOperationPermit
 from shared.utils.ids import new_mediated_permit_id
 from worker.model_turn import ModelTurnRendezvous, PermitDenied
+from worker.model_turn import rendezvous as rendezvous_module
 
 _AGENT = "tsk-agent"
 _CALL = "t0"
@@ -100,3 +103,14 @@ def test_a_released_episode_arms_denied_waiters_until_it_reopens() -> None:
     rv.reopen(_AGENT)
     with rv.register(_AGENT, _CALL) as waiter:
         assert not waiter.refused
+
+
+def test_only_the_latest_given_up_episodes_stay_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rendezvous_module, "_MAX_REFUSED_EPISODES", 2)
+    rv = ModelTurnRendezvous()
+    for agent in ("tsk-1", "tsk-2", "tsk-3"):
+        rv.release(agent, "the model turn was cancelled")
+
+    assert list(rv._refused) == ["tsk-2", "tsk-3"]

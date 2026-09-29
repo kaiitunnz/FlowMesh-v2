@@ -23,6 +23,9 @@ _BoundaryKey = tuple[str, str]
 # permit that arrives once the held turn has already timed out is still identified as a
 # stale held-turn permit rather than a durable-yield one.
 _HELD_KEY_TTL_SEC = 300.0
+# How many given-up episodes stay refused; one given up this long ago has no harness
+# left to make a call.
+_MAX_REFUSED_EPISODES = 1024
 
 
 @dataclass(frozen=True)
@@ -46,9 +49,8 @@ class ModelTurnRendezvous:
         self._held: dict[_BoundaryKey, float] = {}
         # Episodes refused until they reopen, so a held turn's later round cannot arm a
         # waiter and propose once its episode is being given up; a released one's
-        # waiters are armed already denied.
-        self._refused: set[str] = set()
-        self._denials: dict[str, str] = {}
+        # waiters are armed already denied with the reason recorded here.
+        self._refused: dict[str, str | None] = {}
 
     def register(self, agent_task_id: str, call_correlation: str) -> "PermitWaiter":
         """Arm a waiter for one held occurrence before its propose is emitted.
@@ -63,7 +65,7 @@ class ModelTurnRendezvous:
             self._waiters[key] = box
             self._held[key] = time.monotonic() + _HELD_KEY_TTL_SEC
             refused = agent_task_id in self._refused
-            if (reason := self._denials.get(agent_task_id)) is not None:
+            if (reason := self._refused.get(agent_task_id)) is not None:
                 box.put_nowait(PermitDenied(reason=reason))
         return PermitWaiter(self, key, box, refused)
 
@@ -104,14 +106,13 @@ class ModelTurnRendezvous:
     def refuse(self, agent_task_id: str) -> None:
         """Arm the episode's later waiters refused until it reopens."""
         with self._lock:
-            self._refused.add(agent_task_id)
+            self._refuse_locked(agent_task_id, self._refused.get(agent_task_id))
 
     def release(self, agent_task_id: str, reason: str) -> None:
         """Wake every held waiter of one episode with a terminal denial, and deny the
         waiters it arms until it reopens."""
         with self._lock:
-            self._refused.add(agent_task_id)
-            self._denials[agent_task_id] = reason
+            self._refuse_locked(agent_task_id, reason)
             boxes = [
                 box for key, box in self._waiters.items() if key[0] == agent_task_id
             ]
@@ -124,8 +125,13 @@ class ModelTurnRendezvous:
     def reopen(self, agent_task_id: str) -> None:
         """Let a registered episode arm waiters again."""
         with self._lock:
-            self._refused.discard(agent_task_id)
-            self._denials.pop(agent_task_id, None)
+            self._refused.pop(agent_task_id, None)
+
+    def _refuse_locked(self, agent_task_id: str, reason: str | None) -> None:
+        self._refused.pop(agent_task_id, None)
+        self._refused[agent_task_id] = reason
+        while len(self._refused) > _MAX_REFUSED_EPISODES:
+            del self._refused[next(iter(self._refused))]
 
     def _deliver(self, key: _BoundaryKey, delivery: PermitDelivery) -> bool:
         with self._lock:
