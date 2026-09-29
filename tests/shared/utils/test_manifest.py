@@ -2,15 +2,42 @@
 
 import json
 import stat
+import threading
 from pathlib import Path
+
+import pytest
 
 from shared.utils.manifest import (
     ARTIFACTS_DIR,
     LOGS_DIR,
     MANIFEST_NAME,
+    SCRATCH_DIR,
     prepare_output_dir,
+    scratch_dir,
     sync_manifest,
 )
+
+
+def _race(fn, *, threads: int = 8) -> list[BaseException]:
+    """Run ``fn`` on ``threads`` threads released simultaneously."""
+    barrier = threading.Barrier(threads)
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            fn()
+        except BaseException as exc:
+            with lock:
+                errors.append(exc)
+
+    pool = [threading.Thread(target=worker) for _ in range(threads)]
+    for thread in pool:
+        thread.start()
+    for thread in pool:
+        thread.join()
+    return errors
 
 
 class TestPrepareOutputDir:
@@ -19,6 +46,45 @@ class TestPrepareOutputDir:
         prepare_output_dir(out)
         for d in (out, out / LOGS_DIR, out / ARTIFACTS_DIR):
             assert stat.S_IMODE(d.stat().st_mode) == 0o0777
+
+    def test_is_idempotent(self, tmp_path: Path) -> None:
+        out = tmp_path / "task-out"
+        prepare_output_dir(out)
+        prepare_output_dir(out)
+        for d in (out, out / LOGS_DIR, out / ARTIFACTS_DIR):
+            assert stat.S_IMODE(d.stat().st_mode) == 0o0777
+
+    def test_existing_directory_is_remoded(self, tmp_path: Path) -> None:
+        """A directory another writer created at its own mode ends world-writable,
+        so peer worker UIDs can still write into it."""
+        out = tmp_path / "task-out"
+        out.mkdir(mode=0o0755)
+        prepare_output_dir(out)
+        assert stat.S_IMODE(out.stat().st_mode) == 0o0777
+
+    def test_concurrent_calls_do_not_raise(self, tmp_path: Path) -> None:
+        """Concurrent writers materializing one task directory all succeed."""
+        out = tmp_path / "tsk-concurrent"
+        assert _race(lambda: prepare_output_dir(out)) == []
+        for d in (out, out / LOGS_DIR, out / ARTIFACTS_DIR):
+            assert stat.S_IMODE(d.stat().st_mode) == 0o0777
+
+    def test_rejects_non_directory_at_path(self, tmp_path: Path) -> None:
+        out = tmp_path / "task-out"
+        out.write_text("not a directory")
+        with pytest.raises(FileExistsError):
+            prepare_output_dir(out)
+
+
+class TestScratchDir:
+    def test_creates_world_writable_dir(self, tmp_path: Path) -> None:
+        path = scratch_dir(tmp_path)
+        assert path == tmp_path / SCRATCH_DIR
+        assert stat.S_IMODE(path.stat().st_mode) == 0o0777
+
+    def test_concurrent_calls_do_not_raise(self, tmp_path: Path) -> None:
+        assert _race(lambda: scratch_dir(tmp_path)) == []
+        assert stat.S_IMODE((tmp_path / SCRATCH_DIR).stat().st_mode) == 0o0777
 
 
 class TestSyncManifest:
