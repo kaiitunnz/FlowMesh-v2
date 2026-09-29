@@ -21,6 +21,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, Self
 
 from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
@@ -163,6 +164,10 @@ _DEDUP_CAPABLE = frozenset(
         BoundaryEventKind.EXTERNAL_EFFECT,
     }
 )
+# Boundary kinds an off-lane handler settles while their episode is suspended.
+_MEDIATED_BOUNDARY_KINDS = frozenset(
+    {BoundaryEventKind.INVOCATION, BoundaryEventKind.EXTERNAL_EFFECT}
+)
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
@@ -176,6 +181,19 @@ def dependency_failed(task_id: str) -> str:
 
 
 _OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
+
+
+class _LossResolution(Enum):
+    """How the loss of a work item's worker resolves it."""
+
+    NOTHING = auto()
+    PREPARE_AGAIN = auto()
+    BOUNDARY_FAILS = auto()
+    RUN_AGAIN = auto()
+    FAILS = auto()
+
+
+_RERUN_ON_LOSS = frozenset({_LossResolution.PREPARE_AGAIN, _LossResolution.RUN_AGAIN})
 
 
 class RegionError(ValueError):
@@ -258,7 +276,7 @@ def _ds_drive(
 
     Parents on the episode owning the wrapped call's first positional argument (a task
     id) when one resolves to a work item; falls back to the workflow when it does not
-    — ``on_cancelled`` may be called with a scope id rather than a task id, which
+    — ``cancel_scope`` is called with a scope id rather than a task id, which
     resolves no work item.
     """
 
@@ -903,13 +921,20 @@ class OrchestrationEngine:
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
         wi = self._work_item_for_task(task_id)
-        if (
-            wi is None
-            or wi.status in TERMINAL_WORK_ITEM_STATUSES
-            or wi.invocation_id is None
-        ):
+        resolution = self._resolve_loss(wi)
+        if wi is None or resolution is _LossResolution.NOTHING:
             return Advance()
-        if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
+        if resolution is _LossResolution.PREPARE_AGAIN:
+            # An input preparation commits to no invocation and reserves nothing, so
+            # the task resolves its inputs again on another worker.
+            self._emit(
+                "input_preparation_lost",
+                work_item_id=wi.work_item_id,
+                operator_id=wi.operator_id,
+            )
+            return Advance(retry=[wi.legacy_task_id])
+        assert wi.invocation_id is not None
+        if resolution is _LossResolution.BOUNDARY_FAILS:
             # The worker that captured this boundary's request is lost, and the
             # worker-private request cannot be recovered here (a fresh permit would need
             # a fresh proposal on a new worker). Fail the boundary clean so the workflow
@@ -933,7 +958,7 @@ class OrchestrationEngine:
             attempt.status = AttemptStatus.LOST
             attempt.finished_at = now_iso()
             self._emitter.emit_attempt(attempt)
-        if invocation.replayable:
+        if resolution is _LossResolution.RUN_AGAIN:
             wi.status = WorkItemStatus.READY
             self._emit(
                 "invocation_uncertain_retry",
@@ -1208,6 +1233,47 @@ class OrchestrationEngine:
             or env.denial is not None
         )
 
+    def retries_on_loss(self, task_id: str) -> bool:
+        """Whether the loss of the task's worker runs its work item again, as
+        ``on_uncertain`` resolves it, rather than failing it."""
+        return self._resolve_loss(self._work_item_for_task(task_id)) in _RERUN_ON_LOSS
+
+    def _resolve_loss(self, wi: WorkItem | None) -> _LossResolution:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
+            return _LossResolution.NOTHING
+        if wi.invocation_id is None:
+            if wi.work_item_id in self._input_preparations:
+                return _LossResolution.PREPARE_AGAIN
+            return _LossResolution.NOTHING
+        if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
+            return _LossResolution.BOUNDARY_FAILS
+        if self._invocations[wi.invocation_id].replayable:
+            return _LossResolution.RUN_AGAIN
+        return _LossResolution.FAILS
+
+    def awaits_worker_held_boundary(self, task_id: str) -> bool:
+        """Whether the task is suspended on an unsettled boundary whose raw request
+        only its capturing worker holds."""
+        wi = self._work_item_for_task(task_id)
+        return (
+            wi is not None
+            and wi.status is WorkItemStatus.BLOCKED
+            and self._has_pending_local_boundary(wi)
+        )
+
+    def suspending_worker(self, task_id: str) -> str | None:
+        """The worker whose step suspended the task on a mediated boundary that awaits
+        its outcome, or None when the task is not suspended on one."""
+        wi = self._work_item_for_task(task_id)
+        if (
+            wi is None
+            or wi.status is not WorkItemStatus.BLOCKED
+            or not self._awaits_mediated_outcome(wi)
+            or (attempt := self._latest_attempt(wi)) is None
+        ):
+            return None
+        return attempt.worker_id
+
     def _has_pending_local_boundary(self, wi: WorkItem) -> bool:
         """Whether the work item awaits an unsettled worker-originated boundary.
 
@@ -1312,6 +1378,16 @@ class OrchestrationEngine:
                 attempt.finished_at = now_iso()
                 self._emitter.emit_attempt(attempt)
 
+    def _awaits_mediated_outcome(self, wi: WorkItem) -> bool:
+        """Whether the work item's activation awaits a mediated boundary with no
+        outcome."""
+        return any(
+            act == wi.activation_id
+            and env.kind in _MEDIATED_BOUNDARY_KINDS
+            and not self._boundary_resolved(env)
+            for (act, _), env in self._boundary_events.items()
+        )
+
     def pending_tool_dispatches(self) -> list[ToolInvocationEnvelope]:
         """Mediated boundaries suspended with no durable outcome, for a restart.
 
@@ -1323,10 +1399,7 @@ class OrchestrationEngine:
         """
         pending: list[ToolInvocationEnvelope] = []
         for (activation, corr), env in self._boundary_events.items():
-            if env.kind not in (
-                BoundaryEventKind.INVOCATION,
-                BoundaryEventKind.EXTERNAL_EFFECT,
-            ):
+            if env.kind not in _MEDIATED_BOUNDARY_KINDS:
                 continue
             if self._boundary_resolved(env):
                 continue
@@ -2544,7 +2617,7 @@ class OrchestrationEngine:
 
     def cancel_instance(self) -> Advance:
         """Cancel the whole workflow instance: the root scope and every descendant."""
-        return self.on_cancelled(self._root_scope.scope_id)
+        return self.cancel_scope(self._root_scope.scope_id)
 
     def fail_instance(self, reason: str) -> Advance:
         """Fail the whole workflow instance as a recorded terminal event.
@@ -2572,20 +2645,18 @@ class OrchestrationEngine:
         return advance
 
     @_ds_drive(ControlPlaneWindow.POST_START)
-    def on_cancelled(self, scope_or_task: str) -> Advance:
+    def cancel_scope(self, scope_id: str) -> Advance:
         """Cancel a scope subtree as a durable, recorded-before-terminal event.
 
-        ``scope_or_task`` resolves to a scope by scope id, opener activation, region
-        handle, or a settled task's owning scope. Over that scope and each descendant,
-        in order: record the cancellation; revoke the child-init (and loop-time)
-        capability — a transition distinct from sealing; apply the residual-child policy
-        to materialized children; transition the remaining in-flight work items to
-        ``CANCELLED``; revoke the scope's authority grant — distinct from the child-init
-        revoke; and resolve declared outputs to their cancellation / no-winner outcome.
+        Over the scope and each descendant, in order: record the cancellation; revoke
+        the child-init (and loop-time) capability — a transition distinct from sealing;
+        apply the residual-child policy to materialized children; transition the
+        remaining in-flight work items to ``CANCELLED``; revoke the scope's authority
+        grant — distinct from the child-init revoke; and resolve declared outputs to
+        their cancellation / no-winner outcome.
         """
-        scope_id = self._resolve_scope(scope_or_task)
-        if scope_id is None:
-            raise RegionError(f"{scope_or_task!r} resolves to no cancellable scope")
+        if scope_id not in self._scopes:
+            raise RegionError(f"{scope_id!r} is no cancellable scope")
         advance = Advance()
         for sid in self._scope_subtree(scope_id):
             advance.extend(self._cancel_scope(sid))
@@ -2700,16 +2771,6 @@ class OrchestrationEngine:
         )
         self._emitter.emit_work_item(wi)
         self._emitter.emit_activation(wi.activation_id)
-
-    def _resolve_scope(self, handle: str) -> str | None:
-        if handle in self._scopes:
-            return handle
-        if handle in self._scope_by_activation:
-            return self._scope_by_activation[handle]
-        if (wi_id := self._wi_by_task.get(handle)) is not None:
-            act = self._activations.get(self._work_items[wi_id].activation_id)
-            return act.scope_id if act else None
-        return self._scope_id_for(handle)
 
     def _scope_subtree(self, root: str) -> list[str]:
         order = [root]
@@ -4251,6 +4312,10 @@ class OrchestrationEngine:
             <= {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
         ):
             wi.status = WorkItemStatus.BLOCKED
+            return False
+        if wi.status is WorkItemStatus.BLOCKED and self._awaits_mediated_outcome(wi):
+            # A crash beat the ledger save of the boundary's settle; the boundary is
+            # re-issued, and the episode resumes only with its outcome.
             return False
         if wi.status is WorkItemStatus.DISPATCHED:
             if attempt := self._latest_attempt(wi):

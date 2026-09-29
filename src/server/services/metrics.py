@@ -583,6 +583,8 @@ class MetricsRecorder:
     def _on_worker_heartbeat(self, worker_id: str, event: WorkerEvent) -> None:
         meta = self._worker_meta.setdefault(worker_id, {})
         meta["last_heartbeat_ts"] = event.ts
+        if event.status is not None:
+            meta["status"] = event.status
         metrics = event.metrics or {}
         uptime = _safe_float(metrics.get("uptime_sec"))
         if uptime is not None:

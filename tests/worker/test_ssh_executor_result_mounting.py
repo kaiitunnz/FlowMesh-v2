@@ -2,6 +2,7 @@
 
 import io
 import tarfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock
@@ -303,9 +304,14 @@ class _FakeImages:
             raise NotFound(f"image not known: {name}")
         return object()
 
-    def pull(self, name: str) -> object:
-        self.pulled.append(name)
-        return object()
+
+class _FakeApi:
+    def __init__(self, client: "_FakeClient") -> None:
+        self._client = client
+
+    def pull(self, name: str, **_: object) -> Iterator[dict[str, str]]:
+        self._client.images.pulled.append(name)
+        yield {"status": "Downloaded"}
 
 
 class _FakeClient:
@@ -313,6 +319,7 @@ class _FakeClient:
         self.volumes = _FakeVolumes()
         self.containers = _FakeContainers()
         self.images = _FakeImages()
+        self.api = _FakeApi(self)
 
 
 def _archives(container: MagicMock) -> list[tuple[str, bytes]]:
@@ -486,3 +493,15 @@ def test_an_upstream_with_nothing_bound_still_stages_its_artifacts(
 
     assert includes == [True]
     assert (staging_dir / "task-pre" / "artifacts").is_dir()
+
+
+def test_a_staging_container_carries_the_worker_labels_its_volume_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client = _FakeClient()
+
+    _stage_remote(tmp_path, monkeypatch, fake_client)
+
+    kwargs = fake_client.containers.kwargs
+    assert kwargs is not None
+    assert kwargs["labels"] == fake_client.volumes.labels

@@ -13,6 +13,7 @@ import contextlib
 import logging
 import socket
 import threading
+import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -246,10 +247,7 @@ class ResidentLaneHost:
 
     def _authorize(self, frame: dict[str, Any]) -> None:
         if self._origin is not None:
-            self._origin.authorize(
-                str(frame["call_correlation"]),
-                RouteAuthorization.model_validate(frame["auth"]),
-            )
+            self._origin.authorize(RouteAuthorization.model_validate(frame["auth"]))
 
     def _bind(self, frame: dict[str, Any]) -> None:
         if self._replica is None:
@@ -277,7 +275,7 @@ class ResidentLaneHost:
         # A fenced terminal reaps the origin driver and drops the worker-private request
         # so it does not outlive the invocation.
         if self._origin is not None:
-            self._origin.reap(str(frame["call_correlation"]))
+            self._origin.reap(str(frame["task_id"]), str(frame["call_correlation"]))
         self._delete_request(str(frame["task_id"]), str(frame["call_correlation"]))
 
     def _sidecar_reap(self, frame: dict[str, Any]) -> None:
@@ -304,13 +302,18 @@ class ResidentLaneHost:
         elif self._replica is not None:
             await self._replica.on_frame(relay)
 
-    def stop(self) -> None:
-        """Reap the lanes and stop the loop thread."""
+    def stop(self, timeout: float = 15.0) -> None:
+        """Reap the lanes and stop the loop thread within ``timeout`` seconds."""
+        deadline = time.monotonic() + timeout
+
+        def left() -> float:
+            return max(0.0, deadline - time.monotonic())
+
         if self._replica is not None:
             with contextlib.suppress(Exception):
-                self._call(self._replica.aclose).result(timeout=5)
+                self._call(self._replica.aclose).result(timeout=min(5.0, left()))
         if isinstance(self._engine_open, HttpEngineDelivery):
             with contextlib.suppress(Exception):
-                self._call(self._engine_open.aclose).result(timeout=5)
+                self._call(self._engine_open.aclose).result(timeout=min(5.0, left()))
         self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=5)
+        self._thread.join(timeout=min(5.0, left()))

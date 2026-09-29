@@ -352,6 +352,7 @@ class ResidentCapacityControl:
         input_resolution_resolver: InputResolutionResolver = lambda _task_id: None,
         content_scope_resolver: Callable[[str], str] = lambda _task_id: "",
         content_scope_authority: Callable[[str, str], None] | None = None,
+        boundary_settleable: Callable[[str, str], bool] = lambda _task, _call: True,
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
@@ -372,6 +373,7 @@ class ResidentCapacityControl:
         self._resolve_input_resolution = input_resolution_resolver
         self._resolve_content_scope = content_scope_resolver
         self._content_scope_authority = content_scope_authority
+        self._boundary_settleable = boundary_settleable
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
@@ -385,6 +387,9 @@ class ResidentCapacityControl:
         self._control = control if control is not None else NULL_CONTROL_TRACER
         self._transient_failures: dict[str, int] = {}
         self._attempts: dict[str, _Attempt] = {}
+        # The task and call of each workflow origination, so a terminal that ends one
+        # before any attempt reaps the request its origin worker captured.
+        self._originations: dict[str, tuple[str, str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
@@ -546,7 +551,19 @@ class ResidentCapacityControl:
         nothing to reap.
         """
         attempt = self._attempts.pop(invocation_id, None)
-        if attempt is None or self._delivery is None:
+        origination = self._originations.pop(invocation_id, None)
+        if self._delivery is None:
+            return
+        if attempt is None:
+            if origination is not None and (
+                origin := self._delivery.origin_worker_of_task(origination[0])
+            ):
+                task_id, call_correlation = origination
+                self._delivery.relay(
+                    origin,
+                    "resident_reap",
+                    {"task_id": task_id, "call_correlation": call_correlation},
+                )
             return
         if attempt.serve is not None:
             attempt.serve.close_session(attempt.session_id)
@@ -761,6 +778,16 @@ class ResidentCapacityControl:
         raise/resume, endpoint probe) so the originating agent call always settles or
         holds instead of hanging.
         """
+        self._originations[env.invocation_id] = (env.task_id, env.call_correlation)
+        if not self._boundary_settleable(env.task_id, env.call_correlation):
+            # A terminal already settled this boundary. Its release reaps an attempt
+            # still recorded; with none, nothing will, so reap the origin's request
+            # here.
+            if env.invocation_id in self._attempts:
+                self._originations.pop(env.invocation_id, None)
+            else:
+                self._reap_attempt(env.invocation_id)
+            return
         try:
             await self._originate_inner(env)
         except Exception as exc:
@@ -1149,6 +1176,11 @@ class ResidentCapacityControl:
             serve=serve,
             request_id=orig.request_id,
         )
+        if claim.state is ClaimState.TERMINAL:
+            # A terminal released the credit while this bootstrapped and found no
+            # attempt to reap; reap the one just recorded rather than hand it off.
+            self._reap_attempt(orig.invocation_id)
+            return
         if serve is not None:
             serve.open(session_id, handoff, plan)
             return
@@ -1433,11 +1465,7 @@ class ResidentCapacityControl:
                 invocation_id, serve, ClaimTerminalReason.FAILED, detail, success=False
             )
         else:
-            self._admission.settle_invocation_terminal(
-                invocation_id, ClaimTerminalReason.FAILED
-            )
-            self._transient_failures.pop(invocation_id, None)
-            self._reap_attempt(invocation_id)
+            # The boundary's ledger terminal releases the credit and reaps.
             self._settle(task_id, call_correlation, None, error=detail)
 
     def _release_definite(
@@ -1611,6 +1639,8 @@ class ResidentCapacityControl:
         deadline = loop.time() + self._limits.cold_start_deadline_sec
         while True:
             async with self._admit_lock:
+                if claim.state is ClaimState.TERMINAL:
+                    return None
                 self._promote_ready_replicas(family)
                 self._lifecycle.refresh_family_reports(family)
                 handoff = self._admission.admit(

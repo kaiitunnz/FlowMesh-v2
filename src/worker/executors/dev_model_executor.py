@@ -24,7 +24,7 @@ from shared.tasks.task_type import TaskType
 from shared.utils.parsing import parse_float_env
 from worker.config import WorkerConfig
 
-from .base_executor import Executor, ExecutorTask, TaskCancelledError
+from .base_executor import Executor, ExecutorTask, RunSignals
 from .utils.net import resolve_bind_port
 
 logger = logging.getLogger(__name__)
@@ -354,8 +354,7 @@ class DevModelExecutor(Executor):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._cancel_event = threading.Event()
-        self._stop_event = threading.Event()
+        self._signals = RunSignals()
         self._server: _DevModelHTTPServer | None = None
 
     @classmethod
@@ -363,6 +362,10 @@ class DevModelExecutor(Executor):
         return config.enable_dev_model
 
     def run(self, task: ExecutorTask, out_dir: Path) -> DevModelResult:
+        with self._signals.running(task.task_id):
+            return self._serve(task, out_dir)
+
+    def _serve(self, task: ExecutorTask, out_dir: Path) -> DevModelResult:
         spec = self.require_spec(task, DevModelSpecStrict)
 
         model_id = spec.model_name or "dev-model"
@@ -381,10 +384,9 @@ class DevModelExecutor(Executor):
         forward_url = self._config.dev_model_forward_url
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        if self._stop_event.is_set():
-            raise TaskCancelledError(
-                f"dev_model task {task.task_id} stopped before launch"
-            )
+        if self._signals.raise_if_cancelled():
+            logger.info("dev_model task %s stopped before launch", task.task_id)
+            return DevModelResult(model=model_id, port=port)
 
         client = httpx.Client() if forward_url is not None else None
         try:
@@ -435,8 +437,6 @@ class DevModelExecutor(Executor):
             self._wait_for_serve(ttl_sec)
         finally:
             self._server = None
-            self._cancel_event.clear()
-            self._stop_event.clear()
             server.shutdown()
             server.server_close()
             if client is not None:
@@ -448,20 +448,20 @@ class DevModelExecutor(Executor):
     def _wait_for_serve(self, ttl_sec: float) -> None:
         deadline = time.time() + ttl_sec
         while time.time() < deadline:
-            if self._cancel_event.is_set():
-                raise TaskCancelledError("dev_model task cancelled")
-            if self._stop_event.is_set():
+            if self._signals.raise_if_cancelled():
                 logger.info("dev_model task stop requested; terminating server")
                 return
             time.sleep(_POLL_INTERVAL_SEC)
         logger.info("dev_model task TTL reached; terminating server")
 
     def cancel(self, task_id: str) -> None:
-        self._cancel_event.set()
+        if not self._signals.cancel(task_id):
+            return
         if (server := self._server) is not None:
             server.shutdown()
 
     def stop(self, task_id: str) -> None:
-        self._stop_event.set()
+        if not self._signals.stop(task_id):
+            return
         if (server := self._server) is not None:
             server.shutdown()

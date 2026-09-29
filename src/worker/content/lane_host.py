@@ -233,11 +233,16 @@ class ContentLaneHost:
     ) -> "concurrent.futures.Future[Any]":
         return asyncio.run_coroutine_threadsafe(coro_fn(), self._loop)
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + timeout
+
+        def left() -> float:
+            return max(0.0, deadline - time.monotonic())
+
         if self._sweep is not None:
             self._loop.call_soon_threadsafe(self._sweep.cancel)
         if self._holder is not None:
             with contextlib.suppress(Exception):
-                self._call(self._holder.aclose).result(timeout=5)
+                self._call(self._holder.aclose).result(timeout=min(5.0, left()))
         self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=5)
+        self._thread.join(timeout=min(5.0, left()))

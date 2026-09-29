@@ -83,10 +83,10 @@ class WorkerContentPlane:
         if (held := self._lane.report_held()) > 0:
             self._logger.info("reported %d held content objects at startup", held)
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 10.0) -> None:
         """Drain the cache lane, if this worker runs one."""
         if self._lane is not None:
-            self._lane.stop()
+            self._lane.stop(timeout)
 
     def accept_access(self, access: ContentStoreAccess) -> None:
         """Take the access control granted one of this worker's tasks."""

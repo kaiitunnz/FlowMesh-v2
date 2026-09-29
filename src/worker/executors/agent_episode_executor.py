@@ -8,6 +8,7 @@ the server routes any boundary and re-dispatches with the next capsule and outco
 """
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -37,11 +38,18 @@ from shared.tools.search.schema import (
     tool_request_digest,
 )
 
-from ..egress import PendingEgressRequestStore
+from ..egress import CapturedRequest, PendingEgressRequestStore
+from ..model_turn import ResponsesFacade
 from ..private_state import MaterializedState, PrivateStateHolder
 from ..resident import capture_resident_request
 from ..sandbox import AgentSandboxRuntime, SandboxRuntime, build_sandbox_runtime
-from .base_executor import ExecutionError, Executor, ExecutorTask
+from .base_executor import (
+    ExecutionError,
+    Executor,
+    ExecutorTask,
+    RunSignals,
+    TaskCancelledError,
+)
 from .episode_support import EpisodeStepResult, hydrate_delivered_outcomes
 from .harness import build_adapter
 
@@ -59,8 +67,32 @@ class AgentEpisodeExecutor(Executor):
         self._adapter: HarnessAdapter | None = None
         self._episode_task_id: str | None = None
         self._sandbox_runtime: SandboxRuntime | None = None
+        self._signals = RunSignals()
 
     def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
+        with self._signals.running(task.task_id):
+            try:
+                return self._step(task)
+            except BaseException:
+                facade = self._lifecycle.responses_facade if self._lifecycle else None
+                try:
+                    if not self._signals.cancelled:
+                        # A step that raised may leave its turn running on the harness,
+                        # so it gives the turn up; a cancelled step's give-up is
+                        # already under way.
+                        _give_up(task.task_id, self._adapter, facade)
+                except Exception:
+                    _LOG.exception(
+                        "Failed to give up the turn of task %s", task.task_id
+                    )
+                finally:
+                    # Control never learns of a group a raised step captured, so the
+                    # worker drops the requests it stashed for it.
+                    if facade is not None:
+                        facade.unregister_episode(task.task_id)
+                raise
+
+    def _step(self, task: ExecutorTask) -> EpisodeStepResult:
         dispatch = task.agent_episode
         if dispatch is None:
             raise ExecutionError(
@@ -110,16 +142,33 @@ class AgentEpisodeExecutor(Executor):
                 outcome.kind.value,
                 outcome.call_correlation,
             )
-        result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
-        if self._is_capturable_boundary(result, dispatch.model_binding):
-            if (
-                adapter.egress_handoff_mode()
-                is not EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
-            ):
-                raise ExecutionError(
-                    f"backend {dispatch.backend.backend!r} deferred a mediated egress "
-                    "boundary but is not durable_pre_egress_yield"
-                )
+        try:
+            self._signals.raise_if_cancelled()
+            result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
+        except Exception as exc:
+            # However a cancelled turn unwinds, the step ends as cancelled.
+            if self._signals.cancelled and not isinstance(exc, TaskCancelledError):
+                raise TaskCancelledError(f"Task {task.task_id} cancelled") from exc
+            raise
+        capturable = self._is_capturable_boundary(result, dispatch.model_binding)
+        if (
+            capturable
+            and adapter.egress_handoff_mode()
+            is not EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
+        ):
+            raise ExecutionError(
+                f"backend {dispatch.backend.backend!r} deferred a mediated egress "
+                "boundary but is not durable_pre_egress_yield"
+            )
+        value = result.value if result.kind is HarnessResultKind.COMPLETION else None
+        sealed = None
+        if state is not None and holder is not None:
+            # The step has run to its yield, so the components are quiescent and seal as
+            # one generation the next resume binds.
+            sealed = holder.seal(state, _attachment(dispatch))
+        # Captured last, so nothing after the capture can raise past a request the step
+        # holds for control.
+        if capturable:
             result = self._capture_local_request(
                 self._pending_egress_requests(),
                 task.task_id,
@@ -136,13 +185,7 @@ class AgentEpisodeExecutor(Executor):
                 result.request.kind.value,
                 result.request.interface or "-",
             )
-        value = result.value if result.kind is HarnessResultKind.COMPLETION else None
         group = facade.take_captured_group(task.task_id) if facade is not None else None
-        sealed = None
-        if state is not None and holder is not None:
-            # The step has run to its yield, so the components are quiescent and seal as
-            # one generation the next resume binds.
-            sealed = holder.seal(state, _attachment(dispatch))
         return EpisodeStepResult(
             harness_result=result,
             value=value,
@@ -231,18 +274,20 @@ class AgentEpisodeExecutor(Executor):
                 url=model_binding.url or "",
                 model=model_binding.model or "",
             )
-            store.put(task_id, req.call_correlation, model)
+            captured: CapturedRequest = model
             digest = model_request_digest(model.interface, model.url, model.body)
         else:
             parsed = parse_search_request(req.request_payload)
-            store.put(task_id, req.call_correlation, parsed)
+            captured = parsed
             digest = tool_request_digest(
                 parsed.interface, parsed.query, parsed.max_results
             )
         stripped = req.model_copy(
             update={"request_payload": None, "request_digest": digest}
         )
-        return result.model_copy(update={"request": stripped})
+        stripped_result = result.model_copy(update={"request": stripped})
+        store.put(task_id, req.call_correlation, captured)
+        return stripped_result
 
     @staticmethod
     def _is_resident_boundary(
@@ -270,8 +315,18 @@ class AgentEpisodeExecutor(Executor):
         )
 
     def cancel(self, task_id: str) -> None:
-        if self._adapter is not None:
-            self._adapter.cancel(task_id)
+        if not self._signals.cancel(task_id):
+            return
+        adapter = self._adapter
+        facade = self._lifecycle.responses_facade if self._lifecycle else None
+        # Ending the harness waits for it to exit, and the caller may be the thread that
+        # relays the worker's permits and reaps.
+        threading.Thread(
+            target=_give_up,
+            args=(task_id, adapter, facade),
+            name="agent-episode-give-up",
+            daemon=True,
+        ).start()
 
     def cleanup_after_run(self) -> None:
         facade = self._lifecycle.responses_facade if self._lifecycle else None
@@ -279,6 +334,21 @@ class AgentEpisodeExecutor(Executor):
             facade.unregister_episode(self._episode_task_id)
         self._episode_task_id = None
         self._adapter = None
+
+
+def _give_up(
+    task_id: str, adapter: HarnessAdapter | None, facade: ResponsesFacade | None
+) -> None:
+    if facade is not None:
+        facade.refuse_episode(task_id)
+    try:
+        if adapter is not None:
+            adapter.cancel(task_id)
+    finally:
+        # After the harness has exited, so it cannot end its turn on the released call
+        # or retry it into a fresh held turn.
+        if facade is not None:
+            facade.release_episode(task_id)
 
 
 def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:

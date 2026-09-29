@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import threading
 from collections import Counter
@@ -108,6 +107,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
         self._status: WorkerStatus = WorkerStatus.STOPPED
         self._instance_id: int | None = config.instance_id
         self._created_instance = False
+        self._holds_instance = False
         self._hardware: dict[str, Any] | WorkerHardware | None = None
         self._reserved_offer_id: int | None = None
 
@@ -138,17 +138,6 @@ class VastAIWorkerAdapter(WorkerAdapter):
             hardware=hardware,
         )
 
-    async def start(self) -> bool:
-        self.set_status(WorkerStatus.STARTING)
-        try:
-            ok = await asyncio.to_thread(self._start)
-            if not ok:
-                self.set_status(WorkerStatus.STOPPED)
-            return ok
-        except Exception:
-            self.set_status(WorkerStatus.STOPPED)
-            raise
-
     async def prepare(self) -> None:
         if self._hardware is None:
             instance_id = self._instance_id
@@ -162,20 +151,6 @@ class VastAIWorkerAdapter(WorkerAdapter):
                     )
                 hardware = instance_info
             self._hardware = hardware
-
-    async def stop(self) -> bool:
-        prev_status = self.status
-        if prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED):
-            return True
-        self.set_status(WorkerStatus.STOPPING)
-        try:
-            ok = await asyncio.to_thread(self._stop)
-            if not ok:
-                self.set_status(prev_status)
-            return ok
-        except Exception:
-            self.set_status(prev_status)
-            raise
 
     def _base_environment(self) -> dict[str, str]:
         environment = super()._base_environment()
@@ -210,6 +185,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
                 return False
             self._instance_id = instance_id
             self._created_instance = False
+            self._holds_instance = True
             self._hardware = instance_info
             return True
 
@@ -297,6 +273,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
                 hardware = instance_info
             self._instance_id = new_instance_id
             self._created_instance = True
+            self._holds_instance = True
             self._hardware = hardware
             self._reserved_offer_id = instance_id
             logger.debug(
@@ -306,6 +283,9 @@ class VastAIWorkerAdapter(WorkerAdapter):
             )
             return True
         raise RuntimeError("Failed to launch any VastAI instance.")
+
+    def holds_worker(self) -> bool:
+        return self._holds_instance
 
     def _stop(self) -> bool:
         instance_id = self._instance_id
@@ -335,9 +315,13 @@ class VastAIWorkerAdapter(WorkerAdapter):
             )
             self._release_reserved_offer()
             return False
-        self._stop_event.wait(self._STOP_TIMEOUT)
+        if self.has_event_stream:
+            # The worker unregisters as its instance goes; one with no event stream
+            # has nothing to send.
+            self._stop_event.wait(self._STOP_TIMEOUT)
         self._release_reserved_offer()
         self._instance_id = None
+        self._holds_instance = False
         self._hardware = self.config.hardware_specs
         return True
 

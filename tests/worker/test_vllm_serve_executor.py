@@ -395,23 +395,42 @@ class TestVLLMServeExecutorCancelStop:
         hw = make_worker_hardware()
         return VLLMServeExecutor(cfg, hw)
 
-    def test_cancel_sets_event(self) -> None:
+    def test_cancel_signals_the_running_task(self) -> None:
         ex = self._make_executor()
-        assert not ex._cancel_event.is_set()
-        ex.cancel("tsk-test")
-        assert ex._cancel_event.is_set()
+        with ex._signals.running("tsk-test"):
+            assert not ex._signals.cancelled
+            ex.cancel("tsk-test")
+            assert ex._signals.cancelled
 
-    def test_stop_sets_event(self) -> None:
+    def test_stop_signals_the_running_task(self) -> None:
         ex = self._make_executor()
-        assert not ex._stop_event.is_set()
-        ex.stop("tsk-test")
-        assert ex._stop_event.is_set()
+        with ex._signals.running("tsk-test"):
+            assert not ex._signals.stopped
+            ex.stop("tsk-test")
+            assert ex._signals.stopped
+
+    def test_a_signal_after_its_task_ended_does_not_reach_the_next(self) -> None:
+        ex = self._make_executor()
+        mock_proc = MagicMock()
+        ex._proc = mock_proc
+        with patch.object(ex, "_terminate_process_group") as mock_term:
+            with ex._signals.running("tsk-done"):
+                pass
+            ex.cancel("tsk-done")
+            ex.stop("tsk-done")
+            mock_term.assert_not_called()
+        with ex._signals.running("tsk-next"):
+            assert not ex._signals.cancelled
+            assert not ex._signals.stopped
 
     def test_cancel_terminates_proc(self) -> None:
         ex = self._make_executor()
         mock_proc = MagicMock()
         ex._proc = mock_proc
-        with patch.object(ex, "_terminate_process_group") as mock_term:
+        with (
+            patch.object(ex, "_terminate_process_group") as mock_term,
+            ex._signals.running("tsk-test"),
+        ):
             ex.cancel("tsk-test")
             mock_term.assert_called_once_with(mock_proc)
 
@@ -419,7 +438,10 @@ class TestVLLMServeExecutorCancelStop:
         ex = self._make_executor()
         mock_proc = MagicMock()
         ex._proc = mock_proc
-        with patch.object(ex, "_terminate_process_group") as mock_term:
+        with (
+            patch.object(ex, "_terminate_process_group") as mock_term,
+            ex._signals.running("tsk-test"),
+        ):
             ex.stop("tsk-test")
             mock_term.assert_called_once_with(mock_proc)
 
@@ -438,16 +460,17 @@ class TestWaitForServe:
         ex = self._make_executor()
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
-        ex._cancel_event.set()
-        with pytest.raises(TaskCancelledError):
+        with ex._signals.running("tsk-test"), pytest.raises(TaskCancelledError):
+            ex.cancel("tsk-test")
             ex._wait_for_serve(mock_proc, ttl_sec=60.0)
 
     def test_exits_on_stop(self) -> None:
         ex = self._make_executor()
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
-        ex._stop_event.set()
-        ex._wait_for_serve(mock_proc, ttl_sec=60.0)
+        with ex._signals.running("tsk-test"):
+            ex.stop("tsk-test")
+            ex._wait_for_serve(mock_proc, ttl_sec=60.0)
 
     def test_raises_on_unexpected_proc_exit(self) -> None:
         ex = self._make_executor()
@@ -559,23 +582,23 @@ class TestPollHealth:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         tail = self._empty_tail()
-        ex._cancel_event.set()
 
         with patch("requests.get", side_effect=requests.ConnectionError()):
-            with pytest.raises(TaskCancelledError):
+            with ex._signals.running("tsk-cancel"), pytest.raises(TaskCancelledError):
+                ex.cancel("tsk-cancel")
                 ex._poll_health(
                     mock_proc, 8000, "tsk-cancel", timeout_sec=60.0, tail=tail
                 )
 
-    def test_stop_during_poll_raises(self) -> None:
+    def test_stop_during_poll_returns(self) -> None:
         ex = self._make_executor()
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         tail = self._empty_tail()
-        ex._stop_event.set()
 
         with patch("requests.get", side_effect=requests.ConnectionError()):
-            with pytest.raises(TaskCancelledError):
+            with ex._signals.running("tsk-stop"):
+                ex.stop("tsk-stop")
                 ex._poll_health(
                     mock_proc, 8000, "tsk-stop", timeout_sec=60.0, tail=tail
                 )

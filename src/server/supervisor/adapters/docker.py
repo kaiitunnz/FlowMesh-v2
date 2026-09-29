@@ -4,12 +4,13 @@ import logging
 import os
 import re
 import threading
+import time
 from collections import Counter
 from enum import StrEnum
 from typing import Any
 
 from docker import DockerClient
-from docker.errors import NotFound
+from docker.errors import APIError, NotFound
 from docker.models.containers import Container
 from docker.types import DeviceRequest
 from pydantic import BaseModel, Field
@@ -33,6 +34,8 @@ from .base import (
 from .utils import get_worker_image_name, to_env_str
 
 _STOP_TIMEOUT = 30  # seconds
+_REMOVAL_IN_PROGRESS_TIMEOUT = 60  # seconds
+_REMOVAL_IN_PROGRESS_POLL = 1.0  # seconds
 _PROVIDER_NAME = "docker"
 _SSH_OWNER_LABEL = "flowmesh.ssh.worker_id"
 _SSH_MANAGED_LABEL = "flowmesh.ssh.managed"
@@ -40,6 +43,19 @@ _ssh_network_suffix = sanitize_container_name(env.NODE_ALIAS, maxlen=32)
 _SSH_NETWORK_NAME = f"flowmesh_ssh_{_ssh_network_suffix or 'default'}"
 
 logger = logging.getLogger("supervisor")
+
+
+def _is_removal_in_progress(exc: Exception) -> bool:
+    """Whether Docker refused a remove because one is already under way.
+
+    Matched on ``explanation`` as well as status: 409 also reports conflicts
+    that do not resolve on their own, such as a name already in use.
+    """
+    return (
+        isinstance(exc, APIError)
+        and exc.status_code == 409
+        and "already in progress" in (exc.explanation or "")
+    )
 
 
 class _VolumeInitializer:
@@ -226,6 +242,7 @@ class DockerWorkerAdapter(WorkerAdapter):
         self._docker = docker_client
         self._status: WorkerStatus = WorkerStatus.STOPPED
         self._hardware: dict[str, Any] | WorkerHardware | None = None
+        self._is_started = False
 
     @property
     def status(self) -> WorkerStatus:
@@ -248,38 +265,68 @@ class DockerWorkerAdapter(WorkerAdapter):
             ssh_limits=self.config.ssh.to_limits() if self.config.enable_ssh else None,
         )
 
-    async def start(self) -> bool:
-        self.set_status(WorkerStatus.STARTING)
-        try:
-            ok = await asyncio.to_thread(self._start)
-            if not ok:
-                self.set_status(WorkerStatus.STOPPED)
-            return ok
-        except Exception:
-            self.set_status(WorkerStatus.STOPPED)
-            raise
-
     async def prepare(self) -> None:
         self._hardware = await asyncio.to_thread(self._probe_hardware)
-
-    async def stop(self) -> bool:
-        prev_status = self.status
-        if prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED):
-            return True
-        self.set_status(WorkerStatus.STOPPING)
-        try:
-            ok = await asyncio.to_thread(self._stop)
-            if not ok:
-                self.set_status(prev_status)
-            return ok
-        except Exception:
-            self.set_status(prev_status)
-            raise
 
     def get_image_name(self) -> str:
         return get_worker_image_name(
             self.config.docker_registry, self.config.version, self.gpu_arch
         )
+
+    def _remove_stale_container(self, container: Container) -> bool:
+        try:
+            container.remove(force=True)
+        except NotFound:
+            return True
+        except Exception as exc:
+            if _is_removal_in_progress(exc):
+                logger.info(
+                    "Container %s is already being removed; waiting for it to go",
+                    self.container_name,
+                )
+                return self._wait_container_gone()
+            logger.error(
+                "Failed to remove stale container %s: %s", self.container_name, exc
+            )
+            return False
+        logger.debug("Removed stale container %s", self.container_name)
+        return True
+
+    def _wait_container_gone(self) -> bool:
+        """Block until this adapter's container no longer exists, or time out.
+
+        Only ``NotFound`` confirms removal. An inspect that fails any other way
+        leaves the outcome unknown, so the wait runs on to the deadline.
+        """
+        deadline = time.monotonic() + _REMOVAL_IN_PROGRESS_TIMEOUT
+        inspect_error: Exception | None = None
+        while True:
+            try:
+                self._docker.containers.get(self.container_name)
+                inspect_error = None
+            except NotFound:
+                return True
+            except Exception as exc:
+                inspect_error = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_REMOVAL_IN_PROGRESS_POLL)
+
+        if inspect_error is None:
+            logger.error(
+                "Stale container %s is still present %ss after its removal "
+                "was reported in progress",
+                self.container_name,
+                _REMOVAL_IN_PROGRESS_TIMEOUT,
+            )
+        else:
+            logger.error(
+                "Could not confirm removal of stale container %s within %ss: %s",
+                self.container_name,
+                _REMOVAL_IN_PROGRESS_TIMEOUT,
+                inspect_error,
+            )
+        return False
 
     def _start(self) -> bool:
         existing: Container | None = None
@@ -291,35 +338,16 @@ class DockerWorkerAdapter(WorkerAdapter):
             logger.warning(
                 "Failed to inspect Docker container %s: %s",
                 self.container_name,
-                repr(exc),
+                exc,
             )
             return False
 
         if existing is not None:
-            try:
-                existing.reload()
-            except Exception as exc:
-                logger.warning(
-                    "Failed to reload Docker container %s: %s",
-                    self.container_name,
-                    repr(exc),
-                )
-                return False
-
             if existing.status == "running":
                 self._is_started = True
                 logger.warning("Container %s is already running.", self.container_name)
                 return True
-
-            try:
-                existing.remove(force=True)
-                logger.debug("Removed stale container %s", self.container_name)
-            except Exception as exc:
-                logger.error(
-                    "Failed to remove stale container %s: %s",
-                    self.container_name,
-                    repr(exc),
-                )
+            if not self._remove_stale_container(existing):
                 return False
 
         environment: dict[str, str] = self._base_environment()
@@ -353,7 +381,7 @@ class DockerWorkerAdapter(WorkerAdapter):
             logger.error(
                 "Failed to start Docker container %s: %s",
                 self.container_name,
-                repr(exc),
+                exc,
             )
             return False
 
@@ -419,6 +447,9 @@ class DockerWorkerAdapter(WorkerAdapter):
 
         return self._parse_hardware_output(output, output_prefix)
 
+    def holds_worker(self) -> bool:
+        return self._is_started
+
     def _stop(self) -> bool:
         is_started = self._is_started
         try:
@@ -427,34 +458,49 @@ class DockerWorkerAdapter(WorkerAdapter):
             self._is_started = False
             if is_started:
                 logger.warning("Container %s not found.", self.container_name)
+            self._remove_owned_ssh_resources()
             return True
         except Exception as exc:
-            log_fn = logger.error if is_started else logger.warning
-            log_fn(
-                "Failed to fetch Docker container %s: %s",
-                self.container_name,
-                repr(exc),
-            )
+            self._log_failure(is_started, "fetch", exc)
             return False
 
-        self._stop_owned_ssh_containers()
-        self._remove_owned_ssh_volumes()
-
+        # The worker stops first, so its shutdown gives up the SSH tasks it runs before
+        # their containers go; what it leaves behind is removed after. A worker that
+        # fails to stop keeps them. A container gone mid-stop has stopped.
         try:
             container.stop(timeout=_STOP_TIMEOUT)
-            container.remove()
-            self._is_started = False
-            return True
+        except NotFound:
+            pass
         except Exception as exc:
-            log_fn = logger.error if is_started else logger.warning
-            log_fn(
-                "Failed to stop Docker container %s: %s",
-                self.container_name,
-                repr(exc),
-            )
+            self._log_failure(is_started, "stop", exc)
             return False
+        try:
+            container.remove()
+        except NotFound:
+            pass
+        except Exception as exc:
+            self._log_failure(is_started, "remove", exc)
+            return False
+        finally:
+            self._remove_owned_ssh_resources()
+        self._is_started = False
+        return True
 
-    def _stop_owned_ssh_containers(self) -> None:
+    def _log_failure(self, is_started: bool, action: str, exc: Exception) -> None:
+        log_fn = logger.error if is_started else logger.warning
+        log_fn(
+            "Failed to %s Docker container %s: %s",
+            action,
+            self.container_name,
+            repr(exc),
+        )
+
+    def _remove_owned_ssh_resources(self) -> None:
+        # A volume is in use until the container mounting it is removed.
+        self._remove_owned_ssh_containers()
+        self._remove_owned_ssh_volumes()
+
+    def _remove_owned_ssh_containers(self) -> None:
         try:
             containers = self._docker.containers.list(
                 all=True, filters={"label": f"{_SSH_OWNER_LABEL}={self.container_name}"}
@@ -467,17 +513,9 @@ class DockerWorkerAdapter(WorkerAdapter):
             )
             return
 
+        # The worker is stopped or gone, so its SSH containers are killed outright: a
+        # staging container's shell ignores SIGTERM.
         for ssh_container in containers:
-            try:
-                ssh_container.reload()
-                if ssh_container.status == "running":
-                    ssh_container.stop(timeout=_STOP_TIMEOUT)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to stop SSH session container %s: %s",
-                    ssh_container.name,
-                    repr(exc),
-                )
             try:
                 ssh_container.remove(force=True)
             except Exception as exc:

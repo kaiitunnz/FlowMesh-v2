@@ -27,6 +27,7 @@ from shared.schemas.result import BaseExecutorResult
 from shared.tasks.worker_message import WorkerHardware
 from worker.config import WorkerConfig
 
+from ..utils.process import signal_process_group
 from .base_executor import ExecutionError, Executor, ExecutorTask
 
 logger = logging.getLogger(__name__)
@@ -607,7 +608,7 @@ class MPExecutor(Executor):
         if pid is None:
             return
         try:
-            os.killpg(pid, sig)
+            signal_process_group(pid, sig)
         except (ProcessLookupError, PermissionError):
             pass
 

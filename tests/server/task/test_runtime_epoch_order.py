@@ -59,6 +59,12 @@ class _WorkerRegistryStub:
         self.published_interrupts.append((worker, payload))
         return 0
 
+    def release_worker(self, *args: Any) -> bool:
+        return False
+
+    def reservations(self) -> list[Any]:
+        return []
+
 
 def _runtime(worker_registry: Any = None) -> TaskRuntime:
     return TaskRuntime(

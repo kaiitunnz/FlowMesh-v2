@@ -1,6 +1,10 @@
+import asyncio
+import logging
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import NewType
 
 from pydantic import BaseModel, ConfigDict, SecretStr
@@ -9,6 +13,8 @@ from ... import env
 from ...hooks import PrincipalContext
 from ..schemas import WorkerInfo, WorkerStatus
 from .utils import env_to_secret_str, to_env_str
+
+logger = logging.getLogger("supervisor")
 
 
 class WorkerConfig(BaseModel):
@@ -72,6 +78,21 @@ class WorkerConfig(BaseModel):
 WorkerTokenType = NewType("WorkerTokenType", str)
 
 
+class _OperationKind(Enum):
+    START = auto()
+    STOP = auto()
+
+
+@dataclass(eq=False)
+class _Operation:
+    """One accepted start or stop, and the callers sharing it."""
+
+    kind: _OperationKind
+    future: "asyncio.Future[bool]" = field(init=False)
+    begun: bool = False
+    callers: int = 0
+
+
 class WorkerAdapter(ABC):
     def __init__(
         self,
@@ -85,6 +106,10 @@ class WorkerAdapter(ABC):
         self.name = name
         self.config = config
         self.owner = owner
+        # The last start or stop accepted; each waits for the one accepted before it.
+        self._last: _Operation | None = None
+        self._closed = False
+        self._event_streams = 0
 
     @property
     @abstractmethod
@@ -109,24 +134,147 @@ class WorkerAdapter(ABC):
             raise RuntimeError("Worker ID is not set")
         self._worker_id = None
 
+    @property
+    def has_event_stream(self) -> bool:
+        """Whether an event stream from the worker is open."""
+        return self._event_streams > 0
+
+    def attach_event_stream(self) -> None:
+        self._event_streams += 1
+
+    def detach_event_stream(self) -> None:
+        self._event_streams -= 1
+
     @abstractmethod
     def get_info(self) -> WorkerInfo:
         pass
 
-    @abstractmethod
     async def start(self) -> bool:
-        """Start worker. Returns whether the worker was successfully started."""
-        pass
+        """Start worker. Returns whether the worker was successfully started.
+
+        Starts and stops take effect in the order they are accepted: each runs once
+        the one accepted before it ends, and a start or stop joins the last one
+        accepted when that is of its own kind and still running. ``_start`` runs on a
+        thread, which a cancel cannot stop, so a start its callers all abandon is
+        withdrawn only until it begins; it still ends in its turn. A start after
+        :meth:`close` creates nothing, and a start that finds the adapter holding a
+        worker keeps that worker.
+        """
+        operation = self._accept(_OperationKind.START, self._start_in_turn)
+        operation.callers += 1
+        try:
+            return await asyncio.shield(operation.future)
+        except asyncio.CancelledError:
+            operation.callers -= 1
+            operation.future.add_done_callback(self._on_abandoned_start)
+            raise
+
+    def close(self) -> None:
+        """Refuse every later start, as the adapter is about to be destroyed."""
+        self._closed = True
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     async def prepare(self) -> None:
         """Prepare worker (e.g., collecting hardware information) without starting
         it."""
         pass
 
-    @abstractmethod
     async def stop(self) -> bool:
-        """Stop worker. Returns whether the worker was successfully stopped."""
+        """Stop worker. Returns whether the worker was successfully stopped.
+
+        ``_stop`` runs on a thread in its turn among the starts and stops accepted
+        (see :meth:`start`). A stop that joins another returns its result, so no
+        caller sees the worker stopped before it is; a cancel of a caller never stops
+        the stop.
+        """
+        operation = self._accept(_OperationKind.STOP, self._stop_in_turn)
+        return await asyncio.shield(operation.future)
+
+    def _accept(
+        self,
+        kind: _OperationKind,
+        run: Callable[[_Operation, _Operation | None], Awaitable[bool]],
+    ) -> _Operation:
+        last = self._last
+        if last is not None and last.kind is kind and not last.future.done():
+            return last
+        operation = _Operation(kind)
+        operation.future = asyncio.ensure_future(run(operation, last))
+        self._last = operation
+        return operation
+
+    async def _start_in_turn(
+        self, operation: _Operation, before: _Operation | None
+    ) -> bool:
+        if before is not None:
+            await asyncio.wait({before.future})
+        if self._closed or not operation.callers:
+            return False
+        if self.holds_worker():
+            return True
+        operation.begun = True
+        self.set_status(WorkerStatus.STARTING)
+        try:
+            ok = await asyncio.to_thread(self._start)
+        except Exception:
+            self.set_status(WorkerStatus.STOPPED)
+            raise
+        if not ok:
+            self.set_status(WorkerStatus.STOPPED)
+        return ok
+
+    async def _stop_in_turn(
+        self, operation: _Operation, before: _Operation | None
+    ) -> bool:
+        if before is not None:
+            await asyncio.wait({before.future})
+        operation.begun = True
+        prev_status = self.status
+        # The status reads STOPPED whenever the worker's event stream closes, so a
+        # worker the adapter started is stopped whatever its status reads.
+        if (
+            prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED)
+            and not self.holds_worker()
+        ):
+            return True
+        self.set_status(WorkerStatus.STOPPING)
+        return await self._stop_on_thread(prev_status)
+
+    @abstractmethod
+    def _start(self) -> bool:
+        """Start the worker, blocking; returns whether it started."""
         pass
+
+    @abstractmethod
+    def _stop(self) -> bool:
+        """Stop the worker, blocking; returns whether it stopped."""
+        pass
+
+    @abstractmethod
+    def holds_worker(self) -> bool:
+        """Whether this adapter started a worker it has not stopped."""
+        pass
+
+    def _on_abandoned_start(self, starting: asyncio.Future[bool]) -> None:
+        if not starting.cancelled() and (exc := starting.exception()) is not None:
+            logger.warning(
+                "Worker %s failed to start after its start was cancelled: %r",
+                self.name,
+                exc,
+            )
+
+    async def _stop_on_thread(self, prev_status: WorkerStatus) -> bool:
+        try:
+            ok = await asyncio.to_thread(self._stop)
+        except Exception:
+            self.set_status(prev_status)
+            raise
+        if not ok:
+            self.set_status(prev_status)
+        return ok
 
     def _base_environment(self) -> dict[str, str]:
         config = self.config

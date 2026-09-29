@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -59,12 +59,13 @@ from .base_executor import (
     ExecutionError,
     Executor,
     ExecutorTask,
+    RunSignals,
     TaskCancelledError,
 )
 
 try:
     from docker import DockerClient
-    from docker.errors import NotFound
+    from docker.errors import DockerException, ImageNotFound, NotFound
     from docker.models.containers import Container
     from docker.types import DeviceRequest
 
@@ -73,7 +74,7 @@ except Exception:
     _HAS_DOCKER = False
     if TYPE_CHECKING:
         from docker import DockerClient
-        from docker.errors import NotFound
+        from docker.errors import DockerException, ImageNotFound, NotFound
         from docker.models.containers import Container
         from docker.types import DeviceRequest
     else:
@@ -117,7 +118,40 @@ _SSH_RUN_SCRIPT_SOURCE = (
     Path(__file__).resolve().parent.parent / "docker" / "ssh-run.sh"
 )
 
+# How often a staging wait checks for a cancel or stop.
+_STAGING_WAIT_SEC = 1
+
 type DemuxLogStream = Iterator[tuple[bytes | None, bytes | None]]
+
+
+class _ChunkReader(io.RawIOBase):
+    """A readable stream over an iterator of byte chunks that calls ``check`` on
+    each read."""
+
+    def __init__(self, chunks: Iterable[bytes], check: Callable[[], Any]) -> None:
+        self._chunks = iter(chunks)
+        self._check = check
+        self._pending = memoryview(b"")
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        while not self._pending:
+            try:
+                self._pending = memoryview(next(self._chunks))
+            except StopIteration:
+                return 0
+        # Closing a Docker stream before its first read leaves its connection open.
+        self._check()
+        size = min(len(buffer), len(self._pending))
+        buffer[:size] = self._pending[:size]
+        self._pending = self._pending[size:]
+        return size
+
+
+class _Interrupted(Exception):
+    """A cancel or stop reached an SSH task before its session container started."""
 
 
 @dataclass(slots=True)
@@ -145,6 +179,25 @@ class SSHOutputConfig:
             mount_path=spec.mountPath or _DEFAULT_OUTPUT_PATH,
             max_bytes=spec.maxBytes,
         )
+
+
+def _output_limit(output_cfg: SSHOutputConfig | None) -> int | None:
+    """The byte limit on a session's output, if it declares a valid one."""
+    if output_cfg is None or output_cfg.max_bytes is None:
+        return None
+    if output_cfg.max_bytes < 0:
+        logger.warning(
+            "Invalid maxBytes %d in SSH output config; ignoring limit",
+            output_cfg.max_bytes,
+        )
+        return None
+    return output_cfg.max_bytes
+
+
+def _raise_if_exceeded(size: int, max_bytes: int) -> None:
+    if size > max_bytes:
+        logger.warning("SSH output exceeded maxBytes (%d > %d)", size, max_bytes)
+        raise ExecutionError(f"SSH sshOutput exceeded maxBytes ({size} > {max_bytes})")
 
 
 @dataclass(slots=True)
@@ -418,8 +471,7 @@ class SSHExecutor(Executor):
         self._docker: DockerClient | None = None
         self._docker_gpu_runtime: str | None = config.docker_gpu_runtime
         self._ssh_network: str | None = None
-        self._cancel_event = threading.Event()
-        self._finish_event = threading.Event()
+        self._signals = RunSignals()
         self._current_container: Container | None = None
 
     @classmethod
@@ -474,6 +526,10 @@ class SSHExecutor(Executor):
     # ------------------------------------------------------------------ #
 
     def run(self, task: ExecutorTask, out_dir: Path) -> SSHResult:
+        with self._signals.running(task.task_id):
+            return self._run_session(task, out_dir)
+
+    def _run_session(self, task: ExecutorTask, out_dir: Path) -> SSHResult:
         spec = self.require_spec(task, SSHSpecStrict)
         cfg = SSHConfig.from_spec(spec, self._config, self._hardware)
         access_mode = cfg.access_mode
@@ -486,85 +542,98 @@ class SSHExecutor(Executor):
         client = self._docker
         assert client is not None
 
+        session_id = new_ssh_session_id()
         if interactive:
             ports = {"22/tcp": None}  # assign a random host port
             container_cmd = None
         else:
             ports = {}
             # Resolve the command to pass to the wrapper entrypoint.
-            container_cmd = self._resolve_noninteractive_command(client, cfg)
+            try:
+                container_cmd = self._resolve_noninteractive_command(client, cfg)
+            except _Interrupted:
+                return self._interrupted_before_start(task, session_id)
 
-        session_id = new_ssh_session_id()
         worker_name = self.worker_name
         container_name = f"{worker_name}_ssh-{task.task_id[:8]}-{session_id[:8]}"
 
         prepare_output_dir(out_dir)  # Ensure output dir exists before mounting
+        if self._signals.interrupted:
+            return self._interrupted_before_start(task, session_id)
         resolved_inputs = self._resolve_inputs(task, cfg)
-        mount_plan = self._build_mount_plan(
-            client, out_dir, resolved_inputs, cfg, session_id
-        )
-
-        labels = {
-            _LABEL_WORKER: worker_name,
-            _LABEL_TASK: task.task_id,
-            _LABEL_SESSION: session_id,
-            _LABEL_MANAGED: "true",
-        }
-        environment = self._build_environment(
-            cfg.user,
-            cfg.authorized_keys,
-            cfg.extra_env,
-            mount_plan.staged_input_specs,
-            mount_plan.create_dirs,
-            interactive,
-            cfg.gpu_device_ids,
-        )
-        kwargs = self._build_run_kwargs(
-            cfg,
-            container_name,
-            environment,
-            labels,
-            ports,
-            mount_plan.volumes,
-            container_cmd,
-            interactive,
-        )
-
-        if interactive:
-            container_kind = "SSH session"
-            logger.info(
-                "Starting %s container (task=%s session=%s mode=%s ttl=%ds)",
-                container_kind,
-                task.task_id,
-                session_id,
-                access_mode,
-                cfg.ttl_sec,
+        try:
+            mount_plan = self._build_mount_plan(
+                client, out_dir, resolved_inputs, cfg, session_id
             )
-        else:
-            container_kind = "non-interactive"
-            logger.info(
-                "Starting %s container (task=%s session=%s ttl=%ds cmd=%s)",
-                container_kind,
-                task.task_id,
-                session_id,
-                cfg.ttl_sec,
-                container_cmd,
-            )
+        except _Interrupted:
+            return self._interrupted_before_start(task, session_id)
 
         container: Container | None = None
         log_stream: DemuxLogStream | None = None
         exit_code = 0
+        container_kind = "SSH session" if interactive else "non-interactive"
         try:
+            labels = {
+                _LABEL_WORKER: worker_name,
+                _LABEL_TASK: task.task_id,
+                _LABEL_SESSION: session_id,
+                _LABEL_MANAGED: "true",
+            }
+            environment = self._build_environment(
+                cfg.user,
+                cfg.authorized_keys,
+                cfg.extra_env,
+                mount_plan.staged_input_specs,
+                mount_plan.create_dirs,
+                interactive,
+                cfg.gpu_device_ids,
+            )
+            kwargs = self._build_run_kwargs(
+                cfg,
+                container_name,
+                environment,
+                labels,
+                ports,
+                mount_plan.volumes,
+                container_cmd,
+                interactive,
+            )
+
+            if interactive:
+                logger.info(
+                    "Starting %s container (task=%s session=%s mode=%s ttl=%ds)",
+                    container_kind,
+                    task.task_id,
+                    session_id,
+                    access_mode,
+                    cfg.ttl_sec,
+                )
+            else:
+                logger.info(
+                    "Starting %s container (task=%s session=%s ttl=%ds cmd=%s)",
+                    container_kind,
+                    task.task_id,
+                    session_id,
+                    cfg.ttl_sec,
+                    container_cmd,
+                )
             container, log_stream = self._start_container(client, kwargs, interactive)
-        except ExecutionError:
-            raise
+        except _Interrupted:
+            self._cleanup_mount_plan(client, mount_plan)
+            return self._interrupted_before_start(task, session_id)
         except Exception as exc:
+            self._cleanup_mount_plan(client, mount_plan)
+            if isinstance(exc, ExecutionError):
+                raise
             raise ExecutionError(
                 f"Failed to start {container_kind} container: {exc}"
             ) from exc
 
         assert isinstance(container, Container)
         self._current_container = container
+        if self._signals.interrupted:
+            # The request landed before the container existed, so it stopped nothing.
+            self._interrupt_container(container)
         log_thread: threading.Thread | None = None
         if not interactive:
             log_thread = threading.Thread(
@@ -585,9 +654,18 @@ class SSHExecutor(Executor):
                 cfg.ttl_sec,
                 cfg.idle_sec,
                 cfg.poll_interval_sec,
+                cfg.stop_timeout_sec,
                 cfg.output,
                 mount_plan,
             )
+            self._signals.raise_if_cancelled()
+            # Output written after the last poll is checked once the session ends,
+            # before the container's logs are saved under it.
+            max_bytes = _output_limit(cfg.output)
+            if mount_plan.direct_output_path is not None and max_bytes is not None:
+                _raise_if_exceeded(
+                    self._path_size_bytes(mount_plan.direct_output_path), max_bytes
+                )
             result = SSHResult(session_id=session_id, exit_code=exit_code)
             if interactive:
                 for key, value in session_info.items():
@@ -604,18 +682,24 @@ class SSHExecutor(Executor):
                     container,
                     mount_plan.copy_output_path,
                     out_dir / ARTIFACTS_DIR,
+                    max_bytes,
                 )
             maybe_upload_artifacts(task, out_dir, logger=logger, skip_errors=True)
         finally:
+            if container is not None:
+                # A log stream ends only once its container stops. A cancel or stop
+                # stops it at once, inside the worker's own stop timeout.
+                self._stop_container(
+                    container,
+                    1 if self._signals.interrupted else cfg.stop_timeout_sec,
+                )
             if log_thread is not None:
                 # Wait for the thread to drain remaining output before tearing down
                 # the container.
                 log_thread.join(timeout=30.0)
             self._current_container = None
-            self._cancel_event.clear()
-            self._finish_event.clear()
             if container is not None:
-                self._stop_container(container, container_name, cfg.stop_timeout_sec)
+                self._remove_container(container)
             self._cleanup_mount_plan(client, mount_plan)
 
         if not (interactive or exit_code == 0):
@@ -625,29 +709,31 @@ class SSHExecutor(Executor):
 
         return result
 
+    def _interrupted_before_start(
+        self, task: ExecutorTask, session_id: str
+    ) -> SSHResult:
+        """End a task a cancel or stop reached before its session container started:
+        a cancel raises, and a stop succeeds."""
+        self._signals.raise_if_cancelled()
+        logger.info("SSH task %s stopped before its container started", task.task_id)
+        return SSHResult(session_id=session_id, exit_code=0)
+
     def cancel(self, task_id: str) -> None:
-        self._cancel_event.set()
-        container = self._current_container
-        if container is None:
-            return
-        try:
-            container.stop(timeout=1)
-        except Exception:
-            logger.debug(
-                "Failed to stop SSH container during cancellation", exc_info=True
-            )
+        if self._signals.cancel(task_id):
+            self._interrupt_container(self._current_container)
 
     def stop(self, task_id: str) -> None:
-        self._finish_event.set()
-        container = self._current_container
+        if self._signals.stop(task_id):
+            self._interrupt_container(self._current_container)
+
+    @staticmethod
+    def _interrupt_container(container: Container | None) -> None:
         if container is None:
             return
         try:
             container.stop(timeout=1)
         except Exception:
-            logger.debug(
-                "Failed to stop SSH container during graceful stop", exc_info=True
-            )
+            logger.debug("Failed to stop SSH container", exc_info=True)
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -778,13 +864,21 @@ class SSHExecutor(Executor):
             kwargs["network"] = self._ssh_network
         return kwargs
 
-    def _wait_for_port(self, container: Container, timeout_sec: float = 30.0) -> int:
-        """Wait until Docker assigns a host port and sshd accepts connections."""
+    def _wait_for_port(
+        self, container: Container, timeout_sec: float = 30.0
+    ) -> int | None:
+        """Wait until Docker assigns a host port and sshd accepts connections; returns
+        None for a session stopped first."""
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
+            if self._signals.raise_if_cancelled():
+                return None
             try:
                 container.reload()
                 if container.status not in ("running", "restarting"):
+                    # A stop or cancel stops the container it waits on.
+                    if self._signals.raise_if_cancelled():
+                        return None
                     exit_info = container.wait()
                     exit_code = int(exit_info.get("StatusCode", -1))
                     tail = ""
@@ -808,11 +902,19 @@ class SSHExecutor(Executor):
                     host_port = int(port_bindings[0]["HostPort"])
                     if self._is_ssh_ready("127.0.0.1", host_port):
                         return host_port
-            except ExecutionError:
+            except (ExecutionError, TaskCancelledError):
                 raise
+            except NotFound as exc:
+                if self._signals.raise_if_cancelled():
+                    return None
+                raise ExecutionError(
+                    f"Container {container.name} disappeared before SSH became ready"
+                ) from exc
             except Exception:
                 pass
             time.sleep(1.0)
+        if self._signals.raise_if_cancelled():
+            return None
         raise ExecutionError(
             f"Timed out waiting for SSH readiness on container {container.name}. "
             f"Ensure the image has an SSH server (e.g. openssh-server) installed "
@@ -835,6 +937,8 @@ class SSHExecutor(Executor):
         access_mode = cfg.access_mode
         expires_at = self._iso_offset(cfg.ttl_sec)
         host_port = self._wait_for_port(container)
+        if host_port is None:
+            return {}
         host_name = socket.getfqdn()
         ssh_info: dict[str, Any] = {
             "session_id": session_id,
@@ -880,10 +984,12 @@ class SSHExecutor(Executor):
         ttl_sec: float,
         idle_sec: float,
         poll_interval_sec: float,
+        stop_timeout_sec: float,
         output_cfg: SSHOutputConfig | None,
         mount_plan: SSHMountPlan,
     ) -> int:
-        """Block until the container exits or TTL/idle timeout fires.
+        """Block until the container exits or TTL/idle timeout fires, stopping it at
+        its TTL so nothing it writes lands after its output is collected.
 
         Returns the container exit code.
         """
@@ -891,9 +997,7 @@ class SSHExecutor(Executor):
         # and last activity timestamp
         deadline = time.time() + ttl_sec
         while time.time() < deadline:
-            if self._cancel_event.is_set():
-                raise TaskCancelledError("SSH session cancelled")
-            if self._finish_event.is_set() or self._finish_requested(container):
+            if self._signals.raise_if_cancelled() or self._finish_requested(container):
                 logger.info("SSH session finish requested; stopping container")
                 try:
                     container.stop(timeout=1)
@@ -905,26 +1009,42 @@ class SSHExecutor(Executor):
                 return 0
             try:
                 container.reload()
-                self._enforce_output_limit(container, output_cfg, mount_plan)
-                if container.status not in ("running", "restarting"):
-                    return int(container.wait()["StatusCode"])
-            except Exception as exc:
-                logger.debug("Container reload error (may have exited): %s", exc)
-                if self._finish_event.is_set():
+            except NotFound as exc:
+                # A stop or cancel stops the container it waits on; nothing else
+                # removes it while the session runs.
+                if self._signals.raise_if_cancelled():
                     return 0
-                break
+                raise ExecutionError(
+                    f"SSH container {container.name} disappeared while running"
+                ) from exc
+            except Exception as exc:
+                logger.debug("Container reload error: %s", exc)
+            else:
+                if container.status not in ("running", "restarting"):
+                    if self._signals.raise_if_cancelled():
+                        return 0
+                    return int(container.wait()["StatusCode"])
+                try:
+                    self._enforce_output_limit(container, output_cfg, mount_plan)
+                except (DockerException, OSError) as exc:
+                    # The container can stop, or its output change, under the size
+                    # check; the next poll sees it.
+                    logger.debug("SSH output size check failed: %s", exc)
             time.sleep(poll_interval_sec)
 
         logger.info("SSH session TTL reached; stopping container")
+        self._stop_container(container, stop_timeout_sec)
         return 0
 
-    def _stop_container(
-        self, container: Container, name: str, stop_timeout_sec: float
-    ) -> None:
+    @staticmethod
+    def _stop_container(container: Container, stop_timeout_sec: float) -> None:
         try:
             container.stop(timeout=stop_timeout_sec)
         except Exception as exc:
             logger.debug("Error stopping container: %s", exc)
+
+    @staticmethod
+    def _remove_container(container: Container) -> None:
         try:
             container.remove(force=True)
             logger.info("Removed SSH session container")
@@ -947,8 +1067,11 @@ class SSHExecutor(Executor):
             image_config = image_obj.attrs.get("Config", {})
         except Exception:
             try:
-                image_obj = client.images.pull(cfg.image)
+                self._pull_image(client, cfg.image)
+                image_obj = client.images.get(cfg.image)
                 image_config = image_obj.attrs.get("Config", {})
+            except _Interrupted:
+                raise
             except Exception as exc:
                 raise ExecutionError(
                     f"Cannot determine default entrypoint/command for image "
@@ -1022,70 +1145,78 @@ class SSHExecutor(Executor):
     def _start_container(
         self, client: DockerClient, kwargs: dict[str, Any], interactive: bool
     ) -> tuple[Container, DemuxLogStream | None]:
-        image = kwargs.get("image")
         mode = "interactive" if interactive else "non-interactive"
+        self._ensure_image(client, kwargs["image"])
+        try:
+            container = self._create_container(client, kwargs)
+        except (_Interrupted, ExecutionError):
+            raise
+        except Exception as exc:
+            raise ExecutionError(f"Failed to create {mode} container: {exc}") from exc
+        assert isinstance(container, Container)
         log_stream: DemuxLogStream | None = None
         try:
-            if interactive:
-                container = client.containers.run(**kwargs)
-            else:
-                container, log_stream = self._run_noninteractive_container(
-                    client, kwargs
+            if not interactive:
+                container.put_archive("/", self._build_ssh_run_archive())
+                log_stream = cast(
+                    DemuxLogStream,
+                    container.attach(
+                        stream=True, logs=True, stdout=True, stderr=True, demux=True
+                    ),
                 )
-        except Exception as exc:
-            if isinstance(image, str) and "No such image" in str(exc):
-                try:
-                    logger.info("Pulling missing image %s for %s SSH task", image, mode)
-                    client.images.pull(image)
-                    if interactive:
-                        container = client.containers.run(**kwargs)
-                    else:
-                        container, log_stream = self._run_noninteractive_container(
-                            client, kwargs
-                        )
-                except Exception as pull_exc:
-                    raise ExecutionError(
-                        f"Failed to start {mode} container after pulling image "
-                        f"'{image}': {pull_exc}"
-                    ) from pull_exc
-            else:
-                raise ExecutionError(
-                    f"Failed to start {mode} container: {exc}"
-                ) from exc
-        assert isinstance(container, Container)
-        return container, log_stream
-
-    def _run_noninteractive_container(
-        self, client: DockerClient, kwargs: dict[str, Any]
-    ) -> tuple[Container, DemuxLogStream]:
-        try:
-            container = client.containers.create(**kwargs)
-        except Exception as exc:
-            raise ExecutionError(
-                f"Failed to create non-interactive container: {exc}"
-            ) from exc
-        assert isinstance(container, Container)
-        try:
-            container.put_archive("/", self._build_ssh_run_archive())
-            log_stream = cast(
-                DemuxLogStream,
-                container.attach(
-                    stream=True, logs=True, stdout=True, stderr=True, demux=True
-                ),
-            )
             container.start()
         except Exception as exc:
+            # A created container holds the session's staged volumes until removed.
             try:
                 container.remove(force=True)
             except Exception:
                 logger.debug(
-                    "Failed to remove non-interactive container after startup error",
+                    "Failed to remove %s container after startup error",
+                    mode,
                     exc_info=True,
                 )
             raise ExecutionError(
-                f"Failed to initialize non-interactive container: {exc}"
+                f"Failed to initialize {mode} container: {exc}"
             ) from exc
         return container, log_stream
+
+    def _create_container(
+        self, client: DockerClient, kwargs: dict[str, Any], *, retryable: bool = False
+    ) -> Any:
+        """Create a container, pulling its image if it went missing after
+        ``_ensure_image`` found it."""
+        try:
+            return client.containers.create(**kwargs)
+        except ImageNotFound:
+            self._ensure_image(client, kwargs["image"], retryable=retryable)
+            return client.containers.create(**kwargs)
+
+    def _ensure_image(
+        self, client: DockerClient, image: str, *, retryable: bool = False
+    ) -> None:
+        """Pull an image the daemon lacks; ``retryable`` marks a failed pull that may
+        succeed on another attempt."""
+        try:
+            client.images.get(image)
+        except NotFound:
+            logger.info("Pulling missing image %s", image)
+            self._pull_image(client, image, retryable=retryable)
+
+    def _pull_image(
+        self, client: DockerClient, image: str, *, retryable: bool = False
+    ) -> None:
+        """Pull an image, abandoning the pull once a cancel or stop reaches the task."""
+        progress = client.api.pull(image, stream=True, decode=True)
+        try:
+            for line in progress:
+                if self._signals.interrupted:
+                    raise _Interrupted
+                if error := line.get("error"):
+                    raise ExecutionError(
+                        f"Failed to pull image '{image}': {error}", retryable=retryable
+                    )
+        finally:
+            progress.close()
 
     @staticmethod
     def _iso_offset(seconds: float) -> str:
@@ -1142,6 +1273,16 @@ class SSHExecutor(Executor):
         staged_inputs_dir: Path | None = None
         staged_inputs_volume: str | None = None
 
+        # A bad mount path fails before any input is staged.
+        for resolved in resolved_inputs:
+            self._reserve_mount_path(used_mount_paths, resolved.mount_path)
+        output_mount_path: str | None = None
+        if cfg.output is not None:
+            output_mount_path = self._normalize_mount_path(
+                cfg.output.mount_path, field_name="sshOutput.mountPath"
+            )
+            self._reserve_mount_path(used_mount_paths, output_mount_path)
+
         # Stage inputs in an isolated volume/directory
         if results_source and resolved_inputs:
             staged_inputs_volume = self._stage_inputs_in_volume(
@@ -1155,7 +1296,6 @@ class SSHExecutor(Executor):
 
         # Mount resolved inputs
         for resolved in resolved_inputs:
-            self._reserve_mount_path(used_mount_paths, resolved.mount_path)
             if results_source:
                 # Materialize the requested staged input into the final mount path.
                 staged_input_specs.append(
@@ -1172,12 +1312,8 @@ class SSHExecutor(Executor):
 
         direct_output_path: Path | None = None
         copy_output_path: str | None = None
-        if cfg.output is not None:
+        if output_mount_path is not None:
             # Mount output directory
-            output_mount_path = self._normalize_mount_path(
-                cfg.output.mount_path, field_name="sshOutput.mountPath"
-            )
-            self._reserve_mount_path(used_mount_paths, output_mount_path)
             artifacts_dir = out_dir / ARTIFACTS_DIR
             if results_source:
                 # Copy output back from the container after the session ends.
@@ -1209,6 +1345,16 @@ class SSHExecutor(Executor):
         staging_dir = Path(
             tempfile.mkdtemp(prefix=f"flowmesh-ssh-inputs-{session_id[:8]}-")
         )
+        try:
+            self._fill_staging_dir(staging_dir, resolved_inputs)
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+        return staging_dir
+
+    def _fill_staging_dir(
+        self, staging_dir: Path, resolved_inputs: list[ResolvedSSHInput]
+    ) -> None:
         for resolved in resolved_inputs:
             destination = staging_dir / resolved.task_id
             if resolved.source_path.exists():
@@ -1227,7 +1373,6 @@ class SSHExecutor(Executor):
             if resolved.results is not None:
                 destination.mkdir(parents=True, exist_ok=True)
                 (destination / RESULTS_NAME).write_bytes(resolved.results)
-        return staging_dir
 
     def _stage_inputs_in_volume(
         self,
@@ -1272,6 +1417,13 @@ class SSHExecutor(Executor):
                     f"{results_source}:/src:ro",
                     f"{volume_name}:/dst:rw",
                 ],
+                # A worker killed mid-staging leaves it mounting the input volume;
+                # the labels let the supervisor's cleanup of that worker remove both.
+                "labels": {
+                    _LABEL_WORKER: self.worker_name,
+                    _LABEL_SESSION: session_id,
+                    _LABEL_MANAGED: "true",
+                },
             }
             if self._config.network_mode:
                 create_kwargs["network_mode"] = self._config.network_mode
@@ -1288,27 +1440,24 @@ class SSHExecutor(Executor):
             raise
         return volume_name
 
-    @staticmethod
     def _run_staging_container(
-        client: DockerClient, create_kwargs: dict[str, Any], hydrated: dict[str, bytes]
+        self,
+        client: DockerClient,
+        create_kwargs: dict[str, Any],
+        hydrated: dict[str, bytes],
     ) -> None:
         """Run the staging container with each hydrated result placed in it first.
 
         A staging failure is retryable: it is a download or a copy that may succeed on
-        another attempt.
+        another attempt. A cancel or stop ends it with `_Interrupted`.
         """
-        image = create_kwargs["image"]
-        try:
-            client.images.get(image)
-        except NotFound:
-            client.images.pull(image)
-        container = client.containers.create(**create_kwargs)
+        self._ensure_image(client, create_kwargs["image"], retryable=True)
+        container = self._create_container(client, create_kwargs, retryable=True)
         try:
             if hydrated:
                 container.put_archive("/", _results_archive(hydrated))
             container.start()
-            status = container.wait()
-            if (code := status.get("StatusCode", 1)) != 0:
+            if (code := self._wait_for_staging(container)) != 0:
                 logs = container.logs().decode("utf-8", errors="replace")
                 raise ExecutionError(
                     f"Staging SSH inputs failed with exit code {code}: {logs.strip()}",
@@ -1321,6 +1470,15 @@ class SSHExecutor(Executor):
                 logger.debug(
                     "Failed to remove SSH input staging container", exc_info=True
                 )
+
+    def _wait_for_staging(self, container: Container) -> int:
+        """Wait for the staging container to exit; returns its exit code."""
+        while True:
+            try:
+                return container.wait(timeout=_STAGING_WAIT_SEC).get("StatusCode", 1)
+            except requests.ReadTimeout:
+                if self._signals.interrupted:
+                    raise _Interrupted from None
 
     def _build_remote_stage_command(self, task_id: str, include_results: bool) -> str:
         url = shlex.quote(self._result_bundle_url(task_id, include_results))
@@ -1360,6 +1518,8 @@ class SSHExecutor(Executor):
                 response.raise_for_status()
                 with tmp_path.open("wb") as sink:
                     for chunk in response.iter_content(chunk_size=64 * 1024):
+                        if self._signals.interrupted:
+                            raise _Interrupted
                         if chunk:
                             sink.write(chunk)
             self._extract_result_bundle(tmp_path, destination_dir)
@@ -1421,13 +1581,7 @@ class SSHExecutor(Executor):
         output_cfg: SSHOutputConfig | None,
         mount_plan: SSHMountPlan,
     ) -> None:
-        if output_cfg is None or output_cfg.max_bytes is None:
-            return
-        max_bytes = output_cfg.max_bytes
-        if max_bytes < 0:
-            logger.warning(
-                "Invalid maxBytes %d in SSH output config; ignoring limit", max_bytes
-            )
+        if (max_bytes := _output_limit(output_cfg)) is None:
             return
 
         if mount_plan.direct_output_path is not None:
@@ -1442,16 +1596,11 @@ class SSHExecutor(Executor):
         if current_size <= max_bytes:
             return
 
-        logger.warning(
-            "SSH output exceeded maxBytes (%d > %d)", current_size, max_bytes
-        )
         try:
             container.stop(timeout=1)
         except Exception as exc:
             logger.debug("Failed to stop SSH container after maxBytes breach: %s", exc)
-        raise ExecutionError(
-            f"SSH sshOutput exceeded maxBytes ({current_size} > {max_bytes})"
-        )
+        _raise_if_exceeded(current_size, max_bytes)
 
     @staticmethod
     def _path_size_bytes(path: Path) -> int:
@@ -1480,42 +1629,71 @@ class SSHExecutor(Executor):
             return 0
 
     def _copy_output_directory(
-        self, container: Container, source_path: str, destination: Path
+        self,
+        container: Container,
+        source_path: str,
+        destination: Path,
+        max_bytes: int | None = None,
     ) -> None:
+        """Copy a session's output out of its container, failing once the files it
+        holds pass ``max_bytes``, before any more of them is read."""
         self.ensure_dir(destination)
+        self._signals.raise_if_cancelled()
         try:
             stream, _ = container.get_archive(source_path)
+        except NotFound:
+            # A stop that lands before the session creates its output directory
+            # leaves no output, and a stop is a success.
+            if self._signals.raise_if_cancelled():
+                return
+            raise ExecutionError(
+                f"Failed to collect SSH output from {source_path}: not found"
+            ) from None
         except Exception as exc:
             raise ExecutionError(
                 f"Failed to collect SSH output from {source_path}: {exc}"
             ) from exc
 
-        with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-            for chunk in stream:
-                tmp.write(chunk)
-
-        source_name = PurePosixPath(source_path).name
+        # Docker holds the container's lock until its archive is fully read or its
+        # connection closes, so an unclosed one blocks the container's stop and
+        # removal.
         try:
-            with tarfile.open(tmp_path) as archive:
-                for member in archive.getmembers():
-                    relative = self._relative_archive_path(member.name, source_name)
-                    if relative is None:
-                        continue
-                    target = destination / relative
-                    if member.isdir():
-                        target.mkdir(parents=True, exist_ok=True)
-                        continue
-                    if not member.isfile():
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    extracted = archive.extractfile(member)
-                    if extracted is None:
-                        continue
-                    with target.open("wb") as fh:
-                        shutil.copyfileobj(extracted, fh)
+            self._extract_output(stream, source_path, destination, max_bytes)
         finally:
-            tmp_path.unlink(missing_ok=True)
+            stream.close()
+
+    def _extract_output(
+        self,
+        stream: Iterable[bytes],
+        source_path: str,
+        destination: Path,
+        max_bytes: int | None,
+    ) -> None:
+        source_name = PurePosixPath(source_path).name
+        total = 0
+        # A stop collects the output; a cancel discards it.
+        reader = _ChunkReader(stream, self._signals.raise_if_cancelled)
+        with tarfile.open(fileobj=reader, mode="r|") as archive:
+            for member in archive:
+                self._signals.raise_if_cancelled()
+                relative = self._relative_archive_path(member.name, source_name)
+                if relative is None:
+                    continue
+                target = destination / relative
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    continue
+                total += member.size
+                if max_bytes is not None:
+                    _raise_if_exceeded(total, max_bytes)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    continue
+                with target.open("wb") as fh:
+                    shutil.copyfileobj(extracted, fh)
 
     @staticmethod
     def _relative_archive_path(member_name: str, source_name: str) -> Path | None:

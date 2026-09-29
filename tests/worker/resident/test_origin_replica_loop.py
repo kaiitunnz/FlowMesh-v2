@@ -138,7 +138,7 @@ class _Harness:
         self.acks.append(ack)
         if ack.outcome is ResidentBootstrapOutcome.ACKED:
             # Control accepts the claim and issues the post-acceptance authorization.
-            self.origin.authorize(ack.call_correlation, _auth())
+            self.origin.authorize(_auth())
 
     def _on_outcome(self, outcome: ResidentOpOutcome) -> None:
         self.outcomes.append(outcome)
@@ -260,7 +260,7 @@ class _DialedHarness:
 
     def _on_ack(self, ack: ResidentBootstrapAck) -> None:
         if ack.outcome is ResidentBootstrapOutcome.ACKED:
-            self.origin.authorize(ack.call_correlation, _auth())
+            self.origin.authorize(_auth())
 
     def _on_outcome(self, outcome: ResidentOpOutcome) -> None:
         self.outcomes.append(outcome)

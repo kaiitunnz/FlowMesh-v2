@@ -409,7 +409,13 @@ if IS_ROOT_NODE:
         check_interval=config.watchdog.check_interval,
         grace_seconds=config.watchdog.grace_sec,
         rehydration_grace_seconds=config.watchdog.rehydration_grace_sec,
+        reap_enabled=config.watchdog.reap_enabled,
+        reap_grace_seconds=config.watchdog.reap_grace_sec,
     )
+    if config.watchdog.reap_enabled and not config.watchdog.enabled:
+        logger.warning(
+            "ENABLE_WORKER_REAPER has no effect while ENABLE_WORKER_WATCHDOG is false"
+        )
 
     CONTENT_AUTHORITY: ContentHydrationAuthority | None = None
     if config.content_store.hydration_enabled and WORKER_REGISTRY is not None:
@@ -454,6 +460,7 @@ if IS_ROOT_NODE:
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
     RUNTIME.set_completion_notifier(EVENT_MONITOR.finalizer.request)
     WATCHDOG.set_failure_fallback(EVENT_MONITOR.handle_task_event)
+    WATCHDOG.set_loss_handler(EVENT_MONITOR.record_worker_losses)
     TASK_EVENTS = TaskEventPublisher(REDIS_CLIENT.sync, logger)
     TASK_EVENTS.set_fallback(EVENT_MONITOR.handle_task_event)
     RUNTIME.set_failure_reporter(TASK_EVENTS.publish)

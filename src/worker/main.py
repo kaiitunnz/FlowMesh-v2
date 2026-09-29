@@ -30,7 +30,7 @@ from .content import (
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
 from .executors.mp_executor import MPExecutor
-from .gpu_sampler import build_gpu_sampler
+from .gpu_sampler import GpuSampler, build_gpu_sampler
 from .hw import collect_hw
 from .lifecycle import Lifecycle
 from .power import PowerMonitor
@@ -305,6 +305,19 @@ def _build_content_plane(
     )
 
 
+def run_until_exit(
+    runner: Runner, lifecycle: Lifecycle, gpu_sampler: GpuSampler
+) -> None:
+    """Run the task loop, then unregister; only a requested shutdown is graceful."""
+    try:
+        runner.start()
+    finally:
+        gpu_sampler.shutdown()
+        lifecycle.shutdown(
+            graceful=runner.shutdown_requested, deadline=runner.stop_deadline
+        )
+
+
 def main() -> None:
     args = _parse_args()
     if args.collect_hw:
@@ -423,8 +436,9 @@ def main() -> None:
     )
 
     # Install signal handlers to allow graceful shutdown
-    def handle_exit_signal(signum: int, _) -> None:
-        logger.info("Received exit signal %d; initiating shutdown", signum)
+    def handle_exit_signal(_signum: int, _) -> None:
+        # No logging here: a handler that takes a lock the interrupted frame holds
+        # never returns.
         runner.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT):
@@ -434,11 +448,7 @@ def main() -> None:
             # Signal not supported on this platform
             logger.debug("Signal %s not supported; skipping handler installation", sig)
 
-    try:
-        runner.start()
-    finally:
-        gpu_sampler.shutdown()
-        lifecycle.shutdown()
+    run_until_exit(runner, lifecycle, gpu_sampler)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from typing import Any
+from weakref import WeakSet
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,6 +16,12 @@ from .registry import WorkerRegistry
 from .schemas import WorkerInfo, WorkerStatus
 
 _MAX_PARALLELISM: int = 16
+
+
+def _is_live(worker: WorkerAdapter) -> bool:
+    # The status reads STOPPED whenever the worker's event stream closes, while what the
+    # adapter started may still run.
+    return worker.status is not WorkerStatus.STOPPED or worker.holds_worker()
 
 
 class WorkerInitConfig(BaseModel):
@@ -68,10 +75,22 @@ class WorkerManager:
         self._default_worker_config: dict[str, Any] | None = None
         self._is_started: bool = False
         self._capacity_change_callback = capacity_change_callback
-        specs = [
-            docker_provider_spec(system_principal),
-            vastai_provider_spec(system_principal),
-        ]
+        # Workers already destroyed: a create's unwind and a shutdown can both reach
+        # one, and a second destroy would free its GPUs twice.
+        self._destroyed: WeakSet[WorkerAdapter] = WeakSet()
+        specs: list[ProviderSpec] = []
+        for label, build_spec in (
+            ("Docker", docker_provider_spec),
+            ("Vast.ai", vastai_provider_spec),
+        ):
+            try:
+                specs.append(build_spec(system_principal))
+            except Exception as exc:
+                logger.warning(
+                    "%s worker provider unavailable, continuing without it: %s",
+                    label,
+                    exc,
+                )
         self._providers: dict[str, ProviderSpec] = {spec.name: spec for spec in specs}
 
     @property
@@ -184,9 +203,17 @@ class WorkerManager:
 
         worker = self._create_worker(init_config)
         if init_config.init_on_start:
-            started = await self._start_worker(worker)
-            if not started:
-                raise RuntimeError(f"Failed to start worker '{worker.name}'")
+            # A create that fails or is cancelled (its command timing out) stops and
+            # destroys its worker. The unwind outlives a second cancel, and the worker
+            # keeps its name until the unwind ends.
+            try:
+                if not await self._start_worker(worker):
+                    raise RuntimeError(f"Failed to start worker '{worker.name}'")
+            except BaseException:
+                unwind = asyncio.ensure_future(self._stop_and_destroy_worker(worker))
+                unwind.add_done_callback(lambda _: self._registry.try_pop(worker.token))
+                await asyncio.shield(unwind)
+                raise
         self._report_capacity_change()
         return worker.get_info()
 
@@ -216,9 +243,6 @@ class WorkerManager:
         worker = self._registry.try_get_by_name(name)
         if worker is None:
             raise ValueError(f"Worker '{name}' does not exist")
-        if worker.status not in (WorkerStatus.STARTING, WorkerStatus.RUNNING):
-            raise ValueError(f"Worker '{name}' is not starting or running")
-
         return await self._stop_worker(worker)
 
     async def destroy_worker(self, name: str) -> bool:
@@ -228,10 +252,14 @@ class WorkerManager:
         if worker is None:
             return False
 
-        success = await self._stop_and_destroy_worker(worker)
+        # An accepted destroy completes even if its command is cancelled.
+        destroying = asyncio.ensure_future(self._stop_and_destroy_worker(worker))
+        destroying.add_done_callback(lambda _: self._forget_worker(name))
+        return await asyncio.shield(destroying)
+
+    def _forget_worker(self, name: str) -> None:
         self._registry.try_pop_by_name(name)
         self._report_capacity_change()
-        return success
 
     async def destroy_workers(self, names: set[str] | None = None) -> None:
         if not self.is_started:
@@ -248,13 +276,17 @@ class WorkerManager:
                 raise ValueError(f"Workers not found: {', '.join(missing)}")
             workers = [self._registry.get_by_name(name) for name in names]
 
-        await self._stop_and_destroy_workers(workers)
-        if names is None:
-            self._registry.clear()
-        else:
-            for name in names:
-                self._registry.try_pop_by_name(name)
-        self._report_capacity_change()
+        def forget(_: asyncio.Future[None]) -> None:
+            if names is None:
+                self._registry.clear()
+            else:
+                for name in names:
+                    self._registry.try_pop_by_name(name)
+            self._report_capacity_change()
+
+        destroying = asyncio.ensure_future(self._stop_and_destroy_workers(workers))
+        destroying.add_done_callback(forget)
+        await asyncio.shield(destroying)
 
     def _create_worker(self, init_config: WorkerInitConfig) -> WorkerAdapter:
         if not self.is_started:
@@ -280,17 +312,21 @@ class WorkerManager:
     async def _start_worker(self, worker: WorkerAdapter) -> bool:
         if not self.is_started:
             raise RuntimeError("WorkerManager not started")
-        if worker.status is not WorkerStatus.STOPPED:
-            raise ValueError(f"Worker '{worker.name}' is already started")
+        if worker.closed:
+            raise ValueError(f"Worker '{worker.name}' is being destroyed")
+        if _is_live(worker):
+            raise ValueError(f"Worker '{worker.name}' is starting, running or stopping")
 
         started = await worker.start()
         if not started:
-            await self._stop_and_destroy_worker(worker)
-            self._registry.try_pop(worker.token)
+            self.logger.error("Worker %s failed to start", worker.name)
             return False
         return True
 
     def _destroy_worker(self, worker: WorkerAdapter) -> None:
+        if worker in self._destroyed:
+            return
+        self._destroyed.add(worker)
         for spec in self._providers.values():
             if isinstance(worker, spec.adapter_cls):
                 spec.factory.destroy_worker(worker)
@@ -321,19 +357,21 @@ class WorkerManager:
 
     async def _stop_and_destroy_worker(self, worker: WorkerAdapter) -> bool:
         worker_name = worker.name
-        success = True
-
-        if worker.status in (WorkerStatus.STARTING, WorkerStatus.RUNNING):
+        was_running = _is_live(worker)
+        if was_running:
             self.logger.info("Stopping worker %s...", worker_name)
-            try:
-                success = await worker.stop()
-            except Exception as exc:
-                self.logger.error(
-                    "Failed to stop worker %s: %s", worker_name, repr(exc)
-                )
-                success = False
         else:
             self.logger.info("Destroying worker %s that is not running.", worker_name)
+        # Closed first, so a start queued behind the stop creates nothing the destroy
+        # would not remove.
+        worker.close()
+        # A worker mid-stop runs until that stop ends, whatever its status reads, so
+        # a destroy joins the stop.
+        try:
+            success = await worker.stop()
+        except Exception as exc:
+            self.logger.error("Failed to stop worker %s: %s", worker_name, repr(exc))
+            success = False
 
         try:
             self._destroy_worker(worker)
@@ -342,21 +380,23 @@ class WorkerManager:
             success = False
 
         if success:
-            self.logger.info("Worker %s stopped.", worker_name)
+            outcome = "stopped" if was_running else "destroyed"
+            self.logger.info("Worker %s %s.", worker_name, outcome)
 
         return success
 
     async def _stop_worker(self, worker: WorkerAdapter) -> bool:
         worker_name = worker.name
-        if worker.status not in (WorkerStatus.STARTING, WorkerStatus.RUNNING):
+        if not _is_live(worker):
             raise ValueError(f"Worker '{worker_name}' is not starting or running")
 
         self.logger.info("Stopping worker %s...", worker_name)
         try:
             success = await worker.stop()
             if success:
-                if self._registry.get_worker_id(worker.token) is None:
-                    # Ensure unregistered workers are restartable after stopped.
+                if not worker.has_event_stream:
+                    # A worker with no event stream open sends nothing that would mark
+                    # it stopped, so it is marked here and can be started again.
                     worker.set_status(WorkerStatus.STOPPED)
                 self.logger.info("Worker %s stopped.", worker_name)
             else:

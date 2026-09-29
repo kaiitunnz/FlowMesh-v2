@@ -1,6 +1,8 @@
 """The worker-local Responses facade's held-turn handling and capture."""
 
 import json
+import threading
+import time
 from typing import Any, cast
 
 import httpx
@@ -29,9 +31,23 @@ class _StubEgress:
         self._result = result
         self.seen: list[tuple[str, str, Any]] = []
 
-    def run(self, task_id: str, correlation: str, request: Any) -> Any:
+    def run(self, task_id: str, correlation: str, request: Any, episode: str) -> Any:
         self.seen.append((task_id, correlation, request))
         return self._result
+
+    timeout_sec = 5.0
+
+    def reopen(self, task_id: str, episode: str) -> None:
+        pass
+
+    def close(self, task_id: str, episode: str) -> None:
+        pass
+
+    def refuse(self, task_id: str) -> None:
+        pass
+
+    def release(self, task_id: str) -> None:
+        pass
 
 
 def _facade(
@@ -149,3 +165,79 @@ def test_a_native_tool_call_passes_through_uncaptured() -> None:
         facade.take_captured_group(_TASK) is None
     )  # a non-facade call is not captured
     assert [item["type"] for item in output] == ["function_call"]
+
+
+def _answered_after_the_release(
+    facade: ResponsesFacade, turn: Any, released_after: float = 0.1
+) -> list[str]:
+    order: list[str] = []
+
+    def run_turn() -> None:
+        try:
+            turn()
+        except FacadeTurnError:
+            order.append("turn answered")
+
+    thread = threading.Thread(target=run_turn, daemon=True)
+    thread.start()
+    time.sleep(released_after)
+    order.append("harness exited")
+    facade.release_episode(_TASK)
+    thread.join(5)
+    return order
+
+
+def test_a_turn_of_an_episode_being_given_up_waits_for_its_release() -> None:
+    facade, egress, _ = _facade(ModelCompletion(content="just thinking"))
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    facade.refuse_episode(_TASK)
+
+    order = _answered_after_the_release(
+        facade, lambda: facade.handle_turn(_TASK, token, {"input": "hello"})
+    )
+
+    assert order == ["harness exited", "turn answered"]
+    assert egress.seen == []
+
+
+def test_a_capture_while_the_episode_is_given_up_waits_and_stashes_nothing() -> None:
+    returning = threading.Event()
+    proceed = threading.Event()
+
+    class _InFlight(_StubEgress):
+        def run(
+            self, task_id: str, correlation: str, request: Any, episode: str
+        ) -> Any:
+            returning.set()
+            assert proceed.wait(5)
+            return super().run(task_id, correlation, request, episode)
+
+    pending = PendingEgressRequestStore()
+    egress = _InFlight(
+        ModelCompletion(
+            content="searching",
+            tool_calls=(
+                ModelToolCall(
+                    call_id="c1", name="web_search", arguments='{"query": "q"}'
+                ),
+            ),
+        )
+    )
+    facade = ResponsesFacade(held_egress=cast(Any, egress), pending=pending)
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+
+    def given_up_mid_call() -> None:
+        assert returning.wait(5)
+        facade.refuse_episode(_TASK)
+        proceed.set()
+
+    threading.Thread(target=given_up_mid_call, daemon=True).start()
+    order = _answered_after_the_release(
+        facade,
+        lambda: facade.handle_turn(_TASK, token, {"input": "find it"}),
+        released_after=0.3,
+    )
+
+    assert order == ["harness exited", "turn answered"]
+    assert pending.occurrences() == []
+    assert facade.take_captured_group(_TASK) is None

@@ -8,6 +8,7 @@ ledger and re-readies or suspends the lane.
 """
 
 import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -23,6 +24,7 @@ from server.orchestration.tool_dispatch import (
 )
 from server.registries.worker import Worker
 from server.task.models import EventEffect, TaskStatus
+from server.task.runtime import TaskRuntime
 from shared.harness import (
     BoundaryEventKind,
     HarnessAdapter,
@@ -33,8 +35,9 @@ from shared.harness import (
     OutcomeKind,
 )
 from shared.private_state import OwnerFence
+from shared.schemas.event import WorkerEvent
 from tests.server.dispatch_helpers import record_dispatch
-from tests.server.task.test_task_merge import _Registry
+from tests.server.task.test_task_merge import _monitor, _Registry
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -914,5 +917,168 @@ def test_a_first_report_handled_again_after_its_record_failed_opens_the_attempt(
         assert outcome.effect is EventEffect.APPLIED
         assert runtime._tasks[writer].status == TaskStatus.DONE
         assert runtime.workflow_settlement(workflow_id).settled
+
+    asyncio.run(run())
+
+
+def test_an_agent_suspended_on_a_boundary_resumes_after_a_restart() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, writer, _, env = await _held_boundary(runtime)
+
+        restored = _runtime(registry)
+        redriven: list[ToolInvocationEnvelope] = []
+        restored.set_model_settler(redriven.append)
+        await restored.rehydrate()
+
+        engine = restored.orchestration_engine(workflow_id)
+        assert engine is not None
+        work_item = engine.work_item(writer)
+        assert work_item is not None
+        assert work_item.status is WorkItemStatus.BLOCKED
+        assert len(work_item.attempt_ids) == 1
+        assert [e.call_correlation for e in redriven] == [env.call_correlation]
+        # A suspended dispatch has started, so it never reads as disowned.
+        suspended = restored.get_record(writer)
+        assert suspended is not None and suspended.assigned_worker is not None
+        suspended.dispatch_id = "dsp-1"
+        assert (
+            restored.resolve_disowned_dispatch(
+                writer, "dsp-1", suspended.assigned_worker, 0
+            )
+            is None
+        )
+        assert restored.settle_episode_invocation(
+            writer, env.call_correlation, "model:draft"
+        )
+        record = restored.get_record(writer)
+        assert record is not None and record.status is TaskStatus.PENDING
+
+    asyncio.run(run())
+
+
+class _Crash(Exception):
+    pass
+
+
+def test_a_boundary_whose_settle_a_crash_cut_short_is_issued_again() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, writer, _, env = await _held_boundary(runtime)
+        save = registry.save_ledger_snapshot
+
+        def crash(*_: Any, **__: Any) -> None:
+            raise _Crash()
+
+        registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+        with pytest.raises(_Crash):
+            runtime.settle_episode_invocation(
+                writer, env.call_correlation, "model:draft"
+            )
+        registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+
+        restored = _runtime(registry)
+        redriven: list[ToolInvocationEnvelope] = []
+        restored.set_model_settler(redriven.append)
+        await restored.rehydrate()
+
+        engine = restored.orchestration_engine(workflow_id)
+        assert engine is not None
+        work_item = engine.work_item(writer)
+        assert work_item is not None and work_item.status is WorkItemStatus.BLOCKED
+        record = restored.get_record(writer)
+        assert record is not None and record.status is TaskStatus.DISPATCHED
+        assert record.assigned_worker == "wkr-1"
+        assert [e.call_correlation for e in redriven] == [env.call_correlation]
+        assert restored.settle_episode_invocation(
+            writer, env.call_correlation, "model:draft"
+        )
+        assert restored.next_ready(threading.Event(), timeout=0.01) == writer
+        dispatch = restored.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        assert [o.value for o in dispatch.delivered_outcomes] == ["model:draft"]
+
+    asyncio.run(run())
+
+
+def _leave(runtime: TaskRuntime, how: str) -> None:
+    if how == "expired":
+        runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
+    else:
+        _monitor(runtime)._handle_worker_event(
+            WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=how == "drained")
+        )
+
+
+@pytest.mark.parametrize("how", ["expired", "drained", "unregistered"])
+def test_an_agent_suspended_on_a_boundary_outlives_its_worker(how: str) -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        _, writer, engine, env = await _held_boundary(runtime)
+
+        _leave(runtime, how)
+
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.DISPATCHED
+        assert engine.work_item(writer).status is WorkItemStatus.BLOCKED
+        assert runtime.settle_episode_invocation(
+            writer, env.call_correlation, "model:draft"
+        )
+        assert runtime.next_ready(threading.Event(), timeout=0.01) == writer
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        assert [o.value for o in dispatch.delivered_outcomes] == ["model:draft"]
+        _step(
+            runtime, ScriptedHarnessAdapter(_MODEL_HELD_SCRIPT, "v1"), writer, "wkr-2"
+        )
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.DONE
+
+    asyncio.run(run())
+
+
+def test_a_give_up_of_a_dispatch_that_ended_at_a_suspension_is_stale() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        _, writer, engine, env = await _held_boundary(runtime)
+
+        outcome = runtime.mark_cancelled(writer, "wkr-1", {}, _TS)
+
+        assert outcome.effect is EventEffect.STALE
+        assert engine.work_item(writer).status is WorkItemStatus.BLOCKED
+        assert runtime.settle_episode_invocation(
+            writer, env.call_correlation, "model:draft"
+        )
+
+    asyncio.run(run())
+
+
+def test_a_cancel_a_crash_cut_short_settles_a_suspended_agent_at_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, writer, _, _ = await _held_boundary(runtime)
+
+        def crash(self: TaskRuntime, engine: Any) -> None:
+            raise _Crash()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(TaskRuntime, "_settle_suspended_cancels_locked", crash)
+            with pytest.raises(_Crash):
+                runtime.cancel_workflow(workflow_id)
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.CANCELLING
+
+        restored = _runtime(registry)
+        restored.set_model_settler(lambda _envelope: None)
+        await restored.rehydrate()
+
+        record = restored.get_record(writer)
+        assert record is not None and record.status is TaskStatus.CANCELLED
+        assert restored.workflow_settlement(workflow_id).settled
 
     asyncio.run(run())

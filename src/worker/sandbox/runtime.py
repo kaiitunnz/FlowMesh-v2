@@ -40,6 +40,8 @@ from shared.sandbox import (
     SandboxUnavailable,
 )
 
+from ..utils.process import signal_process_group
+
 _LOG = logging.getLogger("sandbox-runtime")
 # A drain that outlives its reaped process group is a lost thread, not a lost result.
 _DRAIN_JOIN_SEC = 5.0
@@ -251,7 +253,7 @@ class _Streams:
 def _reap(proc: subprocess.Popen[str]) -> None:
     """Kill the command's whole process group, including anything it left running."""
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        signal_process_group(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
 

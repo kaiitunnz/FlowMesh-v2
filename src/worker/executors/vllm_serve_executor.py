@@ -25,7 +25,8 @@ from shared.tasks.task_type import TaskType
 from shared.utils.parsing import parse_float_env
 from worker.config import WorkerConfig
 
-from .base_executor import ExecutionError, Executor, ExecutorTask, TaskCancelledError
+from ..utils.process import signal_process_group
+from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 from .utils.net import resolve_bind_port
 
 logger = logging.getLogger(__name__)
@@ -70,8 +71,7 @@ class VLLMServeExecutor(Executor):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._cancel_event = threading.Event()
-        self._stop_event = threading.Event()
+        self._signals = RunSignals()
         self._proc: subprocess.Popen[str] | None = None
 
     @classmethod
@@ -84,6 +84,10 @@ class VLLMServeExecutor(Executor):
             return False
 
     def run(self, task: ExecutorTask, out_dir: Path) -> ServeResult:
+        with self._signals.running(task.task_id):
+            return self._serve(task, out_dir)
+
+    def _serve(self, task: ExecutorTask, out_dir: Path) -> ServeResult:
         spec = self.require_spec(task, ServeSpecStrict)
 
         model_id = spec.model_name
@@ -156,10 +160,9 @@ class VLLMServeExecutor(Executor):
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        if self._stop_event.is_set():
-            raise TaskCancelledError(
-                f"Serve task {task.task_id} stopped before vLLM launch"
-            )
+        if self._signals.raise_if_cancelled():
+            logger.info("Serve task %s stopped before vLLM launch", task.task_id)
+            return ServeResult(model=model_id, port=port)
 
         tail: collections.deque[str] = collections.deque(maxlen=_TAIL_MAX_LINES)
         try:
@@ -188,6 +191,9 @@ class VLLMServeExecutor(Executor):
             self._poll_health(
                 proc, port, task.task_id, readiness_timeout, tail, eof_event
             )
+            if self._signals.raise_if_cancelled():
+                logger.info("Serve task stop requested before vLLM became ready")
+                return ServeResult(model=model_id, port=port)
             # Worker-private endpoint facts ("_"-prefixed so task metadata never
             # discloses the raw loopback listener or engine key); the resident endpoint
             # probe reads them to bind the claim-gated sidecar in front of the engine.
@@ -210,8 +216,6 @@ class VLLMServeExecutor(Executor):
             self._wait_for_serve(proc, ttl_sec)
         finally:
             self._proc = None
-            self._cancel_event.clear()
-            self._stop_event.clear()
             self._terminate_process_group(proc)
             drain_thread.join(timeout=5.0)
 
@@ -229,11 +233,12 @@ class VLLMServeExecutor(Executor):
         url = f"http://127.0.0.1:{port}/health"
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
-            if self._cancel_event.is_set():
-                raise TaskCancelledError("Serve task cancelled during health poll")
-            if self._stop_event.is_set():
-                raise TaskCancelledError("Serve task stopped during health poll")
+            if self._signals.raise_if_cancelled():
+                return
             if proc.poll() is not None:
+                # A stop or cancel terminates the process it waits on.
+                if self._signals.raise_if_cancelled():
+                    return
                 _raise_with_tail(
                     f"vLLM server process exited (code={proc.returncode}) "
                     f"before becoming ready (task={task_id})",
@@ -246,6 +251,8 @@ class VLLMServeExecutor(Executor):
                     proc.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
                     pass
+                if self._signals.raise_if_cancelled():
+                    return
                 _raise_with_tail(
                     f"vLLM server process exited (code={proc.returncode}) "
                     f"before becoming ready (task={task_id})",
@@ -267,12 +274,12 @@ class VLLMServeExecutor(Executor):
     def _wait_for_serve(self, proc: subprocess.Popen[str], ttl_sec: float) -> None:
         deadline = time.time() + ttl_sec
         while time.time() < deadline:
-            if self._cancel_event.is_set():
-                raise TaskCancelledError("Serve task cancelled")
-            if self._stop_event.is_set():
+            if self._signals.raise_if_cancelled():
                 logger.info("Serve task stop requested; terminating vLLM server")
                 return
             if proc.poll() is not None:
+                if self._signals.raise_if_cancelled():
+                    return
                 raise ExecutionError(
                     f"vLLM server process exited unexpectedly (code={proc.returncode})"
                 )
@@ -286,14 +293,14 @@ class VLLMServeExecutor(Executor):
             pgid = None
         if pgid is not None:
             try:
-                os.killpg(pgid, signal.SIGTERM)
+                signal_process_group(pgid, signal.SIGTERM)
             except (ProcessLookupError, ChildProcessError, OSError):
                 pass
             try:
                 proc.wait(timeout=_STOP_TIMEOUT_SEC)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(pgid, signal.SIGKILL)
+                    signal_process_group(pgid, signal.SIGKILL)
                 except (ProcessLookupError, ChildProcessError, OSError):
                     pass
                 try:
@@ -306,13 +313,15 @@ class VLLMServeExecutor(Executor):
             pass
 
     def cancel(self, task_id: str) -> None:
-        self._cancel_event.set()
+        if not self._signals.cancel(task_id):
+            return
         proc = self._proc
         if proc is not None:
             self._terminate_process_group(proc)
 
     def stop(self, task_id: str) -> None:
-        self._stop_event.set()
+        if not self._signals.stop(task_id):
+            return
         proc = self._proc
         if proc is not None:
             self._terminate_process_group(proc)

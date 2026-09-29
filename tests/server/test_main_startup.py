@@ -16,6 +16,9 @@ class _Runtime(_Recorder):
     async def rehydrate(self) -> None:
         self.calls.append("runtime.rehydrate")
 
+    def release_ended_reservations(self) -> None:
+        self.calls.append("runtime.release")
+
     def resident_invocation_completed(
         self, workflow_id: str, invocation_id: str
     ) -> None:
@@ -62,6 +65,7 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
         "load_snapshot",
         "control.rehydrate",
         "runtime.rehydrate",
+        "runtime.release",
         "control.reconcile",
         "start",
     ]
@@ -82,6 +86,7 @@ def test_root_startup_reconciles_serve_terminals_after_the_claim_store() -> None
         "control.rehydrate",
         "serve.reconcile",
         "runtime.rehydrate",
+        "runtime.release",
         "control.reconcile",
         "start",
     ]

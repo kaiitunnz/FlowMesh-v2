@@ -524,6 +524,23 @@ def test_disallowed_model_denies_without_allocation_or_credit():
     assert stores.claims.all() == []
 
 
+def test_a_denied_origination_reaps_the_request_its_worker_captured():
+    limits = ResidentPolicyLimits(allowed_models=frozenset({"approved-only"}))
+    svc, _stores, settled, delivery = _build(limits=limits)
+    asyncio.run(svc._originate(_env()))
+    assert settled and delivery.relays == []
+
+    svc.on_invocation_terminal("inv-1", failed=True)
+
+    assert delivery.relays == [
+        (
+            "wkr-origin",
+            "resident_reap",
+            {"task_id": "tsk-1", "call_correlation": "c1"},
+        )
+    ]
+
+
 def test_failed_materialize_recovers_family_and_settles():
     async def boom(family: str, replica: ReplicaIncarnation) -> str:
         raise RuntimeError("cold start failed")
@@ -731,3 +748,28 @@ def test_a_plan_annotation_for_another_node_is_not_read_as_this_one_s():
 
     family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
     assert family is not None and family.warmth is None
+
+
+def test_a_request_that_exhausts_its_redrives_settles_before_it_releases() -> None:
+    svc, stores, _settled, delivery = _build()
+    asyncio.run(svc._originate(_env()))
+    asyncio.run(svc._on_ack(_ack(svc, ResidentBootstrapOutcome.ACKED)))
+    delivery.relays.clear()
+    at_settle: list[tuple[ClaimState, list[str]]] = []
+    settle = svc._settle
+
+    def recording_settle(*args: Any, **kwargs: Any) -> bool:
+        claim = stores.claims.by_invocation("inv-1")[-1]
+        at_settle.append((claim.state, [kind for _, kind, _ in delivery.relays]))
+        return settle(*args, **kwargs)
+
+    svc._settle = recording_settle  # type: ignore[method-assign]
+
+    svc._terminalize_failed("inv-1", "tsk-1", "c1", None, "re-drives exhausted")
+    # The runtime's ledger terminal for the boundary.
+    svc.on_invocation_terminal("inv-1", failed=True)
+
+    ((state, relays),) = at_settle
+    assert state is not ClaimState.TERMINAL and "resident_reap" not in relays
+    assert stores.claims.by_invocation("inv-1")[-1].state is ClaimState.TERMINAL
+    assert [kind for _, kind, _ in delivery.relays].count("resident_reap") == 1

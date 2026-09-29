@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -53,7 +53,7 @@ from ..orchestration.telemetry import (
     WorkflowSpanEmitter,
 )
 from ..registries.node import NodeRegistry
-from ..registries.worker import WorkerRegistry
+from ..registries.worker import ReportOutcome, StatusReport, WorkerRegistry
 from ..schemas.logs import LogEvent
 from ..serve import ServeAccessMode, is_public_base_url
 from ..task.finalizer import WorkflowFinalizer
@@ -61,6 +61,7 @@ from ..task.metadata import extract_model_dataset_names
 from ..task.models import (
     DispatchEnd,
     EventEffect,
+    LossOutcome,
     TaskRecord,
     TaskStatus,
     TaskUsage,
@@ -78,6 +79,12 @@ if TYPE_CHECKING:
 # Model-serving task types adopted as standing resident allocations: the GPU vLLM serve
 # task and its GPU-free dev_model stand-in, both reached only through the gated route.
 _SERVE_TASK_TYPES = frozenset({TaskType.SERVE, TaskType.DEV_MODEL})
+
+# How a report of a task its worker gave up ended the task's dispatch.
+_GIVEN_UP_ENDS = {
+    EventEffect.RETURNED: DispatchEnd.RETURNED,
+    EventEffect.FAILED: DispatchEnd.FAILED,
+}
 
 TASK_EVENT_HANDLER_MAX_ATTEMPTS = 5
 
@@ -472,8 +479,12 @@ class EventMonitor:
                     event.task_id, worker_id, payload, event.dispatch_id
                 )
                 if self._unapplied(event, effect):
+                    # The dispatch ended after the check above, and its release ran
+                    # before this update registered a forward; only this thread
+                    # registers one, so the forward is this update's.
+                    self._unregister_port_forward(event.task_id)
                     return
-                self._maybe_adopt_serve(event.task_id)
+                self._maybe_adopt_serve(event.task_id, worker_id, event.dispatch_id)
             case "TASK_SUCCEEDED":
                 # Count only a settling success; one that yields the lane back would
                 # tally several times for one task.
@@ -485,10 +496,8 @@ class EventMonitor:
                     return
                 if success.status == TaskStatus.CANCELLED:
                     self._record_cancellation(event, success.usages)
-                    self._mark_worker_idle(worker_id)
                     return
-                self._unregister_port_forward(event.task_id)
-                self._maybe_drain_serve(event.task_id)
+                self._release_task(event.task_id)
                 if settles:
                     self._metrics.record_task_event(event)
                 self._schedule_emit_usage(success.usages)
@@ -537,7 +546,6 @@ class EventMonitor:
                         worker_id,
                         exc,
                     )
-                self._mark_worker_idle(worker_id)
                 self._finalizer.close_task_workflow(event.task_id)
             case "TASK_FAILED":
                 self._handle_task_failed(event, worker_id, payload)
@@ -545,10 +553,17 @@ class EventMonitor:
                 cancellation = self._runtime.mark_cancelled(
                     event.task_id, worker_id, payload, event.ts, event.dispatch_id
                 )
+                if (end := _GIVEN_UP_ENDS.get(cancellation.effect)) is not None:
+                    self._record_loss(
+                        worker_id,
+                        LossOutcome(event.task_id, end, cancellation.impacted),
+                        event.dispatch_id,
+                        cancellation.usages,
+                    )
+                    return
                 if self._unapplied(event, cancellation.effect):
                     return
                 self._record_cancellation(event, cancellation.usages)
-                self._mark_worker_idle(worker_id)
             case _:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, payload
@@ -582,7 +597,7 @@ class EventMonitor:
                     event.error,
                 )
             case DispatchEnd.RETURNED:
-                self._unregister_port_forward(event.task_id)
+                self._release_task(event.task_id)
                 self._logger.warning(
                     "Retrying task %s after failure (attempt %d)",
                     event.task_id,
@@ -602,32 +617,97 @@ class EventMonitor:
             case DispatchEnd.CANCELLED:
                 self._record_cancellation(event, failure.usages)
             case DispatchEnd.FAILED:
-                self._unregister_port_forward(event.task_id)
-                self._maybe_drain_serve(event.task_id)
-                self._metrics.record_task_event(event)
-                self._schedule_emit_usage(failure.usages)
-                self._metrics.finalize_task_failure(event.task_id)
-                self._close_task_log_stream(event.task_id)
-                for task_id, reason in failure.impacted:
-                    derived = TaskEvent(
-                        type="TASK_FAILED",
-                        task_id=task_id,
-                        error=reason,
-                        payload={"dependency_failure": event.task_id},
+                self._record_failure(event, failure.impacted, failure.usages)
+
+    def _record_failure(
+        self,
+        event: TaskEvent,
+        impacted: Sequence[tuple[str, str]],
+        usages: list[tuple[str, TaskUsage]],
+    ) -> None:
+        """Apply the side effects of a task that settled FAILED, and of each dependent
+        that failed with it."""
+        self._release_task(event.task_id)
+        self._metrics.record_task_event(event)
+        self._schedule_emit_usage(usages)
+        self._metrics.finalize_task_failure(event.task_id)
+        self._close_task_log_stream(event.task_id)
+        for task_id, reason in impacted:
+            derived = TaskEvent(
+                type="TASK_FAILED",
+                task_id=task_id,
+                error=reason,
+                payload={"dependency_failure": event.task_id},
+            )
+            self._metrics.record_task_event(derived)
+            self._metrics.finalize_task_failure(task_id)
+            self._close_task_log_stream(task_id)
+            self._finalizer.close_task_workflow(task_id)
+        self._finalizer.close_task_workflow(event.task_id)
+
+    def record_worker_losses(
+        self, worker_id: str, losses: list[LossOutcome], reason: str
+    ) -> None:
+        """Apply the side effects of v2 tasks resolved as their worker's loss, for
+        ``reason``."""
+        for loss in losses:
+            self._record_loss(worker_id, loss, None, reason=reason)
+
+    def _record_loss(
+        self,
+        worker_id: str,
+        loss: LossOutcome,
+        dispatch_id: str | None,
+        usages: list[tuple[str, TaskUsage]] | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Apply the side effects of a task its worker lost or gave up."""
+        match loss.end:
+            case DispatchEnd.RETURNED:
+                self._logger.info(
+                    "Requeued task %s that worker %s lost or gave up (dispatch %s)",
+                    loss.task_id,
+                    worker_id,
+                    dispatch_id,
+                )
+                self._release_task(loss.task_id)
+                if loss.spent:
+                    self._metrics.record_task_event(
+                        TaskEvent(
+                            type="TASK_REQUEUED",
+                            task_id=loss.task_id,
+                            worker_id=worker_id,
+                            payload={"reason": reason, "worker": worker_id},
+                        )
                     )
-                    self._metrics.record_task_event(derived)
-                    self._metrics.finalize_task_failure(task_id)
-                    self._close_task_log_stream(task_id)
-                    self._finalizer.close_task_workflow(task_id)
-                self._finalizer.close_task_workflow(event.task_id)
+            case DispatchEnd.FAILED:
+                record = self._runtime.get_record(loss.task_id)
+                error = record.error if record is not None else None
+                self._logger.warning(
+                    "Task %s failed with worker %s lost or giving it up: %s",
+                    loss.task_id,
+                    worker_id,
+                    error,
+                )
+                self._record_failure(
+                    TaskEvent(
+                        type="TASK_FAILED",
+                        task_id=loss.task_id,
+                        worker_id=worker_id,
+                        dispatch_id=dispatch_id,
+                        error=error,
+                        payload={"worker": worker_id},
+                    ),
+                    loss.impacted,
+                    usages or [],
+                )
 
     def _record_cancellation(
         self, event: TaskEvent, usages: list[tuple[str, TaskUsage]]
     ) -> None:
         """Apply the side effects of a task that settled CANCELLED, whatever the event
         that settled it reported."""
-        self._unregister_port_forward(event.task_id)
-        self._maybe_drain_serve(event.task_id)
+        self._release_task(event.task_id)
         self._metrics.record_task_event(
             event.model_copy(update={"type": "TASK_CANCELLED", "error": None})
         )
@@ -635,12 +715,6 @@ class EventMonitor:
         self._metrics.finalize_task_cancellation(event.task_id)
         self._close_task_log_stream(event.task_id)
         self._finalizer.close_task_workflow(event.task_id)
-
-    def _mark_worker_idle(self, worker_id: str) -> None:
-        try:
-            self._worker_registry.update_worker_status(worker_id, WorkerStatus.IDLE)
-        except Exception:
-            pass
 
     def _unapplied(self, event: TaskEvent, effect: EventEffect) -> bool:
         """Whether an event left its task as it was, logging a stale one and closing
@@ -755,13 +829,23 @@ class EventMonitor:
             case "HEARTBEAT":
                 worker_id = (event.worker_id or "").strip()
                 ttl_sec = event.payload.get("ttl_sec", 120)
-                self._worker_registry.update_worker_hb(worker_id, event.ts, ttl_sec)
-            case "STATUS":
-                worker_id = (event.worker_id or "").strip()
-                status = event.status or WorkerStatus.UNKNOWN
-                self._worker_registry.set_worker_status(
-                    worker_id, status, event.ts, event.payload
+                report = self._worker_registry.update_worker_hb(
+                    worker_id, event.ts, ttl_sec, event.status, event.dispatch_id
                 )
+                self._took_status_report(worker_id, report, "Heartbeat", ttl_sec)
+            case "STATUS" if event.origin == "worker":
+                # A server-origin event announces a write the registry already applied
+                # inline; replaying it would land that value again on top of whatever
+                # has since replaced it.
+                worker_id = (event.worker_id or "").strip()
+                report = self._worker_registry.set_worker_status(
+                    worker_id,
+                    event.status or WorkerStatus.UNKNOWN,
+                    event.ts,
+                    event.payload,
+                    event.dispatch_id,
+                )
+                self._took_status_report(worker_id, report, "Status update")
             case "MEDIATED_OP_OUTCOME":
                 self._runtime.settle_mediated_operation(
                     MediatedOperationOutcome.model_validate(event.payload["outcome"])
@@ -828,22 +912,107 @@ class EventMonitor:
                         )
                         self._watchdog.clear_dead_mark(worker_id)
                         return
-                    self._return_lost_tasks(worker_id)
+                    self._return_lost_tasks(worker_id, graceful=event.graceful)
             case _:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
                 )
 
-    def _return_lost_tasks(self, worker_id: str) -> None:
-        """Return the tasks a departed worker held, settling any being cancelled."""
+    def _took_status_report(
+        self,
+        worker_id: str,
+        report: StatusReport,
+        kind: str,
+        heartbeat_ttl_sec: float | None = None,
+    ) -> None:
+        """Handle how the registry took a worker's status report.
+
+        A fenced IDLE names a reservation for a dispatch the worker never reported
+        running; once no publish or task holds that dispatch, it was lost before it
+        reached the worker, so the worker is released. A dispatch still held that the
+        worker's heartbeats disown resolves as lost once the bound a silent worker gets
+        has passed since it was recorded (see
+        ``TaskRuntime.resolve_disowned_dispatch``): a worker reports a dispatch busy
+        before it runs anything of it, and its heartbeat repeats that report.
+        """
+        match report.outcome:
+            case ReportOutcome.UNKNOWN:
+                self._logger.warning(
+                    "%s from unknown worker %s; ignoring", kind, worker_id
+                )
+            case ReportOutcome.FENCED:
+                task_id, dispatch_id = report.reserved_task, report.reserved_dispatch
+                if dispatch_id is None or task_id is None:
+                    return
+                if self._runtime.dispatch_in_flight(task_id, dispatch_id, worker_id):
+                    # Only a heartbeat carries a status the worker repeats; a status
+                    # report naming no dispatch may come from an earlier version.
+                    if heartbeat_ttl_sec is not None:
+                        self._resolve_disowned_dispatch(
+                            worker_id, task_id, dispatch_id, heartbeat_ttl_sec
+                        )
+                    return
+                if self._worker_registry.release_worker(worker_id, dispatch_id):
+                    self._logger.info(
+                        "Released worker %s from lost dispatch %s of task %s",
+                        worker_id,
+                        dispatch_id,
+                        task_id,
+                    )
+
+    def _resolve_disowned_dispatch(
+        self, worker_id: str, task_id: str, dispatch_id: str, ttl_sec: float
+    ) -> None:
+        outcome = self._runtime.resolve_disowned_dispatch(
+            task_id, dispatch_id, worker_id, self._watchdog.death_bound_sec(ttl_sec)
+        )
+        if outcome is None:
+            return
+        self._logger.warning(
+            "Worker %s kept reporting it does not hold dispatch %s of task %s; "
+            "resolving it as lost",
+            worker_id,
+            dispatch_id,
+            task_id,
+        )
+        if (end := _GIVEN_UP_ENDS.get(outcome.effect)) is not None:
+            self._record_loss(
+                worker_id,
+                LossOutcome(task_id, end, outcome.impacted, outcome.spent),
+                dispatch_id,
+                reason="worker_disowned_dispatch",
+            )
+        elif outcome.status == TaskStatus.CANCELLED:
+            self._record_cancellation(
+                TaskEvent(
+                    type="TASK_CANCELLED",
+                    task_id=task_id,
+                    worker_id=worker_id,
+                    dispatch_id=dispatch_id,
+                    ts=now_iso(),
+                ),
+                [],
+            )
+
+    def _return_lost_tasks(self, worker_id: str, graceful: bool) -> None:
+        """Return the tasks a departed worker held, settling any being cancelled.
+
+        A worker that left on its own shutdown gave its tasks up, so they return
+        without spending an attempt; any other departure spends one.
+        """
         requeued: list[str] = []
         ts = now_iso()
-        for task_id in self._runtime.recover_tasks_for_worker(worker_id):
+        recovery = self._runtime.recover_tasks_for_worker(
+            worker_id, spend_attempt=not graceful
+        )
+        self.record_worker_losses(worker_id, recovery.resolved, "worker_unregistered")
+        for task_id in recovery.lost:
             end = self._dispatcher.requeue_task(
                 task_id,
                 reason="worker_unregistered",
                 front=True,
                 holder=worker_id,
+                count_retry=not graceful,
                 extra_payload={"worker": worker_id},
             )
             if end is DispatchEnd.CANCELLED:
@@ -858,7 +1027,7 @@ class EventMonitor:
                 )
                 continue
             if end not in (DispatchEnd.STALE, DispatchEnd.SETTLED):
-                self._unregister_port_forward(task_id)
+                self._release_task(task_id)
             if end is DispatchEnd.RETURNED:
                 requeued.append(task_id)
         if requeued:
@@ -983,12 +1152,16 @@ class EventMonitor:
             return None
         return f"{self._server_base_url.rstrip('/')}/api/v1/serve/tasks/{task_id}"
 
-    def _maybe_adopt_serve(self, task_id: str) -> None:
+    def _maybe_adopt_serve(
+        self, task_id: str, worker_id: str, dispatch_id: str | None
+    ) -> None:
         """Adopt a serve task as a standing resident allocation once its endpoint is up.
 
         Idempotent: the gated edge skips a task that already has a live binding, so
         repeated updates do not re-adopt. Runs after the record's endpoint is stored so
-        the adoption probe reads it.
+        the adoption probe reads it, and adopts only while the update's dispatch holds
+        the task: a release that ran first found nothing to drain, so a later adoption
+        would outlive the task.
         """
         if self._gated_serve is None:
             return
@@ -1005,10 +1178,17 @@ class EventMonitor:
                 task_id,
                 _serve_access_mode(record),
                 _serve_forward_port(record),
+                lambda: self._runtime.holds_dispatch(task_id, worker_id, dispatch_id),
             )
 
+    def _release_task(self, task_id: str) -> None:
+        """Release what a task's dispatch exposed, once it ends or returns to the queue:
+        its forward relay and its serve binding, which a re-run registers afresh."""
+        self._unregister_port_forward(task_id)
+        self._maybe_drain_serve(task_id)
+
     def _maybe_drain_serve(self, task_id: str) -> None:
-        """Drain a stopped serve task's binding and standing replica on its terminal."""
+        """Drain a serve task's binding and standing replica."""
         if self._gated_serve is None:
             return
         record = self._runtime.get_record(task_id)

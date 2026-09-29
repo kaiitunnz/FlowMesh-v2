@@ -28,3 +28,8 @@ class ResidentRequestStore:
     def delete(self, agent_task_id: str, call_correlation: str) -> None:
         with self._lock:
             self._store.pop((agent_task_id, call_correlation), None)
+
+    def occurrences(self) -> list[tuple[str, str]]:
+        """The occurrences whose requests the store holds."""
+        with self._lock:
+            return list(self._store)

@@ -84,7 +84,11 @@ after `TASK_NO_WORKER_GRACE_SEC`.
 
 Each dispatch carries a `dsp-` id that the worker echoes on the task's events;
 an event applies only while its dispatch holds the task. A cancelling task
-settles `CANCELLED` however its dispatch ends.
+settles `CANCELLED` however its dispatch ends. A task its worker gives up
+without a requested cancel, as a draining worker does, returns without spending
+an attempt, and a task whose worker crashes or goes silent spends one. A v2 task
+that cannot safely re-run, such as an `ssh`, `serve`, `api` or training task,
+fails instead, as on its worker's loss.
 
 ## Directory map
 
@@ -254,12 +258,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   completion.
 - **Agent-episode dispatch seam.** Every agent dispatches to the `AgentEpisodeExecutor`,
   which runs one adapter step per dispatch behind its resolved backend key (the built-in
-  `scripted` backend or the `codex` app-server binding). A step resumes the agent's durable
-  context and returns a completion, failure, cancellation, yield, or a typed boundary
-  request; the server routes a boundary into the ledger and either re-dispatches the agent
-  or suspends it until a durable outcome arrives, and a restart resumes with the same
-  context. An agent's harness and managed-model binding are resolved at submission and
-  pinned on its compiled operator; the backend comes from `spec.harness.backend` or the
+  `scripted` backend or the `codex` app-server binding). A step resumes the agent's
+  durable context and returns a completion, failure, cancellation, yield, or a typed
+  boundary request; the server routes a boundary into the ledger and either re-dispatches
+  the agent or suspends it until a durable outcome arrives, and a restart resumes with the
+  same context. A suspended agent keeps waiting on its boundary when its worker leaves;
+  a boundary that worker originated settles with its outcome when the worker finished it
+  before leaving, and fails the agent otherwise. The agent's next step runs only on the
+  worker holding its private state, so it fails once that worker is gone. An agent's
+  harness and managed-model binding are resolved at submission and pinned on its
+  compiled operator; the backend comes from `spec.harness.backend` or the
   `AGENT_HARNESS_DEFAULT_BACKEND` default, and an agent with neither fails template
   validation. `agent` is a v2-only task type: a legacy v1 agent submission is rejected.
 - **Activation-private state.** An agent activation owns its mutable harness state
@@ -525,6 +533,26 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   up — e.g. SSH requires a reachable Docker daemon, and training or omni types
   require their (often GPU-only) dependencies — so a worker missing that executor
   isn't a candidate, rather than being handed a task it would fail.
+- **Worker status.** A worker reports whether it is busy, naming the dispatch the
+  report concerns, and repeats it on every heartbeat. The dispatcher reserves a
+  worker for a dispatch before publishing it. An idle report frees the worker only
+  when it names that dispatch, so a report about an earlier task never frees a worker
+  another task is on its way to; the dispatch ending frees it too, returning it to the
+  status it last reported. When a live worker keeps reporting that it does not hold
+  a dispatch, the dispatch resolves as lost after the bound a silent worker gets, and
+  the task's next placement avoids that worker; a task bound to that worker's private
+  state goes back to it, spending an attempt. A worker shutting down reports itself
+  busy until it leaves.
+- **Stale worker reaping.** The watchdog deletes the registry record of a worker
+  dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
+  recreates a deleted record.
+- **Dispatch queues.** A supervisor keeps one dispatch queue per registered worker id
+  and frees it when the worker's token registers again under a new id or is removed,
+  dropping the frames still queued and ending any task stream still reading it. A new
+  `StreamTasks` on an id takes over the frames still queued, in order, and ends every
+  older stream on that id, so a half-open stream receives nothing once the worker's new
+  stream attaches. A worker whose task stream ends reconnects, and its new stream reads
+  the queue of the id its token then holds.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side.

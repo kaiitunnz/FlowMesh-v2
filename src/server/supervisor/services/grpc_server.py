@@ -192,36 +192,47 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         if worker_id is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid worker token")
 
-        while True:
-            try:
-                event = await self._task_listener.get_event(worker_id)
-            except asyncio.CancelledError:
-                break
-            if event.get("kind") == "interrupt":
-                yield supervisor_pb2.DispatchMessage(
-                    interrupt=supervisor_pb2.InterruptMessage(
-                        task_id=str(event["task_id"]),
-                        reason=str(event["reason"]),
+        stream = self._task_listener.attach_stream(worker_id)
+        if stream is None:
+            self._logger.warning("No dispatch queue for worker %s", worker_id)
+            return
+        try:
+            while True:
+                try:
+                    event = await stream.next()
+                except asyncio.CancelledError:
+                    break
+                if event is None:
+                    break
+                if event.get("kind") == "interrupt":
+                    yield supervisor_pb2.DispatchMessage(
+                        interrupt=supervisor_pb2.InterruptMessage(
+                            task_id=str(event["task_id"]),
+                            reason=str(event["reason"]),
+                        )
                     )
-                )
-            elif event.get("kind") == "stop":
-                yield supervisor_pb2.DispatchMessage(
-                    stop=supervisor_pb2.StopMessage(
-                        task_id=str(event["task_id"]),
-                        reason=str(event["reason"]),
+                elif event.get("kind") == "stop":
+                    yield supervisor_pb2.DispatchMessage(
+                        stop=supervisor_pb2.StopMessage(
+                            task_id=str(event["task_id"]),
+                            reason=str(event["reason"]),
+                        )
                     )
-                )
-            elif event.get("kind") == "mediated_op":
-                yield supervisor_pb2.DispatchMessage(
-                    mediated_op=supervisor_pb2.MediatedOperationFrame(
-                        kind=str(event["frame_kind"]),
-                        payload=_struct_from_payload(event["payload"]),
+                elif event.get("kind") == "mediated_op":
+                    yield supervisor_pb2.DispatchMessage(
+                        mediated_op=supervisor_pb2.MediatedOperationFrame(
+                            kind=str(event["frame_kind"]),
+                            payload=_struct_from_payload(event["payload"]),
+                        )
                     )
-                )
-            else:
-                yield supervisor_pb2.DispatchMessage(
-                    task=supervisor_pb2.TaskMessage(payload=_struct_from_payload(event))
-                )
+                else:
+                    yield supervisor_pb2.DispatchMessage(
+                        task=supervisor_pb2.TaskMessage(
+                            payload=_struct_from_payload(event)
+                        )
+                    )
+        finally:
+            self._task_listener.detach_stream(stream)
         self._logger.info("Task stream closed for worker %s", worker_id)
 
     async def PushEvents(
@@ -239,6 +250,18 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                 grpc.StatusCode.FAILED_PRECONDITION, "Worker not registered"
             )
 
+        worker.attach_event_stream()
+        try:
+            return await self._relay_events(worker, worker_id, request_iterator)
+        finally:
+            worker.detach_event_stream()
+
+    async def _relay_events(
+        self,
+        worker: WorkerAdapter,
+        worker_id: str,
+        request_iterator: AsyncIterator[supervisor_pb2.EventMessage],
+    ) -> Empty:
         registered: bool = False
         unregistered: bool = False
         async for message in request_iterator:

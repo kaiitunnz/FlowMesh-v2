@@ -12,10 +12,10 @@ from server.orchestration import WorkItemStatus
 from server.registries.worker import Worker
 from server.services.monitoring import EventMonitor
 from server.services.watchdog import WorkerWatchdog
-from server.task.models import DispatchEnd, EventEffect, TaskStatus
+from server.task.models import DispatchEnd, EventEffect, TaskStatus, WorkerRecovery
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent, WorkerEvent, parse_event
-from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
+from shared.tasks.worker_message import WorkerTaskMessage
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
 from tests.server.task.test_agent_episode_runtime import _AGENT_WF, _HOLDER, _SCRIPT
@@ -334,6 +334,7 @@ def _fast_worker_dispatcher(
     registry = mock.Mock()
     registry.idle_satisfying_pool.return_value = [_worker("wkr-1")]
     registry.satisfying_workers.return_value = [_worker("wkr-1")]
+    monitor._worker_registry = registry
 
     def publish(_worker: Worker, message: WorkerTaskMessage) -> int:
         for event_type in event_types:
@@ -494,7 +495,7 @@ async def test_a_worker_lost_before_its_dispatch_was_recorded_runs_the_task_else
     [("TASK_STARTED", "TASK_SUCCEEDED"), ("TASK_STARTED", "TASK_FAILED")],
     ids=["succeeded", "failed"],
 )
-async def test_a_dispatch_its_worker_ended_first_leaves_the_worker_idle(
+async def test_a_dispatch_its_worker_ended_first_leaves_the_worker_to_its_own_report(
     event_types: tuple[str, ...],
 ) -> None:
     runtime = _runtime(_Registry())
@@ -506,8 +507,11 @@ async def test_a_dispatch_its_worker_ended_first_leaves_the_worker_idle(
 
     dispatcher.dispatch_once(task_id)
 
-    writes = [call.args for call in worker_registry.update_worker_status.call_args_list]
-    assert ("wkr-1", WorkerStatus.BUSY) not in writes
+    # The worker is reserved once, before the publish; the worker's own IDLE for the
+    # dispatch is what frees it, so the server writes no status after it.
+    worker_registry.reserve_worker.assert_called_once()
+    assert worker_registry.reserve_worker.call_args.args[:2] == ("wkr-1", task_id)
+    worker_registry.release_worker.assert_not_called()
 
 
 @pytest.mark.anyio
@@ -664,8 +668,8 @@ async def test_a_terminal_landing_while_its_worker_unregisters_stays_settled(
     event = event.model_copy(update={"retryable": False})
     listed = runtime.recover_tasks_for_worker
 
-    def listed_then_settled(worker_id: str) -> list[str]:
-        tasks = listed(worker_id)
+    def listed_then_settled(worker_id: str, **kwargs: Any) -> WorkerRecovery:
+        tasks = listed(worker_id, **kwargs)
         monitor.handle_task_event(event)
         return tasks
 

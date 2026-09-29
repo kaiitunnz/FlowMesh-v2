@@ -55,7 +55,7 @@ from shared.utils.time import now_iso
 from .content.inputs import TaskInputHydrator, input_unreadable, read_input
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
-from .executors.episode_support import EpisodeStepResult
+from .executors.episode_support import EpisodeStepResult, discard_step_captures
 from .executors.inference.projection import generated_outputs
 from .executors.inference.resolution import resolve_task_contract
 from .executors.utils.checkpoints import write_executor_result
@@ -75,6 +75,15 @@ def _publishes_result(result: BaseExecutorResult) -> bool:
     if isinstance(result, EpisodeStepResult):
         return result.harness_result.kind is HarnessResultKind.COMPLETION
     return True
+
+
+# The supervisor kills a worker's container 30 seconds after stopping it, so a shutdown
+# unregisters within this budget, leaving the process time to exit.
+_STOP_BUDGET_SEC = 25.0
+# How long, within the budget, a shutdown waits for the boundaries it holds to finish;
+# the rest is left to the teardown.
+_BOUNDARY_DRAIN_SEC = 15.0
+_BOUNDARY_DRAIN_POLL_SEC = 0.1
 
 
 def _declared_result(
@@ -153,6 +162,12 @@ class Runner:
         self._pending_stops: set[str] = set()
         self._cancel_lock = threading.Lock()
         self._shutdown_requested = threading.Event()
+        self._shutdown_thread: threading.Thread | None = None
+        self._stop_deadline: float | None = None
+        self._boundaries_closed = threading.Event()
+        # Orders building a boundary lane against the drain closing them, so a lane
+        # built by a racing frame is one the shutdown sees and stops.
+        self._boundary_lanes_lock = threading.Lock()
 
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
@@ -187,6 +202,19 @@ class Runner:
                         "Error cancelling active executor during shutdown: %s", exc
                     )
 
+    def _cleanup_active_executor_in_budget(self) -> None:
+        """Clean up the active executor, within what is left of a requested stop."""
+        if self._stop_deadline is None:
+            self._cleanup_active_executor()
+            return
+        cleanup = threading.Thread(
+            target=self._cleanup_active_executor, name="executor-cleanup", daemon=True
+        )
+        cleanup.start()
+        cleanup.join(self._stop_time_left())
+        if cleanup.is_alive():
+            self.logger.warning("Leaving the executor's cleanup unfinished at shutdown")
+
     def _cleanup_active_executor(self) -> None:
         self._cancel_active_executor()
         with self._active_executor_lock:
@@ -204,16 +232,81 @@ class Runner:
                 self._active_executor_key = None
                 self._active_executor_last_used_at = None
 
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_requested.is_set()
+
+    @property
+    def stop_deadline(self) -> float | None:
+        """The monotonic time a requested shutdown must unregister by."""
+        return self._stop_deadline
+
     def stop(self) -> None:
+        """Request shutdown; safe from a signal handler.
+
+        The work runs on its own thread, since the frame a signal interrupts may hold a
+        lock that cancelling the active executor takes.
+        """
+        if self._shutdown_requested.is_set():
+            return
+        self._stop_deadline = time.monotonic() + _STOP_BUDGET_SEC
         self._shutdown_requested.set()
+        self.lifecycle.begin_draining()
+        thread = threading.Thread(
+            target=self._shut_down, name="worker-shutdown", daemon=True
+        )
+        self._shutdown_thread = thread
+        thread.start()
+
+    def _shut_down(self) -> None:
+        drain_deadline = time.monotonic() + _BOUNDARY_DRAIN_SEC
+        self.logger.info("Shutdown requested; giving up the running task")
+        self.lifecycle.set_draining()
         self.lifecycle.stop()
         self._cancel_active_executor()
-        if self._mediated_sidecar is not None:
-            self._mediated_sidecar.stop()
-        if self._responses_facade is not None:
-            self._responses_facade.stop()
-        if self._resident_host is not None:
-            self._resident_host.stop()
+        self._finish_held_boundaries(drain_deadline)
+        with self._boundary_lanes_lock:
+            self._boundaries_closed.set()
+            sidecar = self._mediated_sidecar
+            facade = self._responses_facade
+            host = self._resident_host
+        if sidecar is not None:
+            sidecar.stop()
+        if facade is not None:
+            facade.stop(min(5.0, self._stop_time_left()))
+        if host is not None:
+            host.stop(min(15.0, self._stop_time_left()))
+
+    def _stop_time_left(self) -> float:
+        """Seconds left of the stop budget, or the budget when no stop was asked."""
+        if self._stop_deadline is None:
+            return _STOP_BUDGET_SEC
+        return max(0.0, self._stop_deadline - time.monotonic())
+
+    def _finish_held_boundaries(self, deadline: float) -> None:
+        """Wait until ``deadline`` for control to commit the outcome of each boundary
+        this worker holds for a suspended step.
+
+        The permits that run them and the reaps that acknowledge their outcomes keep
+        arriving until the worker unregisters, and an outcome reported after it
+        unregisters would find the boundary already failed as this worker's loss.
+        """
+        while held := self._drained_boundaries():
+            if time.monotonic() >= deadline:
+                self.logger.warning(
+                    "Leaving %d unfinished boundaries at shutdown: %s", len(held), held
+                )
+                return
+            time.sleep(_BOUNDARY_DRAIN_POLL_SEC)
+
+    def _drained_boundaries(self) -> list[tuple[str, str]]:
+        """The held boundaries a shutdown waits for: a held model turn belongs to the
+        running step, which the shutdown gives up."""
+        return [
+            (task_id, call)
+            for task_id, call in self.lifecycle.held_boundaries()
+            if not self._model_turn_rendezvous.has_waiter(task_id, call)
+        ]
 
     def _ensure_mediated_sidecar(self) -> MediatedEgressSidecar | None:
         """Build the mediated-egress sidecar once the worker id is known."""
@@ -273,8 +366,19 @@ class Runner:
 
     def _ensure_resident_host(self) -> ResidentLaneHost | None:
         """Build the resident lane host once the worker id is known."""
+        with self._boundary_lanes_lock:
+            return self._ensure_resident_host_locked()
+
+    def _ensure_resident_host_locked(self) -> ResidentLaneHost | None:
         if self._resident_host is not None:
             return self._resident_host
+        if self._boundaries_closed.is_set():
+            # A host built now would outlive the shutdown that stops the lanes.
+            self.logger.warning(
+                "Dropping a resident frame that arrived after the shutdown's "
+                "boundary drain"
+            )
+            return None
         client = self.lifecycle.client
         try:
             client.worker_id
@@ -332,8 +436,17 @@ class Runner:
             )
             if stale_held:
                 return
-            if (sidecar := self._ensure_mediated_sidecar()) is not None:
-                sidecar.submit_permit(permit)
+            with self._boundary_lanes_lock:
+                if self._boundaries_closed.is_set():
+                    self.logger.warning(
+                        "Dropping a permit for %s:%s that arrived after the shutdown's "
+                        "boundary drain",
+                        permit.agent_task_id,
+                        permit.call_correlation,
+                    )
+                    return
+                if (sidecar := self._ensure_mediated_sidecar()) is not None:
+                    sidecar.submit_permit(permit)
             return
         if frame_kind == "reap":
             if (sidecar := self._ensure_mediated_sidecar()) is not None:
@@ -393,13 +506,17 @@ class Runner:
             raise ExecutionError(str(exc), retryable=False) from exc
 
     def _raise_if_cancel_pending(self, task_id: str) -> None:
-        """Honor a cancel that landed while the task read its inputs, which can wait on
-        the store."""
+        """Honor a cancel, or the worker's shutdown, that landed before the task's
+        executor runs it, such as while it read its inputs from the store."""
         with self._cancel_lock:
             cancelled = task_id in self._pending_cancels
             self._pending_cancels.discard(task_id)
         if cancelled:
             raise TaskCancelledError(f"Task {task_id} was cancelled before execution")
+        if self._shutdown_requested.is_set():
+            raise TaskCancelledError(
+                f"Task {task_id} was given up by the worker shutting down"
+            )
 
     def _materialize_contract(self, msg: WorkerTaskMessage) -> None:
         """Settle the one request a task runs, before its embodiment reaches a model.
@@ -651,14 +768,14 @@ class Runner:
         self._idle_checker_thread = t
         t.start()
 
-    def _stop_idle_checker(self) -> None:
+    def _stop_idle_checker(self, timeout: float = 2.0) -> None:
         """Signal the idle checker thread to stop and wait briefly for join."""
         if not self._idle_checker_thread:
             return
         if self._idle_checker_stop_event:
             self._idle_checker_stop_event.set()
         try:
-            self._idle_checker_thread.join(timeout=2.0)
+            self._idle_checker_thread.join(timeout=timeout)
         except Exception:
             pass
         finally:
@@ -685,9 +802,9 @@ class Runner:
                             except Exception as exc:
                                 self.logger.warning("Executor cancel() raised: %s", exc)
                     for task_id, reason in self.lifecycle.client.iter_stops():
+                        with self._cancel_lock:
+                            self._pending_stops.add(task_id)
                         if self._current_task_id != task_id:
-                            with self._cancel_lock:
-                                self._pending_stops.add(task_id)
                             continue
                         self.logger.info(
                             "Graceful stop for running task %s (reason=%s)",
@@ -721,13 +838,13 @@ class Runner:
         self._interrupt_thread = thread
         thread.start()
 
-    def _stop_interrupt_monitor(self) -> None:
+    def _stop_interrupt_monitor(self, timeout: float = 2.0) -> None:
         if not self._interrupt_thread:
             return
         if self._interrupt_stop_event is not None:
             self._interrupt_stop_event.set()
         try:
-            self._interrupt_thread.join(timeout=2.0)
+            self._interrupt_thread.join(timeout=timeout)
         except Exception:
             pass
         finally:
@@ -784,18 +901,11 @@ class Runner:
                 start_iso = now_iso()
                 start_wall = time.time()
                 notified_task_started: bool = False
+                # A step's captures reach control only on its success report; until it
+                # is sent, the worker drops them if the task ends another way.
+                unreported_step: EpisodeStepResult | None = None
                 try:
-                    with self._cancel_lock:
-                        cancelled_before_start = task_id in self._pending_cancels
-                        if cancelled_before_start:
-                            self._pending_cancels.discard(task_id)
-                        stop_before_start = task_id in self._pending_stops
-                        if stop_before_start:
-                            self._pending_stops.discard(task_id)
-                    if cancelled_before_start:
-                        raise TaskCancelledError(
-                            f"Task {task_id} was cancelled before execution"
-                        )
+                    self._raise_if_cancel_pending(task_id)
                     self._current_task_id = task_id
                     self._input_hydrator.hydrate(msg)
                     if msg.input_preparation:
@@ -908,9 +1018,15 @@ class Runner:
                         # Disable idle checker during execution
                         self._active_executor_last_used_at = None
                         executor_to_run = self._active_executor
-                        if stop_before_start:
+                        # A stop that landed before the executor was bound is handed to
+                        # it here, under the lock the stop's delivery reads it with.
+                        with self._cancel_lock:
+                            stop_pending = task_id in self._pending_stops
+                        if stop_pending:
                             executor_to_run.stop(task_id)
                     out = self._run_executor(executor_to_run, msg, out_dir)
+                    if isinstance(out, EpisodeStepResult):
+                        unreported_step = out
                     references = self._write_results(msg, out_dir, out)
                     metadata = self._build_task_metadata(
                         task_type,
@@ -938,6 +1054,7 @@ class Runner:
                                 out.private_state.model_dump(mode="json")
                             )
                     self.lifecycle.set_succeeded(task_id, metadata=metadata)
+                    unreported_step = None
                     self.logger.info("Task %s completed successfully", task_id)
                 except TaskCancelledError as e:
                     if not notified_task_started:
@@ -991,7 +1108,12 @@ class Runner:
                     else:
                         self.logger.exception("Task %s failed", task_id)
                 finally:
+                    if unreported_step is not None:
+                        discard_step_captures(self.lifecycle, task_id, unreported_step)
                     self._current_task_id = None
+                    with self._cancel_lock:
+                        self._pending_cancels.discard(task_id)
+                        self._pending_stops.discard(task_id)
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()
                     self.lifecycle.set_idle(task_id)
@@ -1008,9 +1130,11 @@ class Runner:
         except KeyboardInterrupt:
             self.logger.info("Runner interrupted by user; shutting down task loop")
         finally:
-            self._cleanup_active_executor()
-            self._stop_interrupt_monitor()
-            self._stop_idle_checker()
+            if self._shutdown_thread is not None:
+                self._shutdown_thread.join()
+            self._cleanup_active_executor_in_budget()
+            self._stop_interrupt_monitor(min(2.0, self._stop_time_left()))
+            self._stop_idle_checker(min(2.0, self._stop_time_left()))
 
     def _create_task_logger(
         self, task_id: str, msg: WorkerTaskMessage, out_dir: Path

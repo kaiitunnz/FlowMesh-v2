@@ -5,7 +5,7 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +82,7 @@ class SupervisorClient:
         self._stop = threading.Event()
         self._stop.set()  # Initially stopped
         self._event_ready = threading.Event()
+        self._on_event_stream_ready: Callable[[], None] | None = None
         self._task_ready = threading.Event()
         self._task_queue: queue.Queue[WorkerTaskMessage | object] = queue.Queue()
         # The task being run and its dispatch id: tasks run one at a time, in the order
@@ -185,7 +186,8 @@ class SupervisorClient:
         self._send_register_event()
 
     def stop(self) -> None:
-        """Stop task pulling without fully shutting down."""
+        """Stop task pulling without fully shutting down; the task stream keeps
+        relaying interrupts and mediated operations until shutdown."""
         if self._stop.is_set():
             return
         self._stop.set()
@@ -227,34 +229,44 @@ class SupervisorClient:
         ts: str | None = None,
         metrics: dict[str, Any] | None = None,
         ttl_sec: int = 120,
+        status: WorkerStatus | None = None,
+        dispatch_id: str | None = None,
     ) -> None:
         ts = ts or now_iso()
         event = WorkerEvent(
             type="HEARTBEAT",
             worker_id=self.worker_id,
             ts=ts,
+            status=status,
+            dispatch_id=dispatch_id,
             metrics=metrics or {},
             payload={"ttl_sec": ttl_sec},
         )
-        self._send_event(event)
+        self._offer_event(event)
 
     def set_status(
-        self, status: WorkerStatus, extra: dict[str, Any] | None = None
+        self,
+        status: WorkerStatus,
+        extra: dict[str, Any] | None = None,
+        dispatch_id: str | None = None,
     ) -> None:
         event = WorkerEvent(
             type="STATUS",
             worker_id=self.worker_id,
             status=status,
+            dispatch_id=dispatch_id,
             payload=extra or {},
         )
-        self._send_event(event)
+        self._offer_event(event)
 
     def unregister(
         self,
+        graceful: bool,
         cost_per_hour: float | None = None,
         uptime_sec: float | None = None,
         accrued_cost_usd: float | None = None,
         power_summary: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> None:
         payload: dict[str, Any] = {}
         if cost_per_hour is not None:
@@ -268,17 +280,18 @@ class SupervisorClient:
         event = WorkerEvent(
             type="UNREGISTER",
             worker_id=self.worker_id,
+            graceful=graceful,
             payload=payload,
             actor=self.owner_principal,
         )
-        self._send_event(event)
+        self._send_event(event, timeout)
 
     def task_update(self, task_id: str, payload: dict[str, Any]) -> None:
         event = TaskEvent(
             type="TASK_UPDATE",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             payload=payload,
         )
         self._send_event(event)
@@ -296,7 +309,7 @@ class SupervisorClient:
             type="TASK_FAILED",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             error=error,
             retryable=retryable,
             failure_kind=failure_kind,
@@ -312,7 +325,7 @@ class SupervisorClient:
             type="TASK_SUCCEEDED",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             payload=metadata or {},
         )
         self._send_event(event)
@@ -335,7 +348,7 @@ class SupervisorClient:
             type="TASK_STARTED",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             payload=payload,
         )
         self._send_event(event)
@@ -347,7 +360,7 @@ class SupervisorClient:
             type="TASK_CANCELLED",
             worker_id=self.worker_id,
             task_id=task_id,
-            dispatch_id=self._dispatch_id(task_id),
+            dispatch_id=self.dispatch_id(task_id),
             payload=metadata or {},
         )
         self._send_event(event)
@@ -394,7 +407,8 @@ class SupervisorClient:
             )
             yield item
 
-    def _dispatch_id(self, task_id: str) -> str | None:
+    def dispatch_id(self, task_id: str) -> str | None:
+        """The dispatch running ``task_id``, if this worker is running it."""
         running = self._running_dispatch
         return running[1] if running is not None and running[0] == task_id else None
 
@@ -484,6 +498,8 @@ class SupervisorClient:
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=10)
                 self._event_ready.set()
+                if (on_ready := self._on_event_stream_ready) is not None:
+                    on_ready()
                 self._stub.PushEvents(self._event_messages(), metadata=metadata)
                 if self._shutdown.is_set():
                     break
@@ -508,7 +524,7 @@ class SupervisorClient:
             self.logger.error("Supervisor gRPC channel not initialized")
             return
         metadata = self._grpc_metadata()
-        while not self._stop.is_set():
+        while not self._shutdown.is_set():
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=10)
                 self._task_ready.set()
@@ -540,21 +556,21 @@ class SupervisorClient:
                             )
                         else:
                             self._task_queue.put(task_message)
-                    if self._stop.is_set():
+                    if self._shutdown.is_set():
                         break
-                if self._stop.is_set():
+                if self._shutdown.is_set():
                     break
                 self._task_ready.clear()
                 self.logger.warning("Task stream closed, retrying in 3 seconds")
                 time.sleep(3)
             except grpc.FutureTimeoutError:
-                if self._stop.is_set():
+                if self._shutdown.is_set():
                     break
                 self._task_ready.clear()
                 self.logger.warning("Task stream not ready, retrying in 3 seconds")
                 time.sleep(3)
             except grpc.RpcError as exc:
-                if self._stop.is_set():
+                if self._shutdown.is_set():
                     break
                 self._task_ready.clear()
                 self.logger.error("Supervisor task stream error: %s", exc)
@@ -621,12 +637,30 @@ class SupervisorClient:
         payload = MessageToDict(struct, preserving_proto_field_name=True)
         return normalize_numbers(payload)
 
-    def _send_event(self, event: Event) -> None:
+    def _send_event(self, event: Event, timeout: float | None = None) -> None:
         if self._stub is None:
             raise RuntimeError("Supervisor gRPC client not started")
-        # Wait until the stream is ready without an explicit timeout.
-        if not self._event_ready.wait():
+        if not self._event_ready.wait(timeout):
             raise RuntimeError("Supervisor event stream not ready")
+        self._event_queue.put(serialize_event(event))
+
+    def on_event_stream_ready(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` each time the event stream (re)connects, before the stream
+        starts sending; what the callback sends queues behind any event already
+        queued."""
+        self._on_event_stream_ready = callback
+
+    def _offer_event(self, event: Event) -> None:
+        """Send an event the worker repeats, dropping it while the stream is down.
+
+        Every heartbeat repeats the worker's status, so the first heartbeat after an
+        outage restores a report the outage dropped.
+        """
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.is_set():
+            self.logger.debug("Event stream not ready; dropping %s", event.type)
+            return
         self._event_queue.put(serialize_event(event))
 
     def push_mediated_outcome(self, outcome: MediatedOperationOutcome) -> None:

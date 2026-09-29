@@ -20,11 +20,12 @@ def capture_resident_request(
     assert result.kind is HarnessResultKind.BOUNDARY
     assert req is not None and req.request_payload is not None
     assert req.call_correlation is not None
-    store.put(task_id, req.call_correlation, req.request_payload)
     stripped = req.model_copy(
         update={
             "request_payload": None,
             "request_digest": resident_request_digest(req.request_payload),
         }
     )
-    return result.model_copy(update={"request": stripped})
+    stripped_result = result.model_copy(update={"request": stripped})
+    store.put(task_id, req.call_correlation, req.request_payload)
+    return stripped_result

@@ -91,6 +91,10 @@ class ResponsesFacade:
         # so the completion carries it ordered-with the turn rather than on a separate
         # lossy channel that could race or drop it.
         self._captured: dict[str, FacadeTurnGroup] = {}
+        # Episodes being given up, each with the event its release sets: a turn that
+        # reaches one waits for the release, so its harness never ends the turn on the
+        # refusal while it is still up.
+        self._refused: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self._server: _FacadeHTTPServer | None = None
         self._serve_thread: threading.Thread | None = None
@@ -107,6 +111,8 @@ class ResponsesFacade:
         """Register one episode's binding and facades; return its per-episode token."""
         token = secrets.token_urlsafe(24)
         with self._lock:
+            if (released := self._refused.pop(task_id, None)) is not None:
+                released.set()
             self._episodes[task_id] = EpisodeContext(
                 url=url,
                 model=model,
@@ -114,12 +120,47 @@ class ResponsesFacade:
                 token=token,
                 sandbox=sandbox,
             )
+        self._held_egress.reopen(task_id, token)
         return token
 
     def unregister_episode(self, task_id: str) -> None:
+        """Forget the episode, so a turn still running captures nothing, answer the
+        turns waiting on its release, and drop a captured group no step will report
+        with the requests it stashed."""
         with self._lock:
-            self._episodes.pop(task_id, None)
-            self._captured.pop(task_id, None)
+            ctx = self._episodes.pop(task_id, None)
+            group = self._captured.pop(task_id, None)
+            released = self._refused.pop(task_id, None)
+        if ctx is not None:
+            self._held_egress.close(task_id, ctx.token)
+        if released is not None:
+            released.set()
+        if group is not None:
+            for member in group.members:
+                self._pending.delete(task_id, member.call_correlation)
+
+    def refuse_episode(self, task_id: str) -> None:
+        """Refuse the episode's further turns and model calls.
+
+        A refused turn or call waits for the episode's release. A group a returned turn
+        already captured stays for its step to report.
+        """
+        with self._lock:
+            if task_id in self._episodes:
+                self._refused.setdefault(task_id, threading.Event())
+        self._held_egress.refuse(task_id)
+
+    def release_episode(self, task_id: str) -> None:
+        """End the episode's turns and model calls waiting on a permit or its
+        release."""
+        with self._lock:
+            ctx = self._episodes.pop(task_id, None)
+            released = self._refused.pop(task_id, None)
+        if released is not None:
+            released.set()
+        self._held_egress.release(task_id)
+        if ctx is not None:
+            self._held_egress.close(task_id, ctx.token)
 
     def take_captured_group(self, task_id: str) -> FacadeTurnGroup | None:
         """Return and clear the facade group captured on this episode's last turn."""
@@ -141,12 +182,12 @@ class ResponsesFacade:
         self._log.info("responses facade serving on %s", self.base_url())
         return self._port
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> None:
         if (server := self._server) is not None:
             server.shutdown()
             server.server_close()
         if (thread := self._serve_thread) is not None:
-            thread.join(timeout=5.0)
+            thread.join(timeout=timeout)
         self._server = None
         self._serve_thread = None
         self._port = None
@@ -176,11 +217,18 @@ class ResponsesFacade:
     def _episode_for(self, task_id: str, token: str | None) -> EpisodeContext:
         with self._lock:
             ctx = self._episodes.get(task_id)
+            refused = self._refused.get(task_id)
         if ctx is None:
             raise FacadeTurnError(f"no registered episode for {task_id}")
         if token != ctx.token:
             raise FacadeTurnError("episode token mismatch")
+        if refused is not None:
+            self._await_release(task_id, refused)
         return ctx
+
+    def _await_release(self, task_id: str, released: threading.Event) -> None:
+        released.wait(self._held_egress.timeout_sec)
+        raise FacadeTurnError(f"the episode {task_id} was given up")
 
     def _run_turn(
         self,
@@ -209,16 +257,28 @@ class ResponsesFacade:
             messages.append(_assistant_tool_calls(completion))
             # Every call the model emitted needs a result, or the next request carries
             # a dangling tool call the backend rejects: a call this turn will not run is
-            # answered as not-run rather than left unanswered.
+            # answered as not-run rather than left unanswered. A turn given up runs no
+            # further command.
             for call in completion.tool_calls:
-                if call in local and ran < _MAX_TURN_COMMANDS:
+                if (
+                    call in local
+                    and ran < _MAX_TURN_COMMANDS
+                    and self._holds_turn(task_id, ctx)
+                ):
                     ran += 1
                     messages.append(_tool_result(call, self._run_command(ctx, call)))
                 else:
                     messages.append(_tool_result(call, _DEFERRED))
         # Unreachable: a round that does not return runs at least one command, so the
-        # command bound trips before the round bound does.
+        # command bound trips before the round bound does, unless its episode was given
+        # up, whose next round's egress is refused.
         raise FacadeTurnError("held turn exhausted its command rounds")
+
+    def _holds_turn(self, task_id: str, ctx: EpisodeContext) -> bool:
+        """Whether the turn's episode is still registered with its context and not
+        being given up."""
+        with self._lock:
+            return self._episodes.get(task_id) is ctx and task_id not in self._refused
 
     def _run_command(self, ctx: EpisodeContext, call: ModelToolCall) -> str:
         """Run one local command and render its result for the model."""
@@ -269,7 +329,7 @@ class ResponsesFacade:
         correlation = (
             f"model:{base}" if not round_index else f"model:{base}:{round_index}"
         )
-        result = self._held_egress.run(task_id, correlation, request)
+        result = self._held_egress.run(task_id, correlation, request, ctx.token)
         if isinstance(result, HeldEgressReject):
             raise FacadeTurnError(f"held model egress rejected: {result.reason}")
         return result
@@ -286,10 +346,20 @@ class ResponsesFacade:
         capture = build_facade_capture(
             task_id, facade_calls, list(ctx.descriptors), base
         )
-        for correlation, request in capture.stashes:
-            self._pending.put(task_id, correlation, request)
         with self._lock:
-            self._captured[task_id] = capture.group
+            # A turn that returns after its step ended, or while it is being given up,
+            # has no step to report the group, so it stashes nothing that would outlive
+            # it.
+            ended = self._episodes.get(task_id) is not ctx
+            refused = self._refused.get(task_id)
+            if not ended and refused is None:
+                for correlation, request in capture.stashes:
+                    self._pending.put(task_id, correlation, request)
+                self._captured[task_id] = capture.group
+        if refused is not None:
+            self._await_release(task_id, refused)
+        if ended:
+            raise FacadeTurnError(f"the episode {task_id} ended before its turn")
         output: list[dict[str, Any]] = []
         if completion.content:
             output.append(message_output_item(completion.content))

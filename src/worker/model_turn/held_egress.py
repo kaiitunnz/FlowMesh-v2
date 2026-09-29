@@ -26,6 +26,9 @@ from ..egress import (
 )
 from .rendezvous import ModelTurnRendezvous, PermitDenied
 
+_CANCELLED = "the model turn was cancelled"
+_STALE = "the model turn's episode is no longer registered"
+
 ProposeFn = Callable[[AgentModelTurnProposal], None]
 
 
@@ -49,13 +52,50 @@ class HeldModelEgress:
         self._timeout_sec = timeout_sec
         self._log = logger or logging.getLogger("held-model-egress")
 
+    @property
+    def timeout_sec(self) -> float:
+        """How long a held turn waits on its permit."""
+        return self._timeout_sec
+
+    def refuse(self, task_id: str) -> None:
+        """Refuse an episode's later held turns, which wait for its release."""
+        self._rendezvous.refuse(task_id)
+
+    def release(self, task_id: str) -> None:
+        """End an episode's held turns awaiting a permit, and refuse its later ones."""
+        self._rendezvous.release(task_id, _CANCELLED)
+
+    def reopen(self, task_id: str, episode: str) -> None:
+        """Let the ``episode`` registration of a task run held turns, and no other."""
+        self._rendezvous.reopen(task_id, episode)
+
+    def close(self, task_id: str, episode: str) -> None:
+        """End the held turns of the ``episode`` registration."""
+        self._rendezvous.close(task_id, episode)
+
     def run(
-        self, task_id: str, call_correlation: str, request: ModelRequest
+        self,
+        task_id: str,
+        call_correlation: str,
+        request: ModelRequest,
+        episode: str,
     ) -> ModelCompletion | HeldEgressReject:
-        """Authorize and egress one held model turn, returning its whole reply."""
+        """Authorize and egress one held model turn of the ``episode`` registration,
+        returning its whole reply."""
         digest = model_request_digest(request.interface, request.url, request.body)
-        with self._rendezvous.register(task_id, call_correlation) as waiter:
-            self._pending.put(task_id, call_correlation, request)
+        with self._rendezvous.register(
+            task_id,
+            call_correlation,
+            episode,
+            lambda: self._pending.put(task_id, call_correlation, request),
+        ) as waiter:
+            if waiter.stale:
+                return HeldEgressReject(reason=_STALE)
+            if waiter.refused:
+                # Answered only once the episode is released, after its harness exited,
+                # so the harness never ends its turn on the refusal.
+                waiter.await_permit(self._timeout_sec)
+                return HeldEgressReject(reason=_CANCELLED)
             try:
                 self._propose(
                     AgentModelTurnProposal(
@@ -66,7 +106,7 @@ class HeldModelEgress:
                 )
             except Exception as exc:  # noqa: BLE001 - a propose fault fails the turn
                 self._log.warning("held model propose failed: %s", exc)
-                self._pending.delete(task_id, call_correlation)
+                self._pending.discard(task_id, call_correlation, request)
                 return HeldEgressReject(reason="could not propose the model turn")
             try:
                 delivery = waiter.await_permit(self._timeout_sec)
@@ -76,4 +116,4 @@ class HeldModelEgress:
                     return HeldEgressReject(reason=delivery.reason)
                 return self._sidecar.egress_now(delivery)
             finally:
-                self._pending.delete(task_id, call_correlation)
+                self._pending.discard(task_id, call_correlation, request)

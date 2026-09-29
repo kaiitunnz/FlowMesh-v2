@@ -11,6 +11,7 @@ so a permit that never arrives, a denial, or a cancelled turn ends it rather tha
 import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
@@ -23,6 +24,9 @@ _BoundaryKey = tuple[str, str]
 # permit that arrives once the held turn has already timed out is still identified as a
 # stale held-turn permit rather than a durable-yield one.
 _HELD_KEY_TTL_SEC = 300.0
+# How many given-up episodes stay refused; one given up this long ago has no harness
+# left to make a call.
+_MAX_REFUSED_EPISODES = 1024
 
 
 @dataclass(frozen=True)
@@ -44,16 +48,44 @@ class ModelTurnRendezvous:
         # Occurrences a held waiter was registered for, retained past the waiter's exit
         # so a late permit is still known as a held-turn permit; expiry epoch per key.
         self._held: dict[_BoundaryKey, float] = {}
+        # Episodes refused until they reopen, so a held turn's later round cannot arm a
+        # waiter and propose once its episode is being given up; a released one's
+        # waiters are armed already denied with the reason recorded here.
+        self._refused: dict[str, str | None] = {}
+        # The registration each open episode's held turns run under; a turn of any
+        # other registration of the task is stale.
+        self._open: dict[str, str] = {}
 
-    def register(self, agent_task_id: str, call_correlation: str) -> "PermitWaiter":
-        """Arm a waiter for one held occurrence before its propose is emitted."""
+    def register(
+        self,
+        agent_task_id: str,
+        call_correlation: str,
+        episode: str,
+        on_armed: Callable[[], None],
+    ) -> "PermitWaiter":
+        """Arm a waiter for one held occurrence of the ``episode`` registration
+        before its propose is emitted, running ``on_armed`` as it is armed.
+
+        A released episode's turn gets a waiter already denied, and a turn of a
+        registration no longer open gets a stale one; neither arms anything, so it can
+        neither take a live turn's waiter nor stash over its request. A refused
+        episode's waiter is armed refused, without running ``on_armed``.
+        """
         key = (agent_task_id, call_correlation)
         box: queue.Queue[PermitDelivery] = queue.Queue(maxsize=1)
         with self._lock:
+            if (reason := self._refused.get(agent_task_id)) is not None:
+                box.put_nowait(PermitDenied(reason=reason))
+                return PermitWaiter(self, key, box, refused=True)
+            if self._open.get(agent_task_id) != episode:
+                return PermitWaiter(self, key, box, stale=True)
             self._prune_held_locked()
             self._waiters[key] = box
             self._held[key] = time.monotonic() + _HELD_KEY_TTL_SEC
-        return PermitWaiter(self, key, box)
+            refused = agent_task_id in self._refused
+            if not refused:
+                on_armed()
+        return PermitWaiter(self, key, box, refused=refused)
 
     def has_waiter(self, agent_task_id: str, call_correlation: str) -> bool:
         """Whether a held facade is waiting on this occurrence's permit."""
@@ -78,8 +110,11 @@ class ModelTurnRendezvous:
             self._held.pop(key, None)
 
     def deliver_permit(self, permit: MediatedOperationPermit) -> bool:
-        """Wake the held facade with its permit; False if no waiter is armed."""
-        return self._deliver((permit.agent_task_id, permit.call_correlation), permit)
+        """Wake the held facade with its permit; False if no waiter is armed or the
+        episode is refused, which egresses nothing once it is being given up."""
+        return self._deliver(
+            (permit.agent_task_id, permit.call_correlation), permit, refusable=True
+        )
 
     def deliver_deny(
         self, agent_task_id: str, call_correlation: str, reason: str
@@ -89,8 +124,50 @@ class ModelTurnRendezvous:
             (agent_task_id, call_correlation), PermitDenied(reason=reason)
         )
 
-    def _deliver(self, key: _BoundaryKey, delivery: PermitDelivery) -> bool:
+    def refuse(self, agent_task_id: str) -> None:
+        """Arm the episode's later waiters refused until it reopens."""
         with self._lock:
+            self._refuse_locked(agent_task_id, self._refused.get(agent_task_id))
+
+    def release(self, agent_task_id: str, reason: str) -> None:
+        """Wake every held waiter of one episode with a terminal denial, and deny the
+        waiters it arms until it reopens."""
+        with self._lock:
+            self._refuse_locked(agent_task_id, reason)
+            boxes = [
+                box for key, box in self._waiters.items() if key[0] == agent_task_id
+            ]
+        for box in boxes:
+            try:
+                box.put_nowait(PermitDenied(reason=reason))
+            except queue.Full:
+                pass
+
+    def reopen(self, agent_task_id: str, episode: str) -> None:
+        """Open the ``episode`` registration of a task, whose held turns alone arm
+        waiters from now on."""
+        with self._lock:
+            self._open[agent_task_id] = episode
+            self._refused.pop(agent_task_id, None)
+
+    def close(self, agent_task_id: str, episode: str) -> None:
+        """Close the ``episode`` registration, if it is still the task's open one."""
+        with self._lock:
+            if self._open.get(agent_task_id) == episode:
+                del self._open[agent_task_id]
+
+    def _refuse_locked(self, agent_task_id: str, reason: str | None) -> None:
+        self._refused.pop(agent_task_id, None)
+        self._refused[agent_task_id] = reason
+        while len(self._refused) > _MAX_REFUSED_EPISODES:
+            del self._refused[next(iter(self._refused))]
+
+    def _deliver(
+        self, key: _BoundaryKey, delivery: PermitDelivery, refusable: bool = False
+    ) -> bool:
+        with self._lock:
+            if refusable and key[0] in self._refused:
+                return False
             box = self._waiters.get(key)
         if box is None:
             return False
@@ -100,9 +177,11 @@ class ModelTurnRendezvous:
             return False
         return True
 
-    def _discard(self, key: _BoundaryKey) -> None:
+    def _discard(self, key: _BoundaryKey, box: "queue.Queue[PermitDelivery]") -> None:
+        # A later waiter for the same occurrence may have replaced this one.
         with self._lock:
-            self._waiters.pop(key, None)
+            if self._waiters.get(key) is box:
+                del self._waiters[key]
 
 
 class PermitWaiter:
@@ -113,10 +192,14 @@ class PermitWaiter:
         rendezvous: ModelTurnRendezvous,
         key: _BoundaryKey,
         box: "queue.Queue[PermitDelivery]",
+        refused: bool = False,
+        stale: bool = False,
     ) -> None:
         self._rendezvous = rendezvous
         self._key = key
         self._box = box
+        self.refused = refused
+        self.stale = stale
 
     def __enter__(self) -> Self:
         return self
@@ -127,7 +210,7 @@ class PermitWaiter:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self._rendezvous._discard(self._key)
+        self._rendezvous._discard(self._key, self._box)
 
     def await_permit(self, timeout: float) -> PermitDelivery | None:
         """Block for the permit or denial; None on timeout. Waiter clears on exit."""

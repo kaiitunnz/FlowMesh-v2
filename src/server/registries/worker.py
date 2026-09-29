@@ -1,6 +1,8 @@
 import json
+import logging
 from collections.abc import Iterable, Sequence
-from typing import Any
+from enum import StrEnum
+from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +38,120 @@ from ..clients.redis import (
     worker_hb_key,
     worker_key,
 )
+
+logger = logging.getLogger(__name__)
+
+# A write for a worker that is no longer a set member must not recreate a partial
+# record. A read-then-write cannot promise that, since the watchdog can reap
+# between the two calls; these run the membership test and the write as one
+# atomic Redis call and report whether the write landed.
+#
+# The worker is the authority on its own status, and the dispatcher's reservation
+# fences it: reserving a worker for a dispatch records that dispatch, and an IDLE the
+# worker reports applies only when it names the reserved dispatch, which it clears.
+# An IDLE for an earlier dispatch is fenced and returns the reservation, so it can
+# never free a worker a dispatch is still on its way to. A BUSY always applies and
+# never moves the reservation. The status last reported is kept, fenced or not, so a
+# release returns the worker to it.
+_REPORT_STATUS_IF_REGISTERED = """
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+    return {0}
+end
+if ARGV[3] ~= '' then
+    redis.call('SETEX', KEYS[3], ARGV[3], ARGV[2])
+end
+redis.call('HSET', KEYS[2], 'last_seen', ARGV[2])
+if ARGV[4] == '' then
+    return {1}
+end
+redis.call('HSET', KEYS[2], 'reported_status', ARGV[4])
+if ARGV[4] == 'IDLE' then
+    local reserved = redis.call('HGET', KEYS[2], 'reserved_dispatch')
+    if reserved and reserved ~= ARGV[5] then
+        return {2, reserved, redis.call('HGET', KEYS[2], 'reserved_task') or ''}
+    end
+    redis.call('HDEL', KEYS[2], 'reserved_dispatch', 'reserved_task')
+end
+redis.call('HSET', KEYS[2], 'status', ARGV[4])
+if #ARGV > 5 then
+    redis.call('HSET', KEYS[2], unpack(ARGV, 6))
+end
+return {1}
+"""
+
+_RESERVE_IF_REGISTERED = """
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+    return 0
+end
+redis.call('HSET', KEYS[2], 'status', 'BUSY', 'last_seen', ARGV[2],
+    'reserved_dispatch', ARGV[3], 'reserved_task', ARGV[4])
+return 1
+"""
+
+_RELEASE_IF_RESERVED = """
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+    return ''
+end
+if redis.call('HGET', KEYS[2], 'reserved_dispatch') ~= ARGV[3] then
+    return ''
+end
+local status = redis.call('HGET', KEYS[2], 'reported_status') or 'IDLE'
+redis.call('HSET', KEYS[2], 'status', status, 'last_seen', ARGV[2])
+redis.call('HDEL', KEYS[2], 'reserved_dispatch', 'reserved_task')
+return status
+"""
+
+_SET_FIELDS_IF_REGISTERED = """
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+    return 0
+end
+redis.call('HSET', KEYS[2], unpack(ARGV, 2))
+return 1
+"""
+
+# A heartbeat key with no TTL left (missing, or never given one) is a stale worker.
+_REAP_IF_STALE = """
+if redis.call('TTL', KEYS[3]) >= 0 then
+    return 0
+end
+redis.call('SREM', KEYS[1], ARGV[1])
+redis.call('DEL', KEYS[2], KEYS[3])
+return 1
+"""
+
+
+class ReportOutcome(StrEnum):
+    """How the registry took a worker's report of its status."""
+
+    APPLIED = "applied"
+    UNKNOWN = "unknown"
+    FENCED = "fenced"
+
+
+class StatusReport(NamedTuple):
+    """A worker's status report as the registry took it; a fenced IDLE names the
+    dispatch the worker is reserved for."""
+
+    outcome: ReportOutcome
+    reserved_task: str | None = None
+    reserved_dispatch: str | None = None
+
+
+class Reservation(NamedTuple):
+    """A worker reserved for a dispatch of a task."""
+
+    worker_id: str
+    task_id: str
+    dispatch_id: str
+
+
+def _flatten_fields(mapping: dict[str, str]) -> list[str]:
+    """Flatten a hash mapping into the field/value ARGV tail HSET expects."""
+    flat: list[str] = []
+    for field, value in mapping.items():
+        flat.append(field)
+        flat.append(value)
+    return flat
 
 
 class Worker(BaseModel):
@@ -131,19 +247,16 @@ class WorkerRegistry:
             await pipe.execute()
         return worker_id
 
-    def update_worker_hb(self, worker_id: str, ts: str, ttl_sec: int) -> None:
-        with self._rds.sync.control_pipeline() as pipe:
-            pipe.setex(worker_hb_key(worker_id), ttl_sec, ts)
-            pipe.hset(worker_key(worker_id), mapping={"last_seen": ts})
-            pipe.execute()
-
-    async def update_worker_hb_async(
-        self, worker_id: str, ts: str, ttl_sec: int
-    ) -> None:
-        async with self._rds.asyncio.control_pipeline() as pipe:
-            pipe.setex(worker_hb_key(worker_id), ttl_sec, ts)
-            pipe.hset(worker_key(worker_id), mapping={"last_seen": ts})
-            await pipe.execute()
+    def update_worker_hb(
+        self,
+        worker_id: str,
+        ts: str,
+        ttl_sec: int,
+        status: WorkerStatus | None = None,
+        dispatch_id: str | None = None,
+    ) -> StatusReport:
+        """Record a worker's heartbeat, and the status it carries when it has one."""
+        return self._report_status(worker_id, ts, str(ttl_sec), status, dispatch_id, {})
 
     def set_worker_status(
         self,
@@ -151,27 +264,128 @@ class WorkerRegistry:
         status: WorkerStatus,
         ts: str,
         extra: dict[str, Any] | None,
-    ) -> None:
-        mapping = {"status": status.value, "last_seen": ts}
-        if extra:
-            mapping.update({f"extra_{k}": str(v) for k, v in extra.items()})
-        with self._rds.sync.control_pipeline() as pipe:
-            pipe.hset(worker_key(worker_id), mapping=mapping)
-            pipe.execute()
+        dispatch_id: str | None = None,
+    ) -> StatusReport:
+        """Record the status a worker reports, with the dispatch it concerns."""
+        fields = {f"extra_{k}": str(v) for k, v in (extra or {}).items()}
+        return self._report_status(worker_id, ts, "", status, dispatch_id, fields)
 
-    async def set_worker_status_async(
+    def _report_status(
         self,
         worker_id: str,
-        status: WorkerStatus,
         ts: str,
-        extra: dict[str, Any] | None = None,
-    ) -> None:
-        mapping = {"status": status.value, "last_seen": ts}
-        if extra:
-            mapping.update({f"extra_{k}": str(v) for k, v in extra.items()})
-        async with self._rds.asyncio.control_pipeline() as pipe:
-            pipe.hset(worker_key(worker_id), mapping=mapping)
-            await pipe.execute()
+        ttl: str,
+        status: WorkerStatus | None,
+        dispatch_id: str | None,
+        fields: dict[str, str],
+    ) -> StatusReport:
+        reply = self._rds.sync.eval(
+            _REPORT_STATUS_IF_REGISTERED,
+            3,
+            WORKERS_SET_KEY,
+            worker_key(worker_id),
+            worker_hb_key(worker_id),
+            worker_id,
+            ts,
+            ttl,
+            status.value if status is not None else "",
+            dispatch_id or "",
+            *_flatten_fields(fields),
+        )
+        match int(reply[0]):
+            case 0:
+                return StatusReport(ReportOutcome.UNKNOWN)
+            case 2:
+                return StatusReport(
+                    ReportOutcome.FENCED, _text(reply[2]) or None, _text(reply[1])
+                )
+        return StatusReport(ReportOutcome.APPLIED)
+
+    def reserve_worker(self, worker_id: str, task_id: str, dispatch_id: str) -> bool:
+        """Mark a worker BUSY for a dispatch about to be published to it; returns
+        whether the worker is registered."""
+        ts = now_iso()
+        reserved = self._rds.sync.eval(
+            _RESERVE_IF_REGISTERED,
+            2,
+            WORKERS_SET_KEY,
+            worker_key(worker_id),
+            worker_id,
+            ts,
+            dispatch_id,
+            task_id,
+        )
+        if not int(reserved):
+            return False
+        self._announce_status(worker_id, WorkerStatus.BUSY, ts)
+        return True
+
+    def release_worker(self, worker_id: str, dispatch_id: str) -> bool:
+        """Return a worker still reserved for ``dispatch_id`` to the status it last
+        reported, IDLE if none; returns whether it was reserved for it."""
+        ts = now_iso()
+        released = _text(
+            self._rds.sync.eval(
+                _RELEASE_IF_RESERVED,
+                2,
+                WORKERS_SET_KEY,
+                worker_key(worker_id),
+                worker_id,
+                ts,
+                dispatch_id,
+            )
+        )
+        if not released:
+            return False
+        self._announce_status(worker_id, WorkerStatus(released), ts)
+        return True
+
+    def _announce_status(self, worker_id: str, status: WorkerStatus, ts: str) -> None:
+        """Announce a status the registry stored; a failed announcement leaves the
+        stored status as it is."""
+        payload = {
+            "type": "STATUS",
+            "worker_id": worker_id,
+            "status": status.value,
+            "ts": ts,
+            "origin": "server",
+        }
+        try:
+            self._rds.sync.publish_telemetry(
+                WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to announce worker %s as %s: %s", worker_id, status, exc
+            )
+
+    def reservations(self) -> list[Reservation]:
+        """Every registered worker's reservation."""
+        worker_ids = sorted(self.get_worker_ids())
+        with self._rds.sync.control_pipeline() as pipe:
+            for worker_id in worker_ids:
+                pipe.hmget(
+                    worker_key(worker_id), ["reserved_task", "reserved_dispatch"]
+                )
+            replies = pipe.execute()
+        return [
+            Reservation(worker_id, _text(task_id), _text(dispatch_id))
+            for worker_id, (task_id, dispatch_id) in zip(worker_ids, replies)
+            if task_id and dispatch_id
+        ]
+
+    def reap_stale_worker(self, worker_id: str) -> bool:
+        """Delete a worker's record while its heartbeat is stale; returns whether it
+        was deleted."""
+        reaped = self._rds.sync.eval(
+            _REAP_IF_STALE,
+            3,
+            WORKERS_SET_KEY,
+            worker_key(worker_id),
+            worker_hb_key(worker_id),
+            worker_id,
+        )
+        return bool(int(reaped))
 
     def unregister_workers(self, *worker_ids: str) -> None:
         with self._rds.sync.control_pipeline() as pipe:
@@ -245,39 +459,6 @@ class WorkerRegistry:
     async def worker_exists_async(self, worker_id: str) -> bool:
         return await self._rds.asyncio.exists(worker_key(worker_id))
 
-    def update_worker_status(self, worker_id: str, status: WorkerStatus) -> None:
-        ts = now_iso()
-        payload = {
-            "type": "STATUS",
-            "worker_id": worker_id,
-            "status": status.value,
-            "ts": ts,
-        }
-        self._rds.sync.hash_set(
-            worker_key(worker_id), {"status": status.value, "last_seen": ts}
-        )
-        self._rds.sync.publish_telemetry(
-            WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
-        )
-
-    async def update_worker_status_async(
-        self, worker_id: str, status: WorkerStatus
-    ) -> None:
-        ts = now_iso()
-        payload = {
-            "type": "STATUS",
-            "worker_id": worker_id,
-            "status": status.value,
-            "ts": ts,
-        }
-        await self._rds.asyncio.hash_set(
-            worker_key(worker_id),
-            {"status": status.value, "last_seen": ts},
-        )
-        await self._rds.asyncio.publish_telemetry(
-            WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
-        )
-
     def list_workers(self) -> list[WorkerInfo]:
         results: list[WorkerInfo] = []
         for worker_id in self.get_worker_ids():
@@ -327,9 +508,6 @@ class WorkerRegistry:
         if not models_list and not datasets_list:
             return
 
-        if not self.worker_exists(worker_id):
-            return
-
         try:
             current_models_json, current_datasets_json = self._rds.sync.hash_mget(
                 worker_key(worker_id), ["cache_models_json", "cache_datasets_json"]
@@ -373,7 +551,7 @@ class WorkerRegistry:
             return
 
         try:
-            self._rds.sync.hash_set(worker_key(worker_id), mapping)
+            self._set_worker_fields(worker_id, mapping)
         except Exception:
             return
 
@@ -477,8 +655,23 @@ class WorkerRegistry:
         channel = node_dispatch_channel(worker.node_id)
         return await self._rds.asyncio.publish_control(channel, message)
 
+    def _set_worker_fields(self, worker_id: str, mapping: dict[str, str]) -> bool:
+        wrote = self._rds.sync.eval(
+            _SET_FIELDS_IF_REGISTERED,
+            2,
+            WORKERS_SET_KEY,
+            worker_key(worker_id),
+            worker_id,
+            *_flatten_fields(mapping),
+        )
+        return bool(int(wrote))
+
 
 # --- Helper functions --- #
+
+
+def _text(value: bytes | str) -> str:
+    return value.decode() if isinstance(value, bytes) else value
 
 
 def _normalize_cache_value(value: str) -> str | None:

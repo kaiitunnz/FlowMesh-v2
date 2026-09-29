@@ -27,7 +27,10 @@ Contract:
 """
 
 import json
+import threading
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
@@ -79,6 +82,73 @@ class ExecutionError(RuntimeError):
 
 class TaskCancelledError(RuntimeError):
     """Raised when a task is explicitly cancelled while running."""
+
+
+class RunSignals:
+    """Cancel and stop requests for the task an executor is running.
+
+    A request names its task, so one that lands after its task ended never reaches
+    the next task the executor runs.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._running: str | None = None
+        self._cancels: set[str] = set()
+        self._stops: set[str] = set()
+
+    @contextmanager
+    def running(self, task_id: str) -> Iterator[None]:
+        with self._lock:
+            self._running = task_id
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._running = None
+                self._cancels.clear()
+                self._stops.clear()
+
+    def cancel(self, task_id: str) -> bool:
+        """Request a cancel; returns whether the task is running."""
+        with self._lock:
+            self._cancels.add(task_id)
+            return task_id == self._running
+
+    def stop(self, task_id: str) -> bool:
+        """Request a graceful stop; returns whether the task is running."""
+        with self._lock:
+            self._stops.add(task_id)
+            return task_id == self._running
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._running is not None and self._running in self._cancels
+
+    @property
+    def stopped(self) -> bool:
+        with self._lock:
+            return self._running is not None and self._running in self._stops
+
+    @property
+    def interrupted(self) -> bool:
+        """Whether the running task is cancelled or stopped."""
+        with self._lock:
+            return self._running is not None and (
+                self._running in self._cancels or self._running in self._stops
+            )
+
+    def raise_if_cancelled(self) -> bool:
+        """Raise `TaskCancelledError` if the running task is cancelled; returns whether
+        it is stopped."""
+        with self._lock:
+            running = self._running
+            if running is None:
+                return False
+            if running in self._cancels:
+                raise TaskCancelledError(f"Task {running} cancelled")
+            return running in self._stops
 
 
 class Executor(ABC):

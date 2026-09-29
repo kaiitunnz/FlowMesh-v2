@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from server.config import OrchestrationConfig, WebSearchConfig
 from server.orchestration.state import (
     BoundaryEvent,
@@ -477,7 +479,6 @@ def test_the_codex_sandbox_backs_the_facade_tool_filter() -> None:
     # filter; this config is the second line behind it, so anything that starts anyway
     # runs confined and without network. Guarded so the test does not couple to the
     # optional runtime-harness-codex dependency.
-    import pytest
 
     pytest.importorskip("openai_codex")
     from worker.executors.harness.codex_transport import CodexTransportConfig

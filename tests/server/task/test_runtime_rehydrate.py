@@ -163,6 +163,12 @@ class _WorkerRegistryStub:
     def publish_interrupt(self, *args: Any) -> int:
         return 0
 
+    def release_worker(self, *args: Any) -> bool:
+        return False
+
+    def reservations(self) -> list[Any]:
+        return []
+
 
 def _runtime(registry: FakeWorkflowRegistry) -> TaskRuntime:
     return TaskRuntime(
@@ -386,7 +392,7 @@ async def test_recover_clears_rehydrated_protection() -> None:
 
     restored = _runtime(registry)
     await restored.rehydrate()
-    assert restored.recover_tasks_for_worker("wkr-7") == [a]
+    assert restored.recover_tasks_for_worker("wkr-7", spend_attempt=True).lost == [a]
     assert restored.has_rehydrated_in_flight("wkr-7", 600.0) is False
 
 
@@ -520,9 +526,10 @@ async def test_mark_cancelled_applies_in_memory_atomically_when_persist_raises(
 ) -> None:
     registry = FakeWorkflowRegistry()
     runtime = _runtime(registry)
-    _, ids = await _register(runtime, GRAPH)
+    workflow_id, ids = await _register(runtime, GRAPH)
     a = ids["a"]
     record_dispatch(runtime, a)
+    runtime.cancel_workflow(workflow_id)
 
     def boom(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("redis down")
@@ -548,9 +555,10 @@ async def test_mark_cancelled_repersists_on_replay_after_failed_write(
 ) -> None:
     registry = FakeWorkflowRegistry()
     runtime = _runtime(registry)
-    _, ids = await _register(runtime, GRAPH)
+    workflow_id, ids = await _register(runtime, GRAPH)
     a = ids["a"]
     record_dispatch(runtime, a)
+    runtime.cancel_workflow(workflow_id)
 
     real_commit = registry.commit_transition
     calls = {"n": 0}
@@ -571,7 +579,7 @@ async def test_mark_cancelled_repersists_on_replay_after_failed_write(
     # Attempt 1: cancellation applies in memory, but the durable write fails.
     with pytest.raises(RuntimeError):
         runtime.mark_cancelled(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
-    assert persisted_status(a) == TaskStatus.DISPATCHED
+    assert persisted_status(a) == TaskStatus.CANCELLING
 
     # Replay of the same cancellation: the guard heals by re-persisting.
     runtime.mark_cancelled(a, "wkr-1", {}, "2026-06-01T00:00:00Z")

@@ -233,6 +233,10 @@ class RealCodexAppServerTransport:
         self._client: CodexClient | None = None
         self._finalizer: weakref.finalize | None = None
         self._fresh_thread = False
+        # Orders a connect against a close, so a close that lands while the app-server
+        # spawns still reaps what the spawn started.
+        self._lock = threading.Lock()
+        self._closed = False
 
     @property
     def client(self) -> CodexClient:
@@ -249,7 +253,11 @@ class RealCodexAppServerTransport:
         return proc.pid
 
     def _connect(self) -> CodexClient:
-        if self._client is None:
+        with self._lock:
+            if self._client is not None:
+                return self._client
+            if self._closed:
+                raise CodexTransportError("the Codex app-server was closed")
             self._config.codex_home.mkdir(parents=True, exist_ok=True)
             client = CodexClient(self._config.to_codex_config())
             # Arm teardown before the process spawns, so a failure during start or
@@ -257,9 +265,13 @@ class RealCodexAppServerTransport:
             self._finalizer = weakref.finalize(self, _close_client, client)
             with clean_launch_environ():
                 client.start()
-            client.initialize()
+        # A close during initialize ends the process, which fails the handshake.
+        client.initialize()
+        with self._lock:
+            if self._closed:
+                raise CodexTransportError("the Codex app-server was closed")
             self._client = client
-        return self._client
+        return client
 
     def thread_start(self) -> str:
         self._fresh_thread = True
@@ -334,11 +346,14 @@ class RealCodexAppServerTransport:
                     kind="completed", value=agent_texts[-1] if agent_texts else ""
                 )
 
-    def cancel(self, thread_id: str) -> None:
+    def cancel(self, thread_id: str | None) -> None:
         self.close()
 
     def close(self) -> None:
-        if self._finalizer is not None:
-            self._finalizer()
-            self._finalizer = None
-        self._client = None
+        # Held through the exit, so a concurrent close returns only once it happened.
+        with self._lock:
+            self._closed = True
+            finalizer, self._finalizer = self._finalizer, None
+            self._client = None
+            if finalizer is not None:
+                finalizer()

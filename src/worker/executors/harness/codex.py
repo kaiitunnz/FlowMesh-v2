@@ -15,6 +15,7 @@ maps to its ``idempotency_key`` and injects at most once, so a settled effect ne
 double-applies on a resume.
 """
 
+import threading
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -41,6 +42,13 @@ from worker.private_state import MaterializedState
 
 _BACKEND = "codex"
 _CODEX_ADAPTER_VERSION = "v1"
+
+
+class CodexTurnCancelled(RuntimeError):
+    """A cancel landed before the activation's turn started."""
+
+    def __init__(self, activation_id: str) -> None:
+        super().__init__(f"the Codex turn for {activation_id} was cancelled")
 
 
 class CodexEvent(BaseModel):
@@ -74,7 +82,9 @@ class CodexAppServerTransport(Protocol):
     ) -> None: ...
     def turn_start(self, thread_id: str) -> str: ...
     def next_event(self, thread_id: str, turn_id: str) -> CodexEvent: ...
-    def cancel(self, thread_id: str) -> None: ...
+    def cancel(self, thread_id: str | None) -> None:
+        """Abandon the thread's turn, or with no thread yet, the start opening one."""
+        ...
 
 
 class _CodexState(BaseModel):
@@ -97,6 +107,11 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
         self._transport = transport
         self._version = version
         self._sandbox = sandbox
+        self._lock = threading.Lock()
+        self._cancelled: set[str] = set()
+        # The thread of the step in flight, per activation, which a cancel interrupts;
+        # None while the step is still starting or resuming it.
+        self._threads: dict[str, str | None] = {}
 
     def backend_key(self) -> HarnessBackendKey:
         return HarnessBackendKey(backend=_BACKEND, version=self._version)
@@ -113,20 +128,37 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
         capsule: HarnessCapsule | None,
         outcomes: Sequence[DeliveredOutcome],
     ) -> HarnessResult:
-        if capsule is None:
-            state = _CodexState(
-                thread_id=(tid := self._transport.thread_start()), rollout_ref=tid
-            )
-        else:
-            state = _CodexState.model_validate_json(capsule.blob)
-            self._transport.thread_resume(state.thread_id, state.rollout_ref)
-        self._inject(state, outcomes)
-        turn_id = self._transport.turn_start(state.thread_id)
-        event = self._transport.next_event(state.thread_id, turn_id)
+        with self._lock:
+            self._threads[activation_id] = None
+        try:
+            if capsule is None:
+                state = _CodexState(
+                    thread_id=(tid := self._transport.thread_start()), rollout_ref=tid
+                )
+            else:
+                state = _CodexState.model_validate_json(capsule.blob)
+                self._transport.thread_resume(state.thread_id, state.rollout_ref)
+            with self._lock:
+                cancelled = activation_id in self._cancelled
+                self._threads[activation_id] = state.thread_id
+            if cancelled:
+                raise CodexTurnCancelled(activation_id)
+            self._inject(state, outcomes)
+            turn_id = self._transport.turn_start(state.thread_id)
+            event = self._transport.next_event(state.thread_id, turn_id)
+        finally:
+            with self._lock:
+                self._threads.pop(activation_id, None)
+                self._cancelled.discard(activation_id)
         return self._on_event(state, event)
 
     def cancel(self, activation_id: str) -> None:
-        return None
+        # The app-server may still run a turn whose step already returned or raised,
+        # so the cancel ends it whether or not a step is in flight.
+        with self._lock:
+            self._cancelled.add(activation_id)
+            thread_id = self._threads.get(activation_id)
+        self._transport.cancel(thread_id)
 
     def _inject(self, state: _CodexState, outcomes: Sequence[DeliveredOutcome]) -> None:
         items: list[CodexInjectItem] = []
