@@ -550,8 +550,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   dropping the frames still queued and ending any task stream still reading it. A new
   `StreamTasks` on an id takes over the frames still queued, in order, and ends every
   older stream on that id, so a half-open stream receives nothing once the worker's new
-  stream attaches. A stream that ends makes the worker reconnect and resolve its
-  current id.
+  stream attaches. A worker whose task stream ends reconnects, and its new stream reads
+  the queue of the id its token then holds.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side.
