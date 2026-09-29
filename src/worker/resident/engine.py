@@ -216,16 +216,27 @@ class HttpEngineDelivery:
         """Issue every conversation concurrently and settle them together.
 
         The invocation carrying them settles whole, so one refused conversation fails it
-        rather than leaving the rest to be abandoned mid-flight. Results keep the order
-        the conversations were declared in, whatever order the engine finishes them.
+        rather than leaving the rest to be abandoned mid-flight. A conversation lost in
+        transport may still be generating on the engine, so it decides the batch's
+        failure over any definite one. Results keep the order the conversations were
+        declared in, whatever order the engine finishes them.
         """
         settled = await asyncio.gather(
             *(cls._post(client, url, body, headers) for body in bodies),
             return_exceptions=True,
         )
-        for outcome in settled:
-            if isinstance(outcome, BaseException):
-                raise outcome
+        failures = [
+            outcome for outcome in settled if isinstance(outcome, BaseException)
+        ]
+        if failures:
+            raise next(
+                (
+                    failure
+                    for failure in failures
+                    if isinstance(failure, httpx.TransportError | OSError)
+                ),
+                failures[0],
+            )
         return cast(list[dict[str, Any]], settled)
 
     @staticmethod

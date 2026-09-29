@@ -6,6 +6,7 @@ call; a definite engine 4xx is carried as a definite failure so the origin relea
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -295,6 +296,33 @@ def test_a_request_the_replica_cannot_build_fails_definite() -> None:
     outcome = asyncio.run(_stream_outcome(_http_engine(reply), malformed_batch))
     assert outcome is not None and outcome["kind"] == KIND_FAILED
     assert outcome["definite"] is True
+
+
+def _batch(*prompts: str) -> str:
+    return json.dumps([{"messages": [{"role": "user", "content": p}]} for p in prompts])
+
+
+def _per_conversation(request: httpx.Request) -> httpx.Response:
+    prompt = json.loads(request.content)["messages"][-1]["content"]
+    if prompt == "lost":
+        raise httpx.ReadTimeout("engine stalled", request=request)
+    if prompt == "refused":
+        return httpx.Response(400, json={"error": "bad request"})
+    return httpx.Response(200, text="not json")
+
+
+@pytest.mark.parametrize("definite", ["refused", "unreadable"])
+@pytest.mark.parametrize("lost_first", [True, False])
+def test_a_batch_with_a_lost_conversation_is_not_a_definite_failure(
+    definite: str, lost_first: bool
+) -> None:
+    # The lost conversation may still be generating, so the boundary holds its credit
+    # whichever order the conversations were declared in.
+    prompts = ("lost", definite) if lost_first else (definite, "lost")
+    outcome = asyncio.run(
+        _stream_outcome(_http_engine(_per_conversation), _batch(*prompts))
+    )
+    assert outcome is None or outcome.get("definite") is False
 
 
 def test_an_unreachable_engine_is_not_a_definite_failure() -> None:
