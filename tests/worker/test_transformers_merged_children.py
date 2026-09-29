@@ -11,6 +11,7 @@ pytest.importorskip("torch", reason="torch not installed (needs --extra inferenc
 
 import torch
 from pydantic import TypeAdapter
+from transformers import GPT2Config, GPT2LMHeadModel
 
 from shared.schemas.result import InferenceResult
 from shared.tasks import MergedChildTaskStrict, TaskSpecStrict
@@ -108,11 +109,13 @@ def _run(
     results_dir: Path,
     tokenizer: Any = None,
     task_id: str = "tsk-a",
-) -> tuple[InferenceResult, MagicMock]:
+    model: Any = None,
+) -> tuple[InferenceResult, Any]:
     executor = HFTransformersExecutor(DEFAULT_WORKER_CONFIG)
     executor._tok = tokenizer or _Tokenizer()  # type: ignore[assignment]
-    model = MagicMock()
-    model.generate.side_effect = _generate
+    if model is None:
+        model = MagicMock()
+        model.generate.side_effect = _generate
     executor._model = model
     executor._device = "cpu"
     executor._model_name = "org/model"
@@ -304,6 +307,21 @@ def test_a_failed_generation_fails_the_dispatch(tmp_path: Path) -> None:
     with patch(f"{__name__}._generate", side_effect=RuntimeError("engine")):
         with pytest.raises(RuntimeError, match="engine"):
             _run(_spec("alpha"), [_child("tsk-b", _spec("bravo"))], tmp_path)
+
+
+def test_a_zero_temperature_generates_greedily(tmp_path: Path) -> None:
+    torch.manual_seed(0)
+    model = GPT2LMHeadModel(
+        GPT2Config(n_layer=1, n_head=2, n_embd=16, vocab_size=128, eos_token_id=_EOS)
+    )
+    spec = _spec("a b c", inference={"temperature": 0, "max_new_tokens": 4})
+
+    runs = [
+        _run(spec, [], tmp_path / str(run), model=model)[0].items for run in range(2)
+    ]
+
+    assert runs[0] == runs[1]
+    assert len(runs[0]) == 1
 
 
 def test_the_parents_own_failure_fails_the_dispatch(tmp_path: Path) -> None:
