@@ -420,6 +420,19 @@ class AgentBindingConfig:
 
 
 @dataclass
+class N8nConfig:
+    """How an n8n submission's encrypted credentials are decrypted."""
+
+    credential_password: str = ""
+
+    @classmethod
+    def from_env(cls) -> "N8nConfig":
+        return cls(
+            credential_password=os.getenv("N8N_CREDENTIAL_AES_PASSWORD", "").strip()
+        )
+
+
+@dataclass
 class ModelSecretVaultConfig:
     """The durable vault backstop TTL for user-supplied model credentials.
 
@@ -773,6 +786,7 @@ class ServerConfig:
     content_store: ContentStoreConfig = field(default_factory=ContentStoreConfig)
     object_store: ObjectStoreConfig = field(default_factory=ObjectStoreConfig)
     telemetry_store: TelemetryStoreConfig = field(default_factory=TelemetryStoreConfig)
+    n8n: N8nConfig = field(default_factory=N8nConfig)
     results_dir: Path = Path("./results")
     plugins: list[str] = field(default_factory=list)
 
@@ -805,6 +819,7 @@ class ServerConfig:
             content_store=ContentStoreConfig.from_env(),
             object_store=ObjectStoreConfig.from_env(results_dir),
             telemetry_store=TelemetryStoreConfig.from_env(),
+            n8n=N8nConfig.from_env(),
             results_dir=results_dir,
             plugins=plugins,
         )

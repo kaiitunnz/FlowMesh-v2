@@ -89,7 +89,9 @@ class ParsedTask:
     v2: dict[str, Any] | None = None
 
 
-def parse_workflow(payload: str, format: str) -> ParsedWorkflow:
+def parse_workflow(
+    payload: str, format: str, n8n_credential_password: str = ""
+) -> ParsedWorkflow:
     match format:
         case "native":
             try:
@@ -108,7 +110,7 @@ def parse_workflow(payload: str, format: str) -> ParsedWorkflow:
                     "n8n payload must be a JSON object",
                 )
             try:
-                data = translate_n8n_workflow(payload_dict)
+                data = translate_n8n_workflow(payload_dict, n8n_credential_password)
             except Exception as exc:
                 raise ValueError(f"Failed to parse n8n workflow: {exc}")
         case _:

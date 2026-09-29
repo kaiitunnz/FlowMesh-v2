@@ -83,7 +83,7 @@ from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
 from shared.utils.ids import new_model_secret_ref
 
-from ..config import AgentBindingConfig, OrchestrationConfig
+from ..config import AgentBindingConfig, N8nConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
 from ..orchestration import (
     AcceptedInput,
@@ -593,6 +593,7 @@ class TaskRuntime:
         tracer: Tracer | None = None,
         telemetry: TelemetryConfig | None = None,
         content_scope_authority: Callable[[str, str], None] | None = None,
+        n8n: N8nConfig | None = None,
         redrive: Callable[
             [Callable[[str], None], logging.Logger], StoreRedriveScheduler
         ] = StoreRedriveScheduler,
@@ -606,6 +607,7 @@ class TaskRuntime:
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
         self._content_scope_authority = content_scope_authority
+        self._n8n_credential_password = (n8n or N8nConfig()).credential_password
         self._control = control if control is not None else NULL_CONTROL_TRACER
         self._tracer = tracer
         self._telemetry = telemetry
@@ -699,8 +701,11 @@ class TaskRuntime:
     # Registration & submission
     # ------------------------------------------------------------------ #
 
+    def _parse(self, payload: str, format: str) -> ParsedWorkflow:
+        return parse_workflow(payload, format, self._n8n_credential_password)
+
     def validate(self, payload: str, format: str = "native") -> list[TaskParsingResult]:
-        parsed_workflow = parse_workflow(payload, format)
+        parsed_workflow = self._parse(payload, format)
         specs = parsed_workflow.tasks
         results: list[TaskParsingResult] = []
         for entry in specs:
@@ -723,7 +728,7 @@ class TaskRuntime:
         Returns ``None`` for a non-v2 submission. Structural frontend errors raise
         ``CompileError``; semantic findings ride on the report's diagnostics.
         """
-        parsed_workflow = parse_workflow(payload, format)
+        parsed_workflow = self._parse(payload, format)
         if not ExecutionMode.is_v2(parsed_workflow.api_version):
             return None
         # A dry run never vaults; drop any inline credential and redact the source so
@@ -770,7 +775,7 @@ class TaskRuntime:
         resident: bool = False,
     ) -> tuple[str, list[TaskParsingResult]]:
         submitted_at = now_iso()
-        parsed_workflow = parse_workflow(payload, format)
+        parsed_workflow = self._parse(payload, format)
         specs = parsed_workflow.tasks
         yaml_text = redact_source_text(payload, format)
         results: list[TaskParsingResult] = []

@@ -228,6 +228,7 @@ if IS_ROOT_NODE:
         tracer=SERVER_TRACER,
         telemetry=config.telemetry,
         content_scope_authority=FINALIZATION_INDEX.assign_scope,
+        n8n=config.n8n,
     )
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
