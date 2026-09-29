@@ -448,8 +448,13 @@ Summary:"""
             kwargs["tensor_parallel_size"] = tp_value
 
             safe_util, free_ratio = self._compute_safe_utilization(requested_util)
+            if tp_idx == 1:
+                # Only the reading taken before any attempt counts: a failed attempt
+                # may still hold memory the next reading sees.
+                memory_constrained = (
+                    free_ratio is not None and free_ratio < requested_util
+                )
             if safe_util < requested_util - 1e-3:
-                memory_constrained = True
                 if free_ratio is not None:
                     logger.warning(
                         "Requested gpu_memory_utilization=%.3f but only %.2f%% of GPU "
@@ -549,7 +554,7 @@ Summary:"""
                 f"candidates {tp_candidates} and gpu_memory_utilization adjustments "
                 f"(last error: {last_exc})"
             )
-            # A load that had to shrink below the requested memory may fit on another
+            # A load that found less than the requested memory free may fit on another
             # worker's GPU, so it is retried there.
             raise ExecutionError(message, retryable=memory_constrained)
 
