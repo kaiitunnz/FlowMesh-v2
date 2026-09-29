@@ -42,9 +42,11 @@ def test_grouped_items_validate_as_inference_items() -> None:
 
     grouped = _Mixin()._populate_table(items, _tables(2, 1))
 
-    assert len(grouped) == 2
-    for payload in grouped:
-        InferenceItem.model_validate(payload)
+    validated = [InferenceItem.model_validate(payload) for payload in grouped]
+    assert [(v.index, v.prompt, v.finish_reason) for v in validated] == [
+        (0, "prompt-0", ["stop", "stop"]),
+        (1, "prompt-2", ["stop"]),
+    ]
 
 
 def test_outputs_are_grouped_per_table_in_order() -> None:

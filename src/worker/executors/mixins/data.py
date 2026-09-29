@@ -728,9 +728,7 @@ class DataMixin(GovernanceMixin):
     def _populate_table(
         self, items: list[dict[str, Any]], table_stores_list: list[pd.DataFrame]
     ) -> list[dict[str, Any]]:
-        """
-        Group row-level generation outputs back into per-table outputs.
-        """
+        """Group row-level generation items into one item per table."""
         cur = 0
         grouped_items: list[dict[str, Any]] = []
         for group_index, df in enumerate(table_stores_list):
@@ -738,15 +736,16 @@ class DataMixin(GovernanceMixin):
                 raise ExecutionError("table_stores_list must contain DataFrames.")
             size = len(df)
             group = items[cur : cur + size]
-            # A group has no single prompt or finish_reason of its own, so it takes the
-            # first row's prompt and reports one finish_reason per member.
+            first = group[0] if group else {}
+            # A group has no prompt or metadata of its own, so it takes its first row's,
+            # and reports one finish_reason per member.
             payload: dict[str, Any] = {
                 "index": group_index,
-                "prompt": str(group[0].get("prompt", "")) if group else "",
+                "prompt": str(first.get("prompt", "")),
                 "output": [item["output"] for item in group],
                 "finish_reason": [item.get("finish_reason") for item in group],
             }
-            if metadata := (group[0].get("metadata") if group else None):
+            if metadata := first.get("metadata"):
                 payload["metadata"] = metadata
             grouped_items.append(payload)
             cur += size
