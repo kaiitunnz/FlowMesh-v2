@@ -17,7 +17,9 @@ from server.supervisor.adapters.base import ProviderSpec, WorkerTokenType
 from server.supervisor.adapters.vastai import VastAIWorkerAdapter, VastAIWorkerConfig
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.schemas import WorkerStatus
+from server.supervisor.services.grpc_server import SupervisorServicer
 from server.utils.helpers import ResourcePool
+from shared.grpc.supervisor.v1 import supervisor_pb2
 from tests.server.supervisor_helpers import StubWorkerManager
 from tests.server.test_docker_removal_in_progress import _adapter
 
@@ -173,6 +175,67 @@ async def test_a_crashed_worker_an_operator_stopped_starts_again(kind: str) -> N
 
     assert await wm.start_worker(world.adapter.name)
     assert world.adapter.holds_worker()
+
+
+def _events_servicer(wm: StubWorkerManager) -> SupervisorServicer:
+    servicer = SupervisorServicer.__new__(SupervisorServicer)
+    servicer._registry = wm._registry
+    servicer._relay_service = MagicMock()
+    servicer._resident_bridge = None
+    servicer._content_bridge = None
+    servicer._logger = logging.getLogger("test")
+    return servicer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_a_worker_that_died_before_its_event_stream_opened_starts_again(
+    kind: str,
+) -> None:
+    world = _world(kind)
+    await world.start()
+    wm = _manager(world, kind)
+    # Registered, so its id and binding are set, but it died before PushEvents.
+    wm._registry.set_worker_id(world.adapter.token, "wkr-1")
+    world.adapter.set_worker_id("wkr-1")
+    world.adapter.set_status(WorkerStatus.STARTING)
+
+    assert await wm.stop_worker(world.adapter.name)
+    assert world.adapter.status is WorkerStatus.STOPPED
+
+    assert await wm.start_worker(world.adapter.name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_a_stopped_worker_whose_event_stream_is_open_stops_at_its_close(
+    kind: str,
+) -> None:
+    world = _world(kind)
+    await world.start()
+    wm = _manager(world, kind)
+    wm._registry.set_worker_id(world.adapter.token, "wkr-1")
+    world.adapter.set_worker_id("wkr-1")
+    closed = asyncio.Event()
+
+    async def events() -> Any:
+        yield supervisor_pb2.EventMessage()
+        await closed.wait()
+
+    context = MagicMock()
+    context.invocation_metadata.return_value = [("x-worker-token", world.adapter.token)]
+    stream = asyncio.ensure_future(_events_servicer(wm).PushEvents(events(), context))
+    await asyncio.sleep(0)
+    assert world.adapter.has_event_stream
+
+    assert await wm.stop_worker(world.adapter.name)
+    assert world.adapter.status is WorkerStatus.STOPPING
+
+    closed.set()
+    await stream
+    assert not world.adapter.has_event_stream
+    assert world.adapter.status is WorkerStatus.STOPPED
+    assert await wm.start_worker(world.adapter.name)
 
 
 @pytest.mark.asyncio

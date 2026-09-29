@@ -384,11 +384,8 @@ class WorkerManager:
         try:
             success = await worker.stop()
             if success:
-                if (
-                    worker.worker_id is None
-                    or self._registry.get_worker_id(worker.token) is None
-                ):
-                    # A worker with no event stream left sends nothing that would mark
+                if not worker.has_event_stream:
+                    # A worker with no event stream open sends nothing that would mark
                     # it stopped, so it is marked here and can be started again.
                     worker.set_status(WorkerStatus.STOPPED)
                 self.logger.info("Worker %s stopped.", worker_name)

@@ -92,6 +92,7 @@ class WorkerAdapter(ABC):
         self._starting: asyncio.Future[bool] | None = None
         self._stopping: asyncio.Future[bool] | None = None
         self._closed = False
+        self._event_streams = 0
 
     @property
     @abstractmethod
@@ -115,6 +116,17 @@ class WorkerAdapter(ABC):
         if self._worker_id is None:
             raise RuntimeError("Worker ID is not set")
         self._worker_id = None
+
+    @property
+    def has_event_stream(self) -> bool:
+        """Whether an event stream from the worker is open."""
+        return self._event_streams > 0
+
+    def attach_event_stream(self) -> None:
+        self._event_streams += 1
+
+    def detach_event_stream(self) -> None:
+        self._event_streams -= 1
 
     @abstractmethod
     def get_info(self) -> WorkerInfo:

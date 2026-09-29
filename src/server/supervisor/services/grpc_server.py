@@ -250,6 +250,18 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                 grpc.StatusCode.FAILED_PRECONDITION, "Worker not registered"
             )
 
+        worker.attach_event_stream()
+        try:
+            return await self._relay_events(worker, worker_id, request_iterator)
+        finally:
+            worker.detach_event_stream()
+
+    async def _relay_events(
+        self,
+        worker: WorkerAdapter,
+        worker_id: str,
+        request_iterator: AsyncIterator[supervisor_pb2.EventMessage],
+    ) -> Empty:
         registered: bool = False
         unregistered: bool = False
         async for message in request_iterator:
