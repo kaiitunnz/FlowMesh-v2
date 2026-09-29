@@ -130,3 +130,13 @@ def test_a_permit_for_a_refused_episode_is_turned_away_until_it_reopens() -> Non
     with rv.register(_AGENT, _CALL) as waiter:
         assert rv.deliver_permit(_permit())
         assert isinstance(waiter.await_permit(timeout=1.0), MediatedOperationPermit)
+
+
+def test_an_older_waiter_exiting_late_leaves_a_newer_one_armed() -> None:
+    rv = ModelTurnRendezvous()
+    older = rv.register(_AGENT, _CALL)
+    with rv.register(_AGENT, _CALL) as newer:
+        older.__exit__(None, None, None)
+        assert rv.deliver_permit(_permit())
+        assert isinstance(newer.await_permit(timeout=1.0), MediatedOperationPermit)
+    assert not rv.has_waiter(_AGENT, _CALL)

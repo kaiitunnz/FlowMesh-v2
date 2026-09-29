@@ -151,9 +151,11 @@ class ModelTurnRendezvous:
             return False
         return True
 
-    def _discard(self, key: _BoundaryKey) -> None:
+    def _discard(self, key: _BoundaryKey, box: "queue.Queue[PermitDelivery]") -> None:
+        # A later waiter for the same occurrence may have replaced this one.
         with self._lock:
-            self._waiters.pop(key, None)
+            if self._waiters.get(key) is box:
+                del self._waiters[key]
 
 
 class PermitWaiter:
@@ -180,7 +182,7 @@ class PermitWaiter:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self._rendezvous._discard(self._key)
+        self._rendezvous._discard(self._key, self._box)
 
     def await_permit(self, timeout: float) -> PermitDelivery | None:
         """Block for the permit or denial; None on timeout. Waiter clears on exit."""
