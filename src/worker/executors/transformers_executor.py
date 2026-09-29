@@ -652,8 +652,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                     )
         latency = time.time() - t0
 
-        items: list[list[InferenceItem]] = [[] for _ in entries]
-        export_items: list[list[dict[str, Any]]] = [[] for _ in entries]
+        items: list[list[dict[str, Any]]] = [[] for _ in entries]
         prompt_tokens = [0] * len(entries)
         completion_tokens = [0] * len(entries)
 
@@ -694,15 +693,6 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                 max_new_tokens=max_new_tokens,
                 stop_strings=stops,
             )
-            items[owner].append(
-                InferenceItem(
-                    index=i,
-                    prompt=prompt_text,
-                    output=text,
-                    finish_reason=finish_reason,
-                    metadata=metadata_entry or None,
-                )
-            )
             payload: dict[str, Any] = {
                 "index": i,
                 "prompt": prompt_text,
@@ -711,14 +701,18 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             }
             if metadata_entry:
                 payload["metadata"] = metadata_entry
-            export_items[owner].append(payload)
+            items[owner].append(payload)
             prompt_tokens[owner] += input_len
             completion_tokens[owner] += int(gen_part.shape[0])
+
+        for owner, entry in enumerate(entries):
+            if entry.tables:
+                items[owner] = self._populate_table(items[owner], entry.tables)
 
         results = [
             InferenceResult(
                 model=self._model_name,
-                items=items[owner],
+                items=[InferenceItem.model_validate(item) for item in items[owner]],
                 usage=GenerationUsage(
                     prompt_tokens=prompt_tokens[owner],
                     completion_tokens=completion_tokens[owner],
@@ -738,7 +732,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         }
 
         for (owner_id, owner_spec, owner_dir), owner_items in zip(
-            batch, export_items, strict=True
+            batch, items, strict=True
         ):
             if not isinstance(owner_spec, InferenceSpecStrict):
                 continue

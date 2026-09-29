@@ -62,6 +62,15 @@ class _Tokenizer:
         )
 
 
+class _ChatTokenizer(_Tokenizer):
+    """Renders a conversation as its messages' contents."""
+
+    chat_template = "template"
+
+    def apply_chat_template(self, messages: Any, **_kwargs: Any) -> str:
+        return " ".join(message["content"] for message in messages)
+
+
 def _generate(input_ids: Any, attention_mask: Any, **_kwargs: Any) -> Any:
     """Answers each word of a prompt, then EOS, padding rows to the longest answer."""
     answers = [
@@ -279,12 +288,6 @@ def test_any_error_in_a_childs_own_preparation_leaves_it_out(tmp_path: Path) -> 
 
 
 def test_a_child_templated_differently_is_left_out(tmp_path: Path) -> None:
-    class _ChatTokenizer(_Tokenizer):
-        chat_template = "template"
-
-        def apply_chat_template(self, messages: Any, **_kwargs: Any) -> str:
-            return " ".join(message["content"] for message in messages)
-
     parent = _spec("alpha", inference={"apply_chat_template": False})
     child = _spec("x", inference={"apply_chat_template": False}) | {
         "data": {"type": "list", "items": [[{"role": "user", "content": "bravo"}]]}
@@ -308,3 +311,51 @@ def test_the_parents_own_failure_fails_the_dispatch(tmp_path: Path) -> None:
 
     with pytest.raises(ExecutionError):
         _run(empty, [_child("tsk-c", _spec("charlie"))], tmp_path)
+
+
+def _table_spec(*groups: list[str]) -> dict[str, Any]:
+    return {
+        "taskType": "inference",
+        "model": _MODEL,
+        "data": {
+            "type": "dataframe",
+            "columns": [
+                {"label": "q", "data": {"type": "list", "items": list(groups)}}
+            ],
+            "messages": [{"role": "user", "content": "Q {q}"}],
+        },
+    }
+
+
+def test_a_table_leaf_reports_one_item_per_table(tmp_path: Path) -> None:
+    result, _ = _run(_table_spec(["a", "b"], ["c"]), [], tmp_path, _ChatTokenizer())
+
+    assert [
+        (item.index, item.prompt, item.output, item.finish_reason)
+        for item in result.items
+    ] == [
+        (0, "Q a", ["out-Q out-a", "out-Q out-b"], ["stop", "stop"]),
+        (1, "Q c", ["out-Q out-c"], ["stop"]),
+    ]
+
+
+def test_a_merged_table_child_gets_the_items_it_gets_alone(tmp_path: Path) -> None:
+    parent = _table_spec(["a", "b"], ["c"])
+    child = _table_spec(["d"], ["e", "f"])
+
+    merged, _ = _run(
+        parent, [_child("tsk-b", child)], tmp_path / "merged", _ChatTokenizer()
+    )
+    parent_alone, _ = _run(parent, [], tmp_path / "parent", _ChatTokenizer())
+    child_alone, _ = _run(
+        child, [], tmp_path / "child", _ChatTokenizer(), task_id="tsk-b"
+    )
+
+    merged_child = merged.children["tsk-b"]
+    assert isinstance(merged_child, InferenceResult)
+    assert merged.items == parent_alone.items
+    assert merged_child.items == child_alone.items
+    assert [item.output for item in merged_child.items] == [
+        ["out-Q out-d"],
+        ["out-Q out-e", "out-Q out-f"],
+    ]
