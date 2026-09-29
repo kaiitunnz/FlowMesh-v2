@@ -252,10 +252,14 @@ class WorkerManager:
         if worker is None:
             return False
 
-        success = await self._stop_and_destroy_worker(worker)
+        # An accepted destroy completes even if its command is cancelled.
+        destroying = asyncio.ensure_future(self._stop_and_destroy_worker(worker))
+        destroying.add_done_callback(lambda _: self._forget_worker(name))
+        return await asyncio.shield(destroying)
+
+    def _forget_worker(self, name: str) -> None:
         self._registry.try_pop_by_name(name)
         self._report_capacity_change()
-        return success
 
     async def destroy_workers(self, names: set[str] | None = None) -> None:
         if not self.is_started:
@@ -272,13 +276,17 @@ class WorkerManager:
                 raise ValueError(f"Workers not found: {', '.join(missing)}")
             workers = [self._registry.get_by_name(name) for name in names]
 
-        await self._stop_and_destroy_workers(workers)
-        if names is None:
-            self._registry.clear()
-        else:
-            for name in names:
-                self._registry.try_pop_by_name(name)
-        self._report_capacity_change()
+        def forget(_: asyncio.Future[None]) -> None:
+            if names is None:
+                self._registry.clear()
+            else:
+                for name in names:
+                    self._registry.try_pop_by_name(name)
+            self._report_capacity_change()
+
+        destroying = asyncio.ensure_future(self._stop_and_destroy_workers(workers))
+        destroying.add_done_callback(forget)
+        await asyncio.shield(destroying)
 
     def _create_worker(self, init_config: WorkerInitConfig) -> WorkerAdapter:
         if not self.is_started:
@@ -304,6 +312,8 @@ class WorkerManager:
     async def _start_worker(self, worker: WorkerAdapter) -> bool:
         if not self.is_started:
             raise RuntimeError("WorkerManager not started")
+        if worker.closed:
+            raise ValueError(f"Worker '{worker.name}' is being destroyed")
         if _is_live(worker):
             raise ValueError(f"Worker '{worker.name}' is starting, running or stopping")
 

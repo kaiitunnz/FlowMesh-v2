@@ -7,6 +7,7 @@ crash or a reconnect, while its container or instance still runs.
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock
@@ -623,3 +624,54 @@ async def test_stops_accepted_together_stop_once(kind: str) -> None:
 
     assert await asyncio.gather(first, second) == [True, True]
     assert world.stops == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_a_destroy_whose_command_is_cancelled_still_removes_the_worker(
+    kind: str,
+) -> None:
+    world = _world(kind)
+    await world.start()
+    wm = _manager(world, kind)
+    stopping = threading.Event()
+    release = threading.Event()
+    stop = world.adapter._stop
+
+    def gated_stop() -> bool:
+        stopping.set()
+        release.wait(5)
+        return stop()
+
+    world.adapter._stop = gated_stop
+    destroy = asyncio.ensure_future(wm.destroy_worker(world.adapter.name))
+    await asyncio.to_thread(stopping.wait, 5)
+    destroy.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await destroy
+    with pytest.raises(ValueError, match="is being destroyed"):
+        await wm.start_worker(world.adapter.name)
+
+    release.set()
+    deadline = time.monotonic() + 5
+    while wm._registry.try_get_by_name(world.adapter.name) is not None:
+        assert time.monotonic() < deadline, "the destroy never removed the worker"
+        await asyncio.sleep(0.01)
+    assert not world.adapter.holds_worker()
+
+
+@pytest.mark.asyncio
+async def test_a_vastai_worker_with_no_event_stream_stops_without_waiting() -> None:
+    world = _VastAI()
+    world.adapter._STOP_TIMEOUT = 5.0
+    await world.start()
+    wm = _manager(world, "vastai")
+    wm._registry.set_worker_id(world.adapter.token, "wkr-1")
+    world.adapter.set_worker_id("wkr-1")
+    world.adapter.set_status(WorkerStatus.STARTING)
+
+    started = time.monotonic()
+    assert await wm.stop_worker(world.adapter.name)
+
+    assert time.monotonic() - started < 1.0
+    assert world.adapter.status is WorkerStatus.STOPPED

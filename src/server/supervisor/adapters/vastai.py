@@ -315,7 +315,10 @@ class VastAIWorkerAdapter(WorkerAdapter):
             )
             self._release_reserved_offer()
             return False
-        self._stop_event.wait(self._STOP_TIMEOUT)
+        if self.has_event_stream:
+            # The worker unregisters as its instance goes; one with no event stream
+            # has nothing to send.
+            self._stop_event.wait(self._STOP_TIMEOUT)
         self._release_reserved_offer()
         self._instance_id = None
         self._holds_instance = False
