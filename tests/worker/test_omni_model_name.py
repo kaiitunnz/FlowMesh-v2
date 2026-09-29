@@ -1,21 +1,45 @@
 """An omni result names the model that produced it."""
 
-import pytest
+from pathlib import Path
+from unittest.mock import patch
 
+import pytest
+from PIL import Image
+
+from shared.schemas.result import OmniText2ImageResult
+from shared.tasks.task_type import TaskType
+from tests.worker.factories import DEFAULT_WORKER_CONFIG, make_worker_task_message
 from worker.executors.base_executor import ExecutionError
 from worker.executors.omni_text2image_executor import OmniText2ImageExecutor
 
-
-def _executor(model_name: str | None) -> OmniText2ImageExecutor:
-    executor = object.__new__(OmniText2ImageExecutor)
-    executor._model_name = model_name
-    return executor
-
-
-def test_the_loaded_model_names_the_result() -> None:
-    assert _executor("Qwen/Qwen3-Omni-30B-A3B").model_name == "Qwen/Qwen3-Omni-30B-A3B"
+_SPEC = {
+    "taskType": "omni_text2image",
+    "model": {"source": {"identifier": "org/omni"}},
+    "data": {"type": "list", "items": ["a cat"]},
+}
 
 
-def test_a_result_with_no_loaded_model_fails() -> None:
+def _run(loaded: str | None, out_dir: Path) -> OmniText2ImageResult:
+    executor = OmniText2ImageExecutor(DEFAULT_WORKER_CONFIG)
+
+    def load(_spec: object) -> None:
+        executor._model_name = loaded
+
+    msg = make_worker_task_message(_SPEC, task_type=TaskType.OMNI_TEXT2IMAGE)
+    image = Image.new("RGB", (1, 1))
+    with (
+        patch.object(executor, "_ensure_omni", side_effect=load),
+        patch.object(executor, "_generate_images", return_value=[image]),
+    ):
+        result = executor.run(msg, out_dir)
+    assert isinstance(result, OmniText2ImageResult)
+    return result
+
+
+def test_the_loaded_model_names_the_result(tmp_path: Path) -> None:
+    assert _run("org/omni", tmp_path).model == "org/omni"
+
+
+def test_a_result_with_no_loaded_model_fails_the_task(tmp_path: Path) -> None:
     with pytest.raises(ExecutionError, match="not initialized"):
-        _ = _executor(None).model_name
+        _run(None, tmp_path)
