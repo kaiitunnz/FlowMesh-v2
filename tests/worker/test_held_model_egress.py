@@ -1,6 +1,8 @@
 """The held model turn's authorize-before-egress round trip."""
 
-from typing import Any
+from typing import Any, cast
+
+import pytest
 
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationPermit
 from shared.tools.model.schema import (
@@ -124,3 +126,28 @@ def test_sidecar_fence_reject_propagates() -> None:
 
     result = _egress(rv, propose, sidecar).run(_AGENT, _CALL, _REQUEST)
     assert isinstance(result, HeldEgressReject) and "fence" in result.reason
+
+
+@pytest.mark.parametrize("ends", ["propose_fault", "denied"])
+def test_a_turn_unwinding_late_keeps_a_later_capture_of_its_call(ends: str) -> None:
+    rv = ModelTurnRendezvous()
+    pending = PendingEgressRequestStore()
+    retried = ModelRequest(interface=MODEL_INTERFACE, url="http://up/v1", body=_BODY)
+
+    def propose(p: AgentModelTurnProposal) -> None:
+        # The task's next run on this worker captures the same call first.
+        pending.put(_AGENT, _CALL, retried)
+        if ends == "propose_fault":
+            raise RuntimeError("event stream not ready")
+        rv.deliver_deny(_AGENT, _CALL, "model turn egress denied")
+
+    egress = HeldModelEgress(
+        rendezvous=rv,
+        pending=pending,
+        propose=propose,
+        sidecar=cast(Any, _StubSidecar(ModelCompletion(content="unused"))),
+        timeout_sec=1.0,
+    )
+
+    assert isinstance(egress.run(_AGENT, _CALL, _REQUEST), HeldEgressReject)
+    assert pending.peek(_AGENT, _CALL) is retried

@@ -90,7 +90,7 @@ class HeldModelEgress:
                 )
             except Exception as exc:  # noqa: BLE001 - a propose fault fails the turn
                 self._log.warning("held model propose failed: %s", exc)
-                self._pending.delete(task_id, call_correlation)
+                self._pending.discard(task_id, call_correlation, request)
                 return HeldEgressReject(reason="could not propose the model turn")
             try:
                 delivery = waiter.await_permit(self._timeout_sec)
@@ -100,4 +100,4 @@ class HeldModelEgress:
                     return HeldEgressReject(reason=delivery.reason)
                 return self._sidecar.egress_now(delivery)
             finally:
-                self._pending.delete(task_id, call_correlation)
+                self._pending.discard(task_id, call_correlation, request)

@@ -43,6 +43,16 @@ class PendingEgressRequestStore:
         with self._lock:
             self._store.pop((agent_task_id, call_correlation), None)
 
+    def discard(
+        self, agent_task_id: str, call_correlation: str, request: CapturedRequest
+    ) -> None:
+        """Drop the request for an occurrence only while it is still ``request``, so a
+        later capture of the same occurrence stays."""
+        key = (agent_task_id, call_correlation)
+        with self._lock:
+            if self._store.get(key) is request:
+                del self._store[key]
+
     def occurrences(self) -> list[tuple[str, str]]:
         """The occurrences whose requests the store holds."""
         with self._lock:
