@@ -152,6 +152,14 @@ def test_a_command_past_its_deadline_is_killed(runtime, profile, tmp_path):
     assert result.exit_code == -1
 
 
+def test_a_command_deadline_is_capped_by_the_envelope(runtime, tmp_path):
+    profile = SandboxRuntimeProfile(command_timeout_sec=1.0)
+    result = run(runtime, profile, tmp_path, "sh", "-c", "sleep 5", timeout_sec=60.0)
+
+    assert result.timed_out
+    assert result.exit_code == -1
+
+
 def test_a_background_process_does_not_outlive_its_command(runtime, profile, tmp_path):
     marker = tmp_path / "alive.txt"
     result = run(

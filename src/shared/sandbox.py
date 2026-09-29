@@ -97,7 +97,8 @@ class SandboxCommand(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     argv: tuple[str, ...]
-    timeout_sec: float | None = None  # None takes the capability's envelope deadline
+    # None takes the capability's envelope deadline, which also caps a longer one.
+    timeout_sec: float | None = None
 
 
 class SandboxCommandResult(BaseModel):
