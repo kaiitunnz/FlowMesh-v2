@@ -38,7 +38,7 @@ def _run(
     out_dir: Path,
     chat_template: str | None = "a-chat-template",
     window: int = 4096,
-) -> MagicMock:
+) -> tuple[InferenceResult, MagicMock]:
     """Run one task through the executor against a stand-in engine.
 
     The stand-in tokenizer carries a chat template unless a test takes it away, which is
@@ -67,8 +67,9 @@ def _run(
         task_type=TaskType.INFERENCE,
     )
     msg.resolved_contract = contract
-    llm.result = executor.run(msg, out_dir)
-    return llm
+    result = executor.run(msg, out_dir)
+    assert isinstance(result, InferenceResult)
+    return result, llm
 
 
 def _contract(*prompts: str) -> CanonicalInferenceRequest:
@@ -78,7 +79,7 @@ def _contract(*prompts: str) -> CanonicalInferenceRequest:
 
 
 def test_a_resolved_contract_generates_from_its_conversations(tmp_path: Path) -> None:
-    llm = _run(["a", "b", "c"], _contract("a", "b", "c"), tmp_path)
+    _, llm = _run(["a", "b", "c"], _contract("a", "b", "c"), tmp_path)
 
     llm.generate.assert_not_called()
     conversations = llm.chat.call_args.args[0]
@@ -92,7 +93,7 @@ def test_a_resolved_contract_generates_from_its_conversations(tmp_path: Path) ->
 def test_the_engine_is_the_only_place_a_contract_is_rendered(tmp_path: Path) -> None:
     # Rendering here as well would apply the model's chat template twice and prepend a
     # second sequence of special tokens, which is not the request the replica runs.
-    llm = _run(["a"], _contract("a"), tmp_path)
+    _, llm = _run(["a"], _contract("a"), tmp_path)
 
     llm.get_tokenizer.return_value.apply_chat_template.assert_not_called()
 
@@ -101,7 +102,7 @@ def test_a_leaf_without_a_contract_still_renders_and_generates_its_prompts(
     tmp_path: Path,
 ) -> None:
     # The path every task without a resolved contract takes is unchanged.
-    llm = _run(["a", "b"], None, tmp_path)
+    _, llm = _run(["a", "b"], None, tmp_path)
 
     llm.chat.assert_not_called()
     llm.get_tokenizer.return_value.apply_chat_template.assert_called()
@@ -115,7 +116,7 @@ def test_a_model_without_a_chat_template_generates_from_its_prompts(
     # template can render one. A base model generates from the prompts its spec
     # prepared, as a leaf carrying no contract does, rather than failing on a template
     # it does not have.
-    llm = _run(["a", "b"], _contract("a", "b"), tmp_path, chat_template=None)
+    _, llm = _run(["a", "b"], _contract("a", "b"), tmp_path, chat_template=None)
 
     llm.chat.assert_not_called()
     assert llm.generate.call_args.args[0] == ["a", "b"]
@@ -126,7 +127,7 @@ def test_a_model_without_a_chat_template_still_stores_the_declared_shape(
 ) -> None:
     # The result projection is embodiment-blind and reads the contract either way, so
     # the generation path a model forces does not change what the leaf reports.
-    llm = _run(["a"], _contract("a"), tmp_path, chat_template=None)
+    _, llm = _run(["a"], _contract("a"), tmp_path, chat_template=None)
 
     assert llm.generate.called
     llm.get_tokenizer.return_value.apply_chat_template.assert_not_called()
@@ -140,13 +141,12 @@ def _sampling_params(llm: MagicMock) -> Any:
 def test_a_leaf_without_a_contract_caps_max_tokens_to_the_window(
     tmp_path: Path,
 ) -> None:
-    llm = _run(["a"], None, tmp_path, window=356)
+    result, llm = _run(["a"], None, tmp_path, window=356)
 
     params = _sampling_params(llm)
     assert isinstance(params, list)
     assert [p.max_tokens for p in params] == [356 - 100 - 16]
-    assert isinstance(llm.result, InferenceResult)
-    assert llm.result.items[0].diagnostics == {
+    assert result.items[0].diagnostics == {
         "auto_cap": {"max_tokens": 240, "requested": 512}
     }
 
@@ -158,10 +158,11 @@ def test_a_contract_runs_its_declared_max_tokens_on_either_path(
     # A replica rejects an over-window request rather than clamping it, so a local run
     # of a contract issues the same request, whether the engine renders conversations
     # or generates from prompts.
-    llm = _run(["a"], _contract("a"), tmp_path, chat_template=chat_template, window=356)
+    result, llm = _run(
+        ["a"], _contract("a"), tmp_path, chat_template=chat_template, window=356
+    )
 
     params = _sampling_params(llm)
     assert not isinstance(params, list)
     assert params.max_tokens == 512
-    assert isinstance(llm.result, InferenceResult)
-    assert llm.result.items[0].diagnostics is None
+    assert result.items[0].diagnostics is None

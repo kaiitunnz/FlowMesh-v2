@@ -296,8 +296,7 @@ def test_a_table_item_reports_one_cap_per_row(tmp_path: Path) -> None:
 
 
 def test_an_item_missing_a_required_field_fails_the_task(tmp_path: Path) -> None:
-    # A grouping that reported only the outputs would store items with no index or
-    # prompt; the producer check fails the task instead.
+    # A grouping that reports only the outputs fails the producer check.
     def outputs_only(
         items: list[dict[str, Any]], tables: list[Any]
     ) -> list[dict[str, Any]]:
