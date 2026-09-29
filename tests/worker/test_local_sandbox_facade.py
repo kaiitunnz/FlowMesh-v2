@@ -35,7 +35,7 @@ from worker.egress import PendingEgressRequestStore
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.harness import register_adapter
 from worker.model_turn import HeldModelEgress, ResponsesFacade
-from worker.model_turn.facade import _MAX_TURN_COMMANDS, FacadeTurnError
+from worker.model_turn.facade import _DEFERRED, _MAX_TURN_COMMANDS, FacadeTurnError
 from worker.model_turn.rendezvous import ModelTurnRendezvous
 
 _TASK = "tsk-agent"
@@ -71,6 +71,9 @@ class _ScriptedEgress:
         return self._completions[index]
 
     def reopen(self, task_id: str) -> None:
+        pass
+
+    def refuse(self, task_id: str) -> None:
         pass
 
 
@@ -406,6 +409,40 @@ def test_a_round_during_the_harness_close_waits_for_the_release_unproposed() -> 
     assert order == ["harness exited", "turn answered"]
     assert len(proposed) == 1
     assert pending.occurrences() == []
+
+
+@pytest.mark.parametrize("given_up", ["refused", "unregistered"])
+def test_a_turn_given_up_mid_batch_runs_no_more_of_its_commands(given_up: str) -> None:
+    batch = ModelCompletion(
+        content="",
+        tool_calls=tuple(
+            _call("run_command", {"command": ["step", str(i)]}, call_id=f"c{i}")
+            for i in range(4)
+        ),
+    )
+
+    class _GivenUpOnFirstCommand(_RecordingSandbox):
+        def execute(self, command: SandboxCommand) -> SandboxCommandResult:
+            if given_up == "refused":
+                facade.refuse_episode(_TASK)
+            else:
+                facade.unregister_episode(_TASK)
+            return super().execute(command)
+
+    sandbox = _GivenUpOnFirstCommand()
+    facade, egress, _, token = _facade(
+        [batch, ModelCompletion(content="done")], sandbox
+    )
+
+    facade.handle_turn(_TASK, token, {"input": "go"})
+
+    assert sandbox.commands == [("step", "0")]
+    results = [
+        message["content"]
+        for message in egress.seen[1][2].body["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert results[1:] == [_DEFERRED] * 3
 
 
 def test_a_step_that_raises_gives_up_the_turn_still_running(tmp_path: Path) -> None:

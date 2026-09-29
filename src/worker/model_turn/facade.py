@@ -252,9 +252,14 @@ class ResponsesFacade:
             messages.append(_assistant_tool_calls(completion))
             # Every call the model emitted needs a result, or the next request carries
             # a dangling tool call the backend rejects: a call this turn will not run is
-            # answered as not-run rather than left unanswered.
+            # answered as not-run rather than left unanswered. A turn given up runs no
+            # further command.
             for call in completion.tool_calls:
-                if call in local and ran < _MAX_TURN_COMMANDS:
+                if (
+                    call in local
+                    and ran < _MAX_TURN_COMMANDS
+                    and self._holds_turn(task_id, ctx)
+                ):
                     ran += 1
                     messages.append(_tool_result(call, self._run_command(ctx, call)))
                 else:
@@ -262,6 +267,12 @@ class ResponsesFacade:
         # Unreachable: a round that does not return runs at least one command, so the
         # command bound trips before the round bound does.
         raise FacadeTurnError("held turn exhausted its command rounds")
+
+    def _holds_turn(self, task_id: str, ctx: EpisodeContext) -> bool:
+        """Whether the turn's episode is still registered with its context and not
+        being given up."""
+        with self._lock:
+            return self._episodes.get(task_id) is ctx and task_id not in self._refused
 
     def _run_command(self, ctx: EpisodeContext, call: ModelToolCall) -> str:
         """Run one local command and render its result for the model."""
