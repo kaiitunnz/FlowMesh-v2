@@ -121,6 +121,7 @@ from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.credential_vault import CredentialVault
 from ..utils.time import now_iso, parse_iso_ts, ts_to_iso
 from .credentials import (
+    CredentialRefs,
     InlineCredentials,
     TaskCredentials,
     credential_merge_key,
@@ -128,7 +129,9 @@ from .credentials import (
     mask_inline_credentials,
     pop_inline_model_secrets,
     redact_source_text,
+    redact_stored_source,
     take_inline_credentials,
+    take_spec_credentials,
 )
 from .models import (
     SETTLING_TASK_STATUSES,
@@ -1034,6 +1037,7 @@ class TaskRuntime:
             ]
             if not tasks:
                 continue
+            await self._vault_stored_credentials(workflow_id, tasks)
             remaining = await self._workflow_registry.get_remaining_tasks_async(
                 workflow_id
             )
@@ -1096,6 +1100,53 @@ class TaskRuntime:
                 "Rehydrated %d workflow(s) from durable state", len(restored)
             )
         return len(restored)
+
+    async def _vault_stored_credentials(
+        self, workflow_id: str, tasks: list[PersistedTask]
+    ) -> None:
+        """Take the inline credentials out of records stored before they were vaulted.
+
+        A record that can still dispatch has its credentials vaulted and the refs
+        recorded, as a submission does; a settled one is masked. Every one gets its
+        source redacted again. The vault is written before the records, so a crash in
+        between leaves the records to be taken again at the next start. A record that
+        cannot be taken is left as stored, and runs as it did.
+        """
+        refs = CredentialRefs()
+        taken: list[PersistedTask] = []
+        for persisted in tasks:
+            record = persisted.record
+            if record.credential_refs is not None:
+                continue
+            task = record.task.model_copy(deep=True)
+            try:
+                credentials = take_spec_credentials(
+                    task.spec,
+                    refs if record.status not in TERMINAL_TASK_STATUSES else None,
+                )
+                source = redact_stored_source(record.raw_yaml)
+            except Exception:
+                self._logger.exception(
+                    "Task %s keeps its stored credentials; they could not be vaulted",
+                    record.task_id,
+                )
+                continue
+            record.task = task
+            record.raw_yaml = source
+            record.credential_refs = credentials.refs
+            if record.merge_key is not None:
+                record.merge_key = (
+                    None
+                    if credentials.renders
+                    else credential_merge_key(
+                        task.spec, credentials.refs, scope=record.org_id
+                    )
+                )
+            taken.append(persisted)
+        if not taken:
+            return
+        await self._secret_vault.store_values(workflow_id, refs.values)
+        await self._workflow_registry.save_task_states_async(taken)
 
     def _restore_merges_locked(self) -> None:
         """Rebuild the in-flight merges from durable records.

@@ -65,41 +65,58 @@ class InlineCredentials:
     tasks: dict[str, TaskCredentials] = field(default_factory=dict)
 
 
+class CredentialRefs:
+    """Mints the refs one workflow's credentials are vaulted under, one per distinct
+    value, and collects the values to vault."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, Any] = {}
+        self._by_identity: dict[str, str] = {}
+
+    def ref(self, value: Any) -> str:
+        identity = json.dumps(value, sort_keys=True)
+        if (ref := self._by_identity.get(identity)) is None:
+            ref = self._by_identity[identity] = new_credential_ref()
+            self.values[ref] = value
+        return ref
+
+
+def take_spec_credentials(
+    spec: TaskSpec, refs: CredentialRefs | None
+) -> TaskCredentials:
+    """Mask every inline credential in ``spec`` in place, minting a ref for each from
+    ``refs``; with no ``refs`` the credentials are only masked."""
+    found = find_spec_credentials(spec)
+    taken = TaskCredentials(
+        refs=(
+            {pointer: refs.ref(value) for pointer, value in found.items()}
+            if refs is not None
+            else {}
+        ),
+        renders=any(holds_placeholder(value) for value in found.values()),
+    )
+    mask_spec_values(spec, found)
+    return taken
+
+
 def take_inline_credentials(parsed: ParsedWorkflow) -> InlineCredentials:
     """Mask every inline task-spec credential in ``parsed`` in place and return them.
 
     Each credential is replaced by its marker where it sits, so no value reaches a
     persisted record or the compiled template and plan.
     """
-    refs_by_value: dict[str, str] = {}
-    values: dict[str, Any] = {}
-    tasks: dict[str, TaskCredentials] = {}
-    for task in parsed.tasks:
-        spec = task.task.spec
-        found = find_spec_credentials(spec)
-        refs: dict[str, str] = {}
-        for pointer, value in found.items():
-            identity = json.dumps(value, sort_keys=True)
-            if (ref := refs_by_value.get(identity)) is None:
-                ref = refs_by_value[identity] = new_credential_ref()
-                values[ref] = value
-            refs[pointer] = ref
-        mask_spec_values(spec, found)
-        tasks[task.task_id] = TaskCredentials(
-            refs=refs, renders=any(holds_placeholder(v) for v in found.values())
-        )
-    return InlineCredentials(values=values, tasks=tasks)
+    refs = CredentialRefs()
+    tasks = {
+        task.task_id: take_spec_credentials(task.task.spec, refs)
+        for task in parsed.tasks
+    }
+    return InlineCredentials(values=refs.values, tasks=tasks)
 
 
-def mask_inline_credentials(parsed: ParsedWorkflow) -> dict[str, frozenset[str]]:
-    """Mask every inline task-spec credential in ``parsed`` in place, returning the
-    pointers masked in each task."""
-    masked: dict[str, frozenset[str]] = {}
+def mask_inline_credentials(parsed: ParsedWorkflow) -> None:
+    """Mask every inline task-spec credential in ``parsed`` in place."""
     for task in parsed.tasks:
-        found = find_spec_credentials(task.task.spec)
-        mask_spec_values(task.task.spec, found)
-        masked[task.task_id] = frozenset(found)
-    return masked
+        take_spec_credentials(task.task.spec, None)
 
 
 def credential_merge_key(
@@ -178,6 +195,13 @@ def _redact_n8n_document(document: Any) -> Any:
         ):
             params["jsonOutput"] = _redact_embedded_json(json_output)
     return redacted
+
+
+def redact_stored_source(source: str) -> str:
+    """Redact a source stored as the redacted form of either submission format."""
+    return redact_source_text(
+        source, "n8n" if source.lstrip().startswith("{") else "native"
+    )
 
 
 def redact_source_text(raw_payload: str, format: str) -> str:

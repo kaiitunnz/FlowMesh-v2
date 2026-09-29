@@ -87,7 +87,9 @@ restart safe:
 - **Vaulted credentials.** A workflow's inline credentials stay in its
   credential vault until the workflow settles, so a task dispatched after a
   restart receives them. Startup keeps every live workflow's vault and drops the
-  vault of a workflow that settled or never finished registering.
+  vault of a workflow that settled or never finished registering. A task record
+  stored with its credentials inline has them vaulted, and its source redacted, by
+  the first start that loads it.
 
 Rehydration runs inside the ASGI lifespan **before it yields**, so the server
 does not accept traffic (and its healthcheck does not pass) until scheduling

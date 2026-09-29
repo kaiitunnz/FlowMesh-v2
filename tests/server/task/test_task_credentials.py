@@ -1,7 +1,9 @@
 """Inline task-spec credentials are vaulted at submission and restored at dispatch."""
 
 import asyncio
+import json
 import logging
+from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
@@ -277,3 +279,94 @@ def test_a_restart_dispatches_a_task_with_its_credentials():
     assert disp.failed == []
     message = publisher.publish_task.call_args[0][1]
     assert message.task.spec.api["headers"]["Authorization"] == _AUTH
+
+
+_PRE_VAULT = Path(__file__).parent / "fixtures" / "pre_vault_records.json"
+_LEGACY = (
+    "legacy-inline-credential",
+    "legacy-model-credential",
+    "legacy-settled-credential",
+)
+
+
+def _pre_vault_registry() -> tuple[FakeRegistry, dict[str, Any]]:
+    """Records a build that kept inline credentials in plaintext stored."""
+    stored = json.loads(_PRE_VAULT.read_text())
+    registry = FakeRegistry()
+    registry.task_blobs.update(stored["task_blobs"])
+    registry.sched.update(stored["sched"])
+    registry.workflow_task_ids.update(stored["workflow_task_ids"])
+    return registry, stored
+
+
+def _task_named(runtime: TaskRuntime, workflow_id: str, name: str) -> str:
+    return next(
+        record.task_id
+        for record in runtime.list_tasks()
+        if record.workflow_id == workflow_id and record.graph_node_name == name
+    )
+
+
+def test_a_restart_vaults_credentials_stored_before_they_were_vaulted():
+    registry, stored = _pre_vault_registry()
+    assert any(secret in "".join(registry.task_blobs.values()) for secret in _LEGACY)
+    vault = InMemoryCredentialVault()
+    runtime = _runtime(registry, vault)
+
+    asyncio.run(runtime.rehydrate())
+
+    blobs = "".join(registry.task_blobs.values())
+    assert not any(secret in blobs for secret in _LEGACY)
+    for info in runtime.list_tasks():
+        assert not any(secret in info.model_dump_json() for secret in _LEGACY)
+    infer = runtime.get_record(_task_named(runtime, stored["live"], "infer"))
+    assert infer is not None and infer.merge_key is not None
+    # The settled workflow's credentials are masked and nothing of it is vaulted.
+    assert set(vault.redis.hashes) == {f"workflow:{stored['live']}:model_secret"}
+
+    call = _task_named(runtime, stored["live"], "call")
+    publisher, disp = _dispatch(runtime, call)
+    assert disp.failed == []
+    message = publisher.publish_task.call_args[0][1]
+    assert message.task.spec.api["headers"]["Authorization"] == (
+        "Bearer legacy-inline-credential"
+    )
+
+
+def test_a_second_restart_keeps_the_credentials_the_first_vaulted():
+    registry, stored = _pre_vault_registry()
+    vault = InMemoryCredentialVault()
+    asyncio.run(_runtime(registry, vault).rehydrate())
+    vaulted = json.dumps(vault.redis.hashes, sort_keys=True)
+
+    restarted = _runtime(registry, vault)
+    asyncio.run(restarted.rehydrate())
+
+    assert json.dumps(vault.redis.hashes, sort_keys=True) == vaulted
+    call = _task_named(restarted, stored["live"], "call")
+    publisher, _ = _dispatch(restarted, call)
+    message = publisher.publish_task.call_args[0][1]
+    assert message.task.spec.api["headers"]["Authorization"] == (
+        "Bearer legacy-inline-credential"
+    )
+
+
+def test_a_record_that_cannot_be_vaulted_loads_and_runs_as_stored(monkeypatch):
+    registry, stored = _pre_vault_registry()
+    runtime = _runtime(registry)
+
+    def refuse(*args: Any) -> Any:
+        raise RuntimeError("unreadable spec")
+
+    monkeypatch.setattr("server.task.runtime.take_spec_credentials", refuse)
+    asyncio.run(runtime.rehydrate())
+
+    call = _task_named(runtime, stored["live"], "call")
+    record = runtime.get_record(call)
+    assert record is not None and record.credential_refs is None
+    publisher, disp = _dispatch(runtime, call)
+    assert disp.failed == []
+    message = publisher.publish_task.call_args[0][1]
+    assert message.task.spec.api["headers"]["Authorization"] == (
+        "Bearer legacy-inline-credential"
+    )
