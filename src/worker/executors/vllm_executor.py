@@ -310,6 +310,7 @@ Summary:"""
         adjust_tp: Callable[[int], int],
         task_ids: Iterable[str] | None,
     ) -> None:
+        """Load or reuse the vLLM engine for ``ident``."""
         if self._llm:
             if self._inference_spec == new_inference_spec:
                 logger.info("Reusing existing vLLM instance for model %s", ident)
@@ -440,12 +441,19 @@ Summary:"""
         last_exc: Exception | None = None
         success = False
         chosen_kwargs: dict[str, Any] = {}
+        memory_constrained = False
 
         for tp_idx, tp_value in enumerate(tp_candidates, start=1):
             kwargs = dict(kwargs_base)
             kwargs["tensor_parallel_size"] = tp_value
 
             safe_util, free_ratio = self._compute_safe_utilization(requested_util)
+            if tp_idx == 1:
+                # Only the reading taken before any attempt counts: a failed attempt
+                # may still hold memory the next reading sees.
+                memory_constrained = (
+                    free_ratio is not None and free_ratio < requested_util
+                )
             if safe_util < requested_util - 1e-3:
                 if free_ratio is not None:
                     logger.warning(
@@ -546,7 +554,9 @@ Summary:"""
                 f"candidates {tp_candidates} and gpu_memory_utilization adjustments "
                 f"(last error: {last_exc})"
             )
-            raise ExecutionError(message)
+            # A load that found less than the requested memory free may fit on another
+            # worker's GPU, so it is retried there.
+            raise ExecutionError(message, retryable=memory_constrained)
 
         self._llm_kwargs = chosen_kwargs
         self._model_name = ident

@@ -48,12 +48,18 @@ def _run(
     children: list[MergedChildTaskStrict],
     out_dir: Path,
     rejected: str | None = None,
+    chat_template: str | None = None,
 ) -> tuple[InferenceResult, MagicMock]:
     """Run a merged dispatch against a stand-in engine, which aborts the whole batch
-    when it rejects the ``rejected`` prompt, as vLLM does."""
+    when it rejects the ``rejected`` prompt, as vLLM does. A ``chat_template`` renders
+    each conversation as its last message's content."""
     executor = VLLMExecutor(DEFAULT_WORKER_CONFIG, lifecycle=None)
     llm = MagicMock()
-    llm.get_tokenizer.return_value.chat_template = None
+    tokenizer = llm.get_tokenizer.return_value
+    tokenizer.chat_template = chat_template
+    tokenizer.apply_chat_template.side_effect = lambda messages, **_kwargs: messages[
+        -1
+    ]["content"]
 
     def _generate(prompts: list[Any], **_kwargs: Any) -> list[SimpleNamespace]:
         if rejected in prompts:
@@ -195,3 +201,40 @@ def test_the_parent_reports_only_its_own_usage(tmp_path: Path) -> None:
             "completion_tokens": 1,
             "num_requests": 1,
         }
+
+
+def _table_spec(*groups: list[str]) -> dict[str, Any]:
+    return {
+        "taskType": "inference",
+        "model": _MODEL,
+        "data": {
+            "type": "dataframe",
+            "columns": [
+                {"label": "q", "data": {"type": "list", "items": list(groups)}}
+            ],
+            "messages": [{"role": "user", "content": "Q: {q}"}],
+        },
+    }
+
+
+def test_a_merged_table_child_gets_the_items_it_gets_alone(tmp_path: Path) -> None:
+    parent = _table_spec(["a", "b"], ["c"])
+    child = _table_spec(["d"], ["e", "f"])
+
+    merged, _ = _run(
+        parent, [_child("tsk-b", child)], tmp_path / "merged", chat_template="chat"
+    )
+    parent_alone, _ = _run(parent, [], tmp_path / "parent", chat_template="chat")
+    child_alone, _ = _run(child, [], tmp_path / "child", chat_template="chat")
+
+    merged_child = merged.children["tsk-b"]
+    assert isinstance(merged_child, InferenceResult)
+    assert merged.items == parent_alone.items
+    assert merged_child.items == child_alone.items
+    assert [
+        (item.index, item.prompt, item.output, item.finish_reason)
+        for item in merged_child.items
+    ] == [
+        (0, "Q: d", ["out-Q: d"], ["stop"]),
+        (1, "Q: e", ["out-Q: e", "out-Q: f"], ["stop", "stop"]),
+    ]

@@ -49,6 +49,7 @@ spec:
 Output file: out_dir/results.json
 """
 
+import gc
 import logging
 import os
 import time
@@ -172,7 +173,11 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             )
         configure_hf_library_logging()
 
-    def _pick_device(self, cfg: dict[str, Any]) -> str:
+    def _pick_device(self, cfg: dict[str, Any], *, enforce_cpu: bool = False) -> str:
+        # enforce_cpu is the task's own placement request, so it outranks the model
+        # config's device_map.
+        if enforce_cpu:
+            return "cpu"
         # Explicit device_map overrides simple device if provided
         device_map = cfg.get("device_map")
         if device_map in {
@@ -212,9 +217,10 @@ class HFTransformersExecutor(InferenceMixin, Executor):
 
         model_cfg = spec.model
         tcfg = (model_cfg and model_cfg.transformers) or {}
-        self._mode = tcfg.get("mode", "text-generation")
+        mode = tcfg.get("mode", "text-generation")
 
-        device = self._pick_device(tcfg)
+        enforce_cpu = isinstance(spec, InferenceSpecStrict) and spec.enforce_cpu is True
+        device = self._pick_device(tcfg, enforce_cpu=enforce_cpu)
         dtype = self._to_torch_dtype(tcfg.get("dtype", "auto"))
         trust_remote_code = spec.model_trust_remote_code or bool(
             tcfg.get("trust_remote_code", False)
@@ -253,16 +259,27 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             if model_cfg is not None
             else None
         )
-        if self._model is not None and self._model_config == model_cfg_payload:
+        resolved_device = (
+            device
+            if device != "auto"
+            else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        if (
+            self._model is not None
+            and self._model_config == model_cfg_payload
+            and self._device == resolved_device
+        ):
             logger.info("Model already loaded and matches spec; reusing.")
             return
 
-        self._model_config = model_cfg_payload
-
+        self._release_model()
+        model: PreTrainedModel
+        tok: PreTrainedTokenizerBase | None = None
+        image_processor: Any | None = None
         try:
-            match self._mode:
+            match mode:
                 case "visual-embedding":
-                    self._model = AutoModelForImageTextToText.from_pretrained(
+                    model = AutoModelForImageTextToText.from_pretrained(
                         ident, **load_kwargs
                     )
                     tok_kwargs: dict[str, Any] = {
@@ -271,10 +288,9 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                     }
                     if revision:
                         tok_kwargs["revision"] = revision
-                    self._image_processor = AutoImageProcessor.from_pretrained(
+                    image_processor = AutoImageProcessor.from_pretrained(
                         ident, **tok_kwargs
                     )
-                    self._tok = None
 
                 case "text-generation":
                     tok_kwargs = {
@@ -284,32 +300,43 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                     if revision:
                         tok_kwargs["revision"] = revision
                     tokenizer = AutoTokenizer.from_pretrained(ident, **tok_kwargs)
-                    self._tok = tokenizer
                     # Ensure we have a pad token for batch generation
                     if tokenizer.pad_token_id is None:
                         # Fallback to eos token, common for decoder-only LMs
                         tokenizer.pad_token = tokenizer.eos_token
+                    tok = tokenizer
 
-                    self._model = AutoModelForCausalLM.from_pretrained(
-                        ident, **load_kwargs
-                    )
-                    self._image_processor = None
+                    model = AutoModelForCausalLM.from_pretrained(ident, **load_kwargs)
 
                 case _:
-                    raise ExecutionError(f"Unsupported task type: {self._mode}")
+                    raise ExecutionError(f"Unsupported task type: {mode}")
 
             if device != "auto":  # single-device path
-                self._model.to(device)  # type: ignore[arg-type]
-            self._model.eval()
+                model.to(device)  # type: ignore[arg-type]
+            model.eval()
         except Exception as e:
             raise ExecutionError(f"Failed to load model/tokenizer: {e}", retryable=True)
 
-        self._device = (
-            device
-            if device != "auto"
-            else ("cuda" if torch.cuda.is_available() else "cpu")
-        )
+        self._mode = mode
+        self._model = model
+        self._tok = tok
+        self._image_processor = image_processor
+        self._model_config = model_cfg_payload
+        self._device = resolved_device
         self._model_name = ident
+
+    def _release_model(self) -> None:
+        if self._model is None:
+            return
+        self._model = None
+        self._tok = None
+        self._image_processor = None
+        self._model_config = None
+        self._device = None
+        self._model_name = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------ #
     # Execution

@@ -139,10 +139,10 @@ class TestCollectMetrics:
             hardware=None,
         )
         m = _collect_worker_metrics(w)
-        assert m.get("gpu_count", 0) == 0
-        assert m.get("vram_total", 0) == 0
-        assert m.get("sys_ram", 0) == 0
-        assert m.get("cpu_cores", 0) == 0
+        assert m["gpu_count"] == 0
+        assert m["vram_gb"] == 0
+        assert m["sys_ram_gb"] == 0
+        assert m["cpu_cores"] == 0
 
     def test_unified_memory_worker_does_not_double_count_vram(self) -> None:
         w = _worker(

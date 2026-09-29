@@ -20,7 +20,13 @@ from fastapi import (
 from fastapi.responses import FileResponse, Response
 
 from shared.schemas.result import RESULT_MEDIA_TYPE, AnyExecutorResult, result_file_path
-from shared.utils.manifest import ARTIFACTS_DIR, LOGS_DIR, RESULTS_NAME, sync_manifest
+from shared.utils.manifest import (
+    ARTIFACTS_DIR,
+    LOGS_DIR,
+    RESULTS_NAME,
+    prepare_output_dir,
+    sync_manifest,
+)
 
 from ...app_state import (
     get_logger,
@@ -121,6 +127,7 @@ async def upload_result_file(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
         )
 
+    prepare_output_dir(base_dir)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with target_path.open("wb") as out:

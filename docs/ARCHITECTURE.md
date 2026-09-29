@@ -78,9 +78,10 @@ tasks cycle back to `PENDING` until exhausted.
 
 Retries are routed to a worker that has not already failed the task and
 stop once every eligible worker has been tried or `max_attempts` is
-reached; the terminal error is the executor's own message. Controlled
-executor errors are not retried. A task that no worker can satisfy fails
-after `TASK_NO_WORKER_GRACE_SEC`.
+reached; the terminal error is the executor's own message. A controlled
+executor error is retried only when its executor marks it retryable, as a
+vLLM load that failed for lack of GPU memory is. A task that no worker can
+satisfy fails after `TASK_NO_WORKER_GRACE_SEC`.
 
 Each dispatch carries a `dsp-` id that the worker echoes on the task's events;
 an event applies only while its dispatch holds the task. A cancelling task

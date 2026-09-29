@@ -18,20 +18,25 @@ SCRATCH_DIR = "scratch"
 _SHARED_DIR_MODE = 0o0777
 
 
+def _ensure_shared_dir(path: Path) -> None:
+    """Create ``path`` if absent and make it writable by peer UIDs."""
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(_SHARED_DIR_MODE)
+    except OSError:
+        pass
+
+
 def prepare_output_dir(base_dir: Path) -> None:
     """Ensure the base directory and standard sub-directories exist."""
     for d in (base_dir, base_dir / LOGS_DIR, base_dir / ARTIFACTS_DIR):
-        if not d.exists():
-            d.mkdir(parents=True)
-            d.chmod(_SHARED_DIR_MODE)
+        _ensure_shared_dir(d)
 
 
 def scratch_dir(base_dir: Path) -> Path:
     """Return `out_dir/scratch/`, creating it if needed."""
     path = base_dir / SCRATCH_DIR
-    if not path.exists():
-        path.mkdir(parents=True)
-        path.chmod(_SHARED_DIR_MODE)
+    _ensure_shared_dir(path)
     return path
 
 

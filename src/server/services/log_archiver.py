@@ -7,7 +7,7 @@ from threading import Event
 from typing import Any
 
 from shared.schemas.result import result_file_path
-from shared.utils.manifest import sync_manifest
+from shared.utils.manifest import LOGS_DIR, prepare_output_dir, sync_manifest
 
 from ..clients.redis import (
     TASK_LOGS_STREAM_PREFIX,
@@ -130,14 +130,9 @@ class TaskLogArchiver:
         )
         self._buffers.setdefault(task_id, [])
 
-    def _task_logs_dir(self, task_id: str) -> Path:
-        base_dir = result_file_path(self._results_dir, task_id).parent
-        logs_dir = base_dir / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        return logs_dir
-
     def _logs_path(self, task_id: str) -> Path:
-        return self._task_logs_dir(task_id) / "logs.jsonl"
+        base_dir = result_file_path(self._results_dir, task_id).parent
+        return base_dir / LOGS_DIR / "logs.jsonl"
 
     def _load_checkpoint(self, task_id: str) -> str | None:
         last_id = self._redis.get(task_log_archive_last_id_key(task_id))
@@ -152,6 +147,7 @@ class TaskLogArchiver:
         if not items:
             return
         logs_path = self._logs_path(task_id)
+        prepare_output_dir(logs_path.parent.parent)
         last_id = self._states[task_id].last_id
         with logs_path.open("a", encoding="utf-8") as fh:
             for _, fields in items:
@@ -192,6 +188,7 @@ class TaskLogArchiver:
             expected_artifacts = record.task.spec.get_artifacts()
         expected_artifacts.append("logs/logs.jsonl")
         base_dir = result_file_path(self._results_dir, task_id).parent
+        prepare_output_dir(base_dir)
         self._logs_path(task_id).touch(exist_ok=True)
         try:
             sync_manifest(base_dir, task_id, expected_artifacts)
