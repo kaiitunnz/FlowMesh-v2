@@ -124,9 +124,10 @@ the core stack and leaves that stack otherwise untouched. The Collector receives
 already runs. ClickHouse keeps its data in a named volume, so a stack restart does not
 discard a trace.
 
-Both halves default to the bundled instance's development password. A deployment that
-exposes ClickHouse beyond its own host sets `TELEMETRY_CLICKHOUSE_PASSWORD` and
-`SERVER_METRICS_CLICKHOUSE_PASSWORD` to a real one.
+`flowmesh stack init --role root` writes one random password into both
+`TELEMETRY_CLICKHOUSE_PASSWORD` and `SERVER_METRICS_CLICKHOUSE_PASSWORD`, and
+`flowmesh stack up` refuses to start the telemetry profile on an unset or well-known
+password.
 
 The server's read path is configured separately, through `SERVER_METRICS_CLICKHOUSE_*`,
 and never writes. The two halves commonly address the same instance but are never the

@@ -1,4 +1,5 @@
-"""A root node runs its own Redis and content store on credentials of its own."""
+"""A root node runs its own Redis, content store and ClickHouse on credentials of its
+own."""
 
 from pathlib import Path
 from unittest import mock
@@ -15,7 +16,18 @@ _CREDENTIALS = (
     "REDIS_PASSWORD",
     "CONTENT_STORE_ACCESS_KEY",
     "CONTENT_STORE_SECRET_KEY",
+    "TELEMETRY_CLICKHOUSE_PASSWORD",
 )
+
+
+def _set(env_file: Path, key: str, value: str) -> None:
+    lines = env_file.read_text().splitlines()
+    env_file.write_text(
+        "\n".join(
+            f"{key}={value}" if line.startswith(f"{key}=") else line for line in lines
+        )
+        + "\n"
+    )
 
 
 def _init(tmp_path: Path, role: str, name: str = ".env") -> dict[str, str]:
@@ -33,7 +45,12 @@ def test_a_root_init_writes_fresh_credentials_it_never_prints(tmp_path, capsys):
         assert len(first[key]) >= 16
         assert first[key] != second[key]
         assert first[key] not in printed.out + printed.err
+    assert (
+        first["SERVER_METRICS_CLICKHOUSE_PASSWORD"]
+        == first["TELEMETRY_CLICKHOUSE_PASSWORD"]
+    )
     assert service_credential_errors(first) == []
+    assert service_credential_errors({**first, "COMPOSE_PROFILES": "telemetry"}) == []
 
 
 def test_a_worker_init_generates_no_redis_password(tmp_path):
@@ -69,6 +86,45 @@ def test_up_refuses_a_root_on_a_default_credential_and_names_it(tmp_path, key, v
     assert any(key in call.args[0] for call in error.call_args_list)
     errors, _ = validate_env_values(STACK_ENV_SCHEMA, parse_env_file(env_file))
     assert any(key in message for message in errors)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("TELEMETRY_CLICKHOUSE_PASSWORD", "flowmesh"),
+        ("TELEMETRY_CLICKHOUSE_PASSWORD", ""),
+        ("SERVER_METRICS_CLICKHOUSE_PASSWORD", "flowmesh"),
+    ],
+)
+@pytest.mark.parametrize("role", ["root", "worker"])
+def test_up_refuses_the_telemetry_profile_on_a_default_password(
+    tmp_path, role, key, value
+):
+    env_file = tmp_path / ".env"
+    stack.init(env_file=env_file, force=True, role=role, deploy=False)
+    _set(env_file, "COMPOSE_PROFILES", "telemetry")
+    _set(env_file, key, value)
+
+    with mock.patch.object(stack, "_compose") as compose:
+        with mock.patch.object(stack.logging, "error") as error:
+            with pytest.raises(typer.Exit):
+                stack.up(env_file=env_file, image_tag=None)
+
+    compose.assert_not_called()
+    assert any(key in call.args[0] for call in error.call_args_list)
+
+
+def test_the_telemetry_password_is_not_checked_without_its_profile():
+    assert (
+        service_credential_errors(
+            {
+                "NODE_ROLE": "worker",
+                "TELEMETRY_CLICKHOUSE_PASSWORD": "flowmesh",
+                "SERVER_METRICS_CLICKHOUSE_PASSWORD": "flowmesh",
+            }
+        )
+        == []
+    )
 
 
 def test_up_leaves_disabled_acl_and_an_external_store_to_the_operator(tmp_path):

@@ -118,13 +118,15 @@ server connects to the root node's Redis via `REDIS_CONTROL_URL` and
 endpoints on the root node, and authenticates with the root's `REDIS_USERNAME`
 and `REDIS_PASSWORD`, copied from the root's `.env`.
 
-`flowmesh stack init --role root` writes a random `REDIS_PASSWORD` and random
+`flowmesh stack init --role root` writes a random `REDIS_PASSWORD`, random
 co-located content store credentials (`CONTENT_STORE_ACCESS_KEY`,
-`CONTENT_STORE_SECRET_KEY`) into the `.env` it renders. `flowmesh stack up` refuses to
-start a root node whose Redis or co-located content store would run on an unset or
-well-known credential, and names the variable to set. An existing deployment sets its
-own values in `.env` and runs `flowmesh stack up`; Redis and the content store take
-the new credentials at restart, and the content store keeps its data. The content
+`CONTENT_STORE_SECRET_KEY`), and one random password for the telemetry profile's
+ClickHouse (`TELEMETRY_CLICKHOUSE_PASSWORD`, `SERVER_METRICS_CLICKHOUSE_PASSWORD`) into
+the `.env` it renders. `flowmesh stack up` refuses to start a node whose Redis,
+co-located content store, or ClickHouse would run on an unset or well-known credential,
+and names the variable to set. An existing deployment sets its own values in `.env`
+and runs `flowmesh stack restart`; the services take the new credentials and keep
+their data. The content
 store console listens on `127.0.0.1` (`CONTENT_STORE_CONSOLE_BIND_HOST`), and
 `CONTENT_STORE_BIND_HOST` narrows the address the store's API listens on, which
 worker nodes reach.

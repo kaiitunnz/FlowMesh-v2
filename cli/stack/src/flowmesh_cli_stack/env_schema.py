@@ -19,7 +19,12 @@ _WELL_KNOWN_CREDENTIALS = {
     "REDIS_PASSWORD": "very-strong-password",  # nosec B105 - a default refused
     "CONTENT_STORE_ACCESS_KEY": "flowmesh",
     "CONTENT_STORE_SECRET_KEY": "flowmeshcontent",  # nosec B105 - a default refused
+    "TELEMETRY_CLICKHOUSE_PASSWORD": "flowmesh",  # nosec B105 - a default refused
+    "SERVER_METRICS_CLICKHOUSE_PASSWORD": "flowmesh",  # nosec B105 - a default refused
 }
+
+# The compose profile carrying the bundled ClickHouse telemetry store.
+TELEMETRY_PROFILE = "telemetry"
 
 
 def colocates_content_store(env: dict[str, str]) -> bool:
@@ -36,38 +41,51 @@ def colocates_content_store(env: dict[str, str]) -> bool:
     return not env.get("CONTENT_STORE_ENDPOINT_URL", "").strip()
 
 
+def runs_telemetry_store(env: dict[str, str]) -> bool:
+    """Whether this node's selected compose profiles bring up the bundled ClickHouse."""
+    profiles = env.get("COMPOSE_PROFILES", "").split(",")
+    return TELEMETRY_PROFILE in (name.strip() for name in profiles)
+
+
 def credential_overrides(role: NodeRole) -> dict[str, str]:
     """Fresh credentials for the services a root node runs itself.
 
     A worker node reaches the root's Redis with the root's password, so it gets none.
+    The server reads the bundled ClickHouse it writes to, so both carry one password.
     """
     if role != NodeRole.ROOT:
         return {}
+    clickhouse_password = secrets.token_urlsafe(32)
     return {
         "REDIS_PASSWORD": secrets.token_urlsafe(32),
         "CONTENT_STORE_ACCESS_KEY": secrets.token_hex(12),
         "CONTENT_STORE_SECRET_KEY": secrets.token_urlsafe(32),
+        "TELEMETRY_CLICKHOUSE_PASSWORD": clickhouse_password,
+        "SERVER_METRICS_CLICKHOUSE_PASSWORD": clickhouse_password,
     }
 
 
 def service_credential_errors(env: dict[str, str]) -> list[str]:
-    """Why a root node's own Redis or co-located content store would run on an unset or
-    well-known credential."""
+    """Why a node's own Redis, co-located content store or bundled ClickHouse would run
+    on an unset or well-known credential."""
     role = env.get("NODE_ROLE", "").strip().lower()
-    if role and role != NodeRole.ROOT.value:
-        return []
-    keys: list[str] = []
-    if parse_bool(env.get("REDIS_ACL_ENABLED", "")):
-        keys.append("REDIS_PASSWORD")
-    if colocates_content_store(env):
-        keys.extend(("CONTENT_STORE_ACCESS_KEY", "CONTENT_STORE_SECRET_KEY"))
+    required: dict[str, str] = {}
+    if not role or role == NodeRole.ROOT.value:
+        if parse_bool(env.get("REDIS_ACL_ENABLED", "")):
+            required["REDIS_PASSWORD"] = ""
+        if colocates_content_store(env):
+            for key in ("CONTENT_STORE_ACCESS_KEY", "CONTENT_STORE_SECRET_KEY"):
+                required[key] = "the co-located content store"
+    if runs_telemetry_store(env):
+        required["TELEMETRY_CLICKHOUSE_PASSWORD"] = "the telemetry profile's ClickHouse"
+        required["SERVER_METRICS_CLICKHOUSE_PASSWORD"] = ""
     errors: list[str] = []
-    for key in keys:
+    for key, service in required.items():
         value = env.get(key, "").strip()
         if value == _WELL_KNOWN_CREDENTIALS[key]:
             errors.append(f"{key} is a well-known default; set a value of your own")
-        elif not value and key != "REDIS_PASSWORD":
-            errors.append(f"{key} must be set for the co-located content store")
+        elif not value and service:
+            errors.append(f"{key} must be set for {service}")
     return errors
 
 
@@ -1312,7 +1330,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "SERVER_METRICS_CLICKHOUSE_PASSWORD",
-                    "flowmesh",
+                    "",
                     description="ClickHouse password for the store read port.",
                 ),
                 EnvVar(
@@ -1339,7 +1357,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "TELEMETRY_CLICKHOUSE_PASSWORD",
-                    "flowmesh",
+                    "",
                     description="ClickHouse password for the telemetry profile.",
                 ),
                 EnvVar(
