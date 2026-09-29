@@ -10,7 +10,7 @@ import httpx
 from shared.schemas.result import APIResult
 from shared.tasks.specs import ApiSpecStrict
 from shared.tasks.task_type import TaskType
-from shared.utils.redact import is_credential_key
+from shared.utils.redact import is_credential_key, redact_url
 
 from .base_executor import ExecutionError, Executor, ExecutorTask
 
@@ -216,7 +216,7 @@ class APIExecutor(Executor):
             ok=resp.is_success,
             executor=self.name,
             method=method,
-            url=str(resp.url),
+            url=redact_url(str(resp.url)),
             status_code=resp.status_code,
             truncated=truncated,
         )

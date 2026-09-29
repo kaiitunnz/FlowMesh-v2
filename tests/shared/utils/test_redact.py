@@ -5,6 +5,7 @@ from shared.utils.redact import (
     REDACTED,
     is_credential_key,
     redact_credential_fields,
+    redact_url,
 )
 
 
@@ -147,3 +148,21 @@ def test_redaction_masks_ordered_pairs_and_returns_lists() -> None:
 def test_redaction_covers_every_rejected_harness_param(name: str) -> None:
     assert _looks_credential(name)
     assert is_credential_key(name)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://user:pw@api.example/v1?api_key=k&limit=3",
+            "https://api.example/v1?api_key=[REDACTED]&limit=3",
+        ),
+        ("https://tok@git.example/r.git", "https://git.example/r.git"),
+        (
+            "https://api.example/v1?limit=3&q=a%20b",
+            "https://api.example/v1?limit=3&q=a%20b",
+        ),
+    ],
+)
+def test_redact_url_drops_userinfo_and_masks_credential_query_values(url, expected):
+    assert redact_url(url) == expected

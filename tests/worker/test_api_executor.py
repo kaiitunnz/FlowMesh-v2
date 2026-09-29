@@ -11,6 +11,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from shared.schemas.result import APIResult
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.executors.api_executor import APIExecutor
 from worker.executors.base_executor import ExecutionError
@@ -60,11 +61,11 @@ class _RecordingTransport(httpx.MockTransport):
 
 def _run(
     executor: APIExecutor, task: WorkerTaskMessage, transport: _RecordingTransport
-) -> None:
+) -> APIResult:
     with patch.object(
         APIExecutor, "_get_client", return_value=httpx.Client(transport=transport)
     ):
-        executor.run(task, Path(tempfile.gettempdir()))
+        return executor.run(task, Path(tempfile.gettempdir()))
 
 
 class TestNebulaPath:
@@ -274,3 +275,17 @@ def test_a_pooled_client_carries_no_cookie_between_tasks() -> None:
         server.shutdown()
         server.server_close()
     assert server.cookies_seen == [None, None]
+
+
+def test_the_stored_url_carries_no_credential_the_request_sent() -> None:
+    task = _task_message(
+        url="https://user:pw@api.example/v1/chat",
+        params={"api_key": "query-secret", "limit": 3},
+        headers={"Authorization": "Bearer custom"},
+    )
+    transport = _RecordingTransport()
+    result = _run(APIExecutor.__new__(APIExecutor), task, transport)
+
+    assert transport.request is not None
+    assert "query-secret" in str(transport.request.url)
+    assert result.url == "https://api.example/v1/chat?api_key=[REDACTED]&limit=3"

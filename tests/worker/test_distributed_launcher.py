@@ -282,3 +282,19 @@ def test_task_spec_dump_load_round_trip(tmp_path: Path) -> None:
     # into ``executor.run`` via ``self.require_spec(task, ...)``.
     assert rehydrated.spec is not None
     assert rehydrated.task.kind == "EchoTask"
+
+
+def test_the_launch_task_file_is_private_and_outlives_only_its_launch(tmp_path: Path):
+    task = make_worker_task_message(
+        task_type=TaskType.ECHO, spec=EchoSpecStrict(taskType=TaskType.ECHO)
+    )
+
+    with distributed.launcher_task_file(tmp_path, task) as path:
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert WorkerTaskMessage.model_validate(json.loads(path.read_text())) == task
+    assert not path.exists()
+
+    with pytest.raises(RuntimeError):
+        with distributed.launcher_task_file(tmp_path, task) as path:
+            raise RuntimeError("launch failed")
+    assert not path.exists()

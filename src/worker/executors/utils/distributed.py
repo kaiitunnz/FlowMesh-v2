@@ -17,10 +17,33 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from pydantic import BaseModel
 from torch.distributed.run import main as _torchrun_main
+
+from shared.utils.manifest import scratch_dir
 
 # .../src/worker/executors/utils/distributed.py → parents[3] = .../src
 _SRC_DIR = Path(__file__).resolve().parents[3]
+
+
+@contextmanager
+def launcher_task_file(out_dir: Path, task: BaseModel) -> Iterator[Path]:
+    """The task a distributed launch's ranks read, for the span of the launch.
+
+    The task carries its credentials, so the file is readable by the worker alone and
+    is removed once the launch exits.
+    """
+    launcher_dir = scratch_dir(out_dir) / "launcher"
+    launcher_dir.mkdir(parents=True, exist_ok=True)
+    path = launcher_dir / "task_spec.json"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(task.model_dump_json(by_alias=True))
+    try:
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
 
 
 @contextmanager

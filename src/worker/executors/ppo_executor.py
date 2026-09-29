@@ -50,7 +50,7 @@ from .utils.checkpoints import (
     write_executor_result,
 )
 from .utils.data_utils import resolve_jsonl_path
-from .utils.distributed import run_torchrun
+from .utils.distributed import launcher_task_file, run_torchrun
 from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 
 logger = logging.getLogger("worker.ppo")
@@ -1222,24 +1222,19 @@ class PPOExecutor(TrainingMixin, Executor):
         launcher_flag: str,
         training_config: dict[str, Any],
     ) -> None:
-        launcher_dir = scratch_dir(out_dir) / "launcher"
-        launcher_dir.mkdir(parents=True, exist_ok=True)
-        task_file = launcher_dir / "task_spec.json"
-        with task_file.open("w", encoding="utf-8") as fh:
-            json.dump(task.model_dump(mode="json", by_alias=True), fh)
-
         nproc = int(training_config.get("nproc_per_node", n_gpus))
         logger.info(
             "Launching torchrun for PPO (nproc=%d, CUDA_VISIBLE_DEVICES=%s)",
             nproc,
             os.environ.get("CUDA_VISIBLE_DEVICES"),
         )
-        run_torchrun(
-            nproc_per_node=nproc,
-            module="worker.executors.ppo_dist_entry",
-            module_args=[task_file.as_posix(), out_dir.as_posix()],
-            launcher_env_flag=launcher_flag,
-        )
+        with launcher_task_file(out_dir, task) as task_file:
+            run_torchrun(
+                nproc_per_node=nproc,
+                module="worker.executors.ppo_dist_entry",
+                module_args=[task_file.as_posix(), out_dir.as_posix()],
+                launcher_env_flag=launcher_flag,
+            )
 
     @staticmethod
     def _detect_gpu_count(training_config: dict[str, Any]) -> int:

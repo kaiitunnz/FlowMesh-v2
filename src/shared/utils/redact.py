@@ -3,7 +3,7 @@
 import re
 from collections.abc import Iterator
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 REDACTED = "[REDACTED]"
 
@@ -77,6 +77,26 @@ def is_credential_url(value: str) -> bool:
         return True
     query = parse_qsl(parts.query, keep_blank_values=True)
     return any(is_credential_key(name) for name, _ in query)
+
+
+def redact_url(url: str) -> str:
+    """``url`` without its userinfo and with each credential query value masked."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return REDACTED
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    if "@" not in parts.netloc and not any(is_credential_key(k) for k, _ in query):
+        return url
+    return urlunsplit(
+        parts._replace(
+            netloc=parts.netloc.rpartition("@")[2],
+            query=urlencode(
+                [(k, REDACTED if is_credential_key(k) else v) for k, v in query],
+                safe="[]",
+            ),
+        )
+    )
 
 
 def masked(value: Any) -> Any:
@@ -161,4 +181,5 @@ __all__ = [
     "is_credential_url",
     "masked",
     "redact_credential_fields",
+    "redact_url",
 ]
