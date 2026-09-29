@@ -114,3 +114,19 @@ def test_only_the_latest_given_up_episodes_stay_refused(
         rv.release(agent, "the model turn was cancelled")
 
     assert list(rv._refused) == ["tsk-2", "tsk-3"]
+
+
+def test_a_permit_for_a_refused_episode_is_turned_away_until_it_reopens() -> None:
+    rv = ModelTurnRendezvous()
+    with rv.register(_AGENT, _CALL) as waiter:
+        rv.refuse(_AGENT)
+        assert not rv.deliver_permit(_permit())
+        assert rv.was_held(_AGENT, _CALL)
+        rv.release(_AGENT, "the model turn was cancelled")
+        assert waiter.await_permit(timeout=1.0) == PermitDenied(
+            reason="the model turn was cancelled"
+        )
+    rv.reopen(_AGENT)
+    with rv.register(_AGENT, _CALL) as waiter:
+        assert rv.deliver_permit(_permit())
+        assert isinstance(waiter.await_permit(timeout=1.0), MediatedOperationPermit)

@@ -92,8 +92,11 @@ class ModelTurnRendezvous:
             self._held.pop(key, None)
 
     def deliver_permit(self, permit: MediatedOperationPermit) -> bool:
-        """Wake the held facade with its permit; False if no waiter is armed."""
-        return self._deliver((permit.agent_task_id, permit.call_correlation), permit)
+        """Wake the held facade with its permit; False if no waiter is armed or the
+        episode is refused, which egresses nothing once it is being given up."""
+        return self._deliver(
+            (permit.agent_task_id, permit.call_correlation), permit, refusable=True
+        )
 
     def deliver_deny(
         self, agent_task_id: str, call_correlation: str, reason: str
@@ -133,8 +136,12 @@ class ModelTurnRendezvous:
         while len(self._refused) > _MAX_REFUSED_EPISODES:
             del self._refused[next(iter(self._refused))]
 
-    def _deliver(self, key: _BoundaryKey, delivery: PermitDelivery) -> bool:
+    def _deliver(
+        self, key: _BoundaryKey, delivery: PermitDelivery, refusable: bool = False
+    ) -> bool:
         with self._lock:
+            if refusable and key[0] in self._refused:
+                return False
             box = self._waiters.get(key)
         if box is None:
             return False
