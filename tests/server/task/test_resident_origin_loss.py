@@ -374,3 +374,81 @@ def test_a_cancel_at_a_re_drive_s_check_reaps_after_the_credit_release(
     )
     assert held_at_reap == [0]
     assert [kind for _, kind, _ in delivery.relays].count("resident_reap") == 1
+
+
+def test_a_cancel_during_the_relay_bootstrap_reaps_the_attempt_it_records(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime()
+    svc, stores, delivery, loop, originated = _wire_resident_service(runtime)
+    sessions = svc._delivery.sessions
+    update = sessions.update
+    cancelled: dict[str, Any] = {}
+
+    async def cancel_during_the_session_write(session_id: str, **fields: Any) -> None:
+        if "at" not in cancelled:
+            cancelled["at"] = session_id
+            runtime.cancel_workflow(cancelled["workflow_id"])
+            # The session write yields to the loop, which runs the queued release.
+            await asyncio.sleep(0)
+        await update(session_id, **fields)
+
+    sessions.update = cancel_during_the_session_write
+    try:
+        workflow_id, ids = loop.run_until_complete(_register(runtime, _RESIDENT_WF))
+        cancelled["workflow_id"] = workflow_id
+        _capture_resident_boundary(runtime, ids["writer"], seal_in=tmp_path)
+        (env,) = originated
+        loop.run_until_complete(asyncio.sleep(0.05))
+    finally:
+        loop.close()
+
+    assert "at" in cancelled
+    assert all(
+        claim.state is ClaimState.TERMINAL
+        for claim in stores.claims.by_invocation(env.invocation_id)
+    )
+    assert env.invocation_id not in svc._attempts
+    kinds = [kind for _, kind, _ in delivery.relays]
+    assert "resident_handoff" not in kinds
+    assert "resident_sidecar_reap" in kinds
+
+
+def test_a_cancel_during_a_cold_start_ends_the_origination(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runtime = _runtime()
+    svc, stores, delivery, loop, originated = _wire_resident_service(runtime)
+    materialize = svc._lifecycle.materialize
+    cancelled: dict[str, Any] = {}
+
+    async def cancel_during_the_cold_start(definition: Any) -> Any:
+        if "during" not in cancelled:
+            cancelled["during"] = True
+            runtime.cancel_workflow(cancelled["workflow_id"])
+            await asyncio.sleep(0)
+        return await materialize(definition)
+
+    svc._lifecycle.materialize = cancel_during_the_cold_start
+    try:
+        workflow_id, ids = loop.run_until_complete(_register(runtime, _RESIDENT_WF))
+        cancelled["workflow_id"] = workflow_id
+        _capture_resident_boundary(runtime, ids["writer"], seal_in=tmp_path)
+        (env,) = originated
+        with caplog.at_level(logging.WARNING):
+            loop.run_until_complete(asyncio.sleep(0.3))
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+    finally:
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+
+    assert cancelled.get("during")
+    assert pending == []
+    assert all(
+        claim.state is ClaimState.TERMINAL
+        for claim in stores.claims.by_invocation(env.invocation_id)
+    )
+    assert not [record for record in caplog.records if record.levelname == "ERROR"]
+    assert "resident_handoff" not in [kind for _, kind, _ in delivery.relays]

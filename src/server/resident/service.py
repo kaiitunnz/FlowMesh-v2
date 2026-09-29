@@ -1176,6 +1176,11 @@ class ResidentCapacityControl:
             serve=serve,
             request_id=orig.request_id,
         )
+        if claim.state is ClaimState.TERMINAL:
+            # A terminal released the credit while this bootstrapped and found no
+            # attempt to reap; reap the one just recorded rather than hand it off.
+            self._reap_attempt(orig.invocation_id)
+            return
         if serve is not None:
             serve.open(session_id, handoff, plan)
             return
@@ -1634,6 +1639,8 @@ class ResidentCapacityControl:
         deadline = loop.time() + self._limits.cold_start_deadline_sec
         while True:
             async with self._admit_lock:
+                if claim.state is ClaimState.TERMINAL:
+                    return None
                 self._promote_ready_replicas(family)
                 self._lifecycle.refresh_family_reports(family)
                 handoff = self._admission.admit(
