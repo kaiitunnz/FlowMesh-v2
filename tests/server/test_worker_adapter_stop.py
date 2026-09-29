@@ -279,6 +279,38 @@ async def test_a_cancelled_start_that_then_failed_leaves_the_worker_stopped(
 
 
 @pytest.mark.asyncio
+async def test_a_start_behind_a_stop_queued_on_a_start_runs_after_the_stop() -> None:
+    world = _VastAI()
+    contracts = iter([70, 80])
+    creating = threading.Event()
+    release = threading.Event()
+
+    def create_instance(**_: Any) -> dict[str, Any]:
+        creating.set()
+        release.wait(5)
+        return {"success": True, "new_contract": next(contracts)}
+
+    world.client.create_instance.side_effect = create_instance
+    wm = _manager(world, "vastai")
+    first = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    await asyncio.to_thread(creating.wait, 5)
+    stop = asyncio.ensure_future(wm.stop_worker(world.adapter.name))
+    await asyncio.sleep(0.05)
+    world.adapter.set_status(WorkerStatus.STOPPED)  # a late stream close
+    second = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    await asyncio.sleep(0.05)
+
+    release.set()
+    assert await asyncio.gather(first, stop, second) == [True, True, True]
+
+    assert [c.kwargs["id"] for c in world.client.destroy_instance.call_args_list] == [
+        70
+    ]
+    assert world.adapter._instance_id == 80
+    assert world.adapter.holds_worker()
+
+
+@pytest.mark.asyncio
 async def test_a_destroy_logs_stopping_a_worker_whose_event_stream_closed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

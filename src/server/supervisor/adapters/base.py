@@ -155,26 +155,28 @@ class WorkerAdapter(ABC):
         """Stop worker. Returns whether the worker was successfully stopped.
 
         ``_stop`` runs on a thread once a start still creating the worker finishes. A
-        stop while another runs waits for that one and returns its result, so no
-        caller sees the worker stopped before it is; a cancel of a caller never stops
-        the stop.
+        stop is in flight from the moment it is accepted, so a start after it waits
+        for it. A stop while another runs waits for that one and returns its result,
+        so no caller sees the worker stopped before it is; a cancel of a caller never
+        stops the stop.
         """
+        if (stopping := self._stopping) is None or stopping.done():
+            stopping = self._stopping = asyncio.ensure_future(self._stop_after_start())
+        return await asyncio.shield(stopping)
+
+    async def _stop_after_start(self) -> bool:
         if (starting := self._starting) is not None and not starting.done():
             await asyncio.wait({starting})
-        if (stopping := self._stopping) is None or stopping.done():
-            prev_status = self.status
-            # The status reads STOPPED whenever the worker's event stream closes, so a
-            # worker the adapter started is stopped whatever its status reads.
-            if (
-                prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED)
-                and not self.holds_worker()
-            ):
-                return True
-            self.set_status(WorkerStatus.STOPPING)
-            stopping = self._stopping = asyncio.ensure_future(
-                self._stop_on_thread(prev_status)
-            )
-        return await asyncio.shield(stopping)
+        prev_status = self.status
+        # The status reads STOPPED whenever the worker's event stream closes, so a
+        # worker the adapter started is stopped whatever its status reads.
+        if (
+            prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED)
+            and not self.holds_worker()
+        ):
+            return True
+        self.set_status(WorkerStatus.STOPPING)
+        return await self._stop_on_thread(prev_status)
 
     @abstractmethod
     def _start(self) -> bool:
