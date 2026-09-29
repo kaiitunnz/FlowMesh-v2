@@ -120,7 +120,7 @@ class ResponsesFacade:
                 token=token,
                 sandbox=sandbox,
             )
-        self._held_egress.reopen(task_id)
+        self._held_egress.reopen(task_id, token)
         return token
 
     def unregister_episode(self, task_id: str) -> None:
@@ -128,9 +128,11 @@ class ResponsesFacade:
         turns waiting on its release, and drop a captured group no step will report
         with the requests it stashed."""
         with self._lock:
-            self._episodes.pop(task_id, None)
+            ctx = self._episodes.pop(task_id, None)
             group = self._captured.pop(task_id, None)
             released = self._refused.pop(task_id, None)
+        if ctx is not None:
+            self._held_egress.close(task_id, ctx.token)
         if released is not None:
             released.set()
         if group is not None:
@@ -152,11 +154,13 @@ class ResponsesFacade:
         """End the episode's turns and model calls waiting on a permit or its
         release."""
         with self._lock:
-            self._episodes.pop(task_id, None)
+            ctx = self._episodes.pop(task_id, None)
             released = self._refused.pop(task_id, None)
         if released is not None:
             released.set()
         self._held_egress.release(task_id)
+        if ctx is not None:
+            self._held_egress.close(task_id, ctx.token)
 
     def take_captured_group(self, task_id: str) -> FacadeTurnGroup | None:
         """Return and clear the facade group captured on this episode's last turn."""
@@ -266,7 +270,8 @@ class ResponsesFacade:
                 else:
                     messages.append(_tool_result(call, _DEFERRED))
         # Unreachable: a round that does not return runs at least one command, so the
-        # command bound trips before the round bound does.
+        # command bound trips before the round bound does, unless its episode was given
+        # up, whose next round's egress is refused.
         raise FacadeTurnError("held turn exhausted its command rounds")
 
     def _holds_turn(self, task_id: str, ctx: EpisodeContext) -> bool:
@@ -324,7 +329,7 @@ class ResponsesFacade:
         correlation = (
             f"model:{base}" if not round_index else f"model:{base}:{round_index}"
         )
-        result = self._held_egress.run(task_id, correlation, request)
+        result = self._held_egress.run(task_id, correlation, request, ctx.token)
         if isinstance(result, HeldEgressReject):
             raise FacadeTurnError(f"held model egress rejected: {result.reason}")
         return result

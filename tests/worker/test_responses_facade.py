@@ -31,13 +31,16 @@ class _StubEgress:
         self._result = result
         self.seen: list[tuple[str, str, Any]] = []
 
-    def run(self, task_id: str, correlation: str, request: Any) -> Any:
+    def run(self, task_id: str, correlation: str, request: Any, episode: str) -> Any:
         self.seen.append((task_id, correlation, request))
         return self._result
 
     timeout_sec = 5.0
 
-    def reopen(self, task_id: str) -> None:
+    def reopen(self, task_id: str, episode: str) -> None:
+        pass
+
+    def close(self, task_id: str, episode: str) -> None:
         pass
 
     def refuse(self, task_id: str) -> None:
@@ -202,10 +205,12 @@ def test_a_capture_while_the_episode_is_given_up_waits_and_stashes_nothing() -> 
     proceed = threading.Event()
 
     class _InFlight(_StubEgress):
-        def run(self, task_id: str, correlation: str, request: Any) -> Any:
+        def run(
+            self, task_id: str, correlation: str, request: Any, episode: str
+        ) -> Any:
             returning.set()
             assert proceed.wait(5)
-            return super().run(task_id, correlation, request)
+            return super().run(task_id, correlation, request, episode)
 
     pending = PendingEgressRequestStore()
     egress = _InFlight(

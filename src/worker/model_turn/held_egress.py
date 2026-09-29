@@ -27,6 +27,7 @@ from ..egress import (
 from .rendezvous import ModelTurnRendezvous, PermitDenied
 
 _CANCELLED = "the model turn was cancelled"
+_STALE = "the model turn's episode is no longer registered"
 
 ProposeFn = Callable[[AgentModelTurnProposal], None]
 
@@ -64,22 +65,37 @@ class HeldModelEgress:
         """End an episode's held turns awaiting a permit, and refuse its later ones."""
         self._rendezvous.release(task_id, _CANCELLED)
 
-    def reopen(self, task_id: str) -> None:
-        """Let a registered episode run held turns again."""
-        self._rendezvous.reopen(task_id)
+    def reopen(self, task_id: str, episode: str) -> None:
+        """Let the ``episode`` registration of a task run held turns, and no other."""
+        self._rendezvous.reopen(task_id, episode)
+
+    def close(self, task_id: str, episode: str) -> None:
+        """End the held turns of the ``episode`` registration."""
+        self._rendezvous.close(task_id, episode)
 
     def run(
-        self, task_id: str, call_correlation: str, request: ModelRequest
+        self,
+        task_id: str,
+        call_correlation: str,
+        request: ModelRequest,
+        episode: str,
     ) -> ModelCompletion | HeldEgressReject:
-        """Authorize and egress one held model turn, returning its whole reply."""
+        """Authorize and egress one held model turn of the ``episode`` registration,
+        returning its whole reply."""
         digest = model_request_digest(request.interface, request.url, request.body)
-        with self._rendezvous.register(task_id, call_correlation) as waiter:
+        with self._rendezvous.register(
+            task_id,
+            call_correlation,
+            episode,
+            lambda: self._pending.put(task_id, call_correlation, request),
+        ) as waiter:
+            if waiter.stale:
+                return HeldEgressReject(reason=_STALE)
             if waiter.refused:
                 # Answered only once the episode is released, after its harness exited,
                 # so the harness never ends its turn on the refusal.
                 waiter.await_permit(self._timeout_sec)
                 return HeldEgressReject(reason=_CANCELLED)
-            self._pending.put(task_id, call_correlation, request)
             try:
                 self._propose(
                     AgentModelTurnProposal(

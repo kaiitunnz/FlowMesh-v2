@@ -15,10 +15,23 @@ from typing import Any, cast
 from shared.tools.contract import MediatedOperationPermit
 from shared.utils.ids import new_mediated_permit_id
 from worker.model_turn import ModelTurnRendezvous, PermitDenied
+from worker.model_turn.rendezvous import PermitWaiter
 from worker.runner import Runner
 
 _AGENT = "tsk-agent"
 _CALL = "t0"
+
+_EPISODE = "episode-1"
+
+
+def _opened() -> ModelTurnRendezvous:
+    rv = ModelTurnRendezvous()
+    rv.reopen(_AGENT, _EPISODE)
+    return rv
+
+
+def _arm(rv: ModelTurnRendezvous) -> PermitWaiter:
+    return rv.register(_AGENT, _CALL, _EPISODE, lambda: None)
 
 
 class _StubSidecar:
@@ -67,8 +80,8 @@ def _route(fake_self: Any, kind: str, frame: dict[str, Any]) -> None:
 
 
 def test_permit_with_an_armed_waiter_wakes_the_facade_not_the_sidecar() -> None:
-    rv, sidecar = ModelTurnRendezvous(), _StubSidecar()
-    with rv.register(_AGENT, _CALL) as waiter:
+    rv, sidecar = _opened(), _StubSidecar()
+    with _arm(rv) as waiter:
         _route(_self(rv, sidecar), "permit", _permit().model_dump(mode="json"))
         got = waiter.await_permit(timeout=1.0)
     assert isinstance(got, MediatedOperationPermit)
@@ -79,8 +92,8 @@ def test_a_stale_held_model_permit_is_dropped_not_egressed() -> None:
     # A held-turn model permit whose waiter has already left is stale; egressing it on
     # the async lane would duplicate the call and reap a concurrent retry's request, so
     # it is dropped and recovery re-proposes under a fresh permit.
-    rv, sidecar = ModelTurnRendezvous(), _StubSidecar()
-    with rv.register(_AGENT, _CALL):
+    rv, sidecar = _opened(), _StubSidecar()
+    with _arm(rv):
         pass  # the held waiter registered and left (its turn timed out)
     _route(_self(rv, sidecar), "permit", _permit("model").model_dump(mode="json"))
     assert sidecar.submitted == []
@@ -88,20 +101,20 @@ def test_a_stale_held_model_permit_is_dropped_not_egressed() -> None:
 
 def test_a_durable_yield_model_permit_never_held_drives_the_sidecar() -> None:
     # A durable-yield model permit never armed a waiter, so it drives the async lane.
-    rv, sidecar = ModelTurnRendezvous(), _StubSidecar()
+    rv, sidecar = _opened(), _StubSidecar()
     _route(_self(rv, sidecar), "permit", _permit("model").model_dump(mode="json"))
     assert len(sidecar.submitted) == 1
 
 
 def test_a_waiterless_search_permit_drives_the_async_sidecar() -> None:
-    rv, sidecar = ModelTurnRendezvous(), _StubSidecar()
+    rv, sidecar = _opened(), _StubSidecar()
     _route(_self(rv, sidecar), "permit", _permit("search/v1").model_dump(mode="json"))
     assert len(sidecar.submitted) == 1
 
 
 def test_deny_frame_wakes_a_held_facade() -> None:
-    rv, sidecar = ModelTurnRendezvous(), _StubSidecar()
-    with rv.register(_AGENT, _CALL) as waiter:
+    rv, sidecar = _opened(), _StubSidecar()
+    with _arm(rv) as waiter:
         _route(
             _self(rv, sidecar),
             "deny",
@@ -113,7 +126,7 @@ def test_deny_frame_wakes_a_held_facade() -> None:
 
 
 def test_reap_frame_reaps_on_the_sidecar() -> None:
-    rv, sidecar = ModelTurnRendezvous(), _StubSidecar()
+    rv, sidecar = _opened(), _StubSidecar()
     _route(
         _self(rv, sidecar),
         "reap",

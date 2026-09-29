@@ -218,8 +218,13 @@ def test_a_held_model_turn_does_not_hold_the_boundary_drain(tmp_path: Path) -> N
     runner.lifecycle = lifecycle
     started = time.monotonic()
 
-    with runner._model_turn_rendezvous.register(*_HELD):
+    rendezvous = runner._model_turn_rendezvous
+    rendezvous.reopen(_HELD[0], "episode-1")
+
+    def stash() -> None:
         lifecycle.pending_egress_requests.put(*_HELD, cast(Any, object()))
+
+    with rendezvous.register(*_HELD, "episode-1", stash):
         runner._finish_held_boundaries(started + 5.0)
 
     assert time.monotonic() - started < 1.0

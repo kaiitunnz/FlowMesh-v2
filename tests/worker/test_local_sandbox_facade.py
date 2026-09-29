@@ -26,16 +26,21 @@ from shared.sandbox import (
 )
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationPermit
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
-from shared.tools.model.schema import ModelCompletion, ModelToolCall
+from shared.tools.model.schema import (
+    ModelCompletion,
+    ModelRequest,
+    ModelToolCall,
+    model_request_digest,
+)
 from shared.tools.search.schema import SEARCH_INTERFACE
 from shared.utils.ids import new_mediated_permit_id
 from tests.worker.factories import make_worker_config
 from tests.worker.test_agent_episode_executor import _dispatch_msg, _FakeAdapter
-from worker.egress import PendingEgressRequestStore
+from worker.egress import HeldEgressReject, PendingEgressRequestStore
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.harness import register_adapter
 from worker.model_turn import HeldModelEgress, ResponsesFacade
-from worker.model_turn.facade import _DEFERRED, _MAX_TURN_COMMANDS, FacadeTurnError
+from worker.model_turn.facade import _MAX_TURN_COMMANDS, FacadeTurnError
 from worker.model_turn.rendezvous import ModelTurnRendezvous
 
 _TASK = "tsk-agent"
@@ -65,15 +70,21 @@ class _ScriptedEgress:
         self._completions = completions
         self.seen: list[tuple[str, str, Any]] = []
 
-    def run(self, task_id: str, correlation: str, request: Any) -> Any:
+    def run(self, task_id: str, correlation: str, request: Any, episode: str) -> Any:
         self.seen.append((task_id, correlation, request))
         index = min(len(self.seen) - 1, len(self._completions) - 1)
         return self._completions[index]
 
-    def reopen(self, task_id: str) -> None:
+    def reopen(self, task_id: str, episode: str) -> None:
+        pass
+
+    def close(self, task_id: str, episode: str) -> None:
         pass
 
     def refuse(self, task_id: str) -> None:
+        pass
+
+    def release(self, task_id: str) -> None:
         pass
 
 
@@ -411,6 +422,55 @@ def test_a_round_during_the_harness_close_waits_for_the_release_unproposed() -> 
     assert pending.occurrences() == []
 
 
+class _Control:
+    """Answers each proposed model turn with a permit over its digest, and egresses
+    it as the sidecar does: fenced against the request the worker stashed."""
+
+    def __init__(self, replies: Any) -> None:
+        self.rendezvous = ModelTurnRendezvous()
+        self.pending = PendingEgressRequestStore()
+        self.proposals: list[AgentModelTurnProposal] = []
+        self.answer_at_once = True
+        self._replies = replies
+        self._proposed = threading.Condition()
+        self.facade = ResponsesFacade(
+            held_egress=HeldModelEgress(
+                rendezvous=self.rendezvous,
+                pending=self.pending,
+                propose=self._propose,
+                sidecar=cast(Any, self),
+                timeout_sec=5.0,
+            ),
+            pending=self.pending,
+        )
+
+    def _propose(self, proposal: AgentModelTurnProposal) -> None:
+        with self._proposed:
+            self.proposals.append(proposal)
+            self._proposed.notify_all()
+        if self.answer_at_once:
+            self.answer(proposal)
+
+    def answer(self, proposal: AgentModelTurnProposal) -> None:
+        self.rendezvous.deliver_permit(
+            _permit(proposal.agent_task_id, proposal.call_correlation).model_copy(
+                update={"request_digest": proposal.request_digest}
+            )
+        )
+
+    def await_proposals(self, count: int) -> None:
+        with self._proposed:
+            assert self._proposed.wait_for(lambda: len(self.proposals) >= count, 5)
+
+    def egress_now(self, permit: MediatedOperationPermit) -> Any:
+        request = self.pending.peek(permit.agent_task_id, permit.call_correlation)
+        assert isinstance(request, ModelRequest)
+        digest = model_request_digest(request.interface, request.url, request.body)
+        if digest != permit.request_digest:
+            return HeldEgressReject(reason="permit fence rejected: digest")
+        return self._replies(permit.call_correlation, request)
+
+
 @pytest.mark.parametrize("given_up", ["refused", "unregistered"])
 def test_a_turn_given_up_mid_batch_runs_no_more_of_its_commands(given_up: str) -> None:
     batch = ModelCompletion(
@@ -420,29 +480,107 @@ def test_a_turn_given_up_mid_batch_runs_no_more_of_its_commands(given_up: str) -
             for i in range(4)
         ),
     )
+    control = _Control(lambda *_: batch)
+    facade = control.facade
+
+    def release_once_the_next_round_waits() -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not control.rendezvous.has_waiter(
+            _TASK, "model:0:1"
+        ):
+            time.sleep(0.005)
+        facade.release_episode(_TASK)
 
     class _GivenUpOnFirstCommand(_RecordingSandbox):
         def execute(self, command: SandboxCommand) -> SandboxCommandResult:
+            facade.refuse_episode(_TASK)
             if given_up == "refused":
-                facade.refuse_episode(_TASK)
+                threading.Thread(
+                    target=release_once_the_next_round_waits, daemon=True
+                ).start()
             else:
+                facade.release_episode(_TASK)
                 facade.unregister_episode(_TASK)
             return super().execute(command)
 
     sandbox = _GivenUpOnFirstCommand()
-    facade, egress, _, token = _facade(
-        [batch, ModelCompletion(content="done")], sandbox
-    )
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_RUN_COMMAND], sandbox)
 
-    facade.handle_turn(_TASK, token, {"input": "go"})
+    with pytest.raises(FacadeTurnError, match="cancelled"):
+        facade.handle_turn(_TASK, token, {"input": "go"})
 
     assert sandbox.commands == [("step", "0")]
-    results = [
-        message["content"]
-        for message in egress.seen[1][2].body["messages"]
-        if message.get("role") == "tool"
+    assert [p.call_correlation for p in control.proposals] == ["model:0"]
+    assert control.pending.occurrences() == []
+
+
+def test_a_given_up_turn_egresses_nothing_once_its_task_registers_again() -> None:
+    def reply(correlation: str, request: Any) -> ModelCompletion:
+        if correlation != "model:0":
+            return ModelCompletion(content="done")
+        tag = "stale" if "stale" in json.dumps(request.body) else "retry"
+        return ModelCompletion(
+            content="", tool_calls=(_call("run_command", {"command": [tag]}),)
+        )
+
+    control = _Control(reply)
+    control.answer_at_once = False
+    facade = control.facade
+    in_command = threading.Event()
+    resume = threading.Event()
+
+    class _Sandbox(_RecordingSandbox):
+        def execute(self, command: SandboxCommand) -> SandboxCommandResult:
+            if command.argv == ("stale",):
+                in_command.set()
+                assert resume.wait(5)
+            return super().execute(command)
+
+    turns: dict[str, Any] = {}
+
+    def turn(name: str, token: str) -> threading.Thread:
+        def run() -> None:
+            try:
+                turns[name] = facade.handle_turn(_TASK, token, {"input": name})
+            except FacadeTurnError as exc:
+                turns[name] = exc
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return thread
+
+    first = facade.register_episode(
+        _TASK, "http://up/v1", "m", [_RUN_COMMAND], _Sandbox()
+    )
+    stale = turn("stale", first)
+    control.await_proposals(1)
+    control.answer(control.proposals[0])
+    assert in_command.wait(5)
+    # The step raised: its turn is given up, and its retry lands on this worker.
+    facade.refuse_episode(_TASK)
+    facade.release_episode(_TASK)
+    facade.unregister_episode(_TASK)
+    second = facade.register_episode(
+        _TASK, "http://up/v1", "m", [_RUN_COMMAND], _Sandbox()
+    )
+    retry = turn("retry", second)
+    control.await_proposals(2)
+    control.answer(control.proposals[1])
+    control.await_proposals(3)
+
+    # The given-up turn's command returns while the retry waits on the same call.
+    resume.set()
+    stale.join(5)
+    control.answer(control.proposals[2])
+    retry.join(5)
+
+    assert [p.call_correlation for p in control.proposals] == [
+        "model:0",
+        "model:0",
+        "model:0:1",
     ]
-    assert results[1:] == [_DEFERRED] * 3
+    assert isinstance(turns["stale"], FacadeTurnError)
+    assert turns["retry"][0]["content"][0]["text"] == "done"
 
 
 def test_a_step_that_raises_gives_up_the_turn_still_running(tmp_path: Path) -> None:

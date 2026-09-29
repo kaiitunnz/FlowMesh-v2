@@ -11,6 +11,7 @@ so a permit that never arrives, a denial, or a cancelled turn ends it rather tha
 import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
@@ -51,23 +52,40 @@ class ModelTurnRendezvous:
         # waiter and propose once its episode is being given up; a released one's
         # waiters are armed already denied with the reason recorded here.
         self._refused: dict[str, str | None] = {}
+        # The registration each open episode's held turns run under; a turn of any
+        # other registration of the task is stale.
+        self._open: dict[str, str] = {}
 
-    def register(self, agent_task_id: str, call_correlation: str) -> "PermitWaiter":
-        """Arm a waiter for one held occurrence before its propose is emitted.
+    def register(
+        self,
+        agent_task_id: str,
+        call_correlation: str,
+        episode: str,
+        on_armed: Callable[[], None],
+    ) -> "PermitWaiter":
+        """Arm a waiter for one held occurrence of the ``episode`` registration
+        before its propose is emitted, running ``on_armed`` as it is armed.
 
-        A refused episode's waiter is armed refused, and a released one's is armed
-        already denied.
+        A released episode's turn gets a waiter already denied, and a turn of a
+        registration no longer open gets a stale one; neither arms anything, so it can
+        neither take a live turn's waiter nor stash over its request. A refused
+        episode's waiter is armed refused, without running ``on_armed``.
         """
         key = (agent_task_id, call_correlation)
         box: queue.Queue[PermitDelivery] = queue.Queue(maxsize=1)
         with self._lock:
+            if (reason := self._refused.get(agent_task_id)) is not None:
+                box.put_nowait(PermitDenied(reason=reason))
+                return PermitWaiter(self, key, box, refused=True)
+            if self._open.get(agent_task_id) != episode:
+                return PermitWaiter(self, key, box, stale=True)
             self._prune_held_locked()
             self._waiters[key] = box
             self._held[key] = time.monotonic() + _HELD_KEY_TTL_SEC
             refused = agent_task_id in self._refused
-            if (reason := self._refused.get(agent_task_id)) is not None:
-                box.put_nowait(PermitDenied(reason=reason))
-        return PermitWaiter(self, key, box, refused)
+            if not refused:
+                on_armed()
+        return PermitWaiter(self, key, box, refused=refused)
 
     def has_waiter(self, agent_task_id: str, call_correlation: str) -> bool:
         """Whether a held facade is waiting on this occurrence's permit."""
@@ -125,10 +143,18 @@ class ModelTurnRendezvous:
             except queue.Full:
                 pass
 
-    def reopen(self, agent_task_id: str) -> None:
-        """Let a registered episode arm waiters again."""
+    def reopen(self, agent_task_id: str, episode: str) -> None:
+        """Open the ``episode`` registration of a task, whose held turns alone arm
+        waiters from now on."""
         with self._lock:
+            self._open[agent_task_id] = episode
             self._refused.pop(agent_task_id, None)
+
+    def close(self, agent_task_id: str, episode: str) -> None:
+        """Close the ``episode`` registration, if it is still the task's open one."""
+        with self._lock:
+            if self._open.get(agent_task_id) == episode:
+                del self._open[agent_task_id]
 
     def _refuse_locked(self, agent_task_id: str, reason: str | None) -> None:
         self._refused.pop(agent_task_id, None)
@@ -167,11 +193,13 @@ class PermitWaiter:
         key: _BoundaryKey,
         box: "queue.Queue[PermitDelivery]",
         refused: bool = False,
+        stale: bool = False,
     ) -> None:
         self._rendezvous = rendezvous
         self._key = key
         self._box = box
         self.refused = refused
+        self.stale = stale
 
     def __enter__(self) -> Self:
         return self
