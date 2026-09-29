@@ -118,13 +118,10 @@ class ResponsesFacade:
         return token
 
     def unregister_episode(self, task_id: str) -> None:
+        """Forget the episode, so a turn still running captures nothing, and drop a
+        captured group no step will report with the requests it stashed."""
         with self._lock:
             self._episodes.pop(task_id, None)
-        self.discard_captured_group(task_id)
-
-    def discard_captured_group(self, task_id: str) -> None:
-        """Drop a captured group no step will report, with the requests it stashed."""
-        with self._lock:
             group = self._captured.pop(task_id, None)
         if group is not None:
             for member in group.members:
@@ -304,9 +301,13 @@ class ResponsesFacade:
         capture = build_facade_capture(
             task_id, facade_calls, list(ctx.descriptors), base
         )
-        for correlation, request in capture.stashes:
-            self._pending.put(task_id, correlation, request)
         with self._lock:
+            # A turn that returns after its step ended has no step to report the group,
+            # so it stashes nothing that would outlive it.
+            if self._episodes.get(task_id) is not ctx:
+                raise FacadeTurnError(f"the episode {task_id} ended before its turn")
+            for correlation, request in capture.stashes:
+                self._pending.put(task_id, correlation, request)
             self._captured[task_id] = capture.group
         output: list[dict[str, Any]] = []
         if completion.content:

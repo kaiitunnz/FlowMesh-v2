@@ -297,6 +297,72 @@ def test_a_step_that_raises_drops_the_requests_its_turn_stashed(
     assert facade.take_captured_group(msg.task_id) is None
 
 
+class _LateCaptureAdapter(_FakeAdapter):
+    """A step that ends while its held turn's model call is still in flight."""
+
+    def __init__(self, facade: ResponsesFacade, egress_started: threading.Event):
+        super().__init__(HarnessResult(kind=HarnessResultKind.COMPLETION, value="ok"))
+        self._facade = facade
+        self._egress_started = egress_started
+        self.turn_errors: list[BaseException] = []
+        self.turn: threading.Thread | None = None
+
+    def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
+        token = self._facade.register_episode(
+            activation_id, "http://up/v1", "m", [_SEARCH]
+        )
+
+        def turn() -> None:
+            try:
+                self._facade.handle_turn(activation_id, token, {"input": "find it"})
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertion
+                self.turn_errors.append(exc)
+
+        self.turn = threading.Thread(target=turn, daemon=True)
+        self.turn.start()
+        assert self._egress_started.wait(5)
+        raise RuntimeError("the app-server closed mid-turn")
+
+
+def test_a_turn_returning_after_its_step_raised_captures_nothing(
+    tmp_path: Path,
+) -> None:
+    pending = PendingEgressRequestStore()
+    egress_started = threading.Event()
+    step_ended = threading.Event()
+
+    def egress(*_: Any) -> ModelCompletion:
+        egress_started.set()
+        assert step_ended.wait(5)
+        return ModelCompletion(
+            content="searching",
+            tool_calls=(
+                ModelToolCall(
+                    call_id="c1", name="web_search", arguments='{"query": "q"}'
+                ),
+            ),
+        )
+
+    held = MagicMock()
+    held.run.side_effect = egress
+    facade = ResponsesFacade(held_egress=held, pending=pending)
+    lifecycle = MagicMock()
+    lifecycle.responses_facade = facade
+    adapter = _LateCaptureAdapter(facade, egress_started)
+    register_adapter("fake", lambda *_: adapter)
+    ex = AgentEpisodeExecutor(make_worker_config(), lifecycle=lifecycle)
+
+    with pytest.raises(RuntimeError, match="closed mid-turn"):
+        ex.run(_dispatch_msg(), tmp_path)
+    step_ended.set()
+    assert adapter.turn is not None
+    adapter.turn.join(5)
+
+    assert len(adapter.turn_errors) == 1
+    assert pending.occurrences() == []
+    assert facade._captured == {}
+
+
 class _YieldingAdapter(_FakeAdapter):
     def egress_handoff_mode(self) -> EgressHandoffMode:
         return EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD

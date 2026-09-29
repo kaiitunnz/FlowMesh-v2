@@ -75,10 +75,10 @@ class AgentEpisodeExecutor(Executor):
                 return self._step(task)
             except BaseException:
                 # Control never learns of a group a raised step captured, so the worker
-                # drops the requests it stashed for it.
+                # drops the requests it stashed for it and refuses a turn still running.
                 facade = self._lifecycle.responses_facade if self._lifecycle else None
                 if facade is not None:
-                    facade.discard_captured_group(task.task_id)
+                    facade.unregister_episode(task.task_id)
                 raise
 
     def _step(self, task: ExecutorTask) -> EpisodeStepResult:
