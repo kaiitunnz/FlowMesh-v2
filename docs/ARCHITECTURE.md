@@ -219,7 +219,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the menu answers with its self-contained embodiment; a pinned leaf admits no other
   embodiment, so it fails at admission instead. A leaf whose request the compiler cannot
   project runs one prompt per invocation and is refused at submission when it declares
-  more. See [`EXECUTORS.md`](EXECUTORS.md).
+  more. A leaf whose adapter source carries a credential runs self-contained, and a
+  resident binding on one is refused at submission. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Upstream-resolved inference inputs.** An inference leaf names its prompts through one
   `CanonicalInferenceInputSource`: literal items, or one bounded projection of a declared
   direct upstream input, written as `data.expr` or `data.node` plus `data.path` and

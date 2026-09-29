@@ -12,6 +12,8 @@ import pytest
 from server.config import OrchestrationConfig
 from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
+from server.task.v2 import PersistedV2Workflow
+from server.task.v2.compiler.diagnostics import CompileError
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.redact import REDACTED
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -370,3 +372,77 @@ def test_a_record_that_cannot_be_vaulted_loads_and_runs_as_stored(monkeypatch):
     assert message.task.spec.api["headers"]["Authorization"] == (
         "Bearer legacy-inline-credential"
     )
+
+
+_PRESIGNED = (
+    "https://bucket.s3.amazonaws.com/lora.tar?X-Amz-Credential=AKIA-PRESIGNED-SECRET"
+    "&X-Amz-Signature=sig"
+)
+
+
+def _adapter_leaf(adapter_url: str, service: str = "") -> str:
+    service_line = f"\n          service: {service}" if service else ""
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: adapter}}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: inference
+          model:
+            source: {{identifier: Qwen/Qwen3-4B}}
+            adapters: [{{type: lora, name: my-lora, url: "{adapter_url}"}}]
+          resources: {{hardware: {{gpu: {{count: 1}}}}}}
+          data: {{type: list, items: [hi]}}{service_line}
+"""
+
+
+def _plan_nodes(registry: FakeRegistry, workflow_id: str) -> list[Any]:
+    bundle = PersistedV2Workflow.model_validate_json(registry.v2_blobs[workflow_id])
+    return list(bundle.plan.nodes)
+
+
+def test_a_leaf_whose_adapter_url_carries_a_credential_runs_self_contained():
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, _ = _register(runtime, _adapter_leaf(_PRESIGNED))
+
+    [node] = _plan_nodes(registry, workflow_id)
+    assert node.embodiment_menu is None
+    assert node.service_family_requirement is None
+    assert node.residency_intent is None
+    persisted = "".join([*registry.v2_blobs.values(), *registry.ledger_blobs.values()])
+    assert "PRESIGNED-SECRET" not in persisted
+    report = runtime.inspect_v2(_adapter_leaf(_PRESIGNED))
+    assert report is not None
+    assert "PRESIGNED-SECRET" not in report.model_dump_json()
+
+
+@pytest.mark.parametrize("service", ["{mode: resident}", "{isolation: team}"])
+def test_resident_serving_of_a_credentialed_adapter_is_refused(service):
+    payload = _adapter_leaf(_PRESIGNED, service)
+    runtime = _runtime()
+
+    with pytest.raises(CompileError, match="adapter"):
+        _register(runtime, payload)
+    with pytest.raises(CompileError, match="adapter"):
+        runtime.inspect_v2(payload)
+
+
+def test_resident_serving_of_a_plain_adapter_url_keeps_its_source():
+    registry = FakeRegistry()
+    url = "https://example.com/lora.tar"
+    workflow_id, _ = _register(
+        _runtime(registry), _adapter_leaf(url, "{mode: resident}")
+    )
+
+    [node] = _plan_nodes(registry, workflow_id)
+    assert node.service_family_requirement is not None
+    bundle = PersistedV2Workflow.model_validate_json(registry.v2_blobs[workflow_id])
+    [leaf] = bundle.template.operators
+    assert leaf.service_dependency is not None
+    assert leaf.service_dependency.adapter_source == url

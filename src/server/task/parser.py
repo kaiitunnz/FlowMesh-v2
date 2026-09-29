@@ -87,6 +87,9 @@ class ParsedTask:
     position_in_epoch: int | None = None
     selected_worker: list[str] | None = None
     v2: dict[str, Any] | None = None
+    # The pointers of the inline credentials masked in the spec, set once they are
+    # taken out of it.
+    masked_credentials: frozenset[str] = frozenset()
 
 
 def parse_workflow(

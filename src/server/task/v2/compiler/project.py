@@ -81,6 +81,7 @@ from .bindings import (
 from .diagnostics import compile_error
 from .embodiment import (
     embodiment_menu,
+    reject_credentialed_adapter,
     reject_resident_batch,
     reject_unproven,
     unproven_reason,
@@ -193,7 +194,8 @@ def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
     whether or not it declares a binding. A leaf the proof does not clear, and a leaf
     kind for which only one embodiment is proven, keeps the embodiment its source names:
     resident when it declares a binding, self-contained when it declares none. A leaf
-    that asks for both explicitly is failed rather than quietly narrowed.
+    that asks for both explicitly is failed rather than quietly narrowed, and so is a
+    resident-served leaf whose adapter source carries a credential.
     """
     spec = task.task.spec
     if not isinstance(spec, _SERVICE_BACKED_SPECS):
@@ -206,13 +208,16 @@ def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
     )
     if binding is not None and binding.mode is ServiceBindingMode.RESIDENT:
         reject_resident_batch(task, spec, named)
+        reject_credentialed_adapter(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+        reject_credentialed_adapter(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     if binding is not None and binding.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
         reject_unproven(task, spec)
     elif unproven_reason(spec) is not None:
         reject_resident_batch(task, spec, named)
+        reject_credentialed_adapter(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     return InferenceEmbodimentBinding(
         eligibility=InferenceEmbodimentEligibility.LOCAL_ELIGIBLE,

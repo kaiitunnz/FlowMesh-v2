@@ -379,6 +379,9 @@ base replica through its own slot — the resident consumer loads its adapter in
 slot and selects it as the request model. Adapter serving is supported only on the chat
 interface; a resident embedding leaf that declares an adapter is rejected at compile. An
 adapter-bound leaf declares a single adapter with a loadable `path`, `url`, or `task_id`.
+A replica loads an adapter from a source that carries no credential, so a resident binding
+on a leaf whose adapter URL carries one is refused at submission; the leaf runs
+self-contained instead.
 
 `RESIDENT_ADAPTER_SLOTS` bounds the distinct adapters a replica holds concurrently. A claim
 for a base model or an already-resident adapter admits without consuming a new slot, and a

@@ -106,17 +106,19 @@ def take_inline_credentials(parsed: ParsedWorkflow) -> InlineCredentials:
     persisted record or the compiled template and plan.
     """
     refs = CredentialRefs()
-    tasks = {
-        task.task_id: take_spec_credentials(task.task.spec, refs)
-        for task in parsed.tasks
-    }
+    tasks: dict[str, TaskCredentials] = {}
+    for task in parsed.tasks:
+        taken = tasks[task.task_id] = take_spec_credentials(task.task.spec, refs)
+        task.masked_credentials = frozenset(taken.refs)
     return InlineCredentials(values=refs.values, tasks=tasks)
 
 
 def mask_inline_credentials(parsed: ParsedWorkflow) -> None:
     """Mask every inline task-spec credential in ``parsed`` in place."""
     for task in parsed.tasks:
-        take_spec_credentials(task.task.spec, None)
+        found = find_spec_credentials(task.task.spec)
+        mask_spec_values(task.task.spec, found)
+        task.masked_credentials = frozenset(found)
 
 
 def credential_merge_key(

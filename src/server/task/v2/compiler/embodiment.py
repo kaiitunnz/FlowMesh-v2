@@ -22,6 +22,7 @@ from shared.tasks.specs import (
     InferenceSpecTemplate,
     TaskSpecBase,
 )
+from shared.tasks.specs.common import ModelSpecStrict, ModelSpecTemplate
 
 from ...parser import ParsedTask
 from ..representations.operators import (
@@ -182,6 +183,42 @@ def reject_resident_batch(
         f"contract projects; here {reason}. Declare one prompt, or declare a leaf "
         f"whose request projects",
     )
+
+
+def _serves_credentialed_adapter(task: ParsedTask, spec: TaskSpecBase) -> bool:
+    """Whether the adapter a resident replica would load names a vaulted credential.
+
+    A replica loads the adapter from the source the plan carries, and a vaulted source
+    reaches the plan masked, so such a leaf has no resident embodiment.
+    """
+    adapters = (
+        spec.adapters
+        if isinstance(spec, (ModelSpecStrict, ModelSpecTemplate))
+        else None
+    )
+    if not adapters:
+        return False
+    adapter = adapters[0]
+    field = "path" if adapter.path else "url" if adapter.url else None
+    return field is not None and f"/model/adapters/0/{field}" in task.masked_credentials
+
+
+def reject_credentialed_adapter(
+    task: ParsedTask, spec: TaskSpecBase, eligibility: InferenceEmbodimentEligibility
+) -> None:
+    """Fail a leaf that admits only resident serving of an adapter whose source carries
+    a credential."""
+    if (
+        eligibility is InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+        and _serves_credentialed_adapter(task, spec)
+    ):
+        raise _reject(
+            task,
+            "embodiment.resident-adapter-credential",
+            "a resident-served leaf loads its adapter on a shared replica, which "
+            "cannot carry a credential in the adapter's source; serve the leaf "
+            "self-contained, or load the adapter from a source without one",
+        )
 
 
 def _unproven(task: ParsedTask, reason: str) -> Exception:
