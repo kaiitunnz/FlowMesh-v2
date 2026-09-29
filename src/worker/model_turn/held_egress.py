@@ -51,6 +51,10 @@ class HeldModelEgress:
         self._timeout_sec = timeout_sec
         self._log = logger or logging.getLogger("held-model-egress")
 
+    def refuse(self, task_id: str) -> None:
+        """Refuse an episode's later held turns, which wait for its release."""
+        self._rendezvous.refuse(task_id)
+
     def release(self, task_id: str) -> None:
         """End an episode's held turns awaiting a permit, and refuse its later ones."""
         self._rendezvous.release(task_id, _CANCELLED)
@@ -65,7 +69,10 @@ class HeldModelEgress:
         """Authorize and egress one held model turn, returning its whole reply."""
         digest = model_request_digest(request.interface, request.url, request.body)
         with self._rendezvous.register(task_id, call_correlation) as waiter:
-            if waiter.released:
+            if waiter.refused:
+                # Answered only once the episode is released, after its harness exited,
+                # so the harness never ends its turn on the refusal.
+                waiter.await_permit(self._timeout_sec)
                 return HeldEgressReject(reason=_CANCELLED)
             self._pending.put(task_id, call_correlation, request)
             try:

@@ -78,11 +78,25 @@ def test_register_before_deliver_closes_the_race() -> None:
     assert isinstance(got, MediatedOperationPermit)
 
 
+def test_a_refused_episode_arms_refused_waiters_until_it_reopens() -> None:
+    rv = ModelTurnRendezvous()
+    rv.refuse(_AGENT)
+    with rv.register(_AGENT, _CALL) as waiter:
+        assert waiter.refused
+        assert waiter.await_permit(timeout=0.05) is None
+    rv.reopen(_AGENT)
+    with rv.register(_AGENT, _CALL) as waiter:
+        assert not waiter.refused
+
+
 def test_a_released_episode_arms_denied_waiters_until_it_reopens() -> None:
     rv = ModelTurnRendezvous()
     rv.release(_AGENT, "the model turn was cancelled")
     with rv.register(_AGENT, _CALL) as waiter:
-        assert waiter.released
+        assert waiter.refused
+        assert waiter.await_permit(timeout=0) == PermitDenied(
+            reason="the model turn was cancelled"
+        )
     rv.reopen(_AGENT)
     with rv.register(_AGENT, _CALL) as waiter:
-        assert not waiter.released
+        assert not waiter.refused

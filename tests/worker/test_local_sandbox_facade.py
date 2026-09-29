@@ -7,6 +7,8 @@ already were.
 """
 
 import json
+import threading
+import time
 from typing import Any, cast
 
 import pytest
@@ -328,7 +330,8 @@ def test_a_turn_cancelled_during_a_command_proposes_no_later_round() -> None:
 
     class _CancelledMidCommand(_RecordingSandbox):
         def execute(self, command: SandboxCommand) -> SandboxCommandResult:
-            facade.cancel_episode(_TASK)
+            facade.refuse_episode(_TASK)
+            facade.release_episode(_TASK)
             return super().execute(command)
 
     sandbox = _CancelledMidCommand()
@@ -342,6 +345,61 @@ def test_a_turn_cancelled_during_a_command_proposes_no_later_round() -> None:
     assert egressed == proposed
     assert pending.occurrences() == []
     assert not rendezvous.has_waiter(_TASK, proposed[0])
+
+
+def test_a_round_during_the_harness_close_waits_for_the_release_unproposed() -> None:
+    rendezvous = ModelTurnRendezvous()
+    pending = PendingEgressRequestStore()
+    proposed: list[str] = []
+    order: list[str] = []
+
+    class _Sidecar:
+        def egress_now(self, permit: MediatedOperationPermit) -> ModelCompletion:
+            return ModelCompletion(
+                content="",
+                tool_calls=(_call("run_command", {"command": ["make"]}),),
+            )
+
+    def propose(proposal: AgentModelTurnProposal) -> None:
+        proposed.append(proposal.call_correlation)
+        rendezvous.deliver_permit(
+            _permit(proposal.agent_task_id, proposal.call_correlation)
+        )
+
+    held = HeldModelEgress(
+        rendezvous=rendezvous,
+        pending=pending,
+        propose=propose,
+        sidecar=cast(Any, _Sidecar()),
+        timeout_sec=5.0,
+    )
+    facade = ResponsesFacade(held_egress=held, pending=pending)
+
+    def close_the_harness_then_release() -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any(
+            task_id == _TASK for task_id, _ in rendezvous._waiters
+        ):
+            time.sleep(0.005)
+        order.append("harness exited")
+        facade.release_episode(_TASK)
+
+    class _GivenUpMidCommand(_RecordingSandbox):
+        def execute(self, command: SandboxCommand) -> SandboxCommandResult:
+            facade.refuse_episode(_TASK)
+            threading.Thread(target=close_the_harness_then_release, daemon=True).start()
+            return super().execute(command)
+
+    sandbox = _GivenUpMidCommand()
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_RUN_COMMAND], sandbox)
+
+    with pytest.raises(FacadeTurnError, match="cancelled"):
+        facade.handle_turn(_TASK, token, {"input": "go"})
+    order.append("turn answered")
+
+    assert order == ["harness exited", "turn answered"]
+    assert len(proposed) == 1
+    assert pending.occurrences() == []
 
 
 def _permit(task_id: str, call_correlation: str) -> MediatedOperationPermit:

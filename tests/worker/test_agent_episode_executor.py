@@ -533,7 +533,10 @@ def test_a_give_up_returns_at_once_and_releases_the_turn_once_the_harness_exited
             order.append("harness exited")
 
     lifecycle = MagicMock()
-    lifecycle.responses_facade.cancel_episode.side_effect = lambda _: order.append(
+    lifecycle.responses_facade.refuse_episode.side_effect = lambda _: order.append(
+        "turn refused"
+    )
+    lifecycle.responses_facade.release_episode.side_effect = lambda _: order.append(
         "turn released"
     )
     ex = AgentEpisodeExecutor(make_worker_config(), lifecycle=lifecycle)
@@ -544,11 +547,11 @@ def test_a_give_up_returns_at_once_and_releases_the_turn_once_the_harness_exited
         ex.cancel("tsk-1")
         returned_after = time.monotonic() - started
         assert exiting.wait(5)
-        assert order == []
+        assert order == ["turn refused"]
         exited.set()
         deadline = time.monotonic() + 5
-        while len(order) < 2 and time.monotonic() < deadline:
+        while len(order) < 3 and time.monotonic() < deadline:
             time.sleep(0.01)
 
     assert returned_after < 1.0
-    assert order == ["harness exited", "turn released"]
+    assert order == ["turn refused", "harness exited", "turn released"]
