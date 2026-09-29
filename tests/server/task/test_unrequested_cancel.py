@@ -30,6 +30,13 @@ from tests.server.task.test_v2_orchestration import (
     _worker,
 )
 from tests.server.task.test_v2_region_failure import _HEAD, _JOINS, _spawn_join
+from tests.server.task.test_worker_originated_boundary import (
+    _SEARCH_WF,
+    _dispatch_agent,
+)
+from tests.server.task.test_worker_originated_boundary import (
+    _runtime as _boundary_runtime,
+)
 
 _USAGE = {
     "started_at": _TS,
@@ -407,6 +414,34 @@ async def test_a_drained_external_effect_fails_whichever_report_lands_first(
         assert after.error == f"Dependency {task_id} failed"
         assert rt.ready_queue_length() == 0
         assert rt.workflow_settlement(workflow_id).settled
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("max_attempts", [1, 3])
+@pytest.mark.parametrize("held", ["external_effect", "worker_held_boundary"])
+async def test_a_crash_of_a_task_that_cannot_rerun_spends_no_attempt(
+    held: str, max_attempts: int
+) -> None:
+    if held == "external_effect":
+        runtime = _runtime(FakeRegistry())
+        _, ids = await _register(runtime, SSH_THEN_ECHO)
+        task_id = ids["session"]
+        assert _next(runtime) == task_id
+        record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
+    else:
+        runtime = _boundary_runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        task_id = ids["writer"]
+        _dispatch_agent(runtime, task_id)
+    record = runtime.get_record(task_id)
+    assert record is not None
+    record.max_attempts = max_attempts
+
+    _crash(runtime, _monitor(runtime), "wkr-1", "supervisor")
+
+    assert record.status == TaskStatus.FAILED
+    assert record.attempts == 0
+    assert record.error == "ambiguity-terminal effect"
 
 
 def _dispatched_unsaved(
