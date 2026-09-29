@@ -44,8 +44,8 @@ def pop_inline_model_secrets(parsed: ParsedWorkflow) -> dict[str, SecretStr]:
 class TaskCredentials:
     """Where one task's vaulted credentials sit in its spec.
 
-    ``refs`` maps each credential's pointer to the ref it is vaulted under. A task one
-    of whose vaulted values renders from an upstream stage is ``renders``: the ref
+    ``refs`` maps each credential's pointer to the ref it is vaulted under.
+    ``renders`` is set when a vaulted value renders from an upstream stage: its ref
     names the unrendered value, so it cannot tell two rendered credentials apart.
     """
 

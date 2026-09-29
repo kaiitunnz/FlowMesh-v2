@@ -14,6 +14,9 @@ from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
 from server.task.v2 import PersistedV2Workflow
 from server.task.v2.compiler.diagnostics import CompileError
+from server.task.v2.representations.operators import LeafOperator
+from shared.tasks.components.output import OutputDestinationHTTP
+from shared.tasks.specs import ApiSpecStrict, ApiSpecTemplate
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.redact import REDACTED
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -98,6 +101,18 @@ def _dispatch(runtime: TaskRuntime, task_id: str) -> tuple[mock.Mock, Any]:
     return registry, disp
 
 
+def _api(task: Any) -> dict[str, Any]:
+    spec = task.spec
+    assert isinstance(spec, (ApiSpecStrict, ApiSpecTemplate)) and spec.api is not None
+    return spec.api
+
+
+def _merge_key(runtime: TaskRuntime, task_id: str) -> str | None:
+    record = runtime.get_record(task_id)
+    assert record is not None
+    return record.merge_key
+
+
 def _no_secret(text: str) -> bool:
     return not any(secret in text for secret in _SECRETS)
 
@@ -122,11 +137,11 @@ def test_no_persisted_or_served_surface_holds_an_inline_credential(api_version):
 
     call = runtime.get_record(ids["call"])
     assert call is not None
-    assert call.task.spec.api["headers"] == {
+    assert _api(call.task)["headers"] == {
         "Authorization": REDACTED,
         "Accept": "application/json",
     }
-    assert call.task.spec.api["url"] == REDACTED
+    assert _api(call.task)["url"] == REDACTED
 
 
 @pytest.mark.parametrize("api_version", ["flowmesh/v1", "flowmesh/v2"])
@@ -139,10 +154,13 @@ def test_a_dispatch_carries_the_task_its_own_credentials(api_version):
     assert disp.failed == []
     message = registry.publish_task.call_args[0][1]
     assert isinstance(message, WorkerTaskMessage)
-    api = message.task.spec.api
+    api = _api(message.task)
     assert api["headers"]["Authorization"] == _AUTH
     assert api["url"] == f"https://api.example/v1/chat?api_key={_QUERY_KEY}"
-    assert message.task.spec.output.destination.headers == {"X-Api-Key": _OUTPUT_KEY}
+    output = message.task.spec.output
+    assert output is not None
+    assert isinstance(output.destination, OutputDestinationHTTP)
+    assert output.destination.headers == {"X-Api-Key": _OUTPUT_KEY}
     # The record the dispatch rendered from keeps only the refs.
     record = runtime.get_record(ids["call"])
     assert record is not None and _no_secret(record.model_dump_json())
@@ -212,16 +230,13 @@ def test_merge_keys_tell_credentials_apart_and_carry_none():
     _, ids = _register(runtime, payload)
     _, again = _register(runtime, payload)
 
-    keys = {
-        name: runtime.get_record(task_id).merge_key for name, task_id in ids.items()
-    }
-    assert all(key is not None for key in keys.values())
+    keys = {name: _merge_key(runtime, task_id) for name, task_id in ids.items()}
     assert keys["a"] == keys["b"] != keys["c"]
-    assert all(
-        secret not in key for key in keys.values() for secret in (_T1, _T2, _K1, _K2)
-    )
+    for key in keys.values():
+        assert key is not None
+        assert all(secret not in key for secret in (_T1, _T2, _K1, _K2))
     # A credential names a merge key only within its own workflow.
-    assert runtime.get_record(again["a"]).merge_key != keys["a"]
+    assert _merge_key(runtime, again["a"]) != keys["a"]
 
 
 def test_a_merged_dispatch_carries_each_task_its_own_credentials():
@@ -265,8 +280,8 @@ def test_a_task_whose_credential_renders_from_a_stage_never_merges():
     payload = _inference_workflow({"a": _T1, "b": "${a.token}"}, {"a": _K1, "b": _K2})
     _, ids = _register(runtime, payload)
 
-    assert runtime.get_record(ids["a"]).merge_key is not None
-    assert runtime.get_record(ids["b"]).merge_key is None
+    assert _merge_key(runtime, ids["a"]) is not None
+    assert _merge_key(runtime, ids["b"]) is None
 
 
 def test_a_restart_dispatches_a_task_with_its_credentials():
@@ -444,5 +459,5 @@ def test_resident_serving_of_a_plain_adapter_url_keeps_its_source():
     assert node.service_family_requirement is not None
     bundle = PersistedV2Workflow.model_validate_json(registry.v2_blobs[workflow_id])
     [leaf] = bundle.template.operators
-    assert leaf.service_dependency is not None
+    assert isinstance(leaf, LeafOperator) and leaf.service_dependency is not None
     assert leaf.service_dependency.adapter_source == url
