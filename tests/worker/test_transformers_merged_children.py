@@ -359,3 +359,18 @@ def test_a_merged_table_child_gets_the_items_it_gets_alone(tmp_path: Path) -> No
         ["out-Q out-d"],
         ["out-Q out-e", "out-Q out-f"],
     ]
+
+
+def test_an_item_missing_a_required_field_fails_the_task(tmp_path: Path) -> None:
+    def outputs_only(
+        items: list[dict[str, Any]], tables: list[Any]
+    ) -> list[dict[str, Any]]:
+        return [{"output": [item["output"] for item in items]}]
+
+    with (
+        patch.object(
+            HFTransformersExecutor, "_populate_table", staticmethod(outputs_only)
+        ),
+        pytest.raises(ExecutionError, match="cannot report"),
+    ):
+        _run(_table_spec(["a"]), [], tmp_path, _ChatTokenizer())

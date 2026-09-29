@@ -46,6 +46,19 @@ class InferenceItem(StrictModel):
     diagnostics: dict[str, Any] | None = None
 
 
+class InferenceItemStrict(InferenceItem):
+    """An inference item as a producer emits it.
+
+    Every producer reports ``index``, ``prompt`` and ``output``, so an item missing one
+    is rejected before it is stored; ``output`` may be null. Stored items read through
+    the tolerant ``InferenceItem``.
+    """
+
+    index: int
+    prompt: str
+    output: JsonValue
+
+
 class OmniImageItem(StrictModel):
     """One text-to-image generation."""
 

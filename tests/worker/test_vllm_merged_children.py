@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -293,3 +293,18 @@ def test_a_table_item_reports_one_cap_per_row(tmp_path: Path) -> None:
             "requested": 512,
         }
     }
+
+
+def test_an_item_missing_a_required_field_fails_the_task(tmp_path: Path) -> None:
+    # A grouping that reported only the outputs would store items with no index or
+    # prompt; the producer check fails the task instead.
+    def outputs_only(
+        items: list[dict[str, Any]], tables: list[Any]
+    ) -> list[dict[str, Any]]:
+        return [{"output": [item["output"] for item in items]}]
+
+    with (
+        patch.object(VLLMExecutor, "_populate_table", staticmethod(outputs_only)),
+        pytest.raises(ExecutionError, match="cannot report"),
+    ):
+        _run(_table_spec(["a"]), [], tmp_path, chat_template="chat")

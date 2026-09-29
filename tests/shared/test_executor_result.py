@@ -3,7 +3,8 @@
 import json
 from typing import Any
 
-from pydantic import Field
+import pytest
+from pydantic import Field, ValidationError
 
 from shared.schemas.artifact import ArtifactContext, ArtifactRef
 from shared.schemas.result import (
@@ -13,6 +14,8 @@ from shared.schemas.result import (
     DataRetrievalResult,
     EchoItem,
     EchoResult,
+    InferenceItem,
+    InferenceItemStrict,
     InferenceResult,
     OmniText2ImageResult,
     ResultEnvelope,
@@ -135,6 +138,81 @@ def test_required_nullable_fields_survive_serialization() -> None:
     assert dumped["image"] is None
     reloaded = OmniText2ImageResult.model_validate_json(result.model_dump_json())
     assert reloaded == result
+
+
+def test_a_produced_inference_item_requires_index_prompt_and_output() -> None:
+    """A producer reports ``index``, ``prompt`` and ``output`` for every item, so an
+    item omitting one is rejected; ``finish_reason`` and ``metadata`` may be absent."""
+    item = InferenceItemStrict(index=0, prompt="hi", output="hello")
+    assert item.finish_reason is None and item.metadata is None
+
+    complete = {"index": 0, "prompt": "hi", "output": "hello", "finish_reason": "stop"}
+    for missing in ("index", "prompt", "output"):
+        payload = dict(complete)
+        del payload[missing]
+        with pytest.raises(ValidationError):
+            InferenceItemStrict.model_validate(payload)
+
+
+def test_a_produced_null_output_is_stored_as_null() -> None:
+    """``output`` is required but nullable: a structured output whose model returned
+    ``null`` keeps the key on the wire."""
+    result = InferenceResult(
+        items=[InferenceItemStrict(index=0, prompt="hi", output=None)]
+    )
+    stored = json.loads(ResultEnvelope(task_id="t", result=result).model_dump_json())
+    assert stored["result"]["items"] == [{"index": 0, "prompt": "hi", "output": None}]
+
+
+# Every item shape an inference producer has stored, as stored.
+_STORED_ITEMS = {
+    "generated": {"index": 0, "prompt": "p", "output": "o", "finish_reason": "stop"},
+    "no finish reason": {"index": 0, "prompt": "p", "output": "o"},
+    "empty completion": {"index": 0, "prompt": "p", "output": "", "metadata": {"a": 1}},
+    "structured null": {"index": 0, "prompt": "p", "finish_reason": "stop"},
+    "grouped": {
+        "index": 0,
+        "prompt": "p",
+        "output": ["a", "b"],
+        "finish_reason": ["stop", None],
+    },
+    "table without row fields": {"output": ["a", "b"]},
+}
+
+
+@pytest.mark.parametrize("stored", _STORED_ITEMS.values(), ids=list(_STORED_ITEMS))
+def test_every_stored_inference_item_reads_back_unchanged(
+    stored: dict[str, Any],
+) -> None:
+    envelope = {
+        "task_id": "t",
+        "result": {
+            "task_type": "inference",
+            "items": [stored],
+            "children": {"c": {"task_type": "inference", "items": [stored]}},
+        },
+    }
+    result = ResultEnvelope.model_validate_json(json.dumps(envelope)).result
+    assert isinstance(result, InferenceResult)
+    assert isinstance(result.items[0], InferenceItem)
+    reread = json.loads(result.model_dump_json())
+    assert reread["items"] == [stored]
+    assert reread["children"]["c"]["items"] == [stored]
+
+
+def test_a_stored_omni_result_without_a_model_reads_back() -> None:
+    envelope = {
+        "task_id": "t",
+        "result": {
+            "task_type": "omni_text2image",
+            "model": None,
+            "image": None,
+            "items": [],
+        },
+    }
+    result = ResultEnvelope.model_validate_json(json.dumps(envelope)).result
+    assert isinstance(result, OmniText2ImageResult)
+    assert result.model is None
 
 
 def test_drop_none_round_trip_is_lossless() -> None:

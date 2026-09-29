@@ -62,7 +62,6 @@ from shared.schemas.governance import SpanType
 from shared.schemas.result import (
     EmbeddingResult,
     GenerationUsage,
-    InferenceItem,
     InferenceResult,
 )
 from shared.tasks import MergedChildTaskStrict
@@ -75,7 +74,7 @@ from shared.tasks.task_type import TaskType
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
-from .mixins.inference import InferenceMixin, PreparedInferenceEntry
+from .mixins.inference import InferenceMixin, PreparedInferenceEntry, produced_items
 
 try:
     import torch
@@ -712,7 +711,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         results = [
             InferenceResult(
                 model=self._model_name,
-                items=[InferenceItem.model_validate(item) for item in items[owner]],
+                items=produced_items(entry.task_id, items[owner]),
                 usage=GenerationUsage(
                     prompt_tokens=prompt_tokens[owner],
                     completion_tokens=completion_tokens[owner],

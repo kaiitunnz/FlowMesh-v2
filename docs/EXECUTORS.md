@@ -49,6 +49,12 @@ Artifact-bearing fields use `ArtifactRef` (`{"path": rel_path}`);
 relative paths resolve against the producer's `_artifacts` context via
 `artifact_to_source` / `_render_artifact_ref`.
 
+An inference producer reports every item with its `index`, `prompt` and `output`
+(`InferenceItemStrict`), and a task whose item lacks one fails before its result is
+stored. A stored result reads through the tolerant `InferenceItem`, so a result stored in
+an earlier shape stays readable. An omni result likewise names its loaded model when it is
+produced.
+
 A vLLM inference leaf lowers each prompt's `max_tokens` to what the model window holds
 after that prompt, and records the clamp on the prompt's item as
 `diagnostics.auto_cap` (`{max_tokens, requested}`); a grouped item records one budget

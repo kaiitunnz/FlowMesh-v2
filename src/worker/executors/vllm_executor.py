@@ -71,7 +71,6 @@ from shared.schemas.governance import SpanType
 from shared.schemas.result import (
     BaseExecutorResult,
     GenerationUsage,
-    InferenceItem,
     InferenceResult,
 )
 from shared.tasks import MergedChildTaskStrict
@@ -81,7 +80,7 @@ from shared.tasks.task_type import TaskType
 
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry, group_diagnostics
-from .mixins.inference import InferenceMixin, PreparedInferenceEntry
+from .mixins.inference import InferenceMixin, PreparedInferenceEntry, produced_items
 from .utils.checkpoints import resolve_checkpoint_load
 
 logger = logging.getLogger(__name__)
@@ -1369,7 +1368,7 @@ Summary:"""
                 maybe_usage = usage_by_task.get(child_id)
                 child_results[child_id] = InferenceResult(
                     model=self._model_name,
-                    items=[InferenceItem.model_validate(it) for it in child_items],
+                    items=produced_items(child_id, child_items),
                     usage=(
                         GenerationUsage.model_validate(maybe_usage)
                         if maybe_usage
@@ -1380,7 +1379,7 @@ Summary:"""
         result = InferenceResult(
             children=child_results,
             model=self._model_name,
-            items=[InferenceItem.model_validate(it) for it in items],
+            items=produced_items(task_id, items),
             usage=GenerationUsage.model_validate(usage_by_task[task_id]),
         )
 
