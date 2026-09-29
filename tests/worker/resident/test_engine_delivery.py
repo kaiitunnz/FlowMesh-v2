@@ -22,6 +22,7 @@ from shared.resident.contracts import ReplicaEndpoint
 from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
 from worker.resident.engine import (
     HttpEngineDelivery,
+    NoCompletion,
     RawHttpEngineDelivery,
     unload_adapter,
 )
@@ -193,6 +194,28 @@ def test_chat_interface_posts_chat_completions_and_streams_text() -> None:
         content = asyncio.run(_drain(endpoint, "hello"))
     assert server.paths == ["/v1/chat/completions"]
     assert content == "hi there"
+
+
+def _chat_reply(payload: dict[str, Any]) -> tuple[int, str, bytes]:
+    return 200, "application/json", json.dumps(payload).encode()
+
+
+def test_a_response_with_no_choice_carries_no_completion() -> None:
+    with _running() as server:
+        server.chat_override = _chat_reply({"choices": []})
+        with pytest.raises(NoCompletion):
+            asyncio.run(_drain(_chat_endpoint(server), "hello"))
+
+
+def test_a_message_without_content_reads_as_empty_text() -> None:
+    # An engine parser leaves the content null when the whole generation went to
+    # reasoning or tool calls; the completion is empty text, never the string "None".
+    with _running() as server:
+        server.chat_override = _chat_reply(
+            {"choices": [{"message": {"role": "assistant", "content": None}}]}
+        )
+        content = asyncio.run(_drain(_chat_endpoint(server), "hello"))
+    assert content == ""
 
 
 def _batch_payload(*prompts: str) -> str:

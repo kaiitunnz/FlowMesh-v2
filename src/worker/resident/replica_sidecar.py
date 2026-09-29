@@ -56,6 +56,7 @@ from ..telemetry import otel
 from .engine import (
     EngineOpen,
     EngineUnload,
+    NoCompletion,
     RawEngineOpen,
     RawEngineResponse,
     unload_adapter,
@@ -376,6 +377,11 @@ class ResidentReplicaSidecar:
             definite = 400 <= status < 500 and status != 429
             await session.send_wire(
                 KIND_FAILED, definite=definite, reason=f"engine {status}"
+            )
+            return
+        except NoCompletion as exc:
+            await session.send_wire(
+                KIND_FAILED, definite=True, reason=f"engine response unusable: {exc}"
             )
             return
         try:

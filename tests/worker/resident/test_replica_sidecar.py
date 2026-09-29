@@ -26,7 +26,7 @@ from shared.resident.wire import (
     KIND_HEAD,
     KIND_REJECT,
 )
-from worker.resident.engine import EngineResponse, RawEngineResponse
+from worker.resident.engine import EngineResponse, NoCompletion, RawEngineResponse
 from worker.resident.replica_sidecar import ResidentReplicaSidecar
 
 _CHUNKS = ["resi", "dent ", "reply"]
@@ -99,6 +99,15 @@ async def _failing_engine(
     raise httpx.HTTPStatusError(
         "bad request", request=response.request, response=response
     )
+
+
+async def _no_completion_engine(
+    endpoint: ReplicaEndpoint,
+    request: str | None,
+    adapter_name: str | None = None,
+    adapter_source: str | None = None,
+) -> EngineResponse:
+    raise NoCompletion("the engine response carries no choice")
 
 
 class _ToPeer:
@@ -201,6 +210,23 @@ def test_wrong_incarnation_is_refused_before_the_engine() -> None:
 def test_definite_engine_failure_is_carried_definite() -> None:
     async def run() -> None:
         origin, sidecar = _harness(engine=_failing_engine)
+        await origin.send_wire("bootstrap", handoff=_handoff(), request=None)
+        ack = await origin.recv_wire(timeout=5.0)
+        assert ack is not None and ack["kind"] == KIND_ACK
+        await origin.send_wire("stream", auth=_auth())
+        failed = await origin.recv_wire(timeout=5.0)
+        assert failed is not None and failed["kind"] == KIND_FAILED
+        assert failed["definite"] is True
+        await sidecar.aclose()
+
+    asyncio.run(run())
+
+
+def test_an_engine_response_with_no_completion_fails_definite() -> None:
+    # The engine answered and admitted no retry, so the boundary settles as a failure
+    # and releases its credit rather than re-driving the same request.
+    async def run() -> None:
+        origin, sidecar = _harness(engine=_no_completion_engine)
         await origin.send_wire("bootstrap", handoff=_handoff(), request=None)
         ack = await origin.recv_wire(timeout=5.0)
         assert ack is not None and ack["kind"] == KIND_ACK

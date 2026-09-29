@@ -38,9 +38,20 @@ from shared.resident.engine_request import (
 from shared.resident.envelope import ServeRequestEnvelope, filter_response_headers
 
 
+class NoCompletion(ValueError):
+    """An engine response that carries no choice to take a completion from."""
+
+
 def _completion(data: dict[str, Any]) -> str:
-    """The assistant message text of one chat response."""
-    return str(data["choices"][0]["message"]["content"])
+    """The assistant message text of one chat response.
+
+    A message without content, as an engine parser leaves one whose text went wholly
+    to reasoning or tool calls, reads as empty text.
+    """
+    if not (choices := data.get("choices")):
+        raise NoCompletion("the engine response carries no choice")
+    content = choices[0]["message"]["content"]
+    return "" if content is None else str(content)
 
 
 # The already-loaded shapes an engine reports for an idempotent adapter re-load; matched
