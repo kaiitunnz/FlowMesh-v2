@@ -137,7 +137,7 @@ class WorkerAdapter(ABC):
         try:
             ok = await asyncio.shield(starting)
         except asyncio.CancelledError:
-            starting.add_done_callback(self._log_abandoned_start)
+            starting.add_done_callback(self._on_abandoned_start)
             raise
         except Exception:
             self.set_status(WorkerStatus.STOPPED)
@@ -191,13 +191,15 @@ class WorkerAdapter(ABC):
         """Whether this adapter started a worker it has not stopped."""
         pass
 
-    def _log_abandoned_start(self, starting: asyncio.Future[bool]) -> None:
+    def _on_abandoned_start(self, starting: asyncio.Future[bool]) -> None:
         if not starting.cancelled() and (exc := starting.exception()) is not None:
             logger.warning(
                 "Worker %s failed to start after its start was cancelled: %r",
                 self.name,
                 exc,
             )
+        if not self.holds_worker():
+            self.set_status(WorkerStatus.STOPPED)
 
     async def _stop_on_thread(self, prev_status: WorkerStatus) -> bool:
         try:

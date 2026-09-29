@@ -245,6 +245,40 @@ async def test_two_starts_behind_a_finishing_stop_create_one_instance() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("instance_id", [None, 5])
+async def test_a_cancelled_start_that_then_failed_leaves_the_worker_stopped(
+    instance_id: int | None,
+) -> None:
+    world = _VastAI(instance_id)
+    refusing = threading.Event()
+    release = threading.Event()
+
+    def refuse(**_: Any) -> Any:
+        refusing.set()
+        release.wait(5)
+        return "vast refused" if instance_id else {"success": False}
+
+    world.client.start_instance.side_effect = refuse
+    world.client.create_instance.side_effect = refuse
+    wm = _manager(world, "vastai")
+    start = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    await asyncio.to_thread(refusing.wait, 5)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    release.set()
+    assert world.adapter._starting is not None
+    await asyncio.wait({world.adapter._starting})
+    await asyncio.sleep(0)
+
+    assert world.adapter.status is WorkerStatus.STOPPED
+    with pytest.raises(ValueError, match="not starting or running"):
+        await wm.stop_worker(world.adapter.name)
+    assert world.stops == 0
+    assert await wm.start_worker(world.adapter.name) is False
+
+
+@pytest.mark.asyncio
 async def test_a_destroy_logs_stopping_a_worker_whose_event_stream_closed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
