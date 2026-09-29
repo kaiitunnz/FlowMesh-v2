@@ -13,6 +13,7 @@ from server.orchestration.state import WorkItemStatus
 from server.services.watchdog import WorkerWatchdog
 from server.task.models import EventEffect, TaskStatus
 from server.task.runtime import TaskRuntime
+from shared.private_state import OwnerFence
 from shared.schemas.event import TaskEvent, WorkerEvent, parse_event
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_task_merge import _monitor
@@ -326,6 +327,8 @@ async def test_a_v2_task_whose_worker_crashes_on_every_attempt_fails_with_downst
         ("supervisor", "worker_unregistered"),
         ("watchdog", "worker_heartbeat_expired"),
         ("drain", None),
+        ("disowned", None),
+        ("disowned_by_its_owner", "worker_disowned_dispatch"),
     ],
 )
 async def test_a_v2_task_requeues_once_per_attempt_its_worker_s_loss_spent(
@@ -333,17 +336,25 @@ async def test_a_v2_task_requeues_once_per_attempt_its_worker_s_loss_spent(
 ) -> None:
     runtime = _runtime(FakeRegistry())
     monitor = _monitor(runtime)
-    _, ids = await _register(runtime, LINEAR)
+    workflow_id, ids = await _register(runtime, LINEAR)
     task_id = ids["a"]
     assert _next(runtime) == task_id
     record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
 
-    if how == "drain":
-        monitor._handle_worker_event(
-            WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=True)
-        )
-    else:
-        _crash(runtime, monitor, "wkr-1", how)
+    match how:
+        case "drain":
+            monitor._handle_worker_event(
+                WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=True)
+            )
+        case "disowned" | "disowned_by_its_owner":
+            if how == "disowned_by_its_owner":
+                engine = runtime.orchestration_engine(workflow_id)
+                owner = OwnerFence(worker_id="wkr-1", incarnation=1)
+                cast(Any, engine).private_state_owner = MagicMock(return_value=owner)
+            cast(Any, monitor._watchdog).death_bound_sec.return_value = 0
+            monitor._resolve_disowned_dispatch("wkr-1", task_id, "dsp-1", 0)
+        case _:
+            _crash(runtime, monitor, "wkr-1", how)
 
     requeued = [
         call.args[0]

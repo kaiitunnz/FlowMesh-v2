@@ -106,13 +106,15 @@ class DispatchEnd(StrEnum):
 
 
 class SettleOutcome(NamedTuple):
-    """What a worker's success or cancellation report did to its task."""
+    """What a worker's success or cancellation report did to its task; ``spent``
+    when the task returned to the queue spending an attempt."""
 
     effect: EventEffect
     status: str | None
     usages: list[tuple[str, TaskUsage]]
     merged_children: list[str]
     impacted: tuple[tuple[str, str], ...] = ()
+    spent: bool = False
 
 
 class LossOutcome(NamedTuple):

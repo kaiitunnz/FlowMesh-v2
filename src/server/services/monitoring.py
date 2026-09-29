@@ -977,7 +977,10 @@ class EventMonitor:
         )
         if (end := _GIVEN_UP_ENDS.get(outcome.effect)) is not None:
             self._record_loss(
-                worker_id, LossOutcome(task_id, end, outcome.impacted), dispatch_id
+                worker_id,
+                LossOutcome(task_id, end, outcome.impacted, outcome.spent),
+                dispatch_id,
+                reason="worker_disowned_dispatch",
             )
         elif outcome.status == TaskStatus.CANCELLED:
             self._record_cancellation(

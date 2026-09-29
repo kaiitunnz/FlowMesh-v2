@@ -6351,7 +6351,9 @@ class TaskRuntime:
         """
         end = self._return_dispatch_locked(record, increment_retry=True, front=True)
         if end is DispatchEnd.RETURNED:
-            return _settle_outcome(EventEffect.RETURNED, record, [], [])
+            return _settle_outcome(EventEffect.RETURNED, record, [], [])._replace(
+                spent=True
+            )
         impacted, usages = self._mark_failed(
             record.task_id, worker_id, {}, now_iso(), error=record.last_error
         )
