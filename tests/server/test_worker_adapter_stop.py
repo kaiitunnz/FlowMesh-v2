@@ -343,3 +343,94 @@ async def test_a_destroy_logs_stopping_a_worker_whose_event_stream_closed(
 
     assert f"Stopping worker {world.adapter.name}..." in caplog.messages
     assert f"Worker {world.adapter.name} stopped." in caplog.messages
+
+
+def _gate_first_start(world: Any) -> tuple[threading.Event, threading.Event]:
+    starting = threading.Event()
+    release = threading.Event()
+    start = world.adapter._start
+    contracts = iter([70, 80])
+    world.client.create_instance.side_effect = lambda **_: {
+        "success": True,
+        "new_contract": next(contracts),
+    }
+
+    def gated_start() -> bool:
+        if not starting.is_set():
+            starting.set()
+            release.wait(5)
+        return start()
+
+    world.adapter._start = gated_start
+    world.adapter.set_status(WorkerStatus.STOPPED)
+    return starting, release
+
+
+def _created(world: Any) -> int:
+    if isinstance(world, _Docker):
+        return world.client.containers.run.call_count
+    return world.client.create_instance.call_count
+
+
+async def _start_queued_behind_a_stop_on_a_start(
+    world: Any, wm: StubWorkerManager
+) -> tuple[threading.Event, asyncio.Future[bool], asyncio.Future[bool], Any]:
+    starting, release = _gate_first_start(world)
+    first = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    await asyncio.to_thread(starting.wait, 5)
+    stop = asyncio.ensure_future(wm.stop_worker(world.adapter.name))
+    await asyncio.sleep(0.05)
+    world.adapter.set_status(WorkerStatus.STOPPED)  # a late stream close
+    second = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    await asyncio.sleep(0.05)
+    return release, first, stop, second
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_a_start_queued_behind_a_stop_creates_nothing_once_destroyed(
+    kind: str,
+) -> None:
+    world = _world(kind)
+    wm = _manager(world, kind)
+    release, first, stop, second = await _start_queued_behind_a_stop_on_a_start(
+        world, wm
+    )
+    destroy = asyncio.ensure_future(wm.destroy_worker(world.adapter.name))
+    await asyncio.sleep(0.05)
+
+    release.set()
+    assert await asyncio.gather(first, stop, second, destroy) == [
+        True,
+        True,
+        False,
+        True,
+    ]
+
+    assert _created(world) == 1
+    assert not world.adapter.holds_worker()
+    assert wm._registry.try_get_by_name(world.adapter.name) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_a_start_queued_behind_a_failed_stop_keeps_the_running_worker(
+    kind: str,
+) -> None:
+    world = _world(kind)
+    if kind == "docker":
+        world.container.stop.side_effect = RuntimeError("daemon refused")
+    else:
+        world.client.destroy_instance.return_value = "vast refused"
+    wm = _manager(world, kind)
+    release, first, stop, second = await _start_queued_behind_a_stop_on_a_start(
+        world, wm
+    )
+
+    release.set()
+    assert await asyncio.gather(first, stop, second) == [True, False, True]
+
+    assert _created(world) == 1
+    assert world.adapter.holds_worker()
+    if kind == "vastai":
+        assert world.adapter._instance_id == 70

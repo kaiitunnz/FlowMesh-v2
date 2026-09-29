@@ -352,6 +352,9 @@ class WorkerManager:
             self.logger.info("Stopping worker %s...", worker_name)
         else:
             self.logger.info("Destroying worker %s that is not running.", worker_name)
+        # Closed first, so a start queued behind the stop creates nothing the destroy
+        # would not remove.
+        worker.close()
         # A worker mid-stop runs until that stop ends, whatever its status reads, so
         # a destroy joins the stop.
         try:

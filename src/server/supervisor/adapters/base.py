@@ -91,6 +91,7 @@ class WorkerAdapter(ABC):
         self.owner = owner
         self._starting: asyncio.Future[bool] | None = None
         self._stopping: asyncio.Future[bool] | None = None
+        self._closed = False
 
     @property
     @abstractmethod
@@ -123,13 +124,19 @@ class WorkerAdapter(ABC):
         """Start worker. Returns whether the worker was successfully started.
 
         ``_start`` runs on a thread, which a cancel cannot stop; a stop waits for it
-        first, so it finds whatever the start created. A start waits for a stop still
-        running, so the stop never removes what the start creates, and a start while
-        another runs waits for that one and returns its result.
+        first, so it finds whatever the start created. A start waits for every stop
+        still running, so the stop never removes what the start creates, and a start
+        while another runs waits for that one and returns its result. A start after
+        :meth:`close` creates nothing, and a start behind a stop that left the worker
+        running keeps that worker.
         """
-        if (stopping := self._stopping) is not None and not stopping.done():
+        while (stopping := self._stopping) is not None and not stopping.done():
             await asyncio.wait({stopping})
+        if self._closed:
+            return False
         if (starting := self._starting) is None or starting.done():
+            if self.holds_worker():
+                return True
             self.set_status(WorkerStatus.STARTING)
             starting = self._starting = asyncio.ensure_future(
                 asyncio.to_thread(self._start)
@@ -145,6 +152,10 @@ class WorkerAdapter(ABC):
         if not ok:
             self.set_status(WorkerStatus.STOPPED)
         return ok
+
+    def close(self) -> None:
+        """Refuse every later start, as the adapter is about to be destroyed."""
+        self._closed = True
 
     async def prepare(self) -> None:
         """Prepare worker (e.g., collecting hardware information) without starting
