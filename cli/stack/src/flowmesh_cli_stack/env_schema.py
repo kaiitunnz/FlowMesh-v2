@@ -1459,8 +1459,6 @@ STACK_ENV_SCHEMA = EnvSchema(
         EnvSection(
             title="API Keys injected into workers (optional)",
             vars=[
-                EnvVar("OPENAI_API_KEY"),
-                EnvVar("GOOGLE_API_KEY"),
                 EnvVar("VAST_API_KEY"),
                 EnvVar("HF_TOKEN"),
                 EnvVar("NEBULA_API_TOKEN"),

@@ -50,10 +50,6 @@ class WorkerConfig(BaseModel):
     """Path to tar binary"""
     network_bandwidth: float | None = None
     """Bandwidth in bytes per second to throttle HTTP uploads"""
-    openai_api_key: SecretStr | None = env_to_secret_str("OPENAI_API_KEY")
-    """OpenAI API key"""
-    google_api_key: SecretStr | None = env_to_secret_str("GOOGLE_API_KEY")
-    """Google API key"""
     hf_token: SecretStr | None = env_to_secret_str("HF_TOKEN")
     """Hugging Face API token"""
     hf_cache_dir: str | None = env.HF_CACHE_DIR
@@ -342,8 +338,6 @@ class WorkerAdapter(ABC):
             "DOCKER_GPU_RUNTIME": to_env_str(env.DOCKER_GPU_RUNTIME),
             "FLOWMESH_API_KEY": to_env_str(env.FLOWMESH_API_KEY),
             "WORKER_OWNER_PRINCIPAL_JSON": self.owner.model_dump_json(),
-            "OPENAI_API_KEY": to_env_str(config.openai_api_key),
-            "GOOGLE_API_KEY": to_env_str(config.google_api_key),
             "WEB_SEARCH_PROVIDER": env.WEB_SEARCH_PROVIDER,
             "WEB_SEARCH_API_KEY": to_env_str(env.WEB_SEARCH_API_KEY),
             "AGENT_MODEL_API_KEY": to_env_str(env.AGENT_MODEL_API_KEY),
