@@ -433,22 +433,6 @@ class N8nConfig:
 
 
 @dataclass
-class ModelSecretVaultConfig:
-    """The durable vault backstop TTL for user-supplied model credentials.
-
-    The TTL is sliding: a workflow that keeps resolving its credential keeps it, while
-    an abandoned, idle submission expires after this window. Purge on a workflow's
-    terminal transition is the primary reclaim; this backstop bounds the rest.
-    """
-
-    ttl_sec: int = 86400
-
-    @classmethod
-    def from_env(cls) -> "ModelSecretVaultConfig":
-        return cls(ttl_sec=parse_int_env("AGENT_MODEL_SECRET_TTL_SEC", 86400))
-
-
-@dataclass
 class ResidentCapacityConfig:
     """Resident-capacity control admission and materialization knobs.
 
@@ -727,9 +711,6 @@ class OrchestrationConfig:
     agent_input_budget_bytes: int = 262_144
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
     agent_binding: AgentBindingConfig = field(default_factory=AgentBindingConfig)
-    model_secret_vault: ModelSecretVaultConfig = field(
-        default_factory=ModelSecretVaultConfig
-    )
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     resident: ResidentCapacityConfig = field(default_factory=ResidentCapacityConfig)
     network: NetworkPlaneConfig = field(default_factory=NetworkPlaneConfig)
@@ -760,7 +741,6 @@ class OrchestrationConfig:
             agent_input_budget_bytes=parse_int_env("AGENT_INPUT_BUDGET_BYTES", 262_144),
             gateway=AgentModelGatewayConfig.from_env(),
             agent_binding=AgentBindingConfig.from_env(),
-            model_secret_vault=ModelSecretVaultConfig.from_env(),
             web_search=WebSearchConfig.from_env(),
             resident=resident,
             network=network,

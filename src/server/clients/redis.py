@@ -100,8 +100,15 @@ def workflow_ds_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:ds"
 
 
+WORKFLOW_CREDENTIAL_KEY_PATTERN = "workflow:*:model_secret"
+
+
 def workflow_credential_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:model_secret"
+
+
+def credential_key_workflow_id(key: str) -> str:
+    return key.removeprefix("workflow:").removesuffix(":model_secret")
 
 
 def resident_cs_key() -> str:
@@ -653,6 +660,12 @@ class AsyncRedisClient:
 
     async def expire(self, key: str, ttl_sec: int) -> bool:
         return bool(await _awaitable(self._control.expire(key, max(0, int(ttl_sec)))))
+
+    async def persist(self, key: str) -> bool:
+        return bool(await _awaitable(self._control.persist(key)))
+
+    async def scan_keys(self, pattern: str) -> list[str]:
+        return [key async for key in self._control.scan_iter(match=pattern)]
 
     async def expire_telemetry(self, key: str, ttl_sec: int) -> bool:
         return bool(await _awaitable(self._telemetry.expire(key, max(0, int(ttl_sec)))))

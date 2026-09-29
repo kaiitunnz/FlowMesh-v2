@@ -195,9 +195,7 @@ if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
     FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT)
-    CREDENTIAL_VAULT = CredentialVault(
-        REDIS_CLIENT, config.orchestration.model_secret_vault.ttl_sec, logger
-    )
+    CREDENTIAL_VAULT = CredentialVault(REDIS_CLIENT, logger)
     POLICY_SURFACE = build_policy_surface(config.orchestration.policy)
     SERVER_TRACER = build_tracer(
         config.telemetry,

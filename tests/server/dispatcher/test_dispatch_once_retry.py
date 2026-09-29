@@ -7,13 +7,13 @@ from unittest import mock
 
 from server.config import OrchestrationConfig
 from server.task.runtime import TaskRuntime
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
     WorkflowRegistryStub,
     make_capturing_dispatcher,
 )
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 _ECHO_WORKFLOW = """
 apiVersion: mloc/v1
@@ -40,7 +40,7 @@ def _setup(
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("test_dispatch_once_retry"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
     _, results = asyncio.run(
         runtime.register("owner", "org", _ECHO_WORKFLOW, format="native")

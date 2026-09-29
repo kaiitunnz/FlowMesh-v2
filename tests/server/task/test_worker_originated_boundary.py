@@ -50,13 +50,13 @@ from shared.tools.facade import (
     FacadeTurnGroup,
 )
 from shared.tools.search.schema import parse_search_request
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_private_state_ledger import _manifest
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
-    _NoopSecretVault,
     _register,
 )
 from worker.egress import PendingEgressRequestStore
@@ -180,7 +180,7 @@ def _runtime(
         config or OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("wo-test"),
-        secret_vault=cast(Any, vault or _NoopSecretVault()),
+        secret_vault=cast(Any, vault or InMemoryCredentialVault()),
         content_scope_authority=(
             None
             if assigned is None
@@ -1132,7 +1132,7 @@ def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
                 OrchestrationConfig(),
                 make_result_reader(),
                 logging.getLogger("wo-test"),
-                secret_vault=cast(Any, _NoopSecretVault()),
+                secret_vault=cast(Any, InMemoryCredentialVault()),
             )
 
         runtime = runtime_on(registry)

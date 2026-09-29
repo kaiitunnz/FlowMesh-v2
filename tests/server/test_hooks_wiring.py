@@ -50,9 +50,9 @@ from server.task.models import TaskRecord
 from server.task.runtime import TaskRuntime
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.worker_message import WorkerStatus
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 
 @pytest.fixture
@@ -542,7 +542,7 @@ def _make_runtime_with_record(task_id: str) -> tuple[TaskRuntime, TaskRecord]:
         orchestration=OrchestrationConfig(),
         results=make_result_reader(),
         logger=logging.getLogger("test.supplier"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
     env = TaskEnvelopeTemplate.model_validate(
         {"apiVersion": "mloc/v1", "kind": "Task", "spec": {"taskType": "echo"}}

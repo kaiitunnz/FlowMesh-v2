@@ -12,12 +12,12 @@ from server.config import N8nConfig, OrchestrationConfig
 from server.task.n8n_parser import _decode_secret_part, translate_n8n_workflow
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_runtime_rehydrate import (
     FakeWorkflowRegistry,
     _WorkerRegistryStub,
 )
-from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 
 class TestTranslateN8nWorkflow:
@@ -134,7 +134,7 @@ async def test_the_runtime_decrypts_n8n_credentials_with_its_configured_password
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("n8n-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
         n8n=N8nConfig(credential_password=_AES_PASSWORD),
     )
     _, results = await runtime.register(

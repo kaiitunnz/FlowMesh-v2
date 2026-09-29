@@ -470,13 +470,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=0,
                     min_inclusive=False,
                 ),
-                EnvVar(
-                    "AGENT_MODEL_SECRET_TTL_SEC",
-                    "86400",
-                    description="Expiry for a workflow's vaulted model credential.",
-                    var_type=EnvVarType.INT,
-                    min_value=1,
-                ),
             ],
         ),
         EnvSection(

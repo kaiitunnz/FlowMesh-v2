@@ -10,6 +10,7 @@ from server.orchestration import PublicationOutcome
 from server.task.models import EventEffect, TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.result import BaseExecutorResult
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
 from tests.server.task.test_v2_orchestration import (
@@ -17,7 +18,6 @@ from tests.server.task.test_v2_orchestration import (
     AUTORESEARCH,
     LINEAR,
     FakeRegistry,
-    _NoopSecretVault,
     _planned,
     _pop_ready,
     _register,
@@ -47,7 +47,7 @@ def _runtime(registry: FakeRegistry, reader: Any = None) -> TaskRuntime:
         OrchestrationConfig(),
         reader or make_result_reader(),
         logging.getLogger("result-binding"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
 
 

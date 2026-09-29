@@ -11,8 +11,8 @@ from server.auth.security import authenticate_connection
 from server.config import OrchestrationConfig
 from server.routers.v1 import workflows as workflows_router
 from server.task.runtime import TaskRuntime
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import _NoopSecretVault
 from tests.server.task.test_v2_validation import (
     _CALL,
     _FAN,
@@ -110,7 +110,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-endpoint-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
 
 

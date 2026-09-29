@@ -7,14 +7,15 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pydantic import SecretStr
 
 from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 
 class FakeWorkflowRegistry:
@@ -170,14 +171,16 @@ class _WorkerRegistryStub:
         return []
 
 
-def _runtime(registry: FakeWorkflowRegistry) -> TaskRuntime:
+def _runtime(
+    registry: FakeWorkflowRegistry, vault: InMemoryCredentialVault | None = None
+) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("rehydrate-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=vault or InMemoryCredentialVault(),
     )
 
 
@@ -697,3 +700,47 @@ async def test_a_failure_cascades_through_every_level_of_dependents() -> None:
         assert record is not None and record.status == TaskStatus.FAILED
         assert record.error == reason
     assert runtime.workflow_settlement(workflow_id).settled
+
+
+_AGENT_WITH_KEY = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: bind}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: solver
+        spec:
+          taskType: agent
+          v2: {authority: {invoke: [model], delegate: []}, tools: [{name: model}]}
+          harness: {backend: scripted, version: v1, params: {script: []}}
+          model_binding:
+            mode: openai
+            url: "https://api.example/v1"
+            model: m
+            api_key: "sk-user-key"
+"""
+
+
+@pytest.mark.anyio
+async def test_a_restart_keeps_live_vaults_and_drops_settled_and_unregistered_ones():
+    registry = FakeWorkflowRegistry()
+    vault = InMemoryCredentialVault()
+    runtime = _runtime(registry, vault)
+    live, _ = await runtime.register("owner", "org", _AGENT_WITH_KEY, format="native")
+    settled, _ = await runtime.register("owner", "org", GRAPH, format="native")
+    runtime.cancel_workflow(settled)
+    # A crash after the terminal commit but before the purge, and one between vaulting
+    # and registering, each leave a vault behind.
+    await vault.store(settled, "msk-left", SecretStr("sk"))
+    await vault.store("wfl-never-registered", "msk-orphan", SecretStr("sk"))
+    live_key = f"workflow:{live}:model_secret"
+    vault.redis.expiring.add(live_key)
+
+    await _runtime(registry, vault).rehydrate()
+
+    assert live_key in vault.redis.hashes
+    assert live_key not in vault.redis.expiring
+    assert f"workflow:{settled}:model_secret" not in vault.redis.hashes
+    assert "workflow:wfl-never-registered:model_secret" not in vault.redis.hashes

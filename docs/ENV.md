@@ -55,7 +55,6 @@ listed here is in `.env.example`.
 | `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Held model turn egress permit bound (seconds) |
 | `AGENT_MODEL_API_KEY` | – | Worker credential for the default model binding URL |
 | `AGENT_MODEL_EGRESS_TIMEOUT_SEC` | `120` | Held model turn permit-await bound (seconds) |
-| `AGENT_MODEL_SECRET_TTL_SEC` | `86400` | Expiry for a workflow's vaulted model credential |
 | `WEB_SEARCH_PROVIDER` | `duckduckgo` | Fabric web-search backend |
 | `WEB_SEARCH_API_KEY` | – | Deployment key for a keyed search provider |
 | `WEB_SEARCH_MAX_RESULTS` | `5` | Results per search |

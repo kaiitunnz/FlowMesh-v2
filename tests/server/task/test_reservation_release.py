@@ -12,6 +12,7 @@ import pytest
 from server.config import OrchestrationConfig
 from server.registries.worker import WorkerRegistry
 from server.task.runtime import TaskRuntime
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_task_merge import _Registry
@@ -19,7 +20,6 @@ from tests.server.task.test_v2_orchestration import (
     _TS,
     LINEAR,
     FakeRegistry,
-    _NoopSecretVault,
     _planned,
     _register,
     _worker,
@@ -33,7 +33,7 @@ def _runtime(worker_registry: Any) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("reservation-release"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
 
 
@@ -123,7 +123,7 @@ def test_a_redispatch_releases_the_earlier_reservation_it_ends(
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("reservation-release"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
     _, ids = asyncio.run(_register(runtime, LINEAR))
     task_id = ids["a"]

@@ -12,9 +12,10 @@ from server.dispatcher.base import Dispatcher
 from server.registries.worker import Worker
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
+from tests.server.task.test_v2_orchestration import FakeRegistry
 
 _WORKFLOW = """
 apiVersion: mloc/v1
@@ -46,7 +47,7 @@ def _setup() -> tuple[TaskRuntime, str, mock.Mock, list[str]]:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("busy-status-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
     _, results = asyncio.run(
         runtime.register("owner", "org", _WORKFLOW, format="native")

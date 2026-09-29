@@ -17,11 +17,11 @@ from shared.inference import (
 )
 from shared.schemas.event import TaskEvent, WorkerEvent
 from shared.utils.time import now_iso
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_embodiment_fence import (
-    _NoopSecretVault,
     _upstream_task,
     _WorkerRegistryStub,
     _workflow_of,
@@ -39,7 +39,7 @@ def _runtime(
         OrchestrationConfig(max_prepared_input_bytes=max_prepared_input_bytes),
         make_result_reader(),
         logging.getLogger("input-preparation-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
 
 

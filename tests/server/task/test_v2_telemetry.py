@@ -70,10 +70,10 @@ from shared.telemetry.semconv import (
     SPAN_OPERATOR,
 )
 from shared.utils.time import now_iso, parse_iso_datetime
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
-    _NoopSecretVault,
     _WorkerRegistryStub,
 )
 from tests.server.telemetry_helpers import recording_tracer
@@ -850,7 +850,7 @@ def test_the_workflow_span_starts_no_later_than_its_earliest_child() -> None:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-telemetry-submit"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
     workflow_id, _ = asyncio.run(runtime.register("owner", "org", _V2_LINEAR))
 

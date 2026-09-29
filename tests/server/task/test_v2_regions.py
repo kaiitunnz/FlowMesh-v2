@@ -15,11 +15,11 @@ from server.task.v2 import (
     compile_workflow,
 )
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _live_runtime,
-    _NoopSecretVault,
 )
 
 REGIONS_WF = """
@@ -208,7 +208,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(agent_binding=AgentBindingConfig(default_backend="codex")),
         make_result_reader(),
         logging.getLogger("v2-regions-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
 
 

@@ -7,10 +7,10 @@ from server.config import AgentBindingConfig, OrchestrationConfig
 from server.task.runtime import TaskRuntime
 from shared.private_state import OwnerFence
 from shared.tasks.specs import ModelBindingMode
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
-    _NoopSecretVault,
     _WorkerRegistryStub,
 )
 
@@ -64,7 +64,7 @@ def _runtime() -> TaskRuntime:
         config,
         make_result_reader(),
         logging.getLogger("v2-binding-dispatch"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, InMemoryCredentialVault()),
     )
 
 

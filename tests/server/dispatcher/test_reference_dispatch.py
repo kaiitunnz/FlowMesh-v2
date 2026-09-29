@@ -14,10 +14,11 @@ from server.config import OrchestrationConfig
 from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
 from shared.tasks.worker_message import WorkerTaskMessage
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader, result_payload
-from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
+from tests.server.task.test_v2_orchestration import FakeRegistry
 
 _PAYLOAD = "a-payload-only-its-consumer-may-read"
 
@@ -75,7 +76,7 @@ class _Workflow:
             OrchestrationConfig(),
             self.reader,
             logging.getLogger("reference-dispatch"),
-            secret_vault=cast(Any, _NoopSecretVault()),
+            secret_vault=cast(Any, InMemoryCredentialVault()),
         )
         _wf, results = asyncio.run(
             self.runtime.register("owner", "org", payload, format="native")

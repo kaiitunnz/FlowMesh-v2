@@ -52,7 +52,7 @@ otherwise. A recreated node's supervisor re-creates its configured workers,
 which re-register themselves on startup. No cordon step is required.
 
 **Root node.** The root holds the dispatcher's scheduling state in memory, so a
-naive restart would lose every in-flight workflow. Three mechanisms make a root
+naive restart would lose every in-flight workflow. These mechanisms make a root
 restart safe:
 
 - **Durable scheduler state.** Each task's mutable state (status, attempts,
@@ -84,6 +84,10 @@ restart safe:
   extended grace (`WORKER_REHYDRATION_GRACE_SEC`, default 120s) before it may
   reclaim those tasks, so a worker that is merely catching up is not mistaken
   for a dead one and its tasks are not needlessly requeued.
+- **Vaulted credentials.** A workflow's inline credentials stay in its
+  credential vault until the workflow settles, so a task dispatched after a
+  restart receives them. Startup keeps every live workflow's vault and drops the
+  vault of a workflow that settled or never finished registering.
 
 Rehydration runs inside the ASGI lifespan **before it yields**, so the server
 does not accept traffic (and its healthcheck does not pass) until scheduling

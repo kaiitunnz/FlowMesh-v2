@@ -21,6 +21,7 @@ from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import BoundaryEventKind
 from shared.utils.time import ts_to_iso
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.services.test_workflow_span_close import (
@@ -34,7 +35,6 @@ from tests.server.task.test_episode_cancel_safety import (
 from tests.server.task.test_v2_orchestration import (
     AUTORESEARCH,
     FakeRegistry,
-    _NoopSecretVault,
     _planned,
     _register,
     _runtime,
@@ -496,7 +496,7 @@ def test_a_spawn_that_seals_with_no_children_closes_the_workflow() -> None:
             OrchestrationConfig(),
             make_result_reader(),
             logging.getLogger("test.finalizer.fanout"),
-            secret_vault=cast(Any, _NoopSecretVault()),
+            secret_vault=cast(Any, InMemoryCredentialVault()),
         )
         registry.submitted_at = _TS
         workflow_id, ids = await _register(runtime, AUTORESEARCH)

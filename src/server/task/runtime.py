@@ -988,7 +988,7 @@ class TaskRuntime:
         """
         workflow_ids = await self._workflow_registry.get_workflow_ids_async()
         rehydrated_at = time.time()
-        restored = 0
+        restored: list[str] = []
         for workflow_id in sorted(workflow_ids):
             wf_record = await self._workflow_registry.get_workflow_record_async(
                 workflow_id
@@ -1045,7 +1045,7 @@ class TaskRuntime:
                 # still running or already closed.
                 self._notify_terminal_transition(workflow_id)
                 self._cv.notify_all()
-            restored += 1
+            restored.append(workflow_id)
         with self._cv:
             self._restore_merges_locked()
             self._held_dispatches.update(
@@ -1056,10 +1056,20 @@ class TaskRuntime:
                 and record.dispatch_id is not None
                 and not self._dispatch_ended_at_suspension_locked(record)
             )
+            live = [
+                workflow_id
+                for workflow_id in restored
+                if not self._workflow_settlement_locked(workflow_id).settled
+            ]
         self._release_pending_terminations()
+        # Rehydrate completes before the API accepts a submission, so no workflow is
+        # between vaulting its credentials and registering.
+        await self._secret_vault.retain_only(live)
         if restored:
-            self._logger.info("Rehydrated %d workflow(s) from durable state", restored)
-        return restored
+            self._logger.info(
+                "Rehydrated %d workflow(s) from durable state", len(restored)
+            )
+        return len(restored)
 
     def _restore_merges_locked(self) -> None:
         """Rebuild the in-flight merges from durable records.
@@ -1565,8 +1575,7 @@ class TaskRuntime:
     def _reclaim_vault_if_settled_locked(self, workflow_id: str) -> None:
         """Purge a workflow's vaulted credentials once its last task has settled.
 
-        The primary reclaim on the terminal transition, for a workflow that completes or
-        fails; the vault's sliding TTL only backstops a submission that never settles.
+        The reclaim on the terminal transition, for a workflow that completes or fails.
         Called after an event's advance materializes any new children, so a producer
         that fans out is not reclaimed while its children are still pending.
         """

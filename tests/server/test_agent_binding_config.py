@@ -1,6 +1,6 @@
 import pytest
 
-from server.config import AgentBindingConfig, ModelSecretVaultConfig
+from server.config import AgentBindingConfig
 from shared.tasks.specs import ModelBindingMode
 
 
@@ -12,7 +12,6 @@ def _clear_env(monkeypatch):
         "AGENT_MODEL_GATEWAY_MODE",
         "AGENT_MODEL_GATEWAY_URL",
         "AGENT_MODEL_GATEWAY_MODEL",
-        "AGENT_MODEL_SECRET_TTL_SEC",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -46,9 +45,3 @@ def test_the_deployment_holds_no_credential_or_egress_defaults():
     assert not hasattr(cfg, "secrets")
     assert not hasattr(cfg, "allowed_hosts")
     assert not hasattr(cfg, "resident_models")
-
-
-def test_secret_vault_ttl_defaults_and_overrides(monkeypatch):
-    assert ModelSecretVaultConfig.from_env().ttl_sec == 86400
-    monkeypatch.setenv("AGENT_MODEL_SECRET_TTL_SEC", "3600")
-    assert ModelSecretVaultConfig.from_env().ttl_sec == 3600
