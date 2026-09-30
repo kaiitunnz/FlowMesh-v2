@@ -74,14 +74,9 @@ contract.
 
 ## API task
 
-`taskType: api` performs one HTTP request. Without `spec.api.url` it calls the
+`taskType: api` performs one HTTP request, to `spec.api.url` or, without one, to the
 deployment's Nebula endpoint (`NEBULA_API_BASE_URL`, with `/v1/chat/completions`
-appended) with the worker's `NEBULA_API_TOKEN`, unless `spec.api.headers` carries a
-credential header of its own; a request carrying the token drops any author header that
-reroutes it at an ingress (`Host`, `Forwarded`, `X-Forwarded-*`, `X-Host`,
-`X-Original-Host`, `X-Original-URL`, `X-Rewrite-URL`). A `spec.api.url` is called with
-the task's own headers alone. The stored result records the URL without its userinfo and
-with each credential query value masked.
+appended).
 
 ## Inline credentials
 
