@@ -219,8 +219,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the menu answers with its self-contained embodiment; a pinned leaf admits no other
   embodiment, so it fails at admission instead. A leaf whose request the compiler cannot
   project runs one prompt per invocation and is refused at submission when it declares
-  more. A leaf whose adapter source carries a credential runs self-contained, and a
-  resident binding on one is refused at submission. See [`EXECUTORS.md`](EXECUTORS.md).
+  more. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Upstream-resolved inference inputs.** An inference leaf names its prompts through one
   `CanonicalInferenceInputSource`: literal items, or one bounded projection of a declared
   direct upstream input, written as `data.expr` or `data.node` plus `data.path` and
@@ -511,15 +510,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   declared on.
 - **Inline task credentials.** A credential a task spec carries inline — a
   credential-named header, parameter, or field in the fields the spec declares
-  credential-bearing, or an `http(s)` URL with userinfo or a credential query parameter —
-  moves at submission into the workflow's credential vault under an `msk-` ref, before
-  anything persists or compiles. The spec keeps a marker, and the task record keeps a
-  server-owned table of where each ref belongs, which no API serves. The dispatcher
-  restores the values into the task's own dispatch before its stage references render,
-  and writes nothing back; a ref that no longer resolves fails the task as
+  credential-bearing, or a URL carrying a credential in its userinfo, query, fragment, or
+  path parameters — moves at submission into the workflow's credential vault under an
+  `msk-` ref, before anything persists or compiles. The spec keeps a marker, and the task
+  record keeps a server-owned table of where each ref belongs, which no API serves. The
+  dispatcher restores the values into the task's own dispatch before its stage references
+  render, and writes nothing back; a ref that no longer resolves fails the task as
   `credential_not_retained`. A merge key names a credential by its ref, so tasks merge on
-  one credential only within one workflow. A workflow's credentials stay vaulted until it
-  settles.
+  one credential only within one workflow. A workflow's credentials live until the
+  workflow settles.
 - **Task merging.** Ready v1 tasks of one org whose specs share a merge key coalesce
   into one dispatch, whose executor runs every task at once and returns each merged
   child's own result; a task's spec defines its merge key. Merged children ride on

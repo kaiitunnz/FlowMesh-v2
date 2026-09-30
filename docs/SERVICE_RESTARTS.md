@@ -84,7 +84,7 @@ restart safe:
   extended grace (`WORKER_REHYDRATION_GRACE_SEC`, default 120s) before it may
   reclaim those tasks, so a worker that is merely catching up is not mistaken
   for a dead one and its tasks are not needlessly requeued.
-- **Vaulted credentials.** A workflow's inline credentials stay in its
+- **Vaulted credentials.** A workflow's inline credentials live in its
   credential vault until the workflow settles, so a task dispatched after a
   restart receives them. Startup keeps every live workflow's vault and drops the
   vault of a workflow that settled or never finished registering. A task record

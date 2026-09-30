@@ -86,14 +86,13 @@ with each credential query value masked.
 ## Inline credentials
 
 A credential written inline in a task spec — a credential-named header, parameter, or
-field such as `Authorization`, `api_key`, `password`, or `token`, or an `http(s)` URL
-carrying userinfo or a credential query parameter — is kept in its workflow's
-credential vault. The stored task, its source, the task API, and the SDK show
+field such as `Authorization`, `api_key`, `password`, or `token`, or a URL carrying a
+credential in its userinfo, query, fragment, or path parameters — is kept in its
+workflow's credential vault. The stored task, its source, the task API, and the SDK show
 `[REDACTED]` in its place, and only the task's own dispatch carries the value to its
-worker. The credential stays available until its workflow settles, across server
-restarts; a task whose credential is no longer retained fails with
-`credential_not_retained`. Tasks carrying the same credential merge only within one
-workflow.
+worker. The credential lives until its workflow settles, across server restarts; a task
+whose credential is no longer retained fails with `credential_not_retained`. Tasks
+carrying the same credential merge only within one workflow.
 
 ## v2 execution mode (experimental)
 
