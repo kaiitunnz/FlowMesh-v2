@@ -122,7 +122,7 @@ class PortForwardConfig:
     enabled: bool = True
     persistent_listeners: bool = True
     ssh_proxy_enabled: bool = True
-    ssh_audit_enabled: bool = True
+    ssh_connection_registry_enabled: bool = True
     serve_proxy_enabled: bool = True
     serve_forward_enabled: bool = False
     serve_forward_port_start: int = 34000
@@ -139,8 +139,8 @@ class PortForwardConfig:
             enabled=parse_bool_env("ENABLE_SERVER_PORT_FORWARD", True),
             persistent_listeners=parse_bool_env("ENABLE_PERSISTENT_PORT_FORWARD", True),
             ssh_proxy_enabled=parse_bool_env("ENABLE_SERVER_SSH_PROXY", True),
-            ssh_audit_enabled=parse_bool_env(
-                "ENABLE_SERVER_SSH_CONNECTION_AUDIT", True
+            ssh_connection_registry_enabled=parse_bool_env(
+                "ENABLE_SERVER_SSH_CONNECTION_REGISTRY", True
             ),
             serve_proxy_enabled=parse_bool_env("ENABLE_SERVER_SERVE_PROXY", True),
             serve_forward_enabled=parse_bool_env("ENABLE_SERVER_SERVE_FORWARD", False),

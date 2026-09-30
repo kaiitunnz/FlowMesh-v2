@@ -1045,7 +1045,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             vars=[
                 EnvVar("ENABLE_SERVER_SSH_PROXY", "true", var_type=EnvVarType.BOOL),
                 EnvVar(
-                    "ENABLE_SERVER_SSH_CONNECTION_AUDIT",
+                    "ENABLE_SERVER_SSH_CONNECTION_REGISTRY",
                     "true",
                     var_type=EnvVarType.BOOL,
                 ),
