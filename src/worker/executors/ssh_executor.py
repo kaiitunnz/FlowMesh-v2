@@ -60,6 +60,8 @@ class SSHExecutor(Executor):
         self._signals = RunSignals()
         self._current_session: SSHSession | None = None
         self._backend = self._make_backend(config)
+        # A worker that died with a session up left it behind.
+        self._backend.reap_stale()
 
     @classmethod
     def is_available(cls, config: WorkerConfig) -> bool:

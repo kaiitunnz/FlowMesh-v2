@@ -115,8 +115,6 @@ class ProcessSessionBackend(SSHSessionBackend):
         super().__init__(config, hardware)
         self._lock = threading.Lock()
         self._active: ProcessSession | None = None
-        # A worker that died with a session up left it behind.
-        self._reap_stale()
 
     @classmethod
     def is_available(cls, config: WorkerConfig) -> bool:
@@ -160,7 +158,7 @@ class ProcessSessionBackend(SSHSessionBackend):
         with self._lock:
             idle = self._active is None
         if idle:
-            self._reap_stale()
+            self.reap_stale()
 
     def relay_host(self) -> str:
         if override := self._config.ssh_relay_host:
@@ -310,7 +308,7 @@ class ProcessSessionBackend(SSHSessionBackend):
             signals=signals,
         )
 
-    def _reap_stale(self) -> None:
+    def reap_stale(self) -> None:
         """Remove what a session left behind when its worker died: its sshd, its
         account and denials, and its paths."""
         if os.getuid() != 0:

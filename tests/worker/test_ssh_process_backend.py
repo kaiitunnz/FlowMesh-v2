@@ -125,7 +125,7 @@ def test_the_worker_reports_whether_its_sessions_run_batch_tasks(
     with (
         patch.object(DockerSessionBackend, "is_available", return_value=True),
         patch.object(ProcessSessionBackend, "is_available", return_value=True),
-        patch.object(ProcessSessionBackend, "_reap_stale"),
+        patch.object(ProcessSessionBackend, "reap_stale"),
     ):
         executor = SSHExecutor(_config(backend, tmp_path))
 
@@ -511,16 +511,44 @@ def test_a_recycled_pid_is_not_taken_for_the_session_sshd(tmp_path: Path) -> Non
     assert not process_module._is_our_sshd(os.getpid(), config)
 
 
-def test_a_worker_that_is_not_root_reaps_nothing(tmp_path: Path) -> None:
+def test_constructing_the_backend_reaps_nothing(tmp_path: Path) -> None:
     with (
         patch.object(process_module, "reap_session") as reap,
         patch.object(process_module, "reap_stale_accounts") as reap_accounts,
+        patch.object(process_module, "_reset_mount_root") as reset,
     ):
         ProcessSessionBackend(make_live_worker_config(tmp_path))
 
-    if os.getuid() != 0:
-        reap.assert_not_called()
-        reap_accounts.assert_not_called()
+    reap.assert_not_called()
+    reap_accounts.assert_not_called()
+    reset.assert_not_called()
+
+
+def test_a_worker_that_is_not_root_reaps_nothing(tmp_path: Path) -> None:
+    backend = ProcessSessionBackend(make_live_worker_config(tmp_path))
+    with (
+        patch.object(process_module.os, "getuid", return_value=1000),
+        patch.object(process_module, "reap_session") as reap,
+        patch.object(process_module, "reap_stale_accounts") as reap_accounts,
+        patch.object(process_module, "_reset_mount_root") as reset,
+    ):
+        backend.reap_stale()
+
+    reap.assert_not_called()
+    reap_accounts.assert_not_called()
+    reset.assert_not_called()
+
+
+def test_the_executor_reaps_what_a_dead_worker_left_when_it_starts(
+    tmp_path: Path,
+) -> None:
+    with (
+        patch.object(ProcessSessionBackend, "is_available", return_value=True),
+        patch.object(ProcessSessionBackend, "reap_stale") as reap,
+    ):
+        SSHExecutor(_config(SSHBackendName.PROCESS, tmp_path))
+
+    reap.assert_called_once_with()
 
 
 # ------------------------------------------------------------------ #
@@ -550,7 +578,10 @@ def test_a_session_failure_reports_no_restored_credential(tmp_path: Path) -> Non
     backend.start_session.side_effect = ExecutionError(
         f"sshd exited immediately.\nsshd output:\nenvironment TOKEN={_SECRET}"
     )
-    with patch.object(ProcessSessionBackend, "is_available", return_value=True):
+    with (
+        patch.object(ProcessSessionBackend, "is_available", return_value=True),
+        patch.object(ProcessSessionBackend, "reap_stale"),
+    ):
         executor = SSHExecutor(
             _config(SSHBackendName.PROCESS, tmp_path), lifecycle=None
         )

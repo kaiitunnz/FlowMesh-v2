@@ -322,7 +322,7 @@ def test_a_session_left_by_a_dead_worker_is_reaped_at_start(
     account = session.account
 
     # A new worker process finds what the old one left.
-    ProcessSessionBackend(worker)
+    ProcessSessionBackend(worker).reap_stale()
 
     process.wait(timeout=10)
     assert _run(["getent", "passwd", account.name]).returncode != 0

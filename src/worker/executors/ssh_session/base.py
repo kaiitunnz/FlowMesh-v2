@@ -153,6 +153,10 @@ class SSHSessionBackend(ABC):
     def prepare(self) -> None:
         """Initialize whatever the backend needs before the first session."""
 
+    def reap_stale(self) -> None:
+        """Remove what sessions left behind when an earlier worker died."""
+        return None
+
     @abstractmethod
     def start_session(self, request: SessionRequest) -> SSHSession:
         """Create and start a session.
