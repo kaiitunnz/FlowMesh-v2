@@ -2,10 +2,13 @@
 
 import logging
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from google.protobuf.struct_pb2 import Struct
 
+from shared.grpc.supervisor.v1 import supervisor_pb2
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.supervisor_client import SupervisorClient
 
@@ -89,3 +92,39 @@ def test_a_dispatch_without_an_id_is_reported_without_one() -> None:
     next(iter(client.iter_tasks()))
 
     assert _reported_dispatch(client, "TASK_SUCCEEDED", "tsk-a") is None
+
+
+def test_an_unparseable_task_frame_logs_no_payload(monkeypatch, caplog) -> None:
+    client = _client()
+    client._channel = cast(Any, object())
+    client._shutdown.clear()
+    payload = Struct()
+    payload.update(
+        {
+            "task_id": "tsk-a",
+            "task": {
+                "spec": {
+                    "taskType": "api",
+                    "api": {"headers": {"Authorization": "Bearer frame-secret"}},
+                }
+            },
+        }
+    )
+
+    def stream(*args: Any, **kwargs: Any) -> Any:
+        client._shutdown.set()
+        yield supervisor_pb2.DispatchMessage(
+            task=supervisor_pb2.TaskMessage(payload=payload)
+        )
+
+    client._stub = cast(Any, SimpleNamespace(StreamTasks=stream))
+    monkeypatch.setattr(
+        "worker.supervisor_client.grpc.channel_ready_future",
+        lambda channel: SimpleNamespace(result=lambda timeout: None),
+    )
+    with caplog.at_level(logging.ERROR):
+        client._run_task_stream()
+
+    assert "Failed to parse task message tsk-a" in caplog.text
+    assert "frame-secret" not in caplog.text
+    assert client._task_queue.empty()

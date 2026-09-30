@@ -17,12 +17,12 @@ from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent, WorkerEvent
 from shared.tasks.specs.common import ConditionSpec
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload, store_result
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
-    _NoopSecretVault,
     _WorkerRegistryStub,
 )
 
@@ -123,7 +123,7 @@ def _runtime(
         OrchestrationConfig(),
         reader or make_result_reader(),
         logging.getLogger("task-merge"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

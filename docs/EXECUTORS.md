@@ -16,6 +16,7 @@ The worker resolves `spec.taskType` against an executor registry in
 | `agent` | `AgentEpisodeExecutor` | Tool-using LLM agent run as a run-to-yield harness episode; requires a resolved harness binding (`spec.harness` or a deployment default) or fails validation |
 | `data_profiling` | `DataProfilingExecutor` | DataFrame profiling |
 | `data_retrieval` | `DataRetrievalExecutor` | DataFrame loading from sources (`type: sql`, `type: s3`, `type: lumid` with `mode: sql\|s3\|agent` via lumid-data-app; `type: lumid` (mode `sql`/`s3`/`agent`) requires `lumid_data_token`, the bearer forwarded to lumid-data-app) |
+| `api` | `APIExecutor` | HTTP call to an external API |
 | `ssh` | `SSHExecutor` | Interactive SSH session or non-interactive container job |
 | `serve` | `VLLMServeExecutor` | Persistent vLLM API server for a single model |
 | `dev_model` | `DevModelExecutor` | GPU-free OpenAI-compatible endpoint; forwards to an upstream or returns canned responses |
@@ -68,10 +69,11 @@ Declared per agent under `spec.harness`:
   declared step sequence from `params.script`) or `codex` (the version-pinned Codex
   app-server binding).
 - `version` — pins the adapter/protocol so a capsule resumes only on a match.
-- `params` — non-secret backend configuration. The `codex` backend's model upstream
-  comes from `model_binding`, which it reaches through the worker-local Responses facade.
-  A credential-bearing param is rejected; a model credential goes in
-  `model_binding.api_key`. A param naming a filesystem path — a rollout home, working
+- `params` — backend configuration. The `codex` backend's model upstream comes from
+  `model_binding`, which it reaches through the worker-local Responses facade. A param
+  named like a model key (`api_key`, `secret`, `password`, …) is rejected; a model
+  credential goes in `model_binding.api_key`. Any other credential a param carries is
+  vaulted like an inline task credential. A param naming a filesystem path — a rollout home, working
   directory, workspace, or mount — is rejected too: a harness reaches its home and
   workspace only through the activation's private state.
 
@@ -150,12 +152,12 @@ A model boundary the agent defers with a `canned` or `echo` binding settles on t
 plane, against that workflow's own binding; an `openai` binding egresses on the agent's own
 worker (see [Managed external-model egress](#managed-external-model-egress)), and a
 `resident` binding admits through resident-capacity control and runs in the workers over the
-network plane (see [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md)). The model credential is the
-workflow's own inline `api_key`, vaulted server-side at submission so only a reference is
-stored, resolved within its own workflow, and carried to the egressing worker on the one-use
-permit — the raw key never persists in the source, template, ledger, or logs. A credential embedded in a `url` or a harness
-param is rejected. The
-`AGENT_MODEL_GATEWAY_*` defaults are in [`ENV.md`](ENV.md).
+network plane (see [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md)). The model credential is
+the workflow's own inline `api_key`, vaulted server-side at submission so only a reference
+is stored, resolved within its own workflow, and carried to the egressing worker on the
+one-use permit — the raw key never persists in the source, template, ledger, or logs. A
+`url` carrying a credential is refused at submission. The `AGENT_MODEL_GATEWAY_*` defaults
+are in [`ENV.md`](ENV.md).
 
 Vaulted credentials live in the Redis control store's trust boundary (ACL, auth, TLS) and are
 not encrypted at rest, so the deployment operator owns that at-rest boundary.
@@ -379,6 +381,8 @@ base replica through its own slot — the resident consumer loads its adapter in
 slot and selects it as the request model. Adapter serving is supported only on the chat
 interface; a resident embedding leaf that declares an adapter is rejected at compile. An
 adapter-bound leaf declares a single adapter with a loadable `path`, `url`, or `task_id`.
+A leaf whose model or adapter source carries a credential has no resident embodiment; a
+resident binding on one is refused at submission.
 
 `RESIDENT_ADAPTER_SLOTS` bounds the distinct adapters a replica holds concurrently. A claim
 for a base model or an already-resident adapter admits without consuming a new slot, and a

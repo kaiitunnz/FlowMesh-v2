@@ -17,6 +17,7 @@ from shared.harness import HarnessCapsule
 from shared.private_state import PrivateStateSealReport
 from shared.resident.reports import ResidentBootstrapAck, ResidentBootstrapOutcome
 from shared.schemas.event import WorkerEvent
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.resident.test_service import _build
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_private_state_ledger import _manifest
@@ -24,7 +25,6 @@ from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
-    _NoopSecretVault,
     _register,
 )
 from tests.server.task.test_worker_originated_boundary import (
@@ -222,7 +222,7 @@ def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again(
             OrchestrationConfig(),
             make_result_reader(),
             logging.getLogger("resident-test"),
-            secret_vault=cast(Any, _NoopSecretVault()),
+            credential_vault=InMemoryCredentialVault(),
         )
         reoriginated = _originating(restored)
         await restored.rehydrate()

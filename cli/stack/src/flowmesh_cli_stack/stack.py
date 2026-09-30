@@ -29,7 +29,12 @@ from flowmesh_stack.images import (
     get_push_platforms,
 )
 
-from .env_schema import STACK_ENV_SCHEMA, deploy_overrides, role_overrides
+from .env_schema import (
+    STACK_ENV_SCHEMA,
+    credential_overrides,
+    deploy_overrides,
+    role_overrides,
+)
 from .utils import (
     DEFAULT_ENV_FILE,
     STACK_PATH_KEYS,
@@ -803,6 +808,10 @@ def init(
     overrides = {
         **role_overrides(node_role),
         **deploy_overrides(deploy, deploy_version),
+        **credential_overrides(node_role),
     }
-    env_file.write_text(render_env_example(STACK_ENV_SCHEMA, overrides=overrides))
+    fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(render_env_example(STACK_ENV_SCHEMA, overrides=overrides))
     logging.success(f"Wrote {env_file} (NODE_ROLE={node_role.value}).")

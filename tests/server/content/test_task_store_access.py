@@ -21,10 +21,11 @@ from shared.content import (
     ScopedContentCredential,
 )
 from shared.tasks.worker_message import WorkerTaskMessage
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
+from tests.server.task.test_v2_orchestration import FakeRegistry
 
 _ORG = "org-acme"
 
@@ -83,7 +84,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("content-scope-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

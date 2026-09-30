@@ -1,7 +1,7 @@
 import base64
 import binascii
 import json
-import os
+from dataclasses import dataclass, field
 from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -11,7 +11,6 @@ _CHAIN_NODE_TYPE = "@n8n/n8n-nodes-langchain.chainLlm"
 _HF_MODEL_NODE_TYPE = "@n8n/n8n-nodes-langchain.lmOpenHuggingFaceInference"
 _OPENAI_CHAT_MODEL_NODE_TYPE = "@n8n/n8n-nodes-langchain.lmChatOpenAi"
 _OPENAI_CHAT_NODE_TYPE = "@n8n/n8n-nodes-langchain.openAi"
-_N8N_CREDENTIAL_AES_PASSWORD = os.environ.get("N8N_CREDENTIAL_AES_PASSWORD", "").strip()
 
 N8N_NODE_KEY_SCHEMA = {
     "name": str,
@@ -20,7 +19,23 @@ N8N_NODE_KEY_SCHEMA = {
 }
 
 
-def translate_n8n_workflow(payload: dict[str, Any]) -> dict[str, Any]:
+@dataclass(frozen=True)
+class N8nTranslation:
+    document: dict[str, Any]
+    # Each value the translation decrypted, as the document carries it.
+    decrypted: frozenset[str] = frozenset()
+
+
+@dataclass
+class _Credentials:
+    password: str
+    decrypted: set[str] = field(default_factory=set)
+
+
+def translate_n8n_workflow(
+    payload: dict[str, Any], credential_password: str = ""
+) -> N8nTranslation:
+    credentials = _Credentials(credential_password)
     nodes, connections = _parse_and_validate_node(payload)
 
     edges = _collect_edges(connections)
@@ -150,6 +165,7 @@ def translate_n8n_workflow(payload: dict[str, Any]) -> dict[str, Any]:
                 incoming,
                 [n["name"] for n in task_nodes],
                 node_task_types,
+                credentials,
             ),
             "output": _default_api_output_spec(),
         }
@@ -177,7 +193,7 @@ def translate_n8n_workflow(payload: dict[str, Any]) -> dict[str, Any]:
         kind = "HybridTask"
     else:
         kind = "APITask" if has_api else "InferenceTask"
-    return {
+    document = {
         "apiVersion": "flowmesh/v1",
         "kind": kind,
         "metadata": {
@@ -186,6 +202,7 @@ def translate_n8n_workflow(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "spec": workflow_spec,
     }
+    return N8nTranslation(document, frozenset(credentials.decrypted))
 
 
 def _resolve_chain_model_type(
@@ -221,10 +238,11 @@ def _build_api_node_spec(
     incoming: dict[str, list[tuple[str, str]]],
     task_node_names: list[str],
     node_task_types: dict[str, str],
+    credentials: _Credentials,
 ) -> dict[str, Any]:
     model_id = _resolve_api_model_id(node, model_nodes, incoming)
     prompt_text = _extract_api_prompt_text(node)
-    credential_data = _resolve_api_credentials(node, model_nodes, incoming)
+    credential_data = _resolve_api_credentials(node, model_nodes, incoming, credentials)
     deps = _node_dependencies(node["name"], incoming, task_node_names)
     if len(deps) > 1:
         raise ValueError(f"API node '{node['name']}' has multiple dependencies: {deps}")
@@ -290,24 +308,27 @@ def _resolve_api_credentials(
     node: dict[str, Any],
     model_nodes: dict[str, dict[str, Any]],
     incoming: dict[str, list[tuple[str, str]]],
+    credentials: _Credentials,
 ) -> dict[str, str]:
     if node["type"] == _CHAIN_NODE_TYPE:
         for source_name, conn_type in incoming.get(node["name"], []):
             if conn_type != "ai_languageModel":
                 continue
             if model_node := model_nodes.get(source_name):
-                return _extract_openai_credentials(model_node)
+                return _extract_openai_credentials(model_node, credentials)
         return {}
     if node["type"] == _OPENAI_CHAT_NODE_TYPE:
-        return _extract_openai_credentials(node)
+        return _extract_openai_credentials(node, credentials)
     return {}
 
 
-def _extract_openai_credentials(node: dict[str, Any]) -> dict[str, str]:
-    credentials = node.get("credentials")
-    if not isinstance(credentials, dict):
+def _extract_openai_credentials(
+    node: dict[str, Any], credentials: _Credentials
+) -> dict[str, str]:
+    declared = node.get("credentials")
+    if not isinstance(declared, dict):
         return {}
-    openai_api = credentials.get("openAiApi")
+    openai_api = declared.get("openAiApi")
     if not isinstance(openai_api, dict):
         return {}
 
@@ -317,16 +338,20 @@ def _extract_openai_credentials(node: dict[str, Any]) -> dict[str, str]:
     result: dict[str, str] = {}
     raw_url = data.get("url")
     if isinstance(raw_url, str) and raw_url.strip():
-        if _is_truthy_flag(data.get("url_encrypted")):
-            raw_url = _decrypt_credential_value(raw_url)
+        encrypted = _is_truthy_flag(data.get("url_encrypted"))
+        if encrypted:
+            raw_url = _decrypt_credential_value(raw_url, credentials.password)
         normalized_url = _normalize_api_url(raw_url)
         if normalized_url:
             result["url"] = normalized_url
+            if encrypted:
+                credentials.decrypted.add(normalized_url)
 
     raw_key = data.get("apiKey")
     if isinstance(raw_key, str) and raw_key.strip():
         if _is_truthy_flag(data.get("apiKey_encrypted")):
-            raw_key = _decrypt_credential_value(raw_key)
+            raw_key = _decrypt_credential_value(raw_key, credentials.password)
+            credentials.decrypted.add(f"Bearer {raw_key}")
         if raw_key:
             result["api_key"] = raw_key
 
@@ -356,7 +381,7 @@ def _normalize_api_url(url: str) -> str:
     return no_trailing + "/v1/chat/completions"
 
 
-def _decrypt_credential_value(value: str) -> str:
+def _decrypt_credential_value(value: str, password: str) -> str:
     parts = value.split(":")
     if len(parts) != 3:
         raise ValueError("Encrypted credential must be nonce:tag:ciphertext")
@@ -364,7 +389,7 @@ def _decrypt_credential_value(value: str) -> str:
     nonce = _decode_secret_part(parts[0])
     tag = _decode_secret_part(parts[1])
     ciphertext = _decode_secret_part(parts[2])
-    aesgcm = AESGCM(_N8N_CREDENTIAL_AES_PASSWORD.encode("utf-8"))
+    aesgcm = AESGCM(password.encode("utf-8"))
     plaintext = aesgcm.decrypt(nonce, ciphertext + tag, None)
     return plaintext.decode("utf-8")
 

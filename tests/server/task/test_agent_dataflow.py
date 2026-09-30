@@ -42,11 +42,11 @@ from server.task.v2.representations.operators import (
 from server.task.v2.representations.template import TemplateEdge
 from shared.tasks import TaskType
 from shared.tasks.result_binding import ResultBinding
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader, store_result
 from tests.server.task.test_v2_agent_harness import _bundle, _decl, _engine, _leaf
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
-    _NoopSecretVault,
     _WorkerRegistryStub,
 )
 
@@ -341,7 +341,7 @@ def _runtime(budget: int | None = None) -> TaskRuntime:
         config,
         make_result_reader(),
         logging.getLogger("dataflow-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
         redrive=lambda fire, logger: StoreRedriveScheduler(
             fire, logger, run_thread=False
         ),

@@ -19,6 +19,7 @@ from server.task.results import ResultUnavailable, ResultUnreadable
 from server.task.runtime import TaskRuntime
 from shared.content import ContentReference, reference_for
 from shared.schemas.event import TaskEvent, TaskFailureKind
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
 from tests.server.task.test_task_merge import (
@@ -32,7 +33,6 @@ from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
     _live_runtime,
-    _NoopSecretVault,
     _planned,
     _pop_ready,
 )
@@ -262,7 +262,7 @@ class _Attributing:
             OrchestrationConfig(),
             reader,
             logging.getLogger("input-unavailable"),
-            secret_vault=cast(Any, _NoopSecretVault()),
+            credential_vault=InMemoryCredentialVault(),
             redrive=_scheduler,
         )
         self.scheduler = schedulers[0]

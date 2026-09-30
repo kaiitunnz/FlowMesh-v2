@@ -1,10 +1,17 @@
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from ..task_type import TaskType
 from .common import TaskSpecStrictBase, TaskSpecTemplateBase
 
 
 class RagSpecStrict(TaskSpecStrictBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecStrictBase.credential_fields,
+        "qdrant",
+        "embedding",
+        "search",
+        "data",
+    )
     taskType: Literal[TaskType.RAG]
 
     qdrant: dict[str, Any] | None = None
@@ -15,6 +22,13 @@ class RagSpecStrict(TaskSpecStrictBase):
 
 
 class RagSpecTemplate(TaskSpecTemplateBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecTemplateBase.credential_fields,
+        "qdrant",
+        "embedding",
+        "search",
+        "data",
+    )
     taskType: Literal[TaskType.RAG]
 
     qdrant: dict[str, Any] | None = None

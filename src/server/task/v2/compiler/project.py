@@ -8,7 +8,9 @@ from shared.inference import (
 )
 from shared.sandbox import SandboxEgressMode
 from shared.tasks import TaskType
+from shared.tasks.credentials import credential_pointer
 from shared.tasks.specs import (
+    AgentModelBindingSpec,
     AgentSpecStrict,
     AgentSpecTemplate,
     EmbeddingSpecStrict,
@@ -19,6 +21,7 @@ from shared.tasks.specs import (
     TaskSpecBase,
 )
 from shared.tasks.specs.common import ModelSpecTemplate
+from shared.utils.redact import is_credential_url
 
 from ...parser import ParsedTask, ParsedWorkflow
 from ..policy.lowering import (
@@ -80,7 +83,9 @@ from .bindings import (
 )
 from .diagnostics import compile_error
 from .embodiment import (
+    credentialed_source,
     embodiment_menu,
+    reject_credentialed_source,
     reject_resident_batch,
     reject_unproven,
     unproven_reason,
@@ -192,8 +197,10 @@ def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
     An inference leaf admits both embodiments whenever they provably run one contract,
     whether or not it declares a binding. A leaf the proof does not clear, and a leaf
     kind for which only one embodiment is proven, keeps the embodiment its source names:
-    resident when it declares a binding, self-contained when it declares none. A leaf
-    that asks for both explicitly is failed rather than quietly narrowed.
+    resident when it declares a binding, self-contained when it declares none, and so
+    does a leaf whose model or adapter source carries a credential. A leaf that asks for
+    both explicitly is failed rather than quietly narrowed, and so is a resident-served
+    leaf whose model or adapter source carries a credential.
     """
     spec = task.task.spec
     if not isinstance(spec, _SERVICE_BACKED_SPECS):
@@ -206,13 +213,21 @@ def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
     )
     if binding is not None and binding.mode is ServiceBindingMode.RESIDENT:
         reject_resident_batch(task, spec, named)
+        reject_credentialed_source(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+        reject_credentialed_source(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     if binding is not None and binding.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
         reject_unproven(task, spec)
-    elif unproven_reason(spec) is not None:
+        reject_credentialed_source(
+            task, spec, InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
+        )
+    elif (
+        unproven_reason(spec) is not None or credentialed_source(task, spec) is not None
+    ):
         reject_resident_batch(task, spec, named)
+        reject_credentialed_source(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     return InferenceEmbodimentBinding(
         eligibility=InferenceEmbodimentEligibility.LOCAL_ELIGIBLE,
@@ -352,6 +367,35 @@ def _leaf_adapter_source(
     return f"task:{adapter.task_id}" if adapter.task_id else None
 
 
+def _reject_credentialed_model_url(
+    task: ParsedTask, model_binding: AgentModelBindingSpec | None
+) -> None:
+    """Fail an agent whose model URL carries a credential.
+
+    Control reads the URL to route the agent's model boundary, so the plan pins it as
+    written; a harness ``base_url`` standing in for the binding is vaulted like any
+    other credential and reaches the compiler masked.
+    """
+    if model_binding is not None:
+        credentialed = model_binding.url is not None and is_credential_url(
+            model_binding.url
+        )
+    else:
+        credentialed = (
+            credential_pointer(("harness", "params", "base_url"))
+            in task.masked_credentials
+        )
+    if credentialed:
+        source_kind, source_id = _task_source(task)
+        raise compile_error(
+            "agent.model-url-credential",
+            "the agent's model URL carries a credential; put the model credential in "
+            "model_binding.api_key",
+            source_id,
+            source_kind,
+        )
+
+
 def _agent_operator(
     task: ParsedTask,
     name_to_op: dict[str, str],
@@ -370,6 +414,7 @@ def _agent_operator(
         if isinstance(spec, (AgentSpecStrict, AgentSpecTemplate))
         else None
     )
+    _reject_credentialed_model_url(task, model_binding)
     harness_binding, gateway_binding = resolve_agent_bindings(
         harness, model_binding, defaults, secret_ref
     )

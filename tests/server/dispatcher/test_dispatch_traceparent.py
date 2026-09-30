@@ -15,9 +15,10 @@ from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
+from tests.server.task.test_v2_orchestration import FakeRegistry
 from tests.server.telemetry_helpers import recording_control_tracer
 
 _ECHO_WORKFLOW = """
@@ -59,7 +60,7 @@ def _runtime(control: Any = None) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("dispatch-traceparent-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
         control=control,
     )
 

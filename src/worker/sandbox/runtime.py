@@ -160,7 +160,8 @@ class PosixProcessSandbox(SandboxRuntime):
             program,
             *command.argv[1:],
         ]
-        deadline = command.timeout_sec or profile.command_timeout_sec
+        limit = profile.command_timeout_sec
+        deadline = min(command.timeout_sec or limit, limit)
         try:
             # Its own session makes the command's descendants one killable group, so the
             # tree is reaped before the action completes rather than outliving it.

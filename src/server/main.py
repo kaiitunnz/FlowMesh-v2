@@ -75,10 +75,10 @@ from .services.agent_model_gateway import (
     ResolvedGatewayBinding,
     to_gateway_binding,
 )
+from .services.credential_vault import CredentialVault
 from .services.fleet_metrics import build_fleet_sampler
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
-from .services.model_secret_vault import ModelSecretVault
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
 from .services.ssh_audit import SshAuditService
@@ -195,9 +195,7 @@ if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
     FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT)
-    MODEL_SECRET_VAULT = ModelSecretVault(
-        REDIS_CLIENT, config.orchestration.model_secret_vault.ttl_sec, logger
-    )
+    CREDENTIAL_VAULT = CredentialVault(REDIS_CLIENT)
     POLICY_SURFACE = build_policy_surface(config.orchestration.policy)
     SERVER_TRACER = build_tracer(
         config.telemetry,
@@ -222,12 +220,13 @@ if IS_ROOT_NODE:
         config.orchestration,
         ResultReader(open_deployment_store(config.object_store)),
         logger,
-        secret_vault=MODEL_SECRET_VAULT,
+        credential_vault=CREDENTIAL_VAULT,
         surface=POLICY_SURFACE,
         control=CONTROL_TRACER,
         tracer=SERVER_TRACER,
         telemetry=config.telemetry,
         content_scope_authority=FINALIZATION_INDEX.assign_scope,
+        n8n=config.n8n,
     )
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(

@@ -198,7 +198,7 @@ async def test_a_task_without_a_menu_passes_straight_through() -> None:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("no-menu"),
-        secret_vault=cast(Any, None),
+        credential_vault=cast(Any, None),
     )
     dispatcher = make_capturing_dispatcher(runtime=runtime)
     assert dispatcher._resolve_embodiment("tsk-absent", cast(Any, None)) is True

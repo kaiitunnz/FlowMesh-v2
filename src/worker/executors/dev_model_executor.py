@@ -22,6 +22,7 @@ from shared.schemas.result import DevModelResult
 from shared.tasks.specs.dev_model import DevModelSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils.parsing import parse_float_env
+from shared.utils.redact import redact_url
 from worker.config import WorkerConfig
 
 from .base_executor import Executor, ExecutorTask, RunSignals
@@ -414,7 +415,7 @@ class DevModelExecutor(Executor):
             port,
             task.task_id,
             ttl_sec,
-            forward_url or "canned",
+            redact_url(forward_url) if forward_url else "canned",
         )
 
         try:

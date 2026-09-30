@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from shared.tasks import TaskEnvelopeTemplate, TaskType
 from shared.tasks.components import TaskAnnotations
+from shared.tasks.credentials import find_spec_strings
 from shared.tasks.specs import DevModelSpecTemplate, ServeSpecTemplate
 from shared.utils import new_task_id, parse_bool_env
 from shared.utils.json import safe_get
@@ -87,9 +88,18 @@ class ParsedTask:
     position_in_epoch: int | None = None
     selected_worker: list[str] | None = None
     v2: dict[str, Any] | None = None
+    # The pointers of values the source format marks as credentials whatever their
+    # shape, such as an n8n value it carried encrypted.
+    declared_credentials: frozenset[str] = frozenset()
+    # The pointers of the inline credentials masked in the spec, set once they are
+    # taken out of it.
+    masked_credentials: frozenset[str] = frozenset()
 
 
-def parse_workflow(payload: str, format: str) -> ParsedWorkflow:
+def parse_workflow(
+    payload: str, format: str, n8n_credential_password: str = ""
+) -> ParsedWorkflow:
+    decrypted: frozenset[str] = frozenset()
     match format:
         case "native":
             try:
@@ -108,12 +118,18 @@ def parse_workflow(payload: str, format: str) -> ParsedWorkflow:
                     "n8n payload must be a JSON object",
                 )
             try:
-                data = translate_n8n_workflow(payload_dict)
+                translation = translate_n8n_workflow(
+                    payload_dict, n8n_credential_password
+                )
             except Exception as exc:
                 raise ValueError(f"Failed to parse n8n workflow: {exc}")
+            data, decrypted = translation.document, translation.decrypted
         case _:
             raise ValueError(f"Unsupported format: {format}")
-    return _expand_specs(data)
+    parsed = _expand_specs(data)
+    for task in parsed.tasks:
+        task.declared_credentials = find_spec_strings(task.task.spec, decrypted)
+    return parsed
 
 
 def _build_workflow(

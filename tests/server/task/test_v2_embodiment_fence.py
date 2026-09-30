@@ -9,12 +9,12 @@ from server.config import OrchestrationConfig
 from server.task.runtime import TaskRuntime
 from shared.inference import InputResolutionBinding, UpstreamProvenance
 from shared.tasks.specs import InferenceEmbodimentKind
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 
 from .test_v2_orchestration import (
     FakeRegistry,
-    _NoopSecretVault,
     _register,
     _worker,
     _WorkerRegistryStub,
@@ -46,7 +46,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("embodiment-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

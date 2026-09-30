@@ -39,6 +39,8 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
+from shared.utils.redact import redact_url
+
 from .codex import CodexEvent, CodexInjectItem
 
 _INJECT_CALL_PREFIX = "fab-"
@@ -141,7 +143,9 @@ class CodexTransportConfig:
         # base_url and model reach the codex --config DSL as key="value" overrides, so a
         # quote or newline would break the override; the URL must also stay http(s).
         if not self.base_url.startswith(("http://", "https://")):
-            raise ValueError(f"the codex base_url must be http(s): {self.base_url!r}")
+            raise ValueError(
+                f"the codex base_url must be http(s): {redact_url(self.base_url)!r}"
+            )
         for name, value in (("base_url", self.base_url), ("model", self.model)):
             if '"' in value or "\n" in value:
                 raise ValueError(f"the codex {name} may not contain a quote or newline")

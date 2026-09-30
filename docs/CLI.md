@@ -115,7 +115,10 @@ root node, both local Redis services are deployed alongside the server. On a
 worker node (`NODE_ROLE=worker`), Redis services are skipped — the worker
 server connects to the root node's Redis via `REDIS_CONTROL_URL` and
 `REDIS_TELEMETRY_URL`, which must be set in the worker's `.env` to reachable
-endpoints on the root node.
+endpoints on the root node, and authenticates with the root's `REDIS_PASSWORD`.
+
+`flowmesh stack init --role root` writes random Redis, content store, and ClickHouse
+credentials into the root's `.env`.
 
 A root node that names no `CONTENT_STORE_ENDPOINT_URL` also runs the co-located
 content store, the `content` compose profile, which `flowmesh stack up` selects on its

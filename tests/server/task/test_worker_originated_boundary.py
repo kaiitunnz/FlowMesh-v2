@@ -15,7 +15,6 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import SecretStr
 
 from server.config import AgentBindingConfig, OrchestrationConfig
 from server.orchestration.state import WorkItemStatus
@@ -50,13 +49,13 @@ from shared.tools.facade import (
     FacadeTurnGroup,
 )
 from shared.tools.search.schema import parse_search_request
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_private_state_ledger import _manifest
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
-    _NoopSecretVault,
     _register,
 )
 from worker.egress import PendingEgressRequestStore
@@ -150,23 +149,14 @@ class _WorkerStub:
         return 0
 
 
-class _StubVault:
-    """A model-secret vault that stores and resolves a workflow-scoped key in memory."""
-
-    def __init__(self) -> None:
-        self._store: dict[tuple[str, str], SecretStr] = {}
-
-    async def store(self, workflow_id: str, ref: str, secret: SecretStr) -> None:
-        self._store[(workflow_id, ref)] = secret
-
-    def resolve(self, workflow_id: str, ref: str | None) -> SecretStr | None:
-        return self._store.get((workflow_id, ref)) if ref else None
+class _StubVault(InMemoryCredentialVault):
+    """A credential vault whose keys outlive their workflow until dropped."""
 
     def purge(self, workflow_id: str) -> None:
         return None
 
     def expire_all(self) -> None:
-        self._store.clear()
+        self.redis.hashes.clear()
 
 
 def _runtime(
@@ -180,7 +170,7 @@ def _runtime(
         config or OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("wo-test"),
-        secret_vault=cast(Any, vault or _NoopSecretVault()),
+        credential_vault=cast(Any, vault or InMemoryCredentialVault()),
         content_scope_authority=(
             None
             if assigned is None
@@ -1132,7 +1122,7 @@ def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
                 OrchestrationConfig(),
                 make_result_reader(),
                 logging.getLogger("wo-test"),
-                secret_vault=cast(Any, _NoopSecretVault()),
+                credential_vault=InMemoryCredentialVault(),
             )
 
         runtime = runtime_on(registry)

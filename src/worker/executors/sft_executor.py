@@ -39,7 +39,12 @@ from .utils.checkpoints import (
     write_executor_result,
 )
 from .utils.data_utils import resolve_jsonl_path
-from .utils.distributed import deepspeed_available, run_deepspeed, run_torchrun
+from .utils.distributed import (
+    deepspeed_available,
+    launcher_task_file,
+    run_deepspeed,
+    run_torchrun,
+)
 from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 
 logger = logging.getLogger("worker.sft")
@@ -151,12 +156,6 @@ class SFTExecutor(TrainingMixin, Executor):
                 and not already_spawned
                 and (n_gpus or 0) > 1
             ):
-                launcher_dir = scratch_dir(out_dir) / "launcher"
-                launcher_dir.mkdir(parents=True, exist_ok=True)
-                task_file = launcher_dir / "task_spec.json"
-                with task_file.open("w", encoding="utf-8") as fh:
-                    fh.write(task.model_dump_json(by_alias=True))
-
                 nproc = int(training_cfg.get("nproc_per_node", n_gpus))
                 use_deepspeed = deepspeed_intent and deepspeed_available()
                 if deepspeed_intent and not use_deepspeed:
@@ -164,32 +163,33 @@ class SFTExecutor(TrainingMixin, Executor):
                         "DeepSpeed configuration provided but the `deepspeed` "
                         "package is not importable; falling back to torchrun."
                     )
-                if use_deepspeed:
-                    logger.info(
-                        "Launching DeepSpeed for SFT "
-                        "(num_gpus=%d, CUDA_VISIBLE_DEVICES=%s)",
-                        nproc,
-                        os.environ.get("CUDA_VISIBLE_DEVICES"),
-                    )
-                    run_deepspeed(
-                        num_gpus=nproc,
-                        module="worker.executors.sft_dist_entry",
-                        module_args=[task_file.as_posix(), out_dir.as_posix()],
-                        launcher_env_flag=launcher_env_flag,
-                    )
-                else:
-                    logger.info(
-                        "Launching torchrun for SFT "
-                        "(nproc=%d, CUDA_VISIBLE_DEVICES=%s)",
-                        nproc,
-                        os.environ.get("CUDA_VISIBLE_DEVICES"),
-                    )
-                    run_torchrun(
-                        nproc_per_node=nproc,
-                        module="worker.executors.sft_dist_entry",
-                        module_args=[task_file.as_posix(), out_dir.as_posix()],
-                        launcher_env_flag=launcher_env_flag,
-                    )
+                with launcher_task_file(out_dir, task) as task_file:
+                    if use_deepspeed:
+                        logger.info(
+                            "Launching DeepSpeed for SFT "
+                            "(num_gpus=%d, CUDA_VISIBLE_DEVICES=%s)",
+                            nproc,
+                            os.environ.get("CUDA_VISIBLE_DEVICES"),
+                        )
+                        run_deepspeed(
+                            num_gpus=nproc,
+                            module="worker.executors.sft_dist_entry",
+                            module_args=[task_file.as_posix(), out_dir.as_posix()],
+                            launcher_env_flag=launcher_env_flag,
+                        )
+                    else:
+                        logger.info(
+                            "Launching torchrun for SFT "
+                            "(nproc=%d, CUDA_VISIBLE_DEVICES=%s)",
+                            nproc,
+                            os.environ.get("CUDA_VISIBLE_DEVICES"),
+                        )
+                        run_torchrun(
+                            nproc_per_node=nproc,
+                            module="worker.executors.sft_dist_entry",
+                            module_args=[task_file.as_posix(), out_dir.as_posix()],
+                            launcher_env_flag=launcher_env_flag,
+                        )
                 ipc_path = scratch_dir(out_dir) / "distributed_result.json"
                 if ipc_path.exists():
                     self._task_out_dir = None

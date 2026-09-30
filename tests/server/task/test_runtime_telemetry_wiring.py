@@ -18,13 +18,13 @@ from server.orchestration import Advance
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from shared.telemetry.config import TelemetryLevel
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     _TS,
     AUTORESEARCH,
     FakeRegistry,
-    _NoopSecretVault,
     _planned,
     _register,
     _worker,
@@ -44,7 +44,7 @@ def _runtime(
         OrchestrationConfig(),
         reader,
         logging.getLogger(name),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
         control=control,
         tracer=tracer,
         telemetry=config,

@@ -10,9 +10,9 @@ from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 
 class _WorkflowRegistryStub:
@@ -73,7 +73,7 @@ def _runtime(worker_registry: Any = None) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("runtime-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

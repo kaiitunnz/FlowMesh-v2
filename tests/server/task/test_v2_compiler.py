@@ -17,8 +17,8 @@ from server.task.v2 import (
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.bindings import BindingClass, binding_class
 from shared.tasks import TaskType
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 # Legacy example agents declare no harness; a lowering test supplies a deployment
 # default so a bare agent resolves rather than failing binding validation.
@@ -193,7 +193,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-compiler-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import Any, Self, cast
@@ -60,6 +60,8 @@ from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import collection_elements, value_text
+from shared.tasks import TaskEnvelopeTemplate
+from shared.tasks.credentials import set_spec_values
 from shared.tasks.result_binding import (
     ResultBinding,
     ResultElementRef,
@@ -70,6 +72,7 @@ from shared.tasks.specs import (
     InferenceSpecStrict,
     InferenceSpecTemplate,
     ModelBindingMode,
+    TaskSpecBase,
 )
 from shared.telemetry.config import TelemetryConfig
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
@@ -81,9 +84,9 @@ from shared.tools.contract import (
 )
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
-from shared.utils.ids import new_model_secret_ref
+from shared.utils.redact import credential_scrubber
 
-from ..config import AgentBindingConfig, OrchestrationConfig
+from ..config import AgentBindingConfig, N8nConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
 from ..orchestration import (
     AcceptedInput,
@@ -116,8 +119,19 @@ from ..orchestration.tool_dispatch import (
 )
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
-from ..services.model_secret_vault import ModelSecretVault
+from ..services.credential_vault import CredentialVault
 from ..utils.time import now_iso, parse_iso_ts, ts_to_iso
+from .credentials import (
+    CredentialRefs,
+    InlineCredentials,
+    TaskCredentials,
+    credential_merge_key,
+    mask_inline_credentials,
+    redact_source_text,
+    redact_stored_source,
+    take_inline_credentials,
+    take_spec_credentials,
+)
 from .models import (
     SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -157,7 +171,6 @@ from .v2 import (
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.compiler.facades import run_command_schema
-from .v2.credentials import pop_inline_model_secrets, redact_source_text
 from .v2.policy import PolicySurface
 from .v2.representations.admission import ResidentAdmissionBinding
 from .v2.representations.operators import (
@@ -289,6 +302,17 @@ def _input_verdict(task_id: str, check: _InputCheck) -> TaskEvent:
         retryable=False,
         failure_kind=TaskFailureKind.INPUT_UNREADABLE,
     )
+
+
+@dataclass(frozen=True)
+class _StagedRegistration:
+    """A submission's records and plan, built in memory before its durable write."""
+
+    results: list[TaskParsingResult]
+    task_records: list[TaskRecord]
+    candidate_ready: list[str]
+    v2_bundle: PersistedV2Workflow | None
+    v2_engine: OrchestrationEngine | None
 
 
 @dataclass
@@ -576,6 +600,10 @@ def _captured_calls(
     return captures
 
 
+def _unscrubbed(text: str) -> str:
+    return text
+
+
 class TaskRuntime:
     """In-memory task registry with FIFO-ready queue and dependency tracking."""
 
@@ -586,13 +614,14 @@ class TaskRuntime:
         orchestration: OrchestrationConfig,
         results: ResultReader,
         logger: logging.Logger,
-        secret_vault: ModelSecretVault,
+        credential_vault: CredentialVault,
         feasibility_check: EpisodeFeasibility | None = None,
         surface: PolicySurface | None = None,
         control: ControlPlaneTracer | None = None,
         tracer: Tracer | None = None,
         telemetry: TelemetryConfig | None = None,
         content_scope_authority: Callable[[str, str], None] | None = None,
+        n8n: N8nConfig | None = None,
         redrive: Callable[
             [Callable[[str], None], logging.Logger], StoreRedriveScheduler
         ] = StoreRedriveScheduler,
@@ -604,8 +633,9 @@ class TaskRuntime:
         self._redrive = redrive(self._drive_workflow, logger)
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
-        self._secret_vault = secret_vault
+        self._credential_vault = credential_vault
         self._content_scope_authority = content_scope_authority
+        self._n8n_credential_password = (n8n or N8nConfig()).credential_password
         self._control = control if control is not None else NULL_CONTROL_TRACER
         self._tracer = tracer
         self._telemetry = telemetry
@@ -699,8 +729,11 @@ class TaskRuntime:
     # Registration & submission
     # ------------------------------------------------------------------ #
 
+    def _parse(self, payload: str, format: str) -> ParsedWorkflow:
+        return parse_workflow(payload, format, self._n8n_credential_password)
+
     def validate(self, payload: str, format: str = "native") -> list[TaskParsingResult]:
-        parsed_workflow = parse_workflow(payload, format)
+        parsed_workflow = self._parse(payload, format)
         specs = parsed_workflow.tasks
         results: list[TaskParsingResult] = []
         for entry in specs:
@@ -723,12 +756,12 @@ class TaskRuntime:
         Returns ``None`` for a non-v2 submission. Structural frontend errors raise
         ``CompileError``; semantic findings ride on the report's diagnostics.
         """
-        parsed_workflow = parse_workflow(payload, format)
+        parsed_workflow = self._parse(payload, format)
         if not ExecutionMode.is_v2(parsed_workflow.api_version):
             return None
         # A dry run never vaults; drop any inline credential and redact the source so
-        # the inspection echoes no raw key back to the caller.
-        pop_inline_model_secrets(parsed_workflow)
+        # the inspection echoes no credential back.
+        mask_inline_credentials(parsed_workflow)
         source = FrontendWorkflowSource.capture(
             redact_source_text(payload, format), format
         )
@@ -741,25 +774,6 @@ class TaskRuntime:
             surface=self._policy_surface,
         )
 
-    async def _vault_inline_secrets(
-        self, workflow_id: str, parsed: ParsedWorkflow
-    ) -> dict[str, str]:
-        """Vault each agent's inline model credential, returning its generated ref.
-
-        The credential is stripped from the parsed spec and stored under the workflow,
-        so only the opaque ref reaches the compiled binding, the persisted record, and
-        every downstream surface.
-        """
-        secrets = pop_inline_model_secrets(parsed)
-        if not secrets:
-            return {}
-        secret_refs: dict[str, str] = {}
-        for task_id, secret in secrets.items():
-            ref = new_model_secret_ref()
-            await self._secret_vault.store(workflow_id, ref, secret)
-            secret_refs[task_id] = ref
-        return secret_refs
-
     async def register(
         self,
         owner_id: str,
@@ -770,11 +784,55 @@ class TaskRuntime:
         resident: bool = False,
     ) -> tuple[str, list[TaskParsingResult]]:
         submitted_at = now_iso()
-        parsed_workflow = parse_workflow(payload, format)
+        parsed_workflow = self._parse(payload, format)
+        workflow_id = new_workflow_id()
+        # Credentials leave the parsed specs before anything persists or compiles, so
+        # only an opaque ref reaches the template, the plan and the records.
+        credentials = take_inline_credentials(parsed_workflow)
+        await self._credential_vault.store_values(workflow_id, credentials.values)
+        # Once the durable write is attempted the workflow may exist, so a later failure
+        # keeps its credentials; the startup sweep reclaims a vault no workflow owns.
+        try:
+            staged = self._stage_registration(
+                owner_id,
+                org_id,
+                payload,
+                format,
+                resident,
+                workflow_id,
+                parsed_workflow,
+                credentials,
+            )
+        except BaseException:
+            self._discard_credentials(workflow_id)
+            raise
+        return workflow_id, await self._commit_registration(
+            workflow_id, submitted_at, staged
+        )
+
+    def _discard_credentials(self, workflow_id: str) -> None:
+        try:
+            self._credential_vault.purge(workflow_id)
+        except Exception:
+            self._logger.exception(
+                "Failed to purge the credentials of unregistered workflow %s",
+                workflow_id,
+            )
+
+    def _stage_registration(
+        self,
+        owner_id: str,
+        org_id: str,
+        payload: str,
+        format: str,
+        resident: bool,
+        workflow_id: str,
+        parsed_workflow: ParsedWorkflow,
+        credentials: InlineCredentials,
+    ) -> _StagedRegistration:
         specs = parsed_workflow.tasks
         yaml_text = redact_source_text(payload, format)
         results: list[TaskParsingResult] = []
-        workflow_id = new_workflow_id()
         task_records: list[TaskRecord] = []
         candidate_ready: list[str] = []
         graph_task_ids: dict[str, str] = {}
@@ -782,7 +840,6 @@ class TaskRuntime:
         v2_bundle: PersistedV2Workflow | None = None
         v2_engine: OrchestrationEngine | None = None
         if ExecutionMode.is_v2(parsed_workflow.api_version):
-            secret_refs = await self._vault_inline_secrets(workflow_id, parsed_workflow)
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(
                 workflow_id,
@@ -790,7 +847,7 @@ class TaskRuntime:
                 source,
                 strategy=self._lowering_strategy,
                 bindings=self._agent_binding_defaults,
-                secret_refs=secret_refs,
+                secret_refs=credentials.model_keys,
                 surface=self._policy_surface,
                 control=self._control,
             )
@@ -821,6 +878,7 @@ class TaskRuntime:
             for entry in specs:
                 task_id = entry.task_id
                 task = entry.task.model_copy(deep=True)
+                task_credentials = credentials.tasks.get(task_id, TaskCredentials())
                 depends_on = entry.depends_on.copy()
                 original = set(depends_on)
                 pending = {dep for dep in depends_on if dep not in self._completed}
@@ -861,13 +919,14 @@ class TaskRuntime:
                     task_type=task_type,
                     category=category,
                     resident=resident,
+                    credential_refs=task_credentials.refs,
                 )
                 task_records.append(record)
                 record.last_queue_ts = record.submitted_ts
                 if v2_engine is None:
                     # A merged dispatch stores every result under its parent's
                     # authorization scope, so only tasks of one scope merge.
-                    merge_key = task.spec.merge_key(scope=org_id)
+                    merge_key = task_credentials.merge_key(task.spec, scope=org_id)
                     record.merge_key = merge_key
                     selected_worker_hint = (
                         record.selected_worker[0]
@@ -920,8 +979,17 @@ class TaskRuntime:
                     self._workflow_epoch_tasks[workflow_id] = epoch_queue
                     self._workflow_epoch_frontier[workflow_id] = 0
 
+        return _StagedRegistration(
+            results, task_records, candidate_ready, v2_bundle, v2_engine
+        )
+
+    async def _commit_registration(
+        self, workflow_id: str, submitted_at: str, staged: _StagedRegistration
+    ) -> list[TaskParsingResult]:
+        task_records = staged.task_records
+        v2_engine = staged.v2_engine
         await self._workflow_registry.register_workflow_async(
-            workflow_id, task_records, v2=v2_bundle, submitted_at=submitted_at
+            workflow_id, task_records, v2=staged.v2_bundle, submitted_at=submitted_at
         )
 
         with self._cv:
@@ -955,7 +1023,7 @@ class TaskRuntime:
                 # authority-denied roots, so the ledger never leads durable task state
                 # and no later save lands before it.
                 self._save_ledger_locked(workflow_id)
-            for task_id in candidate_ready:
+            for task_id in staged.candidate_ready:
                 maybe_record = self._tasks.get(task_id)
                 if not maybe_record or maybe_record.status != TaskStatus.PENDING:
                     continue
@@ -966,7 +1034,7 @@ class TaskRuntime:
             if new_ready:
                 self._cv.notify_all()
 
-        return workflow_id, results
+        return staged.results
 
     # ------------------------------------------------------------------ #
     # Rehydration
@@ -983,7 +1051,7 @@ class TaskRuntime:
         """
         workflow_ids = await self._workflow_registry.get_workflow_ids_async()
         rehydrated_at = time.time()
-        restored = 0
+        restored: list[str] = []
         for workflow_id in sorted(workflow_ids):
             wf_record = await self._workflow_registry.get_workflow_record_async(
                 workflow_id
@@ -1003,6 +1071,7 @@ class TaskRuntime:
             ]
             if not tasks:
                 continue
+            await self._vault_stored_credentials(workflow_id, tasks)
             remaining = await self._workflow_registry.get_remaining_tasks_async(
                 workflow_id
             )
@@ -1040,7 +1109,7 @@ class TaskRuntime:
                 # still running or already closed.
                 self._notify_terminal_transition(workflow_id)
                 self._cv.notify_all()
-            restored += 1
+            restored.append(workflow_id)
         with self._cv:
             self._restore_merges_locked()
             self._held_dispatches.update(
@@ -1051,10 +1120,61 @@ class TaskRuntime:
                 and record.dispatch_id is not None
                 and not self._dispatch_ended_at_suspension_locked(record)
             )
+            live = [
+                workflow_id
+                for workflow_id in restored
+                if not self._workflow_settlement_locked(workflow_id).settled
+            ]
         self._release_pending_terminations()
+        # Rehydrate completes before the API accepts a submission, so no workflow is
+        # between vaulting its credentials and registering.
+        await self._credential_vault.retain_only(live)
         if restored:
-            self._logger.info("Rehydrated %d workflow(s) from durable state", restored)
-        return restored
+            self._logger.info(
+                "Rehydrated %d workflow(s) from durable state", len(restored)
+            )
+        return len(restored)
+
+    async def _vault_stored_credentials(
+        self, workflow_id: str, tasks: list[PersistedTask]
+    ) -> None:
+        """Take the inline credentials out of records stored before they were vaulted.
+
+        A record that can still dispatch has its credentials vaulted and the refs
+        recorded, as a submission does; a settled one is masked. Every one gets its
+        source redacted again. The vault is written before the records, so a crash in
+        between leaves the records to be taken again at the next start. A record that
+        cannot be taken is left as stored, and runs with its stored credentials.
+        """
+        refs = CredentialRefs()
+        taken: list[PersistedTask] = []
+        for persisted in tasks:
+            record = persisted.record
+            if record.credential_refs is not None:
+                continue
+            task = record.task.model_copy(deep=True)
+            try:
+                live = record.status not in TERMINAL_TASK_STATUSES
+                credentials = take_spec_credentials(
+                    task.spec, refs if live else CredentialRefs()
+                )
+                source = redact_stored_source(record.raw_yaml)
+            except Exception:
+                self._logger.exception(
+                    "Task %s keeps its stored credentials; they could not be vaulted",
+                    record.task_id,
+                )
+                continue
+            record.task = task
+            record.raw_yaml = source
+            record.credential_refs = credentials.refs if live else {}
+            if record.merge_key is not None:
+                record.merge_key = credentials.merge_key(task.spec, scope=record.org_id)
+            taken.append(persisted)
+        if not taken:
+            return
+        await self._credential_vault.store_values(workflow_id, refs.values)
+        await self._workflow_registry.save_task_states_async(taken)
 
     def _restore_merges_locked(self) -> None:
         """Rebuild the in-flight merges from durable records.
@@ -1110,7 +1230,9 @@ class TaskRuntime:
             if record.merge_key is not None:
                 # A key persisted under an earlier rule may omit what now keeps two
                 # tasks apart, so a restored task's key comes from the task itself.
-                record.merge_key = record.task.spec.merge_key(scope=record.org_id)
+                record.merge_key = credential_merge_key(
+                    record.task.spec, record.credential_refs or {}, scope=record.org_id
+                )
             self._merge_key_by_task[task_id] = (record.merge_key, selected_worker_hint)
             if persisted.epoch_index is not None:
                 self._task_epoch_index[task_id] = persisted.epoch_index
@@ -1560,14 +1682,12 @@ class TaskRuntime:
     def _reclaim_vault_if_settled_locked(self, workflow_id: str) -> None:
         """Purge a workflow's vaulted credentials once its last task has settled.
 
-        The primary reclaim on the terminal transition, for a workflow that completes or
-        fails; the vault's sliding TTL only backstops a submission that never settles.
         Called after an event's advance materializes any new children, so a producer
         that fans out is not reclaimed while its children are still pending.
         """
         if self._writes_held() or self._workflow_settlement_locked(workflow_id).settled:
             self._write_locked(
-                lambda: self._secret_vault.purge(workflow_id),
+                lambda: self._credential_vault.purge(workflow_id),
                 lambda held: held.workflow_ids.append(workflow_id),
             )
 
@@ -2259,7 +2379,9 @@ class TaskRuntime:
         if binding is None:
             return _OpCredential()
         if binding.secret_ref is not None:
-            secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
+            secret = self._credential_vault.resolve(
+                agent.workflow_id, binding.secret_ref
+            )
             if secret is None:
                 return _MissingCredential()
             return _OpCredential(credential=secret.get_secret_value())
@@ -3030,7 +3152,42 @@ class TaskRuntime:
                 spec = engine.episode_spec(task_id)
         return True if spec is None else self._feasibility_check(spec)
 
-    def declared_contract(self, task_id: str) -> CanonicalInferenceContract | None:
+    def credential_pointers(self, task_ids: Iterable[str]) -> dict[str, list[str]]:
+        """Where each task's restored credentials sit in its dispatched spec."""
+        with self._lock:
+            return {
+                task_id: sorted(refs)
+                for task_id in task_ids
+                if (record := self._tasks.get(task_id)) is not None
+                and (refs := record.credential_refs)
+            }
+
+    def credentialed_task(
+        self, record: TaskRecord
+    ) -> tuple[TaskEnvelopeTemplate, Callable[[str], str]] | None:
+        """A copy of a task with its vaulted credentials restored, and a scrubber for
+        any text produced from it; None when a credential is no longer retained.
+
+        The copy is what a dispatch renders and sends. Nothing writes it back, so the
+        record keeps only the refs.
+        """
+        refs = record.credential_refs
+        if not refs:
+            return record.task, _unscrubbed
+        values = self._credential_vault.resolve_values(
+            record.workflow_id, refs.values()
+        )
+        if any(ref not in values for ref in refs.values()):
+            return None
+        task = record.task.model_copy(deep=True)
+        set_spec_values(
+            task.spec, {pointer: values[ref] for pointer, ref in refs.items()}
+        )
+        return task, credential_scrubber(values.values())
+
+    def declared_contract(
+        self, task_id: str, spec: TaskSpecBase | None = None
+    ) -> CanonicalInferenceContract | None:
         """The contract a leaf carries to the worker, for it to resolve and report.
 
         A leaf that admits more than one embodiment names its contract here rather than
@@ -3045,13 +3202,15 @@ class TaskRuntime:
         its prompts are literal or come from upstream: it resolves them in its own
         executor and keeps reporting the native result that embodiment has always
         reported. So does a pinned single-prompt literal leaf.
+
+        ``spec``, when given, is the dispatched spec with its credentials restored.
         """
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if record is None or engine is None:
                 return None
-            spec = record.task.spec
+            spec = spec or record.task.spec
             if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
                 return None
             element = self._input_element_locked(task_id)
@@ -5679,7 +5838,7 @@ class TaskRuntime:
 
         self._release_terminated_work(termination)
         self._release_ended_workers()
-        self._secret_vault.purge(workflow_id)
+        self._credential_vault.purge(workflow_id)
         return touched
 
     def _terminate_workflow_locked(

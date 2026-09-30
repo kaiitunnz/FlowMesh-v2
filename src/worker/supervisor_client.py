@@ -13,6 +13,7 @@ import grpc
 from google.protobuf.empty_pb2 import Empty
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
+from pydantic import ValidationError
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.content import ContentReference
@@ -372,6 +373,7 @@ class SupervisorClient:
         owner_id: str,
         task_refs: list[dict[str, str]] | None = None,
         log_paths: dict[str, Path] | None = None,
+        scrub: Callable[[str], str] | None = None,
     ) -> TaskLogEmitter | None:
         if self._stub is None:
             return None
@@ -386,6 +388,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             task_refs=task_refs,
             log_paths=log_paths,
+            scrub=scrub,
         )
 
     # ------------------------------------------------------------------ #
@@ -549,10 +552,16 @@ class SupervisorClient:
                         try:
                             task_message = WorkerTaskMessage.model_validate(payload)
                         except Exception as exc:
+                            # The payload carries the task's credentials, so only
+                            # where parsing failed, and how, is logged.
                             self.logger.error(
-                                "Failed to parse task message payload: %s; error: %s",
-                                payload,
-                                exc,
+                                "Failed to parse task message %s: %s",
+                                payload.get("task_id"),
+                                (
+                                    exc.errors(include_input=False, include_url=False)
+                                    if isinstance(exc, ValidationError)
+                                    else type(exc).__name__
+                                ),
                             )
                         else:
                             self._task_queue.put(task_message)

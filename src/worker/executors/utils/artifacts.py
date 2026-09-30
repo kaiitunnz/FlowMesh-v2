@@ -9,6 +9,7 @@ import requests
 from shared.schemas.result import BaseExecutorResult
 from shared.utils.http import auth_headers
 
+from ...utils.redaction import redact_urls
 from ..base_executor import ExecutionError
 
 
@@ -134,5 +135,6 @@ def resolve_artifact(source: str, timeout: float = 1800) -> Path:
         return local_path
     except Exception as exc:
         raise ExecutionError(
-            f"Failed to resolve embedding artifact: {exc}", retryable=True
+            redact_urls(f"Failed to resolve embedding artifact: {exc}", source),
+            retryable=True,
         ) from exc

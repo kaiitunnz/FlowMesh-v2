@@ -63,6 +63,13 @@ class WorkerTaskMessage(BaseModel):
         default=None,
         description="Collection element a fan-out child runs on.",
     )
+    credential_pointers: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Pointers to the restored credentials in each dispatched task's spec, by "
+            "task id."
+        ),
+    )
     agent_episode: AgentEpisodeDispatch | None = Field(
         default=None,
         description="Agent-episode continuation context for a run-to-yield step.",

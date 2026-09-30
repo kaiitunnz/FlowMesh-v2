@@ -15,6 +15,8 @@ from redis.client import Pipeline, PubSub
 from redis.connection import SSLConnection as SyncSSLConnection
 from redis.typing import EncodableT
 
+from shared.utils.redact import redact_url
+
 from ..config import RedisConfig
 
 # redis-py wraps dropped sockets in its own ConnectionError/TimeoutError, which
@@ -100,8 +102,16 @@ def workflow_ds_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:ds"
 
 
-def workflow_model_secret_key(workflow_id: str) -> str:
+# The ``model_secret`` suffix is the persisted vault layout.
+WORKFLOW_CREDENTIAL_KEY_PATTERN = "workflow:*:model_secret"
+
+
+def workflow_credential_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:model_secret"
+
+
+def credential_key_workflow_id(key: str) -> str:
+    return key.removeprefix("workflow:").removesuffix(":model_secret")
 
 
 def resident_cs_key() -> str:
@@ -331,18 +341,6 @@ def _with_redis_auth(url: str, acl_enabled: bool, username: str, password: str) 
     return urlunparse(parsed._replace(netloc=netloc))
 
 
-def _redact_url(url: str) -> str:
-    parsed = urlparse(url)
-    if not parsed.username and not parsed.password:
-        return url
-    host = parsed.hostname or ""
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
-    user = parsed.username or "user"
-    netloc = f"{user}:****@{host}"
-    return urlunparse(parsed._replace(netloc=netloc))
-
-
 class SyncRedisClient:
     def __init__(
         self,
@@ -389,10 +387,10 @@ class SyncRedisClient:
             client.ping()
         except Exception as exc:
             self.logger.exception(
-                "Failed to connect to %s Redis (%s): %s", label, url, exc
+                "Failed to connect to %s Redis (%s): %s", label, redact_url(url), exc
             )
             raise SystemExit(1) from exc
-        self.logger.info("Connected to %s Redis: %s", label, _redact_url(url))
+        self.logger.info("Connected to %s Redis: %s", label, redact_url(url))
         return client
 
     # ---- String helpers ----
@@ -441,6 +439,12 @@ class SyncRedisClient:
     def expire(self, key: str, ttl_sec: int) -> bool:
         return bool(self._control.expire(key, max(0, int(ttl_sec))))
 
+    def persist(self, key: str) -> bool:
+        return bool(self._control.persist(key))
+
+    def scan_keys(self, pattern: str) -> list[str]:
+        return list(self._control.scan_iter(match=pattern))
+
     def expire_telemetry(self, key: str, ttl_sec: int) -> bool:
         return bool(self._telemetry.expire(key, max(0, int(ttl_sec))))
 
@@ -453,6 +457,13 @@ class SyncRedisClient:
 
     def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
         self._control.hset(key, mapping=mapping)
+
+    def hash_set_persistent(self, key: str, mapping: dict[str, Any]) -> None:
+        """Set hash fields and clear any expiry on the key, in one transaction."""
+        with self._control.pipeline(transaction=True) as pipe:
+            pipe.hset(key, mapping=mapping)
+            pipe.persist(key)
+            pipe.execute()
 
     def hash_delete(self, key: str, *fields: str) -> None:
         if fields:
@@ -546,9 +557,13 @@ class SyncRedisClient:
     # ---- Maintenance ----
     def flush_all(self) -> None:
         self._control.flushdb()
-        self.logger.info("Cleared Redis database at %s (control)", self.control_url)
+        self.logger.info(
+            "Cleared Redis database at %s (control)", redact_url(self.control_url)
+        )
         self._telemetry.flushdb()
-        self.logger.info("Cleared Redis database at %s (telemetry)", self.telemetry_url)
+        self.logger.info(
+            "Cleared Redis database at %s (telemetry)", redact_url(self.telemetry_url)
+        )
 
 
 def _awaitable[T](value: Awaitable[T] | T) -> Awaitable[T]:
@@ -602,10 +617,10 @@ class AsyncRedisClient:
             )
         except Exception as exc:
             self.logger.exception(
-                "Failed to connect to %s Redis (%s): %s", label, url, exc
+                "Failed to connect to %s Redis (%s): %s", label, redact_url(url), exc
             )
             raise SystemExit(1) from exc
-        self.logger.info("Connected to %s Redis: %s", label, _redact_url(url))
+        self.logger.info("Connected to %s Redis: %s", label, redact_url(url))
         return client
 
     # ---- String helpers ----
@@ -654,6 +669,12 @@ class AsyncRedisClient:
     async def expire(self, key: str, ttl_sec: int) -> bool:
         return bool(await _awaitable(self._control.expire(key, max(0, int(ttl_sec)))))
 
+    async def persist(self, key: str) -> bool:
+        return bool(await _awaitable(self._control.persist(key)))
+
+    async def scan_keys(self, pattern: str) -> list[str]:
+        return [key async for key in self._control.scan_iter(match=pattern)]
+
     async def expire_telemetry(self, key: str, ttl_sec: int) -> bool:
         return bool(await _awaitable(self._telemetry.expire(key, max(0, int(ttl_sec)))))
 
@@ -666,6 +687,13 @@ class AsyncRedisClient:
 
     async def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
         await _awaitable(self._control.hset(key, mapping=mapping))
+
+    async def hash_set_persistent(self, key: str, mapping: dict[str, Any]) -> None:
+        """Set hash fields and clear any expiry on the key, in one transaction."""
+        async with self._control.pipeline(transaction=True) as pipe:
+            pipe.hset(key, mapping=mapping)
+            pipe.persist(key)
+            await pipe.execute()
 
     async def hash_delete(self, key: str, *fields: str) -> None:
         if fields:
@@ -779,9 +807,13 @@ class AsyncRedisClient:
 
     async def flush_all(self) -> None:
         await self._control.flushdb()
-        self.logger.info("Cleared Redis database at %s (control)", self.control_url)
+        self.logger.info(
+            "Cleared Redis database at %s (control)", redact_url(self.control_url)
+        )
         await self._telemetry.flushdb()
-        self.logger.info("Cleared Redis database at %s (telemetry)", self.telemetry_url)
+        self.logger.info(
+            "Cleared Redis database at %s (telemetry)", redact_url(self.telemetry_url)
+        )
 
 
 class RedisClient:

@@ -24,6 +24,7 @@ from shared.content import (
     FabricObjectStore,
 )
 from shared.tasks.result_binding import ResultBinding
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, store_result
 from tests.server.task.test_agent_dataflow import (
@@ -38,7 +39,6 @@ from tests.server.task.test_v2_orchestration import (
     AUTORESEARCH,
     FakeRegistry,
     _child_count,
-    _NoopSecretVault,
     _planned,
     _pop_ready,
     _register,
@@ -99,7 +99,7 @@ def _runtime(
         OrchestrationConfig(),
         reader,
         logging.getLogger("store-redrive"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
         redrive=scheduler,
     )
     return runtime, flaky, schedulers, clock

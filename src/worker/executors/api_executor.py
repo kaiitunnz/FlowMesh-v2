@@ -10,8 +10,9 @@ import httpx
 from shared.schemas.result import APIResult
 from shared.tasks.specs import ApiSpecStrict
 from shared.tasks.task_type import TaskType
-from shared.utils.redact import is_credential_key
+from shared.utils.redact import is_credential_key, redact_url
 
+from ..utils.redaction import redact_urls
 from .base_executor import ExecutionError, Executor, ExecutorTask
 
 logger = logging.getLogger(__name__)
@@ -19,14 +20,33 @@ logger = logging.getLogger(__name__)
 # Cache key: (base_url, timeout_seconds, verify_tls, follow_redirects)
 _ClientKey = tuple[str, float, bool, bool]
 
+_ROUTING_HEADERS = frozenset(
+    {
+        "host",
+        "forwarded",
+        "x-host",
+        "x-original-host",
+        "x-original-url",
+        "x-rewrite-url",
+    }
+)
+_ROUTING_HEADER_PREFIX = "x-forwarded-"
+
+
+def _is_routing_header(name: str) -> bool:
+    lowered = name.strip().lower()
+    return lowered in _ROUTING_HEADERS or lowered.startswith(_ROUTING_HEADER_PREFIX)
+
 
 class APIExecutor(Executor):
     """Performs a single HTTP request defined by task YAML.
 
     Without ``spec.api.url`` it calls ``NEBULA_API_BASE_URL`` with ``NEBULA_API_TOKEN``,
-    unless ``spec.api.headers`` carries a credential header of its own. A
-    ``spec.api.url`` is called with its own headers alone; the Nebula token is never
-    sent to it.
+    unless ``spec.api.headers`` carries a credential header of its own. A request
+    carrying the Nebula token drops any author header an ingress may route on and
+    always verifies TLS, so neither routes nor exposes the token past the configured
+    Nebula host. A ``spec.api.url`` is called with its own headers alone; the Nebula
+    token is never sent to it.
     """
 
     name = "api"
@@ -109,6 +129,7 @@ class APIExecutor(Executor):
         if not isinstance(headers, dict):
             raise ExecutionError("spec.api.headers must be a mapping")
 
+        carries_deployment_token = False
         if url is None:
             url = os.getenv("NEBULA_API_BASE_URL")
             if not url:
@@ -122,7 +143,13 @@ class APIExecutor(Executor):
                         "no credential configured: set a credential header or "
                         "NEBULA_API_TOKEN"
                     )
+                headers = {
+                    name: value
+                    for name, value in headers.items()
+                    if not _is_routing_header(str(name))
+                }
                 headers["Authorization"] = f"Bearer {token}"
+                carries_deployment_token = True
 
         params = api_cfg.get("params")
         if params is not None and not isinstance(params, dict):
@@ -133,7 +160,7 @@ class APIExecutor(Executor):
             raise ExecutionError("spec.api.timeout_sec must be a number")
         timeout = httpx.Timeout(timeout_sec)
 
-        verify_tls = api_cfg.get("verify_tls", True)
+        verify_tls = carries_deployment_token or api_cfg.get("verify_tls", True)
         follow_redirects = api_cfg.get("follow_redirects", True)
 
         body = api_cfg.get("body")
@@ -178,7 +205,9 @@ class APIExecutor(Executor):
                 **request_kwargs,
             )
         except httpx.RequestError as exc:
-            raise ExecutionError(f"API request failed: {exc}", retryable=True) from exc
+            raise ExecutionError(
+                redact_urls(f"API request failed: {exc}", str(url)), retryable=True
+            ) from exc
 
         body_bytes = resp.content
         truncated = False
@@ -190,7 +219,7 @@ class APIExecutor(Executor):
             ok=resp.is_success,
             executor=self.name,
             method=method,
-            url=str(resp.url),
+            url=redact_url(str(resp.url)),
             status_code=resp.status_code,
             truncated=truncated,
         )

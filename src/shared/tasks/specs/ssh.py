@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import model_validator
 
@@ -108,6 +108,11 @@ def _validate_inputs[T: "SSHSpecStrict | SSHSpecTemplate"](spec: T) -> T:
 
 
 class SSHSpecStrict(TaskSpecStrictBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecStrictBase.credential_fields,
+        "authorizedKeys",
+        "env",
+    )
     taskType: Literal[TaskType.SSH]
 
     interactive: bool | None = None
@@ -132,6 +137,11 @@ class SSHSpecStrict(TaskSpecStrictBase):
 
 
 class SSHSpecTemplate(TaskSpecTemplateBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecTemplateBase.credential_fields,
+        "authorizedKeys",
+        "env",
+    )
     taskType: Literal[TaskType.SSH]
 
     interactive: bool | None = None

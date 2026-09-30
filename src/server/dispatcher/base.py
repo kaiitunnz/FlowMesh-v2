@@ -37,6 +37,7 @@ from ..clients.redis import REDIS_CONN_ERRORS
 from ..content import ContentAccessBroker
 from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
+from ..task.credentials import credential_merge_key
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import DispatchEnd, TaskRecord, TaskStatus
 from ..task.results import ResultUnavailable
@@ -611,14 +612,24 @@ class Dispatcher:
                     ", ".join(merged_children),
                 )
 
-        # 6. Resolve stage references
+        # 6. Restore the task's vaulted credentials, then resolve stage references.
+        # The credentials go back in before rendering, so a credential that names an
+        # upstream stage renders like any other value.
+        credentialed = self._runtime.credentialed_task(record)
+        if credentialed is None:
+            self._runtime.release_merge(task_id)
+            self._fail_credential_not_retained(task_id)
+            return True
+        task, scrub = credentialed
         context = self._build_stage_context(record)
         try:
             rendered_task, upstream_results = self._resolve_stage_references(
                 task_id, task, context
             )
         except StageReferenceNotReady as exc:
-            self._logger.debug("Task %s waiting on stage artifacts: %s", task_id, exc)
+            self._logger.debug(
+                "Task %s waiting on stage artifacts: %s", task_id, scrub(str(exc))
+            )
             self.requeue_task(
                 task_id, reason="stage_reference_pending", count_retry=False
             )
@@ -627,7 +638,9 @@ class Dispatcher:
             # The store is unreachable, not the result lost: wait it out without
             # spending the task's attempts. A missing or corrupt result fails below.
             self._logger.warning(
-                "Task %s cannot reach a referenced stage result yet: %s", task_id, exc
+                "Task %s cannot reach a referenced stage result yet: %s",
+                task_id,
+                scrub(str(exc)),
             )
             self.requeue_task(
                 task_id, reason="stage_result_unavailable", count_retry=False
@@ -638,15 +651,16 @@ class Dispatcher:
             self.fail_task(
                 task_id,
                 "task_schema_validation_failed",
-                payload={"error": str(exc)},
+                payload={"error": scrub(str(exc))},
             )
             return True
         except Exception as exc:
+            error = scrub(str(exc))
             self._logger.error(
-                "Failed to resolve stage references for %s: %s", task_id, exc
+                "Failed to resolve stage references for %s: %s", task_id, error
             )
             self._runtime.release_merge(task_id)
-            self.fail_task(task_id, str(exc), payload={"error": str(exc)})
+            self.fail_task(task_id, error, payload={"error": error})
             return True
 
         # Re-validate resolved task spec
@@ -655,7 +669,7 @@ class Dispatcher:
         except ValueError as exc:
             self._runtime.release_merge(task_id)
             self.fail_task(
-                task_id, "spec_validation_failed", payload={"error": str(exc)}
+                task_id, "spec_validation_failed", payload={"error": scrub(str(exc))}
             )
             return True
 
@@ -666,14 +680,17 @@ class Dispatcher:
         try:
             self._validate_ssh_inputs(record, rendered_task.spec, context)
         except StageReferenceNotReady as exc:
-            self._logger.debug("Task %s waiting on SSH input stages: %s", task_id, exc)
+            self._logger.debug(
+                "Task %s waiting on SSH input stages: %s", task_id, scrub(str(exc))
+            )
             self.requeue_task(
                 task_id, reason="stage_reference_pending", count_retry=False
             )
             return False
         except ValueError as exc:
             self._runtime.release_merge(task_id)
-            self.fail_task(task_id, str(exc), payload={"error": str(exc)})
+            error = scrub(str(exc))
+            self.fail_task(task_id, error, payload={"error": error})
             return True
 
         rendered_children = self._render_merged_children(
@@ -701,9 +718,14 @@ class Dispatcher:
             merged_children=rendered_children,
             upstream_results=upstream_results,
             input_element=self._runtime.input_element(task_id),
+            credential_pointers=self._runtime.credential_pointers(
+                [task_id, *(child.task_id for child in rendered_children or ())]
+            ),
             agent_episode=agent_episode,
             service_episode=self._runtime.service_episode_dispatch(task_id),
-            declared_contract=self._runtime.declared_contract(task_id),
+            declared_contract=self._runtime.declared_contract(
+                task_id, rendered_task.spec
+            ),
             recorded_resolution=self._runtime.input_resolution_binding(task_id),
             input_preparation=preparing,
             recorded_input=self._runtime.recorded_input_reference(task_id),
@@ -860,20 +882,28 @@ class Dispatcher:
         A child that cannot run in this dispatch leaves the merge rather than failing
         it: one that is not ready yet returns to the queue still mergeable, one whose
         rendered merge key differs from the parent's returns to merge under its rendered
-        key, and one whose own input is at fault or whose condition is not met returns
-        to run alone and settle its own outcome.
+        key, and one whose own input is at fault, whose credential is no longer
+        retained, or whose condition is not met returns to run alone and settle its own
+        outcome.
         """
         rendered: list[MergedChildTaskStrict] = []
+        parent_key = credential_merge_key(
+            parent_spec, record.credential_refs or {}, scope=record.org_id
+        )
         for child_id in list(record.merged_children or []):
             child_record = self._runtime.merged_child_record(task_id, child_id)
-            if child_record is None:
+            credentialed = (
+                self._runtime.credentialed_task(child_record)
+                if child_record is not None
+                else None
+            )
+            if child_record is None or credentialed is None:
                 self._runtime.release_merged_child(task_id, child_id, None)
                 continue
+            child_task, scrub = credentialed
             try:
                 resolved, child_upstream = self._resolve_stage_references(
-                    child_id,
-                    child_record.task,
-                    self._build_stage_context(child_record),
+                    child_id, child_task, self._build_stage_context(child_record)
                 )
                 resolved.spec.validate_dispatchable()
                 if (condition := resolved.spec.condition) is not None and str(
@@ -882,8 +912,12 @@ class Dispatcher:
                     # The child's own dispatch settles its skip.
                     self._runtime.release_merged_child(task_id, child_id, None)
                     continue
-                key = resolved.spec.merge_key(scope=child_record.org_id)
-                if key is None or key != parent_spec.merge_key(scope=record.org_id):
+                key = credential_merge_key(
+                    resolved.spec,
+                    child_record.credential_refs or {},
+                    scope=child_record.org_id,
+                )
+                if key is None or key != parent_key:
                     self._logger.info(
                         "Merged child %s of %s renders a different merge key; it "
                         "leaves the merge",
@@ -907,7 +941,10 @@ class Dispatcher:
                 )
             except (StageReferenceNotReady, ResultUnavailable) as exc:
                 self._logger.debug(
-                    "Merged child %s of %s is not ready yet: %s", child_id, task_id, exc
+                    "Merged child %s of %s is not ready yet: %s",
+                    child_id,
+                    task_id,
+                    scrub(str(exc)),
                 )
                 self._runtime.release_merged_child(
                     task_id, child_id, child_record.merge_key
@@ -917,7 +954,7 @@ class Dispatcher:
                     "Merged child %s of %s cannot be rendered; it runs alone: %s",
                     child_id,
                     task_id,
-                    exc,
+                    scrub(str(exc)),
                 )
                 self._runtime.release_merged_child(task_id, child_id, None)
         return rendered or None
@@ -962,6 +999,17 @@ class Dispatcher:
                 payload.update(extra_payload)
             self._emit_task_event("TASK_REQUEUED", task_id, payload=payload)
         return end
+
+    def _fail_credential_not_retained(self, task_id: str) -> None:
+        self.fail_task(
+            task_id,
+            "credential_not_retained",
+            payload={
+                "reason": "credential_not_retained",
+                "error": "an inline credential this task carries is no longer "
+                "retained by its workflow",
+            },
+        )
 
     def fail_task(
         self,
@@ -1203,15 +1251,6 @@ class Dispatcher:
                     updates[key] = transformed
             return value.model_copy(update=updates) if updates else value
         return value
-
-    def _contains_placeholder(self, value: Any) -> bool:
-        if isinstance(value, str):
-            return bool(PLACEHOLDER_PATTERN.search(value))
-        if isinstance(value, dict):
-            return any(self._contains_placeholder(v) for v in value.values())
-        if isinstance(value, list):
-            return any(self._contains_placeholder(item) for item in value)
-        return False
 
     def _build_stage_context(self, record: TaskRecord) -> dict[str, TaskRecord]:
         """Collect upstream dependency records keyed by stage identity."""

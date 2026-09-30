@@ -1,10 +1,15 @@
 import json
+from pathlib import Path
 
 import yaml
-from pydantic import SecretStr
 
+from server.task.credentials import (
+    redact_source_text,
+    redact_stored_source,
+    take_inline_credentials,
+)
 from server.task.parser import parse_workflow
-from server.task.v2.credentials import pop_inline_model_secrets, redact_source_text
+from shared.tasks.specs import AgentSpecTemplate
 from shared.utils.redact import REDACTED
 
 _WF = """
@@ -27,16 +32,14 @@ spec:
 """
 
 
-def test_pop_inline_model_secrets_strips_and_returns_the_key():
+def test_an_agent_model_key_is_taken_with_the_other_credentials():
     parsed = parse_workflow(_WF, "native")
-    secrets = pop_inline_model_secrets(parsed)
-    assert len(secrets) == 1
-    secret = next(iter(secrets.values()))
-    assert isinstance(secret, SecretStr)
-    assert secret.get_secret_value() == "sk-secret"
-    # The key is stripped from the parsed spec in place.
+    taken = take_inline_credentials(parsed)
     agent = next(t for t in parsed.tasks if t.task.spec.taskType == "agent")
-    assert agent.task.spec.model_binding.api_key is None
+    spec = agent.task.spec
+    assert isinstance(spec, AgentSpecTemplate) and spec.model_binding is not None
+    assert spec.model_binding.api_key is None
+    assert taken.values[taken.model_keys[agent.task_id]] == "sk-secret"
 
 
 def test_redact_source_text_masks_the_inline_key():
@@ -81,7 +84,7 @@ metadata: {name: t}
 spec:
   taskType: echo
 """
-    assert pop_inline_model_secrets(parse_workflow(wf, "native")) == {}
+    assert take_inline_credentials(parse_workflow(wf, "native")).model_keys == {}
 
 
 _HEADER_WF = """
@@ -169,3 +172,54 @@ def test_an_n8n_header_array_is_masked():
     )
     redacted = redact_source_text(payload, "n8n")
     assert "sk-hdr" not in redacted and "sk-query" not in redacted
+
+
+_N8N_DAG = (
+    Path(__file__).resolve().parents[3]
+    / "examples"
+    / "templates"
+    / "n8n"
+    / "dag_inference.json"
+)
+
+
+def _n8n_with_runtime_fragment(json_output: str) -> str:
+    document = json.loads(_N8N_DAG.read_text())
+    for node in document["nodes"]:
+        if node["name"] == "Runtime Spec A":
+            node["parameters"]["jsonOutput"] = json_output
+    return json.dumps(document)
+
+
+def test_an_n8n_set_node_json_output_is_redacted():
+    payload = _n8n_with_runtime_fragment(
+        json.dumps({"tensor_parallel_size": 1, "hf_token": "hf-set-secret"})
+    )
+    parse_workflow(payload, "n8n")
+    redacted = redact_source_text(payload, "n8n")
+    assert "hf-set-secret" not in redacted
+    runtime = next(
+        node
+        for node in json.loads(redacted)["nodes"]
+        if node["name"] == "Runtime Spec A"
+    )
+    assert json.loads(runtime["parameters"]["jsonOutput"]) == {
+        "tensor_parallel_size": 1,
+        "hf_token": REDACTED,
+    }
+
+
+def test_an_n8n_json_output_that_is_not_json_is_masked_whole():
+    payload = _n8n_with_runtime_fragment("={{ 'hf-expr-secret' }}")
+    redacted = redact_source_text(payload, "n8n")
+    assert "hf-expr-secret" not in redacted
+    runtime = next(
+        node
+        for node in json.loads(redacted)["nodes"]
+        if node["name"] == "Runtime Spec A"
+    )
+    assert runtime["parameters"]["jsonOutput"] == REDACTED
+
+
+def test_a_source_stored_as_the_marker_stays_the_marker():
+    assert redact_stored_source(REDACTED) == REDACTED

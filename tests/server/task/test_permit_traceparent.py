@@ -14,10 +14,10 @@ from server.config import OrchestrationConfig
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationPermit
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
-    _NoopSecretVault,
     _register,
 )
 from tests.server.task.test_worker_originated_boundary import (
@@ -40,7 +40,7 @@ def _runtime(control: Any = None) -> Any:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("permit-traceparent-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
         control=control,
     )
 

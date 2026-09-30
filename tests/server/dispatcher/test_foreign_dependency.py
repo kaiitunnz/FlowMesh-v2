@@ -11,11 +11,12 @@ from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.dispatcher.test_result_availability import _worker
 from tests.server.result_store import make_result_reader, result_payload
-from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
+from tests.server.task.test_v2_orchestration import FakeRegistry
 
 _SECRET = "org-a-secret"
 
@@ -51,7 +52,7 @@ def _runtime(registry: FakeRegistry, reader: Any) -> TaskRuntime:
         OrchestrationConfig(),
         reader,
         logging.getLogger("foreign-dependency"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

@@ -1,8 +1,8 @@
 """A configured zero reaches the config it names.
 
-Each knob below has a meaning at zero — no cached secret, the minimum slot or buffer
-its floor allows, no retained warmth, an uncached route, no backoff, no result — so
-reading it must return the zero the deployment set rather than the built-in default.
+Each knob below has a meaning at zero — the minimum slot or buffer its floor allows,
+no retained warmth, an uncached route, no backoff, no result — so reading it must
+return the zero the deployment set rather than the built-in default.
 """
 
 from collections.abc import Callable
@@ -11,18 +11,11 @@ from typing import Any
 import pytest
 
 from server.config import (
-    ModelSecretVaultConfig,
     NetworkPlaneConfig,
     OrchestrationConfig,
     ResidentCapacityConfig,
     WebSearchConfig,
 )
-
-
-def test_model_secret_ttl_honors_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_MODEL_SECRET_TTL_SEC", "0")
-
-    assert ModelSecretVaultConfig.from_env().ttl_sec == 0
 
 
 def test_agent_input_budget_honors_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,12 +99,6 @@ def test_relay_buffer_bytes_settles_at_its_floor_for_zero(
 @pytest.mark.parametrize(
     ("read_config", "env_name", "attribute", "default"),
     [
-        (
-            ModelSecretVaultConfig.from_env,
-            "AGENT_MODEL_SECRET_TTL_SEC",
-            "ttl_sec",
-            86400,
-        ),
         (WebSearchConfig.from_env, "WEB_SEARCH_MAX_RESULTS", "max_results", 5),
         (
             NetworkPlaneConfig.from_env,

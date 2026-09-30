@@ -35,15 +35,15 @@
 3-char prefixes: `wfl-`, `tsk-`, `ssn-`, `scn-`, `cmd-`, `dsp-`, the v2
 orchestration-ledger `act-`, `scp-`, `wki-`, `att-`, `inv-`, `agr-`, `idm-`, the
 resident-capacity `scl-` (service claim), `rpl-` (replica incarnation), `lse-`
-(allocation lease), `hnd-` (claim-bound admission handoff), `msk-` (a vaulted
-model-secret ref), the network-plane `rog-` (route origin) and `rly-` (relay
+(allocation lease), `hnd-` (claim-bound admission handoff), `msk-` (a workflow's
+vaulted credential), the network-plane `rog-` (route origin) and `rly-` (relay
 session), the worker-originated `mop-` (one-use mediated-operation permit), the
 activation-private-state `aps-` (state reference), `sbm-` (sealed-generation manifest),
 and `psa-` (attachment), and the content-plane `chg-` (cache-to-cache hydration grant) and `csg-`
 (content-store access grant).
 Always use
 `new_*_id()`/`new_idempotency_key()`/
-`new_model_secret_ref()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()`
+`new_credential_ref()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()`
 or `secrets.token_hex` for IDs.
 
 ## Security rules (bandit-enforced)

@@ -293,7 +293,7 @@ class TelemetryStoreConfig:
     url: str | None = None
     database: str = "flowmesh"
     username: str = "default"
-    password: str = "flowmesh"
+    password: str = "<replace-with-strong-password>"
     timeout_sec: float = 10.0
 
     @classmethod
@@ -302,7 +302,9 @@ class TelemetryStoreConfig:
             url=(os.getenv("SERVER_METRICS_CLICKHOUSE_URL") or "").strip() or None,
             database=os.getenv("SERVER_METRICS_CLICKHOUSE_DATABASE", "flowmesh"),
             username=os.getenv("SERVER_METRICS_CLICKHOUSE_USERNAME", "default"),
-            password=os.getenv("SERVER_METRICS_CLICKHOUSE_PASSWORD", "flowmesh"),
+            password=os.getenv(
+                "SERVER_METRICS_CLICKHOUSE_PASSWORD", "<replace-with-strong-password>"
+            ),
             timeout_sec=parse_float_env("SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC", 10.0),
         )
 
@@ -420,19 +422,16 @@ class AgentBindingConfig:
 
 
 @dataclass
-class ModelSecretVaultConfig:
-    """The durable vault backstop TTL for user-supplied model credentials.
+class N8nConfig:
+    """How an n8n submission's encrypted credentials are decrypted."""
 
-    The TTL is sliding: a workflow that keeps resolving its credential keeps it, while
-    an abandoned, idle submission expires after this window. Purge on a workflow's
-    terminal transition is the primary reclaim; this backstop bounds the rest.
-    """
-
-    ttl_sec: int = 86400
+    credential_password: str = ""
 
     @classmethod
-    def from_env(cls) -> "ModelSecretVaultConfig":
-        return cls(ttl_sec=parse_int_env("AGENT_MODEL_SECRET_TTL_SEC", 86400))
+    def from_env(cls) -> "N8nConfig":
+        return cls(
+            credential_password=os.getenv("N8N_CREDENTIAL_AES_PASSWORD", "").strip()
+        )
 
 
 @dataclass
@@ -714,9 +713,6 @@ class OrchestrationConfig:
     agent_input_budget_bytes: int = 262_144
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
     agent_binding: AgentBindingConfig = field(default_factory=AgentBindingConfig)
-    model_secret_vault: ModelSecretVaultConfig = field(
-        default_factory=ModelSecretVaultConfig
-    )
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     resident: ResidentCapacityConfig = field(default_factory=ResidentCapacityConfig)
     network: NetworkPlaneConfig = field(default_factory=NetworkPlaneConfig)
@@ -747,7 +743,6 @@ class OrchestrationConfig:
             agent_input_budget_bytes=parse_int_env("AGENT_INPUT_BUDGET_BYTES", 262_144),
             gateway=AgentModelGatewayConfig.from_env(),
             agent_binding=AgentBindingConfig.from_env(),
-            model_secret_vault=ModelSecretVaultConfig.from_env(),
             web_search=WebSearchConfig.from_env(),
             resident=resident,
             network=network,
@@ -773,6 +768,7 @@ class ServerConfig:
     content_store: ContentStoreConfig = field(default_factory=ContentStoreConfig)
     object_store: ObjectStoreConfig = field(default_factory=ObjectStoreConfig)
     telemetry_store: TelemetryStoreConfig = field(default_factory=TelemetryStoreConfig)
+    n8n: N8nConfig = field(default_factory=N8nConfig)
     results_dir: Path = Path("./results")
     plugins: list[str] = field(default_factory=list)
 
@@ -805,6 +801,7 @@ class ServerConfig:
             content_store=ContentStoreConfig.from_env(),
             object_store=ObjectStoreConfig.from_env(results_dir),
             telemetry_store=TelemetryStoreConfig.from_env(),
+            n8n=N8nConfig.from_env(),
             results_dir=results_dir,
             plugins=plugins,
         )

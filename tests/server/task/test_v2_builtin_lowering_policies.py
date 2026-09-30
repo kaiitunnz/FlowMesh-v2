@@ -22,6 +22,7 @@ from server.task.v2.representations.plan import (
     ResidencyWarmth,
 )
 from server.task.v2.representations.template import LogicalWorkflowTemplate
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
 
 # Three fusible pure leaves feeding a resident model boundary. The middle one recovers
@@ -365,11 +366,6 @@ class _CapturingRegistry:
         return None
 
 
-class _NoopSecretVault:
-    async def put(self, *args, **kwargs) -> None:
-        return None
-
-
 def _runtime(**knobs: str) -> TaskRuntime:
     config = PolicySurfaceConfig(**knobs)
     worker_stub = SimpleNamespace(
@@ -382,7 +378,7 @@ def _runtime(**knobs: str) -> TaskRuntime:
         OrchestrationConfig(policy=config),
         make_result_reader(),
         logging.getLogger("builtin-lowering-policies-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
         surface=build_policy_surface(config),
     )
 

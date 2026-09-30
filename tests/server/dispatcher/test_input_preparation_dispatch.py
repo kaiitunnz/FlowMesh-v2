@@ -16,6 +16,7 @@ from shared.inference import (
 )
 from shared.tasks.specs import InferenceEmbodimentKind
 from shared.utils.time import now_iso
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
@@ -23,7 +24,6 @@ from tests.server.dispatcher.helpers import (
 )
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_embodiment_fence import (
-    _NoopSecretVault,
     _upstream_task,
     _WorkerRegistryStub,
 )
@@ -37,7 +37,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("preparation-dispatch-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

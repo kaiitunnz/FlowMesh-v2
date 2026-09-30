@@ -1,5 +1,7 @@
 """Stack env schema."""
 
+import secrets
+
 from flowmesh.models.nodes import NodeRole
 from flowmesh_stack.env import parse_bool
 from flowmesh_stack.env_schema import (
@@ -10,6 +12,24 @@ from flowmesh_stack.env_schema import (
     require_all_or_none,
     require_if_true,
 )
+
+
+def credential_overrides(role: NodeRole) -> dict[str, str]:
+    """Fresh credentials for the services a root node runs itself.
+
+    A worker node reaches the root's Redis with the root's password, so it gets none.
+    The server reads the ClickHouse the collector writes to, so both carry one password.
+    """
+    if role != NodeRole.ROOT:
+        return {}
+    clickhouse_password = secrets.token_urlsafe(32)
+    return {
+        "REDIS_PASSWORD": secrets.token_urlsafe(32),
+        "CONTENT_STORE_ACCESS_KEY": secrets.token_hex(12),
+        "CONTENT_STORE_SECRET_KEY": secrets.token_urlsafe(32),
+        "TELEMETRY_CLICKHOUSE_PASSWORD": clickhouse_password,
+        "SERVER_METRICS_CLICKHOUSE_PASSWORD": clickhouse_password,
+    }
 
 
 def _require_network_plane_for_resident(
@@ -470,13 +490,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=0,
                     min_inclusive=False,
                 ),
-                EnvVar(
-                    "AGENT_MODEL_SECRET_TTL_SEC",
-                    "86400",
-                    description="Expiry for a workflow's vaulted model credential.",
-                    var_type=EnvVarType.INT,
-                    min_value=1,
-                ),
             ],
         ),
         EnvSection(
@@ -665,11 +678,21 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
+                    "CONTENT_STORE_BIND_HOST",
+                    "0.0.0.0",
+                    description="Co-located content store bind address.",
+                ),
+                EnvVar(
                     "CONTENT_STORE_CONSOLE_PORT",
                     "9801",
                     description="Co-located content store console port.",
                     var_type=EnvVarType.INT,
                     min_value=1,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_CONSOLE_BIND_HOST",
+                    "127.0.0.1",
+                    description="Co-located content store console bind address.",
                 ),
                 EnvVar(
                     "CONTENT_STORE_BUCKET",
@@ -688,7 +711,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_STORE_ACCESS_KEY",
-                    "flowmesh",
+                    "<replace-with-access-key>",
                     description=(
                         "Co-located store key the control plane cuts access"
                         " from; set for external storage."
@@ -696,7 +719,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_STORE_SECRET_KEY",
-                    "flowmeshcontent",
+                    "<replace-with-strong-password>",
                     description=(
                         "Co-located store secret the control plane cuts access"
                         " from; set for external storage."
@@ -928,7 +951,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             vars=[
                 EnvVar("REDIS_ACL_ENABLED", "1", var_type=EnvVarType.BOOL),
                 EnvVar("REDIS_USERNAME", "admin"),
-                EnvVar("REDIS_PASSWORD", "very-strong-password"),
+                EnvVar("REDIS_PASSWORD", "<replace-with-strong-password>"),
             ],
         ),
         EnvSection(
@@ -1244,7 +1267,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "SERVER_METRICS_CLICKHOUSE_PASSWORD",
-                    "flowmesh",
+                    "<replace-with-strong-password>",
                     description="ClickHouse password for the store read port.",
                 ),
                 EnvVar(
@@ -1271,7 +1294,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "TELEMETRY_CLICKHOUSE_PASSWORD",
-                    "flowmesh",
+                    "<replace-with-strong-password>",
                     description="ClickHouse password for the telemetry profile.",
                 ),
                 EnvVar(
@@ -1459,8 +1482,6 @@ STACK_ENV_SCHEMA = EnvSchema(
         EnvSection(
             title="API Keys injected into workers (optional)",
             vars=[
-                EnvVar("OPENAI_API_KEY"),
-                EnvVar("GOOGLE_API_KEY"),
                 EnvVar("VAST_API_KEY"),
                 EnvVar("HF_TOKEN"),
                 EnvVar("NEBULA_API_TOKEN"),

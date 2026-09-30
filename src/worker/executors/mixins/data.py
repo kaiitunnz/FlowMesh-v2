@@ -18,8 +18,10 @@ from PIL import Image
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.utils.json import safe_get
+from shared.utils.redact import redact_url
 
 from ...connectors import get_connector_from_spec
+from ...utils.redaction import redact_urls
 from ..base_executor import ExecutionError
 from ..utils.artifacts import (
     is_flowmesh_origin_url,
@@ -106,8 +108,14 @@ class DataMixin(GovernanceMixin):
     @staticmethod
     def _load_image_from_external_url(source: str) -> Image.Image:
         """Fetch an external image URL with a bounded, unauthenticated request."""
-        response = requests.get(source, timeout=_EXTERNAL_IMAGE_FETCH_TIMEOUT_SEC)
-        response.raise_for_status()
+        try:
+            response = requests.get(source, timeout=_EXTERNAL_IMAGE_FETCH_TIMEOUT_SEC)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise ExecutionError(
+                redact_urls(f"Failed to fetch image from {source}: {exc}", source),
+                retryable=True,
+            ) from exc
         return Image.open(io.BytesIO(response.content)).convert("RGB")
 
     def _normalize_s3_cfg(self, s3_cfg: Any) -> tuple[str, str | None, str]:
@@ -690,7 +698,10 @@ class DataMixin(GovernanceMixin):
                     "({path: ...}) or a URL/path string"
                 )
 
-            logger.info("Resolving image embedding from artifact: %s", artifact_source)
+            logger.info(
+                "Resolving image embedding from artifact: %s",
+                redact_url(artifact_source),
+            )
             image_embedding = resolve_artifact(artifact_source)
             source_node = image_embedding_raw.get("node")
             if not source_node and isinstance(expr, str) and expr:

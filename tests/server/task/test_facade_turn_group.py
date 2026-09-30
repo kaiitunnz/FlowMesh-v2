@@ -33,6 +33,7 @@ from server.orchestration.tool_dispatch import (
 )
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessResult, HarnessResultKind
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_agent_harness import (
@@ -47,7 +48,6 @@ from tests.server.task.test_v2_agent_harness import (
 )
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
-    _NoopSecretVault,
     _register,
     _WorkerRegistryStub,
 )
@@ -340,7 +340,7 @@ def _runtime(max_parallel: int) -> TaskRuntime:
         OrchestrationConfig(web_search=WebSearchConfig(max_parallel=max_parallel)),
         make_result_reader(),
         logging.getLogger("group-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 
@@ -414,7 +414,7 @@ def test_a_crash_after_route_does_not_resurrect_a_stale_group() -> None:
             cfg,
             results,
             logging.getLogger("med2"),
-            secret_vault=cast(Any, _NoopSecretVault()),
+            credential_vault=InMemoryCredentialVault(),
         )
         runtime.set_tool_broker(lambda env: None)
         workflow_id, ids = await _register(runtime, _SEARCH_WF)
@@ -448,7 +448,7 @@ def test_a_crash_after_route_does_not_resurrect_a_stale_group() -> None:
             cfg,
             results,
             logging.getLogger("med2-restored"),
-            secret_vault=cast(Any, _NoopSecretVault()),
+            credential_vault=InMemoryCredentialVault(),
         )
         await restored.rehydrate()
         # The stale group did not survive: no capture remains to hijack a completion.

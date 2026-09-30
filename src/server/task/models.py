@@ -263,6 +263,12 @@ class TaskRecord(BaseModel):
         description="Why a conditional task settled without running, when it did.",
         exclude=True,
     )
+    credential_refs: dict[str, str] | None = Field(
+        default=None,
+        description="The vault ref of each inline credential masked in the spec, by "
+        "its pointer; None on a record stored before its credentials were vaulted.",
+        exclude=True,
+    )
     pending_facade_group: FacadeTurnGroup | None = Field(
         default=None,
         description="A turn-scoped facade group the gateway captured for this agent "

@@ -9,6 +9,7 @@ import psycopg
 from psycopg.rows import tuple_row
 from psycopg.sql import SQL, Identifier, Literal
 
+from ..utils.redaction import redact_urls
 from .base_connector import BaseConnector, ConnectorError, ConnectorResult
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,11 @@ class PostgreSQLConnector(BaseConnector):
             )
             logger.info("Connected to PostgreSQL: %s", self._connection.info.dbname)
         except Exception as e:
-            raise ConnectorError(f"Failed to connect to PostgreSQL: {e}") from e
+            raise ConnectorError(
+                redact_urls(
+                    f"Failed to connect to PostgreSQL: {e}", self._connection_string
+                )
+            ) from e
 
     def disconnect(self) -> None:
         """Close PostgreSQL connection."""

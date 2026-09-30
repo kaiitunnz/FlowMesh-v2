@@ -9,9 +9,9 @@ from server.config import OrchestrationConfig
 from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
 from shared.private_state import OwnerFence, PrivateStateUnavailableReason
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatcher.helpers import CapturingDispatcher, WorkflowRegistryStub
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 _OWNER = OwnerFence(worker_id="wkr-owner", incarnation=7)
 
@@ -42,7 +42,7 @@ def _dispatcher(
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("private-state-affinity-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     _, results = asyncio.run(
         runtime.register("owner", "org", _ECHO_WORKFLOW, format="native")

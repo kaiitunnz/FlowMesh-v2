@@ -38,6 +38,7 @@ from server.task.v2.representations.operators import (
     EffectReplayContract,
 )
 from shared.content import ContentReference
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
 
@@ -193,19 +194,6 @@ class _WorkerRegistryStub:
         return []
 
 
-class _NoopSecretVault:
-    """A model-secret vault for tests that never exercise the credential path."""
-
-    async def store(self, workflow_id: str, ref: str, secret: Any) -> None:
-        return None
-
-    def resolve(self, workflow_id: str, ref: str | None) -> None:
-        return None
-
-    def purge(self, workflow_id: str) -> None:
-        return None
-
-
 def _runtime(registry: FakeRegistry) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
@@ -213,7 +201,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 
@@ -335,7 +323,7 @@ def _live_runtime(
         OrchestrationConfig(),
         reader or make_result_reader(),
         logging.getLogger(name),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
         redrive=lambda fire, logger: StoreRedriveScheduler(
             fire, logger, run_thread=False
         ),
@@ -591,7 +579,7 @@ async def test_scheduler_rejects_an_infeasible_episode_alternative() -> None:
         logging.getLogger("feas"),
         feasibility_check=lambda spec: spec.boundary
         is not EpisodeBoundaryKind.SERVICE_ISSUE,
-        secret_vault=cast(Any, _NoopSecretVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     _, ids = await _register(runtime, _INFEASIBLE)
     # A sampled model call lowers to a service-issue episode the check rejects; the

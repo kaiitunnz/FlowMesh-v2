@@ -4,9 +4,12 @@ import logging
 import socket
 import threading
 import time
-from collections.abc import Iterable
+import traceback
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel
 
 from shared.content import (
     ContentReference,
@@ -26,6 +29,7 @@ from shared.inference import (
 from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
+from shared.tasks.credentials import dispatched_credentials
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceBackend,
@@ -50,6 +54,7 @@ from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
+from shared.utils.redact import credential_scrubber
 from shared.utils.time import now_iso
 
 from .content.inputs import TaskInputHydrator, input_unreadable, read_input
@@ -871,6 +876,7 @@ class Runner:
                 task_id = msg.task_id
                 spec = msg.spec
                 task_type = spec.taskType
+                scrub = _task_scrubber(msg)
 
                 parent_task_id = msg.parent_task_id
                 shard_index = msg.shard_index
@@ -999,7 +1005,7 @@ class Runner:
                             task_log_emitter,
                             log_handler_attached,
                             prev_root_log_level,
-                        ) = self._create_task_logger(task_id, msg, out_dir)
+                        ) = self._create_task_logger(task_id, msg, out_dir, scrub)
 
                         # Notify task started just before execution
                         start_iso = now_iso()
@@ -1042,9 +1048,10 @@ class Runner:
                         # boundary and re-dispatches; the attempt still ends here, which
                         # is what releases the lane. A captured facade group rides the
                         # same metadata so control routes it with the completion.
-                        metadata["agent_episode"] = out.harness_result.model_dump(
-                            mode="json"
-                        )
+                        step = out.harness_result
+                        if step.error is not None:
+                            step = step.model_copy(update={"error": scrub(step.error)})
+                        metadata["agent_episode"] = step.model_dump(mode="json")
                         if out.facade_group is not None:
                             metadata["agent_episode_facade_group"] = (
                                 out.facade_group.model_dump(mode="json")
@@ -1074,7 +1081,7 @@ class Runner:
                         shard_total=shard_total,
                     )
                     self.lifecycle.set_cancelled(task_id, metadata=metadata)
-                    self.logger.info("Task %s cancelled: %s", task_id, e)
+                    self.logger.info("Task %s cancelled: %s", task_id, scrub(str(e)))
                 except Exception as e:
                     if not notified_task_started:
                         self.lifecycle.notify_task_started(
@@ -1095,7 +1102,7 @@ class Runner:
                     controlled = e if isinstance(e, ExecutionError) else None
                     self.lifecycle.set_failed(
                         task_id,
-                        str(e),
+                        scrub(str(e)),
                         metadata=metadata,
                         retryable=controlled is None or controlled.retryable,
                         failure_kind=controlled.failure_kind if controlled else None,
@@ -1104,9 +1111,13 @@ class Runner:
                         ),
                     )
                     if isinstance(e, ExecutionError):
-                        self.logger.error("Task %s failed: %s", task_id, e)
+                        self.logger.error("Task %s failed: %s", task_id, scrub(str(e)))
                     else:
-                        self.logger.exception("Task %s failed", task_id)
+                        self.logger.error(
+                            "Task %s failed\n%s",
+                            task_id,
+                            scrub(traceback.format_exc()),
+                        )
                 finally:
                     if unreported_step is not None:
                         discard_step_captures(self.lifecycle, task_id, unreported_step)
@@ -1137,7 +1148,11 @@ class Runner:
             self._stop_idle_checker(min(2.0, self._stop_time_left()))
 
     def _create_task_logger(
-        self, task_id: str, msg: WorkerTaskMessage, out_dir: Path
+        self,
+        task_id: str,
+        msg: WorkerTaskMessage,
+        out_dir: Path,
+        scrub: Callable[[str], str],
     ) -> tuple[TaskLogEmitter | None, bool, int | None]:
         task_log_emitter: TaskLogEmitter | None = None
         log_handler_attached = False
@@ -1187,6 +1202,7 @@ class Runner:
                     owner_id=msg.owner_id,
                     task_refs=task_refs,
                     log_paths=log_paths,
+                    scrub=scrub,
                 )
                 if task_log_emitter is not None:
                     root_logger = logging.getLogger()
@@ -1237,3 +1253,15 @@ class Runner:
         if shard_total is not None:
             metadata["shard_total"] = shard_total
         return metadata
+
+
+def _task_scrubber(msg: WorkerTaskMessage) -> Callable[[str], str]:
+    """Masks the credentials the dispatch restored into its task and merged children."""
+    specs: dict[str, BaseModel] = {msg.task_id: msg.spec}
+    specs.update((child.task_id, child.spec) for child in msg.merged_children or ())
+    return credential_scrubber(
+        value
+        for task_id, pointers in msg.credential_pointers.items()
+        if (spec := specs.get(task_id)) is not None
+        for value in dispatched_credentials(spec, pointers)
+    )

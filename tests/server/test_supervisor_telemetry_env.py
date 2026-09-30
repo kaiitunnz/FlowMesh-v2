@@ -9,6 +9,7 @@ import pytest
 
 from server import env
 from server.hooks import PrincipalContext
+from server.supervisor.adapters.base import WorkerTokenType
 from server.supervisor.adapters.docker import (
     DockerWorkerAdapter,
     DockerWorkerConfig,
@@ -28,7 +29,7 @@ _OWNER = PrincipalContext(
 def _docker_worker() -> DockerWorkerAdapter:
     worker = object.__new__(DockerWorkerAdapter)
     worker.config = DockerWorkerConfig(worker_type=WorkerType.CPU)
-    worker.token = "worker-token"  # type: ignore[assignment]
+    worker.token = WorkerTokenType("worker-token")
     worker.owner = _OWNER
     worker.container_name = "worker-cpu-0"
     return worker
@@ -37,7 +38,7 @@ def _docker_worker() -> DockerWorkerAdapter:
 def _vastai_worker() -> VastAIWorkerAdapter:
     worker = object.__new__(VastAIWorkerAdapter)
     worker.config = VastAIWorkerConfig()
-    worker.token = "worker-token"  # type: ignore[assignment]
+    worker.token = WorkerTokenType("worker-token")
     worker.owner = _OWNER
     return worker
 
