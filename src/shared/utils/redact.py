@@ -126,6 +126,30 @@ def is_credential_url(value: str) -> bool:
     return _userinfo_is_credential(parts) or _has_credential_parameter(parts)
 
 
+def _url_credentials(url: str) -> list[str]:
+    """The credential parts of a URL: its userinfo and each credential parameter's
+    value, raw and decoded."""
+    parts = _split_url(url)
+    if parts is None:
+        return []
+    found: list[str] = []
+    if _userinfo_is_credential(parts):
+        userinfo = parts.netloc.rpartition("@")[0]
+        found.extend((userinfo, *userinfo.split(":", 1)))
+    pairs = [
+        pair.partition("=")
+        for text in (parts.query, parts.fragment)
+        for pair in text.split("&")
+    ]
+    pairs.extend(
+        (m.group(1), "=", m.group(2)) for m in _PATH_PARAMETER.finditer(parts.path)
+    )
+    for name, equals, value in pairs:
+        if equals and value and _is_url_credential_name(name):
+            found.extend((value, unquote_plus(value)))
+    return found
+
+
 def _redact_parameter(pair: str) -> str:
     name, equals, _ = pair.partition("=")
     return f"{name}={REDACTED}" if equals and _is_url_credential_name(name) else pair
@@ -234,7 +258,8 @@ def credential_scrubber(values: Iterable[Any]) -> Callable[[str], str]:
     """A function masking every occurrence of ``values`` in a text.
 
     Each string is matched as written and in its JSON- and ``repr``-escaped forms, so a
-    multi-line key quoted in an error is masked too.
+    multi-line key quoted in an error is masked too; a URL's credential parts are
+    matched on their own, so a text quoting only its path and query is masked too.
     """
     needles: set[str] = set()
     for value in values:
@@ -244,8 +269,9 @@ def credential_scrubber(values: Iterable[Any]) -> Callable[[str], str]:
             else _MIN_SCRUBBED_MEMBER_LENGTH
         )
         for text in _strings(value):
-            if len(text) >= minimum:
-                needles.update((text, json.dumps(text)[1:-1], repr(text)[1:-1]))
+            for part in (text, *_url_credentials(text)):
+                if len(part) >= minimum:
+                    needles.update((part, json.dumps(part)[1:-1], repr(part)[1:-1]))
         if isinstance(value, (dict, list)):
             needles.add(json.dumps(value))
     ordered = sorted(needles, key=len, reverse=True)

@@ -212,3 +212,13 @@ def test_scrubber_masks_escaped_forms_and_skips_short_words() -> None:
     assert "abcdefgh" not in scrub(f'{{"key": {json.dumps(pem)}}}')
     assert "tok-123456" not in scrub("auth failed for tok-123456")
     assert scrub("type none, flag true") == "type none, flag true"
+
+
+def test_scrubber_masks_the_credential_parts_of_a_vaulted_url() -> None:
+    url = "https://u:pass-SECRET@api.example/v1?limit=3&api_key=key-SECRET"
+    scrub = credential_scrubber([url])
+
+    assert scrub("403 for /v1?limit=3&api_key=key-SECRET") == (
+        "403 for /v1?limit=3&api_key=[REDACTED]"
+    )
+    assert "pass-SECRET" not in scrub("login u:pass-SECRET refused")
