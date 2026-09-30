@@ -17,7 +17,7 @@ from shared.tasks.worker_message import (
 )
 from tests.worker.factories import make_worker_config, make_worker_hardware
 from worker.config import WorkerConfig
-from worker.executors.ssh_executor import SSHConfig
+from worker.executors.ssh_session import SSHConfig
 
 
 def _spec(resources: dict[str, object] | None = None) -> SSHSpecStrict:
@@ -74,7 +74,7 @@ class TestSSHConfigResolveLimits:
     def test_spec_above_cap_clamps_and_warns(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        caplog.set_level(logging.WARNING, logger="worker.executors.ssh_executor")
+        caplog.set_level(logging.WARNING, logger="worker.executors.ssh_session.config")
         cfg = SSHConfig.from_spec(
             _spec({"hardware": {"cpu": 8, "memory": "16Gi"}}),
             make_worker_config(

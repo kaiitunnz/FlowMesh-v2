@@ -15,10 +15,19 @@ from docker.models.containers import Container
 
 from shared.schemas.result import SSHResult
 from shared.tasks.worker_message import WorkerTaskMessage
-from tests.worker.factories import make_live_worker_config
+from tests.worker.factories import make_live_worker_config, make_ssh_executor
 from worker.executors import ssh_executor as ssh_module
 from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.ssh_executor import SSHExecutor
+from worker.executors.ssh_session import (
+    DockerSessionBackend,
+    ResolvedSSHInput,
+    SessionInterrupted,
+    SessionRequest,
+)
+from worker.executors.ssh_session import inputs as inputs_module
+from worker.executors.ssh_session.backends import docker as docker_module
+from worker.executors.ssh_session.backends.docker import DockerSession
 
 _TASK_ID = "tsk-ssh-1"
 
@@ -49,9 +58,15 @@ def _task(interactive: bool) -> WorkerTaskMessage:
 @pytest.fixture
 def executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SSHExecutor:
     monkeypatch.setenv("SSH_POLL_INTERVAL_SEC", "0.01")
-    ex = SSHExecutor(make_live_worker_config(tmp_path), lifecycle=None)
-    ex._docker = MagicMock()
+    ex = make_ssh_executor(make_live_worker_config(tmp_path), lifecycle=None)
+    _backend(ex)._docker = MagicMock()
     return ex
+
+
+def _backend(ex: SSHExecutor) -> DockerSessionBackend:
+    backend = ex.backend
+    assert isinstance(backend, DockerSessionBackend)
+    return backend
 
 
 def _container(on_reload: Callable[[MagicMock], None]) -> MagicMock:
@@ -78,21 +93,24 @@ def _run(
     plan = MagicMock()
     plan.copy_output_path = None
     start = start or MagicMock(return_value=(container, None))
+    backend = _backend(ex)
     with (
-        patch.object(ex, "prepare"),
-        patch.object(ex, "_resolve_noninteractive_command", return_value=["sleep"]),
-        patch.object(ex, "_resolve_inputs", return_value=[]),
+        patch.object(backend, "prepare"),
         patch.object(
-            ex,
+            backend, "_resolve_noninteractive_command", return_value=["sleep"]
+        ),
+        patch.object(ssh_module, "resolve_inputs", return_value=[]),
+        patch.object(
+            backend,
             "_build_mount_plan",
             side_effect=build_mount_plan or (lambda *_: plan),
         ),
-        patch.object(ex, "_build_environment", return_value={}),
-        patch.object(ex, "_build_run_kwargs", return_value={}),
-        patch.object(ex, "_start_container", start),
-        patch.object(ex, "_stream_container_logs", side_effect=stream_logs),
-        patch.object(ex, "_save_container_logs"),
-        patch.object(ex, "_cleanup_mount_plan"),
+        patch.object(backend, "_build_environment", return_value={}),
+        patch.object(backend, "_build_run_kwargs", return_value={}),
+        patch.object(backend, "_start_container", start),
+        patch.object(docker_module, "_stream_container_logs", side_effect=stream_logs),
+        patch.object(DockerSession, "save_logs"),
+        patch.object(docker_module, "_cleanup_mount_plan"),
         patch.object(ex, "emit_update"),
         patch.object(ssh_module, "maybe_upload_artifacts"),
     ):
@@ -151,14 +169,9 @@ def test_a_signal_in_the_last_readiness_poll_ends_the_session_as_requested(
 
     container = _container(lambda _c: None)  # running, never ready
     container.stop.side_effect = lambda **_: setattr(container, "status", "exited")
-    wait_for_port = SSHExecutor._wait_for_port
     with (
-        patch.object(
-            executor,
-            "_wait_for_port",
-            lambda c: wait_for_port(executor, c, timeout_sec=0.05),
-        ),
-        patch.object(ssh_module.time, "sleep", side_effect=sleep),
+        patch.object(ssh_module, "_SESSION_READY_TIMEOUT_SEC", 0.05),
+        patch.object(docker_module.time, "sleep", side_effect=sleep),
     ):
         if kind == "cancel":
             with pytest.raises(TaskCancelledError):
@@ -272,9 +285,11 @@ def test_a_signal_while_staging_ends_the_staging(
 
     with (
         executor._signals.running(_TASK_ID),
-        pytest.raises(ssh_module._Interrupted),
+        pytest.raises(SessionInterrupted),
     ):
-        executor._run_staging_container(client, {"image": "busybox"}, {})
+        docker_module._run_staging_container(
+            client, {"image": "busybox"}, {}, executor._signals
+        )
 
     staging.remove.assert_called_once_with(force=True)
 
@@ -287,7 +302,7 @@ def test_a_stop_while_staging_succeeds_and_a_cancel_is_cancelled(
     def interrupted(kind: str) -> Callable[..., Any]:
         def build(*_: Any) -> Any:
             getattr(executor, kind)(_TASK_ID)
-            raise ssh_module._Interrupted
+            raise SessionInterrupted
 
         return build
 
@@ -320,7 +335,9 @@ def test_a_staging_wait_that_loses_docker_fails_promptly(
     started = time.monotonic()
 
     with executor._signals.running(_TASK_ID), pytest.raises(requests.ConnectionError):
-        executor._run_staging_container(client, {"image": "busybox"}, {})
+        docker_module._run_staging_container(
+            client, {"image": "busybox"}, {}, executor._signals
+        )
 
     assert time.monotonic() - started < 1.0
     assert staging.wait.call_count == 1
@@ -346,13 +363,15 @@ def _endless_pull(
 def test_a_signal_during_a_missing_image_pull_ends_it(
     executor: SSHExecutor, tmp_path: Path, kind: str
 ) -> None:
-    client = cast(Any, executor._docker)
+    client = cast(Any, _backend(executor)._docker)
     client.api.pull.side_effect = _endless_pull(
         lambda line: getattr(executor, kind)(_TASK_ID) if line == 2 else None
     )
     # The session container's image is missing, so its start pulls it.
     start = MagicMock(
-        side_effect=lambda docker, *_: executor._pull_image(docker, "alpine:3")
+        side_effect=lambda docker, *_: docker_module._pull_image(
+            docker, "alpine:3", executor._signals
+        )
     )
 
     try:
@@ -379,9 +398,9 @@ def test_a_pull_is_abandoned_once_a_signal_lands(
 
     with (
         executor._signals.running(_TASK_ID),
-        pytest.raises(ssh_module._Interrupted),
+        pytest.raises(SessionInterrupted),
     ):
-        executor._pull_image(client, "alpine:3")
+        docker_module._pull_image(client, "alpine:3", executor._signals)
 
     assert lines == [0, 1, 2]
 
@@ -398,10 +417,10 @@ def test_a_signal_during_a_session_image_pull_starts_nothing(
 
     with (
         executor._signals.running(_TASK_ID),
-        pytest.raises(ssh_module._Interrupted),
+        pytest.raises(SessionInterrupted),
     ):
-        executor._start_container(
-            client, {"image": "cuda-ssh:latest"}, interactive=interactive
+        _backend(executor)._start_container(
+            client, {"image": "cuda-ssh:latest"}, interactive, executor._signals
         )
 
     client.containers.run.assert_not_called()
@@ -413,7 +432,7 @@ def test_a_pull_error_fails_the_task(executor: SSHExecutor) -> None:
     client.api.pull.return_value = (line for line in [{"error": "manifest unknown"}])
 
     with executor._signals.running(_TASK_ID), pytest.raises(ExecutionError):
-        executor._pull_image(client, "alpine:404")
+        docker_module._pull_image(client, "alpine:404", executor._signals)
 
 
 def test_a_failed_staging_pull_is_retryable(executor: SSHExecutor) -> None:
@@ -425,7 +444,9 @@ def test_a_failed_staging_pull_is_retryable(executor: SSHExecutor) -> None:
         executor._signals.running(_TASK_ID),
         pytest.raises(ExecutionError) as failed,
     ):
-        executor._run_staging_container(client, {"image": "busybox"}, {})
+        docker_module._run_staging_container(
+            client, {"image": "busybox"}, {}, executor._signals
+        )
 
     assert failed.value.retryable is True
     client.containers.create.assert_not_called()
@@ -450,10 +471,12 @@ def test_a_bundle_download_is_abandoned_once_a_signal_lands(
 
     with (
         executor._signals.running(_TASK_ID),
-        patch.object(ssh_module.requests, "get", return_value=response),
-        pytest.raises(ssh_module._Interrupted),
+        patch.object(inputs_module.requests, "get", return_value=response),
+        pytest.raises(SessionInterrupted),
     ):
-        executor._download_result_bundle("tsk-up", tmp_path / "bundle", True)
+        inputs_module.download_result_bundle(
+            "tsk-up", tmp_path / "bundle", True, executor._signals
+        )
 
     assert chunks == [0, 1, 2]
 
@@ -461,18 +484,20 @@ def test_a_bundle_download_is_abandoned_once_a_signal_lands(
 def test_a_signal_during_local_staging_leaves_no_staging_dir(
     executor: SSHExecutor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(ssh_module.tempfile, "tempdir", str(tmp_path))
-    upstream = ssh_module.ResolvedSSHInput(
+    monkeypatch.setattr(inputs_module.tempfile, "tempdir", str(tmp_path))
+    upstream = ResolvedSSHInput(
         stage="up", task_id="tsk-up", source_path=tmp_path / "absent", mount_path="/in"
     )
 
     with (
         patch.object(
-            executor, "_download_result_bundle", side_effect=ssh_module._Interrupted
+            inputs_module, "download_result_bundle", side_effect=SessionInterrupted
         ),
-        pytest.raises(ssh_module._Interrupted),
+        pytest.raises(SessionInterrupted),
     ):
-        executor._stage_inputs_locally([upstream], "ssn-12345678")
+        inputs_module.stage_inputs_locally(
+            [upstream], "ssn-12345678", executor._signals
+        )
 
     assert list(tmp_path.glob("flowmesh-ssh-inputs-*")) == []
 
@@ -480,18 +505,24 @@ def test_a_signal_during_local_staging_leaves_no_staging_dir(
 def test_a_duplicate_mount_path_fails_before_staging_anything(
     executor: SSHExecutor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(ssh_module.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(inputs_module.tempfile, "tempdir", str(tmp_path))
     upstreams = [
-        ssh_module.ResolvedSSHInput(
+        ResolvedSSHInput(
             stage=stage, task_id=f"tsk-{stage}", source_path=tmp_path, mount_path="/in"
         )
         for stage in ("a", "b")
     ]
-    cfg = MagicMock(output=None)
+    request = SessionRequest(
+        task_id=_TASK_ID,
+        session_id="ssn-12345678",
+        worker_name="worker-1",
+        cfg=MagicMock(output=None),
+        out_dir=tmp_path / "out",
+        resolved_inputs=upstreams,
+        signals=executor._signals,
+    )
 
     with pytest.raises(ExecutionError, match="Duplicate SSH mountPath"):
-        executor._build_mount_plan(
-            MagicMock(), tmp_path / "out", upstreams, cfg, "ssn-12345678"
-        )
+        _backend(executor)._build_mount_plan(MagicMock(), request)
 
     assert list(tmp_path.glob("flowmesh-ssh-inputs-*")) == []

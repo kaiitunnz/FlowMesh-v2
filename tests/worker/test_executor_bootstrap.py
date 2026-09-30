@@ -14,9 +14,9 @@ import pytest
 
 from shared.schemas.result import BaseExecutorResult
 from tests.worker.factories import make_live_worker_config, make_worker_hardware
-from worker.executors import ssh_executor as ssh_mod
 from worker.executors.base_executor import Executor, ExecutorTask
 from worker.executors.ssh_executor import SSHExecutor
+from worker.executors.ssh_session.backends import docker as ssh_docker_backend
 from worker.main import initialize_executors
 
 
@@ -87,7 +87,7 @@ class TestInitializeExecutorsAvailability:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         cfg = make_live_worker_config(tmp_path)
-        monkeypatch.setattr(ssh_mod, "docker_available", lambda: False)
+        monkeypatch.setattr(ssh_docker_backend, "docker_available", lambda: False)
         assert SSHExecutor.is_available(cfg) is False
-        monkeypatch.setattr(ssh_mod, "docker_available", lambda: True)
+        monkeypatch.setattr(ssh_docker_backend, "docker_available", lambda: True)
         assert SSHExecutor.is_available(cfg) is True

@@ -17,10 +17,13 @@ from docker.models.containers import Container
 
 from shared.schemas.result import SSHResult
 from shared.tasks.worker_message import WorkerTaskMessage
-from tests.worker.factories import make_live_worker_config
+from tests.worker.factories import make_live_worker_config, make_ssh_executor
 from worker.executors import ssh_executor as ssh_module
 from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.ssh_executor import SSHExecutor
+from worker.executors.ssh_session import DockerSessionBackend
+from worker.executors.ssh_session.backends import docker as docker_module
+from worker.executors.ssh_session.backends.docker import DockerSession, SSHMountPlan
 
 _TASK_ID = "tsk-ssh-exit"
 # Far past how long any of these runs, so reaching it fails the test's deadline.
@@ -56,9 +59,29 @@ def _task(max_bytes: int, ttl_sec: int = _TTL_SEC) -> WorkerTaskMessage:
 @pytest.fixture
 def executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SSHExecutor:
     monkeypatch.setenv("SSH_POLL_INTERVAL_SEC", "0.01")
-    ex = SSHExecutor(make_live_worker_config(tmp_path), lifecycle=None)
-    ex._docker = MagicMock()
+    ex = make_ssh_executor(make_live_worker_config(tmp_path), lifecycle=None)
+    _backend(ex)._docker = MagicMock()
     return ex
+
+
+def _backend(ex: SSHExecutor) -> DockerSessionBackend:
+    backend = ex.backend
+    assert isinstance(backend, DockerSessionBackend)
+    return backend
+
+
+def _copy_session(ex: SSHExecutor, container: Any) -> DockerSession:
+    """A session whose output is copied out of ``container`` from ``/out``."""
+    plan = SSHMountPlan(
+        volumes=[],
+        staged_input_specs=[],
+        create_dirs=[],
+        direct_output_path=None,
+        copy_output_path="/out",
+        staged_inputs_dir=None,
+        staged_inputs_volume=None,
+    )
+    return DockerSession(MagicMock(), container, plan, None, MagicMock(), ex._signals)
 
 
 def _container(exit_code: int, output_bytes: int, polls: int = 3) -> MagicMock:
@@ -102,38 +125,41 @@ def _run(
     plan = MagicMock()
     plan.copy_output_path = None if direct_output is not None else "/out"
     plan.direct_output_path = direct_output
+    backend = _backend(ex)
     with (
-        patch.object(ex, "prepare"),
-        patch.object(ex, "_resolve_noninteractive_command", return_value=["true"]),
-        patch.object(ex, "_resolve_inputs", return_value=[]),
-        patch.object(ex, "_build_mount_plan", return_value=plan),
-        patch.object(ex, "_build_environment", return_value={}),
-        patch.object(ex, "_build_run_kwargs", return_value={}),
+        patch.object(backend, "prepare"),
+        patch.object(backend, "_resolve_noninteractive_command", return_value=["true"]),
+        patch.object(ssh_module, "resolve_inputs", return_value=[]),
+        patch.object(backend, "_build_mount_plan", return_value=plan),
+        patch.object(backend, "_build_environment", return_value={}),
+        patch.object(backend, "_build_run_kwargs", return_value={}),
         patch.object(
-            ex,
+            backend,
             "_start_container",
             return_value=(container, None),
             side_effect=start_failure,
         ),
-        patch.object(ex, "_stream_container_logs", side_effect=stream_logs),
+        patch.object(docker_module, "_stream_container_logs", side_effect=stream_logs),
         patch.object(
-            ex,
-            "_save_container_logs",
-            wraps=ex._save_container_logs if save_logs else None,
+            DockerSession,
+            "save_logs",
+            autospec=True,
+            side_effect=DockerSession.save_logs if save_logs else None,
         ),
         patch.object(
-            ex,
-            "_copy_output_directory",
-            wraps=ex._copy_output_directory if copy else None,
+            DockerSession,
+            "collect_output",
+            autospec=True,
+            side_effect=DockerSession.collect_output if copy else None,
         ),
-        patch.object(ex, "_cleanup_mount_plan") as cleanup,
+        patch.object(docker_module, "_cleanup_mount_plan") as cleanup,
         patch.object(ex, "emit_update"),
         patch.object(ssh_module, "maybe_upload_artifacts"),
     ):
         try:
             return ex.run(_task(max_bytes, ttl_sec), tmp_path / "out")
         finally:
-            cleanup.assert_called_once_with(ex._docker, plan)
+            cleanup.assert_called_once_with(backend._docker, plan)
 
 
 def test_a_clean_exit_succeeds_promptly(executor: SSHExecutor, tmp_path: Path) -> None:
@@ -355,9 +381,9 @@ def test_a_cancel_during_an_output_copy_ends_it(
     with executor._signals.running(_TASK_ID):
         if kind == "cancel":
             with pytest.raises(TaskCancelledError):
-                executor._copy_output_directory(container, "/out", destination)
+                _copy_session(executor, container).collect_output(destination, None)
         else:
-            executor._copy_output_directory(container, "/out", destination)
+            _copy_session(executor, container).collect_output(destination, None)
 
     copied = sorted(path.name for path in destination.iterdir())
     assert copied == (
@@ -372,7 +398,7 @@ def test_an_output_copy_reads_its_archive_in_any_chunking(
     container = MagicMock(spec=Container)
     container.get_archive.return_value = (_Archive(data, chunk=777), {})
 
-    executor._copy_output_directory(container, "/out", tmp_path / "copied")
+    _copy_session(executor, container).collect_output(tmp_path / "copied", None)
 
     assert (tmp_path / "copied" / "a.bin").read_bytes() == b"x" * 70_000
     assert (tmp_path / "copied" / "b.bin").read_bytes() == b"xxx"
@@ -420,7 +446,7 @@ def test_a_cancel_during_the_archive_request_releases_its_stream(
 
     with executor._signals.running(_TASK_ID):
         with pytest.raises(TaskCancelledError):
-            executor._copy_output_directory(container, "/out", tmp_path / "copied")
+            _copy_session(executor, container).collect_output(tmp_path / "copied", None)
 
     assert archive.released
 
@@ -438,7 +464,7 @@ def test_a_cancel_ends_an_output_copy_within_one_large_file(
 
     with executor._signals.running(_TASK_ID):
         with pytest.raises(TaskCancelledError):
-            executor._copy_output_directory(container, "/out", tmp_path / "copied")
+            _copy_session(executor, container).collect_output(tmp_path / "copied", None)
 
     assert archive.released
     assert archive.chunks_read <= 3
