@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -683,3 +684,46 @@ def test_a_session_cannot_swap_a_directory_above_worker_state(
         session.cleanup()
         shutil.rmtree(base, ignore_errors=True)
     assert _run(["getent", "group", session.account.name]).returncode != 0
+
+
+def test_a_stop_during_collection_lets_the_collection_finish(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    backend = ProcessSessionBackend(worker)
+    session = backend.start_session(
+        _request(tmp_path, client_key, output="/mnt/flowmesh/output")
+    )
+    collected = tmp_path / "collected"
+    try:
+        port = session.wait_ready(30)
+        assert port is not None
+        made = _ssh(
+            session,
+            client_key,
+            port,
+            "for i in $(seq 64); do head -c 4M /dev/urandom "
+            "> /mnt/flowmesh/output/part-$i; done",
+        )
+        assert made.returncode == 0, made.stderr
+        errors: list[BaseException] = []
+
+        def collect() -> None:
+            try:
+                session.collect_output(collected, None)
+            except BaseException as exc:
+                errors.append(exc)
+
+        collector = threading.Thread(target=collect)
+        collector.start()
+        deadline = time.monotonic() + 30
+        while not any(collected.glob("part-*")) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        session.stop(1)
+        collector.join(timeout=120)
+
+        assert errors == []
+        assert len(list(collected.glob("part-*"))) == 64
+        assert all(part.stat().st_size == 4 << 20 for part in collected.iterdir())
+    finally:
+        session.stop(1)
+        session.cleanup()

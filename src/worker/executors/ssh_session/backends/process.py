@@ -833,6 +833,8 @@ class ProcessSession(SSHSession):
         self.account = account
         self._signals = signals
         self._cleaned = False
+        self._stop_lock = threading.Lock()
+        self._collecting = False
 
     def login_user(self) -> str:
         return self.account.name
@@ -884,6 +886,17 @@ class ProcessSession(SSHSession):
         more access than the session has."""
         if (output_path := self._output_path) is None:
             return
+        with self._stop_lock:
+            self._collecting = True
+        try:
+            self._collect(output_path, destination, max_bytes)
+        finally:
+            with self._stop_lock:
+                self._collecting = False
+
+    def _collect(
+        self, output_path: Path, destination: Path, max_bytes: int | None
+    ) -> None:
         # The session has ended; with its processes gone the tree holds still.
         if not kill_processes(self.account.uid):
             raise ExecutionError(
@@ -893,6 +906,7 @@ class ProcessSession(SSHSession):
         destination.mkdir(parents=True, exist_ok=True)
         archiver = _archive_as(self.account, output_path)
         assert (archive := archiver.stdout) is not None
+        finished = False
         try:
             extract_output_archive(
                 iter(lambda: archive.read(_COPY_CHUNK), b""),
@@ -900,17 +914,29 @@ class ProcessSession(SSHSession):
                 max_bytes,
                 self._signals.raise_if_cancelled,
             )
+            finished = True
         except (OSError, tarfile.TarError) as exc:
             raise ExecutionError(f"Failed to collect SSH output: {exc}") from exc
         finally:
-            _end_archiver(archiver)
+            code = _end_archiver(archiver, finished)
+        if code is not None and code < 0:
+            raise ExecutionError(
+                f"Reading the SSH output was killed by signal {-code}, so the output "
+                "collected may be incomplete"
+            )
 
     def stop(self, timeout_sec: float) -> None:
         # The session's own processes go first, while sshd's subreaper still lives
-        # to reap what they leave; those forked while sshd stops go after it.
-        kill_processes(self.account.uid)
+        # to reap what they leave; those forked while sshd stops go after it. While
+        # its output is collected, the only one left is the reader.
+        self._kill_unless_collecting()
         _terminate(self._process, timeout_sec)
-        kill_processes(self.account.uid)
+        self._kill_unless_collecting()
+
+    def _kill_unless_collecting(self) -> None:
+        with self._stop_lock:
+            if not self._collecting:
+                kill_processes(self.account.uid)
 
     def cleanup(self) -> None:
         if self._cleaned:
@@ -1051,20 +1077,35 @@ def _archive_as(account: SessionAccount, source: Path) -> subprocess.Popen[bytes
         raise ExecutionError(f"Failed to read the SSH output: {exc}") from exc
 
 
-def _end_archiver(archiver: subprocess.Popen[bytes]) -> None:
-    """Stop the archiving child, logging a non-zero exit, which ``tar`` gives when
-    it leaves out a file it could not read."""
-    assert archiver.stdout is not None
-    archiver.stdout.close()
-    if archiver.poll() is None:
-        archiver.kill()
-    code = archiver.wait()
-    if code not in (0, -signal.SIGKILL):
+def _end_archiver(archiver: subprocess.Popen[bytes], finished: bool) -> int | None:
+    """Stop the archiving child and return its exit code, or ``None`` when this had
+    to kill it.
+
+    A ``finished`` read lets it write out its last record and exit. A positive code
+    is logged: ``tar`` gives one when it leaves out a file it could not read.
+    """
+    assert (stream := archiver.stdout) is not None
+    code: int | None = None
+    try:
+        if finished:
+            while stream.read(_COPY_CHUNK):
+                pass
+            try:
+                code = archiver.wait(timeout=_TERMINATE_GRACE_SEC)
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        stream.close()
+        if code is None:
+            archiver.kill()
+            archiver.wait()
+    if code is not None and code > 0:
         logger.warning(
             "Reading the SSH output exited with code %d; files the session could "
             "not read are left out",
             code,
         )
+    return code
 
 
 def _discard_session(

@@ -848,6 +848,99 @@ def test_a_collection_failure_fails_the_session_for_good(
     assert not failed.value.retryable
 
 
+# Writes a tar of two files, or dies of a signal after the first one, which cuts
+# the stream on a header boundary, as a reader the collector never killed would.
+_ARCHIVER = """
+import io, os, signal, sys, tarfile
+def member(name):
+    data = name.encode() * 1000
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()[: 512 + -(-len(data) // 512) * 512]
+out = sys.stdout.buffer
+out.write(member("first"))
+out.flush()
+if sys.argv[1] == "die":
+    os.kill(os.getpid(), signal.SIGKILL)
+out.write(member("second") + bytes(1024))
+out.flush()
+"""
+
+
+def _archiver(outcome: str) -> "subprocess.Popen[bytes]":
+    return subprocess.Popen(  # nosec B603 - argv list, test-only
+        [sys.executable, "-c", _ARCHIVER, outcome], stdout=subprocess.PIPE
+    )
+
+
+@pytest.mark.parametrize("outcome", ["exit", "die"])
+def test_an_archiver_killed_by_what_the_collector_never_sent_fails_the_task(
+    tmp_path: Path, outcome: str
+) -> None:
+    session = _session(RunSignals(), MagicMock())
+    session._output_path = tmp_path / "output"
+    collected = tmp_path / "collected"
+    with (
+        patch.object(process_module, "kill_processes", return_value=True),
+        patch.object(process_module, "_archive_as", return_value=_archiver(outcome)),
+    ):
+        if outcome == "die":
+            with pytest.raises(ExecutionError, match="killed by signal 9") as failed:
+                session.collect_output(collected, None)
+            assert not failed.value.retryable
+        else:
+            session.collect_output(collected, None)
+            assert sorted(p.name for p in collected.iterdir()) == ["first", "second"]
+
+
+def test_a_stop_during_collection_leaves_the_reader_running(tmp_path: Path) -> None:
+    session = _session(RunSignals(), MagicMock())
+    session._output_path = tmp_path / "output"
+    kills: list[str] = []
+
+    def kill(uid: int) -> bool:
+        kills.append("kill")
+        return True
+
+    def extract(*args: Any) -> None:
+        kills.clear()
+        session.stop(1)
+
+    with (
+        patch.object(process_module, "kill_processes", side_effect=kill),
+        patch.object(process_module, "_terminate"),
+        patch.object(process_module, "_archive_as", return_value=_archiver("exit")),
+        patch.object(process_module, "extract_output_archive", side_effect=extract),
+    ):
+        session.collect_output(tmp_path / "collected", None)
+        assert kills == []
+        session.stop(1)
+
+    assert kills == ["kill", "kill"]
+
+
+def test_a_cancel_during_collection_ends_it_cancelled(tmp_path: Path) -> None:
+    signals = RunSignals()
+    session = _session(signals, MagicMock())
+    session._output_path = tmp_path / "output"
+    with (
+        signals.running("tsk"),
+        patch.object(process_module, "kill_processes", return_value=True),
+        patch.object(process_module, "_terminate"),
+        patch.object(process_module, "_archive_as", return_value=_archiver("exit")),
+        patch.object(
+            process_module,
+            "extract_output_archive",
+            side_effect=lambda *args: signals.cancel("tsk") and args[3](),
+        ),
+        pytest.raises(TaskCancelledError),
+    ):
+        session.collect_output(tmp_path / "collected", None)
+
+
 def test_the_session_is_stopped_before_its_sshd_and_again_after() -> None:
     order: list[str] = []
     session = _session(RunSignals(), MagicMock())
