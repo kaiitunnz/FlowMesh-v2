@@ -1628,6 +1628,7 @@ runtime-worker-core = [
     { name = "httpx" },
     { name = "nvidia-ml-py" },
     { name = "protobuf" },
+    { name = "psutil" },
     { name = "python-dotenv" },
     { name = "websocket-client" },
 ]
@@ -1653,6 +1654,7 @@ runtime-worker-cpu = [
     { name = "peft" },
     { name = "pillow" },
     { name = "protobuf" },
+    { name = "psutil" },
     { name = "psycopg", extra = ["binary"] },
     { name = "python-dotenv" },
     { name = "qdrant-client" },
@@ -1855,6 +1857,7 @@ runtime-worker-core = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "nvidia-ml-py", specifier = ">=13.580.82" },
     { name = "protobuf", specifier = ">=5.29.6" },
+    { name = "psutil", specifier = ">=7.1.2" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "websocket-client", specifier = ">=1.9.0" },
 ]
@@ -1880,6 +1883,7 @@ runtime-worker-cpu = [
     { name = "peft", specifier = ">=0.18.0" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "protobuf", specifier = ">=5.29.6" },
+    { name = "psutil", specifier = ">=7.1.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.12" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "qdrant-client", specifier = ">=1.15.1" },

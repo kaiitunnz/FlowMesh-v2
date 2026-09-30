@@ -21,6 +21,7 @@ pandas==2.3.3
 peft==0.19.1
 pillow==12.3.0
 protobuf==5.29.6
+psutil==7.1.2
 psycopg[binary]==3.2.12
 python-dotenv==1.2.2
 qdrant-client==1.15.1
