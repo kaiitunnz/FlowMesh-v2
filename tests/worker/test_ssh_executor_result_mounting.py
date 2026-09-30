@@ -530,3 +530,24 @@ def test_a_staging_container_carries_the_worker_labels_its_volume_does(
     kwargs = fake_client.containers.kwargs
     assert kwargs is not None
     assert kwargs["labels"] == fake_client.volumes.labels
+
+
+def test_a_link_in_a_local_upstream_is_staged_as_a_link(tmp_path: Path) -> None:
+    secret = tmp_path / "worker-state"
+    secret.write_text("not the upstream's", encoding="utf-8")
+    source = tmp_path / "worker-results" / "task-pre"
+    source.mkdir(parents=True)
+    (source / "results.json").write_text("{}", encoding="utf-8")
+    (source / "planted").symlink_to(secret)
+    resolved = ResolvedSSHInput(
+        stage="preprocess",
+        task_id="task-pre",
+        source_path=source,
+        mount_path="/mnt/flowmesh/inputs/preprocess",
+    )
+
+    staging_dir = _stage_locally([resolved], "session-link")
+
+    staged = staging_dir / "task-pre" / "planted"
+    assert staged.is_symlink()
+    assert staged.readlink() == secret

@@ -86,7 +86,11 @@ def _fill_staging_dir(
     for resolved in resolved_inputs:
         destination = staging_dir / resolved.task_id
         if resolved.source_path.exists():
-            shutil.copytree(resolved.source_path, destination, dirs_exist_ok=True)
+            # A link in an upstream's output is copied as a link, never followed as
+            # the worker.
+            shutil.copytree(
+                resolved.source_path, destination, symlinks=True, dirs_exist_ok=True
+            )
         elif resolved.has_artifacts:
             download_result_bundle(
                 resolved.task_id,
