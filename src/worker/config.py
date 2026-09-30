@@ -77,6 +77,7 @@ class WorkerConfig:
     peer_tls_key_b64: str | None = None
     ssh_session_backend: SSHBackendName = SSHBackendName.DOCKER
     ssh_relay_host: str | None = None
+    ssh_stop_timeout_sec: float = 30.0
     home_dir: Path | None = None
     model_cache_dir: Path | None = None
 
@@ -263,6 +264,9 @@ class WorkerConfig:
                 f"{', '.join(sorted(SSHBackendName))}"
             ) from None
         ssh_relay_host = os.getenv("SSH_RELAY_HOST", "").strip() or None
+        ssh_stop_timeout_sec = parse_float_env(
+            "SSH_STOP_TIMEOUT_SEC", WorkerConfig.ssh_stop_timeout_sec
+        )
 
         telemetry = TelemetryConfig.from_env()
 
@@ -321,6 +325,7 @@ class WorkerConfig:
             ssh_network_name=ssh_network_name,
             ssh_session_backend=ssh_session_backend,
             ssh_relay_host=ssh_relay_host,
+            ssh_stop_timeout_sec=ssh_stop_timeout_sec,
             home_dir=home_dir,
             model_cache_dir=model_cache_dir,
         )

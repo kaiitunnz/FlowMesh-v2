@@ -40,3 +40,15 @@ def test_the_gpu_limit_can_be_turned_off(worker_env: pytest.MonkeyPatch) -> None
     worker_env.setenv("ENABLE_SSH_GPU_LIMIT", "false")
 
     assert WorkerConfig.from_env().enable_ssh_gpu_limit is False
+
+
+def test_a_session_and_teardown_stop_within_the_configured_timeout(
+    worker_env: pytest.MonkeyPatch,
+) -> None:
+    worker_env.setenv("SSH_STOP_TIMEOUT_SEC", "7.5")
+    spec = SSHSpecStrict.model_validate({"taskType": "ssh", "command": ["true"]})
+
+    config = WorkerConfig.from_env()
+
+    assert config.ssh_stop_timeout_sec == 7.5
+    assert SSHConfig.from_spec(spec, config).stop_timeout_sec == 7.5

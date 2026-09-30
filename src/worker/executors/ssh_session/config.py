@@ -45,7 +45,6 @@ DEFAULT_TTL_SEC = 3600
 DEFAULT_IDLE_SEC = 900
 MAX_TTL_SEC = 28800  # 8 hours
 POLL_INTERVAL_SEC = 5
-STOP_TIMEOUT_SEC = 30
 DEFAULT_INPUTS_ROOT = "/mnt/flowmesh/inputs"
 DEFAULT_OUTPUT_PATH = "/mnt/flowmesh/output"
 SAFE_MOUNT_ROOT = PurePosixPath("/mnt/flowmesh")
@@ -116,7 +115,6 @@ class SSHConfig:
         default_idle_sec = parse_float_env("SSH_DEFAULT_IDLE_SEC", DEFAULT_IDLE_SEC)
         max_ttl_sec = parse_float_env("SSH_MAX_TTL_SEC", MAX_TTL_SEC)
         poll_interval_sec = parse_float_env("SSH_POLL_INTERVAL_SEC", POLL_INTERVAL_SEC)
-        stop_timeout_sec = parse_float_env("SSH_STOP_TIMEOUT_SEC", STOP_TIMEOUT_SEC)
         output_cfg = (
             SSHOutputConfig.from_spec(ssh_output)
             if (ssh_output := spec.sshOutput)
@@ -146,7 +144,7 @@ class SSHConfig:
             inputs=list(spec.inputs or []),
             output=output_cfg,
             poll_interval_sec=poll_interval_sec,
-            stop_timeout_sec=stop_timeout_sec,
+            stop_timeout_sec=worker_cfg.ssh_stop_timeout_sec,
             cpu_limit=cpu_limit,
             memory_limit_bytes=memory_limit_bytes,
             pids_limit=pids_limit,

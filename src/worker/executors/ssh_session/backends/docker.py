@@ -22,7 +22,6 @@ import requests
 import worker
 from shared.schemas.worker import SSHBackendName
 from shared.tasks.worker_message import WorkerHardware
-from shared.utils import parse_float_env
 from shared.utils.http import auth_headers
 from shared.utils.manifest import ARTIFACTS_DIR, RESULTS_NAME
 from worker.config import WorkerConfig
@@ -50,7 +49,6 @@ from ..config import (
     LABEL_SESSION,
     LABEL_TASK,
     LABEL_WORKER,
-    STOP_TIMEOUT_SEC,
     SSHConfig,
     normalize_mount_path,
     reserve_mount_path,
@@ -150,7 +148,7 @@ class DockerSessionBackend(SSHSessionBackend):
         self._ssh_network = self._ensure_ssh_network(self._docker)
 
     def teardown(self, worker_name: str) -> None:
-        stop_timeout_sec = parse_float_env("SSH_STOP_TIMEOUT_SEC", STOP_TIMEOUT_SEC)
+        stop_timeout_sec = self._config.ssh_stop_timeout_sec
         client = self._get_docker_client()
         try:
             containers = client.containers.list(

@@ -37,7 +37,6 @@ from typing import Any
 
 from shared.schemas.worker import SSHBackendName
 from shared.tasks.worker_message import WorkerHardware
-from shared.utils import parse_float_env
 from worker.config import WorkerConfig
 
 from ...base_executor import ExecutionError, RunSignals
@@ -53,7 +52,7 @@ from ..base import (
     resolve_tailnet_address,
     tree_size_bytes,
 )
-from ..config import SAFE_MOUNT_ROOT, STOP_TIMEOUT_SEC, normalize_mount_path
+from ..config import SAFE_MOUNT_ROOT, normalize_mount_path
 from ..inputs import stage_inputs_locally
 from ..session_identity import (
     SessionAccount,
@@ -210,7 +209,7 @@ class ProcessSessionBackend(SSHSessionBackend):
             session = self._active
         if session is None:
             return
-        session.stop(parse_float_env("SSH_STOP_TIMEOUT_SEC", STOP_TIMEOUT_SEC))
+        session.stop(self._config.ssh_stop_timeout_sec)
         session.cleanup()
 
     def _release(self, session: "ProcessSession", clean: bool) -> None:
