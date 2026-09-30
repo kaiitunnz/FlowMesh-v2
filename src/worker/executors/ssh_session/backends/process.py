@@ -394,11 +394,11 @@ class ProcessSessionBackend(SSHSessionBackend):
 
 
 def ensure_state_roots(config: WorkerConfig) -> list[Path]:
-    """Return :func:`denied_roots` once :func:`prepare_state_roots` has made them;
-    raise while a filesystem content store's root does not exist yet."""
+    """Return the roots :func:`prepare_state_roots` makes ready; raise while a
+    filesystem content store's root it had to leave out does not exist yet."""
     roots = prepare_state_roots(config)
     for root in _shared_roots(config):
-        if not os.path.lexists(root):
+        if not os.path.lexists(root) and not _inside_any(root, roots):
             raise ExecutionError(
                 f"Refusing the SSH session: the shared content store {root} does "
                 "not exist yet",
@@ -408,27 +408,37 @@ def ensure_state_roots(config: WorkerConfig) -> list[Path]:
 
 
 def prepare_state_roots(config: WorkerConfig) -> list[Path]:
-    """Return :func:`denied_roots`, creating each missing one but a filesystem
-    content store's root-owned ``0700`` so a session's deny entry lands on it; raise
-    if one cannot be denied safely.
+    """Return the :func:`denied_roots` a session's deny entries land on, creating
+    each missing one root-owned ``0700``; raise if one cannot be denied safely.
 
-    A filesystem content store is shared across nodes, so the content plane creates
-    its root.
+    A missing root inside another that exists is left out: a session cannot reach
+    anything below a denied root. A filesystem content store is shared across
+    nodes, so the content plane creates its root.
     """
     if problem := _state_problem(config):
         raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
+    roots = denied_roots(config)
+    existing = [root for root in roots if os.path.lexists(root)]
     shared = _shared_roots(config)
-    for root in denied_roots(config):
-        if root not in shared and not os.path.lexists(root):
+    ready: list[Path] = []
+    for root in roots:
+        if not os.path.lexists(root):
+            if _inside_any(root, existing) or root in shared:
+                continue
             try:
                 _create_state_root(root)
             except OSError as exc:
                 raise ExecutionError(
                     f"Cannot create worker state {root}: {exc}", retryable=True
                 ) from exc
+        ready.append(root)
     if problem := _state_problem(config):
         raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
-    return denied_roots(config)
+    return ready
+
+
+def _inside_any(path: Path, roots: Sequence[Path]) -> bool:
+    return any(path != root and path.is_relative_to(root) for root in roots)
 
 
 def denied_roots(config: WorkerConfig) -> list[Path]:

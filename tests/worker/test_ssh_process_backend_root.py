@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import psutil
 import pytest
 
+from shared.content.config import BACKEND_FILESYSTEM
 from shared.utils import new_ssh_session_id
 from tests.worker.factories import make_worker_config
 from worker.config import WorkerConfig
@@ -392,6 +393,33 @@ def test_a_state_root_the_worker_has_not_made_yet_is_denied(
         session.stop(1)
         session.cleanup()
         shutil.rmtree(relocated, ignore_errors=True)
+
+
+def test_a_store_root_made_inside_the_results_dir_mid_session_stays_denied(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    store = worker.results_dir / "shared-content"
+    object_store = dataclasses.replace(
+        worker.object_store, backend=BACKEND_FILESYSTEM, filesystem_root=store
+    )
+    backend = ProcessSessionBackend(
+        dataclasses.replace(worker, object_store=object_store)
+    )
+    session = backend.start_session(_request(tmp_path, client_key))
+    try:
+        port = session.wait_ready(30)
+        assert port is not None
+        # The content plane makes the store on its first write, open by mode.
+        store.mkdir(mode=0o777)
+        store.chmod(0o777)
+        (store / "object").write_text("shared content")
+        (store / "object").chmod(0o666)
+
+        assert _ssh(session, client_key, port, _list(store)).stdout == ""
+        assert _ssh(session, client_key, port, _read(store / "object")).stdout == ""
+    finally:
+        session.stop(1)
+        session.cleanup()
 
 
 def test_a_planted_symlink_under_the_mount_root_is_never_followed(

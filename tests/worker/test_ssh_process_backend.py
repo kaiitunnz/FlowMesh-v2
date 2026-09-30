@@ -387,6 +387,35 @@ def test_a_shared_store_root_is_never_created_and_refuses_sessions_until_it_exis
     assert store in process_module.ensure_state_roots(config)
 
 
+def test_a_missing_store_root_inside_the_results_dir_is_left_out(
+    tmp_path: Path,
+) -> None:
+    config = _state_config(tmp_path)
+    (tmp_path / "results").mkdir()
+    store = tmp_path / "results" / "shared-content"
+    config = _with_store(config, store)
+
+    roots = process_module.ensure_state_roots(config)
+
+    assert not store.exists()
+    assert store not in roots and tmp_path / "results" in roots
+
+
+def test_a_missing_cache_inside_an_existing_cache_root_is_left_out(
+    tmp_path: Path,
+) -> None:
+    hub = tmp_path / "hf" / "hub"
+    (tmp_path / "hf").mkdir()
+    config = _state_config(
+        tmp_path, state_dirs=(tmp_path / "home", tmp_path / "hf", hub)
+    )
+
+    roots = process_module.ensure_state_roots(config)
+
+    assert not hub.exists()
+    assert hub not in roots and tmp_path / "hf" in roots
+
+
 @pytest.mark.parametrize(
     "covering",
     [Path("/"), Path("/mnt"), Path(tempfile.gettempdir()), Path("/var/lib/flowmesh")],
