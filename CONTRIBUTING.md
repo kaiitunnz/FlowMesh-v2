@@ -113,7 +113,7 @@ The process SSH backend's suite, `tests/worker/test_ssh_process_backend_root.py`
 
 ```bash
 docker run --rm -v "$PWD":/repo:ro python:3.12-slim sh -c '
-  apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server openssh-client acl passwd &&
+  apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server openssh-client acl passwd tini &&
   pip install -q uv && mkdir /src && tar -C /repo --exclude=./.venv -cf - . | tar -C /src -xf - && cd /src &&
   uv sync -q --frozen --group runtime-server --group runtime-worker-core &&
   uv run --frozen --group runtime-server --group runtime-worker-core pytest tests/worker/test_ssh_process_backend_root.py'
