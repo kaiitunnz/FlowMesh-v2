@@ -132,6 +132,12 @@ class SSHConfig:
             spec, worker_cfg
         )
         gpu_device_ids = _resolve_gpu_devices(spec, worker_cfg, hardware)
+        ttl_sec = min(spec.ttlSeconds or default_ttl_sec, max_ttl_sec)
+        idle_sec = (
+            default_idle_sec
+            if spec.idleTimeoutSeconds is None
+            else spec.idleTimeoutSeconds
+        )
         return cls(
             image=spec.image or default_image,
             interactive=bool(spec.interactive),
@@ -139,8 +145,8 @@ class SSHConfig:
             authorized_keys=spec.authorizedKeys or [],
             command=spec.command,
             entrypoint=spec.entrypoint,
-            ttl_sec=min(spec.ttlSeconds or default_ttl_sec, max_ttl_sec),
-            idle_sec=spec.idleTimeoutSeconds or default_idle_sec,
+            ttl_sec=ttl_sec,
+            idle_sec=min(idle_sec, ttl_sec),
             access_mode=spec.accessMode or "direct",
             extra_env=dict(spec.env or {}),
             inputs=list(spec.inputs or []),

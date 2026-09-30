@@ -39,6 +39,7 @@ from ..base import (
     SessionRequest,
     SSHSession,
     SSHSessionBackend,
+    count_established_connections,
     is_ssh_ready,
     path_size_bytes,
 )
@@ -682,6 +683,19 @@ class DockerSession(SSHSession):
         except Exception:
             return False
         return result.exit_code == 0
+
+    def established_connections(self) -> int | None:
+        try:
+            result = self._container.exec_run(
+                ["sh", "-c", "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null"]
+            )
+        except (DockerException, OSError):
+            return None
+        if result.exit_code != 0:
+            return None
+        if not (output := _decode_exec_output(result.output)):
+            return None
+        return count_established_connections(output, _SESSION_SSH_PORT)
 
     def output_size_bytes(self) -> int | None:
         plan = self._mount_plan

@@ -1,7 +1,7 @@
 """Session backend seam for the SSH executor.
 
 An SSH session is a sandbox running ``sshd`` plus the transport details needed
-to reach it. The task lifecycle, TTL reaping, ``emit_update`` and the
+to reach it. The task lifecycle, TTL and idle reaping, ``emit_update`` and the
 ``accessMode`` enum sit above this seam, in the executor.
 """
 
@@ -23,6 +23,8 @@ from .config import FINISH_SENTINEL_PATH, ResolvedSSHInput, SSHConfig
 logger = logging.getLogger(__name__)
 
 LOOPBACK_RELAY_HOST = "127.0.0.1"
+
+_TCP_STATE_ESTABLISHED = "01"
 
 
 class SessionInterrupted(Exception):
@@ -67,6 +69,14 @@ class SSHSession(ABC):
     @abstractmethod
     def finish_requested(self) -> bool:
         """Whether the session asked to finish via the in-session helper."""
+
+    @abstractmethod
+    def established_connections(self) -> int | None:
+        """Count of established SSH connections, or ``None`` when unobservable.
+
+        ``None`` means the idle reaper has no evidence either way and must not
+        reap; it is not the same as zero.
+        """
 
     @abstractmethod
     def output_size_bytes(self) -> int | None:
@@ -202,4 +212,27 @@ def path_size_bytes(path: Path) -> int:
     for item in path.rglob("*"):
         if item.is_file():
             total += item.stat().st_size
+    return total
+
+
+def count_established_connections(proc_net_tcp: str, port: int) -> int:
+    """Count established TCP connections to ``port`` in ``/proc/net/tcp`` text.
+
+    Accepts the concatenation of ``/proc/net/tcp`` and ``/proc/net/tcp6``; both
+    encode the local address as ``<hex address>:<hex port>``.
+    """
+    total = 0
+    for line in proc_net_tcp.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or not fields[0].endswith(":"):
+            continue
+        local_address = fields[1]
+        if ":" not in local_address:
+            continue
+        try:
+            local_port = int(local_address.rsplit(":", 1)[1], 16)
+        except ValueError:
+            continue
+        if local_port == port and fields[3] == _TCP_STATE_ESTABLISHED:
+            total += 1
     return total

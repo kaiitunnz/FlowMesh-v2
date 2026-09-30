@@ -222,3 +222,17 @@ cap)`. A task that requests more than the worker cap is dispatched to
 another worker if one has a larger cap; otherwise the dispatcher
 follows its standard requeue/retry behavior. The worker logs a startup
 warning if SSH is enabled with no cap configured.
+
+## SSH session lifetime
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSH_DEFAULT_TTL_SEC` | `3600` | Session TTL when `spec.ttlSeconds` is unset |
+| `SSH_MAX_TTL_SEC` | `28800` | Upper bound on session TTL |
+| `SSH_DEFAULT_IDLE_SEC` | `900` | Idle timeout when `spec.idleTimeoutSeconds` is unset |
+
+An interactive session stops once it has had no established SSH connection
+for its idle timeout, which is clamped to the TTL. The idle clock starts
+with the session, so a session nobody connects to is reaped too.
+`spec.idleTimeoutSeconds: 0` turns idle reaping off, leaving the TTL.
+Non-interactive tasks have no idle timeout.

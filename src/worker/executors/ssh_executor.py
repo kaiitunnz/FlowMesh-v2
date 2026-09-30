@@ -135,12 +135,13 @@ class SSHExecutor(Executor):
         session_kind = "SSH session" if interactive else "non-interactive"
         if interactive:
             logger.info(
-                "Starting %s (task=%s session=%s mode=%s ttl=%ds)",
+                "Starting %s (task=%s session=%s mode=%s ttl=%ds idle=%ds)",
                 session_kind,
                 task.task_id,
                 session_id,
                 access_mode,
                 cfg.ttl_sec,
+                cfg.idle_sec,
             )
         else:
             logger.info(
@@ -291,12 +292,16 @@ class SSHExecutor(Executor):
         return {"expires_at": expires_at, "host": host_name, "port": host_port}
 
     def _wait_for_session(self, session: SSHSession, cfg: SSHConfig) -> int:
-        """Block until the session exits or its TTL fires, stopping it at its TTL so
-        nothing it writes lands after its output is collected.
+        """Block until the session exits or its TTL or idle timeout fires, stopping it
+        at its TTL so nothing it writes lands after its output is collected.
 
-        Returns the session exit code.
+        Returns the session exit code. The idle clock starts when the session does,
+        so a session nobody ever connects to is reaped too.
         """
         deadline = time.time() + cfg.ttl_sec
+        idle_enabled = cfg.interactive and cfg.idle_sec > 0
+        last_active = time.time()
+        idle_unobservable_logged = False
         while time.time() < deadline:
             if self._signals.raise_if_cancelled() or session.finish_requested():
                 logger.info("SSH session finish requested; stopping session")
@@ -315,6 +320,24 @@ class SSHExecutor(Executor):
                     return 0
                 return exit_code
             self._enforce_output_limit(session, cfg)
+            if idle_enabled:
+                connections = session.established_connections()
+                if connections is None:
+                    if not idle_unobservable_logged:
+                        logger.warning(
+                            "SSH idle timeout cannot be enforced: this session's "
+                            "connection state is not observable"
+                        )
+                        idle_unobservable_logged = True
+                    last_active = time.time()
+                elif connections > 0:
+                    last_active = time.time()
+                elif time.time() - last_active >= cfg.idle_sec:
+                    logger.info(
+                        "SSH session idle for %ds; stopping session", cfg.idle_sec
+                    )
+                    session.stop(1)
+                    return 0
             time.sleep(cfg.poll_interval_sec)
 
         logger.info("SSH session TTL reached; stopping session")
