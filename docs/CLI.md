@@ -115,26 +115,10 @@ root node, both local Redis services are deployed alongside the server. On a
 worker node (`NODE_ROLE=worker`), Redis services are skipped — the worker
 server connects to the root node's Redis via `REDIS_CONTROL_URL` and
 `REDIS_TELEMETRY_URL`, which must be set in the worker's `.env` to reachable
-endpoints on the root node, and authenticates with the root's `REDIS_USERNAME`
-and `REDIS_PASSWORD`, copied from the root's `.env`.
+endpoints on the root node, and authenticates with the root's `REDIS_PASSWORD`.
 
-`flowmesh stack init --role root` writes a random `REDIS_PASSWORD`, random
-co-located content store credentials (`CONTENT_STORE_ACCESS_KEY`,
-`CONTENT_STORE_SECRET_KEY`), and one random password for the telemetry profile's
-ClickHouse (`TELEMETRY_CLICKHOUSE_PASSWORD`, `SERVER_METRICS_CLICKHOUSE_PASSWORD`) into
-the `.env` it renders, which only its owner can read. `flowmesh stack up` and
-`flowmesh stack restart` refuse to start a node whose Redis, co-located content store,
-or ClickHouse would run on an unset or well-known credential, and name the variable to
-set; `flowmesh stack restart SERVICE` checks only the credentials the named services
-read.
-
-To rotate a credential, set it in `.env` and run `flowmesh stack restart`; the services
-take the new credentials and keep their data. After a rotation of `REDIS_PASSWORD`,
-every worker node's `.env` takes the root's new password.
-
-The content store console listens on `127.0.0.1` (`CONTENT_STORE_CONSOLE_BIND_HOST`),
-and `CONTENT_STORE_BIND_HOST` sets the address the store's API listens on, which worker
-nodes reach.
+`flowmesh stack init --role root` writes random Redis, content store, and ClickHouse
+credentials into the root's `.env`.
 
 A root node that names no `CONTENT_STORE_ENDPOINT_URL` also runs the co-located
 content store, the `content` compose profile, which `flowmesh stack up` selects on its
