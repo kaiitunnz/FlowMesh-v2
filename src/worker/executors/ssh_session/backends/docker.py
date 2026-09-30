@@ -217,7 +217,7 @@ class DockerSessionBackend(SSHSessionBackend):
                 client, kwargs, interactive, signals
             )
         except BaseException:
-            _cleanup_mount_plan(client, mount_plan)
+            self._cleanup_mount_plan(client, mount_plan)
             raise
         return DockerSession(
             client=client,
@@ -512,7 +512,7 @@ class DockerSessionBackend(SSHSessionBackend):
                 commands.append(f"cp -a {src}/. {dst}/")
             elif resolved.has_artifacts:
                 commands.append(
-                    _build_remote_stage_command(
+                    self._build_remote_stage_command(
                         resolved.task_id, include_results=resolved.results is None
                     )
                 )
@@ -547,6 +547,30 @@ class DockerSessionBackend(SSHSessionBackend):
                 )
             raise
         return volume_name
+
+    @staticmethod
+    def _build_remote_stage_command(task_id: str, include_results: bool) -> str:
+        url = shlex.quote(result_bundle_url(task_id, include_results))
+        header_parts = [
+            f"--header {shlex.quote(f'{k}: {v}')}" for k, v in auth_headers().items()
+        ]
+        header_prefix = f"{' '.join(header_parts)} " if header_parts else ""
+        timeout = int(RESULT_BUNDLE_TIMEOUT_SEC)
+        return f"wget -qO- -T {timeout} -t 1 {header_prefix}{url} | tar -xz -C /dst"
+
+    @staticmethod
+    def _cleanup_mount_plan(client: DockerClient, mount_plan: SSHMountPlan) -> None:
+        if mount_plan.staged_inputs_dir is not None:
+            shutil.rmtree(mount_plan.staged_inputs_dir, ignore_errors=True)
+        if mount_plan.staged_inputs_volume is not None:
+            try:
+                client.volumes.get(mount_plan.staged_inputs_volume).remove(force=True)
+            except Exception:
+                logger.debug(
+                    "Failed to remove staged SSH input volume %s",
+                    mount_plan.staged_inputs_volume,
+                    exc_info=True,
+                )
 
 
 class DockerSession(SSHSession):
@@ -730,11 +754,11 @@ class DockerSession(SSHSession):
             logger.info("Removed SSH session container")
         except Exception as exc:
             logger.debug("Error removing container: %s", exc)
-        _cleanup_mount_plan(self._client, self._mount_plan)
+        DockerSessionBackend._cleanup_mount_plan(self._client, self._mount_plan)
 
     def drain_logs(self) -> None:
         if self._log_stream is not None:
-            _stream_container_logs(self._log_stream)
+            self._stream_container_logs(self._log_stream)
 
     def save_logs(self, out_dir: Path) -> None:
         """Save container stdout/stderr to the output directory."""
@@ -757,6 +781,47 @@ class DockerSession(SSHSession):
             return int(_decode_exec_output(result.output) or "0")
         except ValueError:
             return 0
+
+    @staticmethod
+    def _stream_container_logs(log_stream: DemuxLogStream) -> None:
+        """Stream container stdout/stderr as log records.
+
+        Blocks until the container's output streams are closed (i.e. the container
+        exits), ensuring no trailing output is lost.
+        """
+
+        def _emit(line: str, stream_name: str) -> None:
+            level = logging.WARNING if stream_name == "stderr" else logging.INFO
+            logger.log(level, line, extra={"flowmesh_stream": stream_name})
+
+        buffers: dict[str, str] = {"stdout": "", "stderr": ""}
+        try:
+            for stdout_chunk, stderr_chunk in log_stream:
+                for raw_chunk, stream_name in (
+                    (stdout_chunk, "stdout"),
+                    (stderr_chunk, "stderr"),
+                ):
+                    if raw_chunk is None:
+                        continue
+                    text = buffers[stream_name] + raw_chunk.decode(
+                        "utf-8", errors="replace"
+                    )
+                    # Emit only complete lines; keep the trailing fragment.
+                    if "\n" in text:
+                        *complete, remainder = text.split("\n")
+                        for line in complete:
+                            if line:
+                                _emit(line, stream_name)
+                        buffers[stream_name] = remainder
+                    else:
+                        buffers[stream_name] = text
+        except Exception:
+            logger.debug("Container log stream ended", exc_info=True)
+
+        # Flush any unterminated remainder.
+        for stream_name, leftover in buffers.items():
+            if leftover:
+                _emit(leftover, stream_name)
 
 
 def _ensure_image(
@@ -841,71 +906,6 @@ def _wait_for_staging(container: Container, signals: RunSignals) -> int:
         except requests.ReadTimeout:
             if signals.interrupted:
                 raise SessionInterrupted from None
-
-
-def _build_remote_stage_command(task_id: str, include_results: bool) -> str:
-    url = shlex.quote(result_bundle_url(task_id, include_results))
-    header_parts = [
-        f"--header {shlex.quote(f'{k}: {v}')}" for k, v in auth_headers().items()
-    ]
-    header_prefix = f"{' '.join(header_parts)} " if header_parts else ""
-    timeout = int(RESULT_BUNDLE_TIMEOUT_SEC)
-    return f"wget -qO- -T {timeout} -t 1 {header_prefix}{url} | tar -xz -C /dst"
-
-
-def _cleanup_mount_plan(client: DockerClient, mount_plan: SSHMountPlan) -> None:
-    if mount_plan.staged_inputs_dir is not None:
-        shutil.rmtree(mount_plan.staged_inputs_dir, ignore_errors=True)
-    if mount_plan.staged_inputs_volume is not None:
-        try:
-            client.volumes.get(mount_plan.staged_inputs_volume).remove(force=True)
-        except Exception:
-            logger.debug(
-                "Failed to remove staged SSH input volume %s",
-                mount_plan.staged_inputs_volume,
-                exc_info=True,
-            )
-
-
-def _stream_container_logs(log_stream: DemuxLogStream) -> None:
-    """Stream container stdout/stderr as log records.
-
-    Blocks until the container's output streams are closed (i.e. the container
-    exits), ensuring no trailing output is lost.
-    """
-
-    def _emit(line: str, stream_name: str) -> None:
-        level = logging.WARNING if stream_name == "stderr" else logging.INFO
-        logger.log(level, line, extra={"flowmesh_stream": stream_name})
-
-    buffers: dict[str, str] = {"stdout": "", "stderr": ""}
-    try:
-        for stdout_chunk, stderr_chunk in log_stream:
-            for raw_chunk, stream_name in (
-                (stdout_chunk, "stdout"),
-                (stderr_chunk, "stderr"),
-            ):
-                if raw_chunk is None:
-                    continue
-                text = buffers[stream_name] + raw_chunk.decode(
-                    "utf-8", errors="replace"
-                )
-                # Emit only complete lines; keep the trailing fragment.
-                if "\n" in text:
-                    *complete, remainder = text.split("\n")
-                    for line in complete:
-                        if line:
-                            _emit(line, stream_name)
-                    buffers[stream_name] = remainder
-                else:
-                    buffers[stream_name] = text
-    except Exception:
-        logger.debug("Container log stream ended", exc_info=True)
-
-    # Flush any unterminated remainder.
-    for stream_name, leftover in buffers.items():
-        if leftover:
-            _emit(leftover, stream_name)
 
 
 def _decode_exec_output(raw: Any) -> str:

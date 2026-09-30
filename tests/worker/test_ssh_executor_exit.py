@@ -22,7 +22,6 @@ from worker.executors import ssh_executor as ssh_module
 from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.ssh_executor import SSHExecutor
 from worker.executors.ssh_session import DockerSessionBackend
-from worker.executors.ssh_session.backends import docker as docker_module
 from worker.executors.ssh_session.backends.docker import DockerSession, SSHMountPlan
 
 _TASK_ID = "tsk-ssh-exit"
@@ -139,7 +138,7 @@ def _run(
             return_value=(container, None),
             side_effect=start_failure,
         ),
-        patch.object(docker_module, "_stream_container_logs", side_effect=stream_logs),
+        patch.object(DockerSession, "_stream_container_logs", side_effect=stream_logs),
         patch.object(
             DockerSession,
             "save_logs",
@@ -152,7 +151,7 @@ def _run(
             autospec=True,
             side_effect=DockerSession.collect_output if copy else None,
         ),
-        patch.object(docker_module, "_cleanup_mount_plan") as cleanup,
+        patch.object(DockerSessionBackend, "_cleanup_mount_plan") as cleanup,
         patch.object(ex, "emit_update"),
         patch.object(ssh_module, "maybe_upload_artifacts"),
     ):

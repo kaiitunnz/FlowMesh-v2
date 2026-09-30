@@ -108,9 +108,9 @@ def _run(
         patch.object(backend, "_build_environment", return_value={}),
         patch.object(backend, "_build_run_kwargs", return_value={}),
         patch.object(backend, "_start_container", start),
-        patch.object(docker_module, "_stream_container_logs", side_effect=stream_logs),
+        patch.object(DockerSession, "_stream_container_logs", side_effect=stream_logs),
         patch.object(DockerSession, "save_logs"),
-        patch.object(docker_module, "_cleanup_mount_plan"),
+        patch.object(DockerSessionBackend, "_cleanup_mount_plan"),
         patch.object(ex, "emit_update"),
         patch.object(ssh_module, "maybe_upload_artifacts"),
     ):

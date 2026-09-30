@@ -43,7 +43,7 @@ def _worker_config(
     return make_live_worker_config(tmp_path, ssh_network_name=ssh_network_name)
 
 
-def _make_executor(
+def _make_backend(
     tmp_path: Path, ssh_network_name: str | None = _SSH_NETWORK_NAME
 ) -> DockerSessionBackend:
     return DockerSessionBackend(_worker_config(tmp_path, ssh_network_name))
@@ -68,11 +68,11 @@ def _mock_net(
 
 class TestEnsureSshNetwork:
     def test_creates_network_with_icc_disabled(self, tmp_path: Path) -> None:
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = MagicMock()
         client.networks.list.return_value = []
 
-        result = executor._ensure_ssh_network(client)
+        result = backend._ensure_ssh_network(client)
 
         assert result == _SSH_NETWORK_NAME
         client.networks.create.assert_called_once()
@@ -82,31 +82,31 @@ class TestEnsureSshNetwork:
         assert kwargs["labels"]["flowmesh.ssh.managed"] == "true"
 
     def test_reuses_existing_managed_network(self, tmp_path: Path) -> None:
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = MagicMock()
         client.networks.list.return_value = [_mock_net()]
 
-        result = executor._ensure_ssh_network(client)
+        result = backend._ensure_ssh_network(client)
 
         assert result == _SSH_NETWORK_NAME
         client.networks.create.assert_not_called()
 
     def test_does_not_reuse_unmanaged_network(self, tmp_path: Path) -> None:
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = MagicMock()
         client.networks.list.return_value = [_mock_net(managed="false")]
 
-        result = executor._ensure_ssh_network(client)
+        result = backend._ensure_ssh_network(client)
 
         assert result == _SSH_NETWORK_NAME
         client.networks.create.assert_called_once()
 
     def test_does_not_reuse_network_without_labels(self, tmp_path: Path) -> None:
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = MagicMock()
         client.networks.list.return_value = [_mock_net(has_labels=False)]
 
-        result = executor._ensure_ssh_network(client)
+        result = backend._ensure_ssh_network(client)
 
         assert result == _SSH_NETWORK_NAME
         client.networks.create.assert_called_once()
@@ -114,13 +114,13 @@ class TestEnsureSshNetwork:
     def test_ignores_partial_name_match(self, tmp_path: Path) -> None:
         """Docker networks.list(names=...) does substring matching;
         we must verify the exact name."""
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = MagicMock()
         client.networks.list.return_value = [
             _mock_net(name=f"{_SSH_NETWORK_NAME}_other")
         ]
 
-        result = executor._ensure_ssh_network(client)
+        result = backend._ensure_ssh_network(client)
 
         assert result == _SSH_NETWORK_NAME
         client.networks.create.assert_called_once()
@@ -128,42 +128,42 @@ class TestEnsureSshNetwork:
     def test_returns_none_when_ssh_network_name_not_configured(
         self, tmp_path: Path
     ) -> None:
-        executor = _make_executor(tmp_path, ssh_network_name=None)
+        backend = _make_backend(tmp_path, ssh_network_name=None)
         client = MagicMock()
 
-        result = executor._ensure_ssh_network(client)
+        result = backend._ensure_ssh_network(client)
 
         assert result is None
         client.networks.list.assert_not_called()
         client.networks.create.assert_not_called()
 
     def test_returns_none_on_create_failure(self, tmp_path: Path) -> None:
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = MagicMock()
         client.networks.list.return_value = []
         client.networks.create.side_effect = RuntimeError("permission denied")
 
-        result = executor._ensure_ssh_network(client)
+        result = backend._ensure_ssh_network(client)
 
         assert result is None
 
     def test_returns_none_on_list_and_create_failure(self, tmp_path: Path) -> None:
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = MagicMock()
         client.networks.list.side_effect = RuntimeError("docker down")
         client.networks.create.side_effect = RuntimeError("docker down")
 
-        result = executor._ensure_ssh_network(client)
+        result = backend._ensure_ssh_network(client)
 
         assert result is None
 
     def test_network_is_not_internal(self, tmp_path: Path) -> None:
         """The network must allow outbound internet (internal=False is default)."""
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = MagicMock()
         client.networks.list.return_value = []
 
-        executor._ensure_ssh_network(client)
+        backend._ensure_ssh_network(client)
 
         _, kwargs = client.networks.create.call_args
         assert kwargs.get("internal") is not True
@@ -179,38 +179,38 @@ class TestPrepareCreatesNetwork:
     def test_prepare_sets_ssh_network(
         self, mock_docker_client: MagicMock, tmp_path: Path
     ) -> None:
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = mock_docker_client.return_value
         client.networks.list.return_value = []
 
-        executor.prepare()
+        backend.prepare()
 
-        assert executor._ssh_network == _SSH_NETWORK_NAME
+        assert backend._ssh_network == _SSH_NETWORK_NAME
         client.networks.create.assert_called_once()
 
     @patch("worker.executors.ssh_session.backends.docker.docker_client")
     def test_prepare_graceful_fallback(
         self, mock_docker_client: MagicMock, tmp_path: Path
     ) -> None:
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = mock_docker_client.return_value
         client.networks.list.return_value = []
         client.networks.create.side_effect = RuntimeError("no perms")
 
-        executor.prepare()
+        backend.prepare()
 
-        assert executor._ssh_network is None
+        assert backend._ssh_network is None
 
     @patch("worker.executors.ssh_session.backends.docker.docker_client")
     def test_prepare_skips_network_when_not_configured(
         self, mock_docker_client: MagicMock, tmp_path: Path
     ) -> None:
-        executor = _make_executor(tmp_path, ssh_network_name=None)
+        backend = _make_backend(tmp_path, ssh_network_name=None)
         client = mock_docker_client.return_value
 
-        executor.prepare()
+        backend.prepare()
 
-        assert executor._ssh_network is None
+        assert backend._ssh_network is None
         client.networks.list.assert_not_called()
         client.networks.create.assert_not_called()
 
@@ -222,10 +222,10 @@ class TestPrepareCreatesNetwork:
 
 class TestBuildRunKwargsNetwork:
     def test_includes_network_when_set(self, tmp_path: Path) -> None:
-        executor = _make_executor(tmp_path)
-        executor._ssh_network = _SSH_NETWORK_NAME
+        backend = _make_backend(tmp_path)
+        backend._ssh_network = _SSH_NETWORK_NAME
 
-        kwargs = executor._build_run_kwargs(
+        kwargs = backend._build_run_kwargs(
             _ssh_config(),
             container_name="worker-1_ssh-task-1234",
             environment={},
@@ -239,10 +239,10 @@ class TestBuildRunKwargsNetwork:
         assert kwargs["network"] == _SSH_NETWORK_NAME
 
     def test_omits_network_when_none(self, tmp_path: Path) -> None:
-        executor = _make_executor(tmp_path)
-        executor._ssh_network = None
+        backend = _make_backend(tmp_path)
+        backend._ssh_network = None
 
-        kwargs = executor._build_run_kwargs(
+        kwargs = backend._build_run_kwargs(
             _ssh_config(),
             container_name="worker-1_ssh-task-1234",
             environment={},
@@ -256,10 +256,10 @@ class TestBuildRunKwargsNetwork:
         assert "network" not in kwargs
 
     def test_security_opt_always_present(self, tmp_path: Path) -> None:
-        executor = _make_executor(tmp_path)
-        executor._ssh_network = _SSH_NETWORK_NAME
+        backend = _make_backend(tmp_path)
+        backend._ssh_network = _SSH_NETWORK_NAME
 
-        kwargs = executor._build_run_kwargs(
+        kwargs = backend._build_run_kwargs(
             _ssh_config(),
             container_name="c",
             environment={},
@@ -284,12 +284,12 @@ class TestTeardownSkipsNetwork:
         self, mock_docker_client: MagicMock, tmp_path: Path
     ) -> None:
         """Network cleanup is the supervisor's responsibility, not the worker's."""
-        executor = _make_executor(tmp_path)
+        backend = _make_backend(tmp_path)
         client = mock_docker_client.return_value
         client.containers.list.return_value = []
 
-        executor._ssh_network = _SSH_NETWORK_NAME
-        executor.teardown("worker-1")
+        backend._ssh_network = _SSH_NETWORK_NAME
+        backend.teardown("worker-1")
 
         # teardown should only list containers (for stopping), never networks.
         for call in client.networks.method_calls:

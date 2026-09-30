@@ -1,4 +1,4 @@
-"""Tests for non-interactive SSH executor behaviour."""
+"""Tests for non-interactive SSH backend behaviour."""
 
 import io
 import logging
@@ -103,12 +103,12 @@ class TestSSHConfigFromSpec:
 
 
 class TestResolveNoninteractiveCommand:
-    def _make_executor(self, tmp_path: Path) -> DockerSessionBackend:
+    def _make_backend(self, tmp_path: Path) -> DockerSessionBackend:
         cfg = make_live_worker_config(tmp_path)
         return DockerSessionBackend(cfg)
 
     def test_command_only(self, tmp_path: Path) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         cfg = SSHConfig.from_spec(
             SSHSpecStrict.model_validate(
                 {
@@ -120,11 +120,11 @@ class TestResolveNoninteractiveCommand:
             DEFAULT_WORKER_CONFIG,
         )
         client = MagicMock()
-        result = executor._resolve_noninteractive_command(client, cfg, RunSignals())
+        result = backend._resolve_noninteractive_command(client, cfg, RunSignals())
         assert result == ["python", "train.py"]
 
     def test_entrypoint_only(self, tmp_path: Path) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         cfg = SSHConfig.from_spec(
             SSHSpecStrict.model_validate(
                 {
@@ -136,11 +136,11 @@ class TestResolveNoninteractiveCommand:
             DEFAULT_WORKER_CONFIG,
         )
         client = MagicMock()
-        result = executor._resolve_noninteractive_command(client, cfg, RunSignals())
+        result = backend._resolve_noninteractive_command(client, cfg, RunSignals())
         assert result == ["/run.sh"]
 
     def test_entrypoint_and_command(self, tmp_path: Path) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         cfg = SSHConfig.from_spec(
             SSHSpecStrict.model_validate(
                 {
@@ -153,11 +153,11 @@ class TestResolveNoninteractiveCommand:
             DEFAULT_WORKER_CONFIG,
         )
         client = MagicMock()
-        result = executor._resolve_noninteractive_command(client, cfg, RunSignals())
+        result = backend._resolve_noninteractive_command(client, cfg, RunSignals())
         assert result == ["/bin/bash", "-c", "echo hello"]
 
     def test_neither_inspects_image(self, tmp_path: Path) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         cfg = SSHConfig.from_spec(
             SSHSpecStrict.model_validate(
                 {
@@ -177,12 +177,12 @@ class TestResolveNoninteractiveCommand:
         }
         client = MagicMock()
         client.images.get.return_value = mock_image
-        result = executor._resolve_noninteractive_command(client, cfg, RunSignals())
+        result = backend._resolve_noninteractive_command(client, cfg, RunSignals())
         assert result == ["/usr/bin/myapp", "--serve"]
         client.images.get.assert_called_once_with("myimg:latest")
 
     def test_neither_set_no_image_entrypoint_raises(self, tmp_path: Path) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         cfg = SSHConfig.from_spec(
             SSHSpecStrict.model_validate(
                 {
@@ -198,7 +198,7 @@ class TestResolveNoninteractiveCommand:
         client = MagicMock()
         client.images.get.return_value = mock_image
         with pytest.raises(Exception, match="no Entrypoint or Cmd"):
-            executor._resolve_noninteractive_command(client, cfg, RunSignals())
+            backend._resolve_noninteractive_command(client, cfg, RunSignals())
 
 
 # ------------------------------------------------------------------ #
@@ -207,13 +207,13 @@ class TestResolveNoninteractiveCommand:
 
 
 class TestBuildEnvironment:
-    def _make_executor(self, tmp_path: Path) -> DockerSessionBackend:
+    def _make_backend(self, tmp_path: Path) -> DockerSessionBackend:
         cfg = make_live_worker_config(tmp_path)
         return DockerSessionBackend(cfg)
 
     def test_interactive_includes_ssh_vars(self, tmp_path: Path) -> None:
-        executor = self._make_executor(tmp_path)
-        env = executor._build_environment(
+        backend = self._make_backend(tmp_path)
+        env = backend._build_environment(
             "flowmesh",
             ["ssh-rsa AAAA..."],
             {},
@@ -226,8 +226,8 @@ class TestBuildEnvironment:
         assert "SSH_UID" in env
 
     def test_noninteractive_omits_ssh_vars(self, tmp_path: Path) -> None:
-        executor = self._make_executor(tmp_path)
-        env = executor._build_environment(
+        backend = self._make_backend(tmp_path)
+        env = backend._build_environment(
             "flowmesh",
             ["ssh-rsa AAAA..."],
             {"MY_VAR": "val"},
@@ -244,8 +244,8 @@ class TestBuildEnvironment:
     def test_cuda_visible_devices_normalized_to_slice_count(
         self, tmp_path: Path
     ) -> None:
-        executor = self._make_executor(tmp_path)
-        env = executor._build_environment(
+        backend = self._make_backend(tmp_path)
+        env = backend._build_environment(
             "flowmesh",
             [],
             {},
@@ -259,8 +259,8 @@ class TestBuildEnvironment:
     def test_cuda_visible_devices_absent_when_no_gpu_slice(
         self, tmp_path: Path
     ) -> None:
-        executor = self._make_executor(tmp_path)
-        env = executor._build_environment(
+        backend = self._make_backend(tmp_path)
+        env = backend._build_environment(
             "flowmesh",
             [],
             {},
@@ -308,7 +308,7 @@ def _build_ssh_config(
 
 
 class TestBuildRunKwargs:
-    def _make_executor(
+    def _make_backend(
         self, tmp_path: Path, docker_gpu_runtime: str | None = None
     ) -> DockerSessionBackend:
         cfg = make_live_worker_config(tmp_path, docker_gpu_runtime=docker_gpu_runtime)
@@ -317,8 +317,8 @@ class TestBuildRunKwargs:
     def test_noninteractive_injects_wrapper_entrypoint_and_command(
         self, tmp_path: Path
     ) -> None:
-        executor = self._make_executor(tmp_path)
-        kwargs = executor._build_run_kwargs(
+        backend = self._make_backend(tmp_path)
+        kwargs = backend._build_run_kwargs(
             _build_ssh_config(),
             container_name="worker-1_ssh-task-1234",
             environment={},
@@ -334,8 +334,8 @@ class TestBuildRunKwargs:
     def test_interactive_does_not_override_image_entrypoint(
         self, tmp_path: Path
     ) -> None:
-        executor = self._make_executor(tmp_path)
-        kwargs = executor._build_run_kwargs(
+        backend = self._make_backend(tmp_path)
+        kwargs = backend._build_run_kwargs(
             _build_ssh_config(),
             container_name="worker-1_ssh-task-1234",
             environment={},
@@ -351,7 +351,7 @@ class TestBuildRunKwargs:
     def test_gpu_run_kwargs_omit_runtime_when_not_configured(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         fake_device_request = MagicMock(name="device_request")
         monkeypatch.setattr(
             docker_module,
@@ -359,7 +359,7 @@ class TestBuildRunKwargs:
             MagicMock(return_value=fake_device_request),
         )
 
-        kwargs = executor._build_run_kwargs(
+        kwargs = backend._build_run_kwargs(
             _build_ssh_config(gpu_device_ids=["0"]),
             container_name="worker-1_ssh-task-1234",
             environment={},
@@ -376,7 +376,7 @@ class TestBuildRunKwargs:
     def test_gpu_run_kwargs_include_configured_runtime(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        executor = self._make_executor(tmp_path, docker_gpu_runtime="nvidia")
+        backend = self._make_backend(tmp_path, docker_gpu_runtime="nvidia")
         fake_device_request = MagicMock(name="device_request")
         monkeypatch.setattr(
             docker_module,
@@ -384,7 +384,7 @@ class TestBuildRunKwargs:
             MagicMock(return_value=fake_device_request),
         )
 
-        kwargs = executor._build_run_kwargs(
+        kwargs = backend._build_run_kwargs(
             _build_ssh_config(gpu_device_ids=["0"]),
             container_name="worker-1_ssh-task-1234",
             environment={},
@@ -404,8 +404,8 @@ class TestBuildRunKwargs:
         # Even if WORKER_HOST_GPU_ID is set in env, an empty slice on the
         # config (e.g. CPU-only task) must not emit a device_requests kwarg.
         monkeypatch.setenv("WORKER_HOST_GPU_ID", "0,1")
-        executor = self._make_executor(tmp_path)
-        kwargs = executor._build_run_kwargs(
+        backend = self._make_backend(tmp_path)
+        kwargs = backend._build_run_kwargs(
             _build_ssh_config(),
             container_name="worker-1_ssh-task-1234",
             environment={},
@@ -418,8 +418,8 @@ class TestBuildRunKwargs:
         assert "device_requests" not in kwargs
 
     def test_resource_limits_absent_when_unset(self, tmp_path: Path) -> None:
-        executor = self._make_executor(tmp_path)
-        kwargs = executor._build_run_kwargs(
+        backend = self._make_backend(tmp_path)
+        kwargs = backend._build_run_kwargs(
             _build_ssh_config(),
             container_name="worker-1_ssh-task-1234",
             environment={},
@@ -434,8 +434,8 @@ class TestBuildRunKwargs:
         assert "pids_limit" not in kwargs
 
     def test_resource_limits_applied(self, tmp_path: Path) -> None:
-        executor = self._make_executor(tmp_path)
-        kwargs = executor._build_run_kwargs(
+        backend = self._make_backend(tmp_path)
+        kwargs = backend._build_run_kwargs(
             _build_ssh_config(
                 cpu_limit=2.5,
                 memory_limit_bytes=8 * 1024**3,
@@ -455,15 +455,15 @@ class TestBuildRunKwargs:
 
 
 class TestNoninteractiveContainerStartup:
-    def _make_executor(self, tmp_path: Path) -> DockerSessionBackend:
+    def _make_backend(self, tmp_path: Path) -> DockerSessionBackend:
         cfg = make_live_worker_config(tmp_path)
         return DockerSessionBackend(cfg)
 
     def test_build_ssh_run_archive_contains_executable_script(
         self, tmp_path: Path
     ) -> None:
-        executor = self._make_executor(tmp_path)
-        archive_bytes = executor._build_ssh_run_archive()
+        backend = self._make_backend(tmp_path)
+        archive_bytes = backend._build_ssh_run_archive()
         with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as tar:
             member = tar.getmember(_SSH_RUN_ENTRYPOINT_PATH.lstrip("/"))
             extracted = tar.extractfile(member)
@@ -475,14 +475,14 @@ class TestNoninteractiveContainerStartup:
     def test_create_and_start_noninteractive_container_injects_before_start(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         monkeypatch.setattr(docker_module, "Container", MagicMock)
         container = MagicMock()
         client = MagicMock()
         client.containers.create.return_value = container
         kwargs = {"image": "myimg:latest", "entrypoint": [_SSH_RUN_ENTRYPOINT_PATH]}
 
-        result, log_stream = executor._start_container(
+        result, log_stream = backend._start_container(
             client, kwargs, False, RunSignals()
         )
 
@@ -499,7 +499,7 @@ class TestNoninteractiveContainerStartup:
     def test_create_and_start_noninteractive_container_cleans_up_on_injection_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         monkeypatch.setattr(docker_module, "Container", MagicMock)
         container = MagicMock()
         container.put_archive.side_effect = RuntimeError("boom")
@@ -507,7 +507,7 @@ class TestNoninteractiveContainerStartup:
         client.containers.create.return_value = container
 
         with pytest.raises(Exception, match="initialize non-interactive container"):
-            executor._start_container(client, {"image": "x"}, False, RunSignals())
+            backend._start_container(client, {"image": "x"}, False, RunSignals())
 
         container.start.assert_not_called()
         container.remove.assert_called_once_with(force=True)
@@ -516,14 +516,14 @@ class TestNoninteractiveContainerStartup:
     def test_pulls_a_missing_image_before_starting(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interactive: bool
     ) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         monkeypatch.setattr(docker_module, "Container", MagicMock)
         container = MagicMock()
         client = MagicMock()
         client.images.get.side_effect = NotFound("No such image: myimg:latest")
         client.containers.create.return_value = container
 
-        result, _ = executor._start_container(
+        result, _ = backend._start_container(
             client, {"image": "myimg:latest"}, interactive, RunSignals()
         )
 
@@ -538,7 +538,7 @@ class TestNoninteractiveContainerStartup:
     def test_pulls_an_image_that_went_missing_before_the_create(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interactive: bool
     ) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         monkeypatch.setattr(docker_module, "Container", MagicMock)
         container = MagicMock()
         client = MagicMock()
@@ -553,7 +553,7 @@ class TestNoninteractiveContainerStartup:
         ]
         client.api.pull.return_value = (line for line in [{"status": "done"}])
 
-        result, _ = executor._start_container(
+        result, _ = backend._start_container(
             client, {"image": "myimg:latest"}, interactive, RunSignals()
         )
 
@@ -568,7 +568,7 @@ class TestNoninteractiveContainerStartup:
     def test_removes_a_container_whose_start_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interactive: bool
     ) -> None:
-        executor = self._make_executor(tmp_path)
+        backend = self._make_backend(tmp_path)
         monkeypatch.setattr(docker_module, "Container", MagicMock)
         container = MagicMock()
         container.start.side_effect = APIError("could not select device driver")
@@ -576,7 +576,7 @@ class TestNoninteractiveContainerStartup:
         client.containers.create.return_value = container
 
         with pytest.raises(ExecutionError, match="could not select device driver"):
-            executor._start_container(client, {"image": "x"}, interactive, RunSignals())
+            backend._start_container(client, {"image": "x"}, interactive, RunSignals())
 
         container.remove.assert_called_once_with(force=True)
 
@@ -599,7 +599,7 @@ class TestStreamContainerLogs:
         )
 
         with caplog.at_level(logging.DEBUG, logger=docker_module.__name__):
-            docker_module._stream_container_logs(log_stream)
+            DockerSession._stream_container_logs(log_stream)
         messages = [
             r.message for r in caplog.records if r.name == docker_module.__name__
         ]
@@ -625,7 +625,7 @@ class TestStreamContainerLogs:
         )
 
         with caplog.at_level(logging.DEBUG, logger=docker_module.__name__):
-            docker_module._stream_container_logs(log_stream)
+            DockerSession._stream_container_logs(log_stream)
 
         levels = {
             r.message: r.levelno
@@ -646,7 +646,7 @@ class TestStreamContainerLogs:
         )
 
         with caplog.at_level(logging.DEBUG, logger=docker_module.__name__):
-            docker_module._stream_container_logs(log_stream)
+            DockerSession._stream_container_logs(log_stream)
 
         messages = [
             r.message for r in caplog.records if r.name == docker_module.__name__
@@ -665,7 +665,7 @@ class TestStreamContainerLogs:
         )
 
         with caplog.at_level(logging.DEBUG, logger=docker_module.__name__):
-            docker_module._stream_container_logs(log_stream)
+            DockerSession._stream_container_logs(log_stream)
 
         messages = [
             r.message for r in caplog.records if r.name == docker_module.__name__
@@ -685,7 +685,7 @@ class TestStreamContainerLogs:
         )
 
         with caplog.at_level(logging.DEBUG, logger=docker_module.__name__):
-            docker_module._stream_container_logs(log_stream)
+            DockerSession._stream_container_logs(log_stream)
 
         messages = [
             r.message for r in caplog.records if r.name == docker_module.__name__
@@ -702,7 +702,7 @@ class TestStreamContainerLogs:
         log_stream = _exploding_attach()
 
         with caplog.at_level(logging.DEBUG):
-            docker_module._stream_container_logs(log_stream)
+            DockerSession._stream_container_logs(log_stream)
 
         messages = [
             r.message for r in caplog.records if r.name == docker_module.__name__
