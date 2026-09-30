@@ -123,6 +123,31 @@ def test_a_worker_that_cannot_isolate_or_lock_serves_no_process_session(
         assert not ProcessSessionBackend.is_available(config)
 
 
+@pytest.mark.parametrize("missing", ["find_sshd", "find_ssh_keygen", "find_tar"])
+def test_a_worker_missing_a_tool_serves_no_process_session(
+    tmp_path: Path, missing: str
+) -> None:
+    config = make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+    with _servable(**{missing: None}):
+        assert not ProcessSessionBackend.is_available(config)
+
+
+def test_a_worker_without_the_acl_tools_cannot_isolate_a_session(
+    tmp_path: Path,
+) -> None:
+    with patch.object(process_module.acl, "tools_available", return_value=False):
+        assert not process_module._acl_ready(make_live_worker_config(tmp_path))
+
+
+def test_a_state_dir_someone_else_owns_is_refused(tmp_path: Path) -> None:
+    if os.getuid() == 0:
+        pytest.skip("root owns what it creates")
+    (tmp_path / "state").mkdir()
+
+    with pytest.raises(ExecutionError, match="not a root-owned directory"):
+        process_module._make_private_dir(tmp_path / "state", 0o711)
+
+
 def test_a_root_worker_its_supervisor_cannot_reach_serves_no_process_session(
     tmp_path: Path,
 ) -> None:
