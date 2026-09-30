@@ -13,9 +13,11 @@
   under a mount root emptied before and after every session.
 * **The worker's size is the cap.** The ``SSH_MAX_CPU`` / ``MEMORY`` / ``PIDS``
   caps and the GPU subset need cgroup and device control over the worker itself,
-  so a session runs niced and first in line for the OOM killer.
+  so a session runs niced and, where the kernel honours it, preferred by the OOM
+  killer.
 """
 
+import contextlib
 import errno
 import fcntl
 import json
@@ -23,8 +25,8 @@ import logging
 import os
 import pwd
 import re
+import select
 import shutil
-import signal
 import socket
 import stat
 import subprocess
@@ -32,7 +34,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -67,6 +69,7 @@ from ..session_identity import (
     exec_as,
     interpreter_argv,
     kill_processes,
+    lock_account,
     process_identity_available,
     reap_stale_accounts,
     remove_tree,
@@ -78,12 +81,16 @@ logger = logging.getLogger(__name__)
 # On disk, beside the ACL ledger: staged inputs and output can be large.
 SESSIONS_ROOT = acl.STATE_DIR / "ssh-sessions"
 _MANIFEST_NAME = "manifest.json"
+_AUTHORIZED_KEYS_NAME = "authorized_keys"
 _SSHD_CANDIDATES = ("/usr/sbin/sshd", "/usr/local/sbin/sshd", "sshd")
 _KEYGEN_BINARY = "ssh-keygen"
 _TAR_BINARY = "tar"
 _TINI_BINARY = "tini"
 _KEYGEN_TIMEOUT_SEC = 30.0
 _TERMINATE_GRACE_SEC = 5.0
+_KILL_POLL_SEC = 0.05
+# The reader streams without pause, so this long without a byte means it is stuck.
+_ARCHIVE_IDLE_TIMEOUT_SEC = 60.0
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_VALUE_FORBIDDEN = ('"', "\\", "\n", "\r")
 _PORT_ATTEMPTS = 3
@@ -187,14 +194,15 @@ class ProcessSessionBackend(SSHSessionBackend):
                 "and SSH_RELAY_HOST is unset, so its supervisor cannot reach a session"
             )
             return False
-        if not _acl_ready(config):
-            return False
         if not _acquire_backend_lock():
             logger.info(
                 "Process SSH backend unavailable: another worker sharing this root "
                 "filesystem or %s already serves process-mode sessions",
                 acl.STATE_DIR.as_posix(),
             )
+            return False
+        if not _acl_ready(config):
+            _release_backend_lock()
             return False
         return True
 
@@ -344,7 +352,7 @@ class ProcessSessionBackend(SSHSessionBackend):
             environment["FLOWMESH_FINISH_SENTINEL"] = finish_sentinel.as_posix()
             bin_dir = _install_finish_helper(session_dir, finish_sentinel)
             environment["PATH"] = f"{bin_dir.as_posix()}:{_DEFAULT_SESSION_PATH}"
-            authorized_keys = session_dir / "authorized_keys"
+            authorized_keys = session_dir / _AUTHORIZED_KEYS_NAME
             rendered, exported = _render_authorized_keys(
                 cfg.authorized_keys, environment
             )
@@ -386,12 +394,32 @@ class ProcessSessionBackend(SSHSessionBackend):
 
 
 def ensure_state_roots(config: WorkerConfig) -> list[Path]:
-    """Return :func:`denied_roots`, creating each missing one root-owned ``0700`` so
-    a session's deny entry lands on it; raise if one cannot be denied safely."""
+    """Return :func:`denied_roots` once :func:`prepare_state_roots` has made them;
+    raise while a filesystem content store's root does not exist yet."""
+    roots = prepare_state_roots(config)
+    for root in _shared_roots(config):
+        if not os.path.lexists(root):
+            raise ExecutionError(
+                f"Refusing the SSH session: the shared content store {root} does "
+                "not exist yet",
+                retryable=True,
+            )
+    return roots
+
+
+def prepare_state_roots(config: WorkerConfig) -> list[Path]:
+    """Return :func:`denied_roots`, creating each missing one but a filesystem
+    content store's root-owned ``0700`` so a session's deny entry lands on it; raise
+    if one cannot be denied safely.
+
+    A filesystem content store is shared across nodes, so the content plane creates
+    its root.
+    """
     if problem := _state_problem(config):
         raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
+    shared = _shared_roots(config)
     for root in denied_roots(config):
-        if not os.path.lexists(root):
+        if root not in shared and not os.path.lexists(root):
             try:
                 _create_state_root(root)
             except OSError as exc:
@@ -409,6 +437,12 @@ def denied_roots(config: WorkerConfig) -> list[Path]:
     return list(
         dict.fromkeys(Path(os.path.realpath(path)) for path in _state_paths(config))
     )
+
+
+def _shared_roots(config: WorkerConfig) -> list[Path]:
+    if config.object_store.backend != BACKEND_FILESYSTEM:
+        return []
+    return [Path(os.path.realpath(config.object_store.filesystem_root))]
 
 
 def _state_paths(config: WorkerConfig) -> list[Path]:
@@ -530,11 +564,13 @@ def _acl_ready(config: WorkerConfig) -> bool:
         )
         return False
     try:
-        roots = ensure_state_roots(config)
+        roots = prepare_state_roots(config)
     except ExecutionError as exc:
         logger.info("Process SSH backend unavailable: %s", exc)
         return False
-    for root in roots:
+    # The ledger and each session's authorized_keys, which the session reads by an
+    # ACL entry, live there.
+    for root in (*roots, acl.STATE_DIR):
         try:
             acl.probe(_probe_dir(root))
         except (OSError, ExecutionError) as exc:
@@ -575,6 +611,13 @@ def _acquire_backend_lock() -> bool:
         if _backend_lock_fds is not None:
             return True
         if os.geteuid() == 0:
+            if not _root_only_dir(_RUN_DIR):
+                logger.info(
+                    "Process SSH backend unavailable: %s is not a root-owned "
+                    "directory only root can write",
+                    _RUN_DIR.as_posix(),
+                )
+                return False
             try:
                 _make_private_dir(acl.STATE_DIR, 0o711)
             except (OSError, ExecutionError):
@@ -592,6 +635,26 @@ def _acquire_backend_lock() -> bool:
             fds.append(fd)
         _backend_lock_fds = fds
         return True
+
+
+def _release_backend_lock() -> None:
+    global _backend_lock_fds
+    with _backend_lock_mutex:
+        for fd in _backend_lock_fds or ():
+            os.close(fd)
+        _backend_lock_fds = None
+
+
+def _root_only_dir(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == 0
+        and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
 
 
 def _take_lock(path: Path) -> int | None:
@@ -833,6 +896,7 @@ class ProcessSession(SSHSession):
         self._cleaned = False
         self._stop_lock = threading.Lock()
         self._collecting = False
+        self._archiver: subprocess.Popen[bytes] | None = None
 
     def login_user(self) -> str:
         return self.account.name
@@ -891,11 +955,15 @@ class ProcessSession(SSHSession):
         finally:
             with self._stop_lock:
                 self._collecting = False
+                self._archiver = None
 
     def _collect(
         self, output_path: Path, destination: Path, max_bytes: int | None
     ) -> None:
-        # The session has ended; with its processes gone the tree holds still.
+        # The session has ended. Once nothing can log in and none of its processes
+        # is left, the reader is the only one its account has, so the tree holds
+        # still.
+        self._end_logins()
         if not kill_processes(self.account.uid):
             raise ExecutionError(
                 "Could not stop the SSH session's processes to collect its output"
@@ -903,20 +971,24 @@ class ProcessSession(SSHSession):
         self._signals.raise_if_cancelled()
         destination.mkdir(parents=True, exist_ok=True)
         archiver = _archive_as(self.account, output_path)
-        assert (archive := archiver.stdout) is not None
+        with self._stop_lock:
+            self._archiver = archiver
         finished = False
         try:
+            self._signals.raise_if_cancelled()
             extract_output_archive(
-                iter(lambda: archive.read(_COPY_CHUNK), b""),
+                _read_archive(archiver),
                 destination,
                 max_bytes,
                 self._signals.raise_if_cancelled,
             )
             finished = True
         except (OSError, tarfile.TarError) as exc:
+            self._signals.raise_if_cancelled()
             raise ExecutionError(f"Failed to collect SSH output: {exc}") from exc
         finally:
             code = _end_archiver(archiver, finished)
+        self._signals.raise_if_cancelled()
         if code is not None and code < 0:
             raise ExecutionError(
                 f"Reading the SSH output was killed by signal {-code}, so the output "
@@ -924,11 +996,17 @@ class ProcessSession(SSHSession):
             )
 
     def stop(self, timeout_sec: float) -> None:
-        # The session's own processes go first, while sshd's subreaper still lives
-        # to reap what they leave; those forked while sshd stops go after it. While
-        # its output is collected, the only one left is the reader.
+        # While the output is collected, the only process left is the reader: a
+        # stop lets it finish and a cancel kills it. Otherwise the session's own
+        # processes go first, while sshd's subreaper still lives to reap what they
+        # leave; those forked while sshd ends go after it.
+        with self._stop_lock:
+            if self._collecting:
+                if self._signals.cancelled and self._archiver is not None:
+                    self._archiver.kill()
+                return
         self._kill_unless_collecting()
-        _terminate(self._process, timeout_sec)
+        _end_sshd(self._process)
         self._kill_unless_collecting()
 
     def _kill_unless_collecting(self) -> None:
@@ -936,10 +1014,23 @@ class ProcessSession(SSHSession):
             if not self._collecting:
                 kill_processes(self.account.uid)
 
+    def _end_logins(self) -> None:
+        """Bar the account from logging in, then end sshd and every connection it
+        holds, so no process of the session starts from here on."""
+        try:
+            (self._session_dir / _AUTHORIZED_KEYS_NAME).unlink(missing_ok=True)
+        except OSError as exc:
+            raise ExecutionError(
+                f"Could not bar logins to the SSH session to collect its output: {exc}"
+            ) from exc
+        lock_account(self.account.name)
+        _end_sshd(self._process)
+
     def cleanup(self) -> None:
-        if self._cleaned:
-            return
-        self._cleaned = True
+        with self._stop_lock:
+            if self._cleaned:
+                return
+            self._cleaned = True
         clean = False
         try:
             clean = _discard_session(self._process, self.account, self._session_dir)
@@ -989,8 +1080,8 @@ def reap_session(session_dir: Path) -> bool:
     """
     config_path = (session_dir / "sshd_config").as_posix()
     for proc in psutil.process_iter():
-        if _is_our_sshd(proc.pid, config_path):
-            _kill_tree(proc.pid)
+        if _is_our_sshd(proc, config_path):
+            _kill_tree(proc)
     manifest = SessionManifest.read(session_dir)
     if manifest is not None:
         try:
@@ -1004,37 +1095,66 @@ def reap_session(session_dir: Path) -> bool:
     return True
 
 
-def _is_our_sshd(pid: int, config_path: str) -> bool:
-    """Return whether ``pid`` runs the sshd started with ``config_path``, directly
-    or under its subreaper, so a recycled pid is never signalled.
-
-    sshd rewrites its process title, so the command line is read as one string.
-    """
+def _is_our_sshd(proc: psutil.Process, config_path: str) -> bool:
+    """Return whether ``proc`` runs the sshd started with ``config_path``, directly
+    or under its subreaper."""
     try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
+        args = proc.cmdline()
+    except psutil.Error:
         return False
-    args = cmdline.split(b"\0")
     runs_sshd = any(
-        os.path.basename(arg) == b"sshd" or arg.startswith(b"sshd:") for arg in args
+        os.path.basename(arg) == "sshd" or arg.startswith("sshd:") for arg in args
     )
-    return runs_sshd and config_path.encode() in cmdline
+    return runs_sshd and config_path in args
 
 
-def _kill_tree(pid: int) -> None:
-    """SIGKILL ``pid`` and every process below it, since a subreaper's child outlives
-    the subreaper's SIGKILL."""
+def _end_sshd(process: subprocess.Popen[bytes]) -> None:
+    """SIGKILL sshd, its subreaper and every connection process below them, so none
+    outlives the session to log in to it later."""
+    if process.poll() is not None:
+        return
     try:
-        root = psutil.Process(pid)
-        victims = [*root.children(recursive=True), root]
+        root = psutil.Process(process.pid)
     except psutil.Error:
         return
-    for proc in victims:
+    _kill_tree(root)
+    try:
+        process.wait(timeout=_TERMINATE_GRACE_SEC)
+    except subprocess.TimeoutExpired:
+        logger.warning("sshd did not exit after SIGKILL")
+
+
+def _kill_tree(root: psutil.Process) -> None:
+    """SIGKILL ``root`` and every process below it.
+
+    ``root`` is stopped first so it starts nothing new, and what is below it is
+    killed round after round, since a subreaper adopts what a killed process
+    leaves; ``root`` goes last. A psutil process signals only the process it was
+    made for, never a recycled pid.
+    """
+    with contextlib.suppress(psutil.Error):
+        root.suspend()
+    deadline = time.monotonic() + _TERMINATE_GRACE_SEC
+    while time.monotonic() < deadline:
         try:
-            proc.send_signal(signal.SIGKILL)
+            victims = [p for p in root.children(recursive=True) if _is_live(p)]
         except psutil.Error:
-            continue
-    psutil.wait_procs(victims, timeout=_TERMINATE_GRACE_SEC)
+            break
+        if not victims:
+            break
+        for proc in victims:
+            with contextlib.suppress(psutil.Error):
+                proc.kill()
+        time.sleep(_KILL_POLL_SEC)
+    with contextlib.suppress(psutil.Error):
+        root.kill()
+
+
+def _is_live(proc: psutil.Process) -> bool:
+    try:
+        return proc.status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
 
 
 def _make_private_dir(path: Path, mode: int) -> None:
@@ -1081,6 +1201,24 @@ def _archive_as(account: SessionAccount, source: Path) -> subprocess.Popen[bytes
         raise ExecutionError(f"Failed to read the SSH output: {exc}") from exc
 
 
+def _read_archive(archiver: subprocess.Popen[bytes]) -> Iterator[bytes]:
+    """Yield what ``archiver`` writes until it closes its output, raising once it
+    writes nothing for ``_ARCHIVE_IDLE_TIMEOUT_SEC``."""
+    assert (stream := archiver.stdout) is not None
+    fd = stream.fileno()
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    while True:
+        if not poller.poll(_ARCHIVE_IDLE_TIMEOUT_SEC * 1000):
+            raise ExecutionError(
+                "Reading the SSH output made no progress for "
+                f"{_ARCHIVE_IDLE_TIMEOUT_SEC:g}s"
+            )
+        if not (chunk := os.read(fd, _COPY_CHUNK)):
+            return
+        yield chunk
+
+
 def _end_archiver(archiver: subprocess.Popen[bytes], finished: bool) -> int | None:
     """Stop the archiving child and return its exit code, or ``None`` when this had
     to kill it.
@@ -1092,7 +1230,7 @@ def _end_archiver(archiver: subprocess.Popen[bytes], finished: bool) -> int | No
     code: int | None = None
     try:
         if finished:
-            while stream.read(_COPY_CHUNK):
+            for _ in _read_archive(archiver):
                 pass
             try:
                 code = archiver.wait(timeout=_TERMINATE_GRACE_SEC)
@@ -1122,7 +1260,7 @@ def _discard_session(
     account are gone."""
     steps: list[Callable[[], Any]] = []
     if process is not None:
-        steps.append(lambda: _terminate(process, _TERMINATE_GRACE_SEC))
+        steps.append(lambda: _end_sshd(process))
     if account is not None:
         steps.append(account.release)
     clean = True
@@ -1135,20 +1273,6 @@ def _discard_session(
     _clear_mount_root()
     remove_tree(session_dir)
     return clean
-
-
-def _terminate(process: subprocess.Popen[bytes], timeout_sec: float) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
-        _kill_tree(process.pid)
-        try:
-            process.wait(timeout=_TERMINATE_GRACE_SEC)
-        except subprocess.TimeoutExpired:
-            logger.warning("sshd did not exit after SIGKILL")
 
 
 def _start_sshd(
@@ -1222,8 +1346,8 @@ def _spawn_sshd(
 
 
 def _launch_argv(argv: list[str]) -> list[str]:
-    """Return the command line that runs ``argv`` niced, first in line for the OOM
-    killer, and under a subreaper when ``tini`` is installed.
+    """Return the command line that runs ``argv`` niced, preferred by the OOM killer
+    where the kernel honours it, and under a subreaper when ``tini`` is installed.
 
     A runaway session then cannot starve the worker's heartbeat, and what it
     orphans is reaped whatever runs as PID 1.

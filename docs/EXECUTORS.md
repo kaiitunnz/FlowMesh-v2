@@ -414,7 +414,9 @@ filesystems behind those paths; without either, it does not offer `process`. It
 also does not offer `process` when:
 
 - another worker sharing its root filesystem or its `/var/lib/flowmesh` already
-  serves `process` sessions;
+  serves `process` sessions. A shared `/var/lib/flowmesh` must be on a
+  filesystem whose locks hold across the workers sharing it, which NFS mounted
+  `nolock` is not;
 - one of those paths contains a directory every session needs, such as the
   temp dir or `/mnt/flowmesh`;
 - a directory that resolving one of those paths passes through, links
@@ -422,8 +424,10 @@ also does not offer `process` when:
   or it is sticky and holds the next component as a directory the worker owns
   rather than a link.
 
-The deny entries do not cover files an agent tool writes directly into the temp
-dir. The worker log is readable by the worker's own account alone.
+The content plane creates a filesystem content store's root, and the worker
+refuses `process` sessions until it exists. The deny entries do not cover files
+an agent tool writes directly into the temp dir. The worker log is readable by
+the worker's own account alone.
 
 A session's inputs and output live in its own directory under
 `/var/lib/flowmesh/ssh-sessions`. Each `mountPath` is a link to them under
@@ -437,6 +441,8 @@ another one. Output is collected as the directories and regular files the
 session can read; links and special files are dropped.
 
 On either backend, a stop that lands while the output is collected lets the
-collection finish, and a cancel discards it. With `sshOutput.maxBytes` set,
-output nested more than 64 directories deep, or holding a directory the worker
-cannot open, fails the task.
+collection finish, and a cancel discards it. On the `process` backend, sshd and
+every connection it holds end and the account is barred from logging in before
+collection starts, and a reader that writes nothing for 60 seconds fails the
+task. With `sshOutput.maxBytes` set, output nested more than 64 directories
+deep, or holding a directory the worker cannot open, fails the task.

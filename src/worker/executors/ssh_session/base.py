@@ -269,7 +269,7 @@ def _iter_dir(
         except OSError as exc:
             if exc.errno in _GONE_ERRNOS:
                 continue
-            raise
+            raise OSError(exc.errno, exc.strerror, entry_path.as_posix()) from exc
         try:
             yield from _iter_dir(child_fd, entry_path, depth + 1)
         finally:

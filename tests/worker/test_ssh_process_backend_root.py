@@ -738,6 +738,118 @@ def test_a_stop_during_collection_lets_the_collection_finish(
         session.cleanup()
 
 
+# Opens the connection at once, so sshd holds it before authentication, and relays
+# nothing either way until the gate file appears.
+_GATED_RELAY = """
+import os, select, socket, sys, time
+sock = socket.create_connection(("127.0.0.1", int(sys.argv[2])))
+while not os.path.exists(sys.argv[1]):
+    time.sleep(0.01)
+sources = [0, sock.fileno()]
+while sources:
+    for fd in select.select(sources, [], [])[0]:
+        data = os.read(fd, 65536)
+        if fd == 0:
+            if data:
+                sock.sendall(data)
+            else:
+                sock.shutdown(socket.SHUT_WR)
+                sources.remove(0)
+        elif data:
+            os.write(1, data)
+        else:
+            sys.exit(0)
+"""
+# Stops the reader of the output, as a login that lands during collection could.
+_STOP_THE_READER = (
+    "for d in /proc/[0-9]*; do "
+    '[ "$(cat $d/comm 2>/dev/null)" = tar ] && kill -STOP "${d#/proc/}"; '
+    "done; sleep 600"
+)
+
+
+@pytest.mark.parametrize("stopped_first", [True, False])
+def test_a_login_held_until_collection_starts_is_refused(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path, stopped_first: bool
+) -> None:
+    backend = ProcessSessionBackend(worker)
+    session = backend.start_session(
+        _request(tmp_path, client_key, output="/mnt/flowmesh/output")
+    )
+    collected, gate = tmp_path / "collected", tmp_path / "gate"
+    relay = tmp_path / "relay.py"
+    relay.write_text(_GATED_RELAY)
+    login: subprocess.Popen[str] | None = None
+    collector: threading.Thread | None = None
+    try:
+        port = session.wait_ready(30)
+        assert port is not None
+        made = _ssh(
+            session,
+            client_key,
+            port,
+            "for i in $(seq 128); do head -c 4M /dev/urandom "
+            "> /mnt/flowmesh/output/part-$i; done",
+        )
+        assert made.returncode == 0, made.stderr
+        login = subprocess.Popen(  # nosec B603 - argv list, test-only
+            [
+                "ssh",
+                "-i",
+                client_key.as_posix(),
+                "-o",
+                f"ProxyCommand={sys.executable} {relay.as_posix()} "
+                f"{gate.as_posix()} {port}",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "BatchMode=yes",
+                f"{session.login_user()}@127.0.0.1",
+                _STOP_THE_READER,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 10
+        while (
+            session.established_connections() or 0
+        ) < 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if stopped_first:
+            session.stop(1)
+        errors: list[BaseException] = []
+
+        def collect() -> None:
+            try:
+                session.collect_output(collected, None)
+            except BaseException as exc:
+                errors.append(exc)
+
+        collector = threading.Thread(target=collect)
+        collector.start()
+        deadline = time.monotonic() + 30
+        while not any(collected.glob("part-*")) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        gate.touch()
+        collector.join(timeout=60)
+
+        assert not collector.is_alive(), "collection hung"
+        assert errors == []
+        assert len(list(collected.glob("part-*"))) == 128
+        assert login.wait(timeout=30) != 0
+    finally:
+        if login is not None:
+            login.kill()
+            login.wait()
+        session.stop(1)
+        session.cleanup()
+        if collector is not None:
+            collector.join(timeout=60)
+
+
 def test_a_session_never_widens_what_a_root_s_acl_grants(
     worker: WorkerConfig, tmp_path: Path, client_key: Path
 ) -> None:

@@ -12,12 +12,15 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import typing
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
+import psutil
 import pytest
 
 from server.supervisor.adapters.ssh import SSHConfig as SupervisorSSHConfig
@@ -96,6 +99,11 @@ def test_a_non_root_worker_without_docker_serves_no_ssh(tmp_path: Path) -> None:
         assert SSHExecutor.is_available(config) is False
 
 
+@pytest.fixture(autouse=True)
+def _no_account_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(process_module, "lock_account", MagicMock())
+
+
 def _servable(**patches: Any) -> Any:
     defaults: dict[str, Any] = {
         "process_identity_available": True,
@@ -137,6 +145,28 @@ def test_a_worker_without_the_acl_tools_cannot_isolate_a_session(
 ) -> None:
     with patch.object(process_module.acl, "tools_available", return_value=False):
         assert not process_module._acl_ready(make_live_worker_config(tmp_path))
+
+
+def test_the_filesystem_holding_the_session_state_is_probed_for_acls(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "flowmesh"
+    state.mkdir()
+    with (
+        patch.object(process_module.acl, "tools_available", return_value=True),
+        patch.object(process_module.acl, "STATE_DIR", state),
+        patch.object(
+            process_module.acl,
+            "probe",
+            side_effect=lambda path: _refuse_probe(path, state),
+        ),
+    ):
+        assert not process_module._acl_ready(_state_config(tmp_path))
+
+
+def _refuse_probe(path: Path, refused: Path) -> None:
+    if path == refused:
+        raise ExecutionError("ACL entries do not persist")
 
 
 def test_a_state_dir_someone_else_owns_is_refused(tmp_path: Path) -> None:
@@ -324,6 +354,37 @@ def test_every_missing_state_root_is_created_private_to_the_worker(
     assert set(roots) == set(process_module.denied_roots(config))
     for root in roots:
         assert root.is_dir() and stat.S_IMODE(root.stat().st_mode) == 0o700, root
+
+
+def _with_store(config: WorkerConfig, root: Path) -> WorkerConfig:
+    store = dataclasses.replace(
+        config.object_store, backend=BACKEND_FILESYSTEM, filesystem_root=root
+    )
+    return dataclasses.replace(config, object_store=store)
+
+
+def test_a_shared_store_root_is_never_created_and_refuses_sessions_until_it_exists(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "store"
+    config = _with_store(_state_config(tmp_path), store)
+
+    with (
+        patch.object(process_module.acl, "tools_available", return_value=True),
+        patch.object(process_module.acl, "probe") as probe,
+        patch.object(process_module.acl, "STATE_DIR", tmp_path / "flowmesh"),
+    ):
+        assert process_module._acl_ready(config)
+    assert not store.exists()
+    probed = [call.args[0] for call in probe.call_args_list]
+    assert tmp_path in probed and tmp_path / "results" in probed
+    with pytest.raises(ExecutionError, match="does not exist yet") as refused:
+        process_module.ensure_state_roots(config)
+    assert refused.value.retryable
+    assert not store.exists()
+
+    store.mkdir()
+    assert store in process_module.ensure_state_roots(config)
 
 
 @pytest.mark.parametrize(
@@ -585,6 +646,7 @@ def test_a_worker_sharing_the_state_dir_with_another_serves_no_session(
     monkeypatch.setattr(process_module, "_RUN_DIR", run)
     monkeypatch.setattr(process_module.acl, "STATE_DIR", state)
     monkeypatch.setattr(process_module, "_make_private_dir", lambda path, mode: None)
+    monkeypatch.setattr(process_module, "_root_only_dir", lambda path: True)
     peer = os.open(
         state / process_module._BACKEND_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600
     )
@@ -597,6 +659,36 @@ def test_a_worker_sharing_the_state_dir_with_another_serves_no_session(
 
     assert process_module._acquire_backend_lock()
     assert _lock_held_elsewhere(state / process_module._BACKEND_LOCK_NAME)
+
+
+def test_a_run_dir_another_account_can_write_takes_no_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_state: None
+) -> None:
+    monkeypatch.setattr(process_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(process_module, "_RUN_DIR", Path(tempfile.gettempdir()))
+    monkeypatch.setattr(process_module.acl, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(process_module, "_make_private_dir", lambda path, mode: None)
+
+    assert not process_module._acquire_backend_lock()
+    assert process_module._root_only_dir(Path("/"))
+    assert not process_module._root_only_dir(tmp_path)
+
+
+def test_the_lock_is_taken_before_any_state_root_is_touched(tmp_path: Path) -> None:
+    config = make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+    with (
+        _servable(_acquire_backend_lock=False),
+        patch.object(process_module, "_release_backend_lock") as release,
+    ):
+        assert not ProcessSessionBackend.is_available(config)
+        cast(MagicMock, process_module._acl_ready).assert_not_called()
+    release.assert_not_called()
+    with (
+        _servable(_acl_ready=False),
+        patch.object(process_module, "_release_backend_lock") as release,
+    ):
+        assert not ProcessSessionBackend.is_available(config)
+    release.assert_called_once_with()
 
 
 # ------------------------------------------------------------------ #
@@ -821,12 +913,12 @@ def test_a_linked_output_root_is_not_walked(tmp_path: Path) -> None:
 def test_an_output_dir_the_walk_cannot_open_fails_the_size_check(
     tmp_path: Path,
 ) -> None:
-    locked = tmp_path / "output" / "locked"
+    locked = tmp_path / "output" / "sub" / "locked"
     locked.mkdir(parents=True)
     (locked / "f").write_bytes(b"x" * 1024)
     locked.chmod(0)
     try:
-        with pytest.raises(ExecutionError, match="Permission denied"):
+        with pytest.raises(ExecutionError, match="Permission denied: 'sub/locked'"):
             path_size_bytes(tmp_path / "output")
     finally:
         locked.chmod(0o700)
@@ -1056,7 +1148,7 @@ def test_a_stop_during_collection_leaves_the_reader_running(tmp_path: Path) -> N
 
     with (
         patch.object(process_module, "kill_processes", side_effect=kill),
-        patch.object(process_module, "_terminate"),
+        patch.object(process_module, "_end_sshd"),
         patch.object(process_module, "_archive_as", return_value=_archiver("exit")),
         patch.object(process_module, "extract_output_archive", side_effect=extract),
     ):
@@ -1074,7 +1166,7 @@ def test_a_cancel_during_collection_ends_it_cancelled(tmp_path: Path) -> None:
     with (
         signals.running("tsk"),
         patch.object(process_module, "kill_processes", return_value=True),
-        patch.object(process_module, "_terminate"),
+        patch.object(process_module, "_end_sshd"),
         patch.object(process_module, "_archive_as", return_value=_archiver("exit")),
         patch.object(
             process_module,
@@ -1084,6 +1176,126 @@ def test_a_cancel_during_collection_ends_it_cancelled(tmp_path: Path) -> None:
         pytest.raises(TaskCancelledError),
     ):
         session.collect_output(tmp_path / "collected", None)
+
+
+# Writes a header promising more than it sends, then stops itself, as a reader a
+# process of the session stopped would.
+_STALLED_ARCHIVER = """
+import os, signal, sys, tarfile
+info = tarfile.TarInfo("big")
+info.size = 1 << 20
+sys.stdout.buffer.write(info.tobuf() + bytes(512))
+sys.stdout.buffer.flush()
+os.kill(os.getpid(), signal.SIGSTOP)
+"""
+
+
+def _collect_in_background(
+    session: process_module.ProcessSession, destination: Path
+) -> tuple[threading.Thread, list[BaseException]]:
+    errors: list[BaseException] = []
+
+    def collect() -> None:
+        try:
+            session.collect_output(destination, None)
+        except BaseException as exc:
+            errors.append(exc)
+
+    collector = threading.Thread(target=collect, daemon=True)
+    collector.start()
+    return collector, errors
+
+
+def _stalled_archiver() -> "subprocess.Popen[bytes]":
+    archiver = subprocess.Popen(  # nosec B603 - argv list, test-only
+        [sys.executable, "-c", _STALLED_ARCHIVER], stdout=subprocess.PIPE
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if psutil.Process(archiver.pid).status() == psutil.STATUS_STOPPED:
+            break
+        time.sleep(0.01)
+    return archiver
+
+
+def test_a_cancel_ends_a_collection_whose_reader_is_stuck(tmp_path: Path) -> None:
+    signals = RunSignals()
+    session = _session(signals, MagicMock())
+    session._output_path = tmp_path / "output"
+    archiver = _stalled_archiver()
+    try:
+        with (
+            signals.running("tsk"),
+            patch.object(process_module, "kill_processes", return_value=True),
+            patch.object(process_module, "_end_sshd"),
+            patch.object(process_module, "_archive_as", return_value=archiver),
+        ):
+            collector, errors = _collect_in_background(session, tmp_path / "c")
+            time.sleep(0.2)
+            signals.cancel("tsk")
+            session.stop(1)
+            collector.join(timeout=10)
+            assert not collector.is_alive()
+        assert [type(error) for error in errors] == [TaskCancelledError]
+    finally:
+        archiver.kill()
+        archiver.wait()
+
+
+def test_a_reader_that_writes_nothing_for_too_long_fails_the_collection_for_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(process_module, "_ARCHIVE_IDLE_TIMEOUT_SEC", 0.5)
+    session = _session(RunSignals(), MagicMock())
+    session._output_path = tmp_path / "output"
+    archiver = _stalled_archiver()
+    try:
+        with (
+            patch.object(process_module, "kill_processes", return_value=True),
+            patch.object(process_module, "_end_sshd"),
+            patch.object(process_module, "_archive_as", return_value=archiver),
+        ):
+            collector, errors = _collect_in_background(session, tmp_path / "c")
+            collector.join(timeout=10)
+            assert not collector.is_alive()
+        assert len(errors) == 1 and isinstance(errors[0], ExecutionError)
+        assert "no progress" in str(errors[0])
+        assert not errors[0].retryable
+        assert archiver.poll() == -9
+    finally:
+        archiver.kill()
+        archiver.wait()
+
+
+def test_collection_bars_logins_before_it_ends_sshd_and_the_session(
+    tmp_path: Path,
+) -> None:
+    session = _session(RunSignals(), MagicMock())
+    session._session_dir = tmp_path
+    session._output_path = tmp_path / "output"
+    keys = tmp_path / process_module._AUTHORIZED_KEYS_NAME
+    keys.write_text("key\n")
+    order: list[Any] = []
+
+    def kill(uid: int) -> bool:
+        order.append("kill")
+        return True
+
+    with (
+        patch.object(
+            process_module,
+            "lock_account",
+            side_effect=lambda name: order.append(("lock", keys.exists())),
+        ),
+        patch.object(
+            process_module, "_end_sshd", side_effect=lambda _: order.append("end")
+        ),
+        patch.object(process_module, "kill_processes", side_effect=kill),
+        patch.object(process_module, "_archive_as", return_value=_archiver("exit")),
+    ):
+        session.collect_output(tmp_path / "collected", None)
+
+    assert order == [("lock", False), "end", "kill"]
 
 
 def test_the_session_is_stopped_before_its_sshd_and_again_after() -> None:
@@ -1097,14 +1309,12 @@ def test_the_session_is_stopped_before_its_sshd_and_again_after() -> None:
     with (
         patch.object(process_module, "kill_processes", side_effect=kill),
         patch.object(
-            process_module,
-            "_terminate",
-            side_effect=lambda process, timeout: order.append("terminate"),
+            process_module, "_end_sshd", side_effect=lambda _: order.append("end")
         ),
     ):
         session.stop(1)
 
-    assert order == ["kill", "terminate", "kill"]
+    assert order == ["kill", "end", "kill"]
 
 
 @pytest.mark.parametrize("clean", [True, False])
@@ -1167,15 +1377,28 @@ def test_a_session_s_files_get_their_modes_whatever_the_umask(tmp_path: Path) ->
         process_module._write_private(tmp_path / "authorized_keys", "other\n")
 
 
-def test_an_sshd_that_ignores_a_terminate_is_killed_with_its_children() -> None:
+def test_ending_sshd_kills_its_whole_tree() -> None:
     process = MagicMock(pid=4321)
     process.poll.return_value = None
-    process.wait.side_effect = [subprocess.TimeoutExpired("sshd", 1), 0]
-    with patch.object(process_module, "_kill_tree") as kill_tree:
-        process_module._terminate(process, 1)
+    root = MagicMock()
+    with (
+        patch.object(process_module.psutil, "Process", return_value=root) as find,
+        patch.object(process_module, "_kill_tree") as kill_tree,
+    ):
+        process_module._end_sshd(process)
 
-    process.terminate.assert_called_once_with()
-    kill_tree.assert_called_once_with(4321)
+    find.assert_called_once_with(4321)
+    kill_tree.assert_called_once_with(root)
+    process.wait.assert_called_once()
+
+
+def test_an_ended_sshd_is_left_alone() -> None:
+    process = MagicMock()
+    process.poll.return_value = 0
+    with patch.object(process_module, "_kill_tree") as kill_tree:
+        process_module._end_sshd(process)
+
+    kill_tree.assert_not_called()
 
 
 def test_sshd_runs_niced_and_under_a_subreaper_when_tini_is_there(
@@ -1210,6 +1433,12 @@ def test_sshd_runs_niced_and_under_a_subreaper_when_tini_is_there(
 # ------------------------------------------------------------------ #
 
 
+def _proc_running(argv: list[str]) -> MagicMock:
+    proc = MagicMock()
+    proc.cmdline.return_value = argv
+    return proc
+
+
 def test_a_reap_kills_only_the_sshd_run_with_the_session_s_config(
     tmp_path: Path,
 ) -> None:
@@ -1217,24 +1446,21 @@ def test_a_reap_kills_only_the_sshd_run_with_the_session_s_config(
     session_dir.mkdir()
     process_module.SessionManifest(session_dir=session_dir, account="fmssn1").write()
     config = (session_dir / "sshd_config").as_posix()
-    commands = {
-        11: [b"/usr/bin/tini", b"-s", b"--", b"/usr/sbin/sshd", b"-f", config.encode()],
-        12: [b"sshd: /usr/sbin/sshd -D -e -f " + config.encode()],
-        13: [b"/usr/sbin/sshd", b"-f", b"/other/sshd_config"],
-        14: [b"python3", config.encode()],
-    }
-    tables = {pid: b"\0".join(argv) for pid, argv in commands.items()}
-
-    def read_bytes(path: Path) -> bytes:
-        return tables[int(path.parts[2])]
+    commands = [
+        ["/usr/bin/tini", "-s", "--", "/usr/sbin/sshd", "-f", config],
+        ["sshd:", "/usr/sbin/sshd", "-D", "-e", "-f", config],
+        ["/usr/sbin/sshd", "-f", "/other/sshd_config"],
+        ["python3", config],
+        ["/usr/sbin/sshd", "-f", config + ".bak"],
+    ]
+    procs = [_proc_running(argv) for argv in commands]
+    gone = MagicMock()
+    gone.cmdline.side_effect = psutil.NoSuchProcess(9)
 
     with (
         patch.object(
-            process_module.psutil,
-            "process_iter",
-            return_value=[MagicMock(pid=pid) for pid in tables],
+            process_module.psutil, "process_iter", return_value=[*procs, gone]
         ),
-        patch.object(process_module.Path, "read_bytes", read_bytes),
         patch.object(process_module, "_kill_tree") as kill,
         patch.object(
             process_module.pwd, "getpwnam", return_value=MagicMock(pw_uid=61_001)
@@ -1243,7 +1469,7 @@ def test_a_reap_kills_only_the_sshd_run_with_the_session_s_config(
     ):
         assert process_module.reap_session(session_dir)
 
-    assert [call.args for call in kill.call_args_list] == [(11,), (12,)]
+    assert [call.args for call in kill.call_args_list] == [(procs[0],), (procs[1],)]
     retire.assert_called_once_with("fmssn1", 61_001)
     assert not session_dir.exists()
 
@@ -1266,19 +1492,49 @@ def test_a_reap_keeps_a_session_whose_account_cannot_be_removed(
     assert session_dir.exists()
 
 
-def test_a_reap_kills_the_sshd_below_its_subreaper(tmp_path: Path) -> None:
+def test_a_tree_is_frozen_then_killed_from_the_bottom_up() -> None:
+    order: list[str] = []
     child = MagicMock()
-    parent = MagicMock()
-    parent.children.return_value = [child]
-    with (
-        patch.object(process_module.psutil, "Process", return_value=parent),
-        patch.object(process_module.psutil, "wait_procs") as wait,
-    ):
-        process_module._kill_tree(4321)
+    child.status.return_value = psutil.STATUS_RUNNING
+    child.kill.side_effect = lambda: order.append("child")
+    root = MagicMock()
+    root.children.side_effect = [[child], []]
+    root.suspend.side_effect = lambda: order.append("suspend")
+    root.kill.side_effect = lambda: order.append("root")
+    with patch.object(process_module.time, "sleep"):
+        process_module._kill_tree(root)
 
-    for proc in (parent, child):
-        proc.send_signal.assert_called_once_with(process_module.signal.SIGKILL)
-    wait.assert_called_once()
+    assert order == ["suspend", "child", "root"]
+
+
+def test_a_tree_s_processes_all_die(tmp_path: Path) -> None:
+    ready = tmp_path / "ready"
+    parent = subprocess.Popen(  # nosec B603 - argv list, test-only
+        [
+            sys.executable,
+            "-c",
+            "import pathlib, subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "pathlib.Path(sys.argv[1]).touch()\n"
+            "time.sleep(60)\n",
+            ready.as_posix(),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        root = psutil.Process(parent.pid)
+        (child,) = root.children()
+
+        process_module._kill_tree(root)
+
+        assert parent.wait(timeout=5) == -9
+        psutil.wait_procs([child], timeout=5)
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+    finally:
+        parent.kill()
+        parent.wait()
 
 
 def test_a_worker_serves_no_session_until_a_stuck_account_is_reaped(
@@ -1311,7 +1567,7 @@ def test_a_worker_serves_no_session_until_a_stuck_account_is_reaped(
 def test_a_recycled_pid_is_not_taken_for_the_session_sshd(tmp_path: Path) -> None:
     config = (tmp_path / "sshd_config").as_posix()
 
-    assert not process_module._is_our_sshd(os.getpid(), config)
+    assert not process_module._is_our_sshd(psutil.Process(), config)
 
 
 def test_constructing_the_backend_reaps_nothing(tmp_path: Path) -> None:
