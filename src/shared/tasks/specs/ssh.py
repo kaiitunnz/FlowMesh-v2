@@ -108,11 +108,6 @@ def _validate_inputs[T: "SSHSpecStrict | SSHSpecTemplate"](spec: T) -> T:
 
 
 class SSHSpecStrict(TaskSpecStrictBase):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *TaskSpecStrictBase.credential_fields,
-        "authorizedKeys",
-        "env",
-    )
     taskType: Literal[TaskType.SSH]
 
     interactive: bool | None = None

@@ -166,7 +166,6 @@ def _merge_key_in(key: str | None, context: dict[str, Any]) -> str | None:
 class TaskSpecStrictBase(StrictBaseModel):
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
-    credential_fields: ClassVar[tuple[str, ...]] = ("output",)
     resources: ResourcesSpec | None = None
     output: OutputSpec | None = None
     dependsOn: list[str] | None = None
@@ -259,10 +258,6 @@ type TaskSpecBase = TaskSpecStrictBase | TaskSpecTemplateBase
 
 
 class ModelSpecStrict(TaskSpecStrictBase):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *TaskSpecStrictBase.credential_fields,
-        "model",
-    )
     model: ModelConfig | None = None
 
     @property
@@ -313,12 +308,6 @@ class ModelSpecTemplate(TaskSpecTemplateBase):
 
 
 class ModelInferSpecStrict(ModelSpecStrict):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *ModelSpecStrict.credential_fields,
-        "data",
-        "inference",
-        "checkpoint",
-    )
     data: dict[str, Any] | None = None
     inference: dict[str, Any] | None = None
     checkpoint: dict[str, Any] | None = None

@@ -8,11 +8,6 @@ from .common import ModelSpecStrict, ModelSpecTemplate
 
 
 class TrainingSpecStrict(ModelSpecStrict):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *ModelSpecStrict.credential_fields,
-        "data",
-        "training",
-    )
     data: dict[str, Any] | None = None
     training: dict[str, Any] | None = None
 
@@ -28,10 +23,6 @@ class TrainingSpecTemplate(ModelSpecTemplate):
 
 
 class SFTSpecStrict(TrainingSpecStrict):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *TrainingSpecStrict.credential_fields,
-        "checkpoint",
-    )
     taskType: Literal[TaskType.SFT]
 
     checkpoint: dict[str, Any] | None = None
@@ -48,11 +39,6 @@ class SFTSpecTemplate(TrainingSpecTemplate):
 
 
 class LoRASFTSpecStrict(TrainingSpecStrict):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *TrainingSpecStrict.credential_fields,
-        "lora",
-        "checkpoint",
-    )
     taskType: Literal[TaskType.LORA_SFT]
 
     lora: dict[str, Any] | None = None
@@ -74,11 +60,6 @@ class LoRASFTSpecTemplate(TrainingSpecTemplate):
 
 
 class PPOSpecStrict(TrainingSpecStrict):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *TrainingSpecStrict.credential_fields,
-        "reward_model",
-        "generation",
-    )
     taskType: Literal[TaskType.PPO]
 
     reward_model: dict[str, Any] | None = None
@@ -113,10 +94,6 @@ def _require_image_classification_model(model_name: str | None) -> None:
 
 
 class ImageClassificationTrainingSpecStrict(TrainingSpecStrict):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *TrainingSpecStrict.credential_fields,
-        "checkpoint",
-    )
     taskType: Literal[TaskType.IMAGE_CLASSIFICATION_TRAINING]
 
     checkpoint: dict[str, Any] | None = None

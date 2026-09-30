@@ -61,7 +61,7 @@ from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import collection_elements, value_text
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tasks.credentials import TaskSpec, set_spec_values
+from shared.tasks.credentials import set_spec_values
 from shared.tasks.result_binding import (
     ResultBinding,
     ResultElementRef,
@@ -72,6 +72,7 @@ from shared.tasks.specs import (
     InferenceSpecStrict,
     InferenceSpecTemplate,
     ModelBindingMode,
+    TaskSpecBase,
 )
 from shared.telemetry.config import TelemetryConfig
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
@@ -3145,7 +3146,7 @@ class TaskRuntime:
         return task, credential_scrubber(values.values())
 
     def declared_contract(
-        self, task_id: str, spec: TaskSpec | None = None
+        self, task_id: str, spec: TaskSpecBase | None = None
     ) -> CanonicalInferenceContract | None:
         """The contract a leaf carries to the worker, for it to resolve and report.
 
@@ -3162,8 +3163,7 @@ class TaskRuntime:
         executor and keeps reporting the native result that embodiment has always
         reported. So does a pinned single-prompt literal leaf.
 
-        A dispatch passes the ``spec`` it sends, whose credentials are restored, so
-        the contract names the prompts the leaf declared.
+        ``spec``, when given, is the dispatched spec with its credentials restored.
         """
         with self._lock:
             record = self._tasks.get(task_id)

@@ -481,3 +481,141 @@ def test_resident_serving_of_a_plain_adapter_url_keeps_its_source():
     [leaf] = bundle.template.operators
     assert isinstance(leaf, LeafOperator) and leaf.service_dependency is not None
     assert leaf.service_dependency.adapter_source == url
+
+
+_DSN = "postgres://u:dsn-inline-SECRET@db.example/app"
+_JWT = "jwt-inline-SECRET"
+
+
+def _agent(params: str, model_binding: str = "") -> str:
+    binding = f"\n          model_binding: {model_binding}" if model_binding else ""
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: agent}}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: solver
+        spec:
+          taskType: agent
+          v2: {{authority: {{invoke: [model], delegate: []}}, tools: [{{name: model}}]}}
+          harness: {{backend: scripted, version: v1, params: {params}}}{binding}
+"""
+
+
+_AGENT_PARAMS = f'{{script: [], dsn: "{_DSN}", jwt: "{_JWT}"}}'
+
+
+def test_a_credential_shaped_harness_param_is_vaulted_and_reaches_the_worker():
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    _, ids = _register(runtime, _agent(_AGENT_PARAMS))
+
+    blobs = "".join(
+        [
+            *registry.task_blobs.values(),
+            *registry.v2_blobs.values(),
+            *registry.ledger_blobs.values(),
+        ]
+    )
+    assert _DSN not in blobs and _JWT not in blobs
+    info = runtime.describe_task(ids["solver"])
+    assert info is not None and _JWT not in info.model_dump_json()
+    report = runtime.inspect_v2(_agent(_AGENT_PARAMS))
+    assert report is not None and _JWT not in report.model_dump_json()
+
+    publisher, disp = _dispatch(runtime, ids["solver"])
+    assert disp.failed == []
+    message = publisher.publish_task.call_args[0][1]
+    assert message.task.spec.harness.params == {
+        "script": [],
+        "dsn": _DSN,
+        "jwt": _JWT,
+    }
+
+
+def test_an_agent_stored_with_plaintext_harness_params_still_loads():
+    registry = FakeRegistry()
+    _, ids = _register(_runtime(registry), _agent("{script: []}"))
+    blob = json.loads(registry.task_blobs[ids["solver"]])
+    blob["record"]["task"]["spec"]["harness"]["params"]["jwt"] = _JWT
+    blob["record"].pop("credential_refs", None)
+    registry.task_blobs[ids["solver"]] = json.dumps(blob)
+
+    runtime = _runtime(registry)
+    asyncio.run(runtime.rehydrate())
+
+    record = runtime.get_record(ids["solver"])
+    assert record is not None and record.credential_refs
+    assert _JWT not in registry.task_blobs[ids["solver"]]
+
+
+@pytest.mark.parametrize(
+    ("params", "model_binding"),
+    [
+        (
+            "{script: []}",
+            '{mode: openai, url: "https://api.example/v1?key=k", model: m}',
+        ),
+        ('{script: [], base_url: "https://api.example/v1?api_key=k", model: m}', ""),
+    ],
+)
+def test_an_agent_model_url_carrying_a_credential_is_refused(params, model_binding):
+    payload = _agent(params, model_binding)
+    vault = InMemoryCredentialVault()
+    runtime = _runtime(vault=vault)
+
+    with pytest.raises(CompileError, match="model_binding.api_key"):
+        _register(runtime, payload)
+    with pytest.raises(CompileError, match="model_binding.api_key"):
+        runtime.inspect_v2(payload)
+    assert vault.redis.hashes == {}
+
+
+_SECRET_MODEL = "https://models.example/qwen.tar?token=model-inline-SECRET"
+
+
+def _model_leaf(identifier: str, service: str = "") -> str:
+    service_line = f"\n          service: {service}" if service else ""
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: model}}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: inference
+          model:
+            source: {{identifier: "{identifier}"}}
+            vllm: {{gpu_memory_utilization: 0.9}}
+          resources: {{hardware: {{gpu: {{count: 1}}}}}}
+          data: {{type: list, items: [hi]}}{service_line}
+"""
+
+
+def test_a_leaf_whose_model_source_carries_a_credential_gets_no_menu():
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, _ = _register(runtime, _model_leaf(_SECRET_MODEL))
+
+    [node] = _plan_nodes(registry, workflow_id)
+    assert node.embodiment_menu is None
+    assert node.service_family_requirement is None
+    plain_id, _ = _register(runtime, _model_leaf("Qwen/Qwen3-4B"))
+    [plain] = _plan_nodes(registry, plain_id)
+    assert plain.embodiment_menu is not None
+
+
+@pytest.mark.parametrize("service", ["{mode: resident}", "{mode: local_eligible}"])
+def test_resident_serving_of_a_credentialed_model_source_is_refused(service):
+    payload = _model_leaf(_SECRET_MODEL, service)
+
+    with pytest.raises(CompileError, match="model"):
+        _register(_runtime(), payload)
+    with pytest.raises(CompileError, match="model"):
+        _runtime().inspect_v2(payload)

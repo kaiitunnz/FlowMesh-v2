@@ -7,14 +7,13 @@ import yaml
 from pydantic import SecretStr
 
 from shared.tasks.credentials import (
-    TaskSpec,
     find_spec_credentials,
     holds_placeholder,
     mask_spec_values,
     set_spec_values,
     spec_value,
 )
-from shared.tasks.specs import AgentSpecTemplate
+from shared.tasks.specs import AgentSpecTemplate, TaskSpecBase, TaskSpecTemplateBase
 from shared.utils.ids import new_credential_ref
 from shared.utils.redact import REDACTED, redact_credential_fields
 
@@ -29,7 +28,7 @@ class TaskCredentials:
     # unrendered value, so it cannot tell two rendered credentials apart.
     renders: bool = False
 
-    def merge_key(self, spec: TaskSpec, **context: Any) -> str | None:
+    def merge_key(self, spec: TaskSpecBase, **context: Any) -> str | None:
         """The spec's merge key, or ``None`` when a credential renders at dispatch."""
         if self.renders:
             return None
@@ -62,7 +61,9 @@ class CredentialRefs:
         return ref
 
 
-def take_spec_credentials(spec: TaskSpec, refs: CredentialRefs) -> TaskCredentials:
+def take_spec_credentials(
+    spec: TaskSpecTemplateBase, refs: CredentialRefs
+) -> TaskCredentials:
     """Mask every inline credential in ``spec`` in place, minting a ref for each from
     ``refs``."""
     found = find_spec_credentials(spec)
@@ -74,7 +75,7 @@ def take_spec_credentials(spec: TaskSpec, refs: CredentialRefs) -> TaskCredentia
     return taken
 
 
-def _take_model_key(spec: TaskSpec) -> SecretStr | None:
+def _take_model_key(spec: TaskSpecTemplateBase) -> SecretStr | None:
     if not isinstance(spec, AgentSpecTemplate) or spec.model_binding is None:
         return None
     key, spec.model_binding.api_key = spec.model_binding.api_key, None
@@ -106,7 +107,7 @@ def mask_inline_credentials(parsed: ParsedWorkflow) -> None:
 
 
 def credential_merge_key(
-    spec: TaskSpec, refs: Mapping[str, str], **context: Any
+    spec: TaskSpecBase, refs: Mapping[str, str], **context: Any
 ) -> str | None:
     """The merge key of a spec whose vaulted credentials are named by their refs.
 

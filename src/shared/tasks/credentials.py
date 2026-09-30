@@ -19,9 +19,7 @@ from ..utils.redact import (
     masked,
 )
 from .placeholders import PLACEHOLDER_PATTERN
-from .specs import TaskSpecStrictBase, TaskSpecTemplateBase
-
-type TaskSpec = TaskSpecStrictBase | TaskSpecTemplateBase
+from .specs import TaskSpecTemplateBase
 
 
 def credential_pointer(path: CredentialPath) -> str:
@@ -37,7 +35,7 @@ def _segments(pointer: str) -> list[str]:
     ]
 
 
-def find_spec_credentials(spec: TaskSpec) -> dict[str, Any]:
+def find_spec_credentials(spec: TaskSpecTemplateBase) -> dict[str, Any]:
     """Every inline credential value in ``spec``, keyed by its pointer."""
     found: dict[str, Any] = {}
     for name in type(spec).credential_fields:
@@ -53,7 +51,7 @@ def find_spec_credentials(spec: TaskSpec) -> dict[str, Any]:
     return found
 
 
-def spec_value(spec: TaskSpec, pointer: str) -> Any:
+def spec_value(spec: BaseModel, pointer: str) -> Any:
     """The value at ``pointer`` in ``spec``."""
     container: Any = spec
     for segment in _segments(pointer):
@@ -61,7 +59,7 @@ def spec_value(spec: TaskSpec, pointer: str) -> Any:
     return container
 
 
-def set_spec_values(spec: TaskSpec, values: Mapping[str, Any]) -> None:
+def set_spec_values(spec: BaseModel, values: Mapping[str, Any]) -> None:
     """Write each value at its pointer in ``spec``, in place."""
     for pointer, value in values.items():
         *parents, last = _segments(pointer)
@@ -71,7 +69,7 @@ def set_spec_values(spec: TaskSpec, values: Mapping[str, Any]) -> None:
         _assign(container, last, value)
 
 
-def mask_spec_values(spec: TaskSpec, pointers: Mapping[str, Any]) -> None:
+def mask_spec_values(spec: BaseModel, pointers: Mapping[str, Any]) -> None:
     """Replace each value ``pointers`` names with its credential marker, in place."""
     set_spec_values(
         spec, {pointer: masked(value) for pointer, value in pointers.items()}
@@ -114,7 +112,6 @@ def _assign(container: Any, segment: str, value: Any) -> None:
 
 
 __all__ = [
-    "TaskSpec",
     "credential_pointer",
     "find_spec_credentials",
     "holds_placeholder",

@@ -15,6 +15,7 @@ from shared.inference import (
     declares_multiple_prompts,
     unforwarded_inference_keys,
 )
+from shared.tasks.credentials import credential_pointer
 from shared.tasks.specs import (
     InferenceBackend,
     InferenceEmbodimentKind,
@@ -185,39 +186,43 @@ def reject_resident_batch(
     )
 
 
-def _serves_credentialed_adapter(task: ParsedTask, spec: TaskSpecBase) -> bool:
-    """Whether the adapter a resident replica would load names a vaulted credential.
+def credentialed_source(task: ParsedTask, spec: TaskSpecBase) -> str | None:
+    """The source a resident replica would load that names a vaulted credential.
 
-    A replica loads the adapter from the source the plan carries, and a vaulted source
-    reaches the plan masked, so such a leaf has no resident embodiment.
+    A replica loads the model and its adapter from the sources the plan carries, and a
+    vaulted source reaches the plan masked, so such a leaf has no resident embodiment.
     """
-    adapters = (
-        spec.adapters
-        if isinstance(spec, (ModelSpecStrict, ModelSpecTemplate))
-        else None
+    if not isinstance(spec, (ModelSpecStrict, ModelSpecTemplate)):
+        return None
+    sources = {credential_pointer(("model", "source", "identifier")): "model"}
+    if spec.adapters:
+        adapter = spec.adapters[0]
+        if field := "path" if adapter.path else "url" if adapter.url else None:
+            sources[credential_pointer(("model", "adapters", 0, field))] = "adapter"
+    return next(
+        (
+            name
+            for pointer, name in sources.items()
+            if pointer in task.masked_credentials
+        ),
+        None,
     )
-    if not adapters:
-        return False
-    adapter = adapters[0]
-    field = "path" if adapter.path else "url" if adapter.url else None
-    return field is not None and f"/model/adapters/0/{field}" in task.masked_credentials
 
 
-def reject_credentialed_adapter(
+def reject_credentialed_source(
     task: ParsedTask, spec: TaskSpecBase, eligibility: InferenceEmbodimentEligibility
 ) -> None:
-    """Fail a leaf that admits only resident serving of an adapter whose source carries
-    a credential."""
-    if (
-        eligibility is InferenceEmbodimentEligibility.RESIDENT_REQUIRED
-        and _serves_credentialed_adapter(task, spec)
-    ):
+    """Fail a leaf that admits resident serving of a model or adapter whose source
+    carries a credential."""
+    if eligibility is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED:
+        return
+    if (source := credentialed_source(task, spec)) is not None:
         raise _reject(
             task,
-            "embodiment.resident-adapter-credential",
-            "a resident-served leaf loads its adapter on a shared replica, which "
-            "cannot carry a credential in the adapter's source; serve the leaf "
-            "self-contained, or load the adapter from a source without one",
+            "embodiment.resident-source-credential",
+            f"a resident replica loads the leaf's {source} from a source that "
+            f"cannot carry a credential; serve the leaf self-contained, or load the "
+            f"{source} from a source without one",
         )
 
 
