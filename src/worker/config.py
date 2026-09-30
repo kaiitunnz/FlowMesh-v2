@@ -212,7 +212,7 @@ class WorkerConfig:
                 max_pids=ssh_max_pids,
             )
         )
-        enable_ssh_gpu_limit = parse_bool_env("ENABLE_SSH_GPU_LIMIT", False)
+        enable_ssh_gpu_limit = parse_bool_env("ENABLE_SSH_GPU_LIMIT", True)
 
         telemetry = TelemetryConfig.from_env()
 
