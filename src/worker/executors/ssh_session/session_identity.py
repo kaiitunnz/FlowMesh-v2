@@ -42,31 +42,30 @@ _WORLD_WRITABLE_DIRS = (
     Path("/", "dev", "mqueue"),
 )
 _SYSV_IPC_DIR = Path("/", "proc", "sysvipc")
-# Each /proc/sysvipc table and the column holding its object ids.
 _SYSV_IPC_ID_COLUMNS = {"shm": "shmid", "msg": "msqid", "sem": "semid"}
 _NOGROUP_GID = 65534
 _KILL_GRACE_SEC = 5.0
 _KILL_ROUNDS = 10
 _KILL_ROUND_SEC = 0.5
-# Prologue of every helper run as a session uid: argv is (uid, gid, *args).
-_AS_UID_PROLOGUE = (
-    "import os, sys\n"
+# Prepended to every helper script. It imports what the scripts use before
+# switching to the uid and gid in argv[1:3], since that uid may be unable to read
+# the interpreter's standard library.
+_AS_UID_PREAMBLE = (
+    "import ctypes, os, signal, sys\n"
     "uid = int(sys.argv[1])\n"
     "if os.getuid() != uid:\n"
     "    os.setgroups([])\n"
     "    os.setgid(int(sys.argv[2]))\n"
     "    os.setuid(uid)\n"
 )
-_KILL_ALL_SCRIPT = _AS_UID_PROLOGUE + (
-    "import signal\n"
+_KILL_ALL_SCRIPT = (
     "try:\n"
     "    os.kill(-1, signal.SIGKILL)\n"
     "except ProcessLookupError:\n"
     "    pass\n"
 )
-# argv[3:] are "<kind>:<id>" pairs; IPC_RMID is 0.
-_REMOVE_IPC_SCRIPT = _AS_UID_PROLOGUE + (
-    "import ctypes\n"
+# argv[3:] is "<kind>:<id>" per object; 0 is IPC_RMID.
+_REMOVE_IPC_SCRIPT = (
     "libc = ctypes.CDLL(None, use_errno=True)\n"
     "failed = 0\n"
     "for spec in sys.argv[3:]:\n"
@@ -82,13 +81,14 @@ _REMOVE_IPC_SCRIPT = _AS_UID_PROLOGUE + (
     "        failed = 1\n"
     "sys.exit(failed)\n"
 )
-_EXEC_AS_SCRIPT = _AS_UID_PROLOGUE + "os.execv(sys.argv[3], sys.argv[3:])\n"
+# argv[3:] is the command to exec as the uid.
+_EXEC_SCRIPT = "os.execv(sys.argv[3], sys.argv[3:])\n"
 _HELPER_TIMEOUT_SEC = 10.0
 _COMMAND_TIMEOUT_SEC = 30.0
 
 
 def account_name_for(session_id: str) -> str:
-    """Derive a valid Linux account name from a session id."""
+    """Return a valid Linux account name derived from ``session_id``."""
     tail = re.sub(r"[^a-z0-9]", "", session_id.lower())[-16:]
     name = f"{ACCOUNT_PREFIX}{tail or secrets.token_hex(4)}"[:31]
     if not ACCOUNT_NAME_RE.match(name):
@@ -110,11 +110,10 @@ class SessionAccount:
     def create(
         cls, name: str, home: Path, denied_roots: Iterable[Path]
     ) -> "SessionAccount":
-        """Create the account under a uid no ACL entry on ``denied_roots`` names,
-        and deny it each of them, or leave nothing behind.
+        """Create the account and deny it ``denied_roots``, or leave nothing behind.
 
-        A uid another worker sharing a root has denied it is never drawn, so
-        lifting this account's entries can never lift that worker's.
+        It gets a uid no entry on those roots names, so its deny and revoke never
+        replace or remove an entry someone else set.
         """
         roots = list(denied_roots)
         _ensure_privsep_dir()
@@ -142,10 +141,10 @@ class SessionAccount:
         return account
 
     def deny(self, roots: Iterable[Path]) -> None:
-        """Deny this account each root, all or nothing.
+        """Deny this account each of ``roots``, all or nothing.
 
-        Each entry is recorded before it is written, so a worker that dies midway
-        still lifts it.
+        Each entry is recorded before it is set, so a worker that dies midway still
+        revokes it.
         """
         applied: list[Path] = []
         try:
@@ -162,12 +161,11 @@ class SessionAccount:
             ) from exc
 
     def grant_read(self, path: Path) -> None:
-        """Let this account read a file no other account may."""
+        """Grant this account read access to ``path``."""
         acl.grant_read(self.uid, path)
 
     def release(self) -> None:
-        """Remove the account and everything it holds, or leave it locked and
-        denied the worker's state when it cannot be."""
+        """Retire the account, raising if it stays locked instead."""
         if not retire_account(self.name, self.uid):
             raise ExecutionError(
                 f"SSH session account {self.name} could not be removed; it stays "
@@ -176,13 +174,11 @@ class SessionAccount:
 
 
 def retire_account(name: str, uid: int) -> bool:
-    """End every process of an account, delete it, then remove its files from the
-    shared temporary directories and lift its denials.
+    """Kill every process of the account, delete it, purge what its uid left, and
+    revoke its recorded ACL entries; return whether it is gone.
 
-    The denials stay until the account is gone, since lifting them while one of its
-    processes lives would hand that process the worker's state. An account that
-    cannot be ended or deleted is locked instead, keeping them, and ``False``
-    returned so a later reap can finish it.
+    An account whose processes survive or that cannot be deleted is locked and
+    keeps its entries, since a live process of it must stay denied.
     """
     if not kill_processes(uid):
         lock_account(name)
@@ -208,8 +204,8 @@ def retire_account(name: str, uid: int) -> bool:
 
 
 def reap_stale_accounts() -> bool:
-    """Retire every session account, then lift every denial recorded for an account
-    that no longer exists; returns whether each account is gone."""
+    """Retire every session account, then revoke recorded ACL entries whose uid no
+    longer exists; return whether every account is gone."""
     clean = True
     for entry in pwd.getpwall():
         if not (name := entry.pw_name).startswith(ACCOUNT_PREFIX):
@@ -223,17 +219,21 @@ def reap_stale_accounts() -> bool:
 
 
 def purge_uid(uid: int) -> None:
-    """Delete what ``uid`` left behind that outlives its processes.
+    """Delete the files and System V IPC objects ``uid`` left where every session
+    can reach them.
 
-    Session uids are drawn at random and may come round again, so a later session
-    must not inherit what an earlier one owned.
+    Session uids are reused, so a later session with the same uid must not find
+    them.
     """
     purge_uid_files(uid)
     purge_uid_ipc(uid)
 
 
 def purge_uid_files(uid: int) -> None:
-    """Delete what ``uid`` left in the shared scratch directories."""
+    """Delete everything ``uid`` owns in the shared scratch directories.
+
+    Links are removed, never followed.
+    """
     for base in (Path(tempfile.gettempdir()), *_WORLD_WRITABLE_DIRS):
         for current, dirs, files in os.walk(base, followlinks=False):
             for name in list(dirs):
@@ -251,12 +251,11 @@ def purge_uid_files(uid: int) -> None:
 
 
 def purge_uid_ipc(uid: int) -> None:
-    """Remove the System V IPC objects ``uid`` owns or created.
+    """Remove the System V IPC objects that ``uid`` owns or created.
 
-    Sessions share the worker's IPC namespace, and these objects persist after
-    their creator exits. Only an owner, a creator or a holder of ``CAP_SYS_ADMIN``
-    may remove one, and a container's root lacks that capability, so the removal
-    runs as ``uid``.
+    Removal runs as ``uid``, since removing another user's object needs
+    ``CAP_SYS_ADMIN``, which a container's root lacks. Failures are logged, not
+    raised.
     """
     if uid == 0:
         return
@@ -276,9 +275,9 @@ def purge_uid_ipc(uid: int) -> None:
 
 
 def owned_ipc_ids(table: str, id_column: str, uid: int) -> list[int]:
-    """Ids in a ``/proc/sysvipc`` table whose owner or creator is ``uid``.
+    """Return the ids in a ``/proc/sysvipc`` table owned or created by ``uid``.
 
-    The creator is matched too because the owner can hand an object to any uid.
+    The creator is matched because an owner can give an object to another uid.
     """
     lines = table.splitlines()
     if not lines:
@@ -309,8 +308,12 @@ def _read_ipc_table(kind: str) -> str:
 
 
 def remove_tree(path: Path) -> None:
-    """Delete ``path`` and everything below it without following a link or crossing
-    a mount, however deep a session nested it."""
+    """Delete ``path`` and everything below it, never following a link or crossing a
+    mount.
+
+    ``rm`` removes a tree of any depth, where ``shutil.rmtree`` runs out of file
+    descriptors or recursion on one a session nested thousands deep.
+    """
     rm = shutil.which("rm")
     if rm is None:
         shutil.rmtree(path, ignore_errors=True)
@@ -325,7 +328,7 @@ def remove_tree(path: Path) -> None:
 
 
 def lock_account(name: str) -> None:
-    """Lock an account so nothing can log in as it."""
+    """Lock ``name`` and expire it, so nothing can log in as it."""
     if (usermod := shutil.which("usermod")) is None:
         return
     try:
@@ -335,8 +338,8 @@ def lock_account(name: str) -> None:
 
 
 def kill_processes(uid: int) -> bool:
-    """End every process running as ``uid``: a terminate, then kill rounds until none
-    is left. Returns whether none is left."""
+    """SIGTERM every process of ``uid``, then SIGKILL until none is left; return
+    whether none is."""
     if uid == 0:
         return False
     victims = _processes_of(uid)
@@ -347,8 +350,8 @@ def kill_processes(uid: int) -> bool:
             continue
     if victims:
         psutil.wait_procs(victims, timeout=_KILL_GRACE_SEC)
-    # A snapshot can miss a process that forks and exits in a loop, so it is only
-    # trusted once kill(-1) has left the uid unable to start another.
+    # A snapshot can miss a fork loop's children; kill(-1) as the uid reaches all of
+    # them in one pass, so only a snapshot taken after it is trusted.
     for _ in range(_KILL_ROUNDS):
         _kill_all_as(uid)
         if not (survivors := _processes_of(uid)):
@@ -376,11 +379,11 @@ def delete_account(name: str) -> bool:
 
 
 def exec_as(uid: int, gid: int, argv: list[str]) -> list[str]:
-    """The command line running ``argv`` as ``uid``.
+    """Return the command line that runs ``argv`` as ``uid`` and ``gid``.
 
-    The child drops to ``uid`` itself rather than through ``subprocess``'s ``user=``,
-    which forces a plain ``fork()`` whose atfork handlers crash the child of a
-    process running gRPC threads.
+    The interpreter starts as the worker and ``_AS_UID_PREAMBLE`` switches to
+    ``uid``, because ``subprocess``'s ``user=`` forces a plain ``fork()``, which
+    gRPC's fork handlers crash.
     """
     if uid == 0:
         raise ExecutionError("Refusing to run a session helper as root")
@@ -389,7 +392,7 @@ def exec_as(uid: int, gid: int, argv: list[str]) -> list[str]:
         "-I",
         "-S",
         "-c",
-        _EXEC_AS_SCRIPT,
+        _AS_UID_PREAMBLE + _EXEC_SCRIPT,
         str(uid),
         str(gid),
         *argv,
@@ -397,7 +400,7 @@ def exec_as(uid: int, gid: int, argv: list[str]) -> list[str]:
 
 
 def process_identity_available() -> bool:
-    """Whether this worker can give a session an account of its own."""
+    """Return whether this worker can create a session account."""
     return os.getuid() == 0 and all(
         shutil.which(binary) for binary in ("useradd", "usermod", "userdel")
     )
@@ -412,10 +415,11 @@ def _owned_by(proc: psutil.Process, uid: int) -> bool:
 
 
 def _live_uid(proc: psutil.Process) -> int | None:
-    """The real uid of ``proc``, or ``None`` once it has exited.
+    """Return the real uid of ``proc``, or ``None`` if it has exited or cannot be
+    read.
 
-    A zombie is only an exit status waiting for its parent to reap it, and a PID 1
-    that never reaps would otherwise keep a session account alive forever.
+    A zombie counts as exited, so an init that never reaps cannot keep a session
+    account alive.
     """
     try:
         if proc.status() == psutil.STATUS_ZOMBIE:
@@ -426,11 +430,9 @@ def _live_uid(proc: psutil.Process) -> int | None:
 
 
 def _kill_all_as(uid: int) -> None:
-    """Have the kernel SIGKILL every process of ``uid`` in a single pass.
+    """SIGKILL every process of ``uid`` with one ``kill(-1)`` sent as ``uid``.
 
-    A snapshot of the process table cannot catch a process forked after it was
-    taken, so a fork loop outruns one. ``kill(-1)`` sent as ``uid`` reaches all of
-    that uid's processes at once.
+    Does nothing unless the worker is root and ``uid`` is another user.
     """
     if os.geteuid() != 0 or uid in (0, os.getuid()):
         return
@@ -447,11 +449,12 @@ def _kill_all_as(uid: int) -> None:
 def _run_as(
     uid: int, script: str, args: list[str]
 ) -> "subprocess.CompletedProcess[bytes] | None":
-    """Run ``script`` in a helper interpreter that drops to ``uid`` first.
+    """Run ``_AS_UID_PREAMBLE`` then ``script`` in a new interpreter, with ``uid``,
+    a gid and ``args`` on its argv; return ``None`` if it cannot start.
 
-    The helper drops privileges itself rather than through ``subprocess``'s
-    ``user=``, which forces a plain ``fork()`` whose atfork handlers crash the
-    child of a process running gRPC threads.
+    The interpreter starts as the worker and the preamble switches to ``uid``,
+    because ``subprocess``'s ``user=`` forces a plain ``fork()``, which gRPC's fork
+    handlers crash.
     """
     try:
         return subprocess.run(  # nosec B603 - argv list, no shell=True, the worker's own interpreter
@@ -460,7 +463,7 @@ def _run_as(
                 "-I",
                 "-S",
                 "-c",
-                script,
+                _AS_UID_PREAMBLE + script,
                 str(uid),
                 str(_NOGROUP_GID),
                 *args,
@@ -484,8 +487,8 @@ def _stderr_of(result: "subprocess.CompletedProcess[bytes]") -> str:
 def _add_account(
     useradd: str, name: str, home: Path, avoid_uids: frozenset[int]
 ) -> None:
-    """Create ``name`` under a uid drawn at random from the session range, skipping
-    one an account, a live process or ``avoid_uids`` holds."""
+    """Create ``name`` under a uid drawn at random from the session range that no
+    account, live process or ``avoid_uids`` holds."""
     detail = ""
     for _ in range(_UID_ATTEMPTS):
         uid = SESSION_UID_MIN + secrets.randbelow(SESSION_UID_MAX - SESSION_UID_MIN + 1)
@@ -597,7 +600,8 @@ def _unlock(name: str) -> None:
 
 
 def _unusable_password_hash() -> str:
-    """A valid but unguessable hash, so sshd does not treat the account as locked."""
+    """Return a valid, unguessable password hash, so sshd does not read the account
+    as locked."""
     openssl = shutil.which("openssl")
     if openssl is None:
         # "*" and a leading "!" both read as locked to sshd; a bare salted

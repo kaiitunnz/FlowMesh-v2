@@ -417,3 +417,14 @@ def test_a_segment_the_uid_left_is_removed() -> None:
         assert str(shmid) not in [line.split()[1] for line in listed.splitlines()[1:]]
     finally:
         libc.shmctl(shmid, 0, None)
+
+
+def test_helpers_import_nothing_after_switching_uid() -> None:
+    preamble = session_identity._AS_UID_PREAMBLE
+    assert preamble.rindex("import") < preamble.index("os.setuid")
+    for script in (
+        session_identity._KILL_ALL_SCRIPT,
+        session_identity._REMOVE_IPC_SCRIPT,
+        session_identity._EXEC_SCRIPT,
+    ):
+        assert "import" not in script
