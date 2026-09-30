@@ -64,6 +64,13 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> Iterator[WorkerConfig]:
     roots = {name: base / name for name in ("results", "private", "content", "hf")}
     for path in roots.values():
         path.mkdir(mode=0o777)
+    # The model cache as the worker image leaves it: open to every uid, twice over.
+    hub = roots["hf"] / "hub"
+    hub.mkdir()
+    for path in (roots["hf"], hub):
+        path.chmod(0o777)
+    (hub / "model").write_text("cached model")
+    (hub / "model").chmod(0o666)
     roots["private"].chmod(0o700)
     other = roots["results"] / "tsk-other"
     other.mkdir(mode=0o777)
@@ -83,7 +90,7 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> Iterator[WorkerConfig]:
         private_state_dir=roots["private"],
         content_dir=roots["content"],
         hb_file=hb_file,
-        session_state_dirs=(Path("/root"), roots["hf"]),
+        session_state_dirs=(Path("/root"), hub),
         ssh_relay_host="127.0.0.1",
     )
     yield config
@@ -225,6 +232,7 @@ def test_a_session_logs_in_as_its_own_account_and_reaches_only_its_own_data(
             worker.results_dir / "tsk-other" / "results.json",
             worker.content_dir / "object",
             worker.private_state_dir / "state",
+            worker.session_state_dirs[1] / "model",
             worker.hb_file,
             Path("/proc/1/environ"),
         ):

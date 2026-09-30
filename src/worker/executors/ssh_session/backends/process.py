@@ -412,10 +412,23 @@ def denied_roots(config: WorkerConfig) -> list[Path]:
     for path in config.session_denied_paths():
         parent = Path(os.path.realpath(path.parent))
         if _is_shared_dir(parent):
-            roots[parent / path.name] = None
+            path = parent / path.name
         else:
-            roots[Path(os.path.realpath(path))] = None
+            path = Path(os.path.realpath(path))
+        roots[_above_open_dirs(path)] = None
     return list(roots)
+
+
+def _above_open_dirs(path: Path) -> Path:
+    """``path``, or the highest of its ancestors any account may rename entries in.
+
+    Without the sticky bit, a world-writable parent lets a session swap ``path`` for
+    a directory of its own, so the denial goes on the parent instead, which it then
+    cannot enter.
+    """
+    while _is_open_dir(parent := path.parent) and parent != path:
+        path = parent
+    return path
 
 
 def _root_problem(root: Path) -> str | None:
@@ -465,6 +478,14 @@ def _acl_ready(config: WorkerConfig) -> bool:
             )
             return False
     return True
+
+
+def _is_open_dir(path: Path) -> bool:
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return False
+    return bool(mode & stat.S_IWOTH) and not mode & stat.S_ISVTX
 
 
 def _is_shared_dir(path: Path) -> bool:

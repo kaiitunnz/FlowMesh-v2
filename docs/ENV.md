@@ -234,8 +234,10 @@ of `HF_HOME`, `HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`, `HF_DATASETS_CACHE`,
 `TRANSFORMERS_CACHE`, `TORCH_HOME`, `XDG_CACHE_HOME`, `VLLM_CACHE_ROOT` and
 `FASTEMBED_CACHE_PATH` that is set. `process` is not offered when one of these
 contains a path every session needs, such as the temp dir or `/mnt/flowmesh`,
-or sits in a world-writable directory without being a root-owned directory only
-root can write. The worker log is readable by the worker's own account alone.
+or sits in a sticky world-writable directory without being a root-owned
+directory only root can write. One in a world-writable directory without the
+sticky bit is denied through that directory. The worker log is readable by the
+worker's own account alone.
 
 A session's inputs and output live in its own directory under
 `/var/lib/flowmesh/ssh-sessions`, and each `mountPath` is a link to them under

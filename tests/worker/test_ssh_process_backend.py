@@ -352,6 +352,23 @@ def test_a_link_in_a_shared_dir_is_refused_not_followed(tmp_path: Path) -> None:
     assert "link" in (process_module._root_problem(shared / "cache") or "")
 
 
+def test_a_root_in_a_dir_anyone_may_rename_in_is_denied_by_that_dir(
+    tmp_path: Path,
+) -> None:
+    # As the worker image leaves its model cache, so workers of any uid share it.
+    cache = tmp_path / "cache" / "huggingface"
+    (cache / "hub").mkdir(parents=True)
+    for path in (cache, cache / "hub"):
+        path.chmod(0o777)
+
+    roots = process_module.denied_roots(
+        _state_config(tmp_path, session_state_dirs=(cache / "hub",))
+    )
+
+    assert cache in roots and cache / "hub" not in roots
+    assert process_module._root_problem(cache) is None
+
+
 def test_a_root_others_can_write_in_a_shared_dir_is_refused(tmp_path: Path) -> None:
     shared = tmp_path / "shared"
     shared.mkdir()
