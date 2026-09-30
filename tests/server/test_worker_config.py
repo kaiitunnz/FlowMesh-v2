@@ -113,6 +113,9 @@ class TestSSHEnvironment:
 
         assert adapter._base_environment()["SSH_SESSION_BACKEND"] == "process"
 
+    def test_a_relay_host_reaches_only_the_worker_it_is_set_for(self) -> None:
+        assert "SSH_RELAY_HOST" not in SSHConfig().to_env(True)
+
     def test_an_enabled_worker_with_no_backend_named_gets_auto(self) -> None:
         env = SSHConfig(session_backend=None).to_env(True)
 

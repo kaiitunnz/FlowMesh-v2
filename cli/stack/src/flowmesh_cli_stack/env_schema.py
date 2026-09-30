@@ -1086,10 +1086,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Sandbox an SSH session runs in.",
                     choices=["auto", "docker", "process", "off"],
                 ),
-                EnvVar(
-                    "SSH_RELAY_HOST",
-                    description="Worker address the SSH relay dials.",
-                ),
             ],
         ),
         EnvSection(

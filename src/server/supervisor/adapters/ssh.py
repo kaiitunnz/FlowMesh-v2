@@ -39,8 +39,8 @@ class SSHConfig(BaseModel):
     resource requests."""
     session_backend: SSHBackendName | None = env.SSH_SESSION_BACKEND
     """Session backend the worker uses (``auto``, ``docker``, ``process``)"""
-    relay_host: str | None = env.SSH_RELAY_HOST
-    """Address at which the worker's session ports are reachable from its
+    relay_host: str | None = None
+    """Address at which this worker's session ports are reachable from its
     supervisor"""
 
     @field_validator("session_backend", mode="before")

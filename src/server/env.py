@@ -97,7 +97,6 @@ if _ssh_session_backend is not None and _ssh_session_backend not in set(SSHBacke
 SSH_SESSION_BACKEND: SSHBackendName | None = (
     SSHBackendName(_ssh_session_backend) if _ssh_session_backend else None
 )
-SSH_RELAY_HOST: str | None = os.getenv("SSH_RELAY_HOST", "").strip() or None
 
 LOG_FILE: str = os.getenv("LOG_FILE", "server.log")
 LOG_MAX_BYTES: int = int(os.getenv("LOG_MAX_BYTES", 5_242_880))
