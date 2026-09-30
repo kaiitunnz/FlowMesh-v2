@@ -49,6 +49,7 @@ FINISH_SENTINEL_PATH = PurePosixPath("/", "tmp", ".flowmesh_finish").as_posix()
 # well within PATH_MAX.
 MAX_MOUNT_PATH_CHARS = 1024
 MAX_MOUNT_PATH_COMPONENTS = 32
+MAX_MOUNT_PATH_COMPONENT_BYTES = 255
 
 
 @dataclass(slots=True)
@@ -351,6 +352,13 @@ def normalize_mount_path(path: str, field_name: str) -> str:
     parts = [part for part in raw.split("/") if part not in ("", ".")]
     if ".." in parts:
         raise ExecutionError(f"{field_name} must not contain '..'")
+    if "\0" in raw:
+        raise ExecutionError(f"{field_name} must not contain a NUL character")
+    if any(len(part.encode()) > MAX_MOUNT_PATH_COMPONENT_BYTES for part in parts):
+        raise ExecutionError(
+            f"{field_name} must have components of at most "
+            f"{MAX_MOUNT_PATH_COMPONENT_BYTES} bytes"
+        )
     if len(parts) > MAX_MOUNT_PATH_COMPONENTS:
         raise ExecutionError(
             f"{field_name} must have at most {MAX_MOUNT_PATH_COMPONENTS} components"

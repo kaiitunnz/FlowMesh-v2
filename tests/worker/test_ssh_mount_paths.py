@@ -12,6 +12,7 @@ from worker.executors.base_executor import ExecutionError
 from worker.executors.ssh_session import DockerSessionBackend, normalize_mount_path
 from worker.executors.ssh_session.config import (
     MAX_MOUNT_PATH_CHARS,
+    MAX_MOUNT_PATH_COMPONENT_BYTES,
     MAX_MOUNT_PATH_COMPONENTS,
 )
 
@@ -83,11 +84,22 @@ def test_a_mount_path_outside_the_root_is_rejected(path: str) -> None:
         normalize_mount_path(path, "mountPath")
 
 
+def _longest_mount_path() -> str:
+    """A mount path of exactly the most characters, in components of at most the
+    most bytes."""
+    path = "/mnt/flowmesh"
+    while (room := MAX_MOUNT_PATH_CHARS - len(path) - 1) > 0:
+        path += "/" + "x" * min(room, MAX_MOUNT_PATH_COMPONENT_BYTES)
+    return path
+
+
 @pytest.mark.parametrize(
     "path",
     [
         "/mnt/flowmesh/" + "/".join(["d"] * (MAX_MOUNT_PATH_COMPONENTS - 1)),
-        "/mnt/flowmesh/" + "x" * (MAX_MOUNT_PATH_CHARS - len("/mnt/flowmesh/") + 1),
+        _longest_mount_path() + "/y",
+        "/mnt/flowmesh/" + "x" * (MAX_MOUNT_PATH_COMPONENT_BYTES + 1),
+        "/mnt/flowmesh/" + "é" * (MAX_MOUNT_PATH_COMPONENT_BYTES // 2 + 1),
     ],
 )
 def test_a_mount_path_too_deep_or_long_is_rejected(path: str) -> None:
@@ -95,8 +107,13 @@ def test_a_mount_path_too_deep_or_long_is_rejected(path: str) -> None:
         normalize_mount_path(path, "mountPath")
 
 
+def test_a_mount_path_with_a_nul_is_rejected() -> None:
+    with pytest.raises(ExecutionError, match="NUL"):
+        normalize_mount_path("/mnt/flowmesh/a\0b", "mountPath")
+
+
 def test_a_mount_path_at_the_bounds_is_accepted() -> None:
     deepest = "/mnt/flowmesh/" + "/".join(["d"] * (MAX_MOUNT_PATH_COMPONENTS - 2))
-    longest = "/mnt/flowmesh/" + "x" * (MAX_MOUNT_PATH_CHARS - len("/mnt/flowmesh/"))
-    for path in (deepest, longest):
+    widest = "/mnt/flowmesh/" + "x" * MAX_MOUNT_PATH_COMPONENT_BYTES
+    for path in (deepest, widest, _longest_mount_path()):
         assert normalize_mount_path(path, "mountPath") == path

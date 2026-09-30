@@ -494,3 +494,30 @@ def test_a_cancel_as_the_session_ends_cancels_it_whatever_its_output_path(
             copy=output == "copied",
             direct_output=direct,
         )
+
+
+def test_a_direct_output_too_deep_to_walk_fails_the_docker_size_check(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    deepest = tmp_path.joinpath(*(["d"] * 70))
+    deepest.mkdir(parents=True)
+    plan = SSHMountPlan(
+        volumes=[],
+        staged_input_specs=[],
+        create_dirs=[],
+        direct_output_path=tmp_path,
+        copy_output_path=None,
+        staged_inputs_dir=None,
+        staged_inputs_volume=None,
+    )
+    session = DockerSession(
+        MagicMock(),
+        MagicMock(spec=Container),
+        plan,
+        None,
+        MagicMock(),
+        executor._signals,
+    )
+
+    with pytest.raises(ExecutionError, match="deeper"):
+        session.output_size_bytes()

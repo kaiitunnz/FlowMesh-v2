@@ -6,6 +6,7 @@ container; a root worker without one runs it as a process under an account of it
 own. The executor above it owns the task lifecycle and TTL and idle reaping.
 """
 
+import errno
 import io
 import ipaddress
 import logging
@@ -43,6 +44,8 @@ TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 _TCP_STATE_ESTABLISHED = "01"
 _DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+# A directory removed or swapped for a link mid-walk.
+_GONE_ERRNOS = frozenset({errno.ENOENT, errno.ELOOP, errno.ENOTDIR})
 _MAX_TREE_DEPTH = 64
 
 
@@ -235,13 +238,15 @@ def iter_tree(root: Path) -> Iterator[tuple[PurePosixPath, os.DirEntry[str], int
     opened relative to its parent with ``O_NOFOLLOW``, so a component swapped for a
     link mid-walk is skipped rather than followed, which keeps the walk safe over a
     tree someone else is still writing. A missing or linked ``root`` yields nothing;
-    a tree deeper than the walk will go raises :class:`TreeTooDeepError` rather than
-    being partly skipped.
+    a directory it cannot open, or a tree deeper than the walk will go, raises
+    rather than being skipped.
     """
     try:
         fd = os.open(root, _DIR_OPEN_FLAGS)
-    except OSError:
-        return
+    except OSError as exc:
+        if exc.errno in _GONE_ERRNOS:
+            return
+        raise
     try:
         yield from _iter_dir(fd, PurePosixPath(), 0)
     finally:
@@ -264,8 +269,10 @@ def _iter_dir(
             continue
         try:
             child_fd = os.open(entry.name, _DIR_OPEN_FLAGS, dir_fd=dir_fd)
-        except OSError:
-            continue
+        except OSError as exc:
+            if exc.errno in _GONE_ERRNOS:
+                continue
+            raise
         try:
             yield from _iter_dir(child_fd, entry_path, depth + 1)
         finally:
