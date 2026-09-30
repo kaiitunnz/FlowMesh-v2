@@ -387,7 +387,7 @@ class SyncRedisClient:
             client.ping()
         except Exception as exc:
             self.logger.exception(
-                "Failed to connect to %s Redis (%s): %s", label, url, exc
+                "Failed to connect to %s Redis (%s): %s", label, redact_url(url), exc
             )
             raise SystemExit(1) from exc
         self.logger.info("Connected to %s Redis: %s", label, redact_url(url))
@@ -544,9 +544,13 @@ class SyncRedisClient:
     # ---- Maintenance ----
     def flush_all(self) -> None:
         self._control.flushdb()
-        self.logger.info("Cleared Redis database at %s (control)", self.control_url)
+        self.logger.info(
+            "Cleared Redis database at %s (control)", redact_url(self.control_url)
+        )
         self._telemetry.flushdb()
-        self.logger.info("Cleared Redis database at %s (telemetry)", self.telemetry_url)
+        self.logger.info(
+            "Cleared Redis database at %s (telemetry)", redact_url(self.telemetry_url)
+        )
 
 
 def _awaitable[T](value: Awaitable[T] | T) -> Awaitable[T]:
@@ -600,7 +604,7 @@ class AsyncRedisClient:
             )
         except Exception as exc:
             self.logger.exception(
-                "Failed to connect to %s Redis (%s): %s", label, url, exc
+                "Failed to connect to %s Redis (%s): %s", label, redact_url(url), exc
             )
             raise SystemExit(1) from exc
         self.logger.info("Connected to %s Redis: %s", label, redact_url(url))
@@ -790,9 +794,13 @@ class AsyncRedisClient:
 
     async def flush_all(self) -> None:
         await self._control.flushdb()
-        self.logger.info("Cleared Redis database at %s (control)", self.control_url)
+        self.logger.info(
+            "Cleared Redis database at %s (control)", redact_url(self.control_url)
+        )
         await self._telemetry.flushdb()
-        self.logger.info("Cleared Redis database at %s (telemetry)", self.telemetry_url)
+        self.logger.info(
+            "Cleared Redis database at %s (telemetry)", redact_url(self.telemetry_url)
+        )
 
 
 class RedisClient:
