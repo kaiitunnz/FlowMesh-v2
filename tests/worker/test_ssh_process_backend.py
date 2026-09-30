@@ -24,7 +24,6 @@ from tests.worker.factories import (
     make_worker_hardware,
     make_worker_task_message,
 )
-from tests.worker.test_runner_credential_scrubber import _SECRET
 from worker.config import WorkerConfig
 from worker.executors.base_executor import (
     ExecutionError,
@@ -43,6 +42,8 @@ from worker.executors.ssh_session.base import extract_output_archive, tree_size_
 from worker.executors.ssh_session.config import SSHOutputConfig
 from worker.main import build_capabilities
 from worker.runner import Runner
+
+_SECRET = "tok-restored-SECRET"
 
 
 def _config(backend: SSHBackendName, tmp_path: Path) -> WorkerConfig:

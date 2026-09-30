@@ -12,19 +12,31 @@ import pytest
 from lumid_hooks import PrincipalContext
 
 from server.config import OrchestrationConfig
+from server.registries.worker import Worker
 from server.registries.workflow import WorkflowRegistry
 from server.routers.v1 import tasks as tasks_router
 from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatcher.helpers import CapturingDispatcher
-from tests.server.dispatcher.test_result_availability import _worker
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry
 
-# A task record as the previous SSH spec wrote it, carrying `spec.mounts`.
+# A task record stored with the retired `spec.mounts`.
 _STORED = json.loads(
     (Path(__file__).parent / "fixtures" / "ssh_task_with_mounts.json").read_text()
 )
+
+
+def _worker() -> Worker:
+    return Worker(
+        id="wkr-1",
+        namespace="ns",
+        cluster="c",
+        node_id="n",
+        node_alias="n",
+        incarnation=1,
+    )
+
 
 _WORKFLOW = """
 apiVersion: mloc/v1

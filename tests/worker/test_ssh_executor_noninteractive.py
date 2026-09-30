@@ -1,4 +1,4 @@
-"""Tests for non-interactive SSH backend behaviour."""
+"""Tests for the Docker SSH session backend, including non-interactive runs."""
 
 import io
 import logging
