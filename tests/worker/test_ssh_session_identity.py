@@ -79,14 +79,13 @@ def test_an_id_an_account_a_group_a_process_or_a_state_root_holds_is_not_drawn()
         patch.object(session_identity, "_run", side_effect=run),
     ):
         session_identity._add_account(
-            "fmssn1", Path("/h"), frozenset({first}), frozenset({first + 3})
+            "fmssn1", Path("/h"), frozenset({first, first + 3})
         )
 
     drawn = str(first + 5)
     assert created[0] == ["/x/groupadd", "--gid", drawn, "fmssn1"]
     useradd = created[1]
     assert useradd[0] == "/x/useradd" and useradd[-1] == "fmssn1"
-    assert "--no-user-group" in useradd
     assert useradd[useradd.index("--uid") + 1] == drawn
     assert useradd[useradd.index("--gid") + 1] == drawn
 
@@ -118,32 +117,30 @@ def test_a_group_created_for_an_account_that_fails_is_removed() -> None:
         patch.object(session_identity, "_run", side_effect=run),
         pytest.raises(ExecutionError, match="useradd failed"),
     ):
-        session_identity._add_account("fmssn1", Path("/h"), frozenset(), frozenset())
+        session_identity._add_account("fmssn1", Path("/h"), frozenset())
 
     assert commands == ["groupadd", "useradd", "groupdel"]
     assert not groups
 
 
-def test_a_new_account_avoids_every_id_a_state_root_names(tmp_path: Path) -> None:
-    avoided: list[tuple[frozenset[int], frozenset[int]]] = []
+def test_a_new_account_avoids_every_uid_a_state_root_names(tmp_path: Path) -> None:
+    avoided: list[frozenset[int]] = []
     roots = [tmp_path / "results", tmp_path / "hb"]
     named = {roots[0]: {61001}, roots[1]: {61002}}
-    named_groups = {roots[0]: {61003}, roots[1]: set()}
 
-    def add(name: str, home: Path, uids: frozenset[int], gids: frozenset[int]) -> None:
-        avoided.append((uids, gids))
+    def add(name: str, home: Path, avoid: frozenset[int]) -> None:
+        avoided.append(avoid)
         raise ExecutionError("stop here")
 
     with (
         patch.object(session_identity, "_ensure_privsep_dir"),
         patch.object(session_identity.acl, "named_uids", side_effect=named.get),
-        patch.object(session_identity.acl, "named_gids", side_effect=named_groups.get),
         patch.object(session_identity, "_add_account", side_effect=add),
         pytest.raises(ExecutionError, match="stop here"),
     ):
         session_identity.SessionAccount.create("fmssn1", tmp_path / "home", roots)
 
-    assert avoided == [(frozenset({61001, 61002}), frozenset({61003}))]
+    assert avoided == [frozenset({61001, 61002})]
 
 
 def _create_concurrently(tmp_path: Path) -> list[int]:
@@ -161,7 +158,7 @@ def _create_concurrently(tmp_path: Path) -> list[int]:
         time.sleep(0.1)
         return found
 
-    def add(name: str, home: Path, uids: frozenset[int], gids: frozenset[int]) -> None:
+    def add(name: str, home: Path, uids: frozenset[int]) -> None:
         accounts[name] = min(set(range(61_000, 61_010)) - uids)
 
     def deny(uid: int, root: Path) -> None:
@@ -176,7 +173,6 @@ def _create_concurrently(tmp_path: Path) -> list[int]:
         patch.object(session_identity, "_unlock"),
         patch.object(session_identity.os, "lchown"),
         patch.object(session_identity.acl, "named_uids", side_effect=named),
-        patch.object(session_identity.acl, "named_gids", return_value=set()),
         patch.object(session_identity.acl, "mask", return_value=None),
         patch.object(session_identity.acl, "record"),
         patch.object(session_identity.acl, "deny", side_effect=deny),
@@ -635,11 +631,6 @@ def test_getfacl_output_parses_to_uids() -> None:
     assert session_identity.acl.parse_mask("user::rwx\ngroup::r-x\n") is None
     assert session_identity.acl.parse_denied_uids(output) == {61001}
     assert session_identity.acl.parse_named_uids(output) == {61001, 1000, 61002}
-
-
-def test_getfacl_output_parses_to_gids() -> None:
-    output = "user::rwx\ngroup::r-x\ngroup:61003:r-x\ndefault:group:100:rwx\n"
-    assert session_identity.acl.parse_named_gids(output) == {61003, 100}
 
 
 def test_every_process_of_the_uid_is_signalled_from_a_helper_that_drops_to_it() -> None:

@@ -123,21 +123,18 @@ class SessionAccount:
     ) -> "SessionAccount":
         """Create the account and deny it ``denied_roots``, or leave nothing behind.
 
-        It gets a uid no entry on those roots names, so its deny and revoke never
-        replace or remove an entry someone else set, and a group of its own that no
-        entry on them names, so no group grants it anything.
+        It gets a group of its own and a uid no entry on those roots names, so its
+        deny and revoke never replace or remove an entry someone else set.
         """
         roots = list(denied_roots)
         _ensure_privsep_dir()
         # Workers in other containers draw from the same range and see only each
         # other's entries, so the draw and the denial it rests on happen at once.
         with _locked(roots):
-            taken_uids: set[int] = set()
-            taken_gids: set[int] = set()
+            taken: set[int] = set()
             for root in roots:
-                taken_uids |= acl.named_uids(root)
-                taken_gids |= acl.named_gids(root)
-            _add_account(name, home, frozenset(taken_uids), frozenset(taken_gids))
+                taken |= acl.named_uids(root)
+            _add_account(name, home, frozenset(taken))
             try:
                 entry = pwd.getpwnam(name)
             except KeyError as exc:
@@ -459,7 +456,7 @@ def kill_processes(uid: int) -> bool:
 
 
 def delete_account(name: str) -> bool:
-    """Delete account ``name`` and its group; return whether both are gone."""
+    """Delete account ``name`` and its group; return whether the account is gone."""
     userdel = shutil.which("userdel")
     if userdel is None:
         logger.warning("userdel is missing; leaving account %s behind", name)
@@ -470,7 +467,8 @@ def delete_account(name: str) -> bool:
         if _account_exists(name):
             logger.warning("Failed to delete SSH session account %s", name)
             return False
-    return _delete_group(name)
+    _delete_group(name)
+    return True
 
 
 def exec_as(uid: int, gid: int, argv: list[str]) -> list[str]:
@@ -565,12 +563,14 @@ def _stderr_of(result: "subprocess.CompletedProcess[bytes]") -> str:
     return result.stderr.decode("utf-8", errors="replace").strip()
 
 
-def _add_account(
-    name: str, home: Path, avoid_uids: frozenset[int], avoid_gids: frozenset[int]
-) -> None:
-    """Create ``name`` and a group of the same name, both under an id drawn at
-    random from the session range that no account, group, live process or
-    ``avoid_uids`` and ``avoid_gids`` holds."""
+def _add_account(name: str, home: Path, avoid_uids: frozenset[int]) -> None:
+    """Create ``name`` and a group of the same name, under an id drawn at random
+    from the session range that serves as both its uid and its gid, and that no
+    account, group, live process or ``avoid_uids`` holds.
+
+    The group is the account's alone, so no directory grants the session
+    access through its group.
+    """
     groupadd = _require_binary("groupadd")
     useradd = _require_binary("useradd")
     detail = ""
@@ -578,7 +578,6 @@ def _add_account(
         uid = SESSION_UID_MIN + secrets.randbelow(SESSION_UID_MAX - SESSION_UID_MIN + 1)
         if (
             uid in avoid_uids
-            or uid in avoid_gids
             or _uid_exists(uid)
             or _gid_exists(uid)
             or _processes_of(uid)
@@ -587,7 +586,7 @@ def _add_account(
         try:
             _run(
                 [groupadd, "--gid", str(uid), name],
-                f"create SSH session group {name}",
+                f"create the group of SSH session account {name}",
             )
         except ExecutionError as exc:
             detail = str(exc)
@@ -599,10 +598,9 @@ def _add_account(
                 [
                     useradd,
                     "--no-create-home",
-                    "--no-user-group",
-                    "--gid",
-                    str(uid),
                     "--uid",
+                    str(uid),
+                    "--gid",
                     str(uid),
                     "--home-dir",
                     home.as_posix(),
@@ -623,19 +621,18 @@ def _add_account(
     )
 
 
-def _delete_group(name: str) -> bool:
-    """Delete group ``name`` if it exists; return whether it is gone."""
+def _delete_group(name: str) -> None:
+    """Delete group ``name`` if it exists; ``userdel`` may already have."""
     if not _group_exists(name):
-        return True
-    if (groupdel := shutil.which("groupdel")) is None:
+        return
+    groupdel = shutil.which("groupdel")
+    if groupdel is None:
         logger.warning("groupdel is missing; leaving group %s behind", name)
-        return False
+        return
     try:
         _run([groupdel, name], f"delete SSH session group {name}")
     except ExecutionError:
         logger.warning("Failed to delete SSH session group %s", name)
-        return False
-    return True
 
 
 def _revoke(denial: acl.Denial) -> None:
