@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -239,6 +240,40 @@ def test_a_session_logs_in_as_its_own_account_and_reaches_only_its_own_data(
         assert _acl_users(root) == [], root
     assert session.poll() is not None
     assert list(Path(str(process_module.SAFE_MOUNT_ROOT)).iterdir()) == []
+
+
+def test_collection_reads_the_output_with_the_session_access_alone(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    root_only = Path(tempfile.mkdtemp(dir="/var/lib")) / "root-only"
+    root_only.write_text("root only")
+    root_only.chmod(0o600)
+    backend = ProcessSessionBackend(worker)
+    session = backend.start_session(
+        _request(tmp_path, client_key, output="/mnt/flowmesh/output")
+    )
+    account = session.account
+    try:
+        output = Path("/mnt/flowmesh/output")
+        (output / "kept.txt").write_text("kept")
+        os.mkfifo(output / "pipe")
+        # A session links a file it cannot read where hard links are unprotected.
+        os.link(root_only, output / "linked")
+        for name in ("kept.txt", "pipe"):
+            os.lchown(output / name, account.uid, account.gid)
+
+        started = time.monotonic()
+        session.collect_output(tmp_path / "collected", None)
+
+        assert time.monotonic() - started < 30
+        collected = tmp_path / "collected"
+        assert sorted(p.name for p in collected.iterdir()) == ["kept.txt"]
+        assert (collected / "kept.txt").read_text() == "kept"
+    finally:
+        session.stop(1)
+        session.cleanup()
+        shutil.rmtree(root_only.parent, ignore_errors=True)
+    assert _run(["getent", "passwd", account.name]).returncode != 0
 
 
 def test_a_planted_symlink_under_the_mount_root_is_never_followed(

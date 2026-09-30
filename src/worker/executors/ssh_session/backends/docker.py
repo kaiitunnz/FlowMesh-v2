@@ -12,7 +12,7 @@ import shlex
 import shutil
 import tarfile
 import time
-from collections.abc import Callable, Generator, Iterable, Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
@@ -40,8 +40,9 @@ from ..base import (
     SSHSession,
     SSHSessionBackend,
     count_established_connections,
+    extract_output_archive,
     is_ssh_ready,
-    path_size_bytes,
+    tree_size_bytes,
 )
 from ..config import (
     FINISH_SENTINEL_PATH,
@@ -52,7 +53,6 @@ from ..config import (
     STOP_TIMEOUT_SEC,
     SSHConfig,
     normalize_mount_path,
-    raise_if_exceeded,
     reserve_mount_path,
 )
 from ..inputs import RESULT_BUNDLE_TIMEOUT_SEC, result_bundle_url, stage_inputs_locally
@@ -92,32 +92,6 @@ _SSH_RUN_SCRIPT_SOURCE = (
 _STAGING_WAIT_SEC = 1
 
 type DemuxLogStream = Iterator[tuple[bytes | None, bytes | None]]
-
-
-class _ChunkReader(io.RawIOBase):
-    """A readable stream over an iterator of byte chunks that calls ``check`` on
-    each read."""
-
-    def __init__(self, chunks: Iterable[bytes], check: Callable[[], Any]) -> None:
-        self._chunks = iter(chunks)
-        self._check = check
-        self._pending = memoryview(b"")
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, buffer: Any) -> int:
-        while not self._pending:
-            try:
-                self._pending = memoryview(next(self._chunks))
-            except StopIteration:
-                return 0
-        # Closing a Docker stream before its first read leaves its connection open.
-        self._check()
-        size = min(len(buffer), len(self._pending))
-        buffer[:size] = self._pending[:size]
-        self._pending = self._pending[size:]
-        return size
 
 
 @dataclass(slots=True)
@@ -701,7 +675,7 @@ class DockerSession(SSHSession):
         plan = self._mount_plan
         try:
             if plan.direct_output_path is not None:
-                return path_size_bytes(plan.direct_output_path)
+                return tree_size_bytes(plan.direct_output_path)
             if plan.copy_output_path is not None:
                 return self._container_path_size(plan.copy_output_path)
         except (DockerException, OSError) as exc:
@@ -739,7 +713,14 @@ class DockerSession(SSHSession):
         # removal.
         stream = cast(Generator[bytes], archive)
         try:
-            self._extract_output(stream, source_path, destination, max_bytes)
+            # A stop collects the output; a cancel discards it.
+            extract_output_archive(
+                stream,
+                destination,
+                max_bytes,
+                signals.raise_if_cancelled,
+                source_name=PurePosixPath(source_path).name,
+            )
         finally:
             stream.close()
 
@@ -782,39 +763,6 @@ class DockerSession(SSHSession):
             return int(_decode_exec_output(result.output) or "0")
         except ValueError:
             return 0
-
-    def _extract_output(
-        self,
-        stream: Iterable[bytes],
-        source_path: str,
-        destination: Path,
-        max_bytes: int | None,
-    ) -> None:
-        source_name = PurePosixPath(source_path).name
-        total = 0
-        # A stop collects the output; a cancel discards it.
-        reader = _ChunkReader(stream, self._signals.raise_if_cancelled)
-        with tarfile.open(fileobj=reader, mode="r|") as archive:
-            for member in archive:
-                self._signals.raise_if_cancelled()
-                relative = _relative_archive_path(member.name, source_name)
-                if relative is None:
-                    continue
-                target = destination / relative
-                if member.isdir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                if not member.isfile():
-                    continue
-                total += member.size
-                if max_bytes is not None:
-                    raise_if_exceeded(total, max_bytes)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                extracted = archive.extractfile(member)
-                if extracted is None:
-                    continue
-                with target.open("wb") as fh:
-                    shutil.copyfileobj(extracted, fh)
 
 
 def _ensure_image(
@@ -972,14 +920,3 @@ def _decode_exec_output(raw: Any) -> str:
     if raw is None:
         return ""
     return b"".join(raw).decode("utf-8", errors="ignore").strip()
-
-
-def _relative_archive_path(member_name: str, source_name: str) -> Path | None:
-    parts = [part for part in PurePosixPath(member_name).parts if part not in ("", ".")]
-    if not parts:
-        return None
-    if source_name in parts:
-        parts = parts[parts.index(source_name) + 1 :]
-    if not parts or any(part == ".." for part in parts):
-        return None
-    return Path(*parts)

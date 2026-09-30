@@ -27,6 +27,7 @@ import signal
 import socket
 import stat
 import subprocess
+import tarfile
 import threading
 import time
 from collections.abc import Callable
@@ -46,16 +47,13 @@ from ..base import (
     SSHSession,
     SSHSessionBackend,
     count_established_connections,
+    extract_output_archive,
     is_ssh_ready,
     read_local_proc_net_tcp,
     resolve_tailnet_address,
+    tree_size_bytes,
 )
-from ..config import (
-    SAFE_MOUNT_ROOT,
-    STOP_TIMEOUT_SEC,
-    normalize_mount_path,
-    raise_if_exceeded,
-)
+from ..config import SAFE_MOUNT_ROOT, STOP_TIMEOUT_SEC, normalize_mount_path
 from ..inputs import stage_inputs_locally
 from ..session_identity import (
     SessionAccount,
@@ -74,6 +72,7 @@ SESSIONS_ROOT = Path("/run/flowmesh/ssh-sessions")
 _MANIFEST_NAME = "manifest.json"
 _SSHD_CANDIDATES = ("/usr/sbin/sshd", "/usr/local/sbin/sshd", "sshd")
 _KEYGEN_BINARY = "ssh-keygen"
+_TAR_BINARY = "tar"
 _KEYGEN_TIMEOUT_SEC = 30.0
 _TERMINATE_GRACE_SEC = 5.0
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -102,6 +101,10 @@ def find_ssh_keygen() -> str | None:
     return shutil.which(_KEYGEN_BINARY)
 
 
+def find_tar() -> str | None:
+    return shutil.which(_TAR_BINARY)
+
+
 class ProcessSessionBackend(SSHSessionBackend):
     name = SSHBackendName.PROCESS
     supports_noninteractive = False
@@ -123,9 +126,9 @@ class ProcessSessionBackend(SSHSessionBackend):
                 "an account of its own (it is not root, or lacks useradd/userdel)"
             )
             return False
-        if find_sshd() is None or find_ssh_keygen() is None:
+        if find_sshd() is None or find_ssh_keygen() is None or find_tar() is None:
             logger.info(
-                "Process SSH backend unavailable: sshd or ssh-keygen is missing "
+                "Process SSH backend unavailable: sshd, ssh-keygen or tar is missing "
                 "(install openssh-server in the worker image)"
             )
             return False
@@ -499,23 +502,34 @@ class ProcessSession(SSHSession):
         if (output_path := self._output_path) is None:
             return None
         try:
-            return _tree_size(output_path)
+            return tree_size_bytes(output_path)
         except OSError as exc:
             logger.debug("SSH output size check failed: %s", exc)
             return None
 
     def collect_output(self, destination: Path, max_bytes: int | None) -> None:
-        """Copy the session's output into ``destination``: regular files and
-        directories only, read without following a symlink."""
+        """Copy the session's output into ``destination``: its directories and
+        regular files, read by a child running as the session's own account, so
+        nothing in it is read with more access than the session has."""
         if (output_path := self._output_path) is None:
             return
         # The session has ended; with its processes gone the tree holds still.
         kill_processes(self.account.uid)
         self._signals.raise_if_cancelled()
         destination.mkdir(parents=True, exist_ok=True)
-        _copy_tree_nofollow(
-            output_path, destination, max_bytes, self._signals.raise_if_cancelled
-        )
+        archiver = _archive_as(self.account, output_path)
+        assert (archive := archiver.stdout) is not None
+        try:
+            extract_output_archive(
+                iter(lambda: archive.read(_COPY_CHUNK), b""),
+                destination,
+                max_bytes,
+                self._signals.raise_if_cancelled,
+            )
+        except tarfile.ReadError as exc:
+            raise ExecutionError(f"Failed to collect SSH output: {exc}") from exc
+        finally:
+            _end_archiver(archiver)
 
     def stop(self, timeout_sec: float) -> None:
         _terminate(self._process, timeout_sec)
@@ -626,52 +640,41 @@ def _make_private_dir(path: Path, mode: int) -> None:
     path.chmod(mode)
 
 
-def _tree_size(root: Path) -> int:
-    """Total size of the regular files under ``root``, without following links."""
-    total = 0
-    for current, _dirs, files in os.walk(root, followlinks=False):
-        for name in files:
-            info = os.lstat(os.path.join(current, name))
-            if stat.S_ISREG(info.st_mode):
-                total += info.st_size
-    return total
+def _archive_as(account: SessionAccount, source: Path) -> subprocess.Popen[bytes]:
+    """Stream a tar of ``source`` from a child running as ``account``."""
+    tar = find_tar()
+    if tar is None:
+        raise ExecutionError("tar is missing from this worker image")
+    try:
+        return subprocess.Popen(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()
+            [tar, "--create", "--file=-", f"--directory={source.as_posix()}", "."],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=_sanitized_spawn_env(),
+            user=account.uid,
+            group=account.gid,
+            extra_groups=[],
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise ExecutionError(f"Failed to read the SSH output: {exc}") from exc
 
 
-def _copy_tree_nofollow(
-    source: Path,
-    destination: Path,
-    max_bytes: int | None,
-    check: Callable[[], Any],
-) -> None:
-    total = 0
-    for current, dirs, files in os.walk(source, followlinks=False):
-        relative = Path(current).relative_to(source)
-        target_dir = destination / relative
-        target_dir.mkdir(parents=True, exist_ok=True)
-        for name in dirs:
-            if os.path.islink(os.path.join(current, name)):
-                logger.warning("Skipping symlink %s in SSH output", name)
-        for name in files:
-            check()
-            path = os.path.join(current, name)
-            try:
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            except OSError:
-                logger.warning("Skipping %s in SSH output: not a regular file", name)
-                continue
-            with os.fdopen(fd, "rb") as src:
-                if not stat.S_ISREG(os.fstat(src.fileno()).st_mode):
-                    logger.warning(
-                        "Skipping %s in SSH output: not a regular file", name
-                    )
-                    continue
-                total += os.fstat(src.fileno()).st_size
-                if max_bytes is not None:
-                    raise_if_exceeded(total, max_bytes)
-                with (target_dir / name).open("wb") as dst:
-                    while chunk := src.read(_COPY_CHUNK):
-                        check()
-                        dst.write(chunk)
+def _end_archiver(archiver: subprocess.Popen[bytes]) -> None:
+    """Stop the archiving child and log a non-zero exit, which ``tar`` gives for a
+    file it could not read and so left out."""
+    assert archiver.stdout is not None
+    archiver.stdout.close()
+    if archiver.poll() is None:
+        archiver.kill()
+    code = archiver.wait()
+    if code not in (0, -signal.SIGKILL):
+        logger.warning(
+            "Reading the SSH output exited with code %d; files the session could "
+            "not read are left out",
+            code,
+        )
 
 
 def _discard_session(

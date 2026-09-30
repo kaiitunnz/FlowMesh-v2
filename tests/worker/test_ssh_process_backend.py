@@ -3,7 +3,9 @@ and what it leaves behind. Nothing here starts sshd or touches an account; the
 in-container suite does that."""
 
 import dataclasses
+import io
 import os
+import tarfile
 import typing
 from pathlib import Path
 from typing import Any, cast
@@ -36,6 +38,7 @@ from worker.executors.ssh_session import (
     select_backend_cls,
 )
 from worker.executors.ssh_session.backends import process as process_module
+from worker.executors.ssh_session.base import extract_output_archive, tree_size_bytes
 from worker.executors.ssh_session.config import SSHOutputConfig
 from worker.runner import Runner
 
@@ -215,51 +218,84 @@ def test_mount_components_are_created_one_level_at_a_time(tmp_path: Path) -> Non
 # ------------------------------------------------------------------ #
 
 
-def _output_with_links(root: Path, outside: Path) -> None:
-    (root / "sub").mkdir(parents=True)
-    (root / "result.txt").write_text("ok")
-    (root / "sub" / "nested.txt").write_text("nested")
-    (root / "secret-link").symlink_to(outside / "secret")
-    (root / "dir-link").symlink_to(outside)
+def _archive(members: list[tuple[tarfile.TarInfo, bytes | None]]) -> list[bytes]:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as tar:
+        for info, data in members:
+            if data is not None:
+                info.size = len(data)
+            tar.addfile(info, None if data is None else io.BytesIO(data))
+    raw = stream.getvalue()
+    return [raw[i : i + 512] for i in range(0, len(raw), 512)]
 
 
-def test_collection_copies_files_and_never_follows_a_link(tmp_path: Path) -> None:
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "secret").write_text("worker state")
-    output = tmp_path / "output"
-    _output_with_links(output, outside)
+def _member(
+    name: str, kind: bytes = tarfile.REGTYPE, link: str = ""
+) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type = kind
+    info.linkname = link
+    return info
+
+
+def test_collection_extracts_files_and_directories_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    chunks = _archive(
+        [
+            (_member("./sub", tarfile.DIRTYPE), None),
+            (_member("./result.txt"), b"ok"),
+            (_member("./sub/nested.txt"), b"nested"),
+            (_member("./secret-link", tarfile.SYMTYPE, "/etc/shadow"), None),
+            (_member("./hard-link", tarfile.LNKTYPE, "./result.txt"), None),
+            (_member("./pipe", tarfile.FIFOTYPE), None),
+            (_member("/etc/escaped"), b"x"),
+            (_member("../escaped"), b"x"),
+        ]
+    )
     destination = tmp_path / "collected"
 
-    process_module._copy_tree_nofollow(output, destination, None, lambda: None)
+    extract_output_archive(chunks, destination, None, lambda: None)
 
     collected = sorted(
         p.relative_to(destination).as_posix() for p in destination.rglob("*")
     )
-    assert collected == ["result.txt", "sub", "sub/nested.txt"]
-    assert process_module._tree_size(output) == len("ok") + len("nested")
+    assert collected == ["etc", "etc/escaped", "result.txt", "sub", "sub/nested.txt"]
+    assert (destination / "result.txt").read_text() == "ok"
+
+
+def test_the_output_size_counts_regular_files_without_following_a_link(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("worker state")
+    output = tmp_path / "output"
+    (output / "sub").mkdir(parents=True)
+    (output / "result.txt").write_text("ok")
+    (output / "sub" / "nested.txt").write_text("nested")
+    (output / "secret-link").symlink_to(outside / "secret")
+    (output / "dir-link").symlink_to(outside)
+
+    assert tree_size_bytes(output) == len("ok") + len("nested")
 
 
 def test_collection_fails_past_the_output_limit(tmp_path: Path) -> None:
-    output = tmp_path / "output"
-    output.mkdir()
-    (output / "big.bin").write_bytes(b"x" * 100)
+    chunks = _archive([(_member("./big.bin"), b"x" * 100)])
 
     with pytest.raises(ExecutionError, match="exceeded maxBytes"):
-        process_module._copy_tree_nofollow(output, tmp_path / "c", 10, lambda: None)
+        extract_output_archive(chunks, tmp_path / "c", 10, lambda: None)
 
 
 def test_a_cancel_during_collection_ends_it(tmp_path: Path) -> None:
-    output = tmp_path / "output"
-    output.mkdir()
-    (output / "a.bin").write_bytes(b"x")
+    chunks = _archive([(_member("./a.bin"), b"x")])
     signals = RunSignals()
 
     with signals.running("tsk"):
         signals.cancel("tsk")
         with pytest.raises(TaskCancelledError):
-            process_module._copy_tree_nofollow(
-                output, tmp_path / "c", None, signals.raise_if_cancelled
+            extract_output_archive(
+                chunks, tmp_path / "c", None, signals.raise_if_cancelled
             )
 
 

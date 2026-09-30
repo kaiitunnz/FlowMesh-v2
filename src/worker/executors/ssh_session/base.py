@@ -7,13 +7,18 @@ own. The task lifecycle, TTL and idle reaping, ``emit_update`` and the
 ``accessMode`` enum sit above this seam, in the executor.
 """
 
+import io
 import ipaddress
 import logging
 import os
+import shutil
 import socket
+import stat
+import tarfile
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
 import psutil
@@ -23,7 +28,12 @@ from shared.tasks.worker_message import WorkerHardware
 from worker.config import WorkerConfig
 
 from ..base_executor import RunSignals
-from .config import FINISH_SENTINEL_PATH, ResolvedSSHInput, SSHConfig
+from .config import (
+    FINISH_SENTINEL_PATH,
+    ResolvedSSHInput,
+    SSHConfig,
+    raise_if_exceeded,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,14 +224,90 @@ def is_ssh_ready(host: str, port: int) -> bool:
         return False
 
 
-def path_size_bytes(path: Path) -> int:
-    if not path.exists():
-        return 0
+def tree_size_bytes(root: Path) -> int:
+    """Total size of the regular files under ``root``, without following a link."""
     total = 0
-    for item in path.rglob("*"):
-        if item.is_file():
-            total += item.stat().st_size
+    for current, _dirs, files in os.walk(root, followlinks=False):
+        for name in files:
+            info = os.lstat(os.path.join(current, name))
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
     return total
+
+
+class _ChunkReader(io.RawIOBase):
+    """A readable stream over an iterator of byte chunks that calls ``check`` on
+    each read."""
+
+    def __init__(self, chunks: Iterable[bytes], check: Callable[[], Any]) -> None:
+        self._chunks = iter(chunks)
+        self._check = check
+        self._pending = memoryview(b"")
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        while not self._pending:
+            try:
+                self._pending = memoryview(next(self._chunks))
+            except StopIteration:
+                return 0
+        # Closing a Docker stream before its first read leaves its connection open.
+        self._check()
+        size = min(len(buffer), len(self._pending))
+        buffer[:size] = self._pending[:size]
+        self._pending = self._pending[size:]
+        return size
+
+
+def extract_output_archive(
+    chunks: Iterable[bytes],
+    destination: Path,
+    max_bytes: int | None,
+    check: Callable[[], Any],
+    source_name: str | None = None,
+) -> None:
+    """Extract a streamed tar of a session's output into ``destination``: its
+    directories and regular files only, failing once the files pass ``max_bytes``,
+    before any more of them is read.
+
+    ``source_name`` strips the archive's own top-level directory, as Docker's
+    archive of a container path carries it.
+    """
+    total = 0
+    with tarfile.open(fileobj=_ChunkReader(chunks, check), mode="r|") as archive:
+        for member in archive:
+            check()
+            relative = _relative_archive_path(member.name, source_name)
+            if relative is None:
+                continue
+            target = destination / relative
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                continue
+            total += member.size
+            if max_bytes is not None:
+                raise_if_exceeded(total, max_bytes)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                continue
+            with target.open("wb") as fh:
+                shutil.copyfileobj(extracted, fh)
+
+
+def _relative_archive_path(member_name: str, source_name: str | None) -> Path | None:
+    parts = [
+        part for part in PurePosixPath(member_name).parts if part not in ("", ".", "/")
+    ]
+    if source_name is not None and source_name in parts:
+        parts = parts[parts.index(source_name) + 1 :]
+    if not parts or any(part == ".." for part in parts):
+        return None
+    return Path(*parts)
 
 
 def count_established_connections(proc_net_tcp: str, port: int) -> int:
