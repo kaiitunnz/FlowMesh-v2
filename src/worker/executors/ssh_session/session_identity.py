@@ -286,12 +286,14 @@ def process_identity_available() -> bool:
 
 
 def _processes_of(uid: int) -> list[psutil.Process]:
-    return [p for p in psutil.process_iter(["uids"]) if _owned_by(p, uid)]
+    """The live processes of ``uid``. A zombie runs nothing and holds no file, and
+    stays until its parent reaps it, which a worker without an init may never do."""
+    return [p for p in psutil.process_iter(["uids"]) if _live_and_owned_by(p, uid)]
 
 
-def _owned_by(proc: psutil.Process, uid: int) -> bool:
+def _live_and_owned_by(proc: psutil.Process, uid: int) -> bool:
     try:
-        return proc.uids().real == uid
+        return proc.uids().real == uid and proc.status() != psutil.STATUS_ZOMBIE
     except (psutil.Error, AttributeError):
         return False
 

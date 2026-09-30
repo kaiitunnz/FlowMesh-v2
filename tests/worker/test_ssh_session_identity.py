@@ -3,10 +3,12 @@ removes. Nothing here creates an account or signals a real process."""
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import psutil
 import pytest
 
 from worker.executors.base_executor import ExecutionError
@@ -98,6 +100,22 @@ def test_the_kill_repeats_until_no_process_of_the_account_is_left() -> None:
         assert session_identity.kill_processes(200_000)
 
     assert kill_all.call_count == 2
+
+
+def test_a_zombie_of_the_account_is_not_a_process_left_to_kill() -> None:
+    child = subprocess.Popen(["true"])  # nosec B603 B607 - argv list, test-only
+    try:
+        deadline = time.monotonic() + 10
+        while psutil.Process(child.pid).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        pids = {p.pid for p in session_identity._processes_of(os.getuid())}
+    finally:
+        child.wait()
+
+    assert child.pid not in pids
+    assert os.getpid() in pids
 
 
 def test_an_account_with_a_process_no_kill_ends_is_locked_not_deleted() -> None:

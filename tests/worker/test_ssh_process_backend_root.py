@@ -303,8 +303,12 @@ while True:
 """
 
 
-def _processes_of(uid: int) -> list[psutil.Process]:
-    return [p for p in psutil.process_iter(["uids"]) if p.info["uids"].real == uid]
+def _live_processes_of(uid: int) -> list[psutil.Process]:
+    return [
+        p
+        for p in psutil.process_iter(["uids", "status"])
+        if p.info["uids"].real == uid and p.info["status"] != psutil.STATUS_ZOMBIE
+    ]
 
 
 def test_a_session_leaves_the_next_one_nothing(
@@ -337,7 +341,7 @@ def test_a_session_leaves_the_next_one_nothing(
     first.stop(1)
     first.cleanup()
 
-    assert _processes_of(account.uid) == []
+    assert _live_processes_of(account.uid) == []
     assert _run(["getent", "passwd", account.name]).returncode != 0
     assert not leftover.exists()
     second = backend.start_session(_request(tmp_path, client_key))
