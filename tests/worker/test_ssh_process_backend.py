@@ -41,6 +41,7 @@ from worker.executors.ssh_session import (
 from worker.executors.ssh_session.backends import process as process_module
 from worker.executors.ssh_session.base import extract_output_archive, tree_size_bytes
 from worker.executors.ssh_session.config import SSHOutputConfig
+from worker.main import build_capabilities
 from worker.runner import Runner
 
 
@@ -92,7 +93,46 @@ def test_a_worker_whose_state_takes_no_acl_serves_no_process_session(
         patch.object(process_module, "find_ssh_keygen", return_value="/usr/bin/k"),
         patch.object(process_module, "supports_denials", return_value=False),
     ):
+        assert not ProcessSessionBackend.is_available(
+            make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+        )
+
+
+def test_a_root_worker_its_supervisor_cannot_reach_serves_no_process_session(
+    tmp_path: Path,
+) -> None:
+    with (
+        patch.object(process_module, "process_identity_available", return_value=True),
+        patch.object(process_module, "find_sshd", return_value="/usr/sbin/sshd"),
+        patch.object(process_module, "find_ssh_keygen", return_value="/usr/bin/k"),
+        patch.object(process_module, "find_tar", return_value="/usr/bin/tar"),
+        patch.object(process_module, "supports_denials", return_value=True),
+        patch.object(process_module, "resolve_tailnet_address", return_value=None),
+    ):
         assert not ProcessSessionBackend.is_available(make_live_worker_config(tmp_path))
+        assert ProcessSessionBackend.is_available(
+            make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+        )
+
+
+@pytest.mark.parametrize(
+    ("backend", "noninteractive"),
+    [(SSHBackendName.DOCKER, True), (SSHBackendName.PROCESS, False)],
+)
+def test_the_worker_reports_whether_its_sessions_run_batch_tasks(
+    tmp_path: Path, backend: SSHBackendName, noninteractive: bool
+) -> None:
+    with (
+        patch.object(DockerSessionBackend, "is_available", return_value=True),
+        patch.object(ProcessSessionBackend, "is_available", return_value=True),
+        patch.object(ProcessSessionBackend, "_reap_stale"),
+    ):
+        executor = SSHExecutor(_config(backend, tmp_path))
+
+    capabilities = build_capabilities({"ssh": executor})
+
+    assert TaskType.SSH in capabilities.supported_task_types
+    assert capabilities.ssh_noninteractive is noninteractive
 
 
 def _worker_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

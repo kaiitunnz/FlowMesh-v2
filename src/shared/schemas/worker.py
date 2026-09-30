@@ -48,6 +48,13 @@ class WorkerCapabilities(BaseModel):
         default_factory=frozenset,
         description="Types of tasks this worker can service.",
     )
+    ssh_noninteractive: bool = Field(
+        default=True,
+        description=(
+            "Whether the worker's SSH sessions run non-interactive tasks; a worker "
+            "that serves interactive sessions only reports false."
+        ),
+    )
     resident_listener_port: int = Field(
         default=0,
         description=(

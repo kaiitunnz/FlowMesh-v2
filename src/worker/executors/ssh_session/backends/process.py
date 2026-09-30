@@ -132,6 +132,12 @@ class ProcessSessionBackend(SSHSessionBackend):
                 "(install openssh-server in the worker image)"
             )
             return False
+        if not (config.ssh_relay_host or resolve_tailnet_address()):
+            logger.info(
+                "Process SSH backend unavailable: the worker has no tailnet address "
+                "and SSH_RELAY_HOST is unset, so its supervisor cannot reach a session"
+            )
+            return False
         if not supports_denials(config.state_roots):
             logger.info(
                 "Process SSH backend unavailable: this worker's state cannot be "

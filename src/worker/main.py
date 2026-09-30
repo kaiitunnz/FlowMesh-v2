@@ -30,6 +30,7 @@ from .content import (
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
 from .executors.mp_executor import MPExecutor
+from .executors.ssh_executor import SSHExecutor
 from .gpu_sampler import GpuSampler, build_gpu_sampler
 from .hw import collect_hw
 from .lifecycle import Lifecycle
@@ -200,8 +201,14 @@ def build_capabilities(
     supported_task_types = frozenset[TaskType]().union(
         *(cls.supported_task_types for key in executors if (cls := registry.get(key)))
     )
+    ssh = executors.get("ssh")
     return WorkerCapabilities(
         supported_task_types=supported_task_types,
+        ssh_noninteractive=(
+            ssh.backend.supports_noninteractive
+            if isinstance(ssh, SSHExecutor)
+            else True
+        ),
         resident_listener_port=resident_listener_port,
     )
 
