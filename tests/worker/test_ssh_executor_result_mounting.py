@@ -16,7 +16,11 @@ from shared.content import reference_for
 from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import SSHSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
-from tests.worker.factories import DEFAULT_WORKER_CONFIG, make_live_worker_config
+from tests.worker.factories import (
+    DEFAULT_WORKER_CONFIG,
+    make_live_worker_config,
+    make_ssh_executor,
+)
 from worker.config import WorkerConfig
 from worker.executors.base_executor import ExecutionError, RunSignals
 from worker.executors.ssh_session import (
@@ -551,3 +555,24 @@ def test_a_link_in_a_local_upstream_is_staged_as_a_link(tmp_path: Path) -> None:
     staged = staging_dir / "task-pre" / "planted"
     assert staged.is_symlink()
     assert staged.readlink() == secret
+
+
+def test_a_staging_failure_before_the_session_starts_stays_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker_cfg = _worker_config(tmp_path)
+    (worker_cfg.results_dir / "task-pre").mkdir(parents=True)
+    executor = make_ssh_executor(worker_cfg)
+    backend = executor.backend
+    assert isinstance(backend, DockerSessionBackend)
+    client = MagicMock()
+    client.volumes.create.side_effect = APIError("daemon busy")
+    backend._docker = client
+    monkeypatch.setattr(backend, "prepare", lambda: None)
+
+    # An uncontrolled error is one the runner retries, as a staging failure may
+    # succeed on another attempt.
+    with pytest.raises(APIError, match="daemon busy"):
+        executor.run(
+            _task_message(authorizedKeys=["ssh-ed25519 AAAA key"]), tmp_path / "out"
+        )

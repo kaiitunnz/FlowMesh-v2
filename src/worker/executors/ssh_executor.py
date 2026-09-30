@@ -158,14 +158,12 @@ class SSHExecutor(Executor):
                 cfg.command,
             )
 
+        # Any other error before the session starts reaches the runner as it is, which
+        # retries it: staging and a daemon call may succeed on another attempt.
         try:
             session = self._backend.start_session(request)
         except SessionInterrupted:
             return self._interrupted_before_start(task, session_id)
-        except ExecutionError:
-            raise
-        except Exception as exc:
-            raise ExecutionError(f"Failed to start {session_kind}: {exc}") from exc
 
         self._current_session = session
         if self._signals.interrupted:
