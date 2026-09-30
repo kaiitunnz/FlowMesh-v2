@@ -83,7 +83,7 @@ def _dispatch_downstream(error: Exception) -> CapturingDispatcher:
         OrchestrationConfig(),
         reader,
         logging.getLogger("result-availability"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     _wf, results = asyncio.run(runtime.register("owner", "org", _DAG, format="native"))
     a, b = (r.task_id for r in results)

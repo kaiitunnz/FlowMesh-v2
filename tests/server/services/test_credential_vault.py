@@ -1,8 +1,8 @@
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
+from server.clients.redis import workflow_credential_key
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 
 
@@ -14,7 +14,7 @@ def _vault() -> tuple[InMemoryCredentialVault, Any]:
 @pytest.mark.anyio
 async def test_store_then_resolve_within_the_same_workflow():
     vault, _ = _vault()
-    await vault.store("wfl-1", "msk-a", SecretStr("sk-user"))
+    await vault.store_values("wfl-1", {"msk-a": "sk-user"})
     resolved = vault.resolve("wfl-1", "msk-a")
     assert resolved is not None and resolved.get_secret_value() == "sk-user"
 
@@ -22,7 +22,7 @@ async def test_store_then_resolve_within_the_same_workflow():
 @pytest.mark.anyio
 async def test_a_ref_does_not_resolve_under_another_workflow():
     vault, _ = _vault()
-    await vault.store("wfl-1", "msk-a", SecretStr("sk-user"))
+    await vault.store_values("wfl-1", {"msk-a": "sk-user"})
     assert vault.resolve("wfl-2", "msk-a") is None
 
 
@@ -35,7 +35,7 @@ def test_missing_ref_and_none_resolve_to_none():
 @pytest.mark.anyio
 async def test_purge_drops_the_workflow_credentials():
     vault, _ = _vault()
-    await vault.store("wfl-1", "msk-a", SecretStr("sk-user"))
+    await vault.store_values("wfl-1", {"msk-a": "sk-user"})
     vault.purge("wfl-1")
     assert vault.resolve("wfl-1", "msk-a") is None
 
@@ -67,14 +67,35 @@ async def test_values_resolve_only_within_their_workflow_and_omit_missing_refs()
 async def test_retain_only_keeps_live_vaults_without_expiry_and_drops_the_rest():
     vault, redis = _vault()
     for workflow_id in ("wfl-live", "wfl-settled", "wfl-unregistered"):
-        await vault.store(workflow_id, "msk-a", SecretStr("sk"))
-    redis.expiring.add("workflow:wfl-live:model_secret")
+        await vault.store_values(workflow_id, {"msk-a": "sk"})
+    redis.expiring.add(workflow_credential_key("wfl-live"))
     redis.hashes["workflow:wfl-live:other"] = {"x": "y"}
 
     await vault.retain_only(["wfl-live"])
 
     assert vault.resolve("wfl-live", "msk-a") is not None
-    assert "workflow:wfl-live:model_secret" not in redis.expiring
+    assert workflow_credential_key("wfl-live") not in redis.expiring
     assert vault.resolve("wfl-settled", "msk-a") is None
     assert vault.resolve("wfl-unregistered", "msk-a") is None
     assert "workflow:wfl-live:other" in redis.hashes
+
+
+@pytest.mark.anyio
+async def test_a_model_key_stored_as_its_raw_string_still_resolves():
+    vault, redis = _vault()
+    redis.hashes[workflow_credential_key("wfl-1")] = {"msk-a": "sk-raw", "msk-n": "123"}
+
+    assert vault.resolve("wfl-1", "msk-a").get_secret_value() == "sk-raw"
+    assert vault.resolve("wfl-1", "msk-n").get_secret_value() == "123"
+
+
+@pytest.mark.anyio
+async def test_a_write_clears_an_expiry_the_key_still_carries():
+    vault, redis = _vault()
+    key = workflow_credential_key("wfl-1")
+    redis.hashes[key] = {"msk-old": '"sk"'}
+    redis.expiring.add(key)
+
+    await vault.store_values("wfl-1", {"msk-new": "Bearer sk"})
+
+    assert key not in redis.expiring

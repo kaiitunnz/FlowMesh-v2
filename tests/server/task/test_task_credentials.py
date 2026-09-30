@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 
+from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
 from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
@@ -68,7 +69,7 @@ def _runtime(
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("task-credentials"),
-        secret_vault=vault or InMemoryCredentialVault(),
+        credential_vault=vault or InMemoryCredentialVault(),
     )
 
 
@@ -164,6 +165,23 @@ def test_a_dispatch_carries_the_task_its_own_credentials(api_version):
     # The record the dispatch rendered from keeps only the refs.
     record = runtime.get_record(ids["call"])
     assert record is not None and _no_secret(record.model_dump_json())
+
+
+@pytest.mark.parametrize("api_version", ["flowmesh/v1", "flowmesh/v2"])
+def test_a_credential_under_a_non_string_key_is_vaulted_and_restored(api_version):
+    payload = _api_workflow(api_version).replace(
+        "json: {model: m}", f'json: {{shards: {{1: {{token: "{_HF}"}}}}}}'
+    )
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    _, ids = _register(runtime, payload)
+
+    assert all(_no_secret(blob) for blob in registry.task_blobs.values())
+    if api_version == "flowmesh/v2":
+        assert runtime.inspect_v2(payload) is not None
+    publisher, _ = _dispatch(runtime, ids["call"])
+    message = publisher.publish_task.call_args[0][1]
+    assert _api(message.task)["json"] == {"shards": {1: {"token": _HF}}}
 
 
 def test_a_credential_no_longer_retained_fails_its_task_and_substitutes_nothing():
@@ -264,7 +282,7 @@ def test_a_merged_child_whose_credential_is_gone_leaves_the_merge():
     child = runtime.get_record(ids["b"])
     assert child is not None and child.credential_refs is not None
     gone = child.credential_refs["/data/api_key"]
-    del vault.redis.hashes[f"workflow:{workflow_id}:model_secret"][gone]
+    del vault.redis.hashes[workflow_credential_key(workflow_id)][gone]
 
     registry, disp = _dispatch(runtime, ids["a"])
 
@@ -339,7 +357,7 @@ def test_a_restart_vaults_credentials_stored_before_they_were_vaulted():
     infer = runtime.get_record(_task_named(runtime, stored["live"], "infer"))
     assert infer is not None and infer.merge_key is not None
     # The settled workflow's credentials are masked and nothing of it is vaulted.
-    assert set(vault.redis.hashes) == {f"workflow:{stored['live']}:model_secret"}
+    assert set(vault.redis.hashes) == {workflow_credential_key(stored["live"])}
 
     call = _task_named(runtime, stored["live"], "call")
     publisher, disp = _dispatch(runtime, call)
@@ -440,10 +458,12 @@ def test_a_leaf_whose_adapter_url_carries_a_credential_runs_self_contained():
 @pytest.mark.parametrize("service", ["{mode: resident}", "{isolation: team}"])
 def test_resident_serving_of_a_credentialed_adapter_is_refused(service):
     payload = _adapter_leaf(_PRESIGNED, service)
-    runtime = _runtime()
+    vault = InMemoryCredentialVault()
+    runtime = _runtime(vault=vault)
 
     with pytest.raises(CompileError, match="adapter"):
         _register(runtime, payload)
+    assert vault.redis.hashes == {}
     with pytest.raises(CompileError, match="adapter"):
         runtime.inspect_v2(payload)
 

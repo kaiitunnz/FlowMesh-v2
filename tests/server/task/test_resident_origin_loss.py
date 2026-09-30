@@ -222,7 +222,7 @@ def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again(
             OrchestrationConfig(),
             make_result_reader(),
             logging.getLogger("resident-test"),
-            secret_vault=cast(Any, InMemoryCredentialVault()),
+            credential_vault=InMemoryCredentialVault(),
         )
         reoriginated = _originating(restored)
         await restored.rehydrate()

@@ -1,8 +1,8 @@
 import logging
+from collections.abc import Mapping
 from typing import Any, cast
 
 import pytest
-from pydantic import SecretStr
 
 from server.config import OrchestrationConfig
 from server.task.models import TaskStatus
@@ -44,12 +44,12 @@ spec:
 class _RecordingVault(InMemoryCredentialVault):
     def __init__(self) -> None:
         super().__init__()
-        self.stored: dict[tuple[str, str], SecretStr] = {}
+        self.stored: dict[tuple[str, str], Any] = {}
         self.purged: list[str] = []
 
-    async def store(self, workflow_id: str, ref: str, secret: SecretStr) -> None:
-        self.stored[(workflow_id, ref)] = secret
-        await super().store(workflow_id, ref, secret)
+    async def store_values(self, workflow_id: str, values: Mapping[str, Any]) -> None:
+        self.stored.update(((workflow_id, ref), value) for ref, value in values.items())
+        await super().store_values(workflow_id, values)
 
     def purge(self, workflow_id: str) -> None:
         self.purged.append(workflow_id)
@@ -63,7 +63,7 @@ def _runtime(vault: _RecordingVault, registry: FakeRegistry) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-register-vaulting"),
-        secret_vault=cast(Any, vault),
+        credential_vault=vault,
     )
 
 
@@ -81,7 +81,8 @@ async def test_inline_key_is_vaulted_and_absent_from_every_persisted_surface():
     (vault_wfl, ref), secret = next(iter(vault.stored.items()))
     assert vault_wfl == workflow_id
     assert ref.startswith("msk-")
-    assert secret.get_secret_value() == _RAW_KEY
+    assert secret == _RAW_KEY
+    assert vault.resolve(workflow_id, ref).get_secret_value() == _RAW_KEY
 
     # The pinned binding carries the generated ref, never the raw key.
     binding = runtime.resolve_model_binding(task_id)

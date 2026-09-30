@@ -2,9 +2,8 @@ import json
 from pathlib import Path
 
 import yaml
-from pydantic import SecretStr
 
-from server.task.credentials import pop_inline_model_secrets, redact_source_text
+from server.task.credentials import redact_source_text, take_inline_credentials
 from server.task.parser import parse_workflow
 from shared.utils.redact import REDACTED
 
@@ -28,16 +27,12 @@ spec:
 """
 
 
-def test_pop_inline_model_secrets_strips_and_returns_the_key():
+def test_an_agent_model_key_is_taken_with_the_other_credentials():
     parsed = parse_workflow(_WF, "native")
-    secrets = pop_inline_model_secrets(parsed)
-    assert len(secrets) == 1
-    secret = next(iter(secrets.values()))
-    assert isinstance(secret, SecretStr)
-    assert secret.get_secret_value() == "sk-secret"
-    # The key is stripped from the parsed spec in place.
+    taken = take_inline_credentials(parsed)
     agent = next(t for t in parsed.tasks if t.task.spec.taskType == "agent")
     assert agent.task.spec.model_binding.api_key is None
+    assert taken.values[taken.model_keys[agent.task_id]] == "sk-secret"
 
 
 def test_redact_source_text_masks_the_inline_key():
@@ -82,7 +77,7 @@ metadata: {name: t}
 spec:
   taskType: echo
 """
-    assert pop_inline_model_secrets(parse_workflow(wf, "native")) == {}
+    assert take_inline_credentials(parse_workflow(wf, "native")).model_keys == {}
 
 
 _HEADER_WF = """

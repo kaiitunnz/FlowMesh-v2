@@ -15,6 +15,8 @@ from redis.client import Pipeline, PubSub
 from redis.connection import SSLConnection as SyncSSLConnection
 from redis.typing import EncodableT
 
+from shared.utils.redact import redact_url
+
 from ..config import RedisConfig
 
 # redis-py wraps dropped sockets in its own ConnectionError/TimeoutError, which
@@ -100,6 +102,7 @@ def workflow_ds_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:ds"
 
 
+# The ``model_secret`` suffix is the persisted vault layout.
 WORKFLOW_CREDENTIAL_KEY_PATTERN = "workflow:*:model_secret"
 
 
@@ -338,18 +341,6 @@ def _with_redis_auth(url: str, acl_enabled: bool, username: str, password: str) 
     return urlunparse(parsed._replace(netloc=netloc))
 
 
-def _redact_url(url: str) -> str:
-    parsed = urlparse(url)
-    if not parsed.username and not parsed.password:
-        return url
-    host = parsed.hostname or ""
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
-    user = parsed.username or "user"
-    netloc = f"{user}:****@{host}"
-    return urlunparse(parsed._replace(netloc=netloc))
-
-
 class SyncRedisClient:
     def __init__(
         self,
@@ -399,7 +390,7 @@ class SyncRedisClient:
                 "Failed to connect to %s Redis (%s): %s", label, url, exc
             )
             raise SystemExit(1) from exc
-        self.logger.info("Connected to %s Redis: %s", label, _redact_url(url))
+        self.logger.info("Connected to %s Redis: %s", label, redact_url(url))
         return client
 
     # ---- String helpers ----
@@ -612,7 +603,7 @@ class AsyncRedisClient:
                 "Failed to connect to %s Redis (%s): %s", label, url, exc
             )
             raise SystemExit(1) from exc
-        self.logger.info("Connected to %s Redis: %s", label, _redact_url(url))
+        self.logger.info("Connected to %s Redis: %s", label, redact_url(url))
         return client
 
     # ---- String helpers ----
@@ -679,6 +670,13 @@ class AsyncRedisClient:
 
     async def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
         await _awaitable(self._control.hset(key, mapping=mapping))
+
+    async def hash_set_persistent(self, key: str, mapping: dict[str, Any]) -> None:
+        """Set hash fields and clear any expiry on the key, in one transaction."""
+        async with self._control.pipeline(transaction=True) as pipe:
+            pipe.hset(key, mapping=mapping)
+            pipe.persist(key)
+            await pipe.execute()
 
     async def hash_delete(self, key: str, *fields: str) -> None:
         if fields:

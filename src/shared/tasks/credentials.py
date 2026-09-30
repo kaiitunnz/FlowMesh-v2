@@ -89,12 +89,19 @@ def holds_placeholder(value: Any) -> bool:
     return False
 
 
+def _key(container: Mapping[Any, Any], segment: str) -> Any:
+    """The mapping key a pointer segment names; a pointer spells every key as text."""
+    if segment in container:
+        return segment
+    return next((key for key in container if str(key) == segment), segment)
+
+
 def _child(container: Any, segment: str) -> Any:
     if isinstance(container, BaseModel):
         return getattr(container, segment)
     if isinstance(container, list):
         return container[int(segment)]
-    return container[segment]
+    return container[_key(container, segment)]
 
 
 def _assign(container: Any, segment: str, value: Any) -> None:
@@ -103,7 +110,7 @@ def _assign(container: Any, segment: str, value: Any) -> None:
     elif isinstance(container, list):
         container[int(segment)] = value
     else:
-        container[segment] = value
+        container[_key(container, segment)] = value
 
 
 __all__ = [

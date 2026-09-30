@@ -110,7 +110,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-endpoint-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

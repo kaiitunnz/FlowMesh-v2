@@ -40,7 +40,7 @@ def _setup(
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("test_dispatch_once_retry"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     _, results = asyncio.run(
         runtime.register("owner", "org", _ECHO_WORKFLOW, format="native")

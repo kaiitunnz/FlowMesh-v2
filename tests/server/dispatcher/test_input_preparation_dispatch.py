@@ -37,7 +37,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("preparation-dispatch-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

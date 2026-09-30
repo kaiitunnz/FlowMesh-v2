@@ -10,7 +10,7 @@ import logging
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -542,7 +542,7 @@ def _make_runtime_with_record(task_id: str) -> tuple[TaskRuntime, TaskRecord]:
         orchestration=OrchestrationConfig(),
         results=make_result_reader(),
         logger=logging.getLogger("test.supplier"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     env = TaskEnvelopeTemplate.model_validate(
         {"apiVersion": "mloc/v1", "kind": "Task", "spec": {"taskType": "echo"}}

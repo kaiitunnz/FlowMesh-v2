@@ -340,7 +340,7 @@ def _runtime(max_parallel: int) -> TaskRuntime:
         OrchestrationConfig(web_search=WebSearchConfig(max_parallel=max_parallel)),
         make_result_reader(),
         logging.getLogger("group-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 
@@ -414,7 +414,7 @@ def test_a_crash_after_route_does_not_resurrect_a_stale_group() -> None:
             cfg,
             results,
             logging.getLogger("med2"),
-            secret_vault=cast(Any, InMemoryCredentialVault()),
+            credential_vault=InMemoryCredentialVault(),
         )
         runtime.set_tool_broker(lambda env: None)
         workflow_id, ids = await _register(runtime, _SEARCH_WF)
@@ -448,7 +448,7 @@ def test_a_crash_after_route_does_not_resurrect_a_stale_group() -> None:
             cfg,
             results,
             logging.getLogger("med2-restored"),
-            secret_vault=cast(Any, InMemoryCredentialVault()),
+            credential_vault=InMemoryCredentialVault(),
         )
         await restored.rehydrate()
         # The stale group did not survive: no capture remains to hijack a completion.

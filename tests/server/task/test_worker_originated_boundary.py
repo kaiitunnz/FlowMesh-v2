@@ -170,7 +170,7 @@ def _runtime(
         config or OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("wo-test"),
-        secret_vault=cast(Any, vault or InMemoryCredentialVault()),
+        credential_vault=cast(Any, vault or InMemoryCredentialVault()),
         content_scope_authority=(
             None
             if assigned is None
@@ -1122,7 +1122,7 @@ def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
                 OrchestrationConfig(),
                 make_result_reader(),
                 logging.getLogger("wo-test"),
-                secret_vault=cast(Any, InMemoryCredentialVault()),
+                credential_vault=InMemoryCredentialVault(),
             )
 
         runtime = runtime_on(registry)

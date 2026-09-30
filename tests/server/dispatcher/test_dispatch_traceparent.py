@@ -60,7 +60,7 @@ def _runtime(control: Any = None) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("dispatch-traceparent-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
         control=control,
     )
 

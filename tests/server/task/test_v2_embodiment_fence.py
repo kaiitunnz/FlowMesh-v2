@@ -46,7 +46,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("embodiment-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

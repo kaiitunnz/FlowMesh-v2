@@ -44,7 +44,7 @@ def _runtime(
         OrchestrationConfig(),
         reader,
         logging.getLogger(name),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
         control=control,
         tracer=tracer,
         telemetry=config,

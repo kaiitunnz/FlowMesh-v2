@@ -39,7 +39,7 @@ def _runtime(
         OrchestrationConfig(max_prepared_input_bytes=max_prepared_input_bytes),
         make_result_reader(),
         logging.getLogger("input-preparation-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

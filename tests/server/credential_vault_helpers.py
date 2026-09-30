@@ -20,8 +20,9 @@ class _Async:
     def __init__(self, redis: InMemoryVaultRedis) -> None:
         self._redis = redis
 
-    async def hash_set(self, key: str, mapping: dict[str, str]) -> None:
+    async def hash_set_persistent(self, key: str, mapping: dict[str, str]) -> None:
         self._redis.hashes.setdefault(key, {}).update(mapping)
+        self._redis.expiring.discard(key)
 
     async def scan_keys(self, pattern: str) -> list[str]:
         return [k for k in self._redis.hashes if fnmatch.fnmatchcase(k, pattern)]

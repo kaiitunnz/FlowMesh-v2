@@ -52,7 +52,7 @@ def _runtime(registry: FakeRegistry, reader: Any) -> TaskRuntime:
         OrchestrationConfig(),
         reader,
         logging.getLogger("foreign-dependency"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

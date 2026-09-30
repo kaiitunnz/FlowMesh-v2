@@ -123,7 +123,7 @@ def _runtime(
         OrchestrationConfig(),
         reader or make_result_reader(),
         logging.getLogger("task-merge"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

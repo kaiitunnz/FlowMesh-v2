@@ -60,7 +60,7 @@ def _runtime(*, control: Any = None, episode_lowering: bool = False) -> TaskRunt
         OrchestrationConfig(episode_lowering=episode_lowering),
         make_result_reader(),
         logging.getLogger("control-plane-seam-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
         control=control,
     )
 

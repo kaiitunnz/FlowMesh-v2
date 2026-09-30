@@ -99,7 +99,7 @@ def _runtime(
         OrchestrationConfig(),
         reader,
         logging.getLogger("store-redrive"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
         redrive=scheduler,
     )
     return runtime, flaky, schedulers, clock

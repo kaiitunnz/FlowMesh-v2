@@ -73,7 +73,7 @@ def _runtime(worker_registry: Any = None) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("runtime-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

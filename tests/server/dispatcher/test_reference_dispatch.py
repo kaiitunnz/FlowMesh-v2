@@ -76,7 +76,7 @@ class _Workflow:
             OrchestrationConfig(),
             self.reader,
             logging.getLogger("reference-dispatch"),
-            secret_vault=cast(Any, InMemoryCredentialVault()),
+            credential_vault=InMemoryCredentialVault(),
         )
         _wf, results = asyncio.run(
             self.runtime.register("owner", "org", payload, format="native")

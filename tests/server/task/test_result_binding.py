@@ -47,7 +47,7 @@ def _runtime(registry: FakeRegistry, reader: Any = None) -> TaskRuntime:
         OrchestrationConfig(),
         reader or make_result_reader(),
         logging.getLogger("result-binding"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

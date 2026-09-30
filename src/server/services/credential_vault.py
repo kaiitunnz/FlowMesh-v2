@@ -1,5 +1,4 @@
 import json
-import logging
 from collections.abc import Collection, Mapping
 from typing import Any
 
@@ -13,19 +12,27 @@ from ..clients.redis import (
 )
 
 
+def _model_key(value: str) -> str:
+    try:
+        decoded = json.loads(value)
+    except ValueError:
+        return value
+    return decoded if isinstance(decoded, str) else value
+
+
 class CredentialVault:
     """Durable, workflow-scoped store for the credentials a submission carries inline.
 
     Each credential is vaulted at submission under its owning workflow's namespace and
     referenced everywhere else by an opaque generated ref. A read resolves a ref only
     within its owning workflow, so a ref minted for one workflow never yields another's
-    credential. An agent's model key is stored as its raw string and read with
-    ``resolve``; a task-spec value is stored JSON-encoded and read with
-    ``resolve_values``.
+    credential. Each value is stored JSON-encoded; an agent's model key is read with
+    ``resolve``, which also reads a key stored as its raw string, and a task-spec value
+    with ``resolve_values``.
 
-    A workflow's credentials live until it settles: nothing expires them, the terminal
-    transition or a cancel purges them, and a restart keeps every live workflow's
-    credentials while dropping those of a workflow that settled or never registered.
+    A workflow's credentials live until it settles: the terminal transition or a cancel
+    purges them, and a restart keeps every live workflow's credentials while dropping
+    those of a workflow that settled or never registered.
 
     Values are stored structured (one Redis hash field per ref) within the Redis
     control store's trust boundary. No credential is encrypted at rest here; the store
@@ -33,32 +40,23 @@ class CredentialVault:
     cross-workflow resolution.
     """
 
-    def __init__(
-        self, redis: RedisClient, logger: logging.Logger | None = None
-    ) -> None:
+    def __init__(self, redis: RedisClient) -> None:
         self._redis = redis
-        self._logger = logger or logging.getLogger("credential-vault")
-
-    async def store(self, workflow_id: str, ref: str, secret: SecretStr) -> None:
-        """Vault one workflow-scoped model key under its generated ref."""
-        await self._store_fields(workflow_id, {ref: secret.get_secret_value()})
 
     async def store_values(self, workflow_id: str, values: Mapping[str, Any]) -> None:
-        """Vault task-spec credential values, keyed by their generated refs."""
+        """Vault credential values, keyed by their generated refs."""
         if values:
-            await self._store_fields(
-                workflow_id, {ref: json.dumps(value) for ref, value in values.items()}
+            await self._redis.asyncio.hash_set_persistent(
+                workflow_credential_key(workflow_id),
+                {ref: json.dumps(value) for ref, value in values.items()},
             )
-
-    async def _store_fields(self, workflow_id: str, fields: dict[str, str]) -> None:
-        await self._redis.asyncio.hash_set(workflow_credential_key(workflow_id), fields)
 
     def resolve(self, workflow_id: str, ref: str | None) -> SecretStr | None:
         """The model key for ``ref`` within ``workflow_id``."""
         if not ref:
             return None
         value = self._read(workflow_id, [ref])[0]
-        return None if value is None else SecretStr(value)
+        return None if value is None else SecretStr(_model_key(value))
 
     def resolve_values(self, workflow_id: str, refs: Collection[str]) -> dict[str, Any]:
         """The task-spec values ``refs`` name within ``workflow_id``; a ref that no

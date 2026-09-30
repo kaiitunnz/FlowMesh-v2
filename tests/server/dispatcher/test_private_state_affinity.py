@@ -42,7 +42,7 @@ def _dispatcher(
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("private-state-affinity-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     _, results = asyncio.run(
         runtime.register("owner", "org", _ECHO_WORKFLOW, format="native")

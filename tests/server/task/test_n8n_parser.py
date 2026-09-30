@@ -135,7 +135,7 @@ async def test_the_runtime_decrypts_n8n_credentials_with_its_configured_password
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("n8n-test"),
-        secret_vault=vault,
+        credential_vault=vault,
         n8n=N8nConfig(credential_password=_AES_PASSWORD),
     )
     workflow_id, results = await runtime.register(

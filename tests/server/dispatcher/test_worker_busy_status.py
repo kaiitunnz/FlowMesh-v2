@@ -47,7 +47,7 @@ def _setup() -> tuple[TaskRuntime, str, mock.Mock, list[str]]:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("busy-status-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     _, results = asyncio.run(
         runtime.register("owner", "org", _WORKFLOW, format="native")

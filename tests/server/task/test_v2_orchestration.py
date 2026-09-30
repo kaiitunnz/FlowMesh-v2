@@ -201,7 +201,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 
@@ -323,7 +323,7 @@ def _live_runtime(
         OrchestrationConfig(),
         reader or make_result_reader(),
         logging.getLogger(name),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
         redrive=lambda fire, logger: StoreRedriveScheduler(
             fire, logger, run_thread=False
         ),
@@ -579,7 +579,7 @@ async def test_scheduler_rejects_an_infeasible_episode_alternative() -> None:
         logging.getLogger("feas"),
         feasibility_check=lambda spec: spec.boundary
         is not EpisodeBoundaryKind.SERVICE_ISSUE,
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     _, ids = await _register(runtime, _INFEASIBLE)
     # A sampled model call lowers to a service-issue episode the check rejects; the

@@ -33,7 +33,7 @@ def _runtime(worker_registry: Any) -> TaskRuntime:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("reservation-release"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 
@@ -123,7 +123,7 @@ def test_a_redispatch_releases_the_earlier_reservation_it_ends(
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("reservation-release"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     _, ids = asyncio.run(_register(runtime, LINEAR))
     task_id = ids["a"]

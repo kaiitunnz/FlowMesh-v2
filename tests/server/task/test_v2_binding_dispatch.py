@@ -64,7 +64,7 @@ def _runtime() -> TaskRuntime:
         config,
         make_result_reader(),
         logging.getLogger("v2-binding-dispatch"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

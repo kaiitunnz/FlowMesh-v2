@@ -83,7 +83,7 @@ from shared.tools.contract import (
 )
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
-from shared.utils.ids import new_credential_ref
+from shared.utils.redact import credential_scrubber
 
 from ..config import AgentBindingConfig, N8nConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
@@ -125,9 +125,7 @@ from .credentials import (
     InlineCredentials,
     TaskCredentials,
     credential_merge_key,
-    credential_scrubber,
     mask_inline_credentials,
-    pop_inline_model_secrets,
     redact_source_text,
     redact_stored_source,
     take_inline_credentials,
@@ -604,7 +602,7 @@ class TaskRuntime:
         orchestration: OrchestrationConfig,
         results: ResultReader,
         logger: logging.Logger,
-        secret_vault: CredentialVault,
+        credential_vault: CredentialVault,
         feasibility_check: EpisodeFeasibility | None = None,
         surface: PolicySurface | None = None,
         control: ControlPlaneTracer | None = None,
@@ -623,7 +621,7 @@ class TaskRuntime:
         self._redrive = redrive(self._drive_workflow, logger)
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
-        self._secret_vault = secret_vault
+        self._credential_vault = credential_vault
         self._content_scope_authority = content_scope_authority
         self._n8n_credential_password = (n8n or N8nConfig()).credential_password
         self._control = control if control is not None else NULL_CONTROL_TRACER
@@ -750,8 +748,7 @@ class TaskRuntime:
         if not ExecutionMode.is_v2(parsed_workflow.api_version):
             return None
         # A dry run never vaults; drop any inline credential and redact the source so
-        # the inspection echoes no raw key back to the caller.
-        pop_inline_model_secrets(parsed_workflow)
+        # the inspection echoes no credential back.
         mask_inline_credentials(parsed_workflow)
         source = FrontendWorkflowSource.capture(
             redact_source_text(payload, format), format
@@ -765,25 +762,6 @@ class TaskRuntime:
             surface=self._policy_surface,
         )
 
-    async def _vault_inline_credentials(
-        self, workflow_id: str, parsed: ParsedWorkflow
-    ) -> tuple[dict[str, str], InlineCredentials]:
-        """Vault every inline credential a submission carries.
-
-        Each credential is taken out of the parsed specs and stored under the
-        workflow, so only an opaque ref reaches the compiled template and plan, the
-        persisted records, and every downstream surface. Returns each agent's model
-        key ref by task, and where each task's other credentials sit in its spec.
-        """
-        secret_refs: dict[str, str] = {}
-        for task_id, secret in pop_inline_model_secrets(parsed).items():
-            ref = new_credential_ref()
-            await self._secret_vault.store(workflow_id, ref, secret)
-            secret_refs[task_id] = ref
-        credentials = take_inline_credentials(parsed)
-        await self._secret_vault.store_values(workflow_id, credentials.values)
-        return secret_refs, credentials
-
     async def register(
         self,
         owner_id: str,
@@ -795,17 +773,47 @@ class TaskRuntime:
     ) -> tuple[str, list[TaskParsingResult]]:
         submitted_at = now_iso()
         parsed_workflow = self._parse(payload, format)
+        workflow_id = new_workflow_id()
+        # Credentials leave the parsed specs before anything persists or compiles, so
+        # only an opaque ref reaches the template, the plan and the records.
+        credentials = take_inline_credentials(parsed_workflow)
+        await self._credential_vault.store_values(workflow_id, credentials.values)
+        try:
+            results = await self._register_parsed(
+                owner_id,
+                org_id,
+                payload,
+                format,
+                resident,
+                submitted_at,
+                workflow_id,
+                parsed_workflow,
+                credentials,
+            )
+        except BaseException:
+            self._credential_vault.purge(workflow_id)
+            raise
+        return workflow_id, results
+
+    async def _register_parsed(
+        self,
+        owner_id: str,
+        org_id: str,
+        payload: str,
+        format: str,
+        resident: bool,
+        submitted_at: str,
+        workflow_id: str,
+        parsed_workflow: ParsedWorkflow,
+        credentials: InlineCredentials,
+    ) -> list[TaskParsingResult]:
         specs = parsed_workflow.tasks
         yaml_text = redact_source_text(payload, format)
         results: list[TaskParsingResult] = []
-        workflow_id = new_workflow_id()
         task_records: list[TaskRecord] = []
         candidate_ready: list[str] = []
         graph_task_ids: dict[str, str] = {}
 
-        secret_refs, credentials = await self._vault_inline_credentials(
-            workflow_id, parsed_workflow
-        )
         v2_bundle: PersistedV2Workflow | None = None
         v2_engine: OrchestrationEngine | None = None
         if ExecutionMode.is_v2(parsed_workflow.api_version):
@@ -816,7 +824,7 @@ class TaskRuntime:
                 source,
                 strategy=self._lowering_strategy,
                 bindings=self._agent_binding_defaults,
-                secret_refs=secret_refs,
+                secret_refs=credentials.model_keys,
                 surface=self._policy_surface,
                 control=self._control,
             )
@@ -895,13 +903,7 @@ class TaskRuntime:
                 if v2_engine is None:
                     # A merged dispatch stores every result under its parent's
                     # authorization scope, so only tasks of one scope merge.
-                    merge_key = (
-                        None
-                        if task_credentials.renders
-                        else credential_merge_key(
-                            task.spec, task_credentials.refs, scope=org_id
-                        )
-                    )
+                    merge_key = task_credentials.merge_key(task.spec, scope=org_id)
                     record.merge_key = merge_key
                     selected_worker_hint = (
                         record.selected_worker[0]
@@ -1000,7 +1002,7 @@ class TaskRuntime:
             if new_ready:
                 self._cv.notify_all()
 
-        return workflow_id, results
+        return results
 
     # ------------------------------------------------------------------ #
     # Rehydration
@@ -1094,7 +1096,7 @@ class TaskRuntime:
         self._release_pending_terminations()
         # Rehydrate completes before the API accepts a submission, so no workflow is
         # between vaulting its credentials and registering.
-        await self._secret_vault.retain_only(live)
+        await self._credential_vault.retain_only(live)
         if restored:
             self._logger.info(
                 "Rehydrated %d workflow(s) from durable state", len(restored)
@@ -1120,9 +1122,9 @@ class TaskRuntime:
                 continue
             task = record.task.model_copy(deep=True)
             try:
+                live = record.status not in TERMINAL_TASK_STATUSES
                 credentials = take_spec_credentials(
-                    task.spec,
-                    refs if record.status not in TERMINAL_TASK_STATUSES else None,
+                    task.spec, refs if live else CredentialRefs()
                 )
                 source = redact_stored_source(record.raw_yaml)
             except Exception:
@@ -1133,19 +1135,13 @@ class TaskRuntime:
                 continue
             record.task = task
             record.raw_yaml = source
-            record.credential_refs = credentials.refs
+            record.credential_refs = credentials.refs if live else {}
             if record.merge_key is not None:
-                record.merge_key = (
-                    None
-                    if credentials.renders
-                    else credential_merge_key(
-                        task.spec, credentials.refs, scope=record.org_id
-                    )
-                )
+                record.merge_key = credentials.merge_key(task.spec, scope=record.org_id)
             taken.append(persisted)
         if not taken:
             return
-        await self._secret_vault.store_values(workflow_id, refs.values)
+        await self._credential_vault.store_values(workflow_id, refs.values)
         await self._workflow_registry.save_task_states_async(taken)
 
     def _restore_merges_locked(self) -> None:
@@ -1660,7 +1656,7 @@ class TaskRuntime:
         """
         if self._writes_held() or self._workflow_settlement_locked(workflow_id).settled:
             self._write_locked(
-                lambda: self._secret_vault.purge(workflow_id),
+                lambda: self._credential_vault.purge(workflow_id),
                 lambda held: held.workflow_ids.append(workflow_id),
             )
 
@@ -2352,7 +2348,9 @@ class TaskRuntime:
         if binding is None:
             return _OpCredential()
         if binding.secret_ref is not None:
-            secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
+            secret = self._credential_vault.resolve(
+                agent.workflow_id, binding.secret_ref
+            )
             if secret is None:
                 return _MissingCredential()
             return _OpCredential(credential=secret.get_secret_value())
@@ -3135,7 +3133,9 @@ class TaskRuntime:
         refs = record.credential_refs
         if not refs:
             return record.task, _unscrubbed
-        values = self._secret_vault.resolve_values(record.workflow_id, refs.values())
+        values = self._credential_vault.resolve_values(
+            record.workflow_id, refs.values()
+        )
         if any(ref not in values for ref in refs.values()):
             return None
         task = record.task.model_copy(deep=True)
@@ -5798,7 +5798,7 @@ class TaskRuntime:
 
         self._release_terminated_work(termination)
         self._release_ended_workers()
-        self._secret_vault.purge(workflow_id)
+        self._credential_vault.purge(workflow_id)
         return touched
 
     def _terminate_workflow_locked(

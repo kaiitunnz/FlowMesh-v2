@@ -850,7 +850,7 @@ def test_the_workflow_span_starts_no_later_than_its_earliest_child() -> None:
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-telemetry-submit"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
     workflow_id, _ = asyncio.run(runtime.register("owner", "org", _V2_LINEAR))
 

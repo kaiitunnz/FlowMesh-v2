@@ -378,7 +378,7 @@ def _runtime(**knobs: str) -> TaskRuntime:
         OrchestrationConfig(policy=config),
         make_result_reader(),
         logging.getLogger("builtin-lowering-policies-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
         surface=build_policy_surface(config),
     )
 

@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,55 +14,36 @@ from shared.tasks.credentials import (
     set_spec_values,
     spec_value,
 )
-from shared.tasks.specs import AgentSpecStrict, AgentSpecTemplate
+from shared.tasks.specs import AgentSpecTemplate
 from shared.utils.ids import new_credential_ref
 from shared.utils.redact import REDACTED, redact_credential_fields
 
 from .parser import ParsedWorkflow
 
 
-def pop_inline_model_secrets(parsed: ParsedWorkflow) -> dict[str, SecretStr]:
-    """Remove and return each agent's inline model credential, keyed by task id.
-
-    The api_key is stripped from the parsed spec in place, so no credential rides into
-    the compiled template or the persisted task record. The returned map feeds the
-    vault and the generated ref pinned on each agent's compiled model binding.
-    """
-    secrets: dict[str, SecretStr] = {}
-    for task in parsed.tasks:
-        spec = task.task.spec
-        if not isinstance(spec, (AgentSpecStrict, AgentSpecTemplate)):
-            continue
-        binding = spec.model_binding
-        if binding is not None and binding.api_key is not None:
-            secrets[task.task_id] = binding.api_key
-            binding.api_key = None
-    return secrets
-
-
 @dataclass(frozen=True)
 class TaskCredentials:
-    """Where one task's vaulted credentials sit in its spec.
-
-    ``refs`` maps each credential's pointer to the ref it is vaulted under.
-    ``renders`` is set when a vaulted value renders from an upstream stage: its ref
-    names the unrendered value, so it cannot tell two rendered credentials apart.
-    """
-
+    # Each vaulted credential's pointer in the spec, mapped to its ref.
     refs: dict[str, str] = field(default_factory=dict)
+    # Set when a vaulted value renders from an upstream stage: its ref names the
+    # unrendered value, so it cannot tell two rendered credentials apart.
     renders: bool = False
+
+    def merge_key(self, spec: TaskSpec, **context: Any) -> str | None:
+        """The spec's merge key, or ``None`` when a credential renders at dispatch."""
+        if self.renders:
+            return None
+        return credential_merge_key(spec, self.refs, **context)
 
 
 @dataclass(frozen=True)
 class InlineCredentials:
-    """The inline credentials taken out of one submission.
-
-    ``values`` is what the vault stores, keyed by ref; each distinct value within the
-    submission has one ref, so tasks carrying the same credential name the same ref.
-    """
-
+    # What the vault stores, keyed by ref; one ref per distinct value in the submission.
     values: dict[str, Any] = field(default_factory=dict)
     tasks: dict[str, TaskCredentials] = field(default_factory=dict)
+    # Each agent's model key ref by task id; the key reaches the model gateway through
+    # its binding's ``secret_ref`` and is never restored into the spec.
+    model_keys: dict[str, str] = field(default_factory=dict)
 
 
 class CredentialRefs:
@@ -81,44 +62,47 @@ class CredentialRefs:
         return ref
 
 
-def take_spec_credentials(
-    spec: TaskSpec, refs: CredentialRefs | None
-) -> TaskCredentials:
+def take_spec_credentials(spec: TaskSpec, refs: CredentialRefs) -> TaskCredentials:
     """Mask every inline credential in ``spec`` in place, minting a ref for each from
-    ``refs``; with no ``refs`` the credentials are only masked."""
+    ``refs``."""
     found = find_spec_credentials(spec)
     taken = TaskCredentials(
-        refs=(
-            {pointer: refs.ref(value) for pointer, value in found.items()}
-            if refs is not None
-            else {}
-        ),
+        refs={pointer: refs.ref(value) for pointer, value in found.items()},
         renders=any(holds_placeholder(value) for value in found.values()),
     )
     mask_spec_values(spec, found)
     return taken
 
 
-def take_inline_credentials(parsed: ParsedWorkflow) -> InlineCredentials:
-    """Mask every inline task-spec credential in ``parsed`` in place and return them.
+def _take_model_key(spec: TaskSpec) -> SecretStr | None:
+    if not isinstance(spec, AgentSpecTemplate) or spec.model_binding is None:
+        return None
+    key, spec.model_binding.api_key = spec.model_binding.api_key, None
+    return key
 
-    Each credential is replaced by its marker where it sits, so no value reaches a
-    persisted record or the compiled template and plan.
+
+def take_inline_credentials(parsed: ParsedWorkflow) -> InlineCredentials:
+    """Take every inline credential out of ``parsed`` in place and return them.
+
+    A task-spec credential is replaced by its marker where it sits and an agent's model
+    key is removed from its binding, so no value reaches a persisted record or the
+    compiled template and plan.
     """
     refs = CredentialRefs()
     tasks: dict[str, TaskCredentials] = {}
+    model_keys: dict[str, str] = {}
     for task in parsed.tasks:
-        taken = tasks[task.task_id] = take_spec_credentials(task.task.spec, refs)
+        spec = task.task.spec
+        if (key := _take_model_key(spec)) is not None:
+            model_keys[task.task_id] = refs.ref(key.get_secret_value())
+        taken = tasks[task.task_id] = take_spec_credentials(spec, refs)
         task.masked_credentials = frozenset(taken.refs)
-    return InlineCredentials(values=refs.values, tasks=tasks)
+    return InlineCredentials(values=refs.values, tasks=tasks, model_keys=model_keys)
 
 
 def mask_inline_credentials(parsed: ParsedWorkflow) -> None:
-    """Mask every inline task-spec credential in ``parsed`` in place."""
-    for task in parsed.tasks:
-        found = find_spec_credentials(task.task.spec)
-        mask_spec_values(task.task.spec, found)
-        task.masked_credentials = frozenset(found)
+    """Take every inline credential out of ``parsed`` in place, vaulting nothing."""
+    take_inline_credentials(parsed)
 
 
 def credential_merge_key(
@@ -140,38 +124,6 @@ def credential_merge_key(
         },
     )
     return keyed.merge_key(**context)
-
-
-def credential_scrubber(values: Iterable[Any]) -> Callable[[str], str]:
-    """A function masking every occurrence of ``values`` in a text.
-
-    Applied to any text produced from a task whose credentials were restored, so an
-    error or log line quoting the spec carries no credential.
-    """
-    needles: set[str] = set()
-    for value in values:
-        needles.update(_strings(value))
-        if not isinstance(value, str):
-            needles.add(json.dumps(value))
-    ordered = sorted((n for n in needles if n), key=len, reverse=True)
-
-    def scrub(text: str) -> str:
-        for needle in ordered:
-            text = text.replace(needle, REDACTED)
-        return text
-
-    return scrub
-
-
-def _strings(value: Any) -> Iterator[str]:
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from _strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _strings(item)
 
 
 def _redact_embedded_json(text: str) -> str:

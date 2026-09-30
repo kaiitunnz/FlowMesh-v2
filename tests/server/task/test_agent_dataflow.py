@@ -341,7 +341,7 @@ def _runtime(budget: int | None = None) -> TaskRuntime:
         config,
         make_result_reader(),
         logging.getLogger("dataflow-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
         redrive=lambda fire, logger: StoreRedriveScheduler(
             fire, logger, run_thread=False
         ),

@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from pydantic import SecretStr
 
+from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
@@ -180,7 +180,7 @@ def _runtime(
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("rehydrate-test"),
-        secret_vault=vault or InMemoryCredentialVault(),
+        credential_vault=vault or InMemoryCredentialVault(),
     )
 
 
@@ -733,14 +733,14 @@ async def test_a_restart_keeps_live_vaults_and_drops_settled_and_unregistered_on
     runtime.cancel_workflow(settled)
     # A crash after the terminal commit but before the purge, and one between vaulting
     # and registering, each leave a vault behind.
-    await vault.store(settled, "msk-left", SecretStr("sk"))
-    await vault.store("wfl-never-registered", "msk-orphan", SecretStr("sk"))
-    live_key = f"workflow:{live}:model_secret"
+    await vault.store_values(settled, {"msk-left": "sk"})
+    await vault.store_values("wfl-never-registered", {"msk-orphan": "sk"})
+    live_key = workflow_credential_key(live)
     vault.redis.expiring.add(live_key)
 
     await _runtime(registry, vault).rehydrate()
 
     assert live_key in vault.redis.hashes
     assert live_key not in vault.redis.expiring
-    assert f"workflow:{settled}:model_secret" not in vault.redis.hashes
-    assert "workflow:wfl-never-registered:model_secret" not in vault.redis.hashes
+    assert workflow_credential_key(settled) not in vault.redis.hashes
+    assert workflow_credential_key("wfl-never-registered") not in vault.redis.hashes

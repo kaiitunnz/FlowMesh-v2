@@ -208,7 +208,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(agent_binding=AgentBindingConfig(default_backend="codex")),
         make_result_reader(),
         logging.getLogger("v2-regions-test"),
-        secret_vault=cast(Any, InMemoryCredentialVault()),
+        credential_vault=InMemoryCredentialVault(),
     )
 
 

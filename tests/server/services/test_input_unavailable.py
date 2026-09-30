@@ -262,7 +262,7 @@ class _Attributing:
             OrchestrationConfig(),
             reader,
             logging.getLogger("input-unavailable"),
-            secret_vault=cast(Any, InMemoryCredentialVault()),
+            credential_vault=InMemoryCredentialVault(),
             redrive=_scheduler,
         )
         self.scheduler = schedulers[0]
