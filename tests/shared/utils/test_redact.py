@@ -1,9 +1,13 @@
+import json
+
 import pytest
 
 from shared.tasks.specs.misc import _looks_credential
 from shared.utils.redact import (
     REDACTED,
+    credential_scrubber,
     is_credential_key,
+    is_credential_url,
     redact_credential_fields,
     redact_url,
 )
@@ -162,7 +166,44 @@ def test_redaction_covers_every_rejected_harness_param(name: str) -> None:
             "https://api.example/v1?limit=3&q=a%20b",
             "https://api.example/v1?limit=3&q=a%20b",
         ),
+        (
+            "https://api.example/v1?q=a%20b&flag&token=t",
+            "https://api.example/v1?q=a%20b&flag&token=[REDACTED]",
+        ),
+        ("postgres://u:pw@db.example/app", "postgres://db.example/app"),
+        ("redis://:pw@cache.example:6379/0", "redis://cache.example:6379/0"),
+        ("postgres://u@db.example/app", "postgres://u@db.example/app"),
+        (
+            "https://maps.example/api?key=k&sig=s&signature=g",
+            "https://maps.example/api?key=[REDACTED]&sig=[REDACTED]"
+            "&signature=[REDACTED]",
+        ),
+        (
+            "https://app.example/cb#access_token=t&token_type=bearer",
+            "https://app.example/cb#access_token=[REDACTED]&token_type=bearer",
+        ),
+        (
+            "https://app.example/shop;jsessionid=s?page=2",
+            "https://app.example/shop;jsessionid=[REDACTED]?page=2",
+        ),
+        ("https://docs.example/page#key", "https://docs.example/page#key"),
     ],
 )
 def test_redact_url_drops_userinfo_and_masks_credential_query_values(url, expected):
     assert redact_url(url) == expected
+    assert is_credential_url(url) == (url != expected)
+
+
+@pytest.mark.parametrize("name", ["key", "sig", "signature", "jsessionid"])
+def test_url_only_credential_names_are_not_field_credentials(name: str) -> None:
+    assert not is_credential_key(name)
+
+
+def test_scrubber_masks_escaped_forms_and_skips_short_words() -> None:
+    pem = "-----BEGIN KEY-----\nabcdefgh\n-----END KEY-----"
+    scrub = credential_scrubber([pem, {"type": "none", "token": "tok-123456"}, True])
+
+    assert "abcdefgh" not in scrub(f"bad key {pem!r}")
+    assert "abcdefgh" not in scrub(f'{{"key": {json.dumps(pem)}}}')
+    assert "tok-123456" not in scrub("auth failed for tok-123456")
+    assert scrub("type none, flag true") == "type none, flag true"
