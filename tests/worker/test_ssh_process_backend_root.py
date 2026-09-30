@@ -727,3 +727,22 @@ def test_a_stop_during_collection_lets_the_collection_finish(
     finally:
         session.stop(1)
         session.cleanup()
+
+
+def test_a_session_never_widens_what_a_root_s_acl_grants(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    results = worker.results_dir.as_posix()
+    _run(["setfacl", "-m", "u:5000:rwx,g::rwx", results])
+    _run(["setfacl", "-n", "-m", "m::r-x", results])
+    before = _run(["getfacl", "-cp", results]).stdout
+    backend = ProcessSessionBackend(worker)
+    session = backend.start_session(_request(tmp_path, client_key))
+    try:
+        during = _run(["getfacl", "-cp", results]).stdout
+        assert "mask::r-x" in during.splitlines(), during
+    finally:
+        session.stop(1)
+        session.cleanup()
+
+    assert _run(["getfacl", "-cp", results]).stdout == before

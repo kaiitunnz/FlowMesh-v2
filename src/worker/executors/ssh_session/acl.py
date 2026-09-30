@@ -7,7 +7,8 @@ principal sharing the directory.
 
 Every entry applied is recorded before it is written, in a root-only state
 file, so a worker that crashed mid-session can revoke exactly its own entries
-and never one a peer worker applied to a shared volume.
+and never one a peer worker applied to a shared volume. The record keeps the
+mask the path had, which the entry leaves as it is and its revoke restores.
 """
 
 import logging
@@ -18,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
+from typing import NamedTuple
 
 from ..base_executor import ExecutionError
 
@@ -30,6 +32,8 @@ _ACL_TIMEOUT_SEC = 30.0
 _DENIED_USER_RE = re.compile(r"^user:(\d+):---$")
 _NAMED_USER_RE = re.compile(r"^(?:default:)?user:(\d+):")
 _NAMED_GROUP_RE = re.compile(r"^(?:default:)?group:(\d+):")
+_MASK_RE = re.compile(r"^mask::([rwx-]{3})$")
+_NO_MASK = "-"
 _record_lock = threading.Lock()
 
 
@@ -45,24 +49,36 @@ def tools_available() -> bool:
     return find_setfacl() is not None and find_getfacl() is not None
 
 
+class Denial(NamedTuple):
+    """A deny entry for ``uid`` on ``path``, and the mask ``path`` had before it."""
+
+    uid: int
+    path: str
+    mask: str | None
+
+
 def deny(uid: int, path: Path) -> None:
-    """Deny ``uid`` every access to ``path``."""
-    _setfacl("-m", f"u:{uid}:---", path)
+    """Deny ``uid`` every access to ``path``, leaving its mask as it is."""
+    _setfacl(path, "-n", "-m", f"u:{uid}:---")
 
 
 def grant_read(uid: int, path: Path) -> None:
     """Grant ``uid`` read access to ``path``."""
-    _setfacl("-m", f"u:{uid}:r", path)
+    _setfacl(path, "-m", f"u:{uid}:r")
 
 
-def revoke(uid: int, path: Path) -> None:
-    """Remove ``uid``'s entry from ``path``, and the mask when nothing needs it.
+def revoke(uid: int, path: Path, mask: str | None) -> None:
+    """Remove ``uid``'s entry from ``path`` and put back the ``mask`` it had.
 
-    A mask left behind would make a later ``chmod`` on ``path`` change the mask
-    instead of the group bits, so it is dropped once no named entry remains;
-    ``setfacl`` refuses that while one does, which is the case to leave alone.
+    Where it had none, the mask is dropped once no named entry needs it, since a
+    mask left behind would make a later ``chmod`` on ``path`` change the mask
+    instead of the group bits; ``setfacl`` refuses that while one does, which is
+    the case to leave alone.
     """
-    _setfacl("-x", f"u:{uid}", path)
+    _setfacl(path, "-n", "-x", f"u:{uid}")
+    if mask is not None:
+        _setfacl(path, "-n", "-m", f"m::{mask}")
+        return
     setfacl = _require(find_setfacl(), "setfacl")
     subprocess.run(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()
         [setfacl, "-x", "m::", "--", path.as_posix()],
@@ -70,6 +86,11 @@ def revoke(uid: int, path: Path) -> None:
         timeout=_ACL_TIMEOUT_SEC,
         check=False,
     )
+
+
+def mask(path: Path) -> str | None:
+    """Return ``path``'s ACL mask, or ``None`` when it has none."""
+    return parse_mask(_read_acl(path))
 
 
 def denied_uids(path: Path) -> set[int]:
@@ -99,6 +120,13 @@ def parse_named_gids(getfacl_output: str) -> set[int]:
     return _parse_ids(_NAMED_GROUP_RE, getfacl_output)
 
 
+def parse_mask(getfacl_output: str) -> str | None:
+    for line in getfacl_output.splitlines():
+        if match := _MASK_RE.match(line.strip()):
+            return match.group(1)
+    return None
+
+
 def _parse_ids(pattern: re.Pattern[str], getfacl_output: str) -> set[int]:
     return {
         int(match.group(1))
@@ -107,10 +135,10 @@ def _parse_ids(pattern: re.Pattern[str], getfacl_output: str) -> set[int]:
     }
 
 
-def _read_acl(path: Path) -> str:
+def _read_acl(path: Path, *flags: str) -> str:
     getfacl = _require(find_getfacl(), "getfacl")
     result = subprocess.run(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()
-        [getfacl, "-n", "-c", "-p", "--", path.as_posix()],
+        [getfacl, "-n", "-c", "-p", *flags, "--", path.as_posix()],
         capture_output=True,
         timeout=_ACL_TIMEOUT_SEC,
         check=False,
@@ -123,13 +151,17 @@ def _read_acl(path: Path) -> str:
 
 
 def probe(directory: Path) -> None:
-    """Check that the filesystem backing ``directory`` stores a deny entry."""
+    """Check that the filesystem backing ``directory`` stores a deny entry.
+
+    The probe file is written and read without following a link, since another
+    account may swap it for one in a directory it can write.
+    """
     fd, name = tempfile.mkstemp(prefix=".flowmesh-acl-probe-", dir=directory)
     os.close(fd)
     target = Path(name)
     try:
-        deny(PROBE_UID, target)
-        if PROBE_UID not in denied_uids(target):
+        _setfacl(target, "-P", "-m", f"u:{PROBE_UID}:---")
+        if PROBE_UID not in parse_denied_uids(_read_acl(target, "-P")):
             raise ExecutionError(
                 f"ACL entries do not persist on the filesystem of {directory}"
             )
@@ -137,47 +169,57 @@ def probe(directory: Path) -> None:
         target.unlink(missing_ok=True)
 
 
-def record(uid: int, path: Path) -> None:
-    """Note that ``uid`` is about to be denied ``path``."""
+def record(denial: Denial) -> None:
+    """Note that ``denial`` is about to be applied."""
     with _record_lock:
-        entries = _read_records()
-        entries.add((uid, path.as_posix()))
+        entries = {
+            entry
+            for entry in _read_records()
+            if (entry.uid, entry.path) != (denial.uid, denial.path)
+        }
+        entries.add(denial)
         _write_records(entries)
 
 
-def forget(uid: int, path: Path) -> None:
+def forget(denial: Denial) -> None:
     with _record_lock:
-        entries = _read_records()
-        entries.discard((uid, path.as_posix()))
+        entries = {
+            entry
+            for entry in _read_records()
+            if (entry.uid, entry.path) != (denial.uid, denial.path)
+        }
         _write_records(entries)
 
 
-def recorded() -> set[tuple[int, str]]:
+def recorded() -> set[Denial]:
     with _record_lock:
         return _read_records()
 
 
-def _read_records() -> set[tuple[int, str]]:
+def _read_records() -> set[Denial]:
     try:
         text = DENY_RECORD.read_text(encoding="utf-8")
     except FileNotFoundError:
         return set()
     except OSError as exc:
         raise ExecutionError(f"Cannot read {DENY_RECORD.as_posix()}: {exc}") from exc
-    entries: set[tuple[int, str]] = set()
+    entries: set[Denial] = set()
     for line in text.splitlines():
-        uid, sep, path = line.partition("\t")
-        if sep and uid.isdigit() and path:
-            entries.add((int(uid), path))
+        uid, path, mask = [*line.split("\t", 2), _NO_MASK][:3]
+        if uid.isdigit() and path:
+            entries.add(Denial(int(uid), path, None if mask == _NO_MASK else mask))
     return entries
 
 
-def _write_records(entries: set[tuple[int, str]]) -> None:
+def _write_records(entries: set[Denial]) -> None:
     try:
         STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=".ssh-session-denies-", dir=STATE_DIR)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.writelines(f"{uid}\t{path}\n" for uid, path in sorted(entries))
+            handle.writelines(
+                f"{uid}\t{path}\t{mask or _NO_MASK}\n"
+                for uid, path, mask in sorted(entries, key=lambda e: (e.uid, e.path))
+            )
         os.replace(tmp_name, DENY_RECORD)
     except OSError as exc:
         raise ExecutionError(
@@ -186,10 +228,10 @@ def _write_records(entries: set[tuple[int, str]]) -> None:
         ) from exc
 
 
-def _setfacl(action: str, entry: str, path: Path) -> None:
+def _setfacl(path: Path, *options: str) -> None:
     setfacl = _require(find_setfacl(), "setfacl")
     result = subprocess.run(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()
-        [setfacl, action, entry, "--", path.as_posix()],
+        [setfacl, *options, "--", path.as_posix()],
         capture_output=True,
         timeout=_ACL_TIMEOUT_SEC,
         check=False,

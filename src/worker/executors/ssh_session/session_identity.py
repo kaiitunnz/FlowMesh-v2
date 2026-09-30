@@ -160,15 +160,16 @@ class SessionAccount:
         Each entry is recorded before it is set, so a worker that dies midway still
         revokes it.
         """
-        applied: list[Path] = []
+        applied: list[acl.Denial] = []
         try:
             for root in roots:
-                acl.record(self.uid, root)
-                applied.append(root)
+                denial = acl.Denial(self.uid, root.as_posix(), acl.mask(root))
+                acl.record(denial)
+                applied.append(denial)
                 acl.deny(self.uid, root)
         except ExecutionError as exc:
-            for root in applied:
-                _revoke(self.uid, root)
+            for denial in applied:
+                _revoke(denial)
             raise ExecutionError(
                 f"Could not isolate SSH session account {self.name} from this "
                 f"worker's state: {exc}"
@@ -274,9 +275,9 @@ def retire_account(name: str, uid: int) -> bool:
             exc_info=True,
         )
         return True
-    for recorded_uid, path in records:
-        if recorded_uid == uid:
-            _revoke(uid, Path(path))
+    for denial in records:
+        if denial.uid == uid:
+            _revoke(denial)
     return True
 
 
@@ -647,16 +648,17 @@ def _delete_group(name: str) -> bool:
     return True
 
 
-def _revoke(uid: int, path: Path) -> None:
+def _revoke(denial: acl.Denial) -> None:
+    path = Path(denial.path)
     try:
         if path.exists():
-            acl.revoke(uid, path)
-        acl.forget(uid, path)
+            acl.revoke(denial.uid, path, denial.mask)
+        acl.forget(denial)
     except ExecutionError:
         logger.warning(
             "Failed to lift the SSH session denial of uid %d on %s; the next reap "
             "retries",
-            uid,
+            denial.uid,
             path,
         )
 
@@ -667,9 +669,9 @@ def _revoke_orphaned_denies() -> None:
     except ExecutionError:
         logger.warning("Cannot read recorded SSH session ACL entries", exc_info=True)
         return
-    for uid, path in records:
-        if not _uid_exists(uid):
-            _revoke(uid, Path(path))
+    for denial in records:
+        if not _uid_exists(denial.uid):
+            _revoke(denial)
 
 
 def _uid_exists(uid: int) -> bool:

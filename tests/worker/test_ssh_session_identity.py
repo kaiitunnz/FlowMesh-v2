@@ -177,6 +177,7 @@ def _create_concurrently(tmp_path: Path) -> list[int]:
         patch.object(session_identity.os, "lchown"),
         patch.object(session_identity.acl, "named_uids", side_effect=named),
         patch.object(session_identity.acl, "named_gids", return_value=set()),
+        patch.object(session_identity.acl, "mask", return_value=None),
         patch.object(session_identity.acl, "record"),
         patch.object(session_identity.acl, "deny", side_effect=deny),
         patch.object(session_identity, "_add_account", side_effect=add),
@@ -316,10 +317,14 @@ def test_a_zombie_of_the_account_is_not_a_process_left_to_kill() -> None:
     assert os.getpid() in pids
 
 
+def _denial(uid: int, path: str, mask: str | None = None) -> Any:
+    return session_identity.acl.Denial(uid, path, mask)
+
+
 def _retire(
     killed: bool,
     deleted: bool,
-    recorded: set[tuple[int, str]],
+    recorded: set[Any],
     recorded_error: Exception | None = None,
     **patches: Any,
 ) -> tuple[bool, MagicMock, MagicMock, MagicMock]:
@@ -356,7 +361,7 @@ def _retire(
 
 
 def test_an_account_with_a_process_no_kill_ends_is_locked_and_kept_denied() -> None:
-    retired, lock, purge, revoke = _retire(False, True, {(61_001, "/r")})
+    retired, lock, purge, revoke = _retire(False, True, {_denial(61_001, "/r")})
 
     assert not retired
     lock.assert_called_once_with("fmssn1")
@@ -365,7 +370,7 @@ def test_an_account_with_a_process_no_kill_ends_is_locked_and_kept_denied() -> N
 
 
 def test_an_account_that_cannot_be_deleted_is_locked_and_kept_denied() -> None:
-    retired, lock, purge, revoke = _retire(True, False, {(61_001, "/r")})
+    retired, lock, purge, revoke = _retire(True, False, {_denial(61_001, "/r")})
 
     assert not retired
     lock.assert_called_once_with("fmssn1")
@@ -375,20 +380,22 @@ def test_an_account_that_cannot_be_deleted_is_locked_and_kept_denied() -> None:
 
 def test_a_deleted_account_loses_only_its_own_recorded_denials() -> None:
     retired, lock, purge, revoke = _retire(
-        True, True, {(61_001, "/r"), (61_001, "/hb"), (61_002, "/r")}
+        True,
+        True,
+        {_denial(61_001, "/r"), _denial(61_001, "/hb"), _denial(61_002, "/r")},
     )
 
     assert retired
     lock.assert_not_called()
     purge.assert_called_once_with(61_001)
     assert sorted(call.args for call in revoke.call_args_list) == [
-        (61_001, Path("/hb")),
-        (61_001, Path("/r")),
+        (_denial(61_001, "/hb"),),
+        (_denial(61_001, "/r"),),
     ]
 
 
 def test_an_account_is_killed_then_deleted_then_purged_then_revoked() -> None:
-    _retire(True, True, {(61_001, "/r")})
+    _retire(True, True, {_denial(61_001, "/r")})
 
     assert [name for name, _, _ in _retire.steps.mock_calls] == [  # type: ignore[attr-defined]
         "kill_processes",
@@ -403,7 +410,7 @@ def test_an_account_already_deleted_finishes_its_purge_and_revoke() -> None:
     retired, lock, purge, revoke = _retire(
         True,
         True,
-        {(61_001, "/r")},
+        {_denial(61_001, "/r")},
         _account_exists=MagicMock(return_value=False),
         _uid_exists=MagicMock(return_value=False),
     )
@@ -411,12 +418,15 @@ def test_an_account_already_deleted_finishes_its_purge_and_revoke() -> None:
     assert retired
     lock.assert_not_called()
     purge.assert_called_once_with(61_001)
-    revoke.assert_called_once_with(61_001, Path("/r"))
+    revoke.assert_called_once_with(_denial(61_001, "/r"))
 
 
 def test_the_denials_of_a_uid_another_account_now_holds_are_left_alone() -> None:
     retired, lock, purge, revoke = _retire(
-        True, True, {(61_001, "/r")}, _account_exists=MagicMock(return_value=False)
+        True,
+        True,
+        {_denial(61_001, "/r")},
+        _account_exists=MagicMock(return_value=False),
     )
 
     assert retired
@@ -494,8 +504,8 @@ def test_a_released_account_that_cannot_be_retired_fails_loudly() -> None:
 
 
 def test_a_partial_denial_is_rolled_back(tmp_path: Path) -> None:
-    recorded: list[Path] = []
-    revoked: list[Path] = []
+    recorded: list[Any] = []
+    revoked: list[Any] = []
 
     def deny(uid: int, path: Path) -> None:
         if path.name == "second":
@@ -503,59 +513,105 @@ def test_a_partial_denial_is_rolled_back(tmp_path: Path) -> None:
 
     account = session_identity.SessionAccount("fmssn1", 61_001, 61_001, tmp_path)
     with (
-        patch.object(
-            session_identity.acl, "record", side_effect=lambda u, p: recorded.append(p)
-        ),
+        patch.object(session_identity.acl, "mask", return_value="r-x"),
+        patch.object(session_identity.acl, "record", side_effect=recorded.append),
         patch.object(session_identity.acl, "deny", side_effect=deny),
-        patch.object(
-            session_identity, "_revoke", side_effect=lambda u, p: revoked.append(p)
-        ),
+        patch.object(session_identity, "_revoke", side_effect=revoked.append),
         pytest.raises(ExecutionError, match="Could not isolate"),
     ):
         account.deny([tmp_path / "first", tmp_path / "second", tmp_path / "third"])
 
     # Recorded before written, so the one that failed midway is revoked too.
-    assert recorded == [tmp_path / "first", tmp_path / "second"]
+    assert recorded == [
+        _denial(61_001, (tmp_path / name).as_posix(), "r-x")
+        for name in ("first", "second")
+    ]
     assert revoked == recorded
 
 
 def test_the_reap_lifts_the_denials_of_accounts_that_no_longer_exist() -> None:
-    revoked: list[tuple[int, Path]] = []
+    revoked: list[Any] = []
     with (
         patch.object(session_identity.pwd, "getpwall", return_value=[]),
+        patch.object(session_identity.grp, "getgrall", return_value=[]),
         patch.object(
             session_identity.acl,
             "recorded",
-            return_value={(61_001, "/gone"), (61_002, "/live")},
+            return_value={_denial(61_001, "/gone"), _denial(61_002, "/live")},
         ),
         patch.object(
             session_identity, "_uid_exists", side_effect=lambda uid: uid == 61_002
         ),
-        patch.object(
-            session_identity,
-            "_revoke",
-            side_effect=lambda uid, path: revoked.append((uid, path)),
-        ),
+        patch.object(session_identity, "_revoke", side_effect=revoked.append),
     ):
         assert session_identity.reap_stale_accounts()
 
-    assert revoked == [(61_001, Path("/gone"))]
+    assert revoked == [_denial(61_001, "/gone")]
 
 
-def test_a_revoke_drops_the_mask_once_no_named_entry_needs_it(tmp_path: Path) -> None:
+def _setfacl_calls(revoke_mask: str | None, tmp_path: Path) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def run(argv: list[str], **kwargs: Any) -> "subprocess.CompletedProcess[bytes]":
-        calls.append(argv)
+        calls.append(argv[1:-2])
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
     with (
         patch.object(session_identity.acl.shutil, "which", return_value="/x/setfacl"),
         patch.object(session_identity.acl.subprocess, "run", side_effect=run),
     ):
-        session_identity.acl.revoke(61_001, tmp_path)
+        session_identity.acl.deny(61_001, tmp_path)
+        session_identity.acl.revoke(61_001, tmp_path, revoke_mask)
+    return calls
 
-    assert [argv[1:3] for argv in calls] == [["-x", "u:61001"], ["-x", "m::"]]
+
+def test_a_denial_never_recalculates_the_mask_and_a_revoke_drops_one_it_added(
+    tmp_path: Path,
+) -> None:
+    assert _setfacl_calls(None, tmp_path) == [
+        ["-n", "-m", "u:61001:---"],
+        ["-n", "-x", "u:61001"],
+        ["-x", "m::"],
+    ]
+
+
+def test_a_revoke_puts_back_the_mask_a_path_had(tmp_path: Path) -> None:
+    assert _setfacl_calls("r-x", tmp_path)[1:] == [
+        ["-n", "-x", "u:61001"],
+        ["-n", "-m", "m::r-x"],
+    ]
+
+
+def test_the_acl_probe_never_follows_a_link(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> "subprocess.CompletedProcess[bytes]":
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, b"user:65534:---\n", b"")
+
+    with (
+        patch.object(session_identity.acl.shutil, "which", side_effect=lambda b: b),
+        patch.object(session_identity.acl.subprocess, "run", side_effect=run),
+    ):
+        session_identity.acl.probe(tmp_path)
+
+    assert [argv[0] for argv in calls] == ["setfacl", "getfacl"]
+    assert all("-P" in argv for argv in calls)
+
+
+def test_the_ledger_keeps_each_denial_s_mask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    acl = session_identity.acl
+    monkeypatch.setattr(acl, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(acl, "DENY_RECORD", tmp_path / "denies")
+    (tmp_path / "denies").write_text("61009\t/legacy\n")
+
+    acl.record(_denial(61_001, "/r", "r-x"))
+    acl.record(_denial(61_002, "/r"))
+    acl.forget(_denial(61_002, "/r", "rwx"))
+
+    assert acl.recorded() == {_denial(61_001, "/r", "r-x"), _denial(61_009, "/legacy")}
 
 
 def test_getfacl_output_parses_to_uids() -> None:
@@ -563,6 +619,8 @@ def test_getfacl_output_parses_to_uids() -> None:
         "user::rwx\nuser:61001:---\nuser:1000:r-x\ngroup::r-x\nmask::r-x\n"
         "other::r-x\ndefault:user:61002:---\n"
     )
+    assert session_identity.acl.parse_mask(output) == "r-x"
+    assert session_identity.acl.parse_mask("user::rwx\ngroup::r-x\n") is None
     assert session_identity.acl.parse_denied_uids(output) == {61001}
     assert session_identity.acl.parse_named_uids(output) == {61001, 1000, 61002}
 
