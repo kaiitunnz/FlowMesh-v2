@@ -15,6 +15,8 @@ import secrets
 import shutil
 import signal
 import subprocess
+import sys
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -27,7 +29,15 @@ logger = logging.getLogger(__name__)
 ACCOUNT_PREFIX = "fmssn"
 ACCOUNT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 PRIVSEP_DIR = Path("/run/sshd")
+# Root-only record of the last uid a session held, so no uid is handed out twice.
+UID_HIGH_WATER = Path("/var/lib/flowmesh/ssh-session-uid")
+FIRST_SESSION_UID = 200_000
+# Where any account may leave files behind.
+SHARED_TMP_DIRS = (Path("/", "tmp"), Path("/", "var", "tmp"), Path("/", "dev", "shm"))
+_NOGROUP_GID = 65534
 _KILL_GRACE_SEC = 5.0
+_KILL_ROUNDS = 20
+_KILL_ROUND_SEC = 0.1
 _COMMAND_TIMEOUT_SEC = 30.0
 # A uid no account holds, for probing whether a filesystem takes ACL entries.
 _ACL_PROBE_UID = 2**31 - 3
@@ -65,6 +75,8 @@ class SessionAccount:
                 useradd,
                 "--no-create-home",
                 "--no-user-group",
+                "--uid",
+                str(allocate_uid()),
                 "--home-dir",
                 home.as_posix(),
                 "--shell",
@@ -112,11 +124,81 @@ class SessionAccount:
         )
 
     def release(self) -> None:
-        """End every process of the account, lift its denials, and delete it."""
-        kill_processes(self.uid)
-        lift_denials(self.uid, self._denied)
+        """Remove the account and everything it holds, or leave it locked and still
+        denied the worker's state when a process of it cannot be ended."""
+        if not retire_account(self.name, self.uid, self._denied):
+            raise ExecutionError(
+                f"SSH session account {self.name} still runs a process it could not "
+                "be rid of; it stays locked until a reap removes it"
+            )
         self._denied.clear()
-        delete_account(self.name)
+
+
+def retire_account(name: str, uid: int, roots: Iterable[Path]) -> bool:
+    """End every process of an account, then remove its files from the shared
+    temporary directories, its denials on ``roots``, and the account itself.
+
+    An account with a process that outlives the kill is locked instead, keeping its
+    denials, and ``False`` returned so a later reap can finish it.
+    """
+    if not kill_processes(uid):
+        lock_account(name)
+        logger.error(
+            "SSH session account %s still runs a process after every kill; it stays "
+            "locked and denied the worker's state",
+            name,
+        )
+        return False
+    remove_files_of(uid)
+    lift_denials(uid, roots)
+    delete_account(name)
+    return True
+
+
+def allocate_uid() -> int:
+    """A uid no session on this worker has held, so a later session never inherits
+    what an earlier one left running or owning."""
+    try:
+        last = int(UID_HIGH_WATER.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        last = FIRST_SESSION_UID - 1
+    uid = max(last + 1, FIRST_SESSION_UID)
+    while _uid_in_use(uid):
+        uid += 1
+    UID_HIGH_WATER.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    pending = UID_HIGH_WATER.with_name(f"{UID_HIGH_WATER.name}.tmp")
+    pending.write_text(str(uid), encoding="utf-8")
+    pending.chmod(0o600)
+    pending.replace(UID_HIGH_WATER)
+    return uid
+
+
+def remove_files_of(uid: int) -> None:
+    """Remove what ``uid`` left in the directories every account may write to."""
+    for base in SHARED_TMP_DIRS:
+        for current, dirs, files in os.walk(base, followlinks=False):
+            for name in list(dirs):
+                path = os.path.join(current, name)
+                if _owner(path) != uid:
+                    continue
+                dirs.remove(name)
+                if os.path.islink(path):
+                    _unlink(path)
+                else:
+                    shutil.rmtree(path, ignore_errors=True)
+            for name in files:
+                if _owner(path := os.path.join(current, name)) == uid:
+                    _unlink(path)
+
+
+def lock_account(name: str) -> None:
+    """Lock an account so nothing can log in as it."""
+    if (usermod := shutil.which("usermod")) is None:
+        return
+    try:
+        _run([usermod, "--lock", "--expiredate", "1", name], f"lock account {name}")
+    except ExecutionError:
+        logger.warning("Failed to lock SSH session account %s", name)
 
 
 def lift_denials(uid: int, roots: Iterable[Path]) -> None:
@@ -156,22 +238,23 @@ def supports_denials(roots: Iterable[Path]) -> bool:
     return True
 
 
-def kill_processes(uid: int) -> None:
-    """Terminate every process running as ``uid``, escalating after a grace period."""
-    victims = [p for p in psutil.process_iter(["uids"]) if _owned_by(p, uid)]
+def kill_processes(uid: int) -> bool:
+    """End every process running as ``uid``: a terminate, then kills until none is
+    left. Returns whether none is left."""
+    if not (victims := _processes_of(uid)):
+        return True
     for proc in victims:
         try:
             proc.send_signal(signal.SIGTERM)
         except psutil.Error:
             continue
-    if not victims:
-        return
-    _, alive = psutil.wait_procs(victims, timeout=_KILL_GRACE_SEC)
-    for proc in alive:
-        try:
-            proc.send_signal(signal.SIGKILL)
-        except psutil.Error:
-            continue
+    psutil.wait_procs(victims, timeout=_KILL_GRACE_SEC)
+    for _ in range(_KILL_ROUNDS):
+        if not _processes_of(uid):
+            return True
+        _kill_all_as(uid)
+        time.sleep(_KILL_ROUND_SEC)
+    return not _processes_of(uid)
 
 
 def delete_account(name: str) -> None:
@@ -185,18 +268,18 @@ def delete_account(name: str) -> None:
         logger.warning("Failed to delete SSH session account %s", name)
 
 
-def reap_stale_accounts(state_roots: Iterable[Path], keep: str | None = None) -> None:
-    """Remove every session account but ``keep``: its processes, its denials, and the
-    account itself."""
+def reap_stale_accounts(state_roots: Iterable[Path]) -> bool:
+    """Retire every session account; returns whether each one is gone."""
     roots = list(state_roots)
+    clean = True
     for entry in pwd.getpwall():
-        name = entry.pw_name
-        if not name.startswith(ACCOUNT_PREFIX) or name == keep:
+        if not (name := entry.pw_name).startswith(ACCOUNT_PREFIX):
             continue
-        kill_processes(entry.pw_uid)
-        lift_denials(entry.pw_uid, roots)
-        delete_account(name)
-        logger.info("Reaped stale SSH session account %s", name)
+        if retire_account(name, entry.pw_uid, roots):
+            logger.info("Reaped stale SSH session account %s", name)
+        else:
+            clean = False
+    return clean
 
 
 def process_identity_available() -> bool:
@@ -206,11 +289,61 @@ def process_identity_available() -> bool:
     )
 
 
+def _processes_of(uid: int) -> list[psutil.Process]:
+    return [p for p in psutil.process_iter(["uids"]) if _owned_by(p, uid)]
+
+
 def _owned_by(proc: psutil.Process, uid: int) -> bool:
     try:
         return proc.uids().real == uid
     except (psutil.Error, AttributeError):
         return False
+
+
+def _kill_all_as(uid: int) -> None:
+    """Kill every process of ``uid`` at once, from a child running as ``uid``.
+
+    ``kill(-1)`` signals every process the caller may signal in one step, so a
+    process forking as fast as its siblings are killed cannot outrun it.
+    """
+    if uid == 0 or os.getuid() != 0:
+        return
+    try:
+        subprocess.run(  # nosec B603 - argv list, no shell=True, the running interpreter
+            [sys.executable, "-c", "import os, signal; os.kill(-1, signal.SIGKILL)"],
+            user=uid,
+            group=_NOGROUP_GID,
+            extra_groups=[],
+            env={"PATH": os.defpath},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=_COMMAND_TIMEOUT_SEC,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.warning("Failed to kill the processes of uid %d", uid, exc_info=True)
+
+
+def _uid_in_use(uid: int) -> bool:
+    try:
+        pwd.getpwuid(uid)
+    except KeyError:
+        return bool(_processes_of(uid))
+    return True
+
+
+def _owner(path: str) -> int | None:
+    try:
+        return os.lstat(path).st_uid
+    except OSError:
+        return None
+
+
+def _unlink(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        logger.warning("Failed to remove %s", path)
 
 
 def _ensure_privsep_dir() -> None:
@@ -226,10 +359,7 @@ def _ensure_privsep_dir() -> None:
 
 
 def _login_shell() -> str:
-    for candidate in ("/bin/bash", "/bin/sh"):
-        if Path(candidate).exists():
-            return candidate
-    return "/bin/sh"
+    return "/bin/bash" if Path("/bin/bash").exists() else "/bin/sh"
 
 
 def _unlock(name: str) -> None:

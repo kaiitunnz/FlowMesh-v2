@@ -60,9 +60,9 @@ from ..session_identity import (
     account_name_for,
     delete_account,
     kill_processes,
-    lift_denials,
     process_identity_available,
     reap_stale_accounts,
+    retire_account,
     supports_denials,
 )
 
@@ -115,6 +115,8 @@ class ProcessSessionBackend(SSHSessionBackend):
         super().__init__(config, hardware)
         self._lock = threading.Lock()
         self._active: ProcessSession | None = None
+        # False while an earlier session's account still runs a process.
+        self._clean = True
 
     @classmethod
     def is_available(cls, config: WorkerConfig) -> bool:
@@ -187,6 +189,13 @@ class ProcessSessionBackend(SSHSessionBackend):
                     "This worker already has an SSH session, and process-mode "
                     "sessions share a filesystem, so only one may run at a time"
                 )
+            if not self._clean:
+                raise ExecutionError(
+                    "An earlier SSH session on this worker still runs a process it "
+                    "could not be rid of; the worker serves no session until a reap "
+                    "removes it",
+                    retryable=True,
+                )
             session = self._create_session(request)
             self._active = session
         return session
@@ -199,10 +208,11 @@ class ProcessSessionBackend(SSHSessionBackend):
         session.stop(parse_float_env("SSH_STOP_TIMEOUT_SEC", STOP_TIMEOUT_SEC))
         session.cleanup()
 
-    def _release(self, session: "ProcessSession") -> None:
+    def _release(self, session: "ProcessSession", clean: bool) -> None:
         with self._lock:
             if self._active is session:
                 self._active = None
+            self._clean = self._clean and clean
 
     # ------------------------------------------------------------------ #
     # Session construction
@@ -294,7 +304,8 @@ class ProcessSessionBackend(SSHSessionBackend):
             manifest.sshd_pid = process.pid
             manifest.write()
         except BaseException:
-            _discard_session(process, account, session_dir)
+            if not _discard_session(process, account, session_dir):
+                self._clean = False
             raise
         return ProcessSession(
             backend=self,
@@ -313,12 +324,14 @@ class ProcessSessionBackend(SSHSessionBackend):
         account and denials, and its paths."""
         if os.getuid() != 0:
             return
-        roots = self._config.state_roots
+        clean = True
         if SESSIONS_ROOT.is_dir() and not SESSIONS_ROOT.is_symlink():
             for session_dir in SESSIONS_ROOT.iterdir():
-                reap_session(session_dir)
+                clean = reap_session(session_dir) and clean
         _reset_mount_root()
-        reap_stale_accounts(roots)
+        clean = reap_stale_accounts(self._config.state_roots) and clean
+        with self._lock:
+            self._clean = clean
 
 
 @dataclass(slots=True)
@@ -540,12 +553,13 @@ class ProcessSession(SSHSession):
         kill_processes(self.account.uid)
 
     def cleanup(self) -> None:
+        clean = False
         try:
-            _discard_session(self._process, self.account, self._session_dir)
+            clean = _discard_session(self._process, self.account, self._session_dir)
         finally:
             # A failure above must not strand the worker refusing every later
             # session; the reap before the next session is the backstop.
-            self._backend._release(self)
+            self._backend._release(self, clean)
 
     def _log_tail(self, max_chars: int = 2000) -> str:
         text = _read_log(self._log_path)
@@ -597,8 +611,12 @@ class SessionManifest:
             return None
 
 
-def reap_session(session_dir: Path) -> None:
-    """Undo one session a dead worker left behind, as its manifest records it."""
+def reap_session(session_dir: Path) -> bool:
+    """Undo one session a dead worker left behind, as its manifest records it.
+
+    Returns ``False``, keeping the session's directory for a later reap, when its
+    account still runs a process.
+    """
     manifest = SessionManifest.read(session_dir)
     if manifest is not None:
         config_path = (session_dir / "sshd_config").as_posix()
@@ -609,12 +627,15 @@ def reap_session(session_dir: Path) -> None:
                 os.kill(manifest.sshd_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        if manifest.uid is not None:
-            kill_processes(manifest.uid)
-            lift_denials(manifest.uid, [Path(root) for root in manifest.roots])
-        delete_account(manifest.account)
+        if manifest.uid is None:
+            delete_account(manifest.account)
+        elif not retire_account(
+            manifest.account, manifest.uid, [Path(root) for root in manifest.roots]
+        ):
+            return False
         logger.info("Reaped SSH session %s left by an earlier worker", session_dir.name)
     shutil.rmtree(session_dir, ignore_errors=True)
+    return True
 
 
 def _is_our_sshd(pid: int, config_path: str) -> bool:
@@ -685,9 +706,9 @@ def _discard_session(
     process: subprocess.Popen[bytes] | None,
     account: SessionAccount | None,
     session_dir: Path,
-) -> None:
+) -> bool:
     """Undo whatever a session allocated, each step whether or not the one before it
-    succeeded."""
+    succeeded; returns whether every step did."""
     steps: list[Callable[[], Any]] = []
     if process is not None:
         steps.append(lambda: _terminate(process, _TERMINATE_GRACE_SEC))
@@ -695,11 +716,14 @@ def _discard_session(
         steps.append(account.release)
     steps.append(_reset_mount_root)
     steps.append(lambda: shutil.rmtree(session_dir, ignore_errors=True))
+    clean = True
     for step in steps:
         try:
             step()
         except Exception:
+            clean = False
             logger.warning("Failed to release part of an SSH session", exc_info=True)
+    return clean
 
 
 def _terminate(process: subprocess.Popen[bytes], timeout_sec: float) -> None:

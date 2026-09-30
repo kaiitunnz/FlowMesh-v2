@@ -492,17 +492,55 @@ def test_a_reap_signals_only_the_sshd_its_manifest_names(
     with (
         patch.object(process_module, "_is_our_sshd", return_value=ours),
         patch.object(process_module.os, "kill") as kill,
-        patch.object(process_module, "kill_processes") as kill_processes,
-        patch.object(process_module, "lift_denials") as lift,
-        patch.object(process_module, "delete_account") as delete,
+        patch.object(process_module, "retire_account", return_value=True) as retire,
     ):
-        process_module.reap_session(session_dir)
+        assert process_module.reap_session(session_dir)
 
     assert kill.call_count == (1 if ours else 0)
-    kill_processes.assert_called_once_with(1234)
-    lift.assert_called_once_with(1234, [tmp_path / "results"])
-    delete.assert_called_once_with("fmssn1")
+    retire.assert_called_once_with("fmssn1", 1234, [tmp_path / "results"])
     assert not session_dir.exists()
+
+
+def test_a_reap_keeps_a_session_whose_account_still_runs_a_process(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / "ssn-1"
+    session_dir.mkdir()
+    process_module.SessionManifest(
+        session_dir=session_dir, account="fmssn1", roots=[], uid=1234
+    ).write()
+
+    with patch.object(process_module, "retire_account", return_value=False):
+        assert not process_module.reap_session(session_dir)
+
+    assert session_dir.exists()
+
+
+def test_a_worker_serves_no_session_until_a_stuck_account_is_reaped(
+    tmp_path: Path,
+) -> None:
+    backend = ProcessSessionBackend(make_live_worker_config(tmp_path))
+    with (
+        patch.object(process_module.os, "getuid", return_value=0),
+        patch.object(process_module, "SESSIONS_ROOT", tmp_path / "sessions"),
+        patch.object(process_module, "_reset_mount_root"),
+        patch.object(process_module, "reap_stale_accounts", return_value=False),
+    ):
+        backend.reap_stale()
+    with pytest.raises(ExecutionError, match="serves no session") as refused:
+        backend.start_session(_request(tmp_path, [], None))
+    assert refused.value.retryable
+
+    with (
+        patch.object(process_module.os, "getuid", return_value=0),
+        patch.object(process_module, "SESSIONS_ROOT", tmp_path / "sessions"),
+        patch.object(process_module, "_reset_mount_root"),
+        patch.object(process_module, "reap_stale_accounts", return_value=True),
+        patch.object(backend, "_create_session") as create,
+    ):
+        backend.reap_stale()
+        backend.start_session(_request(tmp_path, [], None))
+    create.assert_called_once()
 
 
 def test_a_recycled_pid_is_not_taken_for_the_session_sshd(tmp_path: Path) -> None:

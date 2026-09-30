@@ -7,6 +7,7 @@ never on a host.
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import psutil
 import pytest
 
 from shared.utils import new_ssh_session_id
@@ -274,6 +276,61 @@ def test_collection_reads_the_output_with_the_session_access_alone(
         session.cleanup()
         shutil.rmtree(root_only.parent, ignore_errors=True)
     assert _run(["getent", "passwd", account.name]).returncode != 0
+
+
+_FORK_CHAIN = """
+import os, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    if os.fork():
+        os._exit(0)
+    time.sleep(0.005)
+"""
+
+
+def _processes_of(uid: int) -> list[psutil.Process]:
+    return [p for p in psutil.process_iter(["uids"]) if p.info["uids"].real == uid]
+
+
+def test_a_session_leaves_the_next_one_nothing(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    backend = ProcessSessionBackend(worker)
+    first = backend.start_session(_request(tmp_path, client_key))
+    account = first.account
+    leftover = Path(tempfile.gettempdir()) / f"left-by-{account.name}"
+    as_account: dict[str, Any] = {
+        "user": account.uid,
+        "group": account.gid,
+        "extra_groups": [],
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    subprocess.run(  # nosec B603 - argv list, test-only
+        ["sh", "-c", f"echo secret > {leftover} && chmod 600 {leftover}"],
+        check=True,
+        **as_account,
+    )
+    # Ignores a terminate and moves to a new pid every few milliseconds, so a kill
+    # of the pids it listed a moment ago misses it.
+    subprocess.Popen(  # nosec B603 - argv list, test-only
+        [sys.executable, "-c", _FORK_CHAIN], start_new_session=True, **as_account
+    )
+    time.sleep(0.5)
+
+    first.stop(1)
+    first.cleanup()
+
+    assert _processes_of(account.uid) == []
+    assert _run(["getent", "passwd", account.name]).returncode != 0
+    assert not leftover.exists()
+    second = backend.start_session(_request(tmp_path, client_key))
+    try:
+        assert second.account.uid != account.uid
+    finally:
+        second.stop(1)
+        second.cleanup()
 
 
 def test_a_planted_symlink_under_the_mount_root_is_never_followed(
