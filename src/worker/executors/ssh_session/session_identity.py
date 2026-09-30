@@ -83,6 +83,7 @@ _REMOVE_IPC_SCRIPT = (
 _EXEC_SCRIPT = "os.execv(sys.argv[3], sys.argv[3:])\n"
 _AS_UID_TIMEOUT_SEC = 10.0
 _NOGROUP_GID = 65534
+_REMOVE_TREE_TIMEOUT_SEC = 300.0
 _USERADD_TIMEOUT_SEC = 30.0
 _SCRATCH_DIRS = (
     Path("/", "tmp"),
@@ -395,25 +396,29 @@ def _read_ipc_table(kind: str) -> str:
 
 
 def remove_tree(path: Path) -> None:
-    """Delete ``path`` and everything below it, never following a link or crossing a
-    mount.
+    """Delete the tree at ``path`` without following links or leaving its
+    filesystem, logging a failure.
 
-    ``rm`` removes a tree of any depth, where ``shutil.rmtree`` runs out of file
-    descriptors or recursion on one a session nested thousands deep.
+    ``rm`` removes a tree of any depth, where ``shutil.rmtree`` holds a
+    descriptor per level and gives up on a deep one.
     """
+    detail = ""
     rm = shutil.which("rm")
     if rm is None:
         shutil.rmtree(path, ignore_errors=True)
-        return
-    try:
-        # A tree of millions of files takes minutes, so it gets no timeout.
-        _run(
-            [rm, "-rf", "--one-file-system", "--", path.as_posix()],
-            f"remove {path.as_posix()}",
-            timeout=None,
-        )
-    except ExecutionError:
-        logger.warning("Failed to remove %s", path, exc_info=True)
+    else:
+        try:
+            result = subprocess.run(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()
+                [rm, "-rf", "--one-file-system", "--", path.as_posix()],
+                capture_output=True,
+                timeout=_REMOVE_TREE_TIMEOUT_SEC,
+                check=False,
+            )
+            detail = _stderr_of(result)
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = str(exc)
+    if os.path.lexists(path):
+        logger.warning("Failed to remove %s: %s", path, detail or "unknown error")
 
 
 def lock_account(name: str) -> None:
@@ -760,15 +765,13 @@ def _require_binary(name: str) -> str:
     return path
 
 
-def _run(
-    argv: list[str], what: str, timeout: float | None = _USERADD_TIMEOUT_SEC
-) -> "subprocess.CompletedProcess[bytes]":
+def _run(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
     try:
         result = subprocess.run(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()
-            argv, capture_output=True, timeout=timeout, check=False
+            argv, capture_output=True, timeout=_USERADD_TIMEOUT_SEC, check=False
         )
     except subprocess.TimeoutExpired as exc:
-        raise ExecutionError(f"Failed to {what}: timed out after {timeout}s") from exc
+        raise ExecutionError(f"Failed to {what}: {exc}") from exc
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise ExecutionError(f"Failed to {what}: {detail}")

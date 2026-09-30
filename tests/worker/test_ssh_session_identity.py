@@ -472,19 +472,19 @@ def test_a_command_that_times_out_fails_as_an_execution_error() -> None:
         session_identity._run(["/bin/rm", "x"], "remove x")
 
 
-def test_a_tree_is_removed_without_a_timeout_and_a_failure_is_only_logged(
-    tmp_path: Path,
+def test_a_tree_removal_that_times_out_is_only_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    timeouts: list[Any] = []
+    stuck = tmp_path / "stuck"
+    stuck.mkdir()
+    with patch.object(
+        session_identity.subprocess,
+        "run",
+        side_effect=subprocess.TimeoutExpired(["rm"], 300),
+    ):
+        session_identity.remove_tree(stuck)
 
-    def run(argv: list[str], what: str, timeout: Any = 30.0) -> Any:
-        timeouts.append(timeout)
-        raise ExecutionError("timed out")
-
-    with patch.object(session_identity, "_run", side_effect=run):
-        session_identity.remove_tree(tmp_path / "gone")
-
-    assert timeouts == [None]
+    assert "Failed to remove" in caplog.text
 
 
 def test_a_failed_file_purge_still_purges_the_ipc_objects() -> None:
