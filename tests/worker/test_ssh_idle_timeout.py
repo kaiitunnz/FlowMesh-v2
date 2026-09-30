@@ -156,7 +156,7 @@ def test_the_idle_clock_restarts_while_a_connection_is_open(
 def test_a_session_is_not_reaped_without_evidence_it_is_idle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, connections: int | None
 ) -> None:
-    session, elapsed = _run(
+    _, elapsed = _run(
         tmp_path, monkeypatch, [connections], ttlSeconds=1, idleTimeoutSeconds=0.05
     )
 
@@ -167,9 +167,7 @@ def test_a_session_is_not_reaped_without_evidence_it_is_idle(
 def test_a_zero_idle_timeout_leaves_only_the_ttl(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    session, elapsed = _run(
-        tmp_path, monkeypatch, [0], ttlSeconds=1, idleTimeoutSeconds=0
-    )
+    _, elapsed = _run(tmp_path, monkeypatch, [0], ttlSeconds=1, idleTimeoutSeconds=0)
 
     assert elapsed >= 1.0
 
@@ -224,6 +222,11 @@ def test_a_docker_session_reads_its_own_connection_table() -> None:
         MagicMock(), container, MagicMock(), None, MagicMock(), MagicMock()
     )
 
+    assert session.established_connections() == 1
+    # Without an IPv6 table, cat fails after printing the IPv4 one.
+    container.exec_run.return_value = MagicMock(
+        exit_code=1, output=_PROC_NET_TCP.encode()
+    )
     assert session.established_connections() == 1
     container.exec_run.return_value = MagicMock(exit_code=1, output=b"")
     assert session.established_connections() is None

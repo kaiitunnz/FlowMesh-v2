@@ -570,14 +570,10 @@ class DockerSession(SSHSession):
         self._cfg = cfg
         self._signals = signals
 
-    @property
-    def mount_plan(self) -> SSHMountPlan:
-        return self._mount_plan
-
     def login_user(self) -> str:
         return self._cfg.user
 
-    def wait_ready(self, timeout_sec: float = 30.0) -> int | None:
+    def wait_ready(self, timeout_sec: float) -> int | None:
         """Wait until Docker assigns a host port and sshd accepts connections."""
         container = self._container
         signals = self._signals
@@ -660,12 +656,12 @@ class DockerSession(SSHSession):
 
     def established_connections(self) -> int | None:
         try:
+            # A host without IPv6 has no tcp6 table, so cat's exit status is no
+            # evidence; what it printed is.
             result = self._container.exec_run(
                 ["sh", "-c", "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null"]
             )
         except (DockerException, OSError):
-            return None
-        if result.exit_code != 0:
             return None
         if not (output := _decode_exec_output(result.output)):
             return None
