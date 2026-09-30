@@ -157,16 +157,15 @@ class SessionAccount:
 
     def deny(self, roots: Iterable[Path]) -> None:
         """Deny this account each of ``roots``, all or nothing."""
-        applied: list[acl.Denial] = []
+        applied: list[Path] = []
         try:
             for root in roots:
-                denial = acl.Denial(self.uid, root.as_posix(), acl.mask(root))
-                acl.record(denial)
-                applied.append(denial)
+                acl.record(self.uid, root)
+                applied.append(root)
                 acl.deny(self.uid, root)
         except ExecutionError as exc:
-            for denial in applied:
-                _revoke(denial)
+            for root in applied:
+                _revoke(self.uid, root)
             raise ExecutionError(
                 f"Could not isolate SSH session account {self.name} from this "
                 f"worker's state: {exc}"
@@ -272,9 +271,9 @@ def retire_account(name: str, uid: int) -> bool:
             exc_info=True,
         )
         return True
-    for denial in records:
-        if denial.uid == uid:
-            _revoke(denial)
+    for recorded_uid, path in records:
+        if recorded_uid == uid:
+            _revoke(uid, Path(path))
     return True
 
 
@@ -635,17 +634,16 @@ def _delete_group(name: str) -> None:
         logger.warning("Failed to delete SSH session group %s", name)
 
 
-def _revoke(denial: acl.Denial) -> None:
-    path = Path(denial.path)
+def _revoke(uid: int, path: Path) -> None:
     try:
         if path.exists():
-            acl.revoke(denial.uid, path, denial.mask)
-        acl.forget(denial)
+            acl.revoke(uid, path)
+        acl.forget(uid, path)
     except ExecutionError:
         logger.warning(
             "Failed to lift the SSH session denial of uid %d on %s; the next reap "
             "retries",
-            denial.uid,
+            uid,
             path,
         )
 
@@ -656,9 +654,9 @@ def _revoke_orphaned_denies() -> None:
     except ExecutionError:
         logger.warning("Cannot read recorded SSH session ACL entries", exc_info=True)
         return
-    for denial in records:
-        if not _uid_exists(denial.uid):
-            _revoke(denial)
+    for uid, path in records:
+        if not _uid_exists(uid):
+            _revoke(uid, Path(path))
 
 
 def _uid_exists(uid: int) -> bool:
