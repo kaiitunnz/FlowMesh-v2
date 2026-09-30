@@ -1,8 +1,6 @@
 """Stack env schema."""
 
 import secrets
-from collections.abc import Collection
-from dataclasses import dataclass
 
 from flowmesh.models.nodes import NodeRole
 from flowmesh_stack.env import parse_bool
@@ -14,39 +12,6 @@ from flowmesh_stack.env_schema import (
     require_all_or_none,
     require_if_true,
 )
-
-# Credentials that were schema defaults; a node never runs its services on them.
-_WELL_KNOWN_CREDENTIALS = {
-    "REDIS_PASSWORD": "very-strong-password",  # nosec B105 - a default refused
-    "CONTENT_STORE_ACCESS_KEY": "flowmesh",
-    "CONTENT_STORE_SECRET_KEY": "flowmeshcontent",  # nosec B105 - a default refused
-    "TELEMETRY_CLICKHOUSE_PASSWORD": "flowmesh",  # nosec B105 - a default refused
-    "SERVER_METRICS_CLICKHOUSE_PASSWORD": "flowmesh",  # nosec B105 - a default refused
-}
-
-TELEMETRY_PROFILE = "telemetry"
-
-
-def _is_root(env: dict[str, str]) -> bool:
-    role = env.get("NODE_ROLE", "").strip().lower()
-    return not role or role == NodeRole.ROOT.value
-
-
-def colocates_content_store(env: dict[str, str]) -> bool:
-    """Whether this node runs the content store itself.
-
-    The fabric's content has to live somewhere, so a root node brings up its own store
-    unless the deployment says where its store already is. Naming an endpoint — cloud
-    object storage, an external MinIO, another node's — is what turns the co-located one
-    off, so pointing at real storage costs one setting and leaves no unused container.
-    """
-    return _is_root(env) and not env.get("CONTENT_STORE_ENDPOINT_URL", "").strip()
-
-
-def runs_telemetry_store(env: dict[str, str]) -> bool:
-    """Whether this node's selected compose profiles bring up the bundled ClickHouse."""
-    profiles = env.get("COMPOSE_PROFILES", "").split(",")
-    return TELEMETRY_PROFILE in (name.strip() for name in profiles)
 
 
 def credential_overrides(role: NodeRole) -> dict[str, str]:
@@ -65,73 +30,6 @@ def credential_overrides(role: NodeRole) -> dict[str, str]:
         "TELEMETRY_CLICKHOUSE_PASSWORD": clickhouse_password,
         "SERVER_METRICS_CLICKHOUSE_PASSWORD": clickhouse_password,
     }
-
-
-@dataclass(frozen=True)
-class _CredentialUse:
-    """What a service credential protects, and the compose services that read it."""
-
-    service: str
-    readers: frozenset[str]
-
-
-_REDIS_READERS = frozenset({"redis_control", "redis_telemetry", "server"})
-_CONTENT_STORE_READERS = frozenset({"content-store", "server"})
-_CLICKHOUSE_READERS = frozenset({"clickhouse", "otel_collector"})
-
-
-def _credentials_in_use(env: dict[str, str]) -> dict[str, _CredentialUse]:
-    """Each service credential this node uses, mapped to what uses it."""
-    in_use: dict[str, _CredentialUse] = {}
-    if parse_bool(env.get("REDIS_ACL_ENABLED", "")):
-        in_use["REDIS_PASSWORD"] = _CredentialUse(
-            "Redis with ACL enabled", _REDIS_READERS
-        )
-    if colocates_content_store(env):
-        for key in ("CONTENT_STORE_ACCESS_KEY", "CONTENT_STORE_SECRET_KEY"):
-            in_use[key] = _CredentialUse(
-                "the co-located content store", _CONTENT_STORE_READERS
-            )
-    if runs_telemetry_store(env):
-        service = "the telemetry profile's ClickHouse"
-        in_use["TELEMETRY_CLICKHOUSE_PASSWORD"] = _CredentialUse(
-            service, _CLICKHOUSE_READERS
-        )
-        # Only the root's server queries the store.
-        if _is_root(env):
-            in_use["SERVER_METRICS_CLICKHOUSE_PASSWORD"] = _CredentialUse(
-                service, frozenset({"server"})
-            )
-    return in_use
-
-
-def service_credential_errors(
-    env: dict[str, str], services: Collection[str] | None = None
-) -> list[str]:
-    """Why a node's Redis, co-located content store or bundled ClickHouse would run on
-    an unset or well-known credential; with ``services``, only the credentials those
-    compose services read."""
-    errors: list[str] = []
-    for key, use in _credentials_in_use(env).items():
-        if services is not None and use.readers.isdisjoint(services):
-            continue
-        value = env.get(key, "").strip()
-        if not value:
-            errors.append(f"{key} must be set for {use.service}")
-        elif value == _WELL_KNOWN_CREDENTIALS[key]:
-            errors.append(f"{key} is a well-known default; set a value of your own")
-    return errors
-
-
-def _refuse_service_credentials(
-    env: dict[str, str], errors: list[str], warnings: list[str]
-) -> None:
-    reported = {error.split(" ", 1)[0] for error in errors}
-    errors.extend(
-        error
-        for error in service_credential_errors(env)
-        if error.split(" ", 1)[0] not in reported
-    )
 
 
 def _require_network_plane_for_resident(
@@ -813,7 +711,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_STORE_ACCESS_KEY",
-                    "",
+                    "<replace-with-access-key>",
                     description=(
                         "Co-located store key the control plane cuts access"
                         " from; set for external storage."
@@ -821,7 +719,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_STORE_SECRET_KEY",
-                    "",
+                    "<replace-with-strong-password>",
                     description=(
                         "Co-located store secret the control plane cuts access"
                         " from; set for external storage."
@@ -1053,7 +951,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             vars=[
                 EnvVar("REDIS_ACL_ENABLED", "1", var_type=EnvVarType.BOOL),
                 EnvVar("REDIS_USERNAME", "admin"),
-                EnvVar("REDIS_PASSWORD", ""),
+                EnvVar("REDIS_PASSWORD", "<replace-with-strong-password>"),
             ],
         ),
         EnvSection(
@@ -1369,7 +1267,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "SERVER_METRICS_CLICKHOUSE_PASSWORD",
-                    "",
+                    "<replace-with-strong-password>",
                     description="ClickHouse password for the store read port.",
                 ),
                 EnvVar(
@@ -1396,7 +1294,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "TELEMETRY_CLICKHOUSE_PASSWORD",
-                    "",
+                    "<replace-with-strong-password>",
                     description="ClickHouse password for the telemetry profile.",
                 ),
                 EnvVar(
@@ -1677,7 +1575,6 @@ STACK_ENV_SCHEMA = EnvSchema(
         _require_peer_trust,
         _require_network_plane_for_resident,
         _require_network_plane_for_content,
-        _refuse_service_credentials,
         _warn_reaper_without_watchdog,
     ],
 )

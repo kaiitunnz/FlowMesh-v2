@@ -3,7 +3,6 @@
 import os
 import shutil
 import subprocess
-from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -32,11 +31,9 @@ from flowmesh_stack.images import (
 
 from .env_schema import (
     STACK_ENV_SCHEMA,
-    colocates_content_store,
     credential_overrides,
     deploy_overrides,
     role_overrides,
-    service_credential_errors,
 )
 from .utils import (
     DEFAULT_ENV_FILE,
@@ -79,6 +76,20 @@ def _stack() -> DockerComposeStack:
 CONTENT_PROFILE = "content"
 
 
+def _colocates_content_store(env: dict[str, str]) -> bool:
+    """Whether this node runs the content store itself.
+
+    The fabric's content has to live somewhere, so a root node brings up its own store
+    unless the deployment says where its store already is. Naming an endpoint — cloud
+    object storage, an external MinIO, another node's — is what turns the co-located one
+    off, so pointing at real storage costs one setting and leaves no unused container.
+    """
+    role = env.get("NODE_ROLE", "").strip().lower()
+    if role and role != NodeRole.ROOT.value:
+        return False
+    return not env.get("CONTENT_STORE_ENDPOINT_URL", "").strip()
+
+
 def _profiles(env_file: Path, profile: str | None) -> list[str]:
     """This node's own compose profile plus any the operator selected.
 
@@ -89,7 +100,7 @@ def _profiles(env_file: Path, profile: str | None) -> list[str]:
     env = parse_env_file(env_file)
     raw = env.get("COMPOSE_PROFILES", "")
     selected.extend(name for part in raw.split(",") if (name := part.strip()))
-    if colocates_content_store(env):
+    if _colocates_content_store(env):
         selected.append(CONTENT_PROFILE)
     seen: dict[str, None] = {}
     for name in selected:
@@ -515,12 +526,8 @@ def up(
     On root nodes (NODE_ROLE=root, the default), the local Redis services are
     started alongside the server. On worker nodes (NODE_ROLE=worker), Redis
     services are skipped — the worker is expected to connect to the root
-    node's Redis via REDIS_CONTROL_URL / REDIS_TELEMETRY_URL. A node is refused
-    when its Redis or a root's co-located content store, or the telemetry
-    profile's ClickHouse on any node, would run on an unset or well-known
-    credential.
+    node's Redis via REDIS_CONTROL_URL / REDIS_TELEMETRY_URL.
     """
-    _require_service_credentials(env_file)
     profile = "root" if _node_role(env_file) == NodeRole.ROOT else None
     _compose(
         ["up", "-d", "--wait"],
@@ -530,17 +537,6 @@ def up(
         profile=profile,
     )
     logging.success("FlowMesh stack is up.")
-
-
-def _require_service_credentials(
-    env_file: Path, services: Collection[str] | None = None
-) -> None:
-    """Refuse to start services on an unset or well-known credential; with
-    ``services``, only the credentials those services read."""
-    if errors := service_credential_errors(parse_env_file(env_file), services):
-        for error in errors:
-            logging.error(error)
-        raise typer.Exit(code=1)
 
 
 def _drain_workers(env_file: Path) -> None:
@@ -605,12 +601,9 @@ def restart(
 
     With one or more SERVICE arguments the stack is left running and only those services
     are recreated; when any of them manages workers (the server / supervisor) its
-    workers are drained first so their in-flight tasks requeue onto other nodes. Like
-    `up`, it refuses to start services on an unset or well-known credential, checking
-    only the credentials the named services read.
+    workers are drained first so their in-flight tasks requeue onto other nodes.
     """
     if not services:
-        _require_service_credentials(env_file)
         logging.info("Draining workers...")
         _drain_workers(env_file)
         _compose(
@@ -639,7 +632,6 @@ def restart(
         )
         raise typer.Exit(code=1)
 
-    _require_service_credentials(env_file, requested)
     if any(svc in WORKER_MANAGING_SERVICES for svc in requested):
         logging.info("Draining workers...")
         _drain_workers(env_file)

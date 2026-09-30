@@ -9,12 +9,6 @@ from flowmesh.models.nodes import NodeRole
 from flowmesh_cli_stack import stack as stack_module
 
 
-@pytest.fixture(autouse=True)
-def _no_credential_check():
-    with patch.object(stack_module, "_require_service_credentials"):
-        yield
-
-
 def _restart(
     services: list[str] | None = None,
     env_file: Path = Path(".env"),

@@ -66,8 +66,8 @@ listed here is in `.env.example`.
 | `CONTENT_STORE_BUCKET` | `flowmesh-content` | Bucket holding fabric content |
 | `CONTENT_STORE_PREFIX` | – | Key prefix within the bucket |
 | `CONTENT_STORE_REGION` | `us-east-1` | Region the store is addressed in |
-| `CONTENT_STORE_ACCESS_KEY` | – | Co-located store key the control plane cuts access from; set for external storage |
-| `CONTENT_STORE_SECRET_KEY` | – | Co-located store secret the control plane cuts access from; set for external storage |
+| `CONTENT_STORE_ACCESS_KEY` | `<replace-with-access-key>` | Co-located store key the control plane cuts access from; set for external storage |
+| `CONTENT_STORE_SECRET_KEY` | `<replace-with-strong-password>` | Co-located store secret the control plane cuts access from; set for external storage |
 | `CONTENT_STORE_FILESYSTEM_ROOT` | – | Shared filesystem root; under the data dir if empty |
 | `CONTENT_STORE_SCOPED_CREDENTIALS` | `true` | Cut per-scope store access instead of sharing one key |
 | `CONTENT_STORE_PORT` | `9800` | Co-located content store port |
@@ -147,12 +147,12 @@ listed here is in `.env.example`.
 | `SERVER_METRICS_CLICKHOUSE_URL` | – | ClickHouse HTTP URL for the store read port (e.g. `http://localhost:8123`); unset disables queries |
 | `SERVER_METRICS_CLICKHOUSE_DATABASE` | `flowmesh` | ClickHouse database for the store read port |
 | `SERVER_METRICS_CLICKHOUSE_USERNAME` | `default` | ClickHouse user for the store read port |
-| `SERVER_METRICS_CLICKHOUSE_PASSWORD` | – | ClickHouse password for the store read port |
+| `SERVER_METRICS_CLICKHOUSE_PASSWORD` | `<replace-with-strong-password>` | ClickHouse password for the store read port |
 | `SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC` | `10` | ClickHouse query timeout (seconds) |
 | `TELEMETRY_CLICKHOUSE_DSN` | `clickhouse://clickhouse:9000?dial_timeout=10s` | ClickHouse DSN the collector writes to |
 | `TELEMETRY_CLICKHOUSE_DATABASE` | `flowmesh` | ClickHouse database for the telemetry profile |
 | `TELEMETRY_CLICKHOUSE_USERNAME` | `default` | ClickHouse user for the telemetry profile |
-| `TELEMETRY_CLICKHOUSE_PASSWORD` | – | ClickHouse password for the telemetry profile |
+| `TELEMETRY_CLICKHOUSE_PASSWORD` | `<replace-with-strong-password>` | ClickHouse password for the telemetry profile |
 | `TELEMETRY_CLICKHOUSE_HTTP_PORT` | `8123` | Host port for the ClickHouse HTTP interface |
 | `TELEMETRY_CLICKHOUSE_NATIVE_PORT` | `9000` | Host port for the ClickHouse native interface |
 | `TELEMETRY_OTLP_GRPC_PORT` | `4317` | Host port for the collector's OTLP gRPC receiver |

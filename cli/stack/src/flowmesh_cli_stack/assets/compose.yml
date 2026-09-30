@@ -196,7 +196,7 @@ services:
       TELEMETRY_CLICKHOUSE_DSN: ${TELEMETRY_CLICKHOUSE_DSN:-clickhouse://clickhouse:9000?dial_timeout=10s}
       TELEMETRY_CLICKHOUSE_DATABASE: ${TELEMETRY_CLICKHOUSE_DATABASE:-flowmesh}
       TELEMETRY_CLICKHOUSE_USERNAME: ${TELEMETRY_CLICKHOUSE_USERNAME:-default}
-      TELEMETRY_CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-}
+      TELEMETRY_CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-<replace-with-strong-password>}
     ports:
       - "${TELEMETRY_OTLP_GRPC_PORT:-4317}:4317"
       - "${TELEMETRY_OTLP_HTTP_PORT:-4318}:4318"
@@ -221,7 +221,7 @@ services:
       # official image enable network access for it at all -- unset, it locks the user
       # to local-socket-only, which would make it unreachable from the collector and
       # store containers.
-      CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-<replace-with-strong-password>}
     ports:
       - "${TELEMETRY_CLICKHOUSE_HTTP_PORT:-8123}:8123"
       - "${TELEMETRY_CLICKHOUSE_NATIVE_PORT:-9000}:9000"
@@ -242,8 +242,8 @@ services:
     container_name: ${FLOWMESH_STACK_SLUG:-flowmesh_node}_content_store
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${CONTENT_STORE_ACCESS_KEY:-}
-      MINIO_ROOT_PASSWORD: ${CONTENT_STORE_SECRET_KEY:-}
+      MINIO_ROOT_USER: ${CONTENT_STORE_ACCESS_KEY:-<replace-with-access-key>}
+      MINIO_ROOT_PASSWORD: ${CONTENT_STORE_SECRET_KEY:-<replace-with-strong-password>}
     ports:
       - "${CONTENT_STORE_BIND_HOST:-0.0.0.0}:${CONTENT_STORE_PORT:-9800}:9000"
       - "${CONTENT_STORE_CONSOLE_BIND_HOST:-127.0.0.1}:${CONTENT_STORE_CONSOLE_PORT:-9801}:9001"
