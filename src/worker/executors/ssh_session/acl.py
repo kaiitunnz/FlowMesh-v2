@@ -29,6 +29,7 @@ PROBE_UID = 65534
 _ACL_TIMEOUT_SEC = 30.0
 _DENIED_USER_RE = re.compile(r"^user:(\d+):---$")
 _NAMED_USER_RE = re.compile(r"^(?:default:)?user:(\d+):")
+_NAMED_GROUP_RE = re.compile(r"^(?:default:)?group:(\d+):")
 _record_lock = threading.Lock()
 
 
@@ -81,15 +82,24 @@ def named_uids(path: Path) -> set[int]:
     return parse_named_uids(_read_acl(path))
 
 
+def named_gids(path: Path) -> set[int]:
+    """Return the gids named by a group entry in ``path``'s access or default ACL."""
+    return parse_named_gids(_read_acl(path))
+
+
 def parse_denied_uids(getfacl_output: str) -> set[int]:
-    return _parse_uids(_DENIED_USER_RE, getfacl_output)
+    return _parse_ids(_DENIED_USER_RE, getfacl_output)
 
 
 def parse_named_uids(getfacl_output: str) -> set[int]:
-    return _parse_uids(_NAMED_USER_RE, getfacl_output)
+    return _parse_ids(_NAMED_USER_RE, getfacl_output)
 
 
-def _parse_uids(pattern: re.Pattern[str], getfacl_output: str) -> set[int]:
+def parse_named_gids(getfacl_output: str) -> set[int]:
+    return _parse_ids(_NAMED_GROUP_RE, getfacl_output)
+
+
+def _parse_ids(pattern: re.Pattern[str], getfacl_output: str) -> set[int]:
     return {
         int(match.group(1))
         for line in getfacl_output.splitlines()

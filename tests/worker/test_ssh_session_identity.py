@@ -47,8 +47,10 @@ def _run_ok(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
     return subprocess.CompletedProcess(argv, 0, b"", b"")
 
 
-def test_a_uid_an_account_a_process_or_a_state_root_holds_is_not_drawn() -> None:
-    draws = iter([0, 1, 2, 3])
+def test_an_id_an_account_a_group_a_process_or_a_state_root_holds_is_not_drawn() -> (
+    None
+):
+    draws = iter(range(8))
     created: list[list[str]] = []
 
     def run(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
@@ -57,11 +59,15 @@ def test_a_uid_an_account_a_process_or_a_state_root_holds_is_not_drawn() -> None
 
     first = session_identity.SESSION_UID_MIN
     with (
+        patch.object(session_identity.shutil, "which", side_effect=lambda b: f"/x/{b}"),
         patch.object(
             session_identity.secrets, "randbelow", side_effect=lambda n: next(draws)
         ),
         patch.object(
             session_identity, "_uid_exists", side_effect=lambda uid: uid == first + 1
+        ),
+        patch.object(
+            session_identity, "_gid_exists", side_effect=lambda gid: gid == first + 4
         ),
         patch.object(
             session_identity,
@@ -71,32 +77,71 @@ def test_a_uid_an_account_a_process_or_a_state_root_holds_is_not_drawn() -> None
         patch.object(session_identity, "_run", side_effect=run),
     ):
         session_identity._add_account(
-            "/usr/sbin/useradd", "fmssn1", Path("/h"), frozenset({first})
+            "fmssn1", Path("/h"), frozenset({first}), frozenset({first + 3})
         )
 
-    ((*_, uid_flag, uid, _home_flag, _home, _shell_flag, _shell, name),) = created
-    assert (uid_flag, uid, name) == ("--uid", str(first + 3), "fmssn1")
+    drawn = str(first + 5)
+    assert created[0] == ["/x/groupadd", "--gid", drawn, "fmssn1"]
+    useradd = created[1]
+    assert useradd[0] == "/x/useradd" and useradd[-1] == "fmssn1"
+    assert "--no-user-group" in useradd
+    assert useradd[useradd.index("--uid") + 1] == drawn
+    assert useradd[useradd.index("--gid") + 1] == drawn
 
 
-def test_a_new_account_avoids_every_uid_a_state_root_names(tmp_path: Path) -> None:
-    avoided: list[frozenset[int]] = []
+def test_a_group_created_for_an_account_that_fails_is_removed() -> None:
+    commands: list[str] = []
+    groups: set[str] = set()
+
+    def run(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
+        commands.append(Path(argv[0]).name)
+        if argv[0].endswith("groupadd"):
+            groups.add(argv[-1])
+        elif argv[0].endswith("groupdel"):
+            groups.discard(argv[-1])
+        else:
+            raise ExecutionError("useradd failed")
+        return _run_ok(argv, what)
+
+    with (
+        patch.object(session_identity.shutil, "which", side_effect=lambda b: f"/x/{b}"),
+        patch.object(session_identity, "_UID_ATTEMPTS", 1),
+        patch.object(session_identity, "_uid_exists", return_value=False),
+        patch.object(session_identity, "_gid_exists", return_value=False),
+        patch.object(session_identity, "_processes_of", return_value=[]),
+        patch.object(session_identity, "_account_exists", return_value=False),
+        patch.object(
+            session_identity, "_group_exists", side_effect=lambda n: n in groups
+        ),
+        patch.object(session_identity, "_run", side_effect=run),
+        pytest.raises(ExecutionError, match="useradd failed"),
+    ):
+        session_identity._add_account("fmssn1", Path("/h"), frozenset(), frozenset())
+
+    assert commands == ["groupadd", "useradd", "groupdel"]
+    assert not groups
+
+
+def test_a_new_account_avoids_every_id_a_state_root_names(tmp_path: Path) -> None:
+    avoided: list[tuple[frozenset[int], frozenset[int]]] = []
     roots = [tmp_path / "results", tmp_path / "hb"]
     named = {roots[0]: {61001}, roots[1]: {61002}}
+    named_groups = {roots[0]: {61003}, roots[1]: set()}
 
-    def add(useradd: str, name: str, home: Path, avoid: frozenset[int]) -> None:
-        avoided.append(avoid)
+    def add(name: str, home: Path, uids: frozenset[int], gids: frozenset[int]) -> None:
+        avoided.append((uids, gids))
         raise ExecutionError("stop here")
 
     with (
         patch.object(session_identity, "_ensure_privsep_dir"),
-        patch.object(session_identity.shutil, "which", return_value="/bin/x"),
         patch.object(session_identity.acl, "named_uids", side_effect=named.get),
+        patch.object(session_identity.acl, "named_gids", side_effect=named_groups.get),
         patch.object(session_identity, "_add_account", side_effect=add),
         pytest.raises(ExecutionError, match="stop here"),
     ):
         session_identity.SessionAccount.create("fmssn1", tmp_path / "home", roots)
 
-    assert avoided == [frozenset({61001, 61002})]
+    assert avoided == [(frozenset({61001, 61002}), frozenset({61003}))]
 
 
 def test_the_uid_range_fits_a_user_namespace() -> None:
@@ -333,6 +378,11 @@ def test_getfacl_output_parses_to_uids() -> None:
     )
     assert session_identity.acl.parse_denied_uids(output) == {61001}
     assert session_identity.acl.parse_named_uids(output) == {61001, 1000, 61002}
+
+
+def test_getfacl_output_parses_to_gids() -> None:
+    output = "user::rwx\ngroup::r-x\ngroup:61003:r-x\ndefault:group:100:rwx\n"
+    assert session_identity.acl.parse_named_gids(output) == {61003, 100}
 
 
 def test_every_process_of_the_uid_is_signalled_from_a_helper_that_drops_to_it() -> None:

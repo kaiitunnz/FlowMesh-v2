@@ -636,3 +636,50 @@ def _ipc_objects_of(uid: int) -> list[str]:
             if uid in {int(fields[column]) for column in columns}:
                 found.append(f"{table} {fields[1]}")
     return found
+
+
+def _useradd_default_gid() -> int:
+    defaults = _run(["useradd", "-D"]).stdout
+    return int(
+        next(line for line in defaults.splitlines() if line.startswith("GROUP="))[6:]
+    )
+
+
+def test_a_session_cannot_swap_a_directory_above_worker_state(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    base = Path(tempfile.mkdtemp(dir="/var/lib"))
+    base.chmod(0o755)
+    # Writable by the group useradd hands an account by default, as on a lab host.
+    lab = base / "lab"
+    lab.mkdir()
+    os.chown(lab, 0, _useradd_default_gid())
+    lab.chmod(0o2775)
+    (lab / "cache").mkdir(mode=0o755)
+    # Open to every account two levels above the state it holds.
+    (base / "open" / "sub" / "results").mkdir(parents=True)
+    (base / "open").chmod(0o777)
+    config = dataclasses.replace(
+        worker,
+        state_dirs=(
+            *worker.state_dirs,
+            lab / "cache",
+            base / "open" / "sub" / "results",
+        ),
+    )
+    backend = ProcessSessionBackend(config)
+    session = backend.start_session(_request(tmp_path, client_key))
+    try:
+        port = session.wait_ready(30)
+        assert port is not None
+        groups = _ssh(session, client_key, port, "id -G").stdout.split()
+        assert groups == [str(session.account.gid)], groups
+        for swapped in (lab / "cache", base / "open" / "sub"):
+            moved = _ssh(session, client_key, port, f"mv {swapped} {swapped}.mine")
+            assert moved.returncode != 0, swapped
+            assert swapped.is_dir() and not swapped.with_suffix(".mine").exists()
+    finally:
+        session.stop(1)
+        session.cleanup()
+        shutil.rmtree(base, ignore_errors=True)
+    assert _run(["getent", "group", session.account.name]).returncode != 0

@@ -7,6 +7,7 @@ worker's state roots keeps it out of the worker's files, which are shared with o
 uids by mode and so readable to any account by default.
 """
 
+import grp
 import logging
 import os
 import pwd
@@ -113,15 +114,17 @@ class SessionAccount:
         """Create the account and deny it ``denied_roots``, or leave nothing behind.
 
         It gets a uid no entry on those roots names, so its deny and revoke never
-        replace or remove an entry someone else set.
+        replace or remove an entry someone else set, and a group of its own that no
+        entry on them names, so no group grants it anything.
         """
         roots = list(denied_roots)
         _ensure_privsep_dir()
-        useradd = _require_binary("useradd")
-        taken: set[int] = set()
+        taken_uids: set[int] = set()
+        taken_gids: set[int] = set()
         for root in roots:
-            taken |= acl.named_uids(root)
-        _add_account(useradd, name, home, frozenset(taken))
+            taken_uids |= acl.named_uids(root)
+            taken_gids |= acl.named_gids(root)
+        _add_account(name, home, frozenset(taken_uids), frozenset(taken_gids))
         try:
             entry = pwd.getpwnam(name)
         except KeyError as exc:
@@ -214,6 +217,11 @@ def reap_stale_accounts() -> bool:
             logger.info("Reaped stale SSH session account %s", name)
         else:
             clean = False
+    for group in grp.getgrall():
+        if group.gr_name.startswith(ACCOUNT_PREFIX) and not _account_exists(
+            group.gr_name
+        ):
+            _delete_group(group.gr_name)
     _revoke_orphaned_denies()
     return clean
 
@@ -366,6 +374,7 @@ def kill_processes(uid: int) -> bool:
 
 
 def delete_account(name: str) -> bool:
+    """Delete account ``name`` and its group; return whether both are gone."""
     userdel = shutil.which("userdel")
     if userdel is None:
         logger.warning("userdel is missing; leaving account %s behind", name)
@@ -375,7 +384,7 @@ def delete_account(name: str) -> bool:
     except ExecutionError:
         logger.warning("Failed to delete SSH session account %s", name)
         return False
-    return True
+    return _delete_group(name)
 
 
 def exec_as(uid: int, gid: int, argv: list[str]) -> list[str]:
@@ -402,7 +411,8 @@ def exec_as(uid: int, gid: int, argv: list[str]) -> list[str]:
 def process_identity_available() -> bool:
     """Return whether this worker can create a session account."""
     return os.getuid() == 0 and all(
-        shutil.which(binary) for binary in ("useradd", "usermod", "userdel")
+        shutil.which(binary)
+        for binary in ("useradd", "usermod", "userdel", "groupadd", "groupdel")
     )
 
 
@@ -485,14 +495,33 @@ def _stderr_of(result: "subprocess.CompletedProcess[bytes]") -> str:
 
 
 def _add_account(
-    useradd: str, name: str, home: Path, avoid_uids: frozenset[int]
+    name: str, home: Path, avoid_uids: frozenset[int], avoid_gids: frozenset[int]
 ) -> None:
-    """Create ``name`` under a uid drawn at random from the session range that no
-    account, live process or ``avoid_uids`` holds."""
+    """Create ``name`` and a group of the same name, both under an id drawn at
+    random from the session range that no account, group, live process or
+    ``avoid_uids`` and ``avoid_gids`` holds."""
+    groupadd = _require_binary("groupadd")
+    useradd = _require_binary("useradd")
     detail = ""
     for _ in range(_UID_ATTEMPTS):
         uid = SESSION_UID_MIN + secrets.randbelow(SESSION_UID_MAX - SESSION_UID_MIN + 1)
-        if uid in avoid_uids or _uid_exists(uid) or _processes_of(uid):
+        if (
+            uid in avoid_uids
+            or uid in avoid_gids
+            or _uid_exists(uid)
+            or _gid_exists(uid)
+            or _processes_of(uid)
+        ):
+            continue
+        try:
+            _run(
+                [groupadd, "--gid", str(uid), name],
+                f"create SSH session group {name}",
+            )
+        except ExecutionError as exc:
+            detail = str(exc)
+            if _group_exists(name):
+                raise
             continue
         try:
             _run(
@@ -500,6 +529,8 @@ def _add_account(
                     useradd,
                     "--no-create-home",
                     "--no-user-group",
+                    "--gid",
+                    str(uid),
                     "--uid",
                     str(uid),
                     "--home-dir",
@@ -515,9 +546,25 @@ def _add_account(
             detail = str(exc)
             if _account_exists(name):
                 raise
+            _delete_group(name)
     raise ExecutionError(
         f"Could not find a free uid for SSH session account {name}. {detail}".strip()
     )
+
+
+def _delete_group(name: str) -> bool:
+    """Delete group ``name`` if it exists; return whether it is gone."""
+    if not _group_exists(name):
+        return True
+    if (groupdel := shutil.which("groupdel")) is None:
+        logger.warning("groupdel is missing; leaving group %s behind", name)
+        return False
+    try:
+        _run([groupdel, name], f"delete SSH session group {name}")
+    except ExecutionError:
+        logger.warning("Failed to delete SSH session group %s", name)
+        return False
+    return True
 
 
 def _revoke(uid: int, path: Path) -> None:
@@ -548,6 +595,22 @@ def _revoke_orphaned_denies() -> None:
 def _uid_exists(uid: int) -> bool:
     try:
         pwd.getpwuid(uid)
+    except KeyError:
+        return False
+    return True
+
+
+def _gid_exists(gid: int) -> bool:
+    try:
+        grp.getgrgid(gid)
+    except KeyError:
+        return False
+    return True
+
+
+def _group_exists(name: str) -> bool:
+    try:
+        grp.getgrnam(name)
     except KeyError:
         return False
     return True
