@@ -2,8 +2,10 @@
 removes. Nothing here creates an account or signals a real process."""
 
 import ctypes
+import errno
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -142,6 +144,70 @@ def test_a_new_account_avoids_every_id_a_state_root_names(tmp_path: Path) -> Non
         session_identity.SessionAccount.create("fmssn1", tmp_path / "home", roots)
 
     assert avoided == [(frozenset({61001, 61002}), frozenset({61003}))]
+
+
+def _create_concurrently(tmp_path: Path) -> list[int]:
+    """Create two accounts at once, as two workers in separate containers sharing
+    the roots would: each sees only the other's ACL entries, never its account."""
+    roots = [tmp_path / "results", tmp_path / "content"]
+    for root in roots:
+        root.mkdir()
+    entries: dict[Path, set[int]] = {root: set() for root in roots}
+    accounts: dict[str, int] = {}
+    barrier = threading.Barrier(2)
+
+    def named(root: Path) -> set[int]:
+        found = set(entries[root])
+        time.sleep(0.1)
+        return found
+
+    def add(name: str, home: Path, uids: frozenset[int], gids: frozenset[int]) -> None:
+        accounts[name] = min(set(range(61_000, 61_010)) - uids)
+
+    def deny(uid: int, root: Path) -> None:
+        entries[root].add(uid)
+
+    def create(name: str) -> None:
+        barrier.wait()
+        session_identity.SessionAccount.create(name, tmp_path / name, roots)
+
+    with (
+        patch.object(session_identity, "_ensure_privsep_dir"),
+        patch.object(session_identity, "_unlock"),
+        patch.object(session_identity.os, "lchown"),
+        patch.object(session_identity.acl, "named_uids", side_effect=named),
+        patch.object(session_identity.acl, "named_gids", return_value=set()),
+        patch.object(session_identity.acl, "record"),
+        patch.object(session_identity.acl, "deny", side_effect=deny),
+        patch.object(session_identity, "_add_account", side_effect=add),
+        patch.object(
+            session_identity.pwd,
+            "getpwnam",
+            side_effect=lambda name: MagicMock(
+                pw_uid=accounts[name], pw_gid=accounts[name]
+            ),
+        ),
+    ):
+        threads = [
+            threading.Thread(target=create, args=(name,))
+            for name in ("fmssna", "fmssnb")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    return sorted(accounts.values())
+
+
+def test_two_workers_sharing_a_root_never_draw_the_same_uid(tmp_path: Path) -> None:
+    assert _create_concurrently(tmp_path) == [61_000, 61_001]
+
+
+def test_a_root_that_refuses_a_lock_is_drawn_on_without_one(tmp_path: Path) -> None:
+    with patch.object(
+        session_identity.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "no locks")
+    ):
+        assert len(_create_concurrently(tmp_path)) == 2
 
 
 def test_the_uid_range_fits_a_user_namespace() -> None:

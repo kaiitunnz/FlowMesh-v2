@@ -7,6 +7,7 @@ worker's state roots keeps it out of the worker's files, which are shared with o
 uids by mode and so readable to any account by default.
 """
 
+import fcntl
 import grp
 import logging
 import os
@@ -18,7 +19,9 @@ import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable
+import time
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import psutil
@@ -85,6 +88,9 @@ _REMOVE_IPC_SCRIPT = (
 # argv[3:] is the command to exec as the uid.
 _EXEC_SCRIPT = "os.execv(sys.argv[3], sys.argv[3:])\n"
 _HELPER_TIMEOUT_SEC = 10.0
+_LOCK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_ROOT_LOCK_TIMEOUT_SEC = 30.0
+_ROOT_LOCK_POLL_SEC = 0.05
 _COMMAND_TIMEOUT_SEC = 30.0
 
 
@@ -119,28 +125,33 @@ class SessionAccount:
         """
         roots = list(denied_roots)
         _ensure_privsep_dir()
-        taken_uids: set[int] = set()
-        taken_gids: set[int] = set()
-        for root in roots:
-            taken_uids |= acl.named_uids(root)
-            taken_gids |= acl.named_gids(root)
-        _add_account(name, home, frozenset(taken_uids), frozenset(taken_gids))
-        try:
-            entry = pwd.getpwnam(name)
-        except KeyError as exc:
-            raise ExecutionError(f"SSH session account {name} was not created") from exc
-        account = cls(name, entry.pw_uid, entry.pw_gid, home)
-        try:
-            # A fresh account's shadow entry is "!", which sshd reads as locked and
-            # refuses even for public-key auth once UsePAM is off. An unguessable
-            # hash leaves it unlocked without granting a usable password.
-            _unlock(name)
-            account.deny(roots)
-            home.mkdir(mode=0o700)
-            os.lchown(home, account.uid, account.gid)
-        except BaseException:
-            account.release()
-            raise
+        # Workers in other containers draw from the same range and see only each
+        # other's entries, so the draw and the denial it rests on happen at once.
+        with _locked(roots):
+            taken_uids: set[int] = set()
+            taken_gids: set[int] = set()
+            for root in roots:
+                taken_uids |= acl.named_uids(root)
+                taken_gids |= acl.named_gids(root)
+            _add_account(name, home, frozenset(taken_uids), frozenset(taken_gids))
+            try:
+                entry = pwd.getpwnam(name)
+            except KeyError as exc:
+                raise ExecutionError(
+                    f"SSH session account {name} was not created"
+                ) from exc
+            account = cls(name, entry.pw_uid, entry.pw_gid, home)
+            try:
+                # A fresh account's shadow entry is "!", which sshd reads as locked
+                # and refuses even for public-key auth once UsePAM is off. An
+                # unguessable hash leaves it unlocked without granting a password.
+                _unlock(name)
+                account.deny(roots)
+                home.mkdir(mode=0o700)
+                os.lchown(home, account.uid, account.gid)
+            except BaseException:
+                account.release()
+                raise
         return account
 
     def deny(self, roots: Iterable[Path]) -> None:
@@ -174,6 +185,55 @@ class SessionAccount:
                 f"SSH session account {self.name} could not be removed; it stays "
                 "locked and denied this worker's state until a reap removes it"
             )
+
+
+@contextmanager
+def _locked(roots: Iterable[Path]) -> Iterator[None]:
+    """Hold an exclusive ``flock`` on each of ``roots``.
+
+    They are taken in inode order, which every container agrees on whatever path it
+    mounts a root at. A root whose filesystem refuses a directory lock, as NFS does,
+    goes unlocked.
+    """
+    fds: list[tuple[tuple[int, int], int, Path]] = []
+    try:
+        for root in roots:
+            try:
+                fd = os.open(root, _LOCK_DIR_FLAGS)
+            except OSError:
+                logger.debug("Cannot open %s to lock it", root, exc_info=True)
+                continue
+            info = os.fstat(fd)
+            fds.append(((info.st_dev, info.st_ino), fd, root))
+        fds.sort(key=lambda held: held[0])
+        seen: set[tuple[int, int]] = set()
+        for key, fd, root in fds:
+            if key not in seen:
+                seen.add(key)
+                _flock(fd, root)
+        yield
+    finally:
+        for _, fd, _ in fds:
+            os.close(fd)
+
+
+def _flock(fd: int, root: Path) -> None:
+    deadline = time.monotonic() + _ROOT_LOCK_TIMEOUT_SEC
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise ExecutionError(
+                    f"Timed out waiting for another worker to finish a session "
+                    f"account on {root}",
+                    retryable=True,
+                ) from None
+            time.sleep(_ROOT_LOCK_POLL_SEC)
+        except OSError:
+            logger.debug("Cannot lock %s; drawing without it", root, exc_info=True)
+            return
 
 
 def retire_account(name: str, uid: int) -> bool:
