@@ -496,7 +496,7 @@ class ProcessSession(SSHSession):
     def login_user(self) -> str:
         return self.account.name
 
-    def wait_ready(self, timeout_sec: float = 30.0) -> int | None:
+    def wait_ready(self, timeout_sec: float) -> int | None:
         signals = self._signals
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
@@ -876,7 +876,7 @@ def _render_sshd_config(
     host_key: Path,
     authorized_keys: Path,
     login_user: str,
-    exported_env: list[str] | None = None,
+    exported_env: list[str],
 ) -> str:
     permit_env = ",".join(exported_env) if exported_env else "no"
     return "\n".join(

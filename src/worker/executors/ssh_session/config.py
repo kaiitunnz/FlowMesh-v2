@@ -12,11 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from shared.tasks.components.resources import GPURequirements
-from shared.tasks.specs.ssh import (
-    SSHInputSpec,
-    SSHOutputSpec,
-    SSHSpecStrict,
-)
+from shared.tasks.specs.ssh import SSHInputSpec, SSHOutputSpec, SSHSpecStrict
 from shared.tasks.worker_message import WorkerHardware
 from shared.utils import parse_float_env, parse_mem_to_bytes
 from shared.utils.hardware import (
