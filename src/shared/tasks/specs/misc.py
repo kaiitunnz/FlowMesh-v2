@@ -192,6 +192,10 @@ class AgentHarnessSpec(BaseModel):
 
 
 class ApiSpecStrict(TaskSpecStrictBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecStrictBase.credential_fields,
+        "api",
+    )
     taskType: Literal[TaskType.API]
     api: dict[str, Any] | None = None
 
@@ -206,6 +210,10 @@ class ApiSpecTemplate(TaskSpecTemplateBase):
 
 
 class EchoSpecStrict(TaskSpecStrictBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecStrictBase.credential_fields,
+        "data",
+    )
     taskType: Literal[TaskType.ECHO]
     data: dict[str, Any] | None = None
 
@@ -257,6 +265,11 @@ class AgentSandboxSpec(BaseModel):
 
 
 class AgentSpecStrict(TaskSpecStrictBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecStrictBase.credential_fields,
+        "data",
+        "harness",
+    )
     taskType: Literal[TaskType.AGENT]
 
     task: str | None = None
@@ -282,6 +295,10 @@ class AgentSpecTemplate(TaskSpecTemplateBase):
 
 
 class DataProfilingSpecStrict(TaskSpecStrictBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecStrictBase.credential_fields,
+        "data",
+    )
     taskType: Literal[TaskType.DATA_PROFILING]
     data: dict[str, Any] | None = None
 
@@ -296,6 +313,10 @@ class DataProfilingSpecTemplate(TaskSpecTemplateBase):
 
 
 class DataRetrievalSpecStrict(TaskSpecStrictBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecStrictBase.credential_fields,
+        "data",
+    )
     taskType: Literal[TaskType.DATA_RETRIEVAL]
     data: dict[str, Any] | None = None
 
@@ -310,6 +331,10 @@ class DataRetrievalSpecTemplate(TaskSpecTemplateBase):
 
 
 class EmbeddingSpecStrict(ModelSpecStrict):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *ModelSpecStrict.credential_fields,
+        "data",
+    )
     taskType: Literal[TaskType.EMBEDDING]
     data: dict[str, Any] | None = None
     service: ServiceBindingSpec | None = None

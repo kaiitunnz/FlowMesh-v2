@@ -5,6 +5,13 @@ from .common import TaskSpecStrictBase, TaskSpecTemplateBase
 
 
 class RagSpecStrict(TaskSpecStrictBase):
+    credential_fields: ClassVar[tuple[str, ...]] = (
+        *TaskSpecStrictBase.credential_fields,
+        "qdrant",
+        "embedding",
+        "search",
+        "data",
+    )
     taskType: Literal[TaskType.RAG]
 
     qdrant: dict[str, Any] | None = None
