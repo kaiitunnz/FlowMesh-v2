@@ -44,9 +44,11 @@ POLL_INTERVAL_SEC = 5
 DEFAULT_INPUTS_ROOT = "/mnt/flowmesh/inputs"
 DEFAULT_OUTPUT_PATH = "/mnt/flowmesh/output"
 SAFE_MOUNT_ROOT = PurePosixPath("/mnt/flowmesh")
-MAX_MOUNT_PATH_DEPTH = 32
-MAX_MOUNT_PATH_LENGTH = 1024
 FINISH_SENTINEL_PATH = PurePosixPath("/", "tmp", ".flowmesh_finish").as_posix()
+# Far below PATH_MAX: the mount root is walked and emptied by path, so a deeper
+# mount path would leave it impossible to clear.
+MAX_MOUNT_PATH_CHARS = 1024
+MAX_MOUNT_PATH_COMPONENTS = 32
 
 
 @dataclass(slots=True)
@@ -346,18 +348,18 @@ def normalize_mount_path(path: str, field_name: str) -> str:
     raw = path.strip()
     if not raw.startswith("/"):
         raise ExecutionError(f"{field_name} must be an absolute path")
-    if len(raw) > MAX_MOUNT_PATH_LENGTH:
-        raise ExecutionError(
-            f"{field_name} must be at most {MAX_MOUNT_PATH_LENGTH} characters"
-        )
     parts = [part for part in raw.split("/") if part not in ("", ".")]
     if ".." in parts:
         raise ExecutionError(f"{field_name} must not contain '..'")
-    if len(parts) > MAX_MOUNT_PATH_DEPTH:
+    if len(parts) > MAX_MOUNT_PATH_COMPONENTS:
         raise ExecutionError(
-            f"{field_name} must be at most {MAX_MOUNT_PATH_DEPTH} components deep"
+            f"{field_name} must have at most {MAX_MOUNT_PATH_COMPONENTS} components"
         )
     normalized = PurePosixPath("/", *parts)
+    if len(normalized.as_posix()) > MAX_MOUNT_PATH_CHARS:
+        raise ExecutionError(
+            f"{field_name} must be at most {MAX_MOUNT_PATH_CHARS} characters long"
+        )
     if normalized == PurePosixPath("/"):
         raise ExecutionError(f"{field_name} cannot be '/'")
     if normalized != SAFE_MOUNT_ROOT and SAFE_MOUNT_ROOT not in normalized.parents:

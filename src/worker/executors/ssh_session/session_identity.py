@@ -41,34 +41,48 @@ _WORLD_WRITABLE_DIRS = (
     Path("/", "dev", "shm"),
     Path("/", "dev", "mqueue"),
 )
-# Each table's id column, and the columns naming its owner and creator.
-_SYSV_IPC_TABLES = {
-    "shm": ("-m", 1, (7, 9)),
-    "msg": ("-q", 1, (7, 9)),
-    "sem": ("-s", 1, (4, 6)),
-}
-_SYSV_IPC_ROOT = Path("/proc/sysvipc")
+_SYSV_IPC_DIR = Path("/", "proc", "sysvipc")
+# Each /proc/sysvipc table and the column holding its object ids.
+_SYSV_IPC_ID_COLUMNS = {"shm": "shmid", "msg": "msqid", "sem": "semid"}
 _NOGROUP_GID = 65534
 _KILL_GRACE_SEC = 5.0
 _KILL_ROUNDS = 10
 _KILL_ROUND_SEC = 0.5
-_KILL_ALL_SCRIPT = (
-    "import os, signal, sys\n"
-    "os.setgroups([])\n"
-    "os.setgid(int(sys.argv[2]))\n"
-    "os.setuid(int(sys.argv[1]))\n"
+# Prologue of every helper run as a session uid: argv is (uid, gid, *args).
+_AS_UID_PROLOGUE = (
+    "import os, sys\n"
+    "uid = int(sys.argv[1])\n"
+    "if os.getuid() != uid:\n"
+    "    os.setgroups([])\n"
+    "    os.setgid(int(sys.argv[2]))\n"
+    "    os.setuid(uid)\n"
+)
+_KILL_ALL_SCRIPT = _AS_UID_PROLOGUE + (
+    "import signal\n"
     "try:\n"
     "    os.kill(-1, signal.SIGKILL)\n"
     "except ProcessLookupError:\n"
     "    pass\n"
 )
-_EXEC_AS_SCRIPT = (
-    "import os, sys\n"
-    "os.setgroups([])\n"
-    "os.setgid(int(sys.argv[2]))\n"
-    "os.setuid(int(sys.argv[1]))\n"
-    "os.execv(sys.argv[3], sys.argv[3:])\n"
+# argv[3:] are "<kind>:<id>" pairs; IPC_RMID is 0.
+_REMOVE_IPC_SCRIPT = _AS_UID_PROLOGUE + (
+    "import ctypes\n"
+    "libc = ctypes.CDLL(None, use_errno=True)\n"
+    "failed = 0\n"
+    "for spec in sys.argv[3:]:\n"
+    "    kind, ipc_id = spec.split(':')\n"
+    "    if kind == 'shm':\n"
+    "        rc = libc.shmctl(int(ipc_id), 0, None)\n"
+    "    elif kind == 'msg':\n"
+    "        rc = libc.msgctl(int(ipc_id), 0, None)\n"
+    "    else:\n"
+    "        rc = libc.semctl(int(ipc_id), 0, 0)\n"
+    "    if rc != 0:\n"
+    "        print(spec, os.strerror(ctypes.get_errno()), file=sys.stderr)\n"
+    "        failed = 1\n"
+    "sys.exit(failed)\n"
 )
+_EXEC_AS_SCRIPT = _AS_UID_PROLOGUE + "os.execv(sys.argv[3], sys.argv[3:])\n"
 _HELPER_TIMEOUT_SEC = 10.0
 _COMMAND_TIMEOUT_SEC = 30.0
 
@@ -186,7 +200,7 @@ def retire_account(name: str, uid: int) -> bool:
             name,
         )
         return False
-    purge_uid_files(uid)
+    purge_uid(uid)
     for recorded_uid, path in acl.recorded():
         if recorded_uid == uid:
             _revoke(uid, Path(path))
@@ -208,14 +222,18 @@ def reap_stale_accounts() -> bool:
     return clean
 
 
-def purge_uid_files(uid: int) -> None:
-    """Delete what ``uid`` left in the shared scratch directories and the SysV IPC
-    objects it owns or created, all of which outlive its processes.
+def purge_uid(uid: int) -> None:
+    """Delete what ``uid`` left behind that outlives its processes.
 
     Session uids are drawn at random and may come round again, so a later session
-    must not inherit what an earlier one owned there.
+    must not inherit what an earlier one owned.
     """
-    _remove_sysv_ipc_of(uid)
+    purge_uid_files(uid)
+    purge_uid_ipc(uid)
+
+
+def purge_uid_files(uid: int) -> None:
+    """Delete what ``uid`` left in the shared scratch directories."""
     for base in (Path(tempfile.gettempdir()), *_WORLD_WRITABLE_DIRS):
         for current, dirs, files in os.walk(base, followlinks=False):
             for name in list(dirs):
@@ -232,38 +250,62 @@ def purge_uid_files(uid: int) -> None:
                     _unlink(path)
 
 
-def _remove_sysv_ipc_of(uid: int) -> None:
+def purge_uid_ipc(uid: int) -> None:
+    """Remove the System V IPC objects ``uid`` owns or created.
+
+    Sessions share the worker's IPC namespace, and these objects persist after
+    their creator exits. Only an owner, a creator or a holder of ``CAP_SYS_ADMIN``
+    may remove one, and a container's root lacks that capability, so the removal
+    runs as ``uid``.
+    """
     if uid == 0:
         return
-    ipcrm = shutil.which("ipcrm")
-    for table, (flag, id_column, owner_columns) in _SYSV_IPC_TABLES.items():
+    specs = [
+        f"{kind}:{ipc_id}"
+        for kind, id_column in _SYSV_IPC_ID_COLUMNS.items()
+        for ipc_id in owned_ipc_ids(_read_ipc_table(kind), id_column, uid)
+    ]
+    if not specs:
+        return
+    result = _run_as(uid, _REMOVE_IPC_SCRIPT, specs)
+    if result is None or result.returncode != 0:
+        detail = "" if result is None else _stderr_of(result)
+        logger.warning(
+            "Failed to remove System V IPC objects of uid %d: %s", uid, detail
+        )
+
+
+def owned_ipc_ids(table: str, id_column: str, uid: int) -> list[int]:
+    """Ids in a ``/proc/sysvipc`` table whose owner or creator is ``uid``.
+
+    The creator is matched too because the owner can hand an object to any uid.
+    """
+    lines = table.splitlines()
+    if not lines:
+        return []
+    header = lines[0].split()
+    try:
+        id_at = header.index(id_column)
+        uid_at = header.index("uid")
+        cuid_at = header.index("cuid")
+    except ValueError:
+        return []
+    ids: list[int] = []
+    for line in lines[1:]:
+        fields = line.split()
         try:
-            lines = (_SYSV_IPC_ROOT / table).read_text(encoding="utf-8").splitlines()
-        except OSError:
+            if uid in (int(fields[uid_at]), int(fields[cuid_at])):
+                ids.append(int(fields[id_at]))
+        except (IndexError, ValueError):
             continue
-        for line in lines[1:]:
-            fields = line.split()
-            try:
-                owners = {int(fields[column]) for column in owner_columns}
-                ipc_id = fields[id_column]
-            except (IndexError, ValueError):
-                continue
-            if uid not in owners:
-                continue
-            if ipcrm is None:
-                logger.warning(
-                    "ipcrm is missing; leaving %s %s of uid %d", table, ipc_id, uid
-                )
-                continue
-            # Its owner or creator may remove it; a root lacking CAP_IPC_OWNER, as
-            # in a container, may not.
-            try:
-                _run(
-                    exec_as(uid, _NOGROUP_GID, [ipcrm, flag, ipc_id]),
-                    f"remove {table} {ipc_id} of uid {uid}",
-                )
-            except ExecutionError as exc:
-                logger.warning("%s", exc)
+    return ids
+
+
+def _read_ipc_table(kind: str) -> str:
+    try:
+        return (_SYSV_IPC_DIR / kind).read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def remove_tree(path: Path) -> None:
@@ -362,16 +404,25 @@ def process_identity_available() -> bool:
 
 
 def _processes_of(uid: int) -> list[psutil.Process]:
-    """The live processes of ``uid``. A zombie runs nothing and holds no file, and
-    stays until its parent reaps it, which a worker without an init may never do."""
-    return [p for p in psutil.process_iter(["uids"]) if _live_and_owned_by(p, uid)]
+    return [p for p in psutil.process_iter(["uids", "status"]) if _owned_by(p, uid)]
 
 
-def _live_and_owned_by(proc: psutil.Process, uid: int) -> bool:
+def _owned_by(proc: psutil.Process, uid: int) -> bool:
+    return _live_uid(proc) == uid
+
+
+def _live_uid(proc: psutil.Process) -> int | None:
+    """The real uid of ``proc``, or ``None`` once it has exited.
+
+    A zombie is only an exit status waiting for its parent to reap it, and a PID 1
+    that never reaps would otherwise keep a session account alive forever.
+    """
     try:
-        return proc.uids().real == uid and proc.status() != psutil.STATUS_ZOMBIE
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return None
+        return int(proc.uids().real)
     except (psutil.Error, AttributeError):
-        return False
+        return None
 
 
 def _kill_all_as(uid: int) -> None:
@@ -383,16 +434,36 @@ def _kill_all_as(uid: int) -> None:
     """
     if os.geteuid() != 0 or uid in (0, os.getuid()):
         return
+    result = _run_as(uid, _KILL_ALL_SCRIPT, [])
+    if result is not None and result.returncode != 0:
+        logger.warning(
+            "Signalling every process of uid %d exited %d: %s",
+            uid,
+            result.returncode,
+            _stderr_of(result),
+        )
+
+
+def _run_as(
+    uid: int, script: str, args: list[str]
+) -> "subprocess.CompletedProcess[bytes] | None":
+    """Run ``script`` in a helper interpreter that drops to ``uid`` first.
+
+    The helper drops privileges itself rather than through ``subprocess``'s
+    ``user=``, which forces a plain ``fork()`` whose atfork handlers crash the
+    child of a process running gRPC threads.
+    """
     try:
-        result = subprocess.run(  # nosec B603 - argv list, no shell=True, the worker's own interpreter
+        return subprocess.run(  # nosec B603 - argv list, no shell=True, the worker's own interpreter
             [
                 sys.executable,
                 "-I",
                 "-S",
                 "-c",
-                _KILL_ALL_SCRIPT,
+                script,
                 str(uid),
                 str(_NOGROUP_GID),
+                *args,
             ],
             env={},
             cwd="/",
@@ -402,15 +473,12 @@ def _kill_all_as(uid: int) -> None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        logger.warning("Failed to signal every process of uid %d", uid, exc_info=True)
-        return
-    if result.returncode != 0:
-        logger.warning(
-            "Signalling every process of uid %d exited %d: %s",
-            uid,
-            result.returncode,
-            result.stderr.decode("utf-8", errors="replace").strip(),
-        )
+        logger.warning("Failed to run a helper as uid %d", uid, exc_info=True)
+        return None
+
+
+def _stderr_of(result: "subprocess.CompletedProcess[bytes]") -> str:
+    return result.stderr.decode("utf-8", errors="replace").strip()
 
 
 def _add_account(

@@ -1,6 +1,7 @@
 """A session account: its name, its uid, its password hash, and what retiring it
 removes. Nothing here creates an account or signals a real process."""
 
+import ctypes
 import os
 import subprocess
 import time
@@ -211,7 +212,7 @@ def _retire(
         patch.object(session_identity, "kill_processes", return_value=killed),
         patch.object(session_identity, "delete_account", return_value=deleted),
         patch.object(session_identity, "lock_account") as lock,
-        patch.object(session_identity, "purge_uid_files") as purge,
+        patch.object(session_identity, "purge_uid") as purge,
         patch.object(session_identity.acl, "recorded", return_value=recorded),
         patch.object(session_identity, "_revoke") as revoke,
     ):
@@ -350,7 +351,7 @@ def test_every_process_of_the_uid_is_signalled_from_a_helper_that_drops_to_it() 
 
     [(argv, kwargs)] = calls
     script, uid, gid = argv[-3:]
-    assert "os.setuid(int(sys.argv[1]))" in script
+    assert "os.setuid(uid)" in script
     assert "os.kill(-1, signal.SIGKILL)" in script
     assert (uid, gid) == ("61001", "65534")
     assert not {"user", "group", "extra_groups", "preexec_fn"} & set(kwargs)
@@ -381,34 +382,38 @@ def test_a_helper_drops_to_the_account_itself_and_never_runs_as_root() -> None:
         session_identity.exec_as(0, 0, ["/usr/bin/tar"])
 
 
-def test_the_sysv_ipc_objects_an_account_owns_or_created_are_removed(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "shm").write_text(
-        "key shmid perms size cpid lpid nattch uid gid cuid cgid\n"
-        "1 10 600 56 1 1 0 61001 100 0 0\n"
-        "2 11 600 56 1 1 0 0 0 61001 100\n"
-        "3 12 600 56 1 1 0 1000 100 1000 100\n"
-    )
-    (tmp_path / "msg").write_text(
-        "key msqid perms cbytes qnum lspid lrpid uid gid cuid cgid\n"
-        "4 20 600 0 0 0 0 61001 100 61001 100\n"
-    )
-    (tmp_path / "sem").write_text(
-        "key semid perms nsems uid gid cuid cgid\n5 30 600 1 61001 100 61001 100\n"
-    )
-    removed: list[list[str]] = []
+_SHM_TABLE = (
+    "   key  shmid perms  size cpid lpid nattch   uid gid  cuid cgid\n"
+    "     0     11   600  4096  100  100      0 61001 100 61001  100\n"
+    "     0     12   600  4096  100  100      0  1000 100 61001  100\n"
+    "     0     13   666  4096  100  100      0  1000 100  1000  100\n"
+)
 
-    def run(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
-        assert argv[-5:-2] == ["61001", "65534", "/usr/bin/ipcrm"]
-        removed.append(argv[-2:])
-        return _run_ok(argv, what)
 
-    with (
-        patch.object(session_identity, "_SYSV_IPC_ROOT", tmp_path),
-        patch.object(session_identity.shutil, "which", return_value="/usr/bin/ipcrm"),
-        patch.object(session_identity, "_run", side_effect=run),
-    ):
-        session_identity._remove_sysv_ipc_of(61001)
+def test_the_ipc_objects_an_account_owns_or_created_are_selected() -> None:
+    assert session_identity.owned_ipc_ids(_SHM_TABLE, "shmid", 61001) == [11, 12]
+    assert session_identity.owned_ipc_ids("", "shmid", 61001) == []
 
-    assert removed == [["-m", "10"], ["-m", "11"], ["-q", "20"], ["-s", "30"]]
+
+def test_a_segment_the_uid_left_is_removed() -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    ipc_private, ipc_creat = 0, 0o1000
+    shmid = libc.shmget(ipc_private, 4096, ipc_creat | 0o600)
+    if shmid < 0:
+        pytest.skip("System V shared memory is unavailable")
+    try:
+        real = Path("/proc/sysvipc/shm").read_text(encoding="utf-8").splitlines()
+        ours = [real[0]] + [line for line in real[1:] if line.split()[1] == str(shmid)]
+        assert len(ours) == 2
+        # Only this test's segment is visible, so no other object of this uid is
+        # touched.
+        with patch.object(
+            session_identity,
+            "_read_ipc_table",
+            side_effect=lambda kind: "\n".join(ours) if kind == "shm" else "",
+        ):
+            session_identity.purge_uid_ipc(os.getuid())
+        listed = Path("/proc/sysvipc/shm").read_text(encoding="utf-8")
+        assert str(shmid) not in [line.split()[1] for line in listed.splitlines()[1:]]
+    finally:
+        libc.shmctl(shmid, 0, None)
