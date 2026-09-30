@@ -718,6 +718,9 @@ class Dispatcher:
             merged_children=rendered_children,
             upstream_results=upstream_results,
             input_element=self._runtime.input_element(task_id),
+            credential_pointers=self._runtime.credential_pointers(
+                [task_id, *(child.task_id for child in rendered_children or ())]
+            ),
             agent_episode=agent_episode,
             service_episode=self._runtime.service_episode_dispatch(task_id),
             declared_contract=self._runtime.declared_contract(
@@ -1248,15 +1251,6 @@ class Dispatcher:
                     updates[key] = transformed
             return value.model_copy(update=updates) if updates else value
         return value
-
-    def _contains_placeholder(self, value: Any) -> bool:
-        if isinstance(value, str):
-            return bool(PLACEHOLDER_PATTERN.search(value))
-        if isinstance(value, dict):
-            return any(self._contains_placeholder(v) for v in value.values())
-        if isinstance(value, list):
-            return any(self._contains_placeholder(item) for item in value)
-        return False
 
     def _build_stage_context(self, record: TaskRecord) -> dict[str, TaskRecord]:
         """Collect upstream dependency records keyed by stage identity."""

@@ -165,6 +165,8 @@ def test_a_dispatch_carries_the_task_its_own_credentials(api_version):
     # The record the dispatch rendered from keeps only the refs.
     record = runtime.get_record(ids["call"])
     assert record is not None and _no_secret(record.model_dump_json())
+    assert record.credential_refs
+    assert message.credential_pointers == {ids["call"]: sorted(record.credential_refs)}
 
 
 @pytest.mark.parametrize("api_version", ["flowmesh/v1", "flowmesh/v2"])

@@ -274,9 +274,11 @@ class TaskLogEmitter(logging.Handler):
         log_paths: dict[str, Path] | None = None,
         flush_interval_sec: float = 5.0,
         flush_max_entries: int = 100,
+        scrub: Callable[[str], str] | None = None,
     ) -> None:
         super().__init__(level=logging.NOTSET)
         self._logger = logger
+        self._scrub = scrub
         self._task_id = task_id
         self._workflow_id = workflow_id
         self._owner_id = owner_id
@@ -315,6 +317,8 @@ class TaskLogEmitter(logging.Handler):
                 message = f"{message}\n{exc_text}" if message else exc_text
         if not message:
             return
+        if self._scrub is not None:
+            message = self._scrub(message)
 
         stream = getattr(record, "flowmesh_stream", None)
         if stream not in ("stdout", "stderr", "system"):

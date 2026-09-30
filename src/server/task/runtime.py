@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import Any, Self, cast
@@ -1113,7 +1113,7 @@ class TaskRuntime:
         recorded, as a submission does; a settled one is masked. Every one gets its
         source redacted again. The vault is written before the records, so a crash in
         between leaves the records to be taken again at the next start. A record that
-        cannot be taken is left as stored, and runs as it did.
+        cannot be taken is left as stored, and runs with its stored credentials.
         """
         refs = CredentialRefs()
         taken: list[PersistedTask] = []
@@ -1651,7 +1651,6 @@ class TaskRuntime:
     def _reclaim_vault_if_settled_locked(self, workflow_id: str) -> None:
         """Purge a workflow's vaulted credentials once its last task has settled.
 
-        The reclaim on the terminal transition, for a workflow that completes or fails.
         Called after an event's advance materializes any new children, so a producer
         that fans out is not reclaimed while its children are still pending.
         """
@@ -3121,6 +3120,16 @@ class TaskRuntime:
             else:
                 spec = engine.episode_spec(task_id)
         return True if spec is None else self._feasibility_check(spec)
+
+    def credential_pointers(self, task_ids: Iterable[str]) -> dict[str, list[str]]:
+        """Where each task's restored credentials sit in its dispatched spec."""
+        with self._lock:
+            return {
+                task_id: sorted(refs)
+                for task_id in task_ids
+                if (record := self._tasks.get(task_id)) is not None
+                and (refs := record.credential_refs)
+            }
 
     def credentialed_task(
         self, record: TaskRecord
