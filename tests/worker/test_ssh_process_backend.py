@@ -513,6 +513,7 @@ def test_a_recycled_pid_is_not_taken_for_the_session_sshd(tmp_path: Path) -> Non
 
 def test_constructing_the_backend_reaps_nothing(tmp_path: Path) -> None:
     with (
+        patch.object(process_module.os, "getuid", return_value=0),
         patch.object(process_module, "reap_session") as reap,
         patch.object(process_module, "reap_stale_accounts") as reap_accounts,
         patch.object(process_module, "_reset_mount_root") as reset,
