@@ -109,6 +109,8 @@ _LAUNCH_SCRIPT = (
 )
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _BACKEND_LOCK_NAME = "flowmesh-ssh-process.lock"
+# A lookup that follows more links than this loops; the kernel stops at 40.
+_MAX_LOOKUP_STEPS = 4096
 # Paths every session needs; a denied root covering one would break it.
 _SESSION_REQUIRED_PATHS = (
     Path(SAFE_MOUNT_ROOT),
@@ -390,6 +392,13 @@ class ProcessSessionBackend(SSHSessionBackend):
 def ensure_state_roots(config: WorkerConfig) -> list[Path]:
     """Return :func:`denied_roots`, creating each missing one root-owned ``0700`` so
     a session's deny entry lands on it; raise if one cannot be denied safely."""
+    for path in _state_paths(config):
+        if link := _lookup(path).shared_link:
+            raise ExecutionError(
+                f"Refusing the SSH session: worker state {path} is reached through "
+                f"{link}, a link in a shared directory",
+                retryable=True,
+            )
     roots = denied_roots(config)
     for root in roots:
         if problem := _root_problem(root):
@@ -414,13 +423,26 @@ def denied_roots(config: WorkerConfig) -> list[Path]:
     """Return the worker state a session is denied, as the paths ``setfacl`` acts on.
 
     Each path in ``DENIED_CONFIG_FIELDS``, and a filesystem content store's root, is
-    made absolute, with the heartbeat file replaced by its directory, and links an
-    operator configured are resolved. A path in a world-writable directory is left
-    unresolved, so that :func:`_root_problem` refuses a link planted there instead
-    of following it, and one in a world-writable directory without the sticky bit
-    is replaced by that directory.
+    resolved, with the heartbeat file replaced by its directory. Each world-writable
+    directory without the sticky bit that resolving it looks an entry up in is
+    denied too, the highest of those below one another, since a session could swap
+    that entry for one of its own; a path below a denied directory is covered by it.
     """
-    configured: list[Path] = []
+    roots: dict[Path, None] = {}
+    for path in _state_paths(config):
+        open_dirs = [
+            directory for directory in _lookup(path).dirs if _is_open_dir(directory)
+        ]
+        resolved = Path(os.path.realpath(path))
+        for candidate in (*open_dirs, resolved):
+            if not any(other in candidate.parents for other in open_dirs):
+                roots[candidate] = None
+    return list(roots)
+
+
+def _state_paths(config: WorkerConfig) -> list[Path]:
+    """Return the absolute paths of the worker state a session is denied."""
+    paths: list[Path] = []
     for field_name in DENIED_CONFIG_FIELDS:
         value = getattr(config, field_name)
         for path in value if isinstance(value, tuple) else (value,):
@@ -429,30 +451,49 @@ def denied_roots(config: WorkerConfig) -> list[Path]:
                 # Denying only the file would still let a session list its name,
                 # which contains the worker token.
                 path = path.parent
-            configured.append(path)
+            paths.append(path)
     if config.object_store.backend == BACKEND_FILESYSTEM:
-        configured.append(Path(os.path.abspath(config.object_store.filesystem_root)))
-    roots: dict[Path, None] = {}
-    for path in configured:
-        parent = Path(os.path.realpath(path.parent))
-        if _is_shared_dir(parent):
-            path = parent / path.name
-        else:
-            path = Path(os.path.realpath(path))
-        roots[_above_open_dirs(path)] = None
-    return list(roots)
+        paths.append(Path(os.path.abspath(config.object_store.filesystem_root)))
+    return paths
 
 
-def _above_open_dirs(path: Path) -> Path:
-    """Return ``path``, or its highest ancestor any account may rename entries in.
+@dataclass(slots=True)
+class _Lookup:
+    """The resolved directories a path's lookup reads an entry from, and the first
+    link it follows out of a shared directory."""
 
-    A world-writable directory without the sticky bit lets a session swap ``path``
-    for a directory of its own, so the denial goes on that directory, which the
-    session then cannot enter.
-    """
-    while _is_open_dir(parent := path.parent) and parent != path:
-        path = parent
-    return path
+    dirs: list[Path] = field(default_factory=list)
+    shared_link: Path | None = None
+
+
+def _lookup(path: Path) -> _Lookup:
+    """Resolve the absolute ``path`` one component at a time, as the kernel does."""
+    lookup = _Lookup()
+    pending = list(PurePosixPath(path).parts[1:])
+    current = Path("/")
+    for _ in range(_MAX_LOOKUP_STEPS):
+        if not pending:
+            break
+        name = pending.pop(0)
+        if name == "..":
+            current = current.parent
+            continue
+        lookup.dirs.append(current)
+        candidate = current / name
+        try:
+            is_link = stat.S_ISLNK(os.lstat(candidate).st_mode)
+        except OSError:
+            is_link = False
+        if not is_link:
+            current = candidate
+            continue
+        if lookup.shared_link is None and _is_shared_dir(current):
+            lookup.shared_link = candidate
+        target = PurePosixPath(os.readlink(candidate))
+        if target.is_absolute():
+            current = Path("/")
+        pending[:0] = [part for part in target.parts if part not in ("/", ".")]
+    return lookup
 
 
 def _root_problem(root: Path) -> str | None:
@@ -505,11 +546,12 @@ def _acl_ready(config: WorkerConfig) -> bool:
 
 
 def _is_open_dir(path: Path) -> bool:
+    """Whether any account may rename entries in ``path``."""
     try:
-        mode = os.stat(path).st_mode
+        mode = os.lstat(path).st_mode
     except OSError:
         return False
-    return bool(mode & stat.S_IWOTH) and not mode & stat.S_ISVTX
+    return stat.S_ISDIR(mode) and bool(mode & stat.S_IWOTH) and not mode & stat.S_ISVTX
 
 
 def _is_shared_dir(path: Path) -> bool:

@@ -334,37 +334,83 @@ def test_an_operator_link_is_resolved_to_its_target(tmp_path: Path) -> None:
     assert process_module._root_problem(data) is None
 
 
-def test_a_link_in_a_shared_dir_is_refused_not_followed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [0o1777, 0o777])
+def test_a_link_in_a_shared_dir_is_refused_not_followed(
+    tmp_path: Path, mode: int
+) -> None:
     shared = tmp_path / "shared"
     shared.mkdir()
-    shared.chmod(0o1777)
+    shared.chmod(mode)
     victim = tmp_path / "victim"
     victim.mkdir()
     (shared / "cache").symlink_to(victim)
+    config = _state_config(tmp_path, state_dirs=(shared / "cache",))
 
-    roots = process_module.denied_roots(
-        _state_config(tmp_path, state_dirs=(shared / "cache",))
+    with pytest.raises(ExecutionError, match="a link in a shared directory"):
+        process_module.ensure_state_roots(config)
+
+
+def test_a_path_through_a_link_in_a_shared_dir_is_refused(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    (tmp_path / "elsewhere" / "results").mkdir(parents=True)
+    (shared / "link").symlink_to(tmp_path / "elsewhere")
+    config = _state_config(tmp_path, results_dir=shared / "link" / "results")
+
+    with pytest.raises(ExecutionError, match="a link in a shared directory"):
+        process_module.ensure_state_roots(config)
+
+
+def _open_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o777)
+    return path
+
+
+def test_an_open_dir_anywhere_above_a_root_is_denied(tmp_path: Path) -> None:
+    open_dir = _open_dir(tmp_path / "x" / "open")
+    (open_dir / "sub" / "results").mkdir(parents=True)
+
+    roots = process_module.ensure_state_roots(
+        _state_config(tmp_path, results_dir=open_dir / "sub" / "results")
     )
 
-    assert shared / "cache" in roots
-    assert "link" in (process_module._root_problem(shared / "cache") or "")
+    assert open_dir in roots
+    assert open_dir / "sub" / "results" not in roots
 
 
-def test_a_root_in_a_dir_anyone_may_rename_in_is_denied_by_that_dir(
+def test_an_open_dir_above_a_missing_part_of_a_root_is_denied_not_created_through(
     tmp_path: Path,
 ) -> None:
-    # As the worker image leaves its model cache, so workers of any uid share it.
-    cache = tmp_path / "cache" / "huggingface"
-    (cache / "hub").mkdir(parents=True)
-    for path in (cache, cache / "hub"):
-        path.chmod(0o777)
+    open_dir = _open_dir(tmp_path / "x" / "open")
 
-    roots = process_module.denied_roots(
-        _state_config(tmp_path, state_dirs=(cache / "hub",))
+    roots = process_module.ensure_state_roots(
+        _state_config(tmp_path, results_dir=open_dir / "missing" / "results")
     )
 
-    assert cache in roots and cache / "hub" not in roots
-    assert process_module._root_problem(cache) is None
+    assert open_dir in roots
+    assert not (open_dir / "missing").exists()
+
+
+def test_an_open_dir_a_link_leads_through_is_denied_with_the_target(
+    tmp_path: Path,
+) -> None:
+    open_dir = _open_dir(tmp_path / "far" / "open")
+    (open_dir / "results").mkdir()
+    (tmp_path / "results").symlink_to(open_dir / "results")
+    closed = tmp_path / "closed"
+    (closed / "real").mkdir(parents=True)
+    _open_dir(tmp_path / "lead")
+    (tmp_path / "lead" / "sub").mkdir()
+    (tmp_path / "lead" / "sub" / "hop").symlink_to(closed / "real")
+
+    roots = process_module.denied_roots(
+        _state_config(tmp_path, content_dir=tmp_path / "lead" / "sub" / "hop")
+    )
+
+    assert open_dir in roots
+    assert {tmp_path / "lead", closed / "real"} <= set(roots)
 
 
 def test_a_root_others_can_write_in_a_shared_dir_is_refused(tmp_path: Path) -> None:
