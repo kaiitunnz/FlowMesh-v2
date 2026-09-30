@@ -32,7 +32,7 @@ logger = logging.getLogger("supervisor")
 def offer_gpu_arch(gpu_name: str | None) -> GpuArch | None:
     """Classify an offer's GPU, or ``None`` when it has none.
 
-    VastAI names a GPU-less offer ``"N/A"`` rather than omitting the field.
+    VastAI names a GPU-less offer's GPU ``"N/A"``.
     """
     name = (gpu_name or "").strip()
     return None if name.lower() in _GPULESS_NAMES else GpuArch.from_name(name)

@@ -16,7 +16,7 @@ class StrictBaseModel(BaseModel):
 
 
 class RetiredFieldsModel(BaseModel):
-    """A model that loads a stored value carrying a field it no longer has.
+    """A model that loads a stored value carrying a field it retired.
 
     A submission naming a retired field is rejected like any unknown key; a value
     loaded under ``PERSISTED_LOAD_CONTEXT`` has the field dropped instead.

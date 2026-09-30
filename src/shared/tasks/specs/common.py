@@ -167,7 +167,7 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
     credential_fields: ClassVar[tuple[str, ...]] = ("output",)
-    # Fields a spec no longer has, which a stored task may still carry.
+    # Fields a spec retired, which a task stored before may carry.
     retired_fields: ClassVar[tuple[str, ...]] = ()
     resources: ResourcesSpec | None = None
     output: OutputSpec | None = None
@@ -216,7 +216,7 @@ class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
     credential_fields: ClassVar[tuple[str, ...]] = ("output",)
-    # Fields a spec no longer has, which a stored task may still carry.
+    # Fields a spec retired, which a task stored before may carry.
     retired_fields: ClassVar[tuple[str, ...]] = ()
     resources: ResourcesSpec | None = None
     output: OutputSpecTemplate | None = None
