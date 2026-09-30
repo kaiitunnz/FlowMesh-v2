@@ -1,10 +1,8 @@
 """The OS identity a process-mode SSH session logs in as.
 
-A root worker mints a throwaway account per session, so the session is a different uid
-from the worker: it cannot read the worker's environment, where the task token and
-every third-party API key live. An ACL entry denying that account each of the
-worker's state roots keeps it out of the worker's files, which are shared with other
-uids by mode and so readable to any account by default.
+A root worker mints a throwaway account per session, so the session cannot read the
+worker's environment, where the task token and every third-party API key live, and
+an ACL entry on each of the worker's state roots denies it the worker's files.
 """
 
 import fcntl
@@ -161,11 +159,7 @@ class SessionAccount:
         return account
 
     def deny(self, roots: Iterable[Path]) -> None:
-        """Deny this account each of ``roots``, all or nothing.
-
-        Each entry is recorded before it is set, so a worker that dies midway still
-        revokes it.
-        """
+        """Deny this account each of ``roots``, all or nothing."""
         applied: list[acl.Denial] = []
         try:
             for root in roots:
@@ -480,12 +474,7 @@ def delete_account(name: str) -> bool:
 
 
 def exec_as(uid: int, gid: int, argv: list[str]) -> list[str]:
-    """Return the command line that runs ``argv`` as ``uid`` and ``gid``.
-
-    The interpreter starts as the worker and ``_AS_UID_PREAMBLE`` switches to
-    ``uid``, because ``subprocess``'s ``user=`` forces a plain ``fork()``, which
-    gRPC's fork handlers crash.
-    """
+    """Return the command line that runs ``argv`` as ``uid`` and ``gid``."""
     if uid == 0:
         raise ExecutionError("Refusing to run a session helper as root")
     return interpreter_argv(_AS_UID_PREAMBLE + _EXEC_SCRIPT, str(uid), str(gid), *argv)

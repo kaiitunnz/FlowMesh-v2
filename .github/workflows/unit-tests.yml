@@ -89,9 +89,9 @@ jobs:
   process-ssh-backend:
     name: Process SSH backend tests (root)
     runs-on: ${{ github.event_name == 'push' && vars.NUS_RUNNERS == 'on' && 'nus-flowmesh' || 'ubuntu-latest' }}
-    # The process SSH backend creates accounts, applies ACLs and starts sshd, so its
-    # suite runs only as root inside a container, which this job gives it. The init
-    # reaps orphaned session processes, as the worker image's tini does.
+    # The suite creates accounts, applies ACLs and starts sshd, so it runs as root in
+    # a container; the init reaps orphaned session processes, as the worker's tini
+    # does.
     container:
       image: python:3.12-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286
       options: --init

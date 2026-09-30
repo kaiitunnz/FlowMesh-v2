@@ -2,20 +2,18 @@
 
 * **One interactive session per worker.** Sessions share the worker's filesystem
   and process namespace, so a second concurrent session is refused, as is a
-  non-interactive task, which needs a container runtime to run its image. Workers
-  that share a root filesystem share the mount root and session accounts, so only
-  one of them serves sessions.
+  non-interactive task. Workers that share a root filesystem or
+  ``/var/lib/flowmesh`` share the mount root, session accounts and session
+  directories, so only one of them serves sessions.
 * **Isolation by account.** Each session logs in as its own throwaway account,
-  denied every root of the worker's state (see ``session_identity``), and sshd and
-  its helpers start from a scrubbed environment.
+  denied every root of the worker's state, and sshd and its helpers start from a
+  scrubbed environment.
 * **Links into the session's own directory.** The session's inputs and output live
   in a root-owned directory of its own, and its mount paths are links to them
-  under a mount root emptied before and after every session, created one component
-  at a time, never through a link and never across a mount. Its output is read
-  back by a child running as its account.
-* **The worker's size is the cap.** ``SSH_MAX_*`` and the GPU subset need cgroup
-  and device control over the worker itself, so a session runs niced, first in
-  line for the OOM killer, and under a subreaper that reaps what it orphans.
+  under a mount root emptied before and after every session.
+* **The worker's size is the cap.** The ``SSH_MAX_CPU`` / ``MEMORY`` / ``PIDS``
+  caps and the GPU subset need cgroup and device control over the worker itself,
+  so a session runs niced and first in line for the OOM killer.
 """
 
 import errno
@@ -98,8 +96,6 @@ _DEFAULT_SESSION_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/games"
 _COPY_CHUNK = 64 * 1024
 _SESSION_NICENESS = 10
 _SESSION_OOM_SCORE_ADJ = 1000
-# Lowers its own priority, then execs the session's sshd, which every process of
-# the session inherits it from.
 _LAUNCH_SCRIPT = (
     "import os, sys\n"
     "os.nice(int(sys.argv[1]))\n"
@@ -582,14 +578,9 @@ def _probe_dir(root: Path) -> Path:
 
 
 def _acquire_backend_lock() -> bool:
-    """Take the process-backend lock files for the life of the worker; return whether
-    this worker holds them.
-
-    Workers that see the same lock file in ``/run`` share the mount root and session
-    accounts, and those that see the same one in ``/var/lib/flowmesh`` share the
-    session directories and the ACL ledger, so only one of them serves sessions. A
-    worker that is not root takes one in the temp dir instead.
-    """
+    """Take the process-backend lock files, in ``/run`` and ``/var/lib/flowmesh``
+    for root or the temp dir otherwise, for the life of the worker; return whether
+    this worker holds them."""
     global _backend_lock_fds
     with _backend_lock_mutex:
         if _backend_lock_fds is not None:

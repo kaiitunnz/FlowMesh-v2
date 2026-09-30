@@ -50,10 +50,7 @@ class WorkerCapabilities(BaseModel):
     )
     ssh_noninteractive: bool = Field(
         default=True,
-        description=(
-            "Whether the worker's SSH sessions run non-interactive tasks; a worker "
-            "that serves interactive sessions only reports false."
-        ),
+        description="Whether the worker's SSH sessions run non-interactive tasks.",
     )
     resident_listener_port: int = Field(
         default=0,

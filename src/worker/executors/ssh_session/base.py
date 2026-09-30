@@ -102,11 +102,8 @@ class SSHSession(ABC):
 
     @abstractmethod
     def output_size_bytes(self) -> int | None:
-        """Current size of the session's output directory.
-
-        ``None`` when the session has no output directory or its size cannot be
-        measured right now.
-        """
+        """Current size of the session's output directory, or ``None`` when it has
+        none or it cannot be measured."""
 
     @abstractmethod
     def collect_output(self, destination: Path, max_bytes: int | None) -> None:

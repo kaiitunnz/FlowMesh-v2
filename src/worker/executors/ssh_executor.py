@@ -158,8 +158,8 @@ class SSHExecutor(Executor):
                 cfg.command,
             )
 
-        # Any other error before the session starts reaches the runner as it is, which
-        # retries it: staging and a daemon call may succeed on another attempt.
+        # Other start failures propagate; staging and a daemon call may succeed on a
+        # retry.
         try:
             session = self._backend.start_session(request)
         except SessionInterrupted:
@@ -296,11 +296,8 @@ class SSHExecutor(Executor):
 
     def _wait_for_session(self, session: SSHSession, cfg: SSHConfig) -> int:
         """Block until the session exits or its TTL or idle timeout fires, stopping it
-        at its TTL so nothing it writes lands after its output is collected.
-
-        Returns the session exit code. The idle clock starts when the session does,
-        so a session nobody ever connects to is reaped too.
-        """
+        at its TTL so nothing it writes lands after its output is collected; return
+        the session's exit code."""
         deadline = time.time() + cfg.ttl_sec
         idle_enabled = cfg.interactive and cfg.idle_sec > 0
         last_active = time.time()

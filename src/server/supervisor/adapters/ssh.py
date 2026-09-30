@@ -38,10 +38,9 @@ class SSHConfig(BaseModel):
     If false, SSH sessions are allocated all available GPUs regardless of their
     resource requests."""
     session_backend: SSHBackendName | None = env.SSH_SESSION_BACKEND
-    """Session backend the worker uses (``auto``, ``docker``, ``process``)"""
+    """Session backend the worker uses"""
     relay_host: str | None = None
-    """Address at which this worker's session ports are reachable from its
-    supervisor"""
+    """Address the supervisor reaches this worker's sessions at"""
 
     @field_validator("session_backend", mode="before")
     @classmethod

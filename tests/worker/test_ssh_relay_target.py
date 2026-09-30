@@ -1,9 +1,4 @@
-"""The relay target an SSH session publishes.
-
-``_relay_target`` is dialled by the supervisor that owns the worker's node, so
-the address has to be routable from the supervisor. Loopback is right only
-when the two share a host.
-"""
+"""The relay target an SSH session publishes, which its supervisor must reach."""
 
 from pathlib import Path
 from typing import Any, cast

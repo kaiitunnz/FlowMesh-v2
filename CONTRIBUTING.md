@@ -109,7 +109,7 @@ uv run pytest tests/test_core_flow.py  # Single file
 
 If your change touches shared schemas or proto definitions, verify downstream compatibility across Server and Worker packages.
 
-The process SSH backend's suite, `tests/worker/test_ssh_process_backend_root.py`, creates accounts and starts `sshd`, so it runs only as root inside a container and skips anywhere else. CI runs it in its own job. To run it locally:
+The process SSH backend's suite, `tests/worker/test_ssh_process_backend_root.py`, creates accounts and starts `sshd`, so it runs only as root inside a container and skips anywhere else. To run it locally:
 
 ```bash
 docker run --rm -v "$PWD":/repo:ro python:3.12-slim sh -c '

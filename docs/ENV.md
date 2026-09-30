@@ -212,26 +212,21 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 
 The backend is `docker` (a sibling container per session), `process` (sshd
 inside the worker), `auto` (`docker` where the worker reaches a Docker daemon,
-else `process`), or `off`. A supervisor sets it on each worker it starts: `off`
-where the worker's `enable_ssh` is false, and otherwise the worker's
-`ssh.session_backend` or this default. A worker started without it uses
-`docker`.
+else `process`), or `off`. A worker's `ssh.session_backend` overrides it, and a
+worker started without either uses `docker`.
 
-`process` runs on a root worker with `sshd`, `useradd`, `setfacl` and `tar`
-and a filesystem that takes ACLs. Each session logs in as its own throwaway
-account, in the worker's own root filesystem and network namespace, loopback and
-tailnet included, so `spec.image` and `spec.user` do not apply. A worker serves
-one interactive session at a time and reports that it runs only interactive ones,
-so the dispatcher sends a non-interactive SSH task elsewhere. `SSH_MAX_*` apply to
-`docker` only, the `ENABLE_SSH_GPU_LIMIT` subset is an advisory
-`CUDA_VISIBLE_DEVICES`, and `ssh -L` forwarding is refused. What a `process`
-session is denied and where its data lives are in
+`process` runs on a root worker with `sshd` and POSIX ACL support. Each session
+logs in as its own throwaway account, in the worker's root filesystem and
+network namespace (loopback and tailnet included), so `spec.image` and
+`spec.user` do not apply. A `process` worker serves one interactive session at a
+time and receives no non-interactive SSH task. `SSH_MAX_CPU`, `SSH_MAX_MEMORY`
+and `SSH_MAX_PIDS` apply to `docker` only, the `ENABLE_SSH_GPU_LIMIT` subset is
+advisory, and `ssh -L` forwarding is refused. What a `process` session is denied
+and where its data lives are in
 [`EXECUTORS.md`](EXECUTORS.md#ssh-executor-process-backend).
 
-The supervisor reaches a session at its worker's relay host: loopback for
-`docker`, and the worker's tailnet address for `process`. A worker's
-`ssh.relay_host` sets it explicitly, and a `process` worker with neither
-serves no sessions.
+A `process` worker needs a tailnet address, or an `ssh.relay_host` set on it,
+for its supervisor to reach its sessions; with neither it serves none.
 
 ## SSH session resource caps
 
@@ -261,7 +256,6 @@ warning if SSH is enabled with no cap configured.
 | `SSH_DEFAULT_IDLE_SEC` | `900` | Idle timeout when `spec.idleTimeoutSeconds` is unset |
 
 An interactive session stops once it has had no established SSH connection
-for its idle timeout, which is clamped to the TTL. The idle clock starts
-with the session, so a session nobody connects to is reaped too.
-`spec.idleTimeoutSeconds: 0` turns idle reaping off, leaving the TTL.
+for its idle timeout, counted from the session's start, so a session nobody
+connects to is reaped too. `spec.idleTimeoutSeconds: 0` turns idle reaping off.
 Non-interactive tasks have no idle timeout.

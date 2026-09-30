@@ -28,11 +28,7 @@ BACKENDS: dict[SSHBackendName, type[SSHSessionBackend]] = {
 
 
 def select_backend_cls(config: WorkerConfig) -> type[SSHSessionBackend] | None:
-    """Resolve the session backend this worker should use, if any.
-
-    ``auto`` prefers the isolation a container gives and falls back to a process
-    session only where the worker can give it an account of its own.
-    """
+    """Resolve the session backend this worker should use, if any."""
     requested = config.ssh_session_backend
     if requested is SSHBackendName.OFF:
         return None
