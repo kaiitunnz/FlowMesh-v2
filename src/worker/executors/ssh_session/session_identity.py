@@ -107,8 +107,6 @@ class SessionAccount:
         """Deny this account each root, failing on the first one that refuses."""
         setfacl = _require_binary("setfacl")
         for root in roots:
-            if not root.exists():
-                continue
             _run(
                 [setfacl, "-m", f"u:{self.uid}:---", root.as_posix()],
                 f"deny SSH session account {self.name} {root.as_posix()}",
@@ -219,13 +217,11 @@ def lift_denials(uid: int, roots: Iterable[Path]) -> None:
 
 
 def supports_denials(roots: Iterable[Path]) -> bool:
-    """Whether every existing root takes an ACL entry."""
+    """Whether every root takes an ACL entry."""
     setfacl = shutil.which("setfacl")
     if setfacl is None:
         return False
     for root in roots:
-        if not root.exists():
-            continue
         try:
             _run(
                 [setfacl, "-m", f"u:{_ACL_PROBE_UID}:---", root.as_posix()],

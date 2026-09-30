@@ -4,6 +4,7 @@ It creates accounts and starts sshd, so it runs only as root inside a container,
 never on a host.
 """
 
+import dataclasses
 import os
 import shutil
 import subprocess
@@ -331,6 +332,30 @@ def test_a_session_leaves_the_next_one_nothing(
     finally:
         second.stop(1)
         second.cleanup()
+
+
+def test_a_state_root_the_worker_has_not_made_yet_is_denied(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    relocated = Path(tempfile.mkdtemp(dir="/var/lib"))
+    relocated.chmod(0o755)
+    content = relocated / "content"
+    backend = ProcessSessionBackend(dataclasses.replace(worker, content_dir=content))
+    session = backend.start_session(_request(tmp_path, client_key))
+    try:
+        port = session.wait_ready(30)
+        assert port is not None
+        # The worker makes its content cache, readable by mode, once it needs it.
+        content.mkdir(exist_ok=True)
+        content.chmod(0o755)
+        (content / "object").write_text("cached content")
+        (content / "object").chmod(0o644)
+
+        assert _ssh(session, client_key, port, _read(content / "object")).stdout == ""
+    finally:
+        session.stop(1)
+        session.cleanup()
+        shutil.rmtree(relocated, ignore_errors=True)
 
 
 def test_a_planted_symlink_under_the_mount_root_is_never_followed(

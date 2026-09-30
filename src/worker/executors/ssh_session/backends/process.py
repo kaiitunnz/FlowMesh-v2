@@ -138,6 +138,11 @@ class ProcessSessionBackend(SSHSessionBackend):
                 "and SSH_RELAY_HOST is unset, so its supervisor cannot reach a session"
             )
             return False
+        try:
+            ensure_state_roots(config)
+        except OSError as exc:
+            logger.info("Process SSH backend unavailable: %s", exc)
+            return False
         if not supports_denials(config.state_roots):
             logger.info(
                 "Process SSH backend unavailable: this worker's state cannot be "
@@ -249,6 +254,7 @@ class ProcessSessionBackend(SSHSessionBackend):
             _make_private_dir(SESSIONS_ROOT, 0o711)
             session_dir.mkdir(mode=0o711)
             manifest.write()
+            ensure_state_roots(self._config)
             account = SessionAccount.create(
                 manifest.account, session_dir / "home", self._config.state_roots
             )
@@ -332,6 +338,16 @@ class ProcessSessionBackend(SSHSessionBackend):
         clean = reap_stale_accounts(self._config.state_roots) and clean
         with self._lock:
             self._clean = clean
+
+
+def ensure_state_roots(config: WorkerConfig) -> None:
+    """Create each state root the worker has not yet, root-owned and private to the
+    worker, so a session's denial always lands on it."""
+    for root in config.state_root_dirs:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not config.hb_file.exists():
+        config.hb_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        config.hb_file.touch()
 
 
 @dataclass(slots=True)

@@ -97,11 +97,13 @@ class WorkerConfig:
     @property
     def state_roots(self) -> tuple[Path, ...]:
         """The paths holding this worker's own state and credentials."""
-        roots = [
-            path
-            for name in sorted(self.STATE_ROOT_FIELDS)
-            if (path := getattr(self, name)) is not None
-        ]
+        return (*self.state_root_dirs, self.hb_file)
+
+    @property
+    def state_root_dirs(self) -> tuple[Path, ...]:
+        """The state roots that are directories."""
+        roots = [self.results_dir, self.private_state_dir, self.content_dir]
+        roots += [path for path in (self.home_dir, self.model_cache_dir) if path]
         if self.object_store.backend == BACKEND_FILESYSTEM:
             roots.append(self.object_store.filesystem_root)
         return tuple(roots)

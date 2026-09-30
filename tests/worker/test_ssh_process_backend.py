@@ -91,6 +91,7 @@ def test_a_worker_whose_state_takes_no_acl_serves_no_process_session(
         patch.object(process_module, "process_identity_available", return_value=True),
         patch.object(process_module, "find_sshd", return_value="/usr/sbin/sshd"),
         patch.object(process_module, "find_ssh_keygen", return_value="/usr/bin/k"),
+        patch.object(process_module, "ensure_state_roots"),
         patch.object(process_module, "supports_denials", return_value=False),
     ):
         assert not ProcessSessionBackend.is_available(
@@ -106,6 +107,7 @@ def test_a_root_worker_its_supervisor_cannot_reach_serves_no_process_session(
         patch.object(process_module, "find_sshd", return_value="/usr/sbin/sshd"),
         patch.object(process_module, "find_ssh_keygen", return_value="/usr/bin/k"),
         patch.object(process_module, "find_tar", return_value="/usr/bin/tar"),
+        patch.object(process_module, "ensure_state_roots"),
         patch.object(process_module, "supports_denials", return_value=True),
         patch.object(process_module, "resolve_tailnet_address", return_value=None),
     ):
@@ -213,6 +215,25 @@ def test_every_worker_path_field_is_classified_as_state_or_not() -> None:
     assert not WorkerConfig.STATE_ROOT_FIELDS & WorkerConfig.NON_STATE_PATH_FIELDS
 
 
+def test_every_missing_state_root_is_created_private_to_the_worker(
+    tmp_path: Path,
+) -> None:
+    config = make_worker_config(
+        results_dir=tmp_path / "results",
+        private_state_dir=tmp_path / "private",
+        content_dir=tmp_path / "relocated" / "content",
+        hb_file=tmp_path / "hb" / "worker.hb",
+        home_dir=tmp_path / "home",
+        model_cache_dir=tmp_path / "hf",
+    )
+
+    process_module.ensure_state_roots(config)
+
+    for root in config.state_root_dirs:
+        assert root.is_dir() and root.stat().st_mode & 0o777 == 0o700, root
+    assert config.hb_file.is_file()
+
+
 def test_the_state_roots_cover_the_worker_state_and_a_filesystem_store(
     tmp_path: Path,
 ) -> None:
@@ -232,6 +253,9 @@ def test_the_state_roots_cover_the_worker_state_and_a_filesystem_store(
 
     roots = set(dataclasses.replace(config, object_store=store).state_roots)
 
+    assert {getattr(config, name) for name in WorkerConfig.STATE_ROOT_FIELDS} == (
+        roots - {tmp_path / "store"}
+    )
     assert roots == {
         tmp_path / name
         for name in ("results", "private", "content", "worker.hb", "home", "hf")
