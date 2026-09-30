@@ -85,8 +85,9 @@ async def test_a_model_key_stored_as_its_raw_string_still_resolves():
     vault, redis = _vault()
     redis.hashes[workflow_credential_key("wfl-1")] = {"msk-a": "sk-raw", "msk-n": "123"}
 
-    assert vault.resolve("wfl-1", "msk-a").get_secret_value() == "sk-raw"
-    assert vault.resolve("wfl-1", "msk-n").get_secret_value() == "123"
+    raw, numeric = vault.resolve("wfl-1", "msk-a"), vault.resolve("wfl-1", "msk-n")
+    assert raw is not None and raw.get_secret_value() == "sk-raw"
+    assert numeric is not None and numeric.get_secret_value() == "123"
 
 
 @pytest.mark.anyio

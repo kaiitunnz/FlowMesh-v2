@@ -82,7 +82,8 @@ async def test_inline_key_is_vaulted_and_absent_from_every_persisted_surface():
     assert vault_wfl == workflow_id
     assert ref.startswith("msk-")
     assert secret == _RAW_KEY
-    assert vault.resolve(workflow_id, ref).get_secret_value() == _RAW_KEY
+    resolved = vault.resolve(workflow_id, ref)
+    assert resolved is not None and resolved.get_secret_value() == _RAW_KEY
 
     # The pinned binding carries the generated ref, never the raw key.
     binding = runtime.resolve_model_binding(task_id)
