@@ -439,6 +439,12 @@ class SyncRedisClient:
     def expire(self, key: str, ttl_sec: int) -> bool:
         return bool(self._control.expire(key, max(0, int(ttl_sec))))
 
+    def persist(self, key: str) -> bool:
+        return bool(self._control.persist(key))
+
+    def scan_keys(self, pattern: str) -> list[str]:
+        return list(self._control.scan_iter(match=pattern))
+
     def expire_telemetry(self, key: str, ttl_sec: int) -> bool:
         return bool(self._telemetry.expire(key, max(0, int(ttl_sec))))
 
@@ -451,6 +457,13 @@ class SyncRedisClient:
 
     def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
         self._control.hset(key, mapping=mapping)
+
+    def hash_set_persistent(self, key: str, mapping: dict[str, Any]) -> None:
+        """Set hash fields and clear any expiry on the key, in one transaction."""
+        with self._control.pipeline(transaction=True) as pipe:
+            pipe.hset(key, mapping=mapping)
+            pipe.persist(key)
+            pipe.execute()
 
     def hash_delete(self, key: str, *fields: str) -> None:
         if fields:
