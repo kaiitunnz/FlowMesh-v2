@@ -180,3 +180,23 @@ def test_a_server_error_reads_as_unreachable(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(requests, "post", lambda url, **kwargs: _rejected(500))
     out = ExternalModelSidecar().execute(_envelope(), _REQUEST, None)
     assert out.value == "the model provider was unreachable"
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_a_provider_fault_logs_no_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, held: bool
+) -> None:
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        raise requests.ConnectionError(f"refused {kwargs['headers']}")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    sidecar = ExternalModelSidecar()
+    with caplog.at_level("WARNING"):
+        if held:
+            with pytest.raises(ModelEgressError):
+                sidecar.complete(_envelope(), _REQUEST, "sk-permit-SECRET")
+        else:
+            sidecar.execute(_envelope(), _REQUEST, "sk-permit-SECRET")
+
+    assert "external-model egress failed" in caplog.text
+    assert "sk-permit-SECRET" not in caplog.text

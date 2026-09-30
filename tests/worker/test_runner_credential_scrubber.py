@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.content import SharedFilesystemObjectStore
+from shared.harness.adapter import HarnessResult, HarnessResultKind
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import (
     FakeContentPlane,
@@ -16,6 +17,7 @@ from tests.worker.factories import (
     make_worker_task_message,
 )
 from worker.executors.base_executor import ExecutionError, Executor
+from worker.executors.episode_support import EpisodeStepResult
 from worker.runner import Runner
 from worker.utils.logging import TaskLogEmitter
 
@@ -25,17 +27,21 @@ _SECRET = "tok-restored-SECRET"
 class _Failing(Executor):
     name = "echo"
 
-    def __init__(self, error: Exception) -> None:
+    def __init__(self, error: Exception | EpisodeStepResult) -> None:
         self.error = error
 
     def run(self, task: Any, out_dir: Path) -> Any:
+        if isinstance(self.error, EpisodeStepResult):
+            return self.error
         raise self.error
 
     def cancel(self, task_id: str) -> None:
         return None
 
 
-def _run(tmp_path: Path, error: Exception, pointers: list[str]) -> MagicMock:
+def _run(
+    tmp_path: Path, error: Exception | EpisodeStepResult, pointers: list[str]
+) -> MagicMock:
     lifecycle = MagicMock()
     lifecycle.worker_id = "wrk-test"
     lifecycle.cost_per_hour = 1.0
@@ -76,6 +82,18 @@ def test_a_failure_reports_and_logs_no_restored_credential(tmp_path, error):
     reported = lifecycle.set_failed.call_args.args[1]
     assert _SECRET not in reported and "[REDACTED]" in reported
     assert _SECRET not in lifecycle.logged
+
+
+def test_an_agent_step_failure_reports_no_restored_credential(tmp_path):
+    step = EpisodeStepResult(
+        harness_result=HarnessResult(
+            kind=HarnessResultKind.FAILURE, error=f"harness rejected {_SECRET}"
+        )
+    )
+    lifecycle = _run(tmp_path, step, ["/data/token"])
+
+    reported = lifecycle.set_succeeded.call_args.kwargs["metadata"]["agent_episode"]
+    assert reported["error"] == "harness rejected [REDACTED]"
 
 
 def test_a_dispatch_naming_no_credentials_reports_its_error_as_is(tmp_path):

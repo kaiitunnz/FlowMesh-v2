@@ -1048,9 +1048,10 @@ class Runner:
                         # boundary and re-dispatches; the attempt still ends here, which
                         # is what releases the lane. A captured facade group rides the
                         # same metadata so control routes it with the completion.
-                        metadata["agent_episode"] = out.harness_result.model_dump(
-                            mode="json"
-                        )
+                        step = out.harness_result
+                        if step.error is not None:
+                            step = step.model_copy(update={"error": scrub(step.error)})
+                        metadata["agent_episode"] = step.model_dump(mode="json")
                         if out.facade_group is not None:
                             metadata["agent_episode_facade_group"] = (
                                 out.facade_group.model_dump(mode="json")

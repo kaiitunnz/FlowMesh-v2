@@ -43,6 +43,7 @@ from shared.tools.contract import (
 )
 from shared.tools.model.egress import ModelEgressError
 from shared.tools.model.schema import ModelCompletion
+from shared.utils.redact import credential_scrubber
 
 from ..telemetry import otel
 from .fence import fence_reason, materialize_tool_outcome
@@ -196,8 +197,11 @@ class MediatedEgressSidecar:
             except Exception as exc:
                 # No report: the control plane holds the boundary pending and
                 # re-drives under the same idempotency key with a fresh permit.
+                scrub = credential_scrubber(
+                    [permit.credential] if permit.credential else []
+                )
                 self._log.warning(
-                    "mediated egress raised, leaving it ambiguous: %s", exc
+                    "mediated egress raised, leaving it ambiguous: %s", scrub(str(exc))
                 )
                 report = None
             finally:

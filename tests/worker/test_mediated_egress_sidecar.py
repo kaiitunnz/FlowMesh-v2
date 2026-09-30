@@ -1,7 +1,9 @@
 """The worker-local mediated-egress sidecar lane."""
 
 import queue
+import time
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -317,3 +319,21 @@ def test_egress_now_permit_replay_is_terminal() -> None:
     replay = sidecar.egress_now(permit)
     assert isinstance(replay, HeldEgressReject) and egress.calls == 1
     sidecar.stop()
+
+
+def test_an_egress_that_raises_logs_no_permit_credential() -> None:
+    logger = MagicMock()
+    h = _Harness()
+    h.sidecar._log = logger
+    error = RuntimeError("provider said sk-permit-SECRET is invalid")
+    with patch.object(h.egress, "execute", side_effect=error):
+        h.stash()
+        h.sidecar.submit_permit(_permit(credential="sk-permit-SECRET"))
+        deadline = time.monotonic() + 5.0
+        while not logger.warning.called and time.monotonic() < deadline:
+            time.sleep(0.01)
+    h.stop()
+
+    logged = " ".join(str(call) for call in logger.warning.call_args_list)
+    assert "leaving it ambiguous" in logged
+    assert "sk-permit-SECRET" not in logged

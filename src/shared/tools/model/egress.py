@@ -11,6 +11,8 @@ from typing import Any
 
 import requests
 
+from shared.utils.redact import credential_scrubber
+
 from ..contract import ToolOperationEnvelope, ToolOutcome, ToolOutcomeStatus
 from .schema import MODEL_INTERFACE, ModelCompletion, ModelRequest, ModelToolCall
 
@@ -50,7 +52,7 @@ class ExternalModelSidecar:
                 status=ToolOutcomeStatus.TIMEOUT, value="the model request timed out"
             )
         except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
-            self._log.warning("external-model egress failed: %s", exc)
+            self._warn_failed(exc, api_key)
             return ToolOutcome(
                 status=ToolOutcomeStatus.UNAVAILABLE, value=_failure_text(exc)
             )
@@ -78,13 +80,17 @@ class ExternalModelSidecar:
         except requests.Timeout as exc:
             raise ModelEgressError("the model request timed out") from exc
         except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
-            self._log.warning("external-model egress failed: %s", exc)
+            self._warn_failed(exc, api_key)
             raise ModelEgressError(_failure_text(exc)) from exc
         content = message.get("content")
         return ModelCompletion(
             content=str(content) if content is not None else "",
             tool_calls=_parse_tool_calls(message.get("tool_calls")),
         )
+
+    def _warn_failed(self, exc: Exception, api_key: str | None) -> None:
+        scrub = credential_scrubber([api_key] if api_key else [])
+        self._log.warning("external-model egress failed: %s", scrub(str(exc)))
 
     @staticmethod
     def _unserved(envelope: ToolOperationEnvelope, request: ModelRequest) -> str | None:
