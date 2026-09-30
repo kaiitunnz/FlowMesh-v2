@@ -293,7 +293,7 @@ class TelemetryStoreConfig:
     url: str | None = None
     database: str = "flowmesh"
     username: str = "default"
-    password: str = "flowmesh"
+    password: str = ""
     timeout_sec: float = 10.0
 
     @classmethod

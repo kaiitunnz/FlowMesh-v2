@@ -1,5 +1,4 @@
-"""A root node runs its own Redis, content store and ClickHouse on credentials of its
-own."""
+"""A node runs its Redis, content store and ClickHouse on credentials of its own."""
 
 from pathlib import Path
 from unittest import mock
@@ -53,17 +52,35 @@ def test_a_root_init_writes_fresh_credentials_it_never_prints(tmp_path, capsys):
     assert service_credential_errors({**first, "COMPOSE_PROFILES": "telemetry"}) == []
 
 
-def test_a_worker_init_generates_no_redis_password(tmp_path):
+def test_a_root_init_writes_an_env_only_its_owner_reads(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    env_file.chmod(0o644)
+
+    stack.init(env_file=env_file, force=True, role="root", deploy=False)
+
+    assert env_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_worker_takes_the_roots_redis_password(tmp_path):
     env = _init(tmp_path, "worker")
 
     assert env["REDIS_PASSWORD"] == ""
-    assert service_credential_errors(env) == []
+    assert [
+        error for error in service_credential_errors(env) if "REDIS_PASSWORD" in error
+    ]
+    root = _init(tmp_path, "root", ".env.root")
+    assert (
+        service_credential_errors({**env, "REDIS_PASSWORD": root["REDIS_PASSWORD"]})
+        == []
+    )
 
 
 @pytest.mark.parametrize(
     ("key", "value"),
     [
         ("REDIS_PASSWORD", "very-strong-password"),
+        ("REDIS_PASSWORD", ""),
         ("CONTENT_STORE_ACCESS_KEY", "flowmesh"),
         ("CONTENT_STORE_SECRET_KEY", "flowmeshcontent"),
         ("CONTENT_STORE_SECRET_KEY", ""),
@@ -94,6 +111,7 @@ def test_up_refuses_a_root_on_a_default_credential_and_names_it(tmp_path, key, v
         ("TELEMETRY_CLICKHOUSE_PASSWORD", "flowmesh"),
         ("TELEMETRY_CLICKHOUSE_PASSWORD", ""),
         ("SERVER_METRICS_CLICKHOUSE_PASSWORD", "flowmesh"),
+        ("SERVER_METRICS_CLICKHOUSE_PASSWORD", ""),
     ],
 )
 @pytest.mark.parametrize("role", ["root", "worker"])
@@ -114,11 +132,33 @@ def test_up_refuses_the_telemetry_profile_on_a_default_password(
     assert any(key in call.args[0] for call in error.call_args_list)
 
 
+@pytest.mark.parametrize("services", [None, ["server"]])
+def test_restart_refuses_a_default_credential_before_touching_the_stack(
+    tmp_path, services
+):
+    env_file = tmp_path / ".env"
+    stack.init(env_file=env_file, force=True, role="root", deploy=False)
+    _set(env_file, "REDIS_PASSWORD", "very-strong-password")
+
+    with (
+        mock.patch.object(stack, "_compose") as compose,
+        mock.patch.object(stack, "_drain_workers") as drain,
+        mock.patch.object(stack.logging, "error") as error,
+        pytest.raises(typer.Exit),
+    ):
+        stack.restart(services=services, env_file=env_file, image_tag=None, pull=False)
+
+    compose.assert_not_called()
+    drain.assert_not_called()
+    assert any("REDIS_PASSWORD" in call.args[0] for call in error.call_args_list)
+
+
 def test_the_telemetry_password_is_not_checked_without_its_profile():
     assert (
         service_credential_errors(
             {
                 "NODE_ROLE": "worker",
+                "REDIS_ACL_ENABLED": "0",
                 "TELEMETRY_CLICKHOUSE_PASSWORD": "flowmesh",
                 "SERVER_METRICS_CLICKHOUSE_PASSWORD": "flowmesh",
             }

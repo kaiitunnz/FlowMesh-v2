@@ -514,15 +514,13 @@ def up(
     On root nodes (NODE_ROLE=root, the default), the local Redis services are
     started alongside the server. On worker nodes (NODE_ROLE=worker), Redis
     services are skipped — the worker is expected to connect to the root
-    node's Redis via REDIS_CONTROL_URL / REDIS_TELEMETRY_URL. A root node whose
-    Redis or co-located content store would run on an unset or well-known
-    credential is refused.
+    node's Redis via REDIS_CONTROL_URL / REDIS_TELEMETRY_URL. A node is refused
+    when its Redis or a root's co-located content store, or the telemetry
+    profile's ClickHouse on any node, would run on an unset or well-known
+    credential.
     """
+    _require_service_credentials(env_file)
     profile = "root" if _node_role(env_file) == NodeRole.ROOT else None
-    if errors := service_credential_errors(parse_env_file(env_file)):
-        for error in errors:
-            logging.error(error)
-        raise typer.Exit(code=1)
     _compose(
         ["up", "-d", "--wait"],
         env_file=env_file,
@@ -531,6 +529,14 @@ def up(
         profile=profile,
     )
     logging.success("FlowMesh stack is up.")
+
+
+def _require_service_credentials(env_file: Path) -> None:
+    """Refuse to start services on an unset or well-known credential."""
+    if errors := service_credential_errors(parse_env_file(env_file)):
+        for error in errors:
+            logging.error(error)
+        raise typer.Exit(code=1)
 
 
 def _drain_workers(env_file: Path) -> None:
@@ -595,9 +601,11 @@ def restart(
 
     With one or more SERVICE arguments the stack is left running and only those services
     are recreated; when any of them manages workers (the server / supervisor) its
-    workers are drained first so their in-flight tasks requeue onto other nodes.
+    workers are drained first so their in-flight tasks requeue onto other nodes. Like
+    `up`, it refuses to start services on an unset or well-known credential.
     """
     if not services:
+        _require_service_credentials(env_file)
         logging.info("Draining workers...")
         _drain_workers(env_file)
         _compose(
@@ -626,6 +634,7 @@ def restart(
         )
         raise typer.Exit(code=1)
 
+    _require_service_credentials(env_file)
     if any(svc in WORKER_MANAGING_SERVICES for svc in requested):
         logging.info("Draining workers...")
         _drain_workers(env_file)
@@ -804,5 +813,8 @@ def init(
         **deploy_overrides(deploy, deploy_version),
         **credential_overrides(node_role),
     }
-    env_file.write_text(render_env_example(STACK_ENV_SCHEMA, overrides=overrides))
+    fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(render_env_example(STACK_ENV_SCHEMA, overrides=overrides))
     logging.success(f"Wrote {env_file} (NODE_ROLE={node_role.value}).")

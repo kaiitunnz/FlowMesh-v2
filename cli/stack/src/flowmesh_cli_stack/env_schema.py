@@ -13,8 +13,7 @@ from flowmesh_stack.env_schema import (
     require_if_true,
 )
 
-# Credentials that shipped as schema defaults; a root node never runs its own services
-# on them.
+# Credentials that were schema defaults; a node never runs its services on them.
 _WELL_KNOWN_CREDENTIALS = {
     "REDIS_PASSWORD": "very-strong-password",  # nosec B105 - a default refused
     "CONTENT_STORE_ACCESS_KEY": "flowmesh",
@@ -23,7 +22,6 @@ _WELL_KNOWN_CREDENTIALS = {
     "SERVER_METRICS_CLICKHOUSE_PASSWORD": "flowmesh",  # nosec B105 - a default refused
 }
 
-# The compose profile carrying the bundled ClickHouse telemetry store.
 TELEMETRY_PROFILE = "telemetry"
 
 
@@ -51,7 +49,7 @@ def credential_overrides(role: NodeRole) -> dict[str, str]:
     """Fresh credentials for the services a root node runs itself.
 
     A worker node reaches the root's Redis with the root's password, so it gets none.
-    The server reads the bundled ClickHouse it writes to, so both carry one password.
+    The server reads the ClickHouse the collector writes to, so both carry one password.
     """
     if role != NodeRole.ROOT:
         return {}
@@ -65,34 +63,45 @@ def credential_overrides(role: NodeRole) -> dict[str, str]:
     }
 
 
-def service_credential_errors(env: dict[str, str]) -> list[str]:
-    """Why a node's own Redis, co-located content store or bundled ClickHouse would run
-    on an unset or well-known credential."""
-    role = env.get("NODE_ROLE", "").strip().lower()
-    required: dict[str, str] = {}
-    if not role or role == NodeRole.ROOT.value:
-        if parse_bool(env.get("REDIS_ACL_ENABLED", "")):
-            required["REDIS_PASSWORD"] = ""
-        if colocates_content_store(env):
-            for key in ("CONTENT_STORE_ACCESS_KEY", "CONTENT_STORE_SECRET_KEY"):
-                required[key] = "the co-located content store"
+def _credentials_in_use(env: dict[str, str]) -> dict[str, str]:
+    """Each service credential this node uses, mapped to what uses it."""
+    in_use: dict[str, str] = {}
+    if parse_bool(env.get("REDIS_ACL_ENABLED", "")):
+        in_use["REDIS_PASSWORD"] = "Redis with ACL enabled"
+    if colocates_content_store(env):
+        for key in ("CONTENT_STORE_ACCESS_KEY", "CONTENT_STORE_SECRET_KEY"):
+            in_use[key] = "the co-located content store"
     if runs_telemetry_store(env):
-        required["TELEMETRY_CLICKHOUSE_PASSWORD"] = "the telemetry profile's ClickHouse"
-        required["SERVER_METRICS_CLICKHOUSE_PASSWORD"] = ""
+        for key in (
+            "TELEMETRY_CLICKHOUSE_PASSWORD",
+            "SERVER_METRICS_CLICKHOUSE_PASSWORD",
+        ):
+            in_use[key] = "the telemetry profile's ClickHouse"
+    return in_use
+
+
+def service_credential_errors(env: dict[str, str]) -> list[str]:
+    """Why a node's Redis, co-located content store or bundled ClickHouse would run on
+    an unset or well-known credential."""
     errors: list[str] = []
-    for key, service in required.items():
+    for key, service in _credentials_in_use(env).items():
         value = env.get(key, "").strip()
-        if value == _WELL_KNOWN_CREDENTIALS[key]:
-            errors.append(f"{key} is a well-known default; set a value of your own")
-        elif not value and service:
+        if not value:
             errors.append(f"{key} must be set for {service}")
+        elif value == _WELL_KNOWN_CREDENTIALS[key]:
+            errors.append(f"{key} is a well-known default; set a value of your own")
     return errors
 
 
 def _refuse_service_credentials(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
-    errors.extend(service_credential_errors(env))
+    reported = {error.split(" ", 1)[0] for error in errors}
+    errors.extend(
+        error
+        for error in service_credential_errors(env)
+        if error.split(" ", 1)[0] not in reported
+    )
 
 
 def _require_network_plane_for_resident(
