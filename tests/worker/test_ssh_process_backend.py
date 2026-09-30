@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from server.supervisor.adapters.ssh import SSHConfig as SupervisorSSHConfig
 from shared.content.config import BACKEND_FILESYSTEM
 from shared.schemas.worker import SSHBackendName
 from shared.tasks.task_type import TaskType
@@ -56,6 +57,7 @@ def _config(backend: SSHBackendName, tmp_path: Path) -> WorkerConfig:
         (SSHBackendName.DOCKER, False, True, None),
         (SSHBackendName.PROCESS, True, True, ProcessSessionBackend),
         (SSHBackendName.PROCESS, True, False, None),
+        (SSHBackendName.OFF, True, True, None),
     ],
 )
 def test_the_backend_follows_the_setting_and_what_the_worker_can_isolate(
@@ -91,6 +93,48 @@ def test_a_worker_whose_state_takes_no_acl_serves_no_process_session(
         patch.object(process_module, "supports_denials", return_value=False),
     ):
         assert not ProcessSessionBackend.is_available(make_live_worker_config(tmp_path))
+
+
+def _worker_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("WORKER_TOKEN", "tok")
+    monkeypatch.setenv("SUPERVISOR_GRPC_TARGET", "127.0.0.1:50051")
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
+    monkeypatch.setenv("WORKER_HB_FILE", str(tmp_path / "worker.hb"))
+    monkeypatch.delenv("SSH_SESSION_BACKEND", raising=False)
+
+
+@pytest.mark.parametrize(
+    ("enable_ssh", "expected"), [(False, None), (True, ProcessSessionBackend)]
+)
+def test_a_root_worker_without_docker_serves_ssh_only_where_it_is_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enable_ssh: bool,
+    expected: type | None,
+) -> None:
+    _worker_env(monkeypatch, tmp_path)
+    for name, value in (
+        SupervisorSSHConfig(session_backend=None).to_env(enable_ssh).items()
+    ):
+        monkeypatch.setenv(name, value)
+
+    with (
+        patch.object(DockerSessionBackend, "is_available", return_value=False),
+        patch.object(ProcessSessionBackend, "is_available", return_value=True),
+    ):
+        assert select_backend_cls(WorkerConfig.from_env()) is expected
+
+
+def test_a_worker_given_no_backend_never_serves_a_process_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _worker_env(monkeypatch, tmp_path)
+
+    with (
+        patch.object(DockerSessionBackend, "is_available", return_value=False),
+        patch.object(ProcessSessionBackend, "is_available", return_value=True),
+    ):
+        assert select_backend_cls(WorkerConfig.from_env()) is None
 
 
 def test_an_unknown_session_backend_stops_the_worker(

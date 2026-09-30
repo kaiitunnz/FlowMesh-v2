@@ -60,7 +60,7 @@ class VastAIWorkerConfig(WorkerConfig):
     """Maximum number of offers to retrieve during search"""
     enable_ssh: bool = env.ENABLE_SSH_BY_DEFAULT
     """Whether to enable support for SSH jobs"""
-    ssh: SSHConfig = Field(default_factory=SSHConfig)
+    ssh: SSHConfig = Field(default_factory=SSHConfig, validate_default=True)
     """Default SSH session configuration"""
 
     @field_validator("ssh")
@@ -183,8 +183,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
     def _base_environment(self) -> dict[str, str]:
         environment = super()._base_environment()
         environment["RESULTS_DIR"] = self.CONTAINER_RESULTS_DIR
-        if self.config.enable_ssh:
-            environment.update(self.config.ssh.to_env())
+        environment.update(self.config.ssh.to_env(self.config.enable_ssh))
         return environment
 
     def _start(self) -> bool:

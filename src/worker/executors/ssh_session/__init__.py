@@ -34,6 +34,8 @@ def select_backend_cls(config: WorkerConfig) -> type[SSHSessionBackend] | None:
     session only where the worker can give it an account of its own.
     """
     requested = config.ssh_session_backend
+    if requested is SSHBackendName.OFF:
+        return None
     candidates = (
         (DockerSessionBackend, ProcessSessionBackend)
         if requested is SSHBackendName.AUTO

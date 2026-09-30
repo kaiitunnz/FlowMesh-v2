@@ -1084,7 +1084,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "SSH_SESSION_BACKEND",
                     "auto",
                     description="Sandbox an SSH session runs in.",
-                    choices=["auto", "docker", "process"],
+                    choices=["auto", "docker", "process", "off"],
                 ),
                 EnvVar(
                     "SSH_RELAY_HOST",

@@ -7,13 +7,13 @@ from server.supervisor.adapters.ssh import SSHConfig
 
 class TestSSHConfigToEnv:
     def test_omits_unset_limits(self) -> None:
-        env = SSHConfig().to_env()
+        env = SSHConfig().to_env(True)
         assert "SSH_MAX_CPU" not in env
         assert "SSH_MAX_MEMORY" not in env
         assert "SSH_MAX_PIDS" not in env
 
     def test_emits_set_limits(self) -> None:
-        env = SSHConfig(max_cpu=4.0, max_memory="8Gi", max_pids=512).to_env()
+        env = SSHConfig(max_cpu=4.0, max_memory="8Gi", max_pids=512).to_env(True)
         assert env["SSH_MAX_CPU"] == "4.0"
         assert env["SSH_MAX_MEMORY"] == "8Gi"
         assert env["SSH_MAX_PIDS"] == "512"

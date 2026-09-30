@@ -75,7 +75,7 @@ class WorkerConfig:
     peer_tls_ca_b64: str | None = None
     peer_tls_cert_b64: str | None = None
     peer_tls_key_b64: str | None = None
-    ssh_session_backend: SSHBackendName = SSHBackendName.AUTO
+    ssh_session_backend: SSHBackendName = SSHBackendName.DOCKER
     ssh_relay_host: str | None = None
     home_dir: Path | None = None
     model_cache_dir: Path | None = None
@@ -247,8 +247,11 @@ class WorkerConfig:
             )
         )
         enable_ssh_gpu_limit = parse_bool_env("ENABLE_SSH_GPU_LIMIT", True)
+        # A worker never falls back to a process session on its own: the supervisor
+        # that turns SSH on names the backend.
         ssh_session_backend_raw = (
-            os.getenv("SSH_SESSION_BACKEND", "").strip().lower() or SSHBackendName.AUTO
+            os.getenv("SSH_SESSION_BACKEND", "").strip().lower()
+            or SSHBackendName.DOCKER
         )
         try:
             ssh_session_backend = SSHBackendName(ssh_session_backend_raw)

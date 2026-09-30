@@ -48,8 +48,16 @@ class SSHConfig(BaseModel):
     def normalize_session_backend(cls, v: Any) -> Any:
         return v.strip().lower() if isinstance(v, str) else v
 
-    def to_env(self) -> dict[str, str]:
-        """Return env vars to inject into the worker container."""
+    @property
+    def uses_docker(self) -> bool:
+        """Whether sessions may run in sibling containers, which need the socket."""
+        return self.session_backend not in (SSHBackendName.PROCESS, SSHBackendName.OFF)
+
+    def to_env(self, enabled: bool) -> dict[str, str]:
+        """Return env vars to inject into the worker container, turning SSH off on a
+        worker it is not enabled for."""
+        if not enabled:
+            return {"SSH_SESSION_BACKEND": SSHBackendName.OFF.value}
         mapping = {
             "SSH_DEFAULT_IMAGE": self.default_image,
             "SSH_DEFAULT_USER": self.default_user,
@@ -62,7 +70,7 @@ class SSHConfig(BaseModel):
             "SSH_MAX_MEMORY": self.max_memory,
             "SSH_MAX_PIDS": self.max_pids,
             "ENABLE_SSH_GPU_LIMIT": self.enable_gpu_limit,
-            "SSH_SESSION_BACKEND": self.session_backend,
+            "SSH_SESSION_BACKEND": self.session_backend or SSHBackendName.AUTO,
             "SSH_RELAY_HOST": self.relay_host,
         }
         return {k: to_env_str(v) for k, v in mapping.items() if v is not None}

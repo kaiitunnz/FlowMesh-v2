@@ -7,6 +7,11 @@ from pydantic import ValidationError
 
 from server.hooks import PrincipalContext
 from server.supervisor.adapters.base import WorkerTokenType
+from server.supervisor.adapters.docker import (
+    DockerWorkerAdapter,
+    DockerWorkerConfig,
+    WorkerType,
+)
 from server.supervisor.adapters.ssh import SSHConfig
 from server.supervisor.adapters.vastai import VastAIWorkerAdapter, VastAIWorkerConfig
 from server.supervisor.manager import ServerWorkerConfig, WorkerInitConfig
@@ -93,28 +98,99 @@ class TestSSHEnvironment:
     def test_the_session_backend_and_relay_host_reach_the_worker(self) -> None:
         env = SSHConfig(
             session_backend=SSHBackendName.PROCESS, relay_host="100.64.0.7"
-        ).to_env()
+        ).to_env(True)
 
         assert env["SSH_SESSION_BACKEND"] == "process"
         assert env["SSH_RELAY_HOST"] == "100.64.0.7"
         assert env["ENABLE_SSH_GPU_LIMIT"] == "1"
 
     def test_a_vastai_worker_with_ssh_gets_the_ssh_environment(self) -> None:
-        adapter = VastAIWorkerAdapter(
-            token=WorkerTokenType("vast_0.token"),
-            name="vast_0",
-            config=VastAIWorkerConfig(
+        adapter = _vastai_adapter(
+            VastAIWorkerConfig(
                 enable_ssh=True, ssh=SSHConfig(session_backend=SSHBackendName.PROCESS)
-            ),
-            vastai_client=MagicMock(),
-            instance_pool=ResourcePool(),
-            owner=PrincipalContext(
-                principal_id="u",
-                org_id="o",
-                external_id="u",
-                principal_type="user",
-                scopes=[],
-            ),
+            )
         )
 
         assert adapter._base_environment()["SSH_SESSION_BACKEND"] == "process"
+
+    def test_an_enabled_worker_with_no_backend_named_gets_auto(self) -> None:
+        env = SSHConfig(session_backend=None).to_env(True)
+
+        assert env["SSH_SESSION_BACKEND"] == "auto"
+
+    @pytest.mark.parametrize(
+        "backend", [None, SSHBackendName.AUTO, SSHBackendName.PROCESS]
+    )
+    def test_a_worker_without_ssh_is_told_to_serve_none(
+        self, backend: SSHBackendName | None
+    ) -> None:
+        adapter = _vastai_adapter(
+            VastAIWorkerConfig(
+                enable_ssh=False,
+                ssh=SSHConfig(session_backend=backend, default_ttl_sec=60),
+            )
+        )
+
+        environment = adapter._base_environment()
+
+        assert environment["SSH_SESSION_BACKEND"] == "off"
+        assert "SSH_DEFAULT_TTL_SEC" not in environment
+
+    def test_a_stack_wide_docker_backend_is_refused_on_vastai(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The stack-wide SSH_SESSION_BACKEND reaches a VastAI worker as the default.
+        monkeypatch.setattr(
+            VastAIWorkerConfig.model_fields["ssh"],
+            "default_factory",
+            lambda: SSHConfig(session_backend=SSHBackendName.DOCKER),
+        )
+        VastAIWorkerConfig.model_rebuild(force=True)
+        try:
+            with pytest.raises(ValidationError, match="cannot be 'docker'"):
+                VastAIWorkerConfig()
+        finally:
+            monkeypatch.undo()
+            VastAIWorkerConfig.model_rebuild(force=True)
+
+
+@pytest.mark.parametrize(
+    ("backend", "mounted"),
+    [
+        (None, True),
+        (SSHBackendName.AUTO, True),
+        (SSHBackendName.DOCKER, True),
+        (SSHBackendName.PROCESS, False),
+    ],
+)
+def test_a_docker_worker_gets_the_socket_only_for_docker_sessions(
+    backend: SSHBackendName | None, mounted: bool
+) -> None:
+    adapter = object.__new__(DockerWorkerAdapter)
+    adapter.config = DockerWorkerConfig(
+        worker_type=WorkerType.CPU,
+        enable_ssh=True,
+        ssh=SSHConfig(session_backend=backend),
+    )
+    volumes: list[str] = []
+
+    adapter._mount_docker_socket(volumes)
+
+    assert bool(volumes) is mounted
+
+
+def _vastai_adapter(config: VastAIWorkerConfig) -> VastAIWorkerAdapter:
+    return VastAIWorkerAdapter(
+        token=WorkerTokenType("vast_0.token"),
+        name="vast_0",
+        config=config,
+        vastai_client=MagicMock(),
+        instance_pool=ResourcePool(),
+        owner=PrincipalContext(
+            principal_id="u",
+            org_id="o",
+            external_id="u",
+            principal_type="user",
+            scopes=[],
+        ),
+    )

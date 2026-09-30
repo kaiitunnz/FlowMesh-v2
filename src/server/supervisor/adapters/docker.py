@@ -498,8 +498,7 @@ class DockerWorkerAdapter(WorkerAdapter):
         environment["WORKER_NETWORK_MODE"] = f"container:{self.container_name}"
         environment["WORKER_CONTAINER_NAME"] = self.container_name
         environment["SSH_NETWORK_NAME"] = _SSH_NETWORK_NAME
-        if self.config.enable_ssh:
-            environment.update(self.config.ssh.to_env())
+        environment.update(self.config.ssh.to_env(self.config.enable_ssh))
         return environment
 
     def _apply_worker_type_settings(
@@ -582,12 +581,16 @@ class DockerWorkerAdapter(WorkerAdapter):
             volumes.append(f"{hf_cache_volume}:{container_cache_dir}")
             return
 
+    @property
+    def _needs_docker_socket(self) -> bool:
+        return self.config.enable_ssh and self.config.ssh.uses_docker
+
     def _mount_docker_socket(self, volumes: list[str]) -> None:
-        if self.config.enable_ssh:
+        if self._needs_docker_socket:
             volumes.append(f"{self.DOCKER_SOCKET_PATH}:{self.DOCKER_SOCKET_PATH}")
 
     def _get_docker_socket_gid(self) -> int | None:
-        if not self.config.enable_ssh:
+        if not self._needs_docker_socket:
             return None
         try:
             gid = os.stat(self.DOCKER_SOCKET_PATH).st_gid
