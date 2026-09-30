@@ -415,7 +415,8 @@ therefore needs the `acl` package (`setfacl` / `getfacl`) and ACL support on
 the filesystems behind those paths; without either, it does not offer
 `process`. It also does not offer `process` when:
 
-- another worker sharing its root filesystem already serves `process` sessions;
+- another worker sharing its root filesystem or its `/var/lib/flowmesh` already
+  serves `process` sessions;
 - one of those paths contains a directory every session needs, such as the
   temp dir or `/mnt/flowmesh`;
 - one of those paths passes through a link in a world-writable directory, or
@@ -427,8 +428,10 @@ dir. The worker log is readable by the worker's own account alone.
 
 A session's inputs and output live in its own directory under
 `/var/lib/flowmesh/ssh-sessions`. Each `mountPath` is a link to them under
-`/mnt/flowmesh`. `/mnt/flowmesh` is emptied before and after every session, and
-a session is refused while a filesystem is mounted below it. A `mountPath` must
+`/mnt/flowmesh`. `/mnt/flowmesh` is emptied before and after every session, so
+it must not be shared between workers (for example, one host directory
+bind-mounted into several containers), and a session is refused while a
+filesystem is mounted below it. A `mountPath` must
 name a path below `/mnt/flowmesh`, must not contain `..`, must have at most 32
 components and 1024 characters, and must not be nested inside another one.
 Output is collected as the directories and regular files the session can read;

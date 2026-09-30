@@ -109,6 +109,7 @@ _LAUNCH_SCRIPT = (
 )
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _BACKEND_LOCK_NAME = "flowmesh-ssh-process.lock"
+_RUN_DIR = Path("/run")
 # A lookup that follows more links than this loops; the kernel stops at 40.
 _MAX_LOOKUP_STEPS = 4096
 # Paths every session needs; a denied root covering one would break it.
@@ -132,7 +133,7 @@ DENIED_CONFIG_FIELDS = (
 ALLOWED_CONFIG_FIELDS: tuple[str, ...] = ()
 _MOUNTINFO = Path("/proc/self/mountinfo")
 _OCTAL_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
-_backend_lock_fd: int | None = None
+_backend_lock_fds: list[int] | None = None
 _backend_lock_mutex = threading.Lock()
 _missing_tini_logged = False
 
@@ -193,9 +194,8 @@ class ProcessSessionBackend(SSHSessionBackend):
         if not _acquire_backend_lock():
             logger.info(
                 "Process SSH backend unavailable: another worker sharing this root "
-                "filesystem already serves process-mode sessions, and they would "
-                "share %s",
-                SAFE_MOUNT_ROOT.as_posix(),
+                "filesystem or %s already serves process-mode sessions",
+                acl.STATE_DIR.as_posix(),
             )
             return False
         return True
@@ -581,35 +581,52 @@ def _probe_dir(root: Path) -> Path:
 
 
 def _acquire_backend_lock() -> bool:
-    """Take the process-backend lock file, in ``/run`` for root or the temp dir
-    otherwise, for the life of the worker; return whether this worker holds it.
+    """Take the process-backend lock files for the life of the worker; return whether
+    this worker holds them.
 
-    Workers that see the same lock file share the mount root and session accounts,
-    so only one of them serves sessions.
+    Workers that see the same lock file in ``/run`` share the mount root and session
+    accounts, and those that see the same one in ``/var/lib/flowmesh`` share the
+    session directories and the ACL ledger, so only one of them serves sessions. A
+    worker that is not root takes one in the temp dir instead.
     """
-    global _backend_lock_fd
+    global _backend_lock_fds
     with _backend_lock_mutex:
-        if _backend_lock_fd is not None:
+        if _backend_lock_fds is not None:
             return True
-        base = Path("/run") if os.geteuid() == 0 else Path(tempfile.gettempdir())
-        try:
-            fd = os.open(
-                base / _BACKEND_LOCK_NAME,
-                os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
-                0o600,
-            )
-        except OSError:
-            logger.debug("Cannot open the process-backend lock", exc_info=True)
-            return False
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            os.close(fd)
-            if exc.errno not in (errno.EAGAIN, errno.EACCES):
-                logger.debug("Cannot take the process-backend lock", exc_info=True)
-            return False
-        _backend_lock_fd = fd
+        if os.geteuid() == 0:
+            try:
+                _make_private_dir(acl.STATE_DIR, 0o711)
+            except (OSError, ExecutionError):
+                logger.debug("Cannot prepare %s", acl.STATE_DIR, exc_info=True)
+                return False
+            bases: tuple[Path, ...] = (_RUN_DIR, acl.STATE_DIR)
+        else:
+            bases = (Path(tempfile.gettempdir()),)
+        fds: list[int] = []
+        for base in bases:
+            if (fd := _take_lock(base / _BACKEND_LOCK_NAME)) is None:
+                for held in fds:
+                    os.close(held)
+                return False
+            fds.append(fd)
+        _backend_lock_fds = fds
         return True
+
+
+def _take_lock(path: Path) -> int | None:
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        logger.debug("Cannot open the process-backend lock %s", path, exc_info=True)
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno not in (errno.EAGAIN, errno.EACCES):
+            logger.debug("Cannot take the process-backend lock %s", path, exc_info=True)
+        return None
+    return fd
 
 
 @dataclass(slots=True)

@@ -3,6 +3,7 @@ and what it leaves behind. Nothing here starts sshd or touches an account; the
 in-container suite does that."""
 
 import dataclasses
+import fcntl
 import io
 import logging
 import os
@@ -12,6 +13,7 @@ import sys
 import tarfile
 import tempfile
 import typing
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -441,32 +443,63 @@ def test_a_filesystem_that_takes_no_acl_offers_no_process_backend(
 # ------------------------------------------------------------------ #
 
 
+def _lock_held_elsewhere(lock: Path) -> bool:
+    other = subprocess.run(  # nosec B603 - argv list, test-only
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n",
+            lock.as_posix(),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    return other.returncode != 0
+
+
+@pytest.fixture
+def lock_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setattr(process_module, "_backend_lock_fds", None)
+    yield
+    for fd in process_module._backend_lock_fds or ():
+        os.close(fd)
+
+
 def test_one_worker_per_lock_file_holds_the_process_backend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_state: None
 ) -> None:
     monkeypatch.setattr(process_module.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(process_module.tempfile, "tempdir", tmp_path.as_posix())
-    monkeypatch.setattr(process_module, "_backend_lock_fd", None)
-    lock = tmp_path / process_module._BACKEND_LOCK_NAME
+
+    assert process_module._acquire_backend_lock()
+    assert process_module._acquire_backend_lock()
+    assert _lock_held_elsewhere(tmp_path / process_module._BACKEND_LOCK_NAME)
+
+
+def test_a_worker_sharing_the_state_dir_with_another_serves_no_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_state: None
+) -> None:
+    run, state = tmp_path / "run", tmp_path / "state"
+    run.mkdir()
+    state.mkdir()
+    monkeypatch.setattr(process_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(process_module, "_RUN_DIR", run)
+    monkeypatch.setattr(process_module.acl, "STATE_DIR", state)
+    monkeypatch.setattr(process_module, "_make_private_dir", lambda path, mode: None)
+    peer = os.open(
+        state / process_module._BACKEND_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600
+    )
+    fcntl.flock(peer, fcntl.LOCK_EX)
     try:
-        assert process_module._acquire_backend_lock()
-        assert process_module._acquire_backend_lock()
-        other = subprocess.run(  # nosec B603 - argv list, test-only
-            [
-                sys.executable,
-                "-c",
-                "import fcntl, os, sys\n"
-                "fd = os.open(sys.argv[1], os.O_RDWR)\n"
-                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n",
-                lock.as_posix(),
-            ],
-            capture_output=True,
-            check=False,
-        )
-        assert other.returncode != 0
+        assert not process_module._acquire_backend_lock()
+        assert not _lock_held_elsewhere(run / process_module._BACKEND_LOCK_NAME)
     finally:
-        if (fd := process_module._backend_lock_fd) is not None:
-            os.close(fd)
+        os.close(peer)
+
+    assert process_module._acquire_backend_lock()
+    assert _lock_held_elsewhere(state / process_module._BACKEND_LOCK_NAME)
 
 
 # ------------------------------------------------------------------ #
