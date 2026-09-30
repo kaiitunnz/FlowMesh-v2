@@ -9,10 +9,10 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
-from shared.content.config import ObjectStoreConfig
-from shared.schemas.worker import SSHLimits
+from shared.content.config import BACKEND_FILESYSTEM, ObjectStoreConfig
+from shared.schemas.worker import SSHBackendName, SSHLimits
 from shared.telemetry.config import TelemetryConfig
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import (
@@ -75,6 +75,36 @@ class WorkerConfig:
     peer_tls_ca_b64: str | None = None
     peer_tls_cert_b64: str | None = None
     peer_tls_key_b64: str | None = None
+    ssh_session_backend: SSHBackendName = SSHBackendName.AUTO
+    ssh_relay_host: str | None = None
+    home_dir: Path | None = None
+    model_cache_dir: Path | None = None
+
+    # Every path field is either a root of the worker's own state, which a process
+    # SSH session must never reach, or named here as not one.
+    STATE_ROOT_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "results_dir",
+            "private_state_dir",
+            "content_dir",
+            "hb_file",
+            "home_dir",
+            "model_cache_dir",
+        }
+    )
+    NON_STATE_PATH_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+    @property
+    def state_roots(self) -> tuple[Path, ...]:
+        """The paths holding this worker's own state and credentials."""
+        roots = [
+            path
+            for name in sorted(self.STATE_ROOT_FIELDS)
+            if (path := getattr(self, name)) is not None
+        ]
+        if self.object_store.backend == BACKEND_FILESYSTEM:
+            roots.append(self.object_store.filesystem_root)
+        return tuple(roots)
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -130,6 +160,10 @@ class WorkerConfig:
         ).absolute()
 
         hb_interval, hb_ttl, hb_file = get_hb_config()
+        home_dir = Path.home().absolute()
+        model_cache_dir = Path(
+            os.getenv("HF_HOME", "").strip() or (home_dir / ".cache" / "huggingface")
+        ).absolute()
 
         # A relayed variable the node never set arrives set-but-empty, so every default
         # here is taken on an empty value as well as on a missing one.
@@ -213,6 +247,17 @@ class WorkerConfig:
             )
         )
         enable_ssh_gpu_limit = parse_bool_env("ENABLE_SSH_GPU_LIMIT", True)
+        ssh_session_backend_raw = (
+            os.getenv("SSH_SESSION_BACKEND", "").strip().lower() or SSHBackendName.AUTO
+        )
+        try:
+            ssh_session_backend = SSHBackendName(ssh_session_backend_raw)
+        except ValueError:
+            raise SystemExit(
+                f"SSH_SESSION_BACKEND={ssh_session_backend_raw!r} is not one of "
+                f"{', '.join(sorted(SSHBackendName))}"
+            ) from None
+        ssh_relay_host = os.getenv("SSH_RELAY_HOST", "").strip() or None
 
         telemetry = TelemetryConfig.from_env()
 
@@ -269,4 +314,8 @@ class WorkerConfig:
             network_mode=network_mode,
             container_name=container_name,
             ssh_network_name=ssh_network_name,
+            ssh_session_backend=ssh_session_backend,
+            ssh_relay_host=ssh_relay_host,
+            home_dir=home_dir,
+            model_cache_dir=model_cache_dir,
         )

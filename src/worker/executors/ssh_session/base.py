@@ -1,10 +1,13 @@
 """Session backend seam for the SSH executor.
 
 An SSH session is a sandbox running ``sshd`` plus the transport details needed
-to reach it. The task lifecycle, TTL and idle reaping, ``emit_update`` and the
+to reach it. A worker with a Docker socket puts the session in a sibling
+container; a root worker without one runs it as a process under an account of its
+own. The task lifecycle, TTL and idle reaping, ``emit_update`` and the
 ``accessMode`` enum sit above this seam, in the executor.
 """
 
+import ipaddress
 import logging
 import os
 import socket
@@ -12,6 +15,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
+
+import psutil
 
 from shared.schemas.worker import SSHBackendName
 from shared.tasks.worker_message import WorkerHardware
@@ -23,6 +28,10 @@ from .config import FINISH_SENTINEL_PATH, ResolvedSSHInput, SSHConfig
 logger = logging.getLogger(__name__)
 
 LOOPBACK_RELAY_HOST = "127.0.0.1"
+
+# Tailscale hands every node an address out of the CGNAT range, which is how a
+# rented box advertises an address a remote supervisor can dial.
+TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 _TCP_STATE_ESTABLISHED = "01"
 
@@ -153,7 +162,7 @@ class SSHSessionBackend(ABC):
         TCP connection to this address, so it must be routable *from the
         supervisor*, not from the worker.
         """
-        return LOOPBACK_RELAY_HOST
+        return self._config.ssh_relay_host or LOOPBACK_RELAY_HOST
 
     def session_host(self) -> str:
         """Host name reported to the user as the session's location."""
@@ -236,3 +245,33 @@ def count_established_connections(proc_net_tcp: str, port: int) -> int:
         if local_port == port and fields[3] == _TCP_STATE_ESTABLISHED:
             total += 1
     return total
+
+
+def read_local_proc_net_tcp() -> str | None:
+    """Read this network namespace's TCP tables, or ``None`` when unreadable."""
+    chunks: list[str] = []
+    for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            chunks.append(Path(name).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(chunks) if chunks else None
+
+
+def resolve_tailnet_address() -> str | None:
+    """Return this host's tailnet address, or ``None`` when it has none."""
+    try:
+        interfaces = psutil.net_if_addrs()
+    except OSError:
+        return None
+    for addresses in interfaces.values():
+        for address in addresses:
+            if address.family != socket.AF_INET:
+                continue
+            try:
+                parsed = ipaddress.ip_address(address.address)
+            except ValueError:
+                continue
+            if parsed in TAILNET_NETWORK:
+                return str(parsed)
+    return None

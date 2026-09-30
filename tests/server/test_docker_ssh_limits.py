@@ -2,7 +2,7 @@
 
 import pytest
 
-from server.supervisor.adapters.docker import SSHConfig
+from server.supervisor.adapters.ssh import SSHConfig
 
 
 class TestSSHConfigToEnv:

@@ -204,6 +204,20 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `SUPERVISOR_GRPC_EXTERNAL_PORT` | – | External port (when port-forwarded) |
 | `SERVER_GRPC_TLS_*` | – | TLS certificate files |
 
+## SSH session backend
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSH_SESSION_BACKEND` | `auto` | Sandbox a session runs in: `docker` (sibling container), `process` (sshd inside the worker), or `auto` (`docker`, else `process`). |
+| `SSH_RELAY_HOST` | – | Worker address the supervisor's SSH relay dials. Unset, `docker` publishes loopback and `process` the worker's tailnet address. |
+
+`process` runs on a root worker only: each session logs in as its own
+throwaway account, denied the worker's state directories by ACL, so the
+worker needs `sshd`, `useradd` and `setfacl` and a filesystem that takes
+ACLs. It serves one interactive session per worker, ignores `spec.image`,
+and does not enforce `SSH_MAX_*`, the `ENABLE_SSH_GPU_LIMIT` subset or
+`ssh -L` forwarding.
+
 ## SSH session resource caps
 
 When `enable_ssh` is true on a Docker worker, these configured

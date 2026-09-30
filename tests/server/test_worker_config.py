@@ -1,6 +1,17 @@
 """Tests for server worker configuration models."""
 
+from unittest.mock import MagicMock
+
+import pytest
+from pydantic import ValidationError
+
+from server.hooks import PrincipalContext
+from server.supervisor.adapters.base import WorkerTokenType
+from server.supervisor.adapters.ssh import SSHConfig
+from server.supervisor.adapters.vastai import VastAIWorkerAdapter, VastAIWorkerConfig
 from server.supervisor.manager import ServerWorkerConfig, WorkerInitConfig
+from server.utils.helpers import ResourcePool
+from shared.schemas.worker import SSHBackendName
 
 
 class TestWorkerInitConfig:
@@ -55,3 +66,55 @@ class TestServerWorkerConfig:
         assert len(cfg.workers) == 2
         assert cfg.workers[0].provider == "docker"
         assert cfg.workers[1].provider == "vastai"
+
+
+class TestVastAISessionBackend:
+    """A VastAI instance is the worker container and exposes no Docker socket."""
+
+    def test_docker_backend_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="cannot be 'docker'"):
+            VastAIWorkerConfig(ssh=SSHConfig(session_backend=SSHBackendName.DOCKER))
+
+    def test_rejection_ignores_case_and_padding(self) -> None:
+        with pytest.raises(ValidationError, match="cannot be 'docker'"):
+            VastAIWorkerConfig(
+                ssh=SSHConfig.model_validate({"session_backend": "  Docker  "})
+            )
+
+    @pytest.mark.parametrize(
+        "backend", [SSHBackendName.PROCESS, SSHBackendName.AUTO, None]
+    )
+    def test_other_backends_are_accepted(self, backend: SSHBackendName | None) -> None:
+        cfg = VastAIWorkerConfig(ssh=SSHConfig(session_backend=backend))
+        assert cfg.ssh.session_backend is backend
+
+
+class TestSSHEnvironment:
+    def test_the_session_backend_and_relay_host_reach_the_worker(self) -> None:
+        env = SSHConfig(
+            session_backend=SSHBackendName.PROCESS, relay_host="100.64.0.7"
+        ).to_env()
+
+        assert env["SSH_SESSION_BACKEND"] == "process"
+        assert env["SSH_RELAY_HOST"] == "100.64.0.7"
+        assert env["ENABLE_SSH_GPU_LIMIT"] == "1"
+
+    def test_a_vastai_worker_with_ssh_gets_the_ssh_environment(self) -> None:
+        adapter = VastAIWorkerAdapter(
+            token=WorkerTokenType("vast_0.token"),
+            name="vast_0",
+            config=VastAIWorkerConfig(
+                enable_ssh=True, ssh=SSHConfig(session_backend=SSHBackendName.PROCESS)
+            ),
+            vastai_client=MagicMock(),
+            instance_pool=ResourcePool(),
+            owner=PrincipalContext(
+                principal_id="u",
+                org_id="o",
+                external_id="u",
+                principal_type="user",
+                scopes=[],
+            ),
+        )
+
+        assert adapter._base_environment()["SSH_SESSION_BACKEND"] == "process"

@@ -17,6 +17,7 @@ class SSHBackendName(StrEnum):
 
     AUTO = "auto"
     DOCKER = "docker"
+    PROCESS = "process"
 
 
 class SSHLimits(BaseModel):

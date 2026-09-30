@@ -84,7 +84,10 @@ class SSHExecutor(Executor):
     def _make_backend(self, config: WorkerConfig) -> SSHSessionBackend:
         backend_cls = select_backend_cls(config)
         if backend_cls is None:
-            raise ExecutionError("No SSH session backend is available on this worker")
+            raise ExecutionError(
+                "No SSH session backend is available on this worker "
+                f"(SSH_SESSION_BACKEND={config.ssh_session_backend})"
+            )
         logger.info("SSH sessions use the %s backend", backend_cls.name)
         return backend_cls(config, self._hardware)
 

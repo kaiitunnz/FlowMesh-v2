@@ -67,10 +67,13 @@ def resolve_inputs(
 
 
 def stage_inputs_locally(
-    resolved_inputs: list[ResolvedSSHInput], session_id: str, signals: RunSignals
+    resolved_inputs: list[ResolvedSSHInput],
+    session_id: str,
+    signals: RunSignals,
+    parent: Path | None = None,
 ) -> Path:
     staging_dir = Path(
-        tempfile.mkdtemp(prefix=f"flowmesh-ssh-inputs-{session_id[:8]}-")
+        tempfile.mkdtemp(prefix=f"flowmesh-ssh-inputs-{session_id[:8]}-", dir=parent)
     )
     try:
         _fill_staging_dir(staging_dir, resolved_inputs, signals)
