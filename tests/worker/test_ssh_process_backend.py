@@ -5,7 +5,6 @@ in-container suite does that."""
 import dataclasses
 import fcntl
 import io
-import logging
 import os
 import stat
 import subprocess
@@ -110,6 +109,7 @@ def _servable(**patches: Any) -> Any:
         "find_sshd": "/usr/sbin/sshd",
         "find_ssh_keygen": "/usr/bin/ssh-keygen",
         "find_tar": "/usr/bin/tar",
+        "find_tini": "/usr/bin/tini",
         "_acl_ready": True,
         "_acquire_backend_lock": True,
         **patches,
@@ -131,7 +131,9 @@ def test_a_worker_that_cannot_isolate_or_lock_serves_no_process_session(
         assert not ProcessSessionBackend.is_available(config)
 
 
-@pytest.mark.parametrize("missing", ["find_sshd", "find_ssh_keygen", "find_tar"])
+@pytest.mark.parametrize(
+    "missing", ["find_sshd", "find_ssh_keygen", "find_tar", "find_tini"]
+)
 def test_a_worker_missing_a_tool_serves_no_process_session(
     tmp_path: Path, missing: str
 ) -> None:
@@ -1430,12 +1432,8 @@ def test_an_ended_sshd_is_left_alone() -> None:
     kill_tree.assert_not_called()
 
 
-def test_sshd_runs_niced_and_under_a_subreaper_when_tini_is_there(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(process_module, "_missing_tini_logged", False)
-    with patch.object(process_module.shutil, "which", return_value="/usr/bin/tini"):
-        argv = process_module._launch_argv(["/usr/sbin/sshd", "-D"])
+def test_sshd_runs_niced_and_under_tini_as_a_subreaper() -> None:
+    argv = process_module._launch_argv("/usr/bin/tini", ["/usr/sbin/sshd", "-D"])
 
     assert argv[-7:] == [
         "10",
@@ -1447,14 +1445,6 @@ def test_sshd_runs_niced_and_under_a_subreaper_when_tini_is_there(
         "-D",
     ]
     assert "oom_score_adj" in argv[argv.index("-c") + 1]
-
-    with (
-        patch.object(process_module.shutil, "which", return_value=None),
-        caplog.at_level(logging.WARNING),
-    ):
-        assert process_module._launch_argv(["/usr/sbin/sshd"])[-1] == "/usr/sbin/sshd"
-        process_module._launch_argv(["/usr/sbin/sshd"])
-    assert sum("tini is missing" in r.message for r in caplog.records) == 1
 
 
 # ------------------------------------------------------------------ #

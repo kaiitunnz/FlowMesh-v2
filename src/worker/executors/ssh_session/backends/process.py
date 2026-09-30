@@ -140,7 +140,6 @@ _MOUNTINFO = Path("/proc/self/mountinfo")
 _OCTAL_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 _backend_lock_fds: list[int] | None = None
 _backend_lock_mutex = threading.Lock()
-_missing_tini_logged = False
 
 
 def find_sshd() -> str | None:
@@ -159,6 +158,10 @@ def find_ssh_keygen() -> str | None:
 
 def find_tar() -> str | None:
     return shutil.which(_TAR_BINARY)
+
+
+def find_tini() -> str | None:
+    return shutil.which(_TINI_BINARY)
 
 
 class ProcessSessionBackend(SSHSessionBackend):
@@ -186,6 +189,12 @@ class ProcessSessionBackend(SSHSessionBackend):
             logger.info(
                 "Process SSH backend unavailable: sshd, ssh-keygen or tar is missing "
                 "(install openssh-server in the worker image)"
+            )
+            return False
+        if find_tini() is None:
+            logger.info(
+                "Process SSH backend unavailable: tini is missing, so nothing would "
+                "reap what a session orphans (install tini in the worker image)"
             )
             return False
         if not (config.ssh_relay_host or resolve_tailnet_address()):
@@ -1338,11 +1347,15 @@ def _start_sshd(
 def _spawn_sshd(
     sshd_path: str, config_path: Path, log_path: Path
 ) -> subprocess.Popen[bytes]:
+    if (tini := find_tini()) is None:
+        raise ExecutionError(
+            "SSH session cannot start: tini is missing from this worker image"
+        )
     log_handle = log_path.open("wb")
     log_path.chmod(0o600)
     try:
         return subprocess.Popen(  # nosec B603 - argv list, no shell=True, the worker's own interpreter and absolute paths via shutil.which()
-            _launch_argv([sshd_path, "-D", "-e", "-f", config_path.as_posix()]),
+            _launch_argv(tini, [sshd_path, "-D", "-e", "-f", config_path.as_posix()]),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -1355,24 +1368,21 @@ def _spawn_sshd(
         log_handle.close()
 
 
-def _launch_argv(argv: list[str]) -> list[str]:
+def _launch_argv(tini: str, argv: list[str]) -> list[str]:
     """Return the command line that runs ``argv`` niced, preferred by the OOM killer
-    where the kernel honours it, and under a subreaper when ``tini`` is installed.
+    where the kernel honours it, and under ``tini`` as a subreaper.
 
     A runaway session then cannot starve the worker's heartbeat, and what it
     orphans is reaped whatever runs as PID 1.
     """
-    global _missing_tini_logged
-    if tini := shutil.which(_TINI_BINARY):
-        argv = [tini, "-s", "--", *argv]
-    elif not _missing_tini_logged:
-        _missing_tini_logged = True
-        logger.warning(
-            "tini is missing from this worker image; what an SSH session orphans is "
-            "left to PID 1 to reap"
-        )
     return interpreter_argv(
-        _LAUNCH_SCRIPT, str(_SESSION_NICENESS), str(_SESSION_OOM_SCORE_ADJ), *argv
+        _LAUNCH_SCRIPT,
+        str(_SESSION_NICENESS),
+        str(_SESSION_OOM_SCORE_ADJ),
+        tini,
+        "-s",
+        "--",
+        *argv,
     )
 
 

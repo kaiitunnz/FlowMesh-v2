@@ -409,9 +409,9 @@ content store's root, the worker's home, any of `HF_HOME`, `HF_HUB_CACHE`,
 `HUGGINGFACE_HUB_CACHE`, `HF_DATASETS_CACHE`, `TRANSFORMERS_CACHE`,
 `TORCH_HOME`, `XDG_CACHE_HOME`, `VLLM_CACHE_ROOT` and `FASTEMBED_CACHE_PATH`
 that is set, and the `fastembed_cache` directory in the temp dir. The worker
-therefore needs the `acl` package (`setfacl` / `getfacl`) and ACL support on the
-filesystems behind those paths; without either, it does not offer `process`. It
-also does not offer `process` when:
+therefore needs `tini`, the `acl` package (`setfacl` / `getfacl`) and ACL
+support on the filesystems behind those paths; without any of them, it does not
+offer `process`. It also does not offer `process` when:
 
 - another worker sharing its root filesystem or its `/var/lib/flowmesh` already
   serves `process` sessions. A shared `/var/lib/flowmesh` must be on a
