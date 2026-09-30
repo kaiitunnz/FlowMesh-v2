@@ -84,6 +84,9 @@ _SPAWN_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TZ")
 # sshd's own default; the session's PATH prepends the per-session bin dir.
 _DEFAULT_SESSION_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/games"
 _COPY_CHUNK = 64 * 1024
+_SESSION_NICENESS = 10
+_SESSION_OOM_SCORE_ADJ = 1000
+_PROC_ROOT = Path("/proc")
 
 
 def find_sshd() -> str | None:
@@ -811,7 +814,7 @@ def _spawn_sshd(
     log_handle = log_path.open("wb")
     log_path.chmod(0o600)
     try:
-        return subprocess.Popen(  # nosec B603 - argv list, no shell=True, absolute path via find_sshd()
+        process = subprocess.Popen(  # nosec B603 - argv list, no shell=True, absolute path via find_sshd()
             [sshd_path, "-D", "-e", "-f", config_path.as_posix()],
             stdout=log_handle,
             stderr=subprocess.STDOUT,
@@ -823,6 +826,21 @@ def _spawn_sshd(
         raise ExecutionError(f"Failed to start sshd: {exc}") from exc
     finally:
         log_handle.close()
+    _yield_to_the_worker(process.pid)
+    return process
+
+
+def _yield_to_the_worker(pid: int) -> None:
+    """Run sshd, and every session it forks from here on, below the worker's
+    priority and first in line for the OOM killer, so a runaway session cannot
+    starve the worker's heartbeat."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, pid, _SESSION_NICENESS)
+        (_PROC_ROOT / str(pid) / "oom_score_adj").write_text(
+            str(_SESSION_OOM_SCORE_ADJ), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning("Could not lower the SSH session's priority: %s", exc)
 
 
 def _generate_host_key(keygen_path: str, host_key: Path) -> None:

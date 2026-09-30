@@ -184,6 +184,12 @@ def test_a_session_logs_in_as_its_own_account_and_reaches_only_its_own_data(
         assert port is not None
         account = session.account
 
+        sshd = psutil.Process(cast(Any, session)._process.pid)
+        assert sshd.nice() == 10
+        assert Path(f"/proc/{sshd.pid}/oom_score_adj").read_text().strip() == "1000"
+        shell = _ssh(session, client_key, port, "nice; cat /proc/self/oom_score_adj")
+        assert shell.stdout.split() == ["10", "1000"], shell.stderr
+
         uid = _ssh(session, client_key, port, "id -u")
         assert uid.returncode == 0, uid.stderr
         assert int(uid.stdout.strip()) == account.uid != 0
