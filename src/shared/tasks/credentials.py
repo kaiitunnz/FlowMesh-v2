@@ -114,11 +114,16 @@ def mask_spec_values(spec: BaseModel, pointers: Mapping[str, Any]) -> None:
     )
 
 
+def _pointer_key(key: Any) -> str:
+    return next(iter(to_jsonable_python({key: None})))
+
+
 def _key(container: Mapping[Any, Any], segment: str) -> Any:
-    """The mapping key a pointer segment names; a pointer spells every key as text."""
+    """The mapping key a pointer segment names; a pointer spells every key in its JSON
+    form, so ``True`` is ``true``."""
     if segment in container:
         return segment
-    return next((key for key in container if str(key) == segment), segment)
+    return next((key for key in container if _pointer_key(key) == segment), segment)
 
 
 def _child(container: Any, segment: str) -> Any:
