@@ -418,9 +418,9 @@ also does not offer `process` when:
 - one of those paths contains a directory every session needs, such as the
   temp dir or `/mnt/flowmesh`;
 - a directory that resolving one of those paths passes through, links
-  included, is world-writable, unless it is sticky and holds the next component
-  as a directory the worker owns rather than a link, or it is one of those
-  paths or lies inside one.
+  included, is world-writable, unless it is one of those paths or inside one,
+  or it is sticky and holds the next component as a directory the worker owns
+  rather than a link.
 
 The deny entries do not cover files an agent tool writes directly into the temp
 dir. The worker log is readable by the worker's own account alone.

@@ -32,7 +32,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -458,17 +458,16 @@ def _state_problem(config: WorkerConfig) -> str | None:
     return None
 
 
-def _path_problem(path: Path, denied: Iterable[Path] = ()) -> str | None:
+def _path_problem(path: Path, denied: Sequence[Path] = ()) -> str | None:
     """Why a session could replace ``path`` or a directory on the way to it, if
     it could.
 
     Every directory that resolving ``path`` looks a name up in is checked,
-    those a link leads through included. A session can rename any entry of a
-    directory it can write; in a sticky one only its own, so there the entry
-    must be a directory the worker owns, not a link. A directory in ``denied``,
-    or below one, is not checked, since the session cannot search it.
+    those a link leads through included, except one at or below a root in
+    ``denied``, which the session cannot search. A session can rename any entry
+    of a directory it can write; in a sticky one only its own, so there the
+    entry must be a directory the worker owns, not a link.
     """
-    denied = tuple(denied)
     directory = Path("/")
     pending = list(path.parts[1:])
     hops = 0
@@ -486,7 +485,7 @@ def _path_problem(path: Path, denied: Iterable[Path] = ()) -> str | None:
         except OSError as exc:
             return f"cannot inspect {entry} on the way to worker state {path}: {exc}"
         if dir_mode & stat.S_IWOTH and not any(
-            directory == root or root in directory.parents for root in denied
+            directory.is_relative_to(root) for root in denied
         ):
             if not dir_mode & stat.S_ISVTX:
                 return (

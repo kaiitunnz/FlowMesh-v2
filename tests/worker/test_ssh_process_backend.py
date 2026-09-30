@@ -472,6 +472,21 @@ def test_a_world_writable_dir_inside_a_denied_root_is_accepted(
     assert {cache, cache / "hub"} <= set(roots)
 
 
+def test_a_cache_on_the_default_volume_is_accepted(tmp_path: Path) -> None:
+    # The supervisor's named volume: a worker-owned 0755 root, its hub opened by
+    # the entrypoint's prefetch.
+    cache = tmp_path / "huggingface"
+    (cache / "hub").mkdir(parents=True)
+    cache.chmod(0o755)
+    (cache / "hub").chmod(0o777)
+
+    for state_dirs in ((cache, cache / "hub"), (cache / "hub",)):
+        roots = process_module.ensure_state_roots(
+            _state_config(tmp_path, state_dirs=state_dirs)
+        )
+        assert set(state_dirs) <= set(roots)
+
+
 def test_the_same_world_writable_dir_outside_any_denied_root_is_refused(
     tmp_path: Path,
 ) -> None:
