@@ -251,11 +251,7 @@ def _resolve_gpu_devices(
     when only ``type`` or ``memory`` is set without ``count``, defaults to
     slicing a single matching device.
     """
-    host_gpu_ids = [
-        d_stripped
-        for d in os.getenv("WORKER_HOST_GPU_ID", "").split(",")
-        if (d_stripped := d.strip())
-    ]
+    host_gpu_ids = _host_gpu_ids(hardware)
     if not config.enable_ssh_gpu_limit:
         return host_gpu_ids
 
@@ -276,9 +272,9 @@ def _resolve_gpu_devices(
             f"SSH task requested {requested} GPU(s) but this worker has none"
         )
 
-    # The supervisor passes WORKER_HOST_GPU_ID in the same order as
-    # worker.hardware.gpu.devices, so positions line up 1:1. When metadata is
-    # missing or misaligned, fall back to count-only slicing.
+    # Host ids line up 1:1 with worker.hardware.gpu.devices, whether the supervisor
+    # passed them or the worker detected them. When metadata is missing or
+    # misaligned, fall back to count-only slicing.
     devices = hardware.gpu.devices if hardware is not None else []
     if devices and len(devices) != len(host_gpu_ids):
         logger.warning(
@@ -329,6 +325,19 @@ def _resolve_gpu_devices(
         f"only {len(matching_indices)} satisfying device(s) are available "
         "on this worker"
     )
+
+
+def _host_gpu_ids(hardware: WorkerHardware | None) -> list[str]:
+    """The GPUs a session may be given: those the supervisor passed in
+    ``WORKER_HOST_GPU_ID``, else those the worker detected itself."""
+    if passed := [
+        d_stripped
+        for d in os.getenv("WORKER_HOST_GPU_ID", "").split(",")
+        if (d_stripped := d.strip())
+    ]:
+        return passed
+    # A UUID names a device whatever order CUDA enumerates it in.
+    return [device.uuid for device in hardware.gpu.devices] if hardware else []
 
 
 def normalize_mount_path(path: str, field_name: str) -> str:
