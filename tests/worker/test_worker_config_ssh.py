@@ -52,3 +52,20 @@ def test_a_session_and_teardown_stop_within_the_configured_timeout(
 
     assert config.ssh_stop_timeout_sec == 7.5
     assert SSHConfig.from_spec(spec, config).stop_timeout_sec == 7.5
+
+
+def test_a_session_config_keeps_what_the_spec_itself_named(
+    worker_env: pytest.MonkeyPatch,
+) -> None:
+    config = WorkerConfig.from_env()
+    bare = SSHSpecStrict.model_validate({"taskType": "ssh", "command": ["true"]})
+    named = SSHSpecStrict.model_validate(
+        {"taskType": "ssh", "command": ["true"], "image": "img", "user": "alice"}
+    )
+
+    defaulted = SSHConfig.from_spec(bare, config)
+    chosen = SSHConfig.from_spec(named, config)
+
+    assert defaulted.image and defaulted.user
+    assert (defaulted.requested_image, defaulted.requested_user) == (None, None)
+    assert (chosen.requested_image, chosen.requested_user) == ("img", "alice")

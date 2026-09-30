@@ -107,7 +107,8 @@ def _request(
         extra_env={"TOKEN": _SESSION_TOKEN},
         output=None if output is None else SSHOutputConfig(output, None),
         gpu_device_ids=[],
-        image=None,
+        requested_image=None,
+        requested_user=None,
     )
     return SessionRequest(
         task_id="tsk-ssh",

@@ -236,11 +236,11 @@ class ProcessSessionBackend(SSHSessionBackend):
                 "worker image"
             )
         plan = _plan_mounts(request)
-        if cfg.image:
+        if cfg.requested_image:
             logger.info(
                 "Ignoring SSH spec image %s: process-mode sessions run in the "
                 "worker's own root filesystem",
-                cfg.image,
+                cfg.requested_image,
             )
 
         session_dir = SESSIONS_ROOT / request.session_id
@@ -262,11 +262,11 @@ class ProcessSessionBackend(SSHSessionBackend):
             )
             manifest.uid = account.uid
             manifest.write()
-            if cfg.user != account.name:
+            if cfg.requested_user:
                 logger.info(
                     "Ignoring SSH spec user %s: this session logs in as its own "
                     "account %s",
-                    cfg.user,
+                    cfg.requested_user,
                     account.name,
                 )
 

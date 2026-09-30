@@ -98,6 +98,9 @@ class SSHConfig:
     memory_limit_bytes: int | None
     pids_limit: int | None
     gpu_device_ids: list[str]
+    # What the spec itself named, before the worker's defaults.
+    requested_image: str | None = None
+    requested_user: str | None = None
 
     @classmethod
     def from_spec(
@@ -149,6 +152,8 @@ class SSHConfig:
             memory_limit_bytes=memory_limit_bytes,
             pids_limit=pids_limit,
             gpu_device_ids=gpu_device_ids,
+            requested_image=spec.image,
+            requested_user=spec.user,
         )
 
 
