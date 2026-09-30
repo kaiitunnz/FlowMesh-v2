@@ -208,15 +208,29 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SSH_SESSION_BACKEND` | `auto` | Sandbox a session runs in: `docker` (sibling container), `process` (sshd inside the worker), or `auto` (`docker`, else `process`). |
-| `SSH_RELAY_HOST` | – | Worker address the supervisor's SSH relay dials. Unset, `docker` publishes loopback and `process` the worker's tailnet address. |
+| `SSH_SESSION_BACKEND` | `auto` | Sandbox an SSH session runs in |
 
-`process` runs on a root worker only: each session logs in as its own
-throwaway account, denied the worker's state directories by ACL, so the
-worker needs `sshd`, `useradd` and `setfacl` and a filesystem that takes
-ACLs. It serves one interactive session per worker, ignores `spec.image`,
-and does not enforce `SSH_MAX_*`, the `ENABLE_SSH_GPU_LIMIT` subset or
-`ssh -L` forwarding.
+The backend is `docker` (a sibling container per session), `process` (sshd
+inside the worker), `auto` (`docker` where the worker reaches a Docker daemon,
+else `process`), or `off`. A supervisor sets it on each worker it starts: `off`
+where the worker's `enable_ssh` is false, and otherwise the worker's
+`ssh.session_backend` or this default. A worker started without it uses
+`docker`.
+
+`process` runs on a root worker with `sshd`, `useradd`, `setfacl` and `tar`
+and a filesystem that takes ACLs. Each session logs in as its own throwaway
+account, denied the worker's state directories by ACL, in the worker's own
+root filesystem and network namespace, loopback and tailnet included, so
+`spec.image` and `spec.user` do not apply. A worker serves one interactive
+session at a time and reports that it runs only interactive ones, so the
+dispatcher sends a non-interactive SSH task elsewhere. `SSH_MAX_*` apply to
+`docker` only, the `ENABLE_SSH_GPU_LIMIT` subset is an advisory
+`CUDA_VISIBLE_DEVICES`, and `ssh -L` forwarding is refused.
+
+The supervisor reaches a session at its worker's relay host: loopback for
+`docker`, and the worker's tailnet address for `process`. A worker's
+`ssh.relay_host` sets it explicitly, and a `process` worker with neither
+serves no sessions.
 
 ## SSH session resource caps
 
@@ -241,8 +255,8 @@ warning if SSH is enabled with no cap configured.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SSH_DEFAULT_TTL_SEC` | `3600` | Session TTL when `spec.ttlSeconds` is unset |
-| `SSH_MAX_TTL_SEC` | `28800` | Upper bound on session TTL |
+| `SSH_DEFAULT_TTL_SEC` | `3600` | SSH session TTL when `spec.ttlSeconds` is unset |
+| `SSH_MAX_TTL_SEC` | `28800` | Upper bound on SSH session TTL |
 | `SSH_DEFAULT_IDLE_SEC` | `900` | Idle timeout when `spec.idleTimeoutSeconds` is unset |
 
 An interactive session stops once it has had no established SSH connection

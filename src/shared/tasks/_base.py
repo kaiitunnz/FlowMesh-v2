@@ -4,8 +4,8 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
 
-# Validation context for a model loaded back from durable storage, where a key that
-# an older build wrote and this one retired must still load.
+# Validation context for a model loaded from durable storage, under which it drops the
+# fields it retired.
 PERSISTED_LOAD_CONTEXT: Mapping[str, bool] = MappingProxyType({"persisted_load": True})
 
 

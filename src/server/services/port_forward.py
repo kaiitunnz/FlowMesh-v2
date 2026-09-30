@@ -27,11 +27,8 @@ _DEFAULT_TIMEOUT_SEC = 5.0
 
 @dataclass(slots=True)
 class _ConnectionContext:
-    """Connection-registry metadata for a forwarded session.
-
-    Fed to the connection registry when a client connects; not used by the forwarding
-    path.
-    """
+    """Connection-registry metadata for a forwarded session, recorded when a client
+    connects."""
 
     workflow_id: str | None
     worker_id: str

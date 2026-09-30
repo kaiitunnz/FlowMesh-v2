@@ -1,11 +1,6 @@
-"""Upstream-result staging for SSH sessions.
-
-Resolving an ``inputs[]`` entry to a local directory is the same work for every
-session backend: locate the upstream task's results on disk, or download the
-result bundle when this worker never ran that task, and place the upstream's
-hydrated result envelope beside its artifacts. How the staged directory is then
-exposed to the session is backend-specific.
-"""
+"""Stages an SSH task's ``inputs[]`` in a local directory: an upstream's results
+from this worker's disk, or its result bundle downloaded when another worker ran it,
+with its hydrated result envelope beside its artifacts."""
 
 import os
 import shutil
@@ -89,8 +84,8 @@ def _fill_staging_dir(
     for resolved in resolved_inputs:
         destination = staging_dir / resolved.task_id
         if resolved.source_path.exists():
-            # A link in an upstream's output is copied as a link, never followed as
-            # the worker.
+            # Links copy as links, so staging never reads what one points to with
+            # the worker's access.
             shutil.copytree(
                 resolved.source_path, destination, symlinks=True, dirs_exist_ok=True
             )

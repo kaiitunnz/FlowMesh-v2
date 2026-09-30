@@ -1057,9 +1057,24 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar("ENABLE_SSH_BY_DEFAULT", "true", var_type=EnvVarType.BOOL),
                 EnvVar("SSH_DEFAULT_IMAGE"),
                 EnvVar("SSH_DEFAULT_USER"),
-                EnvVar("SSH_DEFAULT_TTL_SEC", var_type=EnvVarType.FLOAT, min_value=0),
-                EnvVar("SSH_DEFAULT_IDLE_SEC", var_type=EnvVarType.FLOAT, min_value=0),
-                EnvVar("SSH_MAX_TTL_SEC", var_type=EnvVarType.FLOAT, min_value=0),
+                EnvVar(
+                    "SSH_DEFAULT_TTL_SEC",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    description="SSH session TTL when spec.ttlSeconds is unset.",
+                ),
+                EnvVar(
+                    "SSH_DEFAULT_IDLE_SEC",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    description="Idle timeout when spec.idleTimeoutSeconds is unset.",
+                ),
+                EnvVar(
+                    "SSH_MAX_TTL_SEC",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    description="Upper bound on SSH session TTL.",
+                ),
                 EnvVar("SSH_POLL_INTERVAL_SEC", var_type=EnvVarType.FLOAT, min_value=0),
                 EnvVar("SSH_STOP_TIMEOUT_SEC", var_type=EnvVarType.FLOAT, min_value=0),
                 EnvVar(

@@ -3,8 +3,7 @@
 An SSH session is a sandbox running ``sshd`` plus the transport details needed
 to reach it. A worker with a Docker socket puts the session in a sibling
 container; a root worker without one runs it as a process under an account of its
-own. The task lifecycle, TTL and idle reaping, ``emit_update`` and the
-``accessMode`` enum sit above this seam, in the executor.
+own. The executor above it owns the task lifecycle and TTL and idle reaping.
 """
 
 import io
@@ -94,7 +93,7 @@ class SSHSession(ABC):
         """Count of established SSH connections, or ``None`` when unobservable.
 
         ``None`` means the idle reaper has no evidence either way and must not
-        reap; it is not the same as zero.
+        reap.
         """
 
     @abstractmethod
@@ -170,12 +169,7 @@ class SSHSessionBackend(ABC):
         """Reap any sessions ``worker_name`` still owns."""
 
     def relay_host(self) -> str:
-        """Address at which this worker's session ports are reachable.
-
-        The supervisor that dials the relay uplink is the consumer: it opens a
-        TCP connection to this address, so it must be routable *from the
-        supervisor*, not from the worker.
-        """
+        """Address the supervisor dials to reach this worker's session ports."""
         return self._config.ssh_relay_host or LOOPBACK_RELAY_HOST
 
     def session_host(self) -> str:

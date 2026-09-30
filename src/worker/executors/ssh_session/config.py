@@ -1,9 +1,5 @@
-"""Resolved configuration for an SSH session.
-
-Transport-agnostic: every value here is derived from the task spec, the worker
-config and the environment, and means the same thing whichever session backend
-ends up running the session.
-"""
+"""Resolved configuration for an SSH session, derived from the task spec, the worker
+config and the environment."""
 
 import logging
 import os

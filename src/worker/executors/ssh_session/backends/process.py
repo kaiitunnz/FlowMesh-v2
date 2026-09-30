@@ -1,7 +1,4 @@
-"""Process session backend: sshd as a process beside the worker.
-
-For root workers with no Docker socket, which cannot create a sibling container to
-put a session in. Having no container around the session shapes the backend:
+"""Serves SSH sessions on a root worker with no Docker socket:
 
 * **One interactive session per worker.** Sessions sharing a worker would share its
   filesystem and process namespace, so a second concurrent session is refused, and
@@ -13,9 +10,10 @@ put a session in. Having no container around the session shapes the backend:
 * **Real paths, created fresh.** The session's mount paths are created under a
   mount root the backend recreates for every session, one component at a time and
   never through a symlink, and only paths the backend created are handed to the
-  session.
-* **No worker-side resource cap.** ``SSH_MAX_*`` and the GPU subset need cgroup and
-  device control the worker does not have over itself.
+  session. Its output is read back by a child running as its account.
+* **The worker's size is the cap.** ``SSH_MAX_*`` and the GPU subset need cgroup
+  and device control over the worker itself, so a session runs niced and first in
+  line for the OOM killer instead.
 """
 
 import json

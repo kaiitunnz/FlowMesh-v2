@@ -206,7 +206,7 @@ ignore-words-list = "pre-select"
 skips = [
     "B101",  # assert: internal invariants, not shipped with -O
     "B102",  # exec: agent Python executor sandbox feature
-    "B104",  # 0.0.0.0 bind: each such listener authenticates its clients
+    "B104",  # 0.0.0.0 bind: server API and gRPC, SSH port forwards, session sshd; all authenticate clients
     "B107",  # password default: placeholder, not a real credential
     "B110",  # try/except/pass: best-effort cleanup paths
     "B112",  # try/except/continue: iteration over partially-bad inputs

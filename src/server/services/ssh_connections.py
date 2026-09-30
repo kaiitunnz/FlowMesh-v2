@@ -7,7 +7,6 @@ from ..schemas.ssh import SSHConnectionInfo
 
 
 class SshConnectionRegistry:
-    """Tracks the SSH connections a server is relaying."""
 
     def __init__(self, redis_client: RedisClient) -> None:
         self._redis = redis_client
