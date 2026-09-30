@@ -218,33 +218,15 @@ where the worker's `enable_ssh` is false, and otherwise the worker's
 `docker`.
 
 `process` runs on a root worker with `sshd`, `useradd`, `setfacl` and `tar`
-and a filesystem that takes ACLs, one such worker per host. Each session logs
-in as its own throwaway account, with a uid from 61000–64999, in the worker's
-own root filesystem and network namespace, loopback and tailnet included, so
-`spec.image` and `spec.user` do not apply. A worker serves one interactive
-session at a time and reports that it runs only interactive ones, so the
-dispatcher sends a non-interactive SSH task elsewhere. `SSH_MAX_*` apply to
+and a filesystem that takes ACLs. Each session logs in as its own throwaway
+account, in the worker's own root filesystem and network namespace, loopback and
+tailnet included, so `spec.image` and `spec.user` do not apply. A worker serves
+one interactive session at a time and reports that it runs only interactive ones,
+so the dispatcher sends a non-interactive SSH task elsewhere. `SSH_MAX_*` apply to
 `docker` only, the `ENABLE_SSH_GPU_LIMIT` subset is an advisory
-`CUDA_VISIBLE_DEVICES`, and `ssh -L` forwarding is refused.
-
-The account is denied by ACL `RESULTS_DIR`, `WORKER_PRIVATE_STATE_DIR`,
-`WORKER_CONTENT_DIR`, the directory holding `WORKER_HB_FILE`, a filesystem
-content store, the worker's home, `fastembed_cache` in the temp dir, and each
-of `HF_HOME`, `HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`, `HF_DATASETS_CACHE`,
-`TRANSFORMERS_CACHE`, `TORCH_HOME`, `XDG_CACHE_HOME`, `VLLM_CACHE_ROOT` and
-`FASTEMBED_CACHE_PATH` that is set. `process` is not offered when one of these
-contains a path every session needs, such as the temp dir or `/mnt/flowmesh`,
-or sits in a sticky world-writable directory without being a root-owned
-directory only root can write. One in a world-writable directory without the
-sticky bit is denied through that directory. The worker log is readable by the
-worker's own account alone.
-
-A session's inputs and output live in its own directory under
-`/var/lib/flowmesh/ssh-sessions`, and each `mountPath` is a link to them under
-`/mnt/flowmesh`, which is emptied before and after every session; a worker
-refuses a session while a filesystem is mounted below it. A `mountPath` is at
-most 32 components and 1024 characters, and output nested more than 64
-directories deep fails the task.
+`CUDA_VISIBLE_DEVICES`, and `ssh -L` forwarding is refused. What a `process`
+session is denied and where its data lives are in
+[`EXECUTORS.md`](EXECUTORS.md#ssh-executor-process-backend).
 
 The supervisor reaches a session at its worker's relay host: loopback for
 `docker`, and the worker's tailnet address for `process`. A worker's

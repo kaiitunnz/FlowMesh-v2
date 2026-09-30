@@ -30,8 +30,9 @@ and artifacts.
 - **[`docs/CLI.md`](docs/CLI.md)** — `flowmesh ...` command groups,
   common workflows (submit/watch/logs), local stack lifecycle, SSH tasks.
 - **[`docs/EXECUTORS.md`](docs/EXECUTORS.md)** — `taskType → Executor`
-  registry table, helper utilities, and the `AgentEpisodeExecutor`
-  harness-backend and per-workflow model-binding contract.
+  registry table, helper utilities, executor-specific requirements and
+  behavior, and the `AgentEpisodeExecutor` harness-backend and per-workflow
+  model-binding contract.
 - **[`docs/WORKFLOWS.md`](docs/WORKFLOWS.md)** — workflow YAML format
   hierarchy: single task, multi-stage DAG (`spec.stages`), graph DAG
   (`taskType: graph_template`), and schedule hints (`epoch_groups`,
