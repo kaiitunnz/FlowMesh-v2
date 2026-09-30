@@ -66,15 +66,22 @@ def is_credential_key(name: str) -> bool:
     return False
 
 
-# Names that carry a credential only as a URL parameter: a Google ``?key=``, an Azure
-# SAS ``sig``, a servlet session id in a ``;jsessionid=`` path parameter.
-_URL_CREDENTIAL_NAMES = frozenset({"key", "sig", "signature", "jsessionid"})
+# Names that carry a credential only as a URL parameter: a Google ``?key=``, a servlet
+# session id in a ``;jsessionid=`` path parameter, and a signature however it is
+# prefixed (an Azure SAS ``sig``, an S3 ``X-Amz-Signature``).
+_URL_CREDENTIAL_NAMES = frozenset({"key", "jsessionid"})
+_URL_CREDENTIAL_LAST_SEGMENTS = frozenset({"sig", "signature"})
 _PATH_PARAMETER = re.compile(r";([^;/=]*)=([^;/]*)")
 
 
 def _is_url_credential_name(name: str) -> bool:
     name = unquote_plus(name)
-    return name.lower() in _URL_CREDENTIAL_NAMES or is_credential_key(name)
+    segments = _segments(name.lower())
+    return (
+        name.lower() in _URL_CREDENTIAL_NAMES
+        or bool(segments and segments[-1] in _URL_CREDENTIAL_LAST_SEGMENTS)
+        or is_credential_key(name)
+    )
 
 
 def _split_url(value: str) -> SplitResult | None:

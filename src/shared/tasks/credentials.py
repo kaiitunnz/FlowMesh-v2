@@ -6,7 +6,7 @@ pointer relative to the spec, so the spec can be masked where it is stored and r
 where it runs.
 """
 
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from typing import Any
 
 from pydantic import BaseModel
@@ -18,7 +18,6 @@ from ..utils.redact import (
     is_credential_key,
     masked,
 )
-from .placeholders import PLACEHOLDER_PATTERN
 from .specs import TaskSpecTemplateBase
 
 
@@ -51,12 +50,51 @@ def find_spec_credentials(spec: TaskSpecTemplateBase) -> dict[str, Any]:
     return found
 
 
+def find_spec_strings(
+    spec: TaskSpecTemplateBase, values: Collection[str]
+) -> frozenset[str]:
+    """The pointers of the strings in ``spec``'s credential fields equal to one of
+    ``values``."""
+    if not values:
+        return frozenset()
+    return frozenset(
+        credential_pointer(path)
+        for name in type(spec).credential_fields
+        if (value := getattr(spec, name)) is not None
+        for path, text in _strings(to_jsonable_python(value), (name,))
+        if text in values
+    )
+
+
+def _strings(value: Any, path: CredentialPath) -> Iterator[tuple[CredentialPath, str]]:
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _strings(item, (*path, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _strings(item, (*path, index))
+
+
 def spec_value(spec: BaseModel, pointer: str) -> Any:
     """The value at ``pointer`` in ``spec``."""
     container: Any = spec
     for segment in _segments(pointer):
         container = _child(container, segment)
     return container
+
+
+def dispatched_credentials(spec: BaseModel, pointers: Iterable[str]) -> list[Any]:
+    """The credential values at ``pointers`` in a dispatched spec; a pointer the spec
+    does not hold is skipped."""
+    values: list[Any] = []
+    for pointer in pointers:
+        try:
+            values.append(spec_value(spec, pointer))
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+            continue
+    return values
 
 
 def set_spec_values(spec: BaseModel, values: Mapping[str, Any]) -> None:
@@ -74,17 +112,6 @@ def mask_spec_values(spec: BaseModel, pointers: Mapping[str, Any]) -> None:
     set_spec_values(
         spec, {pointer: masked(value) for pointer, value in pointers.items()}
     )
-
-
-def holds_placeholder(value: Any) -> bool:
-    """Whether a credential value renders from an upstream stage at dispatch."""
-    if isinstance(value, str):
-        return bool(PLACEHOLDER_PATTERN.search(value))
-    if isinstance(value, dict):
-        return any(holds_placeholder(item) for item in value.values())
-    if isinstance(value, list):
-        return any(holds_placeholder(item) for item in value)
-    return False
 
 
 def _key(container: Mapping[Any, Any], segment: str) -> Any:
@@ -113,8 +140,9 @@ def _assign(container: Any, segment: str, value: Any) -> None:
 
 __all__ = [
     "credential_pointer",
+    "dispatched_credentials",
     "find_spec_credentials",
-    "holds_placeholder",
+    "find_spec_strings",
     "mask_spec_values",
     "set_spec_values",
     "spec_value",

@@ -35,7 +35,7 @@ class TestTranslateN8nWorkflow:
                 },
             }
         ]
-        result = translate_n8n_workflow({"nodes": nodes, "connections": {}})
+        result = translate_n8n_workflow({"nodes": nodes, "connections": {}}).document
 
         # Top-level shape
         assert result["kind"] == "APITask"
@@ -76,7 +76,9 @@ class TestTranslateN8nWorkflow:
                 "credentials": {"openAiApi": {"data": {"apiKey": "sk-n8n"}}},
             }
         ]
-        api = translate_n8n_workflow({"nodes": nodes, "connections": {}})["spec"]["api"]
+        api = translate_n8n_workflow({"nodes": nodes, "connections": {}}).document[
+            "spec"
+        ]["api"]
         assert api["headers"]["Authorization"] == "Bearer sk-n8n"
         assert "key" not in api
 
@@ -109,7 +111,10 @@ def _encrypted(plaintext: str) -> str:
     return ":".join(part.hex() for part in (nonce, tag, ciphertext))
 
 
-def _encrypted_openai_payload() -> str:
+def _encrypted_openai_payload(url: str | None = None) -> str:
+    data = {"apiKey": _encrypted("sk-n8n"), "apiKey_encrypted": True}
+    if url is not None:
+        data.update(url=_encrypted(url), url_encrypted=True)
     node = {
         "name": "Chat",
         "type": "@n8n/n8n-nodes-langchain.openAi",
@@ -117,19 +122,13 @@ def _encrypted_openai_payload() -> str:
             "modelId": {"value": "gpt-4"},
             "responses": {"values": [{"content": "hi"}]},
         },
-        "credentials": {
-            "openAiApi": {
-                "data": {"apiKey": _encrypted("sk-n8n"), "apiKey_encrypted": True}
-            }
-        },
+        "credentials": {"openAiApi": {"data": data}},
     }
     return json.dumps({"nodes": [node], "connections": {}})
 
 
-@pytest.mark.anyio
-async def test_the_runtime_decrypts_n8n_credentials_with_its_configured_password():
-    vault = InMemoryCredentialVault()
-    runtime = TaskRuntime(
+def _runtime(vault: InMemoryCredentialVault) -> TaskRuntime:
+    return TaskRuntime(
         cast(Any, FakeWorkflowRegistry()),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
@@ -138,6 +137,12 @@ async def test_the_runtime_decrypts_n8n_credentials_with_its_configured_password
         credential_vault=vault,
         n8n=N8nConfig(credential_password=_AES_PASSWORD),
     )
+
+
+@pytest.mark.anyio
+async def test_the_runtime_decrypts_n8n_credentials_with_its_configured_password():
+    vault = InMemoryCredentialVault()
+    runtime = _runtime(vault)
     workflow_id, results = await runtime.register(
         "owner", "org", _encrypted_openai_payload(), format="n8n"
     )
@@ -145,6 +150,21 @@ async def test_the_runtime_decrypts_n8n_credentials_with_its_configured_password
     assert record is not None and record.credential_refs is not None
     ref = record.credential_refs["/api/headers/Authorization"]
     assert vault.resolve_values(workflow_id, [ref]) == {ref: "Bearer sk-n8n"}
+
+
+@pytest.mark.anyio
+async def test_an_encrypted_url_is_vaulted_however_it_is_shaped():
+    vault = InMemoryCredentialVault()
+    runtime = _runtime(vault)
+    url = "https://private-gateway.example/v1"
+    workflow_id, results = await runtime.register(
+        "owner", "org", _encrypted_openai_payload(url), format="n8n"
+    )
+    record = runtime.get_record(results[0].task_id)
+    assert record is not None and record.credential_refs is not None
+    assert "private-gateway" not in record.model_dump_json()
+    ref = record.credential_refs["/api/url"]
+    assert vault.resolve_values(workflow_id, [ref]) == {ref: f"{url}/chat/completions"}
 
 
 def test_n8n_config_reads_its_password_at_the_config_edge(monkeypatch):

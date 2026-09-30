@@ -3,8 +3,13 @@ from pathlib import Path
 
 import yaml
 
-from server.task.credentials import redact_source_text, take_inline_credentials
+from server.task.credentials import (
+    redact_source_text,
+    redact_stored_source,
+    take_inline_credentials,
+)
 from server.task.parser import parse_workflow
+from shared.tasks.specs import AgentSpecTemplate
 from shared.utils.redact import REDACTED
 
 _WF = """
@@ -31,7 +36,9 @@ def test_an_agent_model_key_is_taken_with_the_other_credentials():
     parsed = parse_workflow(_WF, "native")
     taken = take_inline_credentials(parsed)
     agent = next(t for t in parsed.tasks if t.task.spec.taskType == "agent")
-    assert agent.task.spec.model_binding.api_key is None
+    spec = agent.task.spec
+    assert isinstance(spec, AgentSpecTemplate) and spec.model_binding is not None
+    assert spec.model_binding.api_key is None
     assert taken.values[taken.model_keys[agent.task_id]] == "sk-secret"
 
 
@@ -212,3 +219,7 @@ def test_an_n8n_json_output_that_is_not_json_is_masked_whole():
         if node["name"] == "Runtime Spec A"
     )
     assert runtime["parameters"]["jsonOutput"] == REDACTED
+
+
+def test_a_source_stored_as_the_marker_stays_the_marker():
+    assert redact_stored_source(REDACTED) == REDACTED

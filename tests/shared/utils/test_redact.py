@@ -187,6 +187,11 @@ def test_redaction_covers_every_rejected_harness_param(name: str) -> None:
             "https://app.example/shop;jsessionid=[REDACTED]?page=2",
         ),
         ("https://docs.example/page#key", "https://docs.example/page#key"),
+        (
+            "https://b.s3.example/o?X-Amz-Date=d&X-Amz-Signature=s",
+            "https://b.s3.example/o?X-Amz-Date=d&X-Amz-Signature=[REDACTED]",
+        ),
+        ("https://api.example/v1?sort_key=a", "https://api.example/v1?sort_key=a"),
     ],
 )
 def test_redact_url_drops_userinfo_and_masks_credential_query_values(url, expected):

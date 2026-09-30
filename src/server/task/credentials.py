@@ -8,11 +8,11 @@ from pydantic import SecretStr
 
 from shared.tasks.credentials import (
     find_spec_credentials,
-    holds_placeholder,
     mask_spec_values,
     set_spec_values,
     spec_value,
 )
+from shared.tasks.placeholders import contains_placeholder
 from shared.tasks.specs import AgentSpecTemplate, TaskSpecBase, TaskSpecTemplateBase
 from shared.utils.ids import new_credential_ref
 from shared.utils.redact import REDACTED, redact_credential_fields
@@ -62,14 +62,17 @@ class CredentialRefs:
 
 
 def take_spec_credentials(
-    spec: TaskSpecTemplateBase, refs: CredentialRefs
+    spec: TaskSpecTemplateBase,
+    refs: CredentialRefs,
+    declared: frozenset[str] = frozenset(),
 ) -> TaskCredentials:
-    """Mask every inline credential in ``spec`` in place, minting a ref for each from
-    ``refs``."""
-    found = find_spec_credentials(spec)
+    """Mask every inline credential in ``spec`` in place, and each value ``declared``
+    points to, minting a ref for each from ``refs``."""
+    found = {pointer: spec_value(spec, pointer) for pointer in declared}
+    found.update(find_spec_credentials(spec))
     taken = TaskCredentials(
         refs={pointer: refs.ref(value) for pointer, value in found.items()},
-        renders=any(holds_placeholder(value) for value in found.values()),
+        renders=any(contains_placeholder(value) for value in found.values()),
     )
     mask_spec_values(spec, found)
     return taken
@@ -96,7 +99,9 @@ def take_inline_credentials(parsed: ParsedWorkflow) -> InlineCredentials:
         spec = task.task.spec
         if (key := _take_model_key(spec)) is not None:
             model_keys[task.task_id] = refs.ref(key.get_secret_value())
-        taken = tasks[task.task_id] = take_spec_credentials(spec, refs)
+        taken = tasks[task.task_id] = take_spec_credentials(
+            spec, refs, task.declared_credentials
+        )
         task.masked_credentials = frozenset(taken.refs)
     return InlineCredentials(values=refs.values, tasks=tasks, model_keys=model_keys)
 
@@ -153,7 +158,10 @@ def _redact_n8n_document(document: Any) -> Any:
 
 
 def redact_stored_source(source: str) -> str:
-    """Redact a source stored as the redacted form of either submission format."""
+    """Redact a source stored as the redacted form of either submission format; a
+    source stored as the marker alone stays the marker."""
+    if source.strip() == REDACTED:
+        return source
     return redact_source_text(
         source, "n8n" if source.lstrip().startswith("{") else "native"
     )
