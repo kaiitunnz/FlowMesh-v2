@@ -112,6 +112,12 @@ def test_a_mount_path_with_a_nul_is_rejected() -> None:
         normalize_mount_path("/mnt/flowmesh/a\0b", "mountPath")
 
 
+def test_a_mount_path_that_is_not_utf_8_fails_for_good() -> None:
+    with pytest.raises(ExecutionError, match="UTF-8") as refused:
+        normalize_mount_path("/mnt/flowmesh/a\udc80", "mountPath")
+    assert not refused.value.retryable
+
+
 def test_a_mount_path_at_the_bounds_is_accepted() -> None:
     deepest = "/mnt/flowmesh/" + "/".join(["d"] * (MAX_MOUNT_PATH_COMPONENTS - 2))
     widest = "/mnt/flowmesh/" + "x" * MAX_MOUNT_PATH_COMPONENT_BYTES

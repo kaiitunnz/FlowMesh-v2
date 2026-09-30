@@ -354,7 +354,11 @@ def normalize_mount_path(path: str, field_name: str) -> str:
         raise ExecutionError(f"{field_name} must not contain '..'")
     if "\0" in raw:
         raise ExecutionError(f"{field_name} must not contain a NUL character")
-    if any(len(part.encode()) > MAX_MOUNT_PATH_COMPONENT_BYTES for part in parts):
+    try:
+        sizes = [len(part.encode()) for part in parts]
+    except UnicodeError:
+        raise ExecutionError(f"{field_name} must be valid UTF-8") from None
+    if any(size > MAX_MOUNT_PATH_COMPONENT_BYTES for size in sizes):
         raise ExecutionError(
             f"{field_name} must have components of at most "
             f"{MAX_MOUNT_PATH_COMPONENT_BYTES} bytes"
