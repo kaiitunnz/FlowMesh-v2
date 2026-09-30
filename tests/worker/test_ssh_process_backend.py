@@ -869,6 +869,52 @@ def test_the_session_is_stopped_before_its_sshd_and_again_after() -> None:
     assert order == ["kill", "terminate", "kill"]
 
 
+@pytest.mark.parametrize("clean", [True, False])
+def test_a_cleanup_releases_the_session_once(clean: bool) -> None:
+    backend = MagicMock()
+    session = _session(RunSignals(), MagicMock())
+    session._backend = backend
+    with patch.object(
+        process_module, "_discard_session", return_value=clean
+    ) as discard:
+        session.cleanup()
+        session.cleanup()
+
+    discard.assert_called_once()
+    backend._release.assert_called_once_with(session, clean)
+
+
+def test_a_session_that_fails_to_start_and_cannot_be_discarded_stops_the_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(process_module, "SESSIONS_ROOT", tmp_path / "sessions")
+    (tmp_path / "sessions").mkdir()
+    backend = ProcessSessionBackend(make_live_worker_config(tmp_path))
+    request = SessionRequest(
+        task_id="tsk-ssh",
+        session_id="ssn-0123456789abcdef",
+        worker_name="worker-1",
+        cfg=MagicMock(interactive=True, output=None, requested_image=None),
+        out_dir=tmp_path / "out",
+        resolved_inputs=[],
+        signals=RunSignals(),
+    )
+    with (
+        patch.object(process_module, "find_sshd", return_value="/usr/sbin/sshd"),
+        patch.object(process_module, "find_ssh_keygen", return_value="/usr/bin/k"),
+        patch.object(process_module, "_make_private_dir"),
+        patch.object(
+            process_module, "ensure_state_roots", side_effect=ExecutionError("no")
+        ),
+        patch.object(process_module, "_discard_session", return_value=False),
+        pytest.raises(ExecutionError, match="no"),
+    ):
+        backend.start_session(request)
+
+    with pytest.raises(ExecutionError, match="could not be rid of"):
+        backend.start_session(request)
+
+
 def test_an_sshd_that_ignores_a_terminate_is_killed_with_its_children() -> None:
     process = MagicMock(pid=4321)
     process.poll.return_value = None

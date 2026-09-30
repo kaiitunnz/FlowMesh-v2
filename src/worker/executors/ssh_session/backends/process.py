@@ -832,6 +832,7 @@ class ProcessSession(SSHSession):
         self._finish_sentinel = finish_sentinel
         self.account = account
         self._signals = signals
+        self._cleaned = False
 
     def login_user(self) -> str:
         return self.account.name
@@ -912,6 +913,9 @@ class ProcessSession(SSHSession):
         kill_processes(self.account.uid)
 
     def cleanup(self) -> None:
+        if self._cleaned:
+            return
+        self._cleaned = True
         clean = False
         try:
             clean = _discard_session(self._process, self.account, self._session_dir)

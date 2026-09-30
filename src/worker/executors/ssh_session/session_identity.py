@@ -181,8 +181,12 @@ def retire_account(name: str, uid: int) -> bool:
     revoke its recorded ACL entries; return whether it is gone.
 
     An account whose processes survive or that cannot be deleted is locked and
-    keeps its entries, since a live process of it must stay denied.
+    keeps its entries, since a live process of it must stay denied. An account
+    already deleted counts as gone, and once another account holds its uid, the
+    entries recorded for that uid are the other account's.
     """
+    if not _account_exists(name) and _uid_exists(uid):
+        return True
     if not kill_processes(uid):
         lock_account(name)
         logger.error(
@@ -200,7 +204,17 @@ def retire_account(name: str, uid: int) -> bool:
         )
         return False
     purge_uid(uid)
-    for recorded_uid, path in acl.recorded():
+    try:
+        records = acl.recorded()
+    except ExecutionError:
+        logger.warning(
+            "Cannot read the recorded SSH session ACL entries; the next reap lifts "
+            "those of uid %d",
+            uid,
+            exc_info=True,
+        )
+        return True
+    for recorded_uid, path in records:
         if recorded_uid == uid:
             _revoke(uid, Path(path))
     return True
@@ -231,10 +245,13 @@ def purge_uid(uid: int) -> None:
     can reach them.
 
     Session uids are reused, so a later session with the same uid must not find
-    them.
+    them. A failure is logged, and does not stop the rest.
     """
-    purge_uid_files(uid)
-    purge_uid_ipc(uid)
+    for purge in (purge_uid_files, purge_uid_ipc):
+        try:
+            purge(uid)
+        except Exception:
+            logger.warning("Failed to purge what uid %d left", uid, exc_info=True)
 
 
 def purge_uid_files(uid: int) -> None:
@@ -327,9 +344,11 @@ def remove_tree(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
         return
     try:
+        # A tree of millions of files takes minutes, so it gets no timeout.
         _run(
             [rm, "-rf", "--one-file-system", "--", path.as_posix()],
             f"remove {path.as_posix()}",
+            timeout=None,
         )
     except ExecutionError:
         logger.warning("Failed to remove %s", path, exc_info=True)
@@ -382,8 +401,9 @@ def delete_account(name: str) -> bool:
     try:
         _run([userdel, name], f"delete SSH session account {name}")
     except ExecutionError:
-        logger.warning("Failed to delete SSH session account %s", name)
-        return False
+        if _account_exists(name):
+            logger.warning("Failed to delete SSH session account %s", name)
+            return False
     return _delete_group(name)
 
 
@@ -690,10 +710,15 @@ def _require_binary(name: str) -> str:
     return path
 
 
-def _run(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
-    result = subprocess.run(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()
-        argv, capture_output=True, timeout=_COMMAND_TIMEOUT_SEC, check=False
-    )
+def _run(
+    argv: list[str], what: str, timeout: float | None = _COMMAND_TIMEOUT_SEC
+) -> "subprocess.CompletedProcess[bytes]":
+    try:
+        result = subprocess.run(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()
+            argv, capture_output=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ExecutionError(f"Failed to {what}: timed out after {timeout}s") from exc
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise ExecutionError(f"Failed to {what}: {detail}")

@@ -251,18 +251,42 @@ def test_a_zombie_of_the_account_is_not_a_process_left_to_kill() -> None:
 
 
 def _retire(
-    killed: bool, deleted: bool, recorded: set[tuple[int, str]]
+    killed: bool,
+    deleted: bool,
+    recorded: set[tuple[int, str]],
+    recorded_error: Exception | None = None,
+    **patches: Any,
 ) -> tuple[bool, MagicMock, MagicMock, MagicMock]:
+    steps = MagicMock()
+    steps.kill_processes.return_value = killed
+    steps.delete_account.return_value = deleted
+    steps.recorded.return_value = recorded
+    steps.recorded.side_effect = recorded_error
+    steps.purge_uid.return_value = None
+    steps.lock_account.return_value = None
+    steps._revoke.return_value = None
+    defaults: dict[str, Any] = {
+        "_account_exists": MagicMock(return_value=True),
+        "_uid_exists": MagicMock(return_value=True),
+        **{
+            name: getattr(steps, name)
+            for name in (
+                "kill_processes",
+                "delete_account",
+                "lock_account",
+                "purge_uid",
+                "_revoke",
+            )
+        },
+        **patches,
+    }
     with (
-        patch.object(session_identity, "kill_processes", return_value=killed),
-        patch.object(session_identity, "delete_account", return_value=deleted),
-        patch.object(session_identity, "lock_account") as lock,
-        patch.object(session_identity, "purge_uid") as purge,
-        patch.object(session_identity.acl, "recorded", return_value=recorded),
-        patch.object(session_identity, "_revoke") as revoke,
+        patch.multiple(session_identity, **defaults),
+        patch.object(session_identity.acl, "recorded", steps.recorded),
     ):
         retired = session_identity.retire_account("fmssn1", 61_001)
-    return retired, lock, purge, revoke
+    _retire.steps = steps  # type: ignore[attr-defined]
+    return retired, steps.lock_account, steps.purge_uid, steps._revoke
 
 
 def test_an_account_with_a_process_no_kill_ends_is_locked_and_kept_denied() -> None:
@@ -295,6 +319,103 @@ def test_a_deleted_account_loses_only_its_own_recorded_denials() -> None:
         (61_001, Path("/hb")),
         (61_001, Path("/r")),
     ]
+
+
+def test_an_account_is_killed_then_deleted_then_purged_then_revoked() -> None:
+    _retire(True, True, {(61_001, "/r")})
+
+    assert [name for name, _, _ in _retire.steps.mock_calls] == [  # type: ignore[attr-defined]
+        "kill_processes",
+        "delete_account",
+        "purge_uid",
+        "recorded",
+        "_revoke",
+    ]
+
+
+def test_an_account_already_deleted_finishes_its_purge_and_revoke() -> None:
+    retired, lock, purge, revoke = _retire(
+        True,
+        True,
+        {(61_001, "/r")},
+        _account_exists=MagicMock(return_value=False),
+        _uid_exists=MagicMock(return_value=False),
+    )
+
+    assert retired
+    lock.assert_not_called()
+    purge.assert_called_once_with(61_001)
+    revoke.assert_called_once_with(61_001, Path("/r"))
+
+
+def test_the_denials_of_a_uid_another_account_now_holds_are_left_alone() -> None:
+    retired, lock, purge, revoke = _retire(
+        True, True, {(61_001, "/r")}, _account_exists=MagicMock(return_value=False)
+    )
+
+    assert retired
+    assert not _retire.steps.kill_processes.called  # type: ignore[attr-defined]
+    purge.assert_not_called()
+    revoke.assert_not_called()
+
+
+def test_an_unreadable_ledger_does_not_fail_a_retirement() -> None:
+    retired, _, purge, revoke = _retire(
+        True, True, set(), recorded_error=ExecutionError("unreadable")
+    )
+
+    assert retired
+    purge.assert_called_once_with(61_001)
+    revoke.assert_not_called()
+
+
+def test_deleting_an_account_that_is_already_gone_succeeds() -> None:
+    with (
+        patch.object(session_identity.shutil, "which", return_value="/x/userdel"),
+        patch.object(
+            session_identity, "_run", side_effect=ExecutionError("does not exist")
+        ),
+        patch.object(session_identity, "_account_exists", return_value=False),
+        patch.object(session_identity, "_group_exists", return_value=False),
+    ):
+        assert session_identity.delete_account("fmssn1")
+
+
+def test_a_command_that_times_out_fails_as_an_execution_error() -> None:
+    with (
+        patch.object(
+            session_identity.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["rm"], 30),
+        ),
+        pytest.raises(ExecutionError, match="timed out"),
+    ):
+        session_identity._run(["/bin/rm", "x"], "remove x")
+
+
+def test_a_tree_is_removed_without_a_timeout_and_a_failure_is_only_logged(
+    tmp_path: Path,
+) -> None:
+    timeouts: list[Any] = []
+
+    def run(argv: list[str], what: str, timeout: Any = 30.0) -> Any:
+        timeouts.append(timeout)
+        raise ExecutionError("timed out")
+
+    with patch.object(session_identity, "_run", side_effect=run):
+        session_identity.remove_tree(tmp_path / "gone")
+
+    assert timeouts == [None]
+
+
+def test_a_failed_file_purge_still_purges_the_ipc_objects() -> None:
+    with (
+        patch.object(session_identity, "purge_uid_files", side_effect=OSError("stuck")),
+        patch.object(session_identity, "purge_uid_ipc") as ipc,
+    ):
+        session_identity.purge_uid(61_001)
+
+    ipc.assert_called_once_with(61_001)
 
 
 def test_a_released_account_that_cannot_be_retired_fails_loudly() -> None:
