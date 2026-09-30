@@ -29,11 +29,7 @@ from tests.worker.factories import (
     make_worker_hardware,
     make_worker_task_message,
 )
-from worker.config import (
-    SESSION_ALLOWED_PATH_FIELDS,
-    SESSION_DENIED_PATH_FIELDS,
-    WorkerConfig,
-)
+from worker.config import WorkerConfig
 from worker.executors.base_executor import (
     ExecutionError,
     RunSignals,
@@ -105,7 +101,7 @@ def _servable(**patches: Any) -> Any:
         "find_ssh_keygen": "/usr/bin/ssh-keygen",
         "find_tar": "/usr/bin/tar",
         "_acl_ready": True,
-        "_acquire_host_lock": True,
+        "_acquire_backend_lock": True,
         **patches,
     }
     return patch.multiple(
@@ -114,7 +110,7 @@ def _servable(**patches: Any) -> Any:
     )
 
 
-@pytest.mark.parametrize("unready", ["_acl_ready", "_acquire_host_lock"])
+@pytest.mark.parametrize("unready", ["_acl_ready", "_acquire_backend_lock"])
 def test_a_worker_that_cannot_isolate_or_lock_serves_no_process_session(
     tmp_path: Path, unready: str
 ) -> None:
@@ -231,8 +227,8 @@ def test_every_worker_path_field_is_classified_exactly_once() -> None:
     path_fields = {
         f.name for f in dataclasses.fields(WorkerConfig) if _path_typed(hints[f.name])
     }
-    denied = set(SESSION_DENIED_PATH_FIELDS)
-    allowed = set(SESSION_ALLOWED_PATH_FIELDS)
+    denied = set(process_module.DENIED_CONFIG_FIELDS)
+    allowed = set(process_module.ALLOWED_CONFIG_FIELDS)
 
     assert not denied & allowed
     assert path_fields == denied | allowed
@@ -244,7 +240,7 @@ def _state_config(tmp_path: Path, **overrides: Any) -> WorkerConfig:
         "private_state_dir": tmp_path / "private",
         "content_dir": tmp_path / "content",
         "hb_file": tmp_path / "hb" / "worker-token.hb",
-        "session_state_dirs": (tmp_path / "home", tmp_path / "hf"),
+        "state_dirs": (tmp_path / "home", tmp_path / "hf"),
     }
     return make_worker_config(**{**fields, **overrides})
 
@@ -259,7 +255,9 @@ def test_the_denied_paths_cover_the_worker_state_and_a_filesystem_store(
         filesystem_root=tmp_path / "store",
     )
 
-    denied = dataclasses.replace(config, object_store=store).session_denied_paths()
+    denied = process_module.denied_roots(
+        dataclasses.replace(config, object_store=store)
+    )
 
     assert set(denied) == {
         tmp_path / name
@@ -268,7 +266,7 @@ def test_the_denied_paths_cover_the_worker_state_and_a_filesystem_store(
 
 
 def test_the_heartbeat_directory_is_denied_not_just_the_file(tmp_path: Path) -> None:
-    denied = _state_config(tmp_path).session_denied_paths()
+    denied = process_module.denied_roots(_state_config(tmp_path))
 
     assert tmp_path / "hb" in denied
     assert tmp_path / "hb" / "worker-token.hb" not in denied
@@ -282,7 +280,7 @@ def test_the_state_dirs_come_from_home_the_caches_and_temp_tools(
     monkeypatch.setenv("TORCH_HOME", (tmp_path / "torch").as_posix())
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
 
-    dirs = WorkerConfig.from_env().session_state_dirs
+    dirs = WorkerConfig.from_env().state_dirs
 
     assert Path.home() in dirs
     assert {tmp_path / "hf", tmp_path / "torch"} <= set(dirs)
@@ -296,7 +294,7 @@ def test_every_missing_state_root_is_created_private_to_the_worker(
 
     roots = process_module.ensure_state_roots(config)
 
-    assert set(roots) == set(config.session_denied_paths())
+    assert set(roots) == set(process_module.denied_roots(config))
     for root in roots:
         assert root.is_dir() and stat.S_IMODE(root.stat().st_mode) == 0o700, root
 
@@ -308,7 +306,7 @@ def test_every_missing_state_root_is_created_private_to_the_worker(
 def test_a_state_root_covering_what_sessions_need_is_refused(
     tmp_path: Path, covering: Path
 ) -> None:
-    config = _state_config(tmp_path, session_state_dirs=(covering,))
+    config = _state_config(tmp_path, state_dirs=(covering,))
 
     with pytest.raises(ExecutionError, match="would also deny"):
         process_module.ensure_state_roots(config)
@@ -345,7 +343,7 @@ def test_a_link_in_a_shared_dir_is_refused_not_followed(tmp_path: Path) -> None:
     (shared / "cache").symlink_to(victim)
 
     roots = process_module.denied_roots(
-        _state_config(tmp_path, session_state_dirs=(shared / "cache",))
+        _state_config(tmp_path, state_dirs=(shared / "cache",))
     )
 
     assert shared / "cache" in roots
@@ -362,7 +360,7 @@ def test_a_root_in_a_dir_anyone_may_rename_in_is_denied_by_that_dir(
         path.chmod(0o777)
 
     roots = process_module.denied_roots(
-        _state_config(tmp_path, session_state_dirs=(cache / "hub",))
+        _state_config(tmp_path, state_dirs=(cache / "hub",))
     )
 
     assert cache in roots and cache / "hub" not in roots
@@ -393,20 +391,20 @@ def test_a_filesystem_that_takes_no_acl_offers_no_process_backend(
 
 
 # ------------------------------------------------------------------ #
-# The host lock
+# The backend lock
 # ------------------------------------------------------------------ #
 
 
-def test_one_worker_per_host_holds_the_process_backend(
+def test_one_worker_per_lock_file_holds_the_process_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(process_module.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(process_module.tempfile, "tempdir", tmp_path.as_posix())
-    monkeypatch.setattr(process_module, "_host_lock_fd", None)
-    lock = tmp_path / process_module._HOST_LOCK_NAME
+    monkeypatch.setattr(process_module, "_backend_lock_fd", None)
+    lock = tmp_path / process_module._BACKEND_LOCK_NAME
     try:
-        assert process_module._acquire_host_lock()
-        assert process_module._acquire_host_lock()
+        assert process_module._acquire_backend_lock()
+        assert process_module._acquire_backend_lock()
         other = subprocess.run(  # nosec B603 - argv list, test-only
             [
                 sys.executable,
@@ -421,7 +419,7 @@ def test_one_worker_per_host_holds_the_process_backend(
         )
         assert other.returncode != 0
     finally:
-        if (fd := process_module._host_lock_fd) is not None:
+        if (fd := process_module._backend_lock_fd) is not None:
             os.close(fd)
 
 

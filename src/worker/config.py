@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from shared.content.config import BACKEND_FILESYSTEM, ObjectStoreConfig
+from shared.content.config import ObjectStoreConfig
 from shared.schemas.worker import SSHBackendName, SSHLimits
 from shared.telemetry.config import TelemetryConfig
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
@@ -25,18 +25,8 @@ from shared.utils.parsing import (
 
 from .utils.health import get_hb_config
 
-# Every path-typed ``WorkerConfig`` field is one or the other: a denied path is kept
-# from process-mode SSH session accounts.
-SESSION_DENIED_PATH_FIELDS = (
-    "results_dir",
-    "private_state_dir",
-    "content_dir",
-    "hb_file",
-    "session_state_dirs",
-)
-SESSION_ALLOWED_PATH_FIELDS: tuple[str, ...] = ()
-# Caches that can hold credentials or other tasks' data.
-_SESSION_STATE_DIR_ENV_VARS = (
+# Env vars that name the cache directories of the worker's libraries.
+_STATE_DIR_ENV_VARS = (
     "HF_HOME",
     "HF_HUB_CACHE",
     "HUGGINGFACE_HUB_CACHE",
@@ -47,8 +37,8 @@ _SESSION_STATE_DIR_ENV_VARS = (
     "VLLM_CACHE_ROOT",
     "FASTEMBED_CACHE_PATH",
 )
-# Defaults of worker-side tools that keep other tasks' data in the temp dir.
-_SESSION_STATE_TEMP_DIRS = ("fastembed_cache",)
+# Directories that worker-side tools create under the temp dir.
+_TEMP_STATE_DIR_NAMES = ("fastembed_cache",)
 
 
 @dataclass(frozen=True)
@@ -104,23 +94,7 @@ class WorkerConfig:
     ssh_session_backend: SSHBackendName = SSHBackendName.DOCKER
     ssh_relay_host: str | None = None
     ssh_stop_timeout_sec: float = 30.0
-    session_state_dirs: tuple[Path, ...] = ()
-
-    def session_denied_paths(self) -> tuple[Path, ...]:
-        """Worker state a process-mode SSH session must not reach."""
-        paths: dict[Path, None] = {}
-        for field_name in SESSION_DENIED_PATH_FIELDS:
-            value = getattr(self, field_name)
-            for path in value if isinstance(value, tuple) else (value,):
-                if path is None:
-                    continue
-                path = Path(os.path.abspath(path))
-                # The heartbeat file is named after the worker token, so the
-                # directory listing it is what must be denied.
-                paths[path.parent if field_name == "hb_file" else path] = None
-        if self.object_store.backend == BACKEND_FILESYSTEM:
-            paths[Path(os.path.abspath(self.object_store.filesystem_root))] = None
-        return tuple(paths)
+    state_dirs: tuple[Path, ...] = ()
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -335,16 +309,18 @@ class WorkerConfig:
             ssh_session_backend=ssh_session_backend,
             ssh_relay_host=ssh_relay_host,
             ssh_stop_timeout_sec=ssh_stop_timeout_sec,
-            session_state_dirs=_session_state_dirs_from_env(),
+            state_dirs=_state_dirs_from_env(),
         )
 
 
-def _session_state_dirs_from_env() -> tuple[Path, ...]:
+def _state_dirs_from_env() -> tuple[Path, ...]:
+    """Return the worker's home, each library cache directory set in the
+    environment, and the tool directories under the temp dir, as absolute paths."""
     dirs = [Path.home()]
     dirs.extend(
         Path(value)
-        for name in _SESSION_STATE_DIR_ENV_VARS
+        for name in _STATE_DIR_ENV_VARS
         if (value := os.getenv(name, "").strip())
     )
-    dirs.extend(Path(tempfile.gettempdir()) / name for name in _SESSION_STATE_TEMP_DIRS)
+    dirs.extend(Path(tempfile.gettempdir()) / name for name in _TEMP_STATE_DIR_NAMES)
     return tuple(Path(os.path.abspath(path)) for path in dirs)

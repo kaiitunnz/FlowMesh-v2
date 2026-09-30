@@ -1,21 +1,21 @@
-"""Serves SSH sessions on a root worker with no Docker socket:
+"""Serves SSH sessions on a root worker with no Docker socket.
 
-* **One interactive session per worker, one such worker per host.** Sessions
-  sharing a worker would share its filesystem and process namespace, so a second
-  concurrent session is refused, and a non-interactive task, which needs a
-  container runtime to run its image, is refused too. Workers on one host would
-  share the mount root and the session accounts, so only one serves sessions.
+* **One interactive session per worker.** Sessions share the worker's filesystem
+  and process namespace, so a second concurrent session is refused, as is a
+  non-interactive task, which needs a container runtime to run its image. Workers
+  that share a root filesystem share the mount root and session accounts, so only
+  one of them serves sessions.
 * **Isolation by account.** Each session logs in as its own throwaway account,
   denied every root of the worker's state (see ``session_identity``), and sshd and
   its helpers start from a scrubbed environment.
 * **Links into the session's own directory.** The session's inputs and output live
-  in a root-owned directory of its own, and its mount paths are links to them,
-  created one component at a time under a mount root emptied before and after
-  every session, never through a link and never across a mount. Its output is read
+  in a root-owned directory of its own, and its mount paths are links to them
+  under a mount root emptied before and after every session, created one component
+  at a time, never through a link and never across a mount. Its output is read
   back by a child running as its account.
 * **The worker's size is the cap.** ``SSH_MAX_*`` and the GPU subset need cgroup
-  and device control over the worker itself, so a session runs niced and first in
-  line for the OOM killer instead, under a subreaper that reaps what it orphans.
+  and device control over the worker itself, so a session runs niced, first in
+  line for the OOM killer, and under a subreaper that reaps what it orphans.
 """
 
 import errno
@@ -42,6 +42,7 @@ from typing import Any
 
 import psutil
 
+from shared.content.config import BACKEND_FILESYSTEM
 from shared.schemas.worker import SSHBackendName
 from shared.tasks.worker_message import WorkerHardware
 from worker.config import WorkerConfig
@@ -107,7 +108,7 @@ _LAUNCH_SCRIPT = (
     "os.execv(sys.argv[3], sys.argv[3:])\n"
 )
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_HOST_LOCK_NAME = "flowmesh-ssh-process.lock"
+_BACKEND_LOCK_NAME = "flowmesh-ssh-process.lock"
 # Paths every session needs; a denied root covering one would break it.
 _SESSION_REQUIRED_PATHS = (
     Path(SAFE_MOUNT_ROOT),
@@ -118,10 +119,19 @@ _SESSION_REQUIRED_PATHS = (
     Path("/etc"),
     Path("/lib"),
 )
+# Every path-typed ``WorkerConfig`` field belongs to exactly one of these.
+DENIED_CONFIG_FIELDS = (
+    "results_dir",
+    "private_state_dir",
+    "content_dir",
+    "hb_file",
+    "state_dirs",
+)
+ALLOWED_CONFIG_FIELDS: tuple[str, ...] = ()
 _MOUNTINFO = Path("/proc/self/mountinfo")
 _OCTAL_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
-_host_lock_fd: int | None = None
-_host_lock_mutex = threading.Lock()
+_backend_lock_fd: int | None = None
+_backend_lock_mutex = threading.Lock()
 _missing_tini_logged = False
 
 
@@ -178,10 +188,11 @@ class ProcessSessionBackend(SSHSessionBackend):
             return False
         if not _acl_ready(config):
             return False
-        if not _acquire_host_lock():
+        if not _acquire_backend_lock():
             logger.info(
-                "Process SSH backend unavailable: another worker on this host already "
-                "serves process-mode sessions, and they would share %s",
+                "Process SSH backend unavailable: another worker sharing this root "
+                "filesystem already serves process-mode sessions, and they would "
+                "share %s",
                 SAFE_MOUNT_ROOT.as_posix(),
             )
             return False
@@ -362,8 +373,8 @@ class ProcessSessionBackend(SSHSessionBackend):
         )
 
     def reap_stale(self) -> None:
-        """Remove what a session left behind when its worker died: its sshd, its
-        account and denials, and its paths."""
+        """Remove the sshd, account, ACL entries and paths of every session an
+        earlier worker left, and record whether any account stays."""
         if os.getuid() != 0:
             return
         clean = True
@@ -377,9 +388,8 @@ class ProcessSessionBackend(SSHSessionBackend):
 
 
 def ensure_state_roots(config: WorkerConfig) -> list[Path]:
-    """The worker's state roots, each checked safe to deny and created, root-owned
-    and private to the worker, when the worker has not made it yet, so a session's
-    denial always lands on it."""
+    """Return :func:`denied_roots`, creating each missing one root-owned ``0700`` so
+    a session's deny entry lands on it; raise if one cannot be denied safely."""
     roots = denied_roots(config)
     for root in roots:
         if problem := _root_problem(root):
@@ -401,15 +411,29 @@ def ensure_state_roots(config: WorkerConfig) -> list[Path]:
 
 
 def denied_roots(config: WorkerConfig) -> list[Path]:
-    """The worker's state roots, as the paths an ACL entry will actually land on.
+    """Return the worker state a session is denied, as the paths ``setfacl`` acts on.
 
-    ``setfacl`` follows a link, so links an operator configured are resolved here.
-    Under a world-writable parent only the parent is resolved: a link there is
-    something anyone could have planted, and :func:`_root_problem` refuses it rather
-    than following it.
+    Each path in ``DENIED_CONFIG_FIELDS``, and a filesystem content store's root, is
+    made absolute, with the heartbeat file replaced by its directory, and links an
+    operator configured are resolved. A path in a world-writable directory is left
+    unresolved, so that :func:`_root_problem` refuses a link planted there instead
+    of following it, and one in a world-writable directory without the sticky bit
+    is replaced by that directory.
     """
+    configured: list[Path] = []
+    for field_name in DENIED_CONFIG_FIELDS:
+        value = getattr(config, field_name)
+        for path in value if isinstance(value, tuple) else (value,):
+            path = Path(os.path.abspath(path))
+            if field_name == "hb_file":
+                # Denying only the file would still let a session list its name,
+                # which contains the worker token.
+                path = path.parent
+            configured.append(path)
+    if config.object_store.backend == BACKEND_FILESYSTEM:
+        configured.append(Path(os.path.abspath(config.object_store.filesystem_root)))
     roots: dict[Path, None] = {}
-    for path in config.session_denied_paths():
+    for path in configured:
         parent = Path(os.path.realpath(path.parent))
         if _is_shared_dir(parent):
             path = parent / path.name
@@ -420,11 +444,11 @@ def denied_roots(config: WorkerConfig) -> list[Path]:
 
 
 def _above_open_dirs(path: Path) -> Path:
-    """``path``, or the highest of its ancestors any account may rename entries in.
+    """Return ``path``, or its highest ancestor any account may rename entries in.
 
-    Without the sticky bit, a world-writable parent lets a session swap ``path`` for
-    a directory of its own, so the denial goes on the parent instead, which it then
-    cannot enter.
+    A world-writable directory without the sticky bit lets a session swap ``path``
+    for a directory of its own, so the denial goes on that directory, which the
+    session then cannot enter.
     """
     while _is_open_dir(parent := path.parent) and parent != path:
         path = parent
@@ -514,34 +538,35 @@ def _probe_dir(root: Path) -> Path:
     return candidate
 
 
-def _acquire_host_lock() -> bool:
-    """Hold this host's process-backend lock for the life of the worker.
+def _acquire_backend_lock() -> bool:
+    """Take the process-backend lock file, in ``/run`` for root or the temp dir
+    otherwise, for the life of the worker; return whether this worker holds it.
 
-    Process-mode sessions of every worker on a host share its mount root and
-    accounts, so only one worker per host may serve them.
+    Workers that see the same lock file share the mount root and session accounts,
+    so only one of them serves sessions.
     """
-    global _host_lock_fd
-    with _host_lock_mutex:
-        if _host_lock_fd is not None:
+    global _backend_lock_fd
+    with _backend_lock_mutex:
+        if _backend_lock_fd is not None:
             return True
         base = Path("/run") if os.geteuid() == 0 else Path(tempfile.gettempdir())
         try:
             fd = os.open(
-                base / _HOST_LOCK_NAME,
+                base / _BACKEND_LOCK_NAME,
                 os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
                 0o600,
             )
         except OSError:
-            logger.debug("Cannot open the process-backend host lock", exc_info=True)
+            logger.debug("Cannot open the process-backend lock", exc_info=True)
             return False
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             os.close(fd)
             if exc.errno not in (errno.EAGAIN, errno.EACCES):
-                logger.debug("Cannot take the process-backend host lock", exc_info=True)
+                logger.debug("Cannot take the process-backend lock", exc_info=True)
             return False
-        _host_lock_fd = fd
+        _backend_lock_fd = fd
         return True
 
 
@@ -588,9 +613,8 @@ def _plan_mounts(request: SessionRequest) -> MountPlan:
 def _link_mounts(
     plan: MountPlan, staged_inputs: Path | None, output_path: Path | None
 ) -> None:
-    """Link each mount path to what it names in the session's directory, under a
-    mount root emptied first, so nothing an earlier session left there is walked
-    through."""
+    """Link each mount path to its target in the session's directory, under a mount
+    root emptied first."""
     links = [
         (mount_path, staged_inputs / task_id)
         for mount_path, task_id in plan.inputs
@@ -734,8 +758,8 @@ def _link_mount_path(root: Path, mount_path: str, target: Path) -> None:
 
 
 def _hand_over_tree(root: Path, account: SessionAccount) -> None:
-    """Give the session ownership of a tree the backend created, never following a
-    symlink in it."""
+    """Hand ``root``, a tree the backend created, to ``account`` without following a
+    link in it."""
     os.lchown(root, account.uid, account.gid)
     for current, dirs, files in os.walk(root, followlinks=False):
         for name in (*dirs, *files):
@@ -798,7 +822,7 @@ class ProcessSession(SSHSession):
         return self._process.poll()
 
     def finish_requested(self) -> bool:
-        # The session owns the sentinel's directory, so it is never followed.
+        # Root must not follow a link the session placed here.
         return os.path.lexists(self._finish_sentinel)
 
     def established_connections(self) -> int | None:
@@ -812,9 +836,9 @@ class ProcessSession(SSHSession):
         return path_size_bytes(output_path)
 
     def collect_output(self, destination: Path, max_bytes: int | None) -> None:
-        """Copy the session's output into ``destination``: its directories and
-        regular files, read by a child running as the session's own account, so
-        nothing in it is read with more access than the session has."""
+        """Copy the session's directories and regular files into ``destination``,
+        read by a child running as the session's account, so nothing is read with
+        more access than the session has."""
         if (output_path := self._output_path) is None:
             return
         # The session has ended; with its processes gone the tree holds still.
@@ -861,8 +885,8 @@ class ProcessSession(SSHSession):
 
 @dataclass(slots=True)
 class SessionManifest:
-    """What a session allocated outside its worker's memory, so a worker that died
-    with the session up can reap it."""
+    """The account and sshd a session allocated, recorded so a later worker can reap
+    them if this one dies."""
 
     session_dir: Path
     account: str
@@ -894,10 +918,8 @@ class SessionManifest:
 
 
 def reap_session(session_dir: Path) -> bool:
-    """Undo one session a dead worker left behind, as its manifest records it.
-
-    Returns ``False``, keeping the session's directory for a later reap, when its
-    account cannot be removed.
+    """Kill the sshd and retire the account that ``session_dir``'s manifest records,
+    then remove the directory; return ``False``, keeping it, if the account stays.
     """
     manifest = SessionManifest.read(session_dir)
     if manifest is not None:
@@ -918,11 +940,10 @@ def reap_session(session_dir: Path) -> bool:
 
 
 def _is_our_sshd(pid: int, config_path: str) -> bool:
-    """Whether ``pid`` runs the sshd started with ``config_path``, directly or under
-    its subreaper, so a recycled pid is never signalled.
+    """Return whether ``pid`` runs the sshd started with ``config_path``, directly
+    or under its subreaper, so a recycled pid is never signalled.
 
-    sshd rewrites its process title, so the check reads the command line as one
-    string.
+    sshd rewrites its process title, so the command line is read as one string.
     """
     try:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
@@ -932,8 +953,8 @@ def _is_our_sshd(pid: int, config_path: str) -> bool:
 
 
 def _kill_tree(pid: int) -> None:
-    """SIGKILL ``pid`` and every process below it; a subreaper's child outlives its
-    SIGKILL otherwise."""
+    """SIGKILL ``pid`` and every process below it, since a subreaper's child outlives
+    the subreaper's SIGKILL."""
     try:
         root = psutil.Process(pid)
         victims = [*root.children(recursive=True), root]
@@ -961,7 +982,8 @@ def _make_private_dir(path: Path, mode: int) -> None:
 
 
 def _archive_as(account: SessionAccount, source: Path) -> subprocess.Popen[bytes]:
-    """Stream a tar of ``source`` from a child running as ``account``."""
+    """Start a child running as ``account`` that writes a tar of ``source`` to its
+    stdout."""
     tar = find_tar()
     if tar is None:
         raise ExecutionError("tar is missing from this worker image")
@@ -984,8 +1006,8 @@ def _archive_as(account: SessionAccount, source: Path) -> subprocess.Popen[bytes
 
 
 def _end_archiver(archiver: subprocess.Popen[bytes]) -> None:
-    """Stop the archiving child and log a non-zero exit, which ``tar`` gives for a
-    file it could not read and so left out."""
+    """Stop the archiving child, logging a non-zero exit, which ``tar`` gives when
+    it leaves out a file it could not read."""
     assert archiver.stdout is not None
     archiver.stdout.close()
     if archiver.poll() is None:
@@ -1004,8 +1026,9 @@ def _discard_session(
     account: SessionAccount | None,
     session_dir: Path,
 ) -> bool:
-    """Undo whatever a session allocated, each step whether or not the one before it
-    succeeded; returns whether its sshd and account are gone."""
+    """Stop the sshd, retire the account and remove the paths a session allocated,
+    each step whether or not an earlier one failed; return whether the sshd and
+    account are gone."""
     steps: list[Callable[[], Any]] = []
     if process is not None:
         steps.append(lambda: _terminate(process, _TERMINATE_GRACE_SEC))
@@ -1108,9 +1131,12 @@ def _spawn_sshd(
 
 
 def _launch_argv(argv: list[str]) -> list[str]:
-    """``argv`` below the worker's priority and first in line for the OOM killer, so
-    a runaway session cannot starve the worker's heartbeat, and under a subreaper,
-    so what the session orphans is reaped whatever runs as PID 1."""
+    """Return the command line that runs ``argv`` niced, first in line for the OOM
+    killer, and under a subreaper when ``tini`` is installed.
+
+    A runaway session then cannot starve the worker's heartbeat, and what it
+    orphans is reaped whatever runs as PID 1.
+    """
     global _missing_tini_logged
     if tini := shutil.which(_TINI_BINARY):
         argv = [tini, "-s", "--", *argv]
@@ -1166,11 +1192,8 @@ def _install_finish_helper(session_dir: Path, sentinel: Path) -> Path:
 
 
 def _sanitized_spawn_env() -> dict[str, str]:
-    """Environment for helper processes, carrying none of the worker's secrets.
-
-    sshd would otherwise inherit the worker's environment, and a session's own
-    shell is sshd's child.
-    """
+    """Return an environment for helper processes that carries none of the
+    worker's secrets, which sshd would otherwise pass to a session's shell."""
     env = {key: value for key in _SPAWN_ENV_KEYS if (value := os.environ.get(key))}
     env.setdefault("PATH", os.defpath)
     return env
