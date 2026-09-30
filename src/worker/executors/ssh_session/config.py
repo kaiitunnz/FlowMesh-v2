@@ -333,6 +333,10 @@ def _resolve_gpu_devices(
 
 def normalize_mount_path(path: str, field_name: str) -> str:
     normalized = PurePosixPath(path.strip())
+    # PurePosixPath keeps "..", so a lexical root check alone would admit a path
+    # that resolves outside it.
+    if ".." in normalized.parts:
+        raise ExecutionError(f"{field_name} must not contain '..'")
     if not normalized.is_absolute():
         raise ExecutionError(f"{field_name} must be an absolute path")
     if normalized == PurePosixPath("/"):
