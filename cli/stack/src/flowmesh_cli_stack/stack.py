@@ -3,6 +3,7 @@
 import os
 import shutil
 import subprocess
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -531,9 +532,12 @@ def up(
     logging.success("FlowMesh stack is up.")
 
 
-def _require_service_credentials(env_file: Path) -> None:
-    """Refuse to start services on an unset or well-known credential."""
-    if errors := service_credential_errors(parse_env_file(env_file)):
+def _require_service_credentials(
+    env_file: Path, services: Collection[str] | None = None
+) -> None:
+    """Refuse to start services on an unset or well-known credential; with
+    ``services``, only the credentials those services read."""
+    if errors := service_credential_errors(parse_env_file(env_file), services):
         for error in errors:
             logging.error(error)
         raise typer.Exit(code=1)
@@ -602,7 +606,8 @@ def restart(
     With one or more SERVICE arguments the stack is left running and only those services
     are recreated; when any of them manages workers (the server / supervisor) its
     workers are drained first so their in-flight tasks requeue onto other nodes. Like
-    `up`, it refuses to start services on an unset or well-known credential.
+    `up`, it refuses to start services on an unset or well-known credential, checking
+    only the credentials the named services read.
     """
     if not services:
         _require_service_credentials(env_file)
@@ -634,7 +639,7 @@ def restart(
         )
         raise typer.Exit(code=1)
 
-    _require_service_credentials(env_file)
+    _require_service_credentials(env_file, requested)
     if any(svc in WORKER_MANAGING_SERVICES for svc in requested):
         logging.info("Draining workers...")
         _drain_workers(env_file)

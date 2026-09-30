@@ -127,7 +127,8 @@ discard a trace.
 `flowmesh stack init --role root` writes one random password into both
 `TELEMETRY_CLICKHOUSE_PASSWORD` and `SERVER_METRICS_CLICKHOUSE_PASSWORD`, and
 `flowmesh stack up` refuses to start a node running the telemetry profile on an unset
-or well-known password.
+or well-known password. Only the root's server reads the store, so a worker node needs
+only `TELEMETRY_CLICKHOUSE_PASSWORD`.
 
 The server's read path is configured separately, through `SERVER_METRICS_CLICKHOUSE_*`,
 and never writes. The two halves commonly address the same instance but are never the

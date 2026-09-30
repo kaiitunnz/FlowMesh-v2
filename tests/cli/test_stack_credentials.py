@@ -106,15 +106,14 @@ def test_up_refuses_a_root_on_a_default_credential_and_names_it(tmp_path, key, v
 
 
 @pytest.mark.parametrize(
-    ("key", "value"),
+    ("role", "key", "value"),
     [
-        ("TELEMETRY_CLICKHOUSE_PASSWORD", "flowmesh"),
-        ("TELEMETRY_CLICKHOUSE_PASSWORD", ""),
-        ("SERVER_METRICS_CLICKHOUSE_PASSWORD", "flowmesh"),
-        ("SERVER_METRICS_CLICKHOUSE_PASSWORD", ""),
-    ],
+        (role, "TELEMETRY_CLICKHOUSE_PASSWORD", value)
+        for role in ("root", "worker")
+        for value in ("flowmesh", "")
+    ]
+    + [("root", "SERVER_METRICS_CLICKHOUSE_PASSWORD", v) for v in ("flowmesh", "")],
 )
-@pytest.mark.parametrize("role", ["root", "worker"])
 def test_up_refuses_the_telemetry_profile_on_a_default_password(
     tmp_path, role, key, value
 ):
@@ -151,6 +150,44 @@ def test_restart_refuses_a_default_credential_before_touching_the_stack(
     compose.assert_not_called()
     drain.assert_not_called()
     assert any("REDIS_PASSWORD" in call.args[0] for call in error.call_args_list)
+
+
+def test_restart_of_a_service_checks_only_the_credentials_it_reads(tmp_path):
+    env_file = tmp_path / ".env"
+    stack.init(env_file=env_file, force=True, role="root", deploy=False)
+    _set(env_file, "COMPOSE_PROFILES", "telemetry")
+    _set(env_file, "TELEMETRY_CLICKHOUSE_PASSWORD", "flowmesh")
+
+    with (
+        mock.patch.object(stack, "_compose") as compose,
+        mock.patch.object(stack, "_drain_workers"),
+    ):
+        stack.restart(
+            services=["redis_control"], env_file=env_file, image_tag=None, pull=False
+        )
+    compose.assert_called_once()
+
+    with (
+        mock.patch.object(stack, "_compose") as compose,
+        mock.patch.object(stack, "_drain_workers"),
+        pytest.raises(typer.Exit),
+    ):
+        stack.restart(services=None, env_file=env_file, image_tag=None, pull=False)
+    compose.assert_not_called()
+
+
+def test_a_worker_on_the_telemetry_profile_needs_only_the_collector_password():
+    env = {
+        "NODE_ROLE": "worker",
+        "COMPOSE_PROFILES": "telemetry",
+        "TELEMETRY_CLICKHOUSE_PASSWORD": "a-password-of-its-own",
+        "CONTENT_STORE_ENDPOINT_URL": "https://store.example",
+    }
+    assert service_credential_errors(env) == []
+    assert service_credential_errors({**env, "NODE_ROLE": "root"}) == [
+        "SERVER_METRICS_CLICKHOUSE_PASSWORD must be set for the telemetry profile's "
+        "ClickHouse"
+    ]
 
 
 def test_the_telemetry_password_is_not_checked_without_its_profile():

@@ -125,7 +125,8 @@ ClickHouse (`TELEMETRY_CLICKHOUSE_PASSWORD`, `SERVER_METRICS_CLICKHOUSE_PASSWORD
 the `.env` it renders, which only its owner can read. `flowmesh stack up` and
 `flowmesh stack restart` refuse to start a node whose Redis, co-located content store,
 or ClickHouse would run on an unset or well-known credential, and name the variable to
-set.
+set; `flowmesh stack restart SERVICE` checks only the credentials the named services
+read.
 
 To rotate a credential, set it in `.env` and run `flowmesh stack restart`; the services
 take the new credentials and keep their data. After a rotation of `REDIS_PASSWORD`,
