@@ -4,7 +4,7 @@ import json
 import re
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
-from urllib.parse import SplitResult, unquote_plus, urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote, unquote_plus, urlsplit, urlunsplit
 
 REDACTED = "[REDACTED]"
 
@@ -69,9 +69,15 @@ def is_credential_key(name: str) -> bool:
 # Names that carry a credential only as a URL parameter: a Google ``?key=``, a servlet
 # session id in a ``;jsessionid=`` path parameter, and a signature however it is
 # prefixed (an Azure SAS ``sig``, an S3 ``X-Amz-Signature``).
-_URL_CREDENTIAL_NAMES = frozenset({"key", "jsessionid"})
+_URL_CREDENTIAL_NAMES = frozenset({"key", "pass", "jsessionid"})
 _URL_CREDENTIAL_LAST_SEGMENTS = frozenset({"sig", "signature"})
 _PATH_PARAMETER = re.compile(r";([^;/=]*)=([^;/]*)")
+_PARAMETER_SEPARATOR = re.compile(r"([&;])")
+# Schemes whose userinfo is a credential even without a password: a token-only
+# ``https://TOKEN@host``.
+_TOKEN_USERINFO_SCHEMES = frozenset(
+    {"http", "https", "git+http", "git+https", "ws", "wss"}
+)
 
 
 def _is_url_credential_name(name: str) -> bool:
@@ -96,11 +102,15 @@ def _userinfo_is_credential(parts: SplitResult) -> bool:
     userinfo, at, _ = parts.netloc.rpartition("@")
     if not at:
         return False
-    return parts.scheme.lower() in ("http", "https") or ":" in userinfo
+    return parts.scheme.lower() in _TOKEN_USERINFO_SCHEMES or ":" in userinfo
+
+
+def _parameters(text: str) -> list[str]:
+    return _PARAMETER_SEPARATOR.split(text)[::2]
 
 
 def _parameter_names(text: str) -> Iterator[str]:
-    for pair in text.split("&"):
+    for pair in _parameters(text):
         name, equals, _ = pair.partition("=")
         if equals:
             yield name
@@ -119,7 +129,8 @@ def _has_credential_parameter(parts: SplitResult) -> bool:
 
 def is_credential_url(value: str) -> bool:
     """Whether a URL carries a credential: a userinfo password (any userinfo on
-    ``http(s)``), or a credential in its query, fragment, or path parameters."""
+    ``http(s)``, ``git+http(s)`` and ``ws(s)``), or a credential in its query,
+    fragment, or path parameters."""
     parts = _split_url(value)
     if parts is None:
         return False
@@ -135,11 +146,12 @@ def _url_credentials(url: str) -> list[str]:
     found: list[str] = []
     if _userinfo_is_credential(parts):
         userinfo = parts.netloc.rpartition("@")[0]
-        found.extend((userinfo, *userinfo.split(":", 1)))
+        for part in (userinfo, *userinfo.split(":", 1)):
+            found.extend((part, unquote(part)))
     pairs = [
         pair.partition("=")
         for text in (parts.query, parts.fragment)
-        for pair in text.split("&")
+        for pair in _parameters(text)
     ]
     pairs.extend(
         (m.group(1), "=", m.group(2)) for m in _PATH_PARAMETER.finditer(parts.path)
@@ -156,7 +168,10 @@ def _redact_parameter(pair: str) -> str:
 
 
 def _redact_parameters(text: str) -> str:
-    return "&".join(_redact_parameter(pair) for pair in text.split("&"))
+    return "".join(
+        _redact_parameter(piece) if index % 2 == 0 else piece
+        for index, piece in enumerate(_PARAMETER_SEPARATOR.split(text))
+    )
 
 
 def redact_url(url: str) -> str:
@@ -236,44 +251,58 @@ def redact_credential_fields(value: Any) -> Any:
     return value
 
 
-# A whole-string credential shorter than the first bound is too common a word to scrub,
-# and so is a string inside a structured credential (``type: none``) shorter than the
-# second.
+# A credential string shorter than the first bound is too common a word to scrub, and
+# so is a string inside a structured credential (``type: none``) shorter than the
+# second, unless a credential-named key holds it.
 _MIN_SCRUBBED_LENGTH = 4
 _MIN_SCRUBBED_MEMBER_LENGTH = 8
+# An ``Authorization``-style ``<scheme> <token>`` value; its token may be echoed alone.
+_SCHEME_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9._+-]*\s+(\S+)")
 
 
-def _strings(value: Any) -> Iterator[str]:
+def _members(value: Any, named: bool) -> Iterator[tuple[str, bool]]:
+    """Each string in a structured value, with whether a credential names it."""
     if isinstance(value, str):
-        yield value
+        yield value, named
     elif isinstance(value, dict):
-        for item in value.values():
-            yield from _strings(item)
+        for key, item in value.items():
+            credential = (
+                named
+                or is_credential_key(str(key))
+                or (key == "value" and _names_credential(value))
+            )
+            yield from _members(item, credential)
     elif isinstance(value, list):
         for item in value:
-            yield from _strings(item)
+            yield from _members(item, named)
+
+
+def _credential_parts(text: str) -> Iterator[str]:
+    yield text
+    yield from _url_credentials(text)
+    if token := _SCHEME_TOKEN.fullmatch(text.strip()):
+        yield token.group(1)
 
 
 def credential_scrubber(values: Iterable[Any]) -> Callable[[str], str]:
     """A function masking every occurrence of ``values`` in a text.
 
     Each string is matched as written and in its JSON- and ``repr``-escaped forms, so a
-    multi-line key quoted in an error is masked too; a URL's credential parts are
-    matched on their own, so a text quoting only its path and query is masked too.
+    multi-line key quoted in an error is masked too; a URL's credential parts and an
+    ``Authorization`` value's token are matched on their own, so a text quoting only
+    part of one is masked too. A structured value is also matched whole, as JSON and as
+    a Python ``repr``.
     """
     needles: set[str] = set()
     for value in values:
-        minimum = (
-            _MIN_SCRUBBED_LENGTH
-            if isinstance(value, str)
-            else _MIN_SCRUBBED_MEMBER_LENGTH
-        )
-        for text in _strings(value):
-            for part in (text, *_url_credentials(text)):
+        structured = isinstance(value, (dict, list))
+        for text, named in _members(value, not structured):
+            minimum = _MIN_SCRUBBED_LENGTH if named else _MIN_SCRUBBED_MEMBER_LENGTH
+            for part in _credential_parts(text):
                 if len(part) >= minimum:
                     needles.update((part, json.dumps(part)[1:-1], repr(part)[1:-1]))
-        if isinstance(value, (dict, list)):
-            needles.add(json.dumps(value))
+        if structured:
+            needles.update((json.dumps(value), repr(value)))
     ordered = sorted(needles, key=len, reverse=True)
 
     def scrub(text: str) -> str:

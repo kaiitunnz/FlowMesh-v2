@@ -192,6 +192,19 @@ def test_redaction_covers_every_rejected_harness_param(name: str) -> None:
             "https://b.s3.example/o?X-Amz-Date=d&X-Amz-Signature=[REDACTED]",
         ),
         ("https://api.example/v1?sort_key=a", "https://api.example/v1?sort_key=a"),
+        (
+            "git+https://ghp_TOKEN@github.example/o/r.git",
+            "git+https://github.example/o/r.git",
+        ),
+        ("wss://tok@stream.example/ws", "wss://stream.example/ws"),
+        (
+            "https://api.example/v1?a=1;api_key=k;b=2",
+            "https://api.example/v1?a=1;api_key=[REDACTED];b=2",
+        ),
+        (
+            "https://ftp.example/get?user=u&pass=p",
+            "https://ftp.example/get?user=u&pass=[REDACTED]",
+        ),
     ],
 )
 def test_redact_url_drops_userinfo_and_masks_credential_query_values(url, expected):
@@ -199,7 +212,7 @@ def test_redact_url_drops_userinfo_and_masks_credential_query_values(url, expect
     assert is_credential_url(url) == (url != expected)
 
 
-@pytest.mark.parametrize("name", ["key", "sig", "signature", "jsessionid"])
+@pytest.mark.parametrize("name", ["key", "pass", "sig", "signature", "jsessionid"])
 def test_url_only_credential_names_are_not_field_credentials(name: str) -> None:
     assert not is_credential_key(name)
 
@@ -222,3 +235,25 @@ def test_scrubber_masks_the_credential_parts_of_a_vaulted_url() -> None:
         "403 for /v1?limit=3&api_key=[REDACTED]"
     )
     assert "pass-SECRET" not in scrub("login u:pass-SECRET refused")
+
+
+def test_scrubber_masks_a_decoded_userinfo_password() -> None:
+    scrub = credential_scrubber(["https://u:p%40ss-SECRET@api.example/v1"])
+
+    assert "ss-SECRET" not in scrub("login u:p@ss-SECRET refused")
+
+
+def test_scrubber_masks_a_token_echoed_without_its_scheme() -> None:
+    scrub = credential_scrubber([{"Authorization": "Bearer sk-abc123"}])
+
+    assert scrub("401: invalid key sk-abc123") == "401: invalid key [REDACTED]"
+
+
+def test_scrubber_masks_short_named_members_and_the_repr_of_a_structure() -> None:
+    credentials = {"user": "bob", "password": "hunter2"}
+    scrub = credential_scrubber([credentials, {"type": "none"}])
+
+    assert "hunter2" not in scrub("login bob/hunter2 refused")
+    assert "hunter2" not in scrub(f"422: {credentials!r}")
+    assert scrub(f"422: {credentials!r}") == "422: [REDACTED]"
+    assert scrub("type none") == "type none"
