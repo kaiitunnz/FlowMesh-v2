@@ -170,9 +170,12 @@ def test_a_dispatch_carries_the_task_its_own_credentials(api_version):
 
 
 @pytest.mark.parametrize("api_version", ["flowmesh/v1", "flowmesh/v2"])
-def test_a_credential_under_a_non_string_key_is_vaulted_and_restored(api_version):
+@pytest.mark.parametrize(("written", "key"), [("1", 1), ("true", True), ("yes", True)])
+def test_a_credential_under_a_non_string_key_is_vaulted_and_restored(
+    api_version, written, key
+):
     payload = _api_workflow(api_version).replace(
-        "json: {model: m}", f'json: {{shards: {{1: {{token: "{_HF}"}}}}}}'
+        "json: {model: m}", f'json: {{shards: {{{written}: {{token: "{_HF}"}}}}}}'
     )
     registry = FakeRegistry()
     runtime = _runtime(registry)
@@ -183,7 +186,35 @@ def test_a_credential_under_a_non_string_key_is_vaulted_and_restored(api_version
         assert runtime.inspect_v2(payload) is not None
     publisher, _ = _dispatch(runtime, ids["call"])
     message = publisher.publish_task.call_args[0][1]
-    assert _api(message.task)["json"] == {"shards": {1: {"token": _HF}}}
+    assert _api(message.task)["json"] == {"shards": {key: {"token": _HF}}}
+
+
+@pytest.mark.parametrize("api_version", ["flowmesh/v1", "flowmesh/v2"])
+def test_a_failure_after_the_durable_write_keeps_the_credentials(api_version):
+    registry = FakeRegistry()
+    vault = InMemoryCredentialVault()
+    runtime = _runtime(registry, vault)
+    boom = RuntimeError("redis unavailable")
+
+    with mock.patch.object(registry, "save_task_states_async", side_effect=boom):
+        with pytest.raises(RuntimeError, match="redis unavailable"):
+            _register(runtime, _api_workflow(api_version))
+
+    [vaulted] = vault.redis.hashes.values()
+    assert _AUTH in json.dumps(list(vaulted.values()))
+
+
+@pytest.mark.parametrize("original", [ValueError("refused"), asyncio.CancelledError()])
+def test_a_failing_purge_leaves_the_registration_error(original):
+    vault = InMemoryCredentialVault()
+    runtime = _runtime(vault=vault)
+
+    with (
+        mock.patch("server.task.runtime.compile_bundle", side_effect=original),
+        mock.patch.object(vault, "purge", side_effect=ConnectionError("down")),
+    ):
+        with pytest.raises(type(original)):
+            _register(runtime, _api_workflow("flowmesh/v2"))
 
 
 def test_a_credential_no_longer_retained_fails_its_task_and_substitutes_nothing():

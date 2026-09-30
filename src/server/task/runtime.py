@@ -304,6 +304,17 @@ def _input_verdict(task_id: str, check: _InputCheck) -> TaskEvent:
     )
 
 
+@dataclass(frozen=True)
+class _StagedRegistration:
+    """A submission's records and plan, built in memory before its durable write."""
+
+    results: list[TaskParsingResult]
+    task_records: list[TaskRecord]
+    candidate_ready: list[str]
+    v2_bundle: PersistedV2Workflow | None
+    v2_engine: OrchestrationEngine | None
+
+
 @dataclass
 class _Termination:
     """What a terminated workflow's work still holds, released after its terminal."""
@@ -779,35 +790,46 @@ class TaskRuntime:
         # only an opaque ref reaches the template, the plan and the records.
         credentials = take_inline_credentials(parsed_workflow)
         await self._credential_vault.store_values(workflow_id, credentials.values)
+        # Once the durable write is attempted the workflow may exist, so a later failure
+        # keeps its credentials; the startup sweep reclaims a vault no workflow owns.
         try:
-            results = await self._register_parsed(
+            staged = self._stage_registration(
                 owner_id,
                 org_id,
                 payload,
                 format,
                 resident,
-                submitted_at,
                 workflow_id,
                 parsed_workflow,
                 credentials,
             )
         except BaseException:
-            self._credential_vault.purge(workflow_id)
+            self._discard_credentials(workflow_id)
             raise
-        return workflow_id, results
+        return workflow_id, await self._commit_registration(
+            workflow_id, submitted_at, staged
+        )
 
-    async def _register_parsed(
+    def _discard_credentials(self, workflow_id: str) -> None:
+        try:
+            self._credential_vault.purge(workflow_id)
+        except Exception:
+            self._logger.exception(
+                "Failed to purge the credentials of unregistered workflow %s",
+                workflow_id,
+            )
+
+    def _stage_registration(
         self,
         owner_id: str,
         org_id: str,
         payload: str,
         format: str,
         resident: bool,
-        submitted_at: str,
         workflow_id: str,
         parsed_workflow: ParsedWorkflow,
         credentials: InlineCredentials,
-    ) -> list[TaskParsingResult]:
+    ) -> _StagedRegistration:
         specs = parsed_workflow.tasks
         yaml_text = redact_source_text(payload, format)
         results: list[TaskParsingResult] = []
@@ -957,8 +979,17 @@ class TaskRuntime:
                     self._workflow_epoch_tasks[workflow_id] = epoch_queue
                     self._workflow_epoch_frontier[workflow_id] = 0
 
+        return _StagedRegistration(
+            results, task_records, candidate_ready, v2_bundle, v2_engine
+        )
+
+    async def _commit_registration(
+        self, workflow_id: str, submitted_at: str, staged: _StagedRegistration
+    ) -> list[TaskParsingResult]:
+        task_records = staged.task_records
+        v2_engine = staged.v2_engine
         await self._workflow_registry.register_workflow_async(
-            workflow_id, task_records, v2=v2_bundle, submitted_at=submitted_at
+            workflow_id, task_records, v2=staged.v2_bundle, submitted_at=submitted_at
         )
 
         with self._cv:
@@ -992,7 +1023,7 @@ class TaskRuntime:
                 # authority-denied roots, so the ledger never leads durable task state
                 # and no later save lands before it.
                 self._save_ledger_locked(workflow_id)
-            for task_id in candidate_ready:
+            for task_id in staged.candidate_ready:
                 maybe_record = self._tasks.get(task_id)
                 if not maybe_record or maybe_record.status != TaskStatus.PENDING:
                     continue
@@ -1003,7 +1034,7 @@ class TaskRuntime:
             if new_ready:
                 self._cv.notify_all()
 
-        return results
+        return staged.results
 
     # ------------------------------------------------------------------ #
     # Rehydration
