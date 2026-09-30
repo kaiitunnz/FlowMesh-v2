@@ -5,7 +5,6 @@ worker's environment, where the task token and every third-party API key live, a
 an ACL entry on each of the worker's state roots denies it the worker's files.
 """
 
-import fcntl
 import grp
 import logging
 import os
@@ -17,9 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
-import time
-from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterable
 from pathlib import Path
 
 import psutil
@@ -94,9 +91,6 @@ _SCRATCH_DIRS = (
 )
 _SYSV_IPC_DIR = Path("/", "proc", "sysvipc")
 _SYSV_IPC_ID_COLUMNS = {"shm": "shmid", "msg": "msqid", "sem": "semid"}
-_LOCK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_ROOT_LOCK_TIMEOUT_SEC = 30.0
-_ROOT_LOCK_POLL_SEC = 0.05
 
 
 def account_name_for(session_id: str) -> str:
@@ -129,9 +123,9 @@ class SessionAccount:
         """
         roots = list(denied_roots)
         _ensure_privsep_dir()
-        # Workers in other containers draw from the same range and see only each
-        # other's entries, so the draw and the denial it rests on happen at once.
-        with _locked(roots):
+        # Held from the draw through the deny, so a worker sharing a root cannot
+        # draw the same uid before this one's entry is there to avoid.
+        with acl.locked(roots):
             taken: set[int] = set()
             for root in roots:
                 taken |= acl.named_uids(root)
@@ -183,55 +177,6 @@ class SessionAccount:
                 f"SSH session account {self.name} could not be removed; it stays "
                 "locked and denied this worker's state until a reap removes it"
             )
-
-
-@contextmanager
-def _locked(roots: Iterable[Path]) -> Iterator[None]:
-    """Hold an exclusive ``flock`` on each of ``roots``.
-
-    They are taken in inode order, which every container agrees on whatever path it
-    mounts a root at. A root whose filesystem refuses a directory lock, as NFS does,
-    goes unlocked.
-    """
-    fds: list[tuple[tuple[int, int], int, Path]] = []
-    try:
-        for root in roots:
-            try:
-                fd = os.open(root, _LOCK_DIR_FLAGS)
-            except OSError:
-                logger.debug("Cannot open %s to lock it", root, exc_info=True)
-                continue
-            info = os.fstat(fd)
-            fds.append(((info.st_dev, info.st_ino), fd, root))
-        fds.sort(key=lambda held: held[0])
-        seen: set[tuple[int, int]] = set()
-        for key, fd, root in fds:
-            if key not in seen:
-                seen.add(key)
-                _flock(fd, root)
-        yield
-    finally:
-        for _, fd, _ in fds:
-            os.close(fd)
-
-
-def _flock(fd: int, root: Path) -> None:
-    deadline = time.monotonic() + _ROOT_LOCK_TIMEOUT_SEC
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                raise ExecutionError(
-                    f"Timed out waiting for another worker to finish a session "
-                    f"account on {root}",
-                    retryable=True,
-                ) from None
-            time.sleep(_ROOT_LOCK_POLL_SEC)
-        except OSError:
-            logger.debug("Cannot lock %s; drawing without it", root, exc_info=True)
-            return
 
 
 def retire_account(name: str, uid: int) -> bool:

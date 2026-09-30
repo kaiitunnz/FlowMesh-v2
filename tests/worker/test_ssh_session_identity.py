@@ -126,6 +126,8 @@ def test_a_group_created_for_an_account_that_fails_is_removed() -> None:
 def test_a_new_account_avoids_every_uid_a_state_root_names(tmp_path: Path) -> None:
     avoided: list[frozenset[int]] = []
     roots = [tmp_path / "results", tmp_path / "hb"]
+    for root in roots:
+        root.mkdir()
     named = {roots[0]: {61001}, roots[1]: {61002}}
 
     def add(name: str, home: Path, avoid: frozenset[int]) -> None:
@@ -199,11 +201,21 @@ def test_two_workers_sharing_a_root_never_draw_the_same_uid(tmp_path: Path) -> N
     assert _create_concurrently(tmp_path) == [61_000, 61_001]
 
 
-def test_a_root_that_refuses_a_lock_is_drawn_on_without_one(tmp_path: Path) -> None:
-    with patch.object(
-        session_identity.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "no locks")
+def test_a_root_that_cannot_be_locked_refuses_the_session(tmp_path: Path) -> None:
+    with (
+        patch.object(
+            session_identity.acl.fcntl,
+            "flock",
+            side_effect=OSError(errno.ENOLCK, "no locks"),
+        ),
+        patch.object(session_identity, "_ensure_privsep_dir"),
+        patch.object(session_identity, "_add_account") as add,
+        pytest.raises(ExecutionError, match="Cannot lock") as refused,
     ):
-        assert len(_create_concurrently(tmp_path)) == 2
+        session_identity.SessionAccount.create("fmssn1", tmp_path / "home", [tmp_path])
+
+    assert refused.value.retryable
+    add.assert_not_called()
 
 
 def test_the_uid_range_fits_a_user_namespace() -> None:
