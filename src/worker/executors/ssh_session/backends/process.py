@@ -479,6 +479,11 @@ def _path_problem(path: Path, denied: Sequence[Path] = ()) -> str | None:
         entry = directory / name
         try:
             dir_mode = os.stat(directory).st_mode
+        except OSError as exc:
+            return (
+                f"cannot inspect {directory} on the way to worker state {path}: {exc}"
+            )
+        try:
             info: os.stat_result | None = os.lstat(entry)
         except FileNotFoundError:
             info = None
