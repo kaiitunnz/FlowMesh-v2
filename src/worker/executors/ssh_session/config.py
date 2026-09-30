@@ -44,6 +44,8 @@ POLL_INTERVAL_SEC = 5
 DEFAULT_INPUTS_ROOT = "/mnt/flowmesh/inputs"
 DEFAULT_OUTPUT_PATH = "/mnt/flowmesh/output"
 SAFE_MOUNT_ROOT = PurePosixPath("/mnt/flowmesh")
+MAX_MOUNT_PATH_DEPTH = 32
+MAX_MOUNT_PATH_LENGTH = 1024
 FINISH_SENTINEL_PATH = PurePosixPath("/", "tmp", ".flowmesh_finish").as_posix()
 
 
@@ -336,13 +338,26 @@ def _host_gpu_ids(hardware: WorkerHardware | None) -> list[str]:
 
 
 def normalize_mount_path(path: str, field_name: str) -> str:
-    normalized = PurePosixPath(path.strip())
-    # PurePosixPath keeps "..", so a lexical root check alone would admit a path
-    # that resolves outside it.
-    if ".." in normalized.parts:
-        raise ExecutionError(f"{field_name} must not contain '..'")
-    if not normalized.is_absolute():
+    """Return ``path`` in canonical form, refusing anything outside the mount root.
+
+    The check is lexical, so a ``..`` component is refused outright rather than
+    resolved: nothing about the filesystem is trusted to decide containment.
+    """
+    raw = path.strip()
+    if not raw.startswith("/"):
         raise ExecutionError(f"{field_name} must be an absolute path")
+    if len(raw) > MAX_MOUNT_PATH_LENGTH:
+        raise ExecutionError(
+            f"{field_name} must be at most {MAX_MOUNT_PATH_LENGTH} characters"
+        )
+    parts = [part for part in raw.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        raise ExecutionError(f"{field_name} must not contain '..'")
+    if len(parts) > MAX_MOUNT_PATH_DEPTH:
+        raise ExecutionError(
+            f"{field_name} must be at most {MAX_MOUNT_PATH_DEPTH} components deep"
+        )
+    normalized = PurePosixPath("/", *parts)
     if normalized == PurePosixPath("/"):
         raise ExecutionError(f"{field_name} cannot be '/'")
     if normalized != SAFE_MOUNT_ROOT and SAFE_MOUNT_ROOT not in normalized.parents:

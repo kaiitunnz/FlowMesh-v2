@@ -10,6 +10,10 @@ from shared.tasks.worker_message import WorkerTaskMessage
 from tests.worker.factories import make_live_worker_config, make_ssh_executor
 from worker.executors.base_executor import ExecutionError
 from worker.executors.ssh_session import DockerSessionBackend, normalize_mount_path
+from worker.executors.ssh_session.config import (
+    MAX_MOUNT_PATH_DEPTH,
+    MAX_MOUNT_PATH_LENGTH,
+)
 
 _ESCAPES = ["/mnt/flowmesh/../../etc", "/mnt/flowmesh/inputs/../../../etc/cron.d"]
 
@@ -66,13 +70,31 @@ def test_a_mount_path_climbing_out_of_the_mount_root_fails_the_task(
     [
         ("/mnt/flowmesh//inputs/./a", "/mnt/flowmesh/inputs/a"),
         ("  /mnt/flowmesh/output/  ", "/mnt/flowmesh/output"),
+        ("//mnt/flowmesh/x", "/mnt/flowmesh/x"),
     ],
 )
 def test_a_mount_path_is_normalized(path: str, expected: str) -> None:
     assert normalize_mount_path(path, "mountPath") == expected
 
 
-@pytest.mark.parametrize("path", ["//mnt/flowmesh/x", "/etc", "/mnt/flowmeshx"])
+@pytest.mark.parametrize("path", ["/etc", "/mnt/flowmeshx", "mnt/flowmesh/x", "/mnt"])
 def test_a_mount_path_outside_the_root_is_rejected(path: str) -> None:
     with pytest.raises(ExecutionError):
         normalize_mount_path(path, "mountPath")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/mnt/flowmesh/" + "/".join(["d"] * (MAX_MOUNT_PATH_DEPTH - 1)),
+        "/mnt/flowmesh/" + "x" * MAX_MOUNT_PATH_LENGTH,
+    ],
+)
+def test_a_mount_path_too_deep_or_long_is_rejected(path: str) -> None:
+    with pytest.raises(ExecutionError, match="at most"):
+        normalize_mount_path(path, "mountPath")
+
+
+def test_a_mount_path_at_the_depth_bound_is_accepted() -> None:
+    path = "/mnt/flowmesh/" + "/".join(["d"] * (MAX_MOUNT_PATH_DEPTH - 2))
+    assert normalize_mount_path(path, "mountPath") == path
