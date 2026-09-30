@@ -12,7 +12,7 @@ becomes durable at the agent's ordinary boundary seal.
 from abc import ABC, abstractmethod
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 SANDBOX_EXECUTE_INTERFACE = "sandbox.execute"
 # Egress is a separate interface, never implied by the authority to run code: an
@@ -98,7 +98,7 @@ class SandboxCommand(BaseModel):
 
     argv: tuple[str, ...]
     # None takes the capability's envelope deadline, which also caps a longer one.
-    timeout_sec: float | None = None
+    timeout_sec: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
 class SandboxCommandResult(BaseModel):

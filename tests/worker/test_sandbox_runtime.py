@@ -160,6 +160,12 @@ def test_a_command_deadline_is_capped_by_the_envelope(runtime, tmp_path):
     assert result.exit_code == -1
 
 
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), 0.0, -1.0])
+def test_a_command_deadline_must_be_finite_and_positive(timeout):
+    with pytest.raises(ValueError, match="timeout_sec"):
+        SandboxCommand(argv=("true",), timeout_sec=timeout)
+
+
 def test_a_background_process_does_not_outlive_its_command(runtime, profile, tmp_path):
     marker = tmp_path / "alive.txt"
     result = run(
