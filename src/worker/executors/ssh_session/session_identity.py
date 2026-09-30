@@ -1,8 +1,8 @@
 """The OS identity a process-mode SSH session logs in as.
 
-A root worker mints a throwaway account per session, so the session is a different
-uid from the worker: it cannot read the worker's environment, where the task token
-and every third-party API key live. An ACL entry denying that account each of the
+A root worker mints a throwaway account per session, so the session is a different uid
+from the worker: it cannot read the worker's environment, where the task token and
+every third-party API key live. An ACL entry denying that account each of the
 worker's state roots keeps it out of the worker's files, which are shared with other
 uids by mode and so readable to any account by default.
 """
@@ -16,31 +16,61 @@ import shutil
 import signal
 import subprocess
 import sys
-import time
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
 import psutil
 
 from ..base_executor import ExecutionError
+from . import acl
 
 logger = logging.getLogger(__name__)
 
 ACCOUNT_PREFIX = "fmssn"
 ACCOUNT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 PRIVSEP_DIR = Path("/run/sshd")
-# Root-only record of the last uid a session held, so no uid is handed out twice.
-UID_HIGH_WATER = Path("/var/lib/flowmesh/ssh-session-uid")
-FIRST_SESSION_UID = 200_000
-# Where any account may leave files behind.
-SHARED_TMP_DIRS = (Path("/", "tmp"), Path("/", "var", "tmp"), Path("/", "dev", "shm"))
+# Debian's on-demand global range: above the uids distributions hand out to
+# accounts, so a session never shares a uid with a principal of a shared volume,
+# and inside the 65536 uids a user namespace maps.
+SESSION_UID_MIN = 61000
+SESSION_UID_MAX = 64999
+_UID_ATTEMPTS = 16
+_WORLD_WRITABLE_DIRS = (
+    Path("/", "var", "tmp"),
+    Path("/", "dev", "shm"),
+    Path("/", "dev", "mqueue"),
+)
+# Each table's id column, and the columns naming its owner and creator.
+_SYSV_IPC_TABLES = {
+    "shm": ("-m", 1, (7, 9)),
+    "msg": ("-q", 1, (7, 9)),
+    "sem": ("-s", 1, (4, 6)),
+}
+_SYSV_IPC_ROOT = Path("/proc/sysvipc")
 _NOGROUP_GID = 65534
 _KILL_GRACE_SEC = 5.0
-_KILL_ROUNDS = 20
-_KILL_ROUND_SEC = 0.1
+_KILL_ROUNDS = 10
+_KILL_ROUND_SEC = 0.5
+_KILL_ALL_SCRIPT = (
+    "import os, signal, sys\n"
+    "os.setgroups([])\n"
+    "os.setgid(int(sys.argv[2]))\n"
+    "os.setuid(int(sys.argv[1]))\n"
+    "try:\n"
+    "    os.kill(-1, signal.SIGKILL)\n"
+    "except ProcessLookupError:\n"
+    "    pass\n"
+)
+_EXEC_AS_SCRIPT = (
+    "import os, sys\n"
+    "os.setgroups([])\n"
+    "os.setgid(int(sys.argv[2]))\n"
+    "os.setuid(int(sys.argv[1]))\n"
+    "os.execv(sys.argv[3], sys.argv[3:])\n"
+)
+_HELPER_TIMEOUT_SEC = 10.0
 _COMMAND_TIMEOUT_SEC = 30.0
-# A uid no account holds, for probing whether a filesystem takes ACL entries.
-_ACL_PROBE_UID = 2**31 - 3
 
 
 def account_name_for(session_id: str) -> str:
@@ -61,30 +91,24 @@ class SessionAccount:
         self.uid = uid
         self.gid = gid
         self.home = home
-        self._denied: list[Path] = []
 
     @classmethod
     def create(
-        cls, name: str, home: Path, state_roots: Iterable[Path]
+        cls, name: str, home: Path, denied_roots: Iterable[Path]
     ) -> "SessionAccount":
-        """Create the account and deny it every state root, or leave nothing behind."""
+        """Create the account under a uid no ACL entry on ``denied_roots`` names,
+        and deny it each of them, or leave nothing behind.
+
+        A uid another worker sharing a root has denied it is never drawn, so
+        lifting this account's entries can never lift that worker's.
+        """
+        roots = list(denied_roots)
         _ensure_privsep_dir()
         useradd = _require_binary("useradd")
-        _run(
-            [
-                useradd,
-                "--no-create-home",
-                "--no-user-group",
-                "--uid",
-                str(allocate_uid()),
-                "--home-dir",
-                home.as_posix(),
-                "--shell",
-                _login_shell(),
-                name,
-            ],
-            f"create SSH session account {name}",
-        )
+        taken: set[int] = set()
+        for root in roots:
+            taken |= acl.named_uids(root)
+        _add_account(useradd, name, home, frozenset(taken))
         try:
             entry = pwd.getpwnam(name)
         except KeyError as exc:
@@ -95,7 +119,7 @@ class SessionAccount:
             # refuses even for public-key auth once UsePAM is off. An unguessable
             # hash leaves it unlocked without granting a usable password.
             _unlock(name)
-            account.deny(state_roots)
+            account.deny(roots)
             home.mkdir(mode=0o700)
             os.lchown(home, account.uid, account.gid)
         except BaseException:
@@ -104,40 +128,47 @@ class SessionAccount:
         return account
 
     def deny(self, roots: Iterable[Path]) -> None:
-        """Deny this account each root, failing on the first one that refuses."""
-        setfacl = _require_binary("setfacl")
-        for root in roots:
-            _run(
-                [setfacl, "-m", f"u:{self.uid}:---", root.as_posix()],
-                f"deny SSH session account {self.name} {root.as_posix()}",
-            )
-            self._denied.append(root)
+        """Deny this account each root, all or nothing.
+
+        Each entry is recorded before it is written, so a worker that dies midway
+        still lifts it.
+        """
+        applied: list[Path] = []
+        try:
+            for root in roots:
+                acl.record(self.uid, root)
+                applied.append(root)
+                acl.deny(self.uid, root)
+        except ExecutionError as exc:
+            for root in applied:
+                _revoke(self.uid, root)
+            raise ExecutionError(
+                f"Could not isolate SSH session account {self.name} from this "
+                f"worker's state: {exc}"
+            ) from exc
 
     def grant_read(self, path: Path) -> None:
         """Let this account read a file no other account may."""
-        setfacl = _require_binary("setfacl")
-        _run(
-            [setfacl, "-m", f"u:{self.uid}:r", path.as_posix()],
-            f"grant SSH session account {self.name} {path.as_posix()}",
-        )
+        acl.grant_read(self.uid, path)
 
     def release(self) -> None:
         """Remove the account and everything it holds, or leave it locked and
-        denied the worker's state when a process of it cannot be ended."""
-        if not retire_account(self.name, self.uid, self._denied):
+        denied the worker's state when it cannot be."""
+        if not retire_account(self.name, self.uid):
             raise ExecutionError(
-                f"SSH session account {self.name} still runs a process it could not "
-                "be rid of; it stays locked until a reap removes it"
+                f"SSH session account {self.name} could not be removed; it stays "
+                "locked and denied this worker's state until a reap removes it"
             )
-        self._denied.clear()
 
 
-def retire_account(name: str, uid: int, roots: Iterable[Path]) -> bool:
-    """End every process of an account, then remove its files from the shared
-    temporary directories, its denials on ``roots``, and the account itself.
+def retire_account(name: str, uid: int) -> bool:
+    """End every process of an account, delete it, then remove its files from the
+    shared temporary directories and lift its denials.
 
-    An account with a process that outlives the kill is locked instead, keeping its
-    denials, and ``False`` returned so a later reap can finish it.
+    The denials stay until the account is gone, since lifting them while one of its
+    processes lives would hand that process the worker's state. An account that
+    cannot be ended or deleted is locked instead, keeping them, and ``False``
+    returned so a later reap can finish it.
     """
     if not kill_processes(uid):
         lock_account(name)
@@ -147,33 +178,45 @@ def retire_account(name: str, uid: int, roots: Iterable[Path]) -> bool:
             name,
         )
         return False
-    remove_files_of(uid)
-    lift_denials(uid, roots)
-    delete_account(name)
+    if not delete_account(name):
+        lock_account(name)
+        logger.error(
+            "SSH session account %s could not be deleted; it stays locked and denied "
+            "the worker's state",
+            name,
+        )
+        return False
+    purge_uid_files(uid)
+    for recorded_uid, path in acl.recorded():
+        if recorded_uid == uid:
+            _revoke(uid, Path(path))
     return True
 
 
-def allocate_uid() -> int:
-    """A uid no session on this worker has held, so a later session never inherits
-    what an earlier one left running or owning."""
-    try:
-        last = int(UID_HIGH_WATER.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        last = FIRST_SESSION_UID - 1
-    uid = max(last + 1, FIRST_SESSION_UID)
-    while _uid_in_use(uid):
-        uid += 1
-    UID_HIGH_WATER.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    pending = UID_HIGH_WATER.with_name(f"{UID_HIGH_WATER.name}.tmp")
-    pending.write_text(str(uid), encoding="utf-8")
-    pending.chmod(0o600)
-    pending.replace(UID_HIGH_WATER)
-    return uid
+def reap_stale_accounts() -> bool:
+    """Retire every session account, then lift every denial recorded for an account
+    that no longer exists; returns whether each account is gone."""
+    clean = True
+    for entry in pwd.getpwall():
+        if not (name := entry.pw_name).startswith(ACCOUNT_PREFIX):
+            continue
+        if retire_account(name, entry.pw_uid):
+            logger.info("Reaped stale SSH session account %s", name)
+        else:
+            clean = False
+    _revoke_orphaned_denies()
+    return clean
 
 
-def remove_files_of(uid: int) -> None:
-    """Remove what ``uid`` left in the directories every account may write to."""
-    for base in SHARED_TMP_DIRS:
+def purge_uid_files(uid: int) -> None:
+    """Delete what ``uid`` left in the shared scratch directories and the SysV IPC
+    objects it owns or created, all of which outlive its processes.
+
+    Session uids are drawn at random and may come round again, so a later session
+    must not inherit what an earlier one owned there.
+    """
+    _remove_sysv_ipc_of(uid)
+    for base in (Path(tempfile.gettempdir()), *_WORLD_WRITABLE_DIRS):
         for current, dirs, files in os.walk(base, followlinks=False):
             for name in list(dirs):
                 path = os.path.join(current, name)
@@ -183,10 +226,60 @@ def remove_files_of(uid: int) -> None:
                 if os.path.islink(path):
                     _unlink(path)
                 else:
-                    shutil.rmtree(path, ignore_errors=True)
+                    remove_tree(Path(path))
             for name in files:
                 if _owner(path := os.path.join(current, name)) == uid:
                     _unlink(path)
+
+
+def _remove_sysv_ipc_of(uid: int) -> None:
+    if uid == 0:
+        return
+    ipcrm = shutil.which("ipcrm")
+    for table, (flag, id_column, owner_columns) in _SYSV_IPC_TABLES.items():
+        try:
+            lines = (_SYSV_IPC_ROOT / table).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines[1:]:
+            fields = line.split()
+            try:
+                owners = {int(fields[column]) for column in owner_columns}
+                ipc_id = fields[id_column]
+            except (IndexError, ValueError):
+                continue
+            if uid not in owners:
+                continue
+            if ipcrm is None:
+                logger.warning(
+                    "ipcrm is missing; leaving %s %s of uid %d", table, ipc_id, uid
+                )
+                continue
+            # Its owner or creator may remove it; a root lacking CAP_IPC_OWNER, as
+            # in a container, may not.
+            try:
+                _run(
+                    exec_as(uid, _NOGROUP_GID, [ipcrm, flag, ipc_id]),
+                    f"remove {table} {ipc_id} of uid {uid}",
+                )
+            except ExecutionError as exc:
+                logger.warning("%s", exc)
+
+
+def remove_tree(path: Path) -> None:
+    """Delete ``path`` and everything below it without following a link or crossing
+    a mount, however deep a session nested it."""
+    rm = shutil.which("rm")
+    if rm is None:
+        shutil.rmtree(path, ignore_errors=True)
+        return
+    try:
+        _run(
+            [rm, "-rf", "--one-file-system", "--", path.as_posix()],
+            f"remove {path.as_posix()}",
+        )
+    except ExecutionError:
+        logger.warning("Failed to remove %s", path, exc_info=True)
 
 
 def lock_account(name: str) -> None:
@@ -199,83 +292,66 @@ def lock_account(name: str) -> None:
         logger.warning("Failed to lock SSH session account %s", name)
 
 
-def lift_denials(uid: int, roots: Iterable[Path]) -> None:
-    """Remove ``uid``'s ACL entry from each root, so a reused uid inherits none."""
-    setfacl = shutil.which("setfacl")
-    if setfacl is None:
-        return
-    for root in roots:
-        if not root.exists():
-            continue
-        try:
-            _run(
-                [setfacl, "-x", f"u:{uid}", root.as_posix()],
-                f"lift the SSH session denial on {root.as_posix()}",
-            )
-        except ExecutionError:
-            logger.warning("Failed to lift the SSH session denial on %s", root)
-
-
-def supports_denials(roots: Iterable[Path]) -> bool:
-    """Whether every root takes an ACL entry."""
-    setfacl = shutil.which("setfacl")
-    if setfacl is None:
-        return False
-    for root in roots:
-        try:
-            _run(
-                [setfacl, "-m", f"u:{_ACL_PROBE_UID}:---", root.as_posix()],
-                f"probe ACL support on {root.as_posix()}",
-            )
-        except ExecutionError:
-            logger.info("SSH session ACLs are unsupported on %s", root)
-            return False
-        lift_denials(_ACL_PROBE_UID, [root])
-    return True
-
-
 def kill_processes(uid: int) -> bool:
-    """End every process running as ``uid``: a terminate, then kills until none is
-    left. Returns whether none is left."""
-    if not (victims := _processes_of(uid)):
-        return True
+    """End every process running as ``uid``: a terminate, then kill rounds until none
+    is left. Returns whether none is left."""
+    if uid == 0:
+        return False
+    victims = _processes_of(uid)
     for proc in victims:
         try:
             proc.send_signal(signal.SIGTERM)
         except psutil.Error:
             continue
-    psutil.wait_procs(victims, timeout=_KILL_GRACE_SEC)
+    if victims:
+        psutil.wait_procs(victims, timeout=_KILL_GRACE_SEC)
+    # A snapshot can miss a process that forks and exits in a loop, so it is only
+    # trusted once kill(-1) has left the uid unable to start another.
     for _ in range(_KILL_ROUNDS):
-        if not _processes_of(uid):
-            return True
         _kill_all_as(uid)
-        time.sleep(_KILL_ROUND_SEC)
+        if not (survivors := _processes_of(uid)):
+            return True
+        for proc in survivors:
+            try:
+                proc.send_signal(signal.SIGKILL)
+            except psutil.Error:
+                continue
+        psutil.wait_procs(survivors, timeout=_KILL_ROUND_SEC)
     return not _processes_of(uid)
 
 
-def delete_account(name: str) -> None:
+def delete_account(name: str) -> bool:
     userdel = shutil.which("userdel")
     if userdel is None:
         logger.warning("userdel is missing; leaving account %s behind", name)
-        return
+        return False
     try:
         _run([userdel, name], f"delete SSH session account {name}")
     except ExecutionError:
         logger.warning("Failed to delete SSH session account %s", name)
+        return False
+    return True
 
 
-def reap_stale_accounts(state_roots: Iterable[Path]) -> bool:
-    """Retire every session account; returns whether each one is gone."""
-    roots = list(state_roots)
-    clean = True
-    for entry in pwd.getpwall():
-        if not (name := entry.pw_name).startswith(ACCOUNT_PREFIX):
-            continue
-        if retire_account(name, entry.pw_uid, roots):
-            logger.info("Reaped stale SSH session account %s", name)
-        else:
-            clean = False
-    return clean
+def exec_as(uid: int, gid: int, argv: list[str]) -> list[str]:
+    """The command line running ``argv`` as ``uid``.
+
+    The child drops to ``uid`` itself rather than through ``subprocess``'s ``user=``,
+    which forces a plain ``fork()`` whose atfork handlers crash the child of a
+    process running gRPC threads.
+    """
+    if uid == 0:
+        raise ExecutionError("Refusing to run a session helper as root")
+    return [
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        _EXEC_AS_SCRIPT,
+        str(uid),
+        str(gid),
+        *argv,
+    ]
 
 
 def process_identity_available() -> bool:
@@ -299,34 +375,118 @@ def _live_and_owned_by(proc: psutil.Process, uid: int) -> bool:
 
 
 def _kill_all_as(uid: int) -> None:
-    """Kill every process of ``uid`` at once, from a child running as ``uid``.
+    """Have the kernel SIGKILL every process of ``uid`` in a single pass.
 
-    ``kill(-1)`` signals every process the caller may signal in one step, so a
-    process forking as fast as its siblings are killed cannot outrun it.
+    A snapshot of the process table cannot catch a process forked after it was
+    taken, so a fork loop outruns one. ``kill(-1)`` sent as ``uid`` reaches all of
+    that uid's processes at once.
     """
-    if uid == 0 or os.getuid() != 0:
+    if os.geteuid() != 0 or uid in (0, os.getuid()):
         return
     try:
-        subprocess.run(  # nosec B603 - argv list, no shell=True, the running interpreter
-            [sys.executable, "-c", "import os, signal; os.kill(-1, signal.SIGKILL)"],
-            user=uid,
-            group=_NOGROUP_GID,
-            extra_groups=[],
-            env={"PATH": os.defpath},
+        result = subprocess.run(  # nosec B603 - argv list, no shell=True, the worker's own interpreter
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                _KILL_ALL_SCRIPT,
+                str(uid),
+                str(_NOGROUP_GID),
+            ],
+            env={},
+            cwd="/",
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            timeout=_COMMAND_TIMEOUT_SEC,
+            timeout=_HELPER_TIMEOUT_SEC,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        logger.warning("Failed to kill the processes of uid %d", uid, exc_info=True)
+    except (OSError, subprocess.SubprocessError):
+        logger.warning("Failed to signal every process of uid %d", uid, exc_info=True)
+        return
+    if result.returncode != 0:
+        logger.warning(
+            "Signalling every process of uid %d exited %d: %s",
+            uid,
+            result.returncode,
+            result.stderr.decode("utf-8", errors="replace").strip(),
+        )
 
 
-def _uid_in_use(uid: int) -> bool:
+def _add_account(
+    useradd: str, name: str, home: Path, avoid_uids: frozenset[int]
+) -> None:
+    """Create ``name`` under a uid drawn at random from the session range, skipping
+    one an account, a live process or ``avoid_uids`` holds."""
+    detail = ""
+    for _ in range(_UID_ATTEMPTS):
+        uid = SESSION_UID_MIN + secrets.randbelow(SESSION_UID_MAX - SESSION_UID_MIN + 1)
+        if uid in avoid_uids or _uid_exists(uid) or _processes_of(uid):
+            continue
+        try:
+            _run(
+                [
+                    useradd,
+                    "--no-create-home",
+                    "--no-user-group",
+                    "--uid",
+                    str(uid),
+                    "--home-dir",
+                    home.as_posix(),
+                    "--shell",
+                    _login_shell(),
+                    name,
+                ],
+                f"create SSH session account {name}",
+            )
+            return
+        except ExecutionError as exc:
+            detail = str(exc)
+            if _account_exists(name):
+                raise
+    raise ExecutionError(
+        f"Could not find a free uid for SSH session account {name}. {detail}".strip()
+    )
+
+
+def _revoke(uid: int, path: Path) -> None:
+    try:
+        if path.exists():
+            acl.revoke(uid, path)
+        acl.forget(uid, path)
+    except ExecutionError:
+        logger.warning(
+            "Failed to lift the SSH session denial of uid %d on %s; the next reap "
+            "retries",
+            uid,
+            path,
+        )
+
+
+def _revoke_orphaned_denies() -> None:
+    try:
+        records = acl.recorded()
+    except ExecutionError:
+        logger.warning("Cannot read recorded SSH session ACL entries", exc_info=True)
+        return
+    for uid, path in records:
+        if not _uid_exists(uid):
+            _revoke(uid, Path(path))
+
+
+def _uid_exists(uid: int) -> bool:
     try:
         pwd.getpwuid(uid)
     except KeyError:
-        return bool(_processes_of(uid))
+        return False
+    return True
+
+
+def _account_exists(name: str) -> bool:
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        return False
     return True
 
 

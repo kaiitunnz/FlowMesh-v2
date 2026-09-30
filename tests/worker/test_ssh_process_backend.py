@@ -4,8 +4,13 @@ in-container suite does that."""
 
 import dataclasses
 import io
+import logging
 import os
+import stat
+import subprocess
+import sys
 import tarfile
+import tempfile
 import typing
 from pathlib import Path
 from typing import Any, cast
@@ -24,7 +29,11 @@ from tests.worker.factories import (
     make_worker_hardware,
     make_worker_task_message,
 )
-from worker.config import WorkerConfig
+from worker.config import (
+    SESSION_ALLOWED_PATH_FIELDS,
+    SESSION_DENIED_PATH_FIELDS,
+    WorkerConfig,
+)
 from worker.executors.base_executor import (
     ExecutionError,
     RunSignals,
@@ -38,7 +47,11 @@ from worker.executors.ssh_session import (
     select_backend_cls,
 )
 from worker.executors.ssh_session.backends import process as process_module
-from worker.executors.ssh_session.base import extract_output_archive, tree_size_bytes
+from worker.executors.ssh_session.base import (
+    extract_output_archive,
+    iter_tree,
+    path_size_bytes,
+)
 from worker.executors.ssh_session.config import SSHOutputConfig
 from worker.main import build_capabilities
 from worker.runner import Runner
@@ -85,31 +98,38 @@ def test_a_non_root_worker_without_docker_serves_no_ssh(tmp_path: Path) -> None:
         assert SSHExecutor.is_available(config) is False
 
 
-def test_a_worker_whose_state_takes_no_acl_serves_no_process_session(
-    tmp_path: Path,
+def _servable(**patches: Any) -> Any:
+    defaults: dict[str, Any] = {
+        "process_identity_available": True,
+        "find_sshd": "/usr/sbin/sshd",
+        "find_ssh_keygen": "/usr/bin/ssh-keygen",
+        "find_tar": "/usr/bin/tar",
+        "_acl_ready": True,
+        "_acquire_host_lock": True,
+        **patches,
+    }
+    return patch.multiple(
+        process_module,
+        **{name: MagicMock(return_value=value) for name, value in defaults.items()},
+    )
+
+
+@pytest.mark.parametrize("unready", ["_acl_ready", "_acquire_host_lock"])
+def test_a_worker_that_cannot_isolate_or_lock_serves_no_process_session(
+    tmp_path: Path, unready: str
 ) -> None:
-    with (
-        patch.object(process_module, "process_identity_available", return_value=True),
-        patch.object(process_module, "find_sshd", return_value="/usr/sbin/sshd"),
-        patch.object(process_module, "find_ssh_keygen", return_value="/usr/bin/k"),
-        patch.object(process_module, "ensure_state_roots"),
-        patch.object(process_module, "supports_denials", return_value=False),
-    ):
-        assert not ProcessSessionBackend.is_available(
-            make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
-        )
+    config = make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+    with _servable():
+        assert ProcessSessionBackend.is_available(config)
+    with _servable(**{unready: False}):
+        assert not ProcessSessionBackend.is_available(config)
 
 
 def test_a_root_worker_its_supervisor_cannot_reach_serves_no_process_session(
     tmp_path: Path,
 ) -> None:
     with (
-        patch.object(process_module, "process_identity_available", return_value=True),
-        patch.object(process_module, "find_sshd", return_value="/usr/sbin/sshd"),
-        patch.object(process_module, "find_ssh_keygen", return_value="/usr/bin/k"),
-        patch.object(process_module, "find_tar", return_value="/usr/bin/tar"),
-        patch.object(process_module, "ensure_state_roots"),
-        patch.object(process_module, "supports_denials", return_value=True),
+        _servable(),
         patch.object(process_module, "resolve_tailnet_address", return_value=None),
     ):
         assert not ProcessSessionBackend.is_available(make_live_worker_config(tmp_path))
@@ -200,67 +220,192 @@ def test_an_unknown_session_backend_stops_the_worker(
 # ------------------------------------------------------------------ #
 
 
-def _path_fields(cls: type) -> set[str]:
-    hints = typing.get_type_hints(cls)
-    return {
-        f.name
-        for f in dataclasses.fields(cls)
-        if Path in {hints[f.name], *typing.get_args(hints[f.name])}
+def _path_typed(annotation: Any) -> bool:
+    if annotation is Path:
+        return True
+    return any(_path_typed(arg) for arg in typing.get_args(annotation))
+
+
+def test_every_worker_path_field_is_classified_exactly_once() -> None:
+    hints = typing.get_type_hints(WorkerConfig)
+    path_fields = {
+        f.name for f in dataclasses.fields(WorkerConfig) if _path_typed(hints[f.name])
     }
+    denied = set(SESSION_DENIED_PATH_FIELDS)
+    allowed = set(SESSION_ALLOWED_PATH_FIELDS)
+
+    assert not denied & allowed
+    assert path_fields == denied | allowed
 
 
-def test_every_worker_path_field_is_classified_as_state_or_not() -> None:
-    classified = WorkerConfig.STATE_ROOT_FIELDS | WorkerConfig.NON_STATE_PATH_FIELDS
+def _state_config(tmp_path: Path, **overrides: Any) -> WorkerConfig:
+    fields: dict[str, Any] = {
+        "results_dir": tmp_path / "results",
+        "private_state_dir": tmp_path / "private",
+        "content_dir": tmp_path / "content",
+        "hb_file": tmp_path / "hb" / "worker-token.hb",
+        "session_state_dirs": (tmp_path / "home", tmp_path / "hf"),
+    }
+    return make_worker_config(**{**fields, **overrides})
 
-    assert _path_fields(WorkerConfig) == classified
-    assert not WorkerConfig.STATE_ROOT_FIELDS & WorkerConfig.NON_STATE_PATH_FIELDS
 
-
-def test_every_missing_state_root_is_created_private_to_the_worker(
+def test_the_denied_paths_cover_the_worker_state_and_a_filesystem_store(
     tmp_path: Path,
 ) -> None:
-    config = make_worker_config(
-        results_dir=tmp_path / "results",
-        private_state_dir=tmp_path / "private",
-        content_dir=tmp_path / "relocated" / "content",
-        hb_file=tmp_path / "hb" / "worker.hb",
-        home_dir=tmp_path / "home",
-        model_cache_dir=tmp_path / "hf",
-    )
-
-    process_module.ensure_state_roots(config)
-
-    for root in config.state_root_dirs:
-        assert root.is_dir() and root.stat().st_mode & 0o777 == 0o700, root
-    assert config.hb_file.is_file()
-
-
-def test_the_state_roots_cover_the_worker_state_and_a_filesystem_store(
-    tmp_path: Path,
-) -> None:
-    config = make_worker_config(
-        results_dir=tmp_path / "results",
-        private_state_dir=tmp_path / "private",
-        content_dir=tmp_path / "content",
-        hb_file=tmp_path / "worker.hb",
-        home_dir=tmp_path / "home",
-        model_cache_dir=tmp_path / "hf",
-    )
+    config = _state_config(tmp_path)
     store = dataclasses.replace(
         config.object_store,
         backend=BACKEND_FILESYSTEM,
         filesystem_root=tmp_path / "store",
     )
 
-    roots = set(dataclasses.replace(config, object_store=store).state_roots)
+    denied = dataclasses.replace(config, object_store=store).session_denied_paths()
 
-    assert {getattr(config, name) for name in WorkerConfig.STATE_ROOT_FIELDS} == (
-        roots - {tmp_path / "store"}
-    )
-    assert roots == {
+    assert set(denied) == {
         tmp_path / name
-        for name in ("results", "private", "content", "worker.hb", "home", "hf")
-    } | {tmp_path / "store"}
+        for name in ("results", "private", "content", "hb", "home", "hf", "store")
+    }
+
+
+def test_the_heartbeat_directory_is_denied_not_just_the_file(tmp_path: Path) -> None:
+    denied = _state_config(tmp_path).session_denied_paths()
+
+    assert tmp_path / "hb" in denied
+    assert tmp_path / "hb" / "worker-token.hb" not in denied
+
+
+def test_the_state_dirs_come_from_home_the_caches_and_temp_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _worker_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_HOME", (tmp_path / "hf").as_posix())
+    monkeypatch.setenv("TORCH_HOME", (tmp_path / "torch").as_posix())
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+
+    dirs = WorkerConfig.from_env().session_state_dirs
+
+    assert Path.home() in dirs
+    assert {tmp_path / "hf", tmp_path / "torch"} <= set(dirs)
+    assert Path(tempfile.gettempdir()) / "fastembed_cache" in dirs
+
+
+def test_every_missing_state_root_is_created_private_to_the_worker(
+    tmp_path: Path,
+) -> None:
+    config = _state_config(tmp_path, content_dir=tmp_path / "relocated" / "content")
+
+    roots = process_module.ensure_state_roots(config)
+
+    assert set(roots) == set(config.session_denied_paths())
+    for root in roots:
+        assert root.is_dir() and stat.S_IMODE(root.stat().st_mode) == 0o700, root
+
+
+@pytest.mark.parametrize(
+    "covering",
+    [Path("/"), Path("/mnt"), Path(tempfile.gettempdir()), Path("/var/lib/flowmesh")],
+)
+def test_a_state_root_covering_what_sessions_need_is_refused(
+    tmp_path: Path, covering: Path
+) -> None:
+    config = _state_config(tmp_path, session_state_dirs=(covering,))
+
+    with pytest.raises(ExecutionError, match="would also deny"):
+        process_module.ensure_state_roots(config)
+
+
+def test_a_heartbeat_in_the_temp_dir_refuses_the_backend(tmp_path: Path) -> None:
+    config = _state_config(
+        tmp_path, hb_file=Path(tempfile.gettempdir()) / "worker-token.hb"
+    )
+
+    with pytest.raises(ExecutionError, match="would also deny"):
+        process_module.ensure_state_roots(config)
+    with patch.object(process_module.acl, "tools_available", return_value=True):
+        assert not process_module._acl_ready(config)
+
+
+def test_an_operator_link_is_resolved_to_its_target(tmp_path: Path) -> None:
+    data = tmp_path / "data" / "results"
+    data.mkdir(parents=True)
+    (tmp_path / "results").symlink_to(data)
+
+    roots = process_module.denied_roots(_state_config(tmp_path))
+
+    assert data in roots
+    assert process_module._root_problem(data) is None
+
+
+def test_a_link_in_a_shared_dir_is_refused_not_followed(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o1777)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (shared / "cache").symlink_to(victim)
+
+    roots = process_module.denied_roots(
+        _state_config(tmp_path, session_state_dirs=(shared / "cache",))
+    )
+
+    assert shared / "cache" in roots
+    assert "link" in (process_module._root_problem(shared / "cache") or "")
+
+
+def test_a_root_others_can_write_in_a_shared_dir_is_refused(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o1777)
+    (shared / "cache").mkdir()
+    (shared / "cache").chmod(0o777)
+
+    assert process_module._root_problem(shared / "cache") is not None
+    assert process_module._root_problem(tmp_path / "missing") is None
+
+
+def test_a_filesystem_that_takes_no_acl_offers_no_process_backend(
+    tmp_path: Path,
+) -> None:
+    with (
+        patch.object(process_module.acl, "tools_available", return_value=True),
+        patch.object(
+            process_module.acl, "probe", side_effect=ExecutionError("no ACLs here")
+        ),
+    ):
+        assert not process_module._acl_ready(_state_config(tmp_path))
+
+
+# ------------------------------------------------------------------ #
+# The host lock
+# ------------------------------------------------------------------ #
+
+
+def test_one_worker_per_host_holds_the_process_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(process_module.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(process_module.tempfile, "tempdir", tmp_path.as_posix())
+    monkeypatch.setattr(process_module, "_host_lock_fd", None)
+    lock = tmp_path / process_module._HOST_LOCK_NAME
+    try:
+        assert process_module._acquire_host_lock()
+        assert process_module._acquire_host_lock()
+        other = subprocess.run(  # nosec B603 - argv list, test-only
+            [
+                sys.executable,
+                "-c",
+                "import fcntl, os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n",
+                lock.as_posix(),
+            ],
+            capture_output=True,
+            check=False,
+        )
+        assert other.returncode != 0
+    finally:
+        if (fd := process_module._host_lock_fd) is not None:
+            os.close(fd)
 
 
 # ------------------------------------------------------------------ #
@@ -304,22 +449,105 @@ def test_mount_paths_that_nest_are_refused(
         process_module._plan_mounts(_request(tmp_path, inputs, output))
 
 
-def test_a_mount_path_through_a_symlink_is_refused(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (tmp_path / "planted").symlink_to(target)
+def test_the_mount_root_is_emptied_without_following_a_link(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious").write_text("keep")
+    root = tmp_path / "mnt"
+    (root / "old" / "deep").mkdir(parents=True)
+    (root / "link").symlink_to(outside)
+    (root / "old" / "link").symlink_to(outside)
+    root.chmod(0o700)
 
-    with pytest.raises(ExecutionError, match="not a directory"):
-        process_module._make_dirs_nofollow(tmp_path / "planted" / "output")
+    process_module._reset_mount_root(root, create=True)
 
-    assert list(target.iterdir()) == []
+    assert list(root.iterdir()) == []
+    assert (outside / "precious").read_text() == "keep"
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755
 
 
-def test_mount_components_are_created_one_level_at_a_time(tmp_path: Path) -> None:
-    fd = process_module._make_dirs_nofollow(tmp_path / "a" / "b" / "c")
-    os.close(fd)
+def test_a_linked_mount_root_is_replaced_not_followed(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious").write_text("keep")
+    root = tmp_path / "mnt"
+    root.symlink_to(outside)
 
-    assert (tmp_path / "a" / "b" / "c").is_dir()
+    process_module._reset_mount_root(root, create=True)
+
+    assert root.is_dir() and not root.is_symlink()
+    assert (outside / "precious").read_text() == "keep"
+
+
+def test_a_filesystem_mounted_below_the_mount_root_is_never_emptied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "mnt root"
+    (root / "data").mkdir(parents=True)
+    (root / "data" / "kept").write_text("operator data")
+    mountinfo = tmp_path / "mountinfo"
+    escaped = (root / "data").as_posix().replace(" ", "\\040")
+    mountinfo.write_text(
+        "23 28 0:22 / /proc rw,relatime - proc proc rw\n"
+        f"90 28 8:1 /srv/data {escaped} rw,relatime - ext4 /dev/sda1 rw\n"
+    )
+    monkeypatch.setattr(process_module, "_MOUNTINFO", mountinfo)
+
+    with pytest.raises(OSError, match="mounted"):
+        process_module._reset_mount_root(root, create=True)
+
+    assert (root / "data" / "kept").read_text() == "operator data"
+
+
+def test_a_mount_on_another_device_below_the_root_is_never_emptied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "mnt"
+    (root / "data").mkdir(parents=True)
+    (root / "data" / "kept").write_text("operator data")
+    real_lstat = os.lstat
+
+    def lstat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        info = real_lstat(path, *args, **kwargs)
+        if Path(path) == root / "data":
+            fields = list(info)
+            fields[stat.ST_DEV] += 1
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(process_module, "_MOUNTINFO", tmp_path / "unreadable")
+    monkeypatch.setattr(process_module.os, "lstat", lstat)
+
+    with pytest.raises(OSError, match="mounted"):
+        process_module._reset_mount_root(root, create=True)
+
+    assert (root / "data" / "kept").read_text() == "operator data"
+
+
+def test_a_mount_path_is_a_link_made_one_level_at_a_time(tmp_path: Path) -> None:
+    root = tmp_path / "mnt"
+    root.mkdir()
+    target = tmp_path / "session" / "output"
+    target.mkdir(parents=True)
+
+    process_module._link_mount_path(root, (root / "a" / "b" / "out").as_posix(), target)
+
+    link = root / "a" / "b" / "out"
+    assert link.is_symlink() and link.readlink() == target
+    assert stat.S_IMODE((root / "a").stat().st_mode) == 0o755
+
+
+def test_a_mount_path_through_a_link_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "mnt"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "a").symlink_to(outside)
+
+    with pytest.raises(ExecutionError, match="conflicts"):
+        process_module._link_mount_path(root, (root / "a" / "out").as_posix(), tmp_path)
+
+    assert list(outside.iterdir()) == []
 
 
 # ------------------------------------------------------------------ #
@@ -386,7 +614,25 @@ def test_the_output_size_counts_regular_files_without_following_a_link(
     (output / "secret-link").symlink_to(outside / "secret")
     (output / "dir-link").symlink_to(outside)
 
-    assert tree_size_bytes(output) == len("ok") + len("nested")
+    assert path_size_bytes(output) == len("ok") + len("nested")
+
+
+def test_a_linked_output_root_is_not_walked(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "f").write_text("data")
+    (tmp_path / "link").symlink_to(real)
+
+    assert list(iter_tree(tmp_path / "link")) == []
+
+
+def test_an_output_too_deep_to_walk_fails_the_size_check(tmp_path: Path) -> None:
+    deepest = tmp_path.joinpath(*(["d"] * 70))
+    deepest.mkdir(parents=True)
+    (deepest / "f").write_bytes(b"x")
+
+    with pytest.raises(ExecutionError, match="deeper"):
+        path_size_bytes(tmp_path)
 
 
 def test_collection_fails_past_the_output_limit(tmp_path: Path) -> None:
@@ -495,6 +741,111 @@ def test_a_signal_in_the_last_readiness_poll_ends_as_requested(kind: str) -> Non
             assert _session(signals, process).wait_ready(0.01) is None
 
 
+def test_the_finish_sentinel_is_never_followed(tmp_path: Path) -> None:
+    sentinel = tmp_path / ".flowmesh_finish"
+    session = _session(RunSignals(), MagicMock())
+    session._finish_sentinel = sentinel
+
+    assert not session.finish_requested()
+    sentinel.symlink_to(tmp_path / "missing")
+    assert session.finish_requested()
+
+
+def test_output_is_not_collected_while_a_process_of_the_session_lives(
+    tmp_path: Path,
+) -> None:
+    session = _session(RunSignals(), MagicMock())
+    session._output_path = tmp_path / "output"
+    with (
+        patch.object(process_module, "kill_processes", return_value=False),
+        patch.object(process_module, "_archive_as") as archive,
+        pytest.raises(ExecutionError, match="collect its output") as refused,
+    ):
+        session.collect_output(tmp_path / "collected", None)
+
+    archive.assert_not_called()
+    assert not refused.value.retryable
+
+
+@pytest.mark.parametrize(
+    "error", [OSError("disk gone"), tarfile.ReadError("truncated")]
+)
+def test_a_collection_failure_fails_the_session_for_good(
+    tmp_path: Path, error: Exception
+) -> None:
+    session = _session(RunSignals(), MagicMock())
+    session._output_path = tmp_path / "output"
+    with (
+        patch.object(process_module, "kill_processes", return_value=True),
+        patch.object(process_module, "_archive_as"),
+        patch.object(process_module, "_end_archiver"),
+        patch.object(process_module, "extract_output_archive", side_effect=error),
+        pytest.raises(ExecutionError, match="Failed to collect") as failed,
+    ):
+        session.collect_output(tmp_path / "collected", None)
+
+    assert not failed.value.retryable
+
+
+def test_the_session_is_stopped_before_its_sshd_and_again_after() -> None:
+    order: list[str] = []
+    session = _session(RunSignals(), MagicMock())
+
+    def kill(uid: int) -> bool:
+        order.append("kill")
+        return True
+
+    with (
+        patch.object(process_module, "kill_processes", side_effect=kill),
+        patch.object(
+            process_module,
+            "_terminate",
+            side_effect=lambda process, timeout: order.append("terminate"),
+        ),
+    ):
+        session.stop(1)
+
+    assert order == ["kill", "terminate", "kill"]
+
+
+def test_an_sshd_that_ignores_a_terminate_is_killed_with_its_children() -> None:
+    process = MagicMock(pid=4321)
+    process.poll.return_value = None
+    process.wait.side_effect = [subprocess.TimeoutExpired("sshd", 1), 0]
+    with patch.object(process_module, "_kill_tree") as kill_tree:
+        process_module._terminate(process, 1)
+
+    process.terminate.assert_called_once_with()
+    kill_tree.assert_called_once_with(4321)
+
+
+def test_sshd_runs_niced_and_under_a_subreaper_when_tini_is_there(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(process_module, "_missing_tini_logged", False)
+    with patch.object(process_module.shutil, "which", return_value="/usr/bin/tini"):
+        argv = process_module._launch_argv(["/usr/sbin/sshd", "-D"])
+
+    assert argv[-7:] == [
+        "10",
+        "1000",
+        "/usr/bin/tini",
+        "-s",
+        "--",
+        "/usr/sbin/sshd",
+        "-D",
+    ]
+    assert "oom_score_adj" in argv[argv.index("-c") + 1]
+
+    with (
+        patch.object(process_module.shutil, "which", return_value=None),
+        caplog.at_level(logging.WARNING),
+    ):
+        assert process_module._launch_argv(["/usr/sbin/sshd"])[-1] == "/usr/sbin/sshd"
+        process_module._launch_argv(["/usr/sbin/sshd"])
+    assert sum("tini is missing" in r.message for r in caplog.records) == 1
+
+
 # ------------------------------------------------------------------ #
 # Reaping what a dead worker left
 # ------------------------------------------------------------------ #
@@ -507,38 +858,55 @@ def test_a_reap_signals_only_the_sshd_its_manifest_names(
     session_dir = tmp_path / "ssn-1"
     session_dir.mkdir()
     process_module.SessionManifest(
-        session_dir=session_dir,
-        account="fmssn1",
-        roots=[(tmp_path / "results").as_posix()],
-        uid=1234,
-        sshd_pid=4321,
+        session_dir=session_dir, account="fmssn1", sshd_pid=4321
     ).write()
 
     with (
         patch.object(process_module, "_is_our_sshd", return_value=ours),
-        patch.object(process_module.os, "kill") as kill,
+        patch.object(process_module, "_kill_tree") as kill,
+        patch.object(
+            process_module.pwd, "getpwnam", return_value=MagicMock(pw_uid=61_001)
+        ),
         patch.object(process_module, "retire_account", return_value=True) as retire,
     ):
         assert process_module.reap_session(session_dir)
 
     assert kill.call_count == (1 if ours else 0)
-    retire.assert_called_once_with("fmssn1", 1234, [tmp_path / "results"])
+    retire.assert_called_once_with("fmssn1", 61_001)
     assert not session_dir.exists()
 
 
-def test_a_reap_keeps_a_session_whose_account_still_runs_a_process(
+def test_a_reap_keeps_a_session_whose_account_cannot_be_removed(
     tmp_path: Path,
 ) -> None:
     session_dir = tmp_path / "ssn-1"
     session_dir.mkdir()
-    process_module.SessionManifest(
-        session_dir=session_dir, account="fmssn1", roots=[], uid=1234
-    ).write()
+    process_module.SessionManifest(session_dir=session_dir, account="fmssn1").write()
 
-    with patch.object(process_module, "retire_account", return_value=False):
+    with (
+        patch.object(
+            process_module.pwd, "getpwnam", return_value=MagicMock(pw_uid=61_001)
+        ),
+        patch.object(process_module, "retire_account", return_value=False),
+    ):
         assert not process_module.reap_session(session_dir)
 
     assert session_dir.exists()
+
+
+def test_a_reap_kills_the_sshd_below_its_subreaper(tmp_path: Path) -> None:
+    child = MagicMock()
+    parent = MagicMock()
+    parent.children.return_value = [child]
+    with (
+        patch.object(process_module.psutil, "Process", return_value=parent),
+        patch.object(process_module.psutil, "wait_procs") as wait,
+    ):
+        process_module._kill_tree(4321)
+
+    for proc in (parent, child):
+        proc.send_signal.assert_called_once_with(process_module.signal.SIGKILL)
+    wait.assert_called_once()
 
 
 def test_a_worker_serves_no_session_until_a_stuck_account_is_reaped(
@@ -548,7 +916,7 @@ def test_a_worker_serves_no_session_until_a_stuck_account_is_reaped(
     with (
         patch.object(process_module.os, "getuid", return_value=0),
         patch.object(process_module, "SESSIONS_ROOT", tmp_path / "sessions"),
-        patch.object(process_module, "_reset_mount_root"),
+        patch.object(process_module, "_clear_mount_root"),
         patch.object(process_module, "reap_stale_accounts", return_value=False),
     ):
         backend.reap_stale()
@@ -559,7 +927,7 @@ def test_a_worker_serves_no_session_until_a_stuck_account_is_reaped(
     with (
         patch.object(process_module.os, "getuid", return_value=0),
         patch.object(process_module, "SESSIONS_ROOT", tmp_path / "sessions"),
-        patch.object(process_module, "_reset_mount_root"),
+        patch.object(process_module, "_clear_mount_root"),
         patch.object(process_module, "reap_stale_accounts", return_value=True),
         patch.object(backend, "_create_session") as create,
     ):
@@ -579,7 +947,7 @@ def test_constructing_the_backend_reaps_nothing(tmp_path: Path) -> None:
         patch.object(process_module.os, "getuid", return_value=0),
         patch.object(process_module, "reap_session") as reap,
         patch.object(process_module, "reap_stale_accounts") as reap_accounts,
-        patch.object(process_module, "_reset_mount_root") as reset,
+        patch.object(process_module, "_clear_mount_root") as reset,
     ):
         ProcessSessionBackend(make_live_worker_config(tmp_path))
 
@@ -594,7 +962,7 @@ def test_a_worker_that_is_not_root_reaps_nothing(tmp_path: Path) -> None:
         patch.object(process_module.os, "getuid", return_value=1000),
         patch.object(process_module, "reap_session") as reap,
         patch.object(process_module, "reap_stale_accounts") as reap_accounts,
-        patch.object(process_module, "_reset_mount_root") as reset,
+        patch.object(process_module, "_clear_mount_root") as reset,
     ):
         backend.reap_stale()
 

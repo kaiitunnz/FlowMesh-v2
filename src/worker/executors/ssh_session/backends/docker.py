@@ -41,7 +41,7 @@ from ..base import (
     count_established_connections,
     extract_output_archive,
     is_ssh_ready,
-    tree_size_bytes,
+    path_size_bytes,
 )
 from ..config import (
     FINISH_SENTINEL_PATH,
@@ -693,7 +693,7 @@ class DockerSession(SSHSession):
         plan = self._mount_plan
         try:
             if plan.direct_output_path is not None:
-                return tree_size_bytes(plan.direct_output_path)
+                return path_size_bytes(plan.direct_output_path)
             if plan.copy_output_path is not None:
                 return self._container_path_size(plan.copy_output_path)
         except (DockerException, OSError) as exc:

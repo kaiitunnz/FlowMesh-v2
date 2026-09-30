@@ -7,9 +7,10 @@ code can depend on a structured config object.
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 from shared.content.config import BACKEND_FILESYSTEM, ObjectStoreConfig
 from shared.schemas.worker import SSHBackendName, SSHLimits
@@ -23,6 +24,31 @@ from shared.utils.parsing import (
 )
 
 from .utils.health import get_hb_config
+
+# Every path-typed ``WorkerConfig`` field is one or the other: a denied path is kept
+# from process-mode SSH session accounts.
+SESSION_DENIED_PATH_FIELDS = (
+    "results_dir",
+    "private_state_dir",
+    "content_dir",
+    "hb_file",
+    "session_state_dirs",
+)
+SESSION_ALLOWED_PATH_FIELDS: tuple[str, ...] = ()
+# Caches that can hold credentials or other tasks' data.
+_SESSION_STATE_DIR_ENV_VARS = (
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "HUGGINGFACE_HUB_CACHE",
+    "HF_DATASETS_CACHE",
+    "TRANSFORMERS_CACHE",
+    "TORCH_HOME",
+    "XDG_CACHE_HOME",
+    "VLLM_CACHE_ROOT",
+    "FASTEMBED_CACHE_PATH",
+)
+# Defaults of worker-side tools that keep other tasks' data in the temp dir.
+_SESSION_STATE_TEMP_DIRS = ("fastembed_cache",)
 
 
 @dataclass(frozen=True)
@@ -78,36 +104,23 @@ class WorkerConfig:
     ssh_session_backend: SSHBackendName = SSHBackendName.DOCKER
     ssh_relay_host: str | None = None
     ssh_stop_timeout_sec: float = 30.0
-    home_dir: Path | None = None
-    model_cache_dir: Path | None = None
+    session_state_dirs: tuple[Path, ...] = ()
 
-    # Every path field is either a root of the worker's own state, which a process
-    # SSH session must never reach, or named here as not one.
-    STATE_ROOT_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {
-            "results_dir",
-            "private_state_dir",
-            "content_dir",
-            "hb_file",
-            "home_dir",
-            "model_cache_dir",
-        }
-    )
-    NON_STATE_PATH_FIELDS: ClassVar[frozenset[str]] = frozenset()
-
-    @property
-    def state_roots(self) -> tuple[Path, ...]:
-        """The paths holding this worker's own state and credentials."""
-        return (*self.state_root_dirs, self.hb_file)
-
-    @property
-    def state_root_dirs(self) -> tuple[Path, ...]:
-        """The state roots that are directories."""
-        roots = [self.results_dir, self.private_state_dir, self.content_dir]
-        roots += [path for path in (self.home_dir, self.model_cache_dir) if path]
+    def session_denied_paths(self) -> tuple[Path, ...]:
+        """Worker state a process-mode SSH session must not reach."""
+        paths: dict[Path, None] = {}
+        for field_name in SESSION_DENIED_PATH_FIELDS:
+            value = getattr(self, field_name)
+            for path in value if isinstance(value, tuple) else (value,):
+                if path is None:
+                    continue
+                path = Path(os.path.abspath(path))
+                # The heartbeat file is named after the worker token, so the
+                # directory listing it is what must be denied.
+                paths[path.parent if field_name == "hb_file" else path] = None
         if self.object_store.backend == BACKEND_FILESYSTEM:
-            roots.append(self.object_store.filesystem_root)
-        return tuple(roots)
+            paths[Path(os.path.abspath(self.object_store.filesystem_root))] = None
+        return tuple(paths)
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -163,10 +176,6 @@ class WorkerConfig:
         ).absolute()
 
         hb_interval, hb_ttl, hb_file = get_hb_config()
-        home_dir = Path.home().absolute()
-        model_cache_dir = Path(
-            os.getenv("HF_HOME", "").strip() or (home_dir / ".cache" / "huggingface")
-        ).absolute()
 
         # A relayed variable the node never set arrives set-but-empty, so every default
         # here is taken on an empty value as well as on a missing one.
@@ -326,6 +335,16 @@ class WorkerConfig:
             ssh_session_backend=ssh_session_backend,
             ssh_relay_host=ssh_relay_host,
             ssh_stop_timeout_sec=ssh_stop_timeout_sec,
-            home_dir=home_dir,
-            model_cache_dir=model_cache_dir,
+            session_state_dirs=_session_state_dirs_from_env(),
         )
+
+
+def _session_state_dirs_from_env() -> tuple[Path, ...]:
+    dirs = [Path.home()]
+    dirs.extend(
+        Path(value)
+        for name in _SESSION_STATE_DIR_ENV_VARS
+        if (value := os.getenv(name, "").strip())
+    )
+    dirs.extend(Path(tempfile.gettempdir()) / name for name in _SESSION_STATE_TEMP_DIRS)
+    return tuple(Path(os.path.abspath(path)) for path in dirs)

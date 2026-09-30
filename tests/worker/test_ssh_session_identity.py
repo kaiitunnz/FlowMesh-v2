@@ -42,44 +42,113 @@ def test_an_account_name_is_derived_from_its_session() -> None:
     assert session_identity.ACCOUNT_NAME_RE.match(name)
 
 
-def test_no_uid_is_handed_out_twice(tmp_path: Path) -> None:
+def _run_ok(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
+    return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
+def test_a_uid_an_account_a_process_or_a_state_root_holds_is_not_drawn() -> None:
+    draws = iter([0, 1, 2, 3])
+    created: list[list[str]] = []
+
+    def run(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
+        created.append(argv)
+        return _run_ok(argv, what)
+
+    first = session_identity.SESSION_UID_MIN
     with (
-        patch.object(session_identity, "UID_HIGH_WATER", tmp_path / "state" / "uid"),
+        patch.object(
+            session_identity.secrets, "randbelow", side_effect=lambda n: next(draws)
+        ),
+        patch.object(
+            session_identity, "_uid_exists", side_effect=lambda uid: uid == first + 1
+        ),
         patch.object(
             session_identity,
-            "_uid_in_use",
-            side_effect=lambda uid: uid == session_identity.FIRST_SESSION_UID + 1,
+            "_processes_of",
+            side_effect=lambda uid: [MagicMock()] if uid == first + 2 else [],
         ),
+        patch.object(session_identity, "_run", side_effect=run),
     ):
-        first = session_identity.allocate_uid()
-        second = session_identity.allocate_uid()
+        session_identity._add_account(
+            "/usr/sbin/useradd", "fmssn1", Path("/h"), frozenset({first})
+        )
 
-    assert first == session_identity.FIRST_SESSION_UID
-    assert second == first + 2
-    assert (tmp_path / "state" / "uid").read_text() == str(second)
-    assert (tmp_path / "state" / "uid").stat().st_mode & 0o777 == 0o600
+    ((*_, uid_flag, uid, _home_flag, _home, _shell_flag, _shell, name),) = created
+    assert (uid_flag, uid, name) == ("--uid", str(first + 3), "fmssn1")
 
 
-def test_retiring_removes_only_the_files_the_account_left(tmp_path: Path) -> None:
+def test_a_new_account_avoids_every_uid_a_state_root_names(tmp_path: Path) -> None:
+    avoided: list[frozenset[int]] = []
+    roots = [tmp_path / "results", tmp_path / "hb"]
+    named = {roots[0]: {61001}, roots[1]: {61002}}
+
+    def add(useradd: str, name: str, home: Path, avoid: frozenset[int]) -> None:
+        avoided.append(avoid)
+        raise ExecutionError("stop here")
+
+    with (
+        patch.object(session_identity, "_ensure_privsep_dir"),
+        patch.object(session_identity.shutil, "which", return_value="/bin/x"),
+        patch.object(session_identity.acl, "named_uids", side_effect=named.get),
+        patch.object(session_identity, "_add_account", side_effect=add),
+        pytest.raises(ExecutionError, match="stop here"),
+    ):
+        session_identity.SessionAccount.create("fmssn1", tmp_path / "home", roots)
+
+    assert avoided == [frozenset({61001, 61002})]
+
+
+def test_the_uid_range_fits_a_user_namespace() -> None:
+    assert (
+        1000
+        < session_identity.SESSION_UID_MIN
+        <= session_identity.SESSION_UID_MAX
+        < 65536
+    )
+
+
+def test_retiring_removes_only_the_files_the_account_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     shared = tmp_path / "tmp"
-    (shared / "left-dir" / "inner").mkdir(parents=True)
+    deep = shared.joinpath("left-dir", *(["d"] * 20))
+    deep.mkdir(parents=True)
     (shared / "left-file").write_text("secret")
     (shared / "left-link").symlink_to(tmp_path)
     kept = tmp_path / "kept"
     kept.write_text("kept")
     uid = os.getuid()
+    monkeypatch.setattr(session_identity.tempfile, "tempdir", shared.as_posix())
+    monkeypatch.setattr(session_identity, "_WORLD_WRITABLE_DIRS", ())
 
-    with patch.object(session_identity, "SHARED_TMP_DIRS", (shared,)):
-        session_identity.remove_files_of(uid + 1)
-        assert sorted(p.name for p in shared.iterdir()) == [
-            "left-dir",
-            "left-file",
-            "left-link",
-        ]
-        session_identity.remove_files_of(uid)
+    session_identity.purge_uid_files(uid + 1)
+    assert sorted(p.name for p in shared.iterdir()) == [
+        "left-dir",
+        "left-file",
+        "left-link",
+    ]
+    session_identity.purge_uid_files(uid)
 
     assert list(shared.iterdir()) == []
     assert kept.read_text() == "kept"
+
+
+def test_a_tree_deeper_than_python_recurses_is_removed(tmp_path: Path) -> None:
+    root = tmp_path / "deep"
+    root.mkdir()
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for _ in range(1500):
+            os.mkdir("d", dir_fd=fd)
+            child = os.open("d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    finally:
+        os.close(fd)
+
+    session_identity.remove_tree(root)
+
+    assert not root.exists()
 
 
 def _process() -> MagicMock:
@@ -95,11 +164,28 @@ def test_the_kill_repeats_until_no_process_of_the_account_is_left() -> None:
         ),
         patch.object(session_identity.psutil, "wait_procs"),
         patch.object(session_identity, "_kill_all_as") as kill_all,
-        patch.object(session_identity.time, "sleep"),
     ):
-        assert session_identity.kill_processes(200_000)
+        assert session_identity.kill_processes(61_000)
 
-    assert kill_all.call_count == 2
+    assert kill_all.call_count == 3
+    assert survivor.send_signal.call_count == 3
+
+
+def test_the_kill_signals_the_account_at_once_even_when_no_process_is_seen() -> None:
+    with (
+        patch.object(session_identity, "_processes_of", return_value=[]),
+        patch.object(session_identity, "_kill_all_as") as kill_all,
+    ):
+        assert session_identity.kill_processes(61_000)
+
+    kill_all.assert_called_once_with(61_000)
+
+
+def test_root_processes_are_never_the_account_s_to_kill() -> None:
+    with patch.object(session_identity, "_processes_of") as processes:
+        assert not session_identity.kill_processes(0)
+
+    processes.assert_not_called()
 
 
 def test_a_zombie_of_the_account_is_not_a_process_left_to_kill() -> None:
@@ -118,24 +204,55 @@ def test_a_zombie_of_the_account_is_not_a_process_left_to_kill() -> None:
     assert os.getpid() in pids
 
 
-def test_an_account_with_a_process_no_kill_ends_is_locked_not_deleted() -> None:
+def _retire(
+    killed: bool, deleted: bool, recorded: set[tuple[int, str]]
+) -> tuple[bool, MagicMock, MagicMock, MagicMock]:
     with (
-        patch.object(session_identity, "kill_processes", return_value=False),
+        patch.object(session_identity, "kill_processes", return_value=killed),
+        patch.object(session_identity, "delete_account", return_value=deleted),
         patch.object(session_identity, "lock_account") as lock,
-        patch.object(session_identity, "lift_denials") as lift,
-        patch.object(session_identity, "delete_account") as delete,
-        patch.object(session_identity, "remove_files_of") as remove,
+        patch.object(session_identity, "purge_uid_files") as purge,
+        patch.object(session_identity.acl, "recorded", return_value=recorded),
+        patch.object(session_identity, "_revoke") as revoke,
     ):
-        assert not session_identity.retire_account("fmssn1", 200_000, [Path("/r")])
+        retired = session_identity.retire_account("fmssn1", 61_001)
+    return retired, lock, purge, revoke
 
+
+def test_an_account_with_a_process_no_kill_ends_is_locked_and_kept_denied() -> None:
+    retired, lock, purge, revoke = _retire(False, True, {(61_001, "/r")})
+
+    assert not retired
     lock.assert_called_once_with("fmssn1")
-    lift.assert_not_called()
-    delete.assert_not_called()
-    remove.assert_not_called()
+    purge.assert_not_called()
+    revoke.assert_not_called()
+
+
+def test_an_account_that_cannot_be_deleted_is_locked_and_kept_denied() -> None:
+    retired, lock, purge, revoke = _retire(True, False, {(61_001, "/r")})
+
+    assert not retired
+    lock.assert_called_once_with("fmssn1")
+    purge.assert_not_called()
+    revoke.assert_not_called()
+
+
+def test_a_deleted_account_loses_only_its_own_recorded_denials() -> None:
+    retired, lock, purge, revoke = _retire(
+        True, True, {(61_001, "/r"), (61_001, "/hb"), (61_002, "/r")}
+    )
+
+    assert retired
+    lock.assert_not_called()
+    purge.assert_called_once_with(61_001)
+    assert sorted(call.args for call in revoke.call_args_list) == [
+        (61_001, Path("/hb")),
+        (61_001, Path("/r")),
+    ]
 
 
 def test_a_released_account_that_cannot_be_retired_fails_loudly() -> None:
-    account = session_identity.SessionAccount("fmssn1", 200_000, 200_000, Path("/h"))
+    account = session_identity.SessionAccount("fmssn1", 61_001, 61_001, Path("/h"))
     with (
         patch.object(session_identity, "retire_account", return_value=False),
         pytest.raises(ExecutionError, match="stays locked"),
@@ -143,14 +260,155 @@ def test_a_released_account_that_cannot_be_retired_fails_loudly() -> None:
         account.release()
 
 
-@pytest.mark.parametrize(("worker_uid", "uid"), [(1000, 200_000), (0, 0)])
-def test_the_kill_runs_only_as_root_and_never_as_root(
-    worker_uid: int, uid: int
+def test_a_partial_denial_is_rolled_back(tmp_path: Path) -> None:
+    recorded: list[Path] = []
+    revoked: list[Path] = []
+
+    def deny(uid: int, path: Path) -> None:
+        if path.name == "second":
+            raise ExecutionError("no ACL support")
+
+    account = session_identity.SessionAccount("fmssn1", 61_001, 61_001, tmp_path)
+    with (
+        patch.object(
+            session_identity.acl, "record", side_effect=lambda u, p: recorded.append(p)
+        ),
+        patch.object(session_identity.acl, "deny", side_effect=deny),
+        patch.object(
+            session_identity, "_revoke", side_effect=lambda u, p: revoked.append(p)
+        ),
+        pytest.raises(ExecutionError, match="Could not isolate"),
+    ):
+        account.deny([tmp_path / "first", tmp_path / "second", tmp_path / "third"])
+
+    # Recorded before written, so the one that failed midway is revoked too.
+    assert recorded == [tmp_path / "first", tmp_path / "second"]
+    assert revoked == recorded
+
+
+def test_the_reap_lifts_the_denials_of_accounts_that_no_longer_exist() -> None:
+    revoked: list[tuple[int, Path]] = []
+    with (
+        patch.object(session_identity.pwd, "getpwall", return_value=[]),
+        patch.object(
+            session_identity.acl,
+            "recorded",
+            return_value={(61_001, "/gone"), (61_002, "/live")},
+        ),
+        patch.object(
+            session_identity, "_uid_exists", side_effect=lambda uid: uid == 61_002
+        ),
+        patch.object(
+            session_identity,
+            "_revoke",
+            side_effect=lambda uid, path: revoked.append((uid, path)),
+        ),
+    ):
+        assert session_identity.reap_stale_accounts()
+
+    assert revoked == [(61_001, Path("/gone"))]
+
+
+def test_a_revoke_drops_the_mask_once_no_named_entry_needs_it(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> "subprocess.CompletedProcess[bytes]":
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    with (
+        patch.object(session_identity.acl.shutil, "which", return_value="/x/setfacl"),
+        patch.object(session_identity.acl.subprocess, "run", side_effect=run),
+    ):
+        session_identity.acl.revoke(61_001, tmp_path)
+
+    assert [argv[1:3] for argv in calls] == [["-x", "u:61001"], ["-x", "m::"]]
+
+
+def test_getfacl_output_parses_to_uids() -> None:
+    output = (
+        "user::rwx\nuser:61001:---\nuser:1000:r-x\ngroup::r-x\nmask::r-x\n"
+        "other::r-x\ndefault:user:61002:---\n"
+    )
+    assert session_identity.acl.parse_denied_uids(output) == {61001}
+    assert session_identity.acl.parse_named_uids(output) == {61001, 1000, 61002}
+
+
+def test_every_process_of_the_uid_is_signalled_from_a_helper_that_drops_to_it() -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> "subprocess.CompletedProcess[bytes]":
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    with (
+        patch.object(session_identity.os, "geteuid", return_value=0),
+        patch.object(session_identity.os, "getuid", return_value=0),
+        patch.object(session_identity.subprocess, "run", side_effect=run),
+    ):
+        session_identity._kill_all_as(61_001)
+
+    [(argv, kwargs)] = calls
+    script, uid, gid = argv[-3:]
+    assert "os.setuid(int(sys.argv[1]))" in script
+    assert "os.kill(-1, signal.SIGKILL)" in script
+    assert (uid, gid) == ("61001", "65534")
+    assert not {"user", "group", "extra_groups", "preexec_fn"} & set(kwargs)
+
+
+@pytest.mark.parametrize(
+    ("euid", "uid", "target"), [(1000, 1000, 61_001), (0, 0, 0), (0, 61_001, 61_001)]
+)
+def test_the_kill_runs_only_as_root_and_never_as_itself(
+    euid: int, uid: int, target: int
 ) -> None:
     with (
-        patch.object(session_identity.os, "getuid", return_value=worker_uid),
+        patch.object(session_identity.os, "geteuid", return_value=euid),
+        patch.object(session_identity.os, "getuid", return_value=uid),
         patch.object(session_identity.subprocess, "run") as run,
     ):
-        session_identity._kill_all_as(uid)
+        session_identity._kill_all_as(target)
 
     run.assert_not_called()
+
+
+def test_a_helper_drops_to_the_account_itself_and_never_runs_as_root() -> None:
+    argv = session_identity.exec_as(61_001, 61_001, ["/usr/bin/tar", "-c"])
+
+    assert argv[-4:] == ["61001", "61001", "/usr/bin/tar", "-c"]
+    assert "os.execv(sys.argv[3], sys.argv[3:])" in argv[argv.index("-c") + 1]
+    with pytest.raises(ExecutionError):
+        session_identity.exec_as(0, 0, ["/usr/bin/tar"])
+
+
+def test_the_sysv_ipc_objects_an_account_owns_or_created_are_removed(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "shm").write_text(
+        "key shmid perms size cpid lpid nattch uid gid cuid cgid\n"
+        "1 10 600 56 1 1 0 61001 100 0 0\n"
+        "2 11 600 56 1 1 0 0 0 61001 100\n"
+        "3 12 600 56 1 1 0 1000 100 1000 100\n"
+    )
+    (tmp_path / "msg").write_text(
+        "key msqid perms cbytes qnum lspid lrpid uid gid cuid cgid\n"
+        "4 20 600 0 0 0 0 61001 100 61001 100\n"
+    )
+    (tmp_path / "sem").write_text(
+        "key semid perms nsems uid gid cuid cgid\n5 30 600 1 61001 100 61001 100\n"
+    )
+    removed: list[list[str]] = []
+
+    def run(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
+        assert argv[-5:-2] == ["61001", "65534", "/usr/bin/ipcrm"]
+        removed.append(argv[-2:])
+        return _run_ok(argv, what)
+
+    with (
+        patch.object(session_identity, "_SYSV_IPC_ROOT", tmp_path),
+        patch.object(session_identity.shutil, "which", return_value="/usr/bin/ipcrm"),
+        patch.object(session_identity, "_run", side_effect=run),
+    ):
+        session_identity._remove_sysv_ipc_of(61001)
+
+    assert removed == [["-m", "10"], ["-m", "11"], ["-q", "20"], ["-s", "30"]]

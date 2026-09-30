@@ -27,6 +27,7 @@ from worker.executors.ssh_session import (
     ProcessSessionBackend,
     ResolvedSSHInput,
     SessionRequest,
+    session_identity,
 )
 from worker.executors.ssh_session.backends import process as process_module
 from worker.executors.ssh_session.config import SSHOutputConfig
@@ -44,6 +45,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 _WORKER_SECRET = "worker-secret-sentinel"
+_WORKER_TOKEN = "worker-token-sentinel"
 _SESSION_TOKEN = "session-token-value"
 
 
@@ -70,16 +72,18 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> Iterator[WorkerConfig]:
     (roots["content"] / "object").write_text("cached content")
     (roots["content"] / "object").chmod(0o666)
     (roots["private"] / "state").write_text("private state")
-    hb_file = base / "worker.hb"
+    # Named after the worker token, in a directory any uid may list.
+    hb_dir = base / "hb"
+    hb_dir.mkdir(mode=0o755)
+    hb_file = hb_dir / f"{_WORKER_TOKEN}.hb"
     hb_file.write_text("alive")
     hb_file.chmod(0o666)
     config = make_worker_config(
         results_dir=roots["results"],
         private_state_dir=roots["private"],
         content_dir=roots["content"],
-        model_cache_dir=roots["hf"],
         hb_file=hb_file,
-        home_dir=Path("/root"),
+        session_state_dirs=(Path("/root"), roots["hf"]),
         ssh_relay_host="127.0.0.1",
     )
     yield config
@@ -153,12 +157,13 @@ def _list(path: Path) -> str:
     return f"ls -A {path.as_posix()} 2>/dev/null; true"
 
 
-def _acl_users(path: Path) -> list[str]:
+def _acl_entries(path: Path) -> list[str]:
+    """The named-user entries on ``path``, and the mask one leaves behind."""
     out = _run(["getfacl", "-cp", path.as_posix()]).stdout
     return [
         line
         for line in out.splitlines()
-        if line.startswith("user:") and "::" not in line
+        if (line.startswith("user:") and "::" not in line) or line.startswith("mask:")
     ]
 
 
@@ -185,9 +190,10 @@ def test_a_session_logs_in_as_its_own_account_and_reaches_only_its_own_data(
         assert port is not None
         account = session.account
 
-        sshd = psutil.Process(cast(Any, session)._process.pid)
-        assert sshd.nice() == 10
-        assert Path(f"/proc/{sshd.pid}/oom_score_adj").read_text().strip() == "1000"
+        launched = psutil.Process(cast(Any, session)._process.pid)
+        for proc in (launched, *launched.children(recursive=True)):
+            assert proc.nice() == 10
+            assert Path(f"/proc/{proc.pid}/oom_score_adj").read_text().strip() == "1000"
         shell = _ssh(session, client_key, port, "nice; cat /proc/self/oom_score_adj")
         assert shell.stdout.split() == ["10", "1000"], shell.stderr
 
@@ -224,10 +230,13 @@ def test_a_session_logs_in_as_its_own_account_and_reaches_only_its_own_data(
         ):
             leaked = _ssh(session, client_key, port, _read(denied))
             assert leaked.stdout == "", (denied, leaked.stdout)
-        for root in worker.state_roots:
-            if root.is_dir():
-                listed = _ssh(session, client_key, port, _list(root))
-                assert listed.stdout == "", (root, listed.stdout)
+        for root in process_module.denied_roots(worker):
+            listed = _ssh(session, client_key, port, _list(root))
+            assert listed.stdout == "", (root, listed.stdout)
+        assert (
+            _WORKER_TOKEN
+            not in _ssh(session, client_key, port, _list(worker.hb_file.parent)).stdout
+        )
         assert (
             _WORKER_SECRET
             not in _ssh(
@@ -253,8 +262,8 @@ def test_a_session_logs_in_as_its_own_account_and_reaches_only_its_own_data(
         session.cleanup()
 
     assert _run(["getent", "passwd", account.name]).returncode != 0
-    for root in worker.state_roots:
-        assert _acl_users(root) == [], root
+    for root in process_module.denied_roots(worker):
+        assert _acl_entries(root) == [], root
     assert session.poll() is not None
     assert list(Path(str(process_module.SAFE_MOUNT_ROOT)).iterdir()) == []
 
@@ -426,8 +435,8 @@ def test_a_session_left_by_a_dead_worker_is_reaped_at_start(
 
     process.wait(timeout=10)
     assert _run(["getent", "passwd", account.name]).returncode != 0
-    for root in worker.state_roots:
-        assert _acl_users(root) == [], root
+    for root in process_module.denied_roots(worker):
+        assert _acl_entries(root) == [], root
     assert list(process_module.SESSIONS_ROOT.iterdir()) == []
 
 
@@ -446,3 +455,176 @@ def test_a_second_session_on_the_worker_is_refused(
 
 def test_the_backend_is_available_on_a_root_worker(worker: WorkerConfig) -> None:
     assert ProcessSessionBackend.is_available(worker)
+
+
+def test_a_uid_another_worker_denied_a_shared_root_is_never_drawn(
+    worker: WorkerConfig,
+    tmp_path: Path,
+    client_key: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A live session of another worker sharing the results volume.
+    peer_uid = session_identity.SESSION_UID_MIN + 7
+    _run(["setfacl", "-m", f"u:{peer_uid}:---", worker.results_dir.as_posix()])
+    draws = iter([7, 8])
+    monkeypatch.setattr(session_identity.secrets, "randbelow", lambda n: next(draws))
+    backend = ProcessSessionBackend(worker)
+    session = backend.start_session(_request(tmp_path, client_key))
+    try:
+        assert session.account.uid == session_identity.SESSION_UID_MIN + 8
+    finally:
+        session.stop(1)
+        session.cleanup()
+
+    assert _acl_entries(worker.results_dir)[0] == f"user:{peer_uid}:---"
+
+
+def _zombies_of(uid: int) -> list[psutil.Process]:
+    return [
+        p
+        for p in psutil.process_iter(["uids", "status"])
+        if p.info["uids"].real == uid and p.info["status"] == psutil.STATUS_ZOMBIE
+    ]
+
+
+@pytest.mark.skipif(shutil.which("tini") is None, reason="needs tini")
+def test_what_a_session_orphans_is_reaped_whatever_runs_as_pid_1(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    backend = ProcessSessionBackend(worker)
+    session = backend.start_session(_request(tmp_path, client_key))
+    account = session.account
+    try:
+        port = session.wait_ready(30)
+        assert port is not None
+        started = _ssh(
+            session,
+            client_key,
+            port,
+            "setsid sh -c 'while :; do (sleep 0.01 &); sleep 0.005; done' "
+            ">/dev/null 2>&1 < /dev/null & sleep 1",
+        )
+        assert started.returncode == 0, started.stderr
+    finally:
+        session.stop(1)
+        session.cleanup()
+
+    assert _zombies_of(account.uid) == []
+
+
+_DEEP_TREE = """
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+for _ in range(3000):
+    os.mkdir("d", dir_fd=fd)
+    child = os.open("d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+    os.close(fd)
+    fd = child
+"""
+
+
+def test_a_deep_tree_a_session_leaves_does_not_wedge_the_worker(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    backend = ProcessSessionBackend(worker)
+    request = _request(tmp_path, client_key, output="/mnt/flowmesh/output")
+    first = backend.start_session(request)
+    try:
+        port = first.wait_ready(30)
+        assert port is not None
+        scratch = Path(tempfile.gettempdir()) / f"deep-{first.account.name}"
+        built = _ssh(
+            first,
+            client_key,
+            port,
+            f"ulimit -n 1024; mkdir {scratch} && "
+            f"python3 -c '{_DEEP_TREE}' /mnt/flowmesh/output && "
+            f"python3 -c '{_DEEP_TREE}' {scratch}",
+        )
+        assert built.returncode == 0, built.stderr
+    finally:
+        first.stop(1)
+        first.cleanup()
+
+    assert not scratch.exists()
+    assert not (process_module.SESSIONS_ROOT / request.session_id).exists()
+    second = backend.start_session(_request(tmp_path, client_key))
+    second.stop(1)
+    second.cleanup()
+
+
+def test_the_mount_root_holds_only_links_into_the_session_s_own_directory(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    backend = ProcessSessionBackend(worker)
+    request = _request(tmp_path, client_key, output="/mnt/flowmesh/out/data")
+    session = backend.start_session(request)
+    try:
+        link = Path("/mnt/flowmesh/out/data")
+        assert link.is_symlink() and os.lstat(link).st_uid == 0
+        assert os.lstat(link.parent).st_uid == 0
+        assert link.readlink().is_relative_to(process_module.SESSIONS_ROOT)
+        assert os.stat(link).st_uid == session.account.uid
+    finally:
+        session.stop(1)
+        session.cleanup()
+
+
+def test_a_filesystem_mounted_below_the_mount_root_is_left_alone(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    data = Path(str(process_module.SAFE_MOUNT_ROOT)) / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    if _run(["mount", "-t", "tmpfs", "tmpfs", data.as_posix()]).returncode != 0:
+        pytest.skip("this container may not mount")
+    try:
+        (data / "kept").write_text("operator data")
+        backend = ProcessSessionBackend(worker)
+        with pytest.raises(ExecutionError, match="mounted below") as refused:
+            backend.start_session(
+                _request(tmp_path, client_key, output="/mnt/flowmesh/output")
+            )
+        assert refused.value.retryable
+        assert (data / "kept").read_text() == "operator data"
+    finally:
+        _run(["umount", data.as_posix()])
+
+
+def test_a_uid_drawn_again_inherits_no_ipc_object_of_its_last_holder(
+    worker: WorkerConfig,
+    tmp_path: Path,
+    client_key: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_identity.secrets, "randbelow", lambda n: 11)
+    backend = ProcessSessionBackend(worker)
+    first = backend.start_session(_request(tmp_path, client_key))
+    try:
+        port = first.wait_ready(30)
+        assert port is not None
+        made = _ssh(first, client_key, port, "ipcmk -M 4096 && ipcmk -Q && ipcmk -S 1")
+        assert made.returncode == 0, made.stderr
+        assert len(_ipc_objects_of(first.account.uid)) == 3
+    finally:
+        first.stop(1)
+        first.cleanup()
+
+    assert _ipc_objects_of(first.account.uid) == []
+    second = backend.start_session(_request(tmp_path, client_key))
+    try:
+        assert second.account.uid == first.account.uid
+        assert _ipc_objects_of(second.account.uid) == []
+    finally:
+        second.stop(1)
+        second.cleanup()
+
+
+def _ipc_objects_of(uid: int) -> list[str]:
+    owner_columns = {"shm": (7, 9), "msg": (7, 9), "sem": (4, 6)}
+    found = []
+    for table, columns in owner_columns.items():
+        for line in Path("/proc/sysvipc", table).read_text().splitlines()[1:]:
+            fields = line.split()
+            if uid in {int(fields[column]) for column in columns}:
+                found.append(f"{table} {fields[1]}")
+    return found

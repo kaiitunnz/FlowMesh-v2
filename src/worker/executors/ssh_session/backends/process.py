@@ -1,43 +1,53 @@
 """Serves SSH sessions on a root worker with no Docker socket:
 
-* **One interactive session per worker.** Sessions sharing a worker would share its
-  filesystem and process namespace, so a second concurrent session is refused, and
-  a non-interactive task, which needs a container runtime to run its image, is
-  refused too.
+* **One interactive session per worker, one such worker per host.** Sessions
+  sharing a worker would share its filesystem and process namespace, so a second
+  concurrent session is refused, and a non-interactive task, which needs a
+  container runtime to run its image, is refused too. Workers on one host would
+  share the mount root and the session accounts, so only one serves sessions.
 * **Isolation by account.** Each session logs in as its own throwaway account,
   denied every root of the worker's state (see ``session_identity``), and sshd and
   its helpers start from a scrubbed environment.
-* **Real paths, created fresh.** The session's mount paths are created under a
-  mount root the backend recreates for every session, one component at a time and
-  never through a symlink, and only paths the backend created are handed to the
-  session. Its output is read back by a child running as its account.
+* **Links into the session's own directory.** The session's inputs and output live
+  in a root-owned directory of its own, and its mount paths are links to them,
+  created one component at a time under a mount root emptied before and after
+  every session, never through a link and never across a mount. Its output is read
+  back by a child running as its account.
 * **The worker's size is the cap.** ``SSH_MAX_*`` and the GPU subset need cgroup
   and device control over the worker itself, so a session runs niced and first in
-  line for the OOM killer instead.
+  line for the OOM killer instead, under a subreaper that reaps what it orphans.
 """
 
+import errno
+import fcntl
 import json
 import logging
 import os
+import pwd
 import re
 import shutil
 import signal
 import socket
 import stat
 import subprocess
+import sys
 import tarfile
+import tempfile
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+
+import psutil
 
 from shared.schemas.worker import SSHBackendName
 from shared.tasks.worker_message import WorkerHardware
 from worker.config import WorkerConfig
 
 from ...base_executor import ExecutionError, RunSignals
+from .. import acl
 from ..base import (
     SessionInterrupted,
     SessionRequest,
@@ -46,30 +56,33 @@ from ..base import (
     count_established_connections,
     extract_output_archive,
     is_ssh_ready,
+    path_size_bytes,
     read_local_proc_net_tcp,
     resolve_tailnet_address,
-    tree_size_bytes,
 )
 from ..config import SAFE_MOUNT_ROOT, normalize_mount_path
 from ..inputs import stage_inputs_locally
 from ..session_identity import (
+    PRIVSEP_DIR,
     SessionAccount,
     account_name_for,
-    delete_account,
+    exec_as,
     kill_processes,
     process_identity_available,
     reap_stale_accounts,
+    remove_tree,
     retire_account,
-    supports_denials,
 )
 
 logger = logging.getLogger(__name__)
 
-SESSIONS_ROOT = Path("/run/flowmesh/ssh-sessions")
+# On disk, beside the ACL ledger: staged inputs and output can be large.
+SESSIONS_ROOT = acl.STATE_DIR / "ssh-sessions"
 _MANIFEST_NAME = "manifest.json"
 _SSHD_CANDIDATES = ("/usr/sbin/sshd", "/usr/local/sbin/sshd", "sshd")
 _KEYGEN_BINARY = "ssh-keygen"
 _TAR_BINARY = "tar"
+_TINI_BINARY = "tini"
 _KEYGEN_TIMEOUT_SEC = 30.0
 _TERMINATE_GRACE_SEC = 5.0
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -84,7 +97,32 @@ _DEFAULT_SESSION_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/games"
 _COPY_CHUNK = 64 * 1024
 _SESSION_NICENESS = 10
 _SESSION_OOM_SCORE_ADJ = 1000
-_PROC_ROOT = Path("/proc")
+# Lowers its own priority, then execs the session's sshd, which every process of
+# the session inherits it from.
+_LAUNCH_SCRIPT = (
+    "import os, sys\n"
+    "os.nice(int(sys.argv[1]))\n"
+    "with open('/proc/self/oom_score_adj', 'w') as fh:\n"
+    "    fh.write(sys.argv[2])\n"
+    "os.execv(sys.argv[3], sys.argv[3:])\n"
+)
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_HOST_LOCK_NAME = "flowmesh-ssh-process.lock"
+# Paths every session needs; a denied root covering one would break it.
+_SESSION_REQUIRED_PATHS = (
+    Path(SAFE_MOUNT_ROOT),
+    SESSIONS_ROOT,
+    PRIVSEP_DIR,
+    Path("/usr"),
+    Path("/bin"),
+    Path("/etc"),
+    Path("/lib"),
+)
+_MOUNTINFO = Path("/proc/self/mountinfo")
+_OCTAL_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
+_host_lock_fd: int | None = None
+_host_lock_mutex = threading.Lock()
+_missing_tini_logged = False
 
 
 def find_sshd() -> str | None:
@@ -138,15 +176,13 @@ class ProcessSessionBackend(SSHSessionBackend):
                 "and SSH_RELAY_HOST is unset, so its supervisor cannot reach a session"
             )
             return False
-        try:
-            ensure_state_roots(config)
-        except OSError as exc:
-            logger.info("Process SSH backend unavailable: %s", exc)
+        if not _acl_ready(config):
             return False
-        if not supports_denials(config.state_roots):
+        if not _acquire_host_lock():
             logger.info(
-                "Process SSH backend unavailable: this worker's state cannot be "
-                "denied to a session (setfacl is missing or ACLs are unsupported)"
+                "Process SSH backend unavailable: another worker on this host already "
+                "serves process-mode sessions, and they would share %s",
+                SAFE_MOUNT_ROOT.as_posix(),
             )
             return False
         return True
@@ -196,7 +232,7 @@ class ProcessSessionBackend(SSHSessionBackend):
                 )
             if not self._clean:
                 raise ExecutionError(
-                    "An earlier SSH session on this worker still runs a process it "
+                    "An earlier SSH session on this worker still has an account it "
                     "could not be rid of; the worker serves no session until a reap "
                     "removes it",
                     retryable=True,
@@ -243,9 +279,7 @@ class ProcessSessionBackend(SSHSessionBackend):
 
         session_dir = SESSIONS_ROOT / request.session_id
         manifest = SessionManifest(
-            session_dir=session_dir,
-            account=account_name_for(request.session_id),
-            roots=[root.as_posix() for root in self._config.state_roots],
+            session_dir=session_dir, account=account_name_for(request.session_id)
         )
         account: SessionAccount | None = None
         process: subprocess.Popen[bytes] | None = None
@@ -254,12 +288,9 @@ class ProcessSessionBackend(SSHSessionBackend):
             _make_private_dir(SESSIONS_ROOT, 0o711)
             session_dir.mkdir(mode=0o711)
             manifest.write()
-            ensure_state_roots(self._config)
             account = SessionAccount.create(
-                manifest.account, session_dir / "home", self._config.state_roots
+                manifest.account, session_dir / "home", ensure_state_roots(self._config)
             )
-            manifest.uid = account.uid
-            manifest.write()
             if cfg.requested_user:
                 logger.info(
                     "Ignoring SSH spec user %s: this session logs in as its own "
@@ -279,7 +310,12 @@ class ProcessSessionBackend(SSHSessionBackend):
                 _hand_over_tree(staged_inputs, account)
             if signals.interrupted:
                 raise SessionInterrupted
-            output_path = _materialize_mounts(plan, staged_inputs, account)
+            output_path: Path | None = None
+            if plan.output is not None:
+                output_path = session_dir / "output"
+                output_path.mkdir(mode=0o700)
+                os.lchown(output_path, account.uid, account.gid)
+            _link_mounts(plan, staged_inputs, output_path)
 
             finish_sentinel = account.home / ".flowmesh_finish"
             host_key = session_dir / "ssh_host_ed25519_key"
@@ -334,20 +370,158 @@ class ProcessSessionBackend(SSHSessionBackend):
         if SESSIONS_ROOT.is_dir() and not SESSIONS_ROOT.is_symlink():
             for session_dir in SESSIONS_ROOT.iterdir():
                 clean = reap_session(session_dir) and clean
-        _reset_mount_root()
-        clean = reap_stale_accounts(self._config.state_roots) and clean
+        _clear_mount_root()
+        clean = reap_stale_accounts() and clean
         with self._lock:
             self._clean = clean
 
 
-def ensure_state_roots(config: WorkerConfig) -> None:
-    """Create each state root the worker has not yet, root-owned and private to the
-    worker, so a session's denial always lands on it."""
-    for root in config.state_root_dirs:
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if not config.hb_file.exists():
-        config.hb_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        config.hb_file.touch()
+def ensure_state_roots(config: WorkerConfig) -> list[Path]:
+    """The worker's state roots, each checked safe to deny and created, root-owned
+    and private to the worker, when the worker has not made it yet, so a session's
+    denial always lands on it."""
+    roots = denied_roots(config)
+    for root in roots:
+        if problem := _root_problem(root):
+            raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
+        if os.path.lexists(root):
+            continue
+        try:
+            root.parent.mkdir(parents=True, exist_ok=True)
+            os.mkdir(root, 0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ExecutionError(
+                f"Cannot create worker state {root}: {exc}", retryable=True
+            ) from exc
+        if problem := _root_problem(root):
+            raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
+    return roots
+
+
+def denied_roots(config: WorkerConfig) -> list[Path]:
+    """The worker's state roots, as the paths an ACL entry will actually land on.
+
+    ``setfacl`` follows a link, so links an operator configured are resolved here.
+    Under a world-writable parent only the parent is resolved: a link there is
+    something anyone could have planted, and :func:`_root_problem` refuses it rather
+    than following it.
+    """
+    roots: dict[Path, None] = {}
+    for path in config.session_denied_paths():
+        parent = Path(os.path.realpath(path.parent))
+        if _is_shared_dir(parent):
+            roots[parent / path.name] = None
+        else:
+            roots[Path(os.path.realpath(path))] = None
+    return list(roots)
+
+
+def _root_problem(root: Path) -> str | None:
+    """Why ``root`` cannot be denied to a session safely, if it cannot."""
+    if blocked := _required_path_under(root):
+        return f"denying {root} would also deny {blocked}"
+    try:
+        info = os.lstat(root)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"cannot inspect worker state {root}: {exc}"
+    if stat.S_ISLNK(info.st_mode):
+        return f"worker state {root} is a link"
+    if _is_shared_dir(root.parent) and (
+        info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        return (
+            f"worker state {root} sits in a shared directory but is not a root-owned "
+            "path only root can write"
+        )
+    return None
+
+
+def _acl_ready(config: WorkerConfig) -> bool:
+    if not acl.tools_available():
+        logger.info(
+            "Process SSH backend unavailable: setfacl/getfacl are missing, so a "
+            "session could not be denied this worker's state (install the acl "
+            "package in the worker image)"
+        )
+        return False
+    try:
+        roots = ensure_state_roots(config)
+    except ExecutionError as exc:
+        logger.info("Process SSH backend unavailable: %s", exc)
+        return False
+    for root in roots:
+        try:
+            acl.probe(_probe_dir(root))
+        except (OSError, ExecutionError) as exc:
+            logger.info(
+                "Process SSH backend unavailable: cannot deny sessions %s with an "
+                "ACL: %s",
+                root,
+                exc,
+            )
+            return False
+    return True
+
+
+def _is_shared_dir(path: Path) -> bool:
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return False
+    return bool(mode & (stat.S_ISVTX | stat.S_IWOTH))
+
+
+def _required_path_under(root: Path) -> Path | None:
+    """A path every session needs that denying ``root`` would also deny."""
+    for required in (Path(tempfile.gettempdir()), *_SESSION_REQUIRED_PATHS):
+        if required == root or required.is_relative_to(root):
+            return required
+    return None
+
+
+def _probe_dir(root: Path) -> Path:
+    """The existing directory whose filesystem will hold ``root``."""
+    candidate = root
+    while not candidate.is_dir():
+        if candidate.parent == candidate:
+            break
+        candidate = candidate.parent
+    return candidate
+
+
+def _acquire_host_lock() -> bool:
+    """Hold this host's process-backend lock for the life of the worker.
+
+    Process-mode sessions of every worker on a host share its mount root and
+    accounts, so only one worker per host may serve them.
+    """
+    global _host_lock_fd
+    with _host_lock_mutex:
+        if _host_lock_fd is not None:
+            return True
+        base = Path("/run") if os.geteuid() == 0 else Path(tempfile.gettempdir())
+        try:
+            fd = os.open(
+                base / _HOST_LOCK_NAME,
+                os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+            )
+        except OSError:
+            logger.debug("Cannot open the process-backend host lock", exc_info=True)
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                logger.debug("Cannot take the process-backend host lock", exc_info=True)
+            return False
+        _host_lock_fd = fd
+        return True
 
 
 @dataclass(slots=True)
@@ -390,73 +564,152 @@ def _plan_mounts(request: SessionRequest) -> MountPlan:
     return plan
 
 
-def _materialize_mounts(
-    plan: MountPlan, staged_inputs: Path | None, account: SessionAccount
-) -> Path | None:
-    """Create the mount paths under a fresh mount root; returns the output path."""
-    _reset_mount_root()
-    for mount_path, task_id in plan.inputs:
-        assert staged_inputs is not None
-        parent = _make_dirs_nofollow(mount_path.parent)
-        os.symlink(staged_inputs / task_id, mount_path.name, dir_fd=parent)
-        os.close(parent)
-    if plan.output is None:
-        return None
-    parent = _make_dirs_nofollow(plan.output.parent)
-    try:
-        os.mkdir(plan.output.name, mode=0o700, dir_fd=parent)
-        os.chown(
-            plan.output.name,
-            account.uid,
-            account.gid,
-            dir_fd=parent,
-            follow_symlinks=False,
-        )
-    finally:
-        os.close(parent)
-    return plan.output
-
-
-def _reset_mount_root() -> None:
-    """Recreate the mount root empty and root-owned, so nothing a session left in it
-    survives into the next."""
+def _link_mounts(
+    plan: MountPlan, staged_inputs: Path | None, output_path: Path | None
+) -> None:
+    """Link each mount path to what it names in the session's directory, under a
+    mount root emptied first, so nothing an earlier session left there is walked
+    through."""
+    links = [
+        (mount_path, staged_inputs / task_id)
+        for mount_path, task_id in plan.inputs
+        if staged_inputs is not None
+    ]
+    if plan.output is not None and output_path is not None:
+        links.append((plan.output, output_path))
+    if not links:
+        return
     root = Path(SAFE_MOUNT_ROOT)
-    if root.is_symlink() or root.is_file():
-        root.unlink()
-    elif root.exists():
-        shutil.rmtree(root)
-    parent = _make_dirs_nofollow(Path(root.parent))
     try:
-        os.mkdir(root.name, mode=0o755, dir_fd=parent)
+        _reset_mount_root(root, create=True)
+    except OSError as exc:
+        raise ExecutionError(
+            f"Cannot prepare {root.as_posix()} on this worker: {exc}", retryable=True
+        ) from exc
+    for mount_path, target in links:
+        _link_mount_path(root, mount_path.as_posix(), target)
+
+
+def _clear_mount_root() -> None:
+    try:
+        _reset_mount_root(Path(SAFE_MOUNT_ROOT), create=False)
+    except OSError:
+        logger.warning("Could not clear %s", SAFE_MOUNT_ROOT.as_posix(), exc_info=True)
+
+
+def _reset_mount_root(root: Path, create: bool) -> None:
+    """Empty ``root`` without following a link, leaving it root-owned ``0755``.
+
+    ``root`` itself is kept rather than replaced when it is a directory, since it
+    may be a mount point.
+    """
+    try:
+        info = os.lstat(root)
+    except FileNotFoundError:
+        if not create:
+            return
+        root.parent.mkdir(parents=True, exist_ok=True)
+        os.mkdir(root, 0o755)
+        info = os.lstat(root)
+    if not stat.S_ISDIR(info.st_mode):
+        os.unlink(root)
+        if not create:
+            return
+        os.mkdir(root, 0o755)
+    _refuse_nested_mounts(root)
+    fd = os.open(root, _DIR_FLAGS)
+    try:
+        with os.scandir(fd) as scanner:
+            entries = list(scanner)
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.name, dir_fd=fd)
+            else:
+                os.unlink(entry.name, dir_fd=fd)
+        if os.geteuid() == 0:
+            os.fchown(fd, 0, 0)
+        os.fchmod(fd, 0o755)  # nosec B103 - the session must traverse it
     finally:
-        os.close(parent)
+        os.close(fd)
 
 
-def _make_dirs_nofollow(path: Path) -> int:
-    """Open ``path`` as a directory fd, creating each missing component as a
-    root-owned directory and refusing any component that is a symlink."""
-    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+def _refuse_nested_mounts(root: Path) -> None:
+    """Refuse to empty ``root`` when a filesystem is mounted anywhere below it.
+
+    Everything under the mount root is the backend's own, so a mount there is an
+    operator's, and emptying the root would delete what it holds. A bind mount from
+    the same filesystem keeps the device number, so the kernel's mount table is what
+    finds it; the device check covers a worker that cannot read that table.
+    """
+    for mount_point in _mount_points():
+        if mount_point != root and mount_point.is_relative_to(root):
+            raise OSError(
+                errno.EBUSY, "a filesystem is mounted below the mount root", mount_point
+            )
+    device = os.lstat(root).st_dev
+    for parent, dirs, _ in os.walk(root, followlinks=False):
+        for name in dirs:
+            path = os.path.join(parent, name)
+            if os.lstat(path).st_dev != device:
+                raise OSError(
+                    errno.EBUSY, "a filesystem is mounted below the mount root", path
+                )
+
+
+def _mount_points() -> list[Path]:
+    """Mount points in this process's mount namespace, or none when unreadable."""
     try:
-        for part in Path(path).parts[1:]:
+        text = _MOUNTINFO.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    points: list[Path] = []
+    for line in text.splitlines():
+        fields = line.split(" ")
+        if len(fields) > 4:
+            points.append(Path(_OCTAL_ESCAPE_RE.sub(_unescape_octal, fields[4])))
+    return points
+
+
+def _unescape_octal(match: re.Match[str]) -> str:
+    return chr(int(match.group(1), 8))
+
+
+def _link_mount_path(root: Path, mount_path: str, target: Path) -> None:
+    """Create ``mount_path`` as a link to ``target``, never following a link.
+
+    Each missing component below ``root`` is created relative to its parent's
+    descriptor, and an existing one is only entered if it is a real directory.
+    """
+    parts = PurePosixPath(mount_path).relative_to(PurePosixPath(root)).parts
+    if not parts:
+        raise ExecutionError(
+            f"mountPath {mount_path} must name a path below {root.as_posix()} on "
+            "this worker"
+        )
+    fd = os.open(root, _DIR_FLAGS)
+    try:
+        for part in parts[:-1]:
             try:
-                os.mkdir(part, mode=0o755, dir_fd=fd)
+                os.mkdir(part, 0o755, dir_fd=fd)
             except FileExistsError:
                 pass
             try:
-                child = os.open(
-                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
-                )
+                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
             except OSError as exc:
                 raise ExecutionError(
-                    f"Cannot create SSH mount path {path.as_posix()}: {part} is not "
-                    "a directory"
+                    f"mountPath {mount_path} conflicts with another mountPath"
                 ) from exc
             os.close(fd)
             fd = child
-    except BaseException:
+            os.fchmod(fd, 0o755)  # nosec B103 - the session must traverse it
+        try:
+            os.symlink(target, parts[-1], dir_fd=fd)
+        except FileExistsError as exc:
+            raise ExecutionError(
+                f"mountPath {mount_path} conflicts with another mountPath"
+            ) from exc
+    finally:
         os.close(fd)
-        raise
-    return fd
 
 
 def _hand_over_tree(root: Path, account: SessionAccount) -> None:
@@ -524,7 +777,8 @@ class ProcessSession(SSHSession):
         return self._process.poll()
 
     def finish_requested(self) -> bool:
-        return self._finish_sentinel.exists()
+        # The session owns the sentinel's directory, so it is never followed.
+        return os.path.lexists(self._finish_sentinel)
 
     def established_connections(self) -> int | None:
         if (proc_net_tcp := read_local_proc_net_tcp()) is None:
@@ -534,11 +788,7 @@ class ProcessSession(SSHSession):
     def output_size_bytes(self) -> int | None:
         if (output_path := self._output_path) is None:
             return None
-        try:
-            return tree_size_bytes(output_path)
-        except OSError as exc:
-            logger.debug("SSH output size check failed: %s", exc)
-            return None
+        return path_size_bytes(output_path)
 
     def collect_output(self, destination: Path, max_bytes: int | None) -> None:
         """Copy the session's output into ``destination``: its directories and
@@ -547,7 +797,10 @@ class ProcessSession(SSHSession):
         if (output_path := self._output_path) is None:
             return
         # The session has ended; with its processes gone the tree holds still.
-        kill_processes(self.account.uid)
+        if not kill_processes(self.account.uid):
+            raise ExecutionError(
+                "Could not stop the SSH session's processes to collect its output"
+            )
         self._signals.raise_if_cancelled()
         destination.mkdir(parents=True, exist_ok=True)
         archiver = _archive_as(self.account, output_path)
@@ -559,12 +812,15 @@ class ProcessSession(SSHSession):
                 max_bytes,
                 self._signals.raise_if_cancelled,
             )
-        except tarfile.ReadError as exc:
+        except (OSError, tarfile.TarError) as exc:
             raise ExecutionError(f"Failed to collect SSH output: {exc}") from exc
         finally:
             _end_archiver(archiver)
 
     def stop(self, timeout_sec: float) -> None:
+        # The session's own processes go first, while sshd's subreaper still lives
+        # to reap what they leave; those forked while sshd stops go after it.
+        kill_processes(self.account.uid)
         _terminate(self._process, timeout_sec)
         kill_processes(self.account.uid)
 
@@ -589,22 +845,13 @@ class SessionManifest:
 
     session_dir: Path
     account: str
-    roots: list[str]
-    uid: int | None = None
     sshd_pid: int | None = None
 
     def write(self) -> None:
         path = self.session_dir / _MANIFEST_NAME
         tmp = path.with_suffix(".tmp")
         tmp.write_text(
-            json.dumps(
-                {
-                    "account": self.account,
-                    "uid": self.uid,
-                    "roots": self.roots,
-                    "sshd_pid": self.sshd_pid,
-                }
-            ),
+            json.dumps({"account": self.account, "sshd_pid": self.sshd_pid}),
             encoding="utf-8",
         )
         tmp.chmod(0o600)
@@ -619,8 +866,6 @@ class SessionManifest:
             return cls(
                 session_dir=session_dir,
                 account=str(raw["account"]),
-                roots=[str(root) for root in raw.get("roots") or []],
-                uid=raw.get("uid"),
                 sshd_pid=raw.get("sshd_pid"),
             )
         except (OSError, ValueError, KeyError, TypeError):
@@ -631,7 +876,7 @@ def reap_session(session_dir: Path) -> bool:
     """Undo one session a dead worker left behind, as its manifest records it.
 
     Returns ``False``, keeping the session's directory for a later reap, when its
-    account still runs a process.
+    account cannot be removed.
     """
     manifest = SessionManifest.read(session_dir)
     if manifest is not None:
@@ -639,24 +884,21 @@ def reap_session(session_dir: Path) -> bool:
         if manifest.sshd_pid is not None and _is_our_sshd(
             manifest.sshd_pid, config_path
         ):
-            try:
-                os.kill(manifest.sshd_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if manifest.uid is None:
-            delete_account(manifest.account)
-        elif not retire_account(
-            manifest.account, manifest.uid, [Path(root) for root in manifest.roots]
-        ):
+            _kill_tree(manifest.sshd_pid)
+        try:
+            uid = pwd.getpwnam(manifest.account).pw_uid
+        except KeyError:
+            uid = None
+        if uid is not None and not retire_account(manifest.account, uid):
             return False
         logger.info("Reaped SSH session %s left by an earlier worker", session_dir.name)
-    shutil.rmtree(session_dir, ignore_errors=True)
+    remove_tree(session_dir)
     return True
 
 
 def _is_our_sshd(pid: int, config_path: str) -> bool:
-    """Whether ``pid`` is the sshd started with ``config_path``, so a recycled pid
-    is never signalled.
+    """Whether ``pid`` runs the sshd started with ``config_path``, directly or under
+    its subreaper, so a recycled pid is never signalled.
 
     sshd rewrites its process title, so the check reads the command line as one
     string.
@@ -666,6 +908,22 @@ def _is_our_sshd(pid: int, config_path: str) -> bool:
     except OSError:
         return False
     return b"sshd" in cmdline and config_path.encode() in cmdline
+
+
+def _kill_tree(pid: int) -> None:
+    """SIGKILL ``pid`` and every process below it; a subreaper's child outlives its
+    SIGKILL otherwise."""
+    try:
+        root = psutil.Process(pid)
+        victims = [*root.children(recursive=True), root]
+    except psutil.Error:
+        return
+    for proc in victims:
+        try:
+            proc.send_signal(signal.SIGKILL)
+        except psutil.Error:
+            continue
+    psutil.wait_procs(victims, timeout=_TERMINATE_GRACE_SEC)
 
 
 def _make_private_dir(path: Path, mode: int) -> None:
@@ -687,15 +945,17 @@ def _archive_as(account: SessionAccount, source: Path) -> subprocess.Popen[bytes
     if tar is None:
         raise ExecutionError("tar is missing from this worker image")
     try:
-        return subprocess.Popen(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()
-            [tar, "--create", "--file=-", f"--directory={source.as_posix()}", "."],
+        return subprocess.Popen(  # nosec B603 - argv list, no shell=True, the worker's own interpreter and an absolute path via shutil.which()
+            exec_as(
+                account.uid,
+                account.gid,
+                [tar, "--create", "--file=-", f"--directory={source.as_posix()}", "."],
+            ),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
             env=_sanitized_spawn_env(),
-            user=account.uid,
-            group=account.gid,
-            extra_groups=[],
+            cwd="/",
             start_new_session=True,
         )
     except OSError as exc:
@@ -724,14 +984,12 @@ def _discard_session(
     session_dir: Path,
 ) -> bool:
     """Undo whatever a session allocated, each step whether or not the one before it
-    succeeded; returns whether every step did."""
+    succeeded; returns whether its sshd and account are gone."""
     steps: list[Callable[[], Any]] = []
     if process is not None:
         steps.append(lambda: _terminate(process, _TERMINATE_GRACE_SEC))
     if account is not None:
         steps.append(account.release)
-    steps.append(_reset_mount_root)
-    steps.append(lambda: shutil.rmtree(session_dir, ignore_errors=True))
     clean = True
     for step in steps:
         try:
@@ -739,6 +997,8 @@ def _discard_session(
         except Exception:
             clean = False
             logger.warning("Failed to release part of an SSH session", exc_info=True)
+    _clear_mount_root()
+    remove_tree(session_dir)
     return clean
 
 
@@ -749,7 +1009,7 @@ def _terminate(process: subprocess.Popen[bytes], timeout_sec: float) -> None:
     try:
         process.wait(timeout=timeout_sec)
     except subprocess.TimeoutExpired:
-        process.kill()
+        _kill_tree(process.pid)
         try:
             process.wait(timeout=_TERMINATE_GRACE_SEC)
         except subprocess.TimeoutExpired:
@@ -812,8 +1072,8 @@ def _spawn_sshd(
     log_handle = log_path.open("wb")
     log_path.chmod(0o600)
     try:
-        process = subprocess.Popen(  # nosec B603 - argv list, no shell=True, absolute path via find_sshd()
-            [sshd_path, "-D", "-e", "-f", config_path.as_posix()],
+        return subprocess.Popen(  # nosec B603 - argv list, no shell=True, the worker's own interpreter and absolute paths via shutil.which()
+            _launch_argv([sshd_path, "-D", "-e", "-f", config_path.as_posix()]),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -824,21 +1084,31 @@ def _spawn_sshd(
         raise ExecutionError(f"Failed to start sshd: {exc}") from exc
     finally:
         log_handle.close()
-    _yield_to_the_worker(process.pid)
-    return process
 
 
-def _yield_to_the_worker(pid: int) -> None:
-    """Run sshd, and every session it forks from here on, below the worker's
-    priority and first in line for the OOM killer, so a runaway session cannot
-    starve the worker's heartbeat."""
-    try:
-        os.setpriority(os.PRIO_PROCESS, pid, _SESSION_NICENESS)
-        (_PROC_ROOT / str(pid) / "oom_score_adj").write_text(
-            str(_SESSION_OOM_SCORE_ADJ), encoding="utf-8"
+def _launch_argv(argv: list[str]) -> list[str]:
+    """``argv`` below the worker's priority and first in line for the OOM killer, so
+    a runaway session cannot starve the worker's heartbeat, and under a subreaper,
+    so what the session orphans is reaped whatever runs as PID 1."""
+    global _missing_tini_logged
+    if tini := shutil.which(_TINI_BINARY):
+        argv = [tini, "-s", "--", *argv]
+    elif not _missing_tini_logged:
+        _missing_tini_logged = True
+        logger.warning(
+            "tini is missing from this worker image; what an SSH session orphans is "
+            "left to PID 1 to reap"
         )
-    except OSError as exc:
-        logger.warning("Could not lower the SSH session's priority: %s", exc)
+    return [
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        _LAUNCH_SCRIPT,
+        str(_SESSION_NICENESS),
+        str(_SESSION_OOM_SCORE_ADJ),
+        *argv,
+    ]
 
 
 def _generate_host_key(keygen_path: str, host_key: Path) -> None:
