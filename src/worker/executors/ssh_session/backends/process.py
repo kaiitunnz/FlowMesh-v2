@@ -30,7 +30,6 @@ import signal
 import socket
 import stat
 import subprocess
-import sys
 import tarfile
 import tempfile
 import threading
@@ -68,6 +67,7 @@ from ..session_identity import (
     SessionAccount,
     account_name_for,
     exec_as,
+    interpreter_argv,
     kill_processes,
     process_identity_available,
     reap_stale_accounts,
@@ -103,8 +103,11 @@ _SESSION_OOM_SCORE_ADJ = 1000
 _LAUNCH_SCRIPT = (
     "import os, sys\n"
     "os.nice(int(sys.argv[1]))\n"
-    "with open('/proc/self/oom_score_adj', 'w') as fh:\n"
-    "    fh.write(sys.argv[2])\n"
+    "try:\n"
+    "    with open('/proc/self/oom_score_adj', 'w') as fh:\n"
+    "        fh.write(sys.argv[2])\n"
+    "except OSError as exc:\n"
+    "    print(f'Cannot raise the SSH session OOM score: {exc}', file=sys.stderr)\n"
     "os.execv(sys.argv[3], sys.argv[3:])\n"
 )
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -300,6 +303,7 @@ class ProcessSessionBackend(SSHSessionBackend):
             _make_private_dir(SESSIONS_ROOT.parent, 0o711)
             _make_private_dir(SESSIONS_ROOT, 0o711)
             session_dir.mkdir(mode=0o711)
+            session_dir.chmod(0o711)
             manifest.write()
             account = SessionAccount.create(
                 manifest.account, session_dir / "home", ensure_state_roots(self._config)
@@ -349,15 +353,12 @@ class ProcessSessionBackend(SSHSessionBackend):
             rendered, exported = _render_authorized_keys(
                 cfg.authorized_keys, environment
             )
-            authorized_keys.write_text(rendered, encoding="utf-8")
             # It carries the session's env; sshd reads it as the session user.
-            authorized_keys.chmod(0o600)
+            _write_private(authorized_keys, rendered)
             account.grant_read(authorized_keys)
             process, port, log_path = _start_sshd(
                 sshd_path, session_dir, host_key, authorized_keys, account, exported
             )
-            manifest.sshd_pid = process.pid
-            manifest.write()
         except BaseException:
             if not _discard_session(process, account, session_dir):
                 self._clean = False
@@ -974,20 +975,16 @@ class ProcessSession(SSHSession):
 
 @dataclass(slots=True)
 class SessionManifest:
-    """The account and sshd a session allocated, recorded so a later worker can reap
-    them if this one dies."""
+    """The account a session allocated, recorded so a later worker can reap it if
+    this one dies."""
 
     session_dir: Path
     account: str
-    sshd_pid: int | None = None
 
     def write(self) -> None:
         path = self.session_dir / _MANIFEST_NAME
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"account": self.account, "sshd_pid": self.sshd_pid}),
-            encoding="utf-8",
-        )
+        tmp.write_text(json.dumps({"account": self.account}), encoding="utf-8")
         tmp.chmod(0o600)
         tmp.replace(path)
 
@@ -997,26 +994,25 @@ class SessionManifest:
             raw: dict[str, Any] = json.loads(
                 (session_dir / _MANIFEST_NAME).read_text(encoding="utf-8")
             )
-            return cls(
-                session_dir=session_dir,
-                account=str(raw["account"]),
-                sshd_pid=raw.get("sshd_pid"),
-            )
+            return cls(session_dir=session_dir, account=str(raw["account"]))
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
 
 def reap_session(session_dir: Path) -> bool:
-    """Kill the sshd and retire the account that ``session_dir``'s manifest records,
-    then remove the directory; return ``False``, keeping it, if the account stays.
+    """Kill the session's sshd and retire the account ``session_dir``'s manifest
+    records, then remove the directory; return ``False``, keeping it, if the account
+    stays.
+
+    The sshd is found by its config path, so one a worker started and died before
+    it could record is found too.
     """
+    config_path = (session_dir / "sshd_config").as_posix()
+    for proc in psutil.process_iter():
+        if _is_our_sshd(proc.pid, config_path):
+            _kill_tree(proc.pid)
     manifest = SessionManifest.read(session_dir)
     if manifest is not None:
-        config_path = (session_dir / "sshd_config").as_posix()
-        if manifest.sshd_pid is not None and _is_our_sshd(
-            manifest.sshd_pid, config_path
-        ):
-            _kill_tree(manifest.sshd_pid)
         try:
             uid = pwd.getpwnam(manifest.account).pw_uid
         except KeyError:
@@ -1038,7 +1034,11 @@ def _is_our_sshd(pid: int, config_path: str) -> bool:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
         return False
-    return b"sshd" in cmdline and config_path.encode() in cmdline
+    args = cmdline.split(b"\0")
+    runs_sshd = any(
+        os.path.basename(arg) == b"sshd" or arg.startswith(b"sshd:") for arg in args
+    )
+    return runs_sshd and config_path.encode() in cmdline
 
 
 def _kill_tree(pid: int) -> None:
@@ -1068,6 +1068,13 @@ def _make_private_dir(path: Path, mode: int) -> None:
                 f"{path.as_posix()} is not a root-owned directory"
             ) from None
     path.chmod(mode)
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write ``text`` to a new file at ``path`` that only root can read."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def _archive_as(account: SessionAccount, source: Path) -> subprocess.Popen[bytes]:
@@ -1250,16 +1257,9 @@ def _launch_argv(argv: list[str]) -> list[str]:
             "tini is missing from this worker image; what an SSH session orphans is "
             "left to PID 1 to reap"
         )
-    return [
-        sys.executable,
-        "-I",
-        "-S",
-        "-c",
-        _LAUNCH_SCRIPT,
-        str(_SESSION_NICENESS),
-        str(_SESSION_OOM_SCORE_ADJ),
-        *argv,
-    ]
+    return interpreter_argv(
+        _LAUNCH_SCRIPT, str(_SESSION_NICENESS), str(_SESSION_OOM_SCORE_ADJ), *argv
+    )
 
 
 def _generate_host_key(keygen_path: str, host_key: Path) -> None:
@@ -1283,6 +1283,7 @@ def _install_finish_helper(session_dir: Path, sentinel: Path) -> Path:
     """
     bin_dir = session_dir / "bin"
     bin_dir.mkdir(mode=0o711)
+    bin_dir.chmod(0o711)
     helper = bin_dir / "flowmesh-finish"
     helper.write_text(
         "#!/bin/sh\n"

@@ -720,6 +720,21 @@ def test_a_linked_output_root_is_not_walked(tmp_path: Path) -> None:
     assert list(iter_tree(tmp_path / "link")) == []
 
 
+@pytest.mark.skipif(os.getuid() == 0, reason="root opens any directory")
+def test_an_output_dir_the_walk_cannot_open_fails_the_size_check(
+    tmp_path: Path,
+) -> None:
+    locked = tmp_path / "output" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "f").write_bytes(b"x" * 1024)
+    locked.chmod(0)
+    try:
+        with pytest.raises(ExecutionError, match="Permission denied"):
+            path_size_bytes(tmp_path / "output")
+    finally:
+        locked.chmod(0o700)
+
+
 def test_an_output_too_deep_to_walk_fails_the_size_check(tmp_path: Path) -> None:
     deepest = tmp_path.joinpath(*(["d"] * 70))
     deepest.mkdir(parents=True)
@@ -1041,6 +1056,20 @@ def test_a_session_that_fails_to_start_and_cannot_be_discarded_stops_the_worker(
         backend.start_session(request)
 
 
+def test_a_session_s_files_get_their_modes_whatever_the_umask(tmp_path: Path) -> None:
+    previous = os.umask(0o077)
+    try:
+        bin_dir = process_module._install_finish_helper(tmp_path, tmp_path / "finish")
+        process_module._write_private(tmp_path / "authorized_keys", "key\n")
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(bin_dir.stat().st_mode) == 0o711
+    assert stat.S_IMODE((tmp_path / "authorized_keys").stat().st_mode) == 0o600
+    with pytest.raises(FileExistsError):
+        process_module._write_private(tmp_path / "authorized_keys", "other\n")
+
+
 def test_an_sshd_that_ignores_a_terminate_is_killed_with_its_children() -> None:
     process = MagicMock(pid=4321)
     process.poll.return_value = None
@@ -1084,18 +1113,31 @@ def test_sshd_runs_niced_and_under_a_subreaper_when_tini_is_there(
 # ------------------------------------------------------------------ #
 
 
-@pytest.mark.parametrize("ours", [True, False])
-def test_a_reap_signals_only_the_sshd_its_manifest_names(
-    tmp_path: Path, ours: bool
+def test_a_reap_kills_only_the_sshd_run_with_the_session_s_config(
+    tmp_path: Path,
 ) -> None:
     session_dir = tmp_path / "ssn-1"
     session_dir.mkdir()
-    process_module.SessionManifest(
-        session_dir=session_dir, account="fmssn1", sshd_pid=4321
-    ).write()
+    process_module.SessionManifest(session_dir=session_dir, account="fmssn1").write()
+    config = (session_dir / "sshd_config").as_posix()
+    commands = {
+        11: [b"/usr/bin/tini", b"-s", b"--", b"/usr/sbin/sshd", b"-f", config.encode()],
+        12: [b"sshd: /usr/sbin/sshd -D -e -f " + config.encode()],
+        13: [b"/usr/sbin/sshd", b"-f", b"/other/sshd_config"],
+        14: [b"python3", config.encode()],
+    }
+    tables = {pid: b"\0".join(argv) for pid, argv in commands.items()}
+
+    def read_bytes(path: Path) -> bytes:
+        return tables[int(path.parts[2])]
 
     with (
-        patch.object(process_module, "_is_our_sshd", return_value=ours),
+        patch.object(
+            process_module.psutil,
+            "process_iter",
+            return_value=[MagicMock(pid=pid) for pid in tables],
+        ),
+        patch.object(process_module.Path, "read_bytes", read_bytes),
         patch.object(process_module, "_kill_tree") as kill,
         patch.object(
             process_module.pwd, "getpwnam", return_value=MagicMock(pw_uid=61_001)
@@ -1104,7 +1146,7 @@ def test_a_reap_signals_only_the_sshd_its_manifest_names(
     ):
         assert process_module.reap_session(session_dir)
 
-    assert kill.call_count == (1 if ours else 0)
+    assert [call.args for call in kill.call_args_list] == [(11,), (12,)]
     retire.assert_called_once_with("fmssn1", 61_001)
     assert not session_dir.exists()
 

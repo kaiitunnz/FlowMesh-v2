@@ -40,14 +40,6 @@ PRIVSEP_DIR = Path("/run/sshd")
 SESSION_UID_MIN = 61000
 SESSION_UID_MAX = 64999
 _UID_ATTEMPTS = 16
-_WORLD_WRITABLE_DIRS = (
-    Path("/", "var", "tmp"),
-    Path("/", "dev", "shm"),
-    Path("/", "dev", "mqueue"),
-)
-_SYSV_IPC_DIR = Path("/", "proc", "sysvipc")
-_SYSV_IPC_ID_COLUMNS = {"shm": "shmid", "msg": "msqid", "sem": "semid"}
-_NOGROUP_GID = 65534
 _KILL_GRACE_SEC = 5.0
 _KILL_ROUNDS = 10
 _KILL_ROUND_SEC = 0.5
@@ -57,10 +49,14 @@ _KILL_ROUND_SEC = 0.5
 _AS_UID_PREAMBLE = (
     "import ctypes, os, signal, sys\n"
     "uid = int(sys.argv[1])\n"
+    "if uid == 0:\n"
+    "    sys.exit('refusing to run a session helper as root')\n"
     "if os.getuid() != uid:\n"
     "    os.setgroups([])\n"
     "    os.setgid(int(sys.argv[2]))\n"
     "    os.setuid(uid)\n"
+    "if os.getresuid() != (uid, uid, uid):\n"
+    "    sys.exit('could not switch to the session uid')\n"
 )
 _KILL_ALL_SCRIPT = (
     "try:\n"
@@ -87,11 +83,21 @@ _REMOVE_IPC_SCRIPT = (
 )
 # argv[3:] is the command to exec as the uid.
 _EXEC_SCRIPT = "os.execv(sys.argv[3], sys.argv[3:])\n"
-_HELPER_TIMEOUT_SEC = 10.0
+_AS_UID_TIMEOUT_SEC = 10.0
+_NOGROUP_GID = 65534
+_USERADD_TIMEOUT_SEC = 30.0
+_SCRATCH_DIRS = (
+    Path("/", "tmp"),
+    Path("/", "var", "tmp"),
+    Path("/", "dev", "shm"),
+    Path("/", "dev", "mqueue"),
+    Path("/", "run", "lock"),
+)
+_SYSV_IPC_DIR = Path("/", "proc", "sysvipc")
+_SYSV_IPC_ID_COLUMNS = {"shm": "shmid", "msg": "msqid", "sem": "semid"}
 _LOCK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _ROOT_LOCK_TIMEOUT_SEC = 30.0
 _ROOT_LOCK_POLL_SEC = 0.05
-_COMMAND_TIMEOUT_SEC = 30.0
 
 
 def account_name_for(session_id: str) -> str:
@@ -320,7 +326,7 @@ def purge_uid_files(uid: int) -> None:
 
     Links are removed, never followed.
     """
-    for base in (Path(tempfile.gettempdir()), *_WORLD_WRITABLE_DIRS):
+    for base in scratch_dirs():
         for current, dirs, files in os.walk(base, followlinks=False):
             for name in list(dirs):
                 path = os.path.join(current, name)
@@ -334,6 +340,11 @@ def purge_uid_files(uid: int) -> None:
             for name in files:
                 if _owner(path := os.path.join(current, name)) == uid:
                     _unlink(path)
+
+
+def scratch_dirs() -> list[Path]:
+    """Return the directories every account may write in, the temp dir first."""
+    return list(dict.fromkeys((Path(tempfile.gettempdir()), *_SCRATCH_DIRS)))
 
 
 def purge_uid_ipc(uid: int) -> None:
@@ -477,16 +488,13 @@ def exec_as(uid: int, gid: int, argv: list[str]) -> list[str]:
     """
     if uid == 0:
         raise ExecutionError("Refusing to run a session helper as root")
-    return [
-        sys.executable,
-        "-I",
-        "-S",
-        "-c",
-        _AS_UID_PREAMBLE + _EXEC_SCRIPT,
-        str(uid),
-        str(gid),
-        *argv,
-    ]
+    return interpreter_argv(_AS_UID_PREAMBLE + _EXEC_SCRIPT, str(uid), str(gid), *argv)
+
+
+def interpreter_argv(script: str, *args: str) -> list[str]:
+    """Return the command line that runs ``script`` with ``args`` in the worker's
+    own interpreter, isolated from the environment and ``site``."""
+    return [sys.executable, "-I", "-S", "-c", script, *args]
 
 
 def process_identity_available() -> bool:
@@ -549,21 +557,14 @@ def _run_as(
     """
     try:
         return subprocess.run(  # nosec B603 - argv list, no shell=True, the worker's own interpreter
-            [
-                sys.executable,
-                "-I",
-                "-S",
-                "-c",
-                _AS_UID_PREAMBLE + script,
-                str(uid),
-                str(_NOGROUP_GID),
-                *args,
-            ],
+            interpreter_argv(
+                _AS_UID_PREAMBLE + script, str(uid), str(_NOGROUP_GID), *args
+            ),
             env={},
             cwd="/",
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            timeout=_HELPER_TIMEOUT_SEC,
+            timeout=_AS_UID_TIMEOUT_SEC,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -733,7 +734,10 @@ def _ensure_privsep_dir() -> None:
 
 
 def _login_shell() -> str:
-    return "/bin/bash" if Path("/bin/bash").exists() else "/bin/sh"
+    for candidate in ("/bin/bash", "/bin/sh"):
+        if Path(candidate).exists():
+            return candidate
+    return "/bin/sh"
 
 
 def _unlock(name: str) -> None:
@@ -773,7 +777,7 @@ def _require_binary(name: str) -> str:
 
 
 def _run(
-    argv: list[str], what: str, timeout: float | None = _COMMAND_TIMEOUT_SEC
+    argv: list[str], what: str, timeout: float | None = _USERADD_TIMEOUT_SEC
 ) -> "subprocess.CompletedProcess[bytes]":
     try:
         result = subprocess.run(  # nosec B603 - argv list, no shell=True, absolute path via shutil.which()

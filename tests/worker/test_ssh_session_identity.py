@@ -231,8 +231,7 @@ def test_retiring_removes_only_the_files_the_account_left(
     kept = tmp_path / "kept"
     kept.write_text("kept")
     uid = os.getuid()
-    monkeypatch.setattr(session_identity.tempfile, "tempdir", shared.as_posix())
-    monkeypatch.setattr(session_identity, "_WORLD_WRITABLE_DIRS", ())
+    monkeypatch.setattr(session_identity, "scratch_dirs", lambda: [shared])
 
     session_identity.purge_uid_files(uid + 1)
     assert sorted(p.name for p in shared.iterdir()) == [
@@ -244,6 +243,19 @@ def test_retiring_removes_only_the_files_the_account_left(
 
     assert list(shared.iterdir()) == []
     assert kept.read_text() == "kept"
+
+
+def test_the_scratch_dirs_include_tmp_when_the_temp_dir_is_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_identity.tempfile, "tempdir", tmp_path.as_posix())
+    dirs = session_identity.scratch_dirs()
+
+    assert dirs[0] == tmp_path
+    assert {Path("/tmp"), Path("/run/lock"), Path("/dev/mqueue")} <= set(dirs)
+    assert len(dirs) == len(set(dirs))
+    monkeypatch.setattr(session_identity.tempfile, "tempdir", "/tmp")
+    assert session_identity.scratch_dirs().count(Path("/tmp")) == 1
 
 
 def test_a_tree_deeper_than_python_recurses_is_removed(tmp_path: Path) -> None:
@@ -712,6 +724,29 @@ def test_a_segment_the_uid_left_is_removed() -> None:
         assert str(shmid) not in [line.split()[1] for line in listed.splitlines()[1:]]
     finally:
         libc.shmctl(shmid, 0, None)
+
+
+def _helper(uid: int) -> "subprocess.CompletedProcess[bytes]":
+    return subprocess.run(  # nosec B603 - argv list, test-only
+        session_identity.interpreter_argv(
+            session_identity._AS_UID_PREAMBLE + "print('ran')", str(uid), "0"
+        ),
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_a_helper_refuses_to_run_as_root() -> None:
+    refused = _helper(0)
+
+    assert refused.returncode != 0
+    assert b"ran" not in refused.stdout
+
+
+def test_a_helper_runs_once_its_every_uid_is_the_session_s() -> None:
+    if os.getuid() == 0:
+        pytest.skip("runs the helper without switching uid")
+    assert _helper(os.getuid()).stdout == b"ran\n"
 
 
 def test_helpers_import_nothing_after_switching_uid() -> None:
