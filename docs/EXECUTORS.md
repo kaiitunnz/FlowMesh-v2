@@ -408,20 +408,19 @@ ACL entry on each of: `RESULTS_DIR`, `WORKER_PRIVATE_STATE_DIR`,
 content store's root, the worker's home, any of `HF_HOME`, `HF_HUB_CACHE`,
 `HUGGINGFACE_HUB_CACHE`, `HF_DATASETS_CACHE`, `TRANSFORMERS_CACHE`,
 `TORCH_HOME`, `XDG_CACHE_HOME`, `VLLM_CACHE_ROOT` and `FASTEMBED_CACHE_PATH`
-that is set, and the `fastembed_cache` directory in the temp dir. A
-world-writable directory without the sticky bit that the path to one of these
-passes through is denied as well. The worker therefore needs the `acl` package
-(`setfacl` / `getfacl`) and ACL support on the filesystems behind those paths;
-without either, it does not offer `process`. It also does not offer `process`
-when:
+that is set, and the `fastembed_cache` directory in the temp dir. The worker
+therefore needs the `acl` package (`setfacl` / `getfacl`) and ACL support on the
+filesystems behind those paths; without either, it does not offer `process`. It
+also does not offer `process` when:
 
 - another worker sharing its root filesystem or its `/var/lib/flowmesh` already
   serves `process` sessions;
 - one of those paths contains a directory every session needs, such as the
   temp dir or `/mnt/flowmesh`;
-- one of those paths passes through a link in a world-writable directory, or
-  sits in a sticky world-writable directory without being a root-owned directory
-  only root can write.
+- a directory that resolving one of those paths passes through, links
+  included, is world-writable, unless it is sticky and holds the next component
+  as a directory the worker owns rather than a link, or it is one of those
+  paths or lies inside one.
 
 The deny entries do not cover files an agent tool writes directly into the temp
 dir. The worker log is readable by the worker's own account alone.

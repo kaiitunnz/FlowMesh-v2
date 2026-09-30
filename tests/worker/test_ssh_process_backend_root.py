@@ -65,7 +65,7 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> Iterator[WorkerConfig]:
     roots = {name: base / name for name in ("results", "private", "content", "hf")}
     for path in roots.values():
         path.mkdir(mode=0o777)
-    # The model cache as the worker image leaves it: open to every uid, twice over.
+    # The model cache as deployments share it: open to every uid, twice over.
     hub = roots["hf"] / "hub"
     hub.mkdir()
     for path in (roots["hf"], hub):
@@ -91,7 +91,7 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> Iterator[WorkerConfig]:
         private_state_dir=roots["private"],
         content_dir=roots["content"],
         hb_file=hb_file,
-        state_dirs=(Path("/root"), hub),
+        state_dirs=(Path("/root"), roots["hf"], hub),
         ssh_relay_host="127.0.0.1",
     )
     yield config
@@ -233,7 +233,7 @@ def test_a_session_logs_in_as_its_own_account_and_reaches_only_its_own_data(
             worker.results_dir / "tsk-other" / "results.json",
             worker.content_dir / "object",
             worker.private_state_dir / "state",
-            worker.state_dirs[1] / "model",
+            worker.state_dirs[2] / "model",
             worker.hb_file,
             Path("/proc/1/environ"),
         ):
@@ -657,17 +657,7 @@ def test_a_session_cannot_swap_a_directory_above_worker_state(
     os.chown(lab, 0, _useradd_default_gid())
     lab.chmod(0o2775)
     (lab / "cache").mkdir(mode=0o755)
-    # Open to every account two levels above the state it holds.
-    (base / "open" / "sub" / "results").mkdir(parents=True)
-    (base / "open").chmod(0o777)
-    config = dataclasses.replace(
-        worker,
-        state_dirs=(
-            *worker.state_dirs,
-            lab / "cache",
-            base / "open" / "sub" / "results",
-        ),
-    )
+    config = dataclasses.replace(worker, state_dirs=(*worker.state_dirs, lab / "cache"))
     backend = ProcessSessionBackend(config)
     session = backend.start_session(_request(tmp_path, client_key))
     try:
@@ -675,15 +665,34 @@ def test_a_session_cannot_swap_a_directory_above_worker_state(
         assert port is not None
         groups = _ssh(session, client_key, port, "id -G").stdout.split()
         assert groups == [str(session.account.gid)], groups
-        for swapped in (lab / "cache", base / "open" / "sub"):
-            moved = _ssh(session, client_key, port, f"mv {swapped} {swapped}.mine")
-            assert moved.returncode != 0, swapped
-            assert swapped.is_dir() and not swapped.with_suffix(".mine").exists()
+        moved = _ssh(session, client_key, port, f"mv {lab / 'cache'} {lab / 'mine'}")
+        assert moved.returncode != 0
+        assert (lab / "cache").is_dir() and not (lab / "mine").exists()
     finally:
         session.stop(1)
         session.cleanup()
         shutil.rmtree(base, ignore_errors=True)
     assert _run(["getent", "group", session.account.name]).returncode != 0
+
+
+def test_state_below_a_directory_any_account_can_write_refuses_sessions(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    base = Path(tempfile.mkdtemp(dir="/var/lib"))
+    base.chmod(0o755)
+    (base / "open" / "sub" / "results").mkdir(parents=True)
+    (base / "open").chmod(0o777)
+    config = dataclasses.replace(
+        worker, state_dirs=(*worker.state_dirs, base / "open" / "sub" / "results")
+    )
+    try:
+        with pytest.raises(ExecutionError, match="world-writable") as refused:
+            ProcessSessionBackend(config).start_session(_request(tmp_path, client_key))
+        assert refused.value.retryable
+        assert not ProcessSessionBackend.is_available(config)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    assert _run(["sh", "-c", "getent passwd | grep -c '^fmssn'"]).stdout.strip() == "0"
 
 
 def test_a_stop_during_collection_lets_the_collection_finish(

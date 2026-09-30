@@ -32,7 +32,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -109,8 +109,7 @@ _LAUNCH_SCRIPT = (
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _BACKEND_LOCK_NAME = "flowmesh-ssh-process.lock"
 _RUN_DIR = Path("/run")
-# A lookup that follows more links than this loops; the kernel stops at 40.
-_MAX_LOOKUP_STEPS = 4096
+_MAX_LINK_HOPS = 40
 # Paths every session needs; a denied root covering one would break it.
 _SESSION_REQUIRED_PATHS = (
     Path(SAFE_MOUNT_ROOT),
@@ -389,129 +388,132 @@ class ProcessSessionBackend(SSHSessionBackend):
 def ensure_state_roots(config: WorkerConfig) -> list[Path]:
     """Return :func:`denied_roots`, creating each missing one root-owned ``0700`` so
     a session's deny entry lands on it; raise if one cannot be denied safely."""
-    for path in _state_paths(config):
-        if link := _lookup(path).shared_link:
-            raise ExecutionError(
-                f"Refusing the SSH session: worker state {path} is reached through "
-                f"{link}, a link in a shared directory",
-                retryable=True,
-            )
-    roots = denied_roots(config)
-    for root in roots:
-        if problem := _root_problem(root):
-            raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
-        if os.path.lexists(root):
-            continue
-        try:
-            root.parent.mkdir(parents=True, exist_ok=True)
-            os.mkdir(root, 0o700)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise ExecutionError(
-                f"Cannot create worker state {root}: {exc}", retryable=True
-            ) from exc
-        if problem := _root_problem(root):
-            raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
-    return roots
+    if problem := _state_problem(config):
+        raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
+    for root in denied_roots(config):
+        if not os.path.lexists(root):
+            try:
+                _create_state_root(root)
+            except OSError as exc:
+                raise ExecutionError(
+                    f"Cannot create worker state {root}: {exc}", retryable=True
+                ) from exc
+    if problem := _state_problem(config):
+        raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
+    return denied_roots(config)
 
 
 def denied_roots(config: WorkerConfig) -> list[Path]:
-    """Return the worker state a session is denied, as the paths ``setfacl`` acts on.
-
-    Each path in ``DENIED_CONFIG_FIELDS``, and a filesystem content store's root, is
-    resolved, with the heartbeat file replaced by its directory. Each world-writable
-    directory without the sticky bit that resolving it looks an entry up in is
-    denied too, the highest of those below one another, since a session could swap
-    that entry for one of its own; a path below a denied directory is covered by it.
-    """
-    roots: dict[Path, None] = {}
-    for path in _state_paths(config):
-        open_dirs = [
-            directory for directory in _lookup(path).dirs if _is_open_dir(directory)
-        ]
-        resolved = Path(os.path.realpath(path))
-        for candidate in (*open_dirs, resolved):
-            if not any(other in candidate.parents for other in open_dirs):
-                roots[candidate] = None
-    return list(roots)
+    """Return the worker state a session is denied, resolved to the paths
+    ``setfacl`` acts on."""
+    return list(
+        dict.fromkeys(Path(os.path.realpath(path)) for path in _state_paths(config))
+    )
 
 
 def _state_paths(config: WorkerConfig) -> list[Path]:
-    """Return the absolute paths of the worker state a session is denied."""
+    """Return each path in ``DENIED_CONFIG_FIELDS``, and a filesystem content store's
+    root, as the worker uses it, made absolute, with the heartbeat file replaced by
+    its directory."""
     paths: list[Path] = []
     for field_name in DENIED_CONFIG_FIELDS:
         value = getattr(config, field_name)
-        for path in value if isinstance(value, tuple) else (value,):
-            path = Path(os.path.abspath(path))
-            if field_name == "hb_file":
-                # Denying only the file would still let a session list its name,
-                # which contains the worker token.
-                path = path.parent
-            paths.append(path)
+        for configured in value if isinstance(value, tuple) else (value,):
+            path = Path(configured).absolute()
+            # Denying only the file would still let a session list its name,
+            # which contains the worker token.
+            paths.append(path.parent if field_name == "hb_file" else path)
     if config.object_store.backend == BACKEND_FILESYSTEM:
-        paths.append(Path(os.path.abspath(config.object_store.filesystem_root)))
+        paths.append(Path(config.object_store.filesystem_root).absolute())
     return paths
 
 
-@dataclass(slots=True)
-class _Lookup:
-    """The resolved directories a path's lookup reads an entry from, and the first
-    link it follows out of a shared directory."""
+def _create_state_root(root: Path) -> None:
+    """Create ``root`` as ``0700`` and each missing parent as ``0755``, never
+    following a link."""
+    parts = root.parts[1:]
+    fd = os.open("/", _DIR_FLAGS)
+    try:
+        for index, part in enumerate(parts):
+            try:
+                os.mkdir(part, 0o700 if index == len(parts) - 1 else 0o755, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    finally:
+        os.close(fd)
 
-    dirs: list[Path] = field(default_factory=list)
-    shared_link: Path | None = None
+
+def _state_problem(config: WorkerConfig) -> str | None:
+    """Why this worker's state cannot be denied to a session safely, if it cannot."""
+    roots = denied_roots(config)
+    for path in _state_paths(config):
+        if problem := _path_problem(path, roots):
+            return problem
+    for root in roots:
+        if blocked := _required_path_under(root):
+            return f"denying {root} would also deny {blocked}"
+    return None
 
 
-def _lookup(path: Path) -> _Lookup:
-    """Resolve the absolute ``path`` one component at a time, as the kernel does."""
-    lookup = _Lookup()
-    pending = list(PurePosixPath(path).parts[1:])
-    current = Path("/")
-    for _ in range(_MAX_LOOKUP_STEPS):
-        if not pending:
-            break
+def _path_problem(path: Path, denied: Iterable[Path] = ()) -> str | None:
+    """Why a session could replace ``path`` or a directory on the way to it, if
+    it could.
+
+    Every directory that resolving ``path`` looks a name up in is checked,
+    those a link leads through included. A session can rename any entry of a
+    directory it can write; in a sticky one only its own, so there the entry
+    must be a directory the worker owns, not a link. A directory in ``denied``,
+    or below one, is not checked, since the session cannot search it.
+    """
+    denied = tuple(denied)
+    directory = Path("/")
+    pending = list(path.parts[1:])
+    hops = 0
+    while pending:
         name = pending.pop(0)
         if name == "..":
-            current = current.parent
+            directory = directory.parent
             continue
-        lookup.dirs.append(current)
-        candidate = current / name
+        entry = directory / name
         try:
-            is_link = stat.S_ISLNK(os.lstat(candidate).st_mode)
-        except OSError:
-            is_link = False
-        if not is_link:
-            current = candidate
+            dir_mode = os.stat(directory).st_mode
+            info: os.stat_result | None = os.lstat(entry)
+        except FileNotFoundError:
+            info = None
+        except OSError as exc:
+            return f"cannot inspect {entry} on the way to worker state {path}: {exc}"
+        if dir_mode & stat.S_IWOTH and not any(
+            directory == root or root in directory.parents for root in denied
+        ):
+            if not dir_mode & stat.S_ISVTX:
+                return (
+                    f"{directory}, on the way to worker state {path}, is "
+                    "world-writable, so a session could replace what it holds"
+                )
+            if info is not None and (
+                info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode)
+            ):
+                return (
+                    f"{entry}, on the way to worker state {path}, sits in a shared "
+                    "directory but is not a directory this worker owns"
+                )
+        if info is None:
+            return None
+        if stat.S_ISLNK(info.st_mode):
+            hops += 1
+            if hops > _MAX_LINK_HOPS:
+                return f"too many links on the way to worker state {path}"
+            target = PurePosixPath(os.readlink(entry))
+            if target.is_absolute():
+                directory = Path("/")
+                pending[:0] = target.parts[1:]
+            else:
+                pending[:0] = target.parts
             continue
-        if lookup.shared_link is None and _is_shared_dir(current):
-            lookup.shared_link = candidate
-        target = PurePosixPath(os.readlink(candidate))
-        if target.is_absolute():
-            current = Path("/")
-        pending[:0] = [part for part in target.parts if part not in ("/", ".")]
-    return lookup
-
-
-def _root_problem(root: Path) -> str | None:
-    """Why ``root`` cannot be denied to a session safely, if it cannot."""
-    if blocked := _required_path_under(root):
-        return f"denying {root} would also deny {blocked}"
-    try:
-        info = os.lstat(root)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        return f"cannot inspect worker state {root}: {exc}"
-    if stat.S_ISLNK(info.st_mode):
-        return f"worker state {root} is a link"
-    if _is_shared_dir(root.parent) and (
-        info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    ):
-        return (
-            f"worker state {root} sits in a shared directory but is not a root-owned "
-            "path only root can write"
-        )
+        directory = entry
     return None
 
 
@@ -540,23 +542,6 @@ def _acl_ready(config: WorkerConfig) -> bool:
             )
             return False
     return True
-
-
-def _is_open_dir(path: Path) -> bool:
-    """Whether any account may rename entries in ``path``."""
-    try:
-        mode = os.lstat(path).st_mode
-    except OSError:
-        return False
-    return stat.S_ISDIR(mode) and bool(mode & stat.S_IWOTH) and not mode & stat.S_ISVTX
-
-
-def _is_shared_dir(path: Path) -> bool:
-    try:
-        mode = os.stat(path).st_mode
-    except OSError:
-        return False
-    return bool(mode & (stat.S_ISVTX | stat.S_IWOTH))
 
 
 def _required_path_under(root: Path) -> Path | None:

@@ -355,10 +355,15 @@ def test_an_operator_link_is_resolved_to_its_target(tmp_path: Path) -> None:
     data.mkdir(parents=True)
     (tmp_path / "results").symlink_to(data)
 
-    roots = process_module.denied_roots(_state_config(tmp_path))
+    assert data in process_module.denied_roots(_state_config(tmp_path))
+    assert process_module._path_problem(tmp_path / "results") is None
 
-    assert data in roots
-    assert process_module._root_problem(data) is None
+
+def _refusal(config: WorkerConfig) -> str:
+    with pytest.raises(ExecutionError) as refused:
+        process_module.ensure_state_roots(config)
+    assert refused.value.retryable
+    return str(refused.value)
 
 
 @pytest.mark.parametrize("mode", [0o1777, 0o777])
@@ -367,88 +372,140 @@ def test_a_link_in_a_shared_dir_is_refused_not_followed(
 ) -> None:
     shared = tmp_path / "shared"
     shared.mkdir()
-    shared.chmod(mode)
     victim = tmp_path / "victim"
     victim.mkdir()
     (shared / "cache").symlink_to(victim)
-    config = _state_config(tmp_path, state_dirs=(shared / "cache",))
+    shared.chmod(mode)
 
-    with pytest.raises(ExecutionError, match="a link in a shared directory"):
-        process_module.ensure_state_roots(config)
+    refusal = _refusal(_state_config(tmp_path, state_dirs=(shared / "cache",)))
+
+    assert ("world-writable" if mode == 0o777 else "shared directory") in refusal
+    assert list(victim.iterdir()) == []
 
 
-def test_a_path_through_a_link_in_a_shared_dir_is_refused(tmp_path: Path) -> None:
+def test_an_owned_root_in_a_sticky_dir_is_accepted(tmp_path: Path) -> None:
     shared = tmp_path / "shared"
+    (shared / "cache").mkdir(parents=True)
+    shared.chmod(0o1777)
+
+    assert process_module._path_problem(shared / "cache") is None
+    assert process_module._path_problem(shared / "missing") is None
+
+
+@pytest.mark.parametrize("depth", [1, 2])
+def test_a_root_anywhere_below_a_world_writable_dir_is_refused(
+    tmp_path: Path, depth: int
+) -> None:
+    shared = tmp_path / "open"
+    root = shared.joinpath(*["sub"] * (depth - 1), "results")
+    root.mkdir(parents=True)
+    shared.chmod(0o777)
+
+    assert "world-writable" in _refusal(_state_config(tmp_path, results_dir=root))
+
+
+def test_a_missing_part_below_a_world_writable_dir_is_refused_not_created(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path / "open"
     shared.mkdir()
     shared.chmod(0o777)
-    (tmp_path / "elsewhere" / "results").mkdir(parents=True)
-    (shared / "link").symlink_to(tmp_path / "elsewhere")
-    config = _state_config(tmp_path, results_dir=shared / "link" / "results")
 
-    with pytest.raises(ExecutionError, match="a link in a shared directory"):
-        process_module.ensure_state_roots(config)
-
-
-def _open_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    path.chmod(0o777)
-    return path
-
-
-def test_an_open_dir_anywhere_above_a_root_is_denied(tmp_path: Path) -> None:
-    open_dir = _open_dir(tmp_path / "x" / "open")
-    (open_dir / "sub" / "results").mkdir(parents=True)
-
-    roots = process_module.ensure_state_roots(
-        _state_config(tmp_path, results_dir=open_dir / "sub" / "results")
+    assert "world-writable" in _refusal(
+        _state_config(tmp_path, results_dir=shared / "missing" / "results")
     )
-
-    assert open_dir in roots
-    assert open_dir / "sub" / "results" not in roots
+    assert not (shared / "missing").exists()
 
 
-def test_an_open_dir_above_a_missing_part_of_a_root_is_denied_not_created_through(
-    tmp_path: Path,
-) -> None:
-    open_dir = _open_dir(tmp_path / "x" / "open")
-
-    roots = process_module.ensure_state_roots(
-        _state_config(tmp_path, results_dir=open_dir / "missing" / "results")
-    )
-
-    assert open_dir in roots
-    assert not (open_dir / "missing").exists()
-
-
-def test_an_open_dir_a_link_leads_through_is_denied_with_the_target(
-    tmp_path: Path,
-) -> None:
-    open_dir = _open_dir(tmp_path / "far" / "open")
-    (open_dir / "results").mkdir()
-    (tmp_path / "results").symlink_to(open_dir / "results")
-    closed = tmp_path / "closed"
-    (closed / "real").mkdir(parents=True)
-    _open_dir(tmp_path / "lead")
-    (tmp_path / "lead" / "sub").mkdir()
-    (tmp_path / "lead" / "sub" / "hop").symlink_to(closed / "real")
-
-    roots = process_module.denied_roots(
-        _state_config(tmp_path, content_dir=tmp_path / "lead" / "sub" / "hop")
-    )
-
-    assert open_dir in roots
-    assert {tmp_path / "lead", closed / "real"} <= set(roots)
-
-
-def test_a_root_others_can_write_in_a_shared_dir_is_refused(tmp_path: Path) -> None:
+def test_a_world_writable_dir_a_link_leads_through_is_refused(tmp_path: Path) -> None:
     shared = tmp_path / "shared"
-    shared.mkdir()
-    shared.chmod(0o1777)
-    (shared / "cache").mkdir()
-    (shared / "cache").chmod(0o777)
+    (shared / "results").mkdir(parents=True)
+    shared.chmod(0o777)
+    (tmp_path / "hop").symlink_to("shared/results")
+    (tmp_path / "results").symlink_to(tmp_path / "hop")
 
-    assert process_module._root_problem(shared / "cache") is not None
-    assert process_module._root_problem(tmp_path / "missing") is None
+    assert "world-writable" in _refusal(_state_config(tmp_path))
+
+
+def test_parent_components_after_a_link_are_resolved_physically(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path / "shared"
+    (shared / "inner").mkdir(parents=True)
+    (shared / "results").mkdir()
+    shared.chmod(0o777)
+    (tmp_path / "safe").mkdir()
+    (tmp_path / "safe" / "link").symlink_to(shared / "inner")
+
+    assert "world-writable" in (
+        process_module._path_problem(tmp_path / "safe" / "link" / ".." / "results")
+        or ""
+    )
+
+
+def test_a_link_loop_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+
+    assert "too many links" in (process_module._path_problem(tmp_path / "a") or "")
+
+
+def _shared_cache(tmp_path: Path) -> Path:
+    """A model cache as deployments share it: a host directory open to every uid,
+    with the hub below it open too."""
+    cache = tmp_path / "huggingface"
+    (cache / "hub").mkdir(parents=True)
+    for path in (cache, cache / "hub"):
+        path.chmod(0o777)
+    return cache
+
+
+def test_a_world_writable_dir_inside_a_denied_root_is_accepted(
+    tmp_path: Path,
+) -> None:
+    cache = _shared_cache(tmp_path)
+
+    roots = process_module.ensure_state_roots(
+        _state_config(tmp_path, state_dirs=(cache, cache / "hub"))
+    )
+
+    assert {cache, cache / "hub"} <= set(roots)
+
+
+def test_the_same_world_writable_dir_outside_any_denied_root_is_refused(
+    tmp_path: Path,
+) -> None:
+    cache = _shared_cache(tmp_path)
+
+    assert "world-writable" in _refusal(
+        _state_config(tmp_path, state_dirs=(cache / "hub",))
+    )
+
+
+def test_a_link_out_of_a_denied_root_to_a_world_writable_dir_is_refused(
+    tmp_path: Path,
+) -> None:
+    cache = _shared_cache(tmp_path)
+    outside = tmp_path / "outside"
+    (outside / "models").mkdir(parents=True)
+    outside.chmod(0o777)
+    (cache / "models").symlink_to(outside / "models")
+
+    assert "world-writable" in _refusal(
+        _state_config(tmp_path, state_dirs=(cache, cache / "models"))
+    )
+
+
+def test_a_root_is_created_without_following_a_link_planted_on_the_way(
+    tmp_path: Path,
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "new").symlink_to(elsewhere)
+
+    with pytest.raises(OSError):
+        process_module._create_state_root(tmp_path / "new" / "state")
+    assert list(elsewhere.iterdir()) == []
 
 
 def test_a_filesystem_that_takes_no_acl_offers_no_process_backend(
