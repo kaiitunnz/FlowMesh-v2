@@ -1,4 +1,4 @@
-from ._base import StrictBaseModel, TemplateBaseModel
+from ._base import PERSISTED_LOAD_CONTEXT, StrictBaseModel, TemplateBaseModel
 from .envelope import (
     TaskEnvelope,
     TaskEnvelopeStrict,
@@ -18,6 +18,7 @@ from .placeholders import (
 from .task_type import TaskType
 
 __all__ = [
+    "PERSISTED_LOAD_CONTEXT",
     "PLACEHOLDER_PATTERN",
     "PlaceholderString",
     "StrictBaseModel",

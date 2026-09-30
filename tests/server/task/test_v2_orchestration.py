@@ -38,6 +38,7 @@ from server.task.v2.representations.operators import (
     EffectReplayContract,
 )
 from shared.content import ContentReference
+from shared.tasks import PERSISTED_LOAD_CONTEXT
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
@@ -101,7 +102,7 @@ class FakeRegistry:
     def load_task_states(self, *task_ids: str) -> list[PersistedTask | None]:
         return [
             (
-                PersistedTask.model_validate_json(blob)
+                PersistedTask.model_validate_json(blob, context=PERSISTED_LOAD_CONTEXT)
                 if (blob := self.task_blobs.get(t))
                 else None
             )

@@ -28,7 +28,6 @@ def _ssh_config(image: str = "myimg:latest") -> SSHConfig:
         extra_env={},
         inputs=[],
         output=None,
-        mounts=[],
         poll_interval_sec=1.0,
         stop_timeout_sec=5.0,
         cpu_limit=None,

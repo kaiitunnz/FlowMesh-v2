@@ -1,4 +1,5 @@
-"""Every Strict task spec declares the credential fields its Template twin does."""
+"""Every Strict task spec declares the credential and retired fields its Template twin
+does."""
 
 import typing
 from typing import Any
@@ -34,3 +35,13 @@ def test_the_twins_declare_the_same_credential_fields(task_type) -> None:
     strict, template = _STRICT[task_type], _TEMPLATE[task_type]
 
     assert strict.credential_fields == template.credential_fields
+
+
+@pytest.mark.parametrize("task_type", list(_TEMPLATE), ids=str)
+def test_the_twins_retire_the_same_fields(task_type) -> None:
+    strict, template = _STRICT[task_type], _TEMPLATE[task_type]
+
+    assert strict.retired_fields == template.retired_fields
+    for retired in strict.retired_fields:
+        assert retired not in strict.model_fields
+        assert retired not in template.model_fields

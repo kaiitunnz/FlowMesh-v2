@@ -14,7 +14,6 @@ from typing import Any
 from shared.tasks.components.resources import GPURequirements
 from shared.tasks.specs.ssh import (
     SSHInputSpec,
-    SSHMountSpec,
     SSHOutputSpec,
     SSHSpecStrict,
 )
@@ -98,7 +97,6 @@ class SSHConfig:
     extra_env: dict[str, Any]
     inputs: list[SSHInputSpec]
     output: SSHOutputConfig | None
-    mounts: list[SSHMountSpec]
     poll_interval_sec: float
     stop_timeout_sec: float
     cpu_limit: float | None
@@ -151,7 +149,6 @@ class SSHConfig:
             extra_env=dict(spec.env or {}),
             inputs=list(spec.inputs or []),
             output=output_cfg,
-            mounts=list(spec.mounts or []),
             poll_interval_sec=poll_interval_sec,
             stop_timeout_sec=stop_timeout_sec,
             cpu_limit=cpu_limit,
