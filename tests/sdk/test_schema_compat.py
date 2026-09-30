@@ -45,6 +45,7 @@ from flowmesh.models import (
     TraceTree,
     VersionResponse,
     Worker,
+    WorkerCapabilities,
     WorkerHardware,
     WorkerInfo,
     WorkerRegisterResponse,
@@ -118,6 +119,7 @@ from shared.schemas.artifact import ArtifactRef as SrvArtifactRef
 from shared.schemas.result import BaseExecutorResult as SrvBaseExecutorResult
 from shared.schemas.result import ResultEnvelope as SrvResultEnvelope
 from shared.schemas.worker import SSHLimits as SrvSSHLimits
+from shared.schemas.worker import WorkerCapabilities as SrvWorkerCapabilities
 from shared.tasks.task_type import TaskType as SrvTaskType
 
 from .helpers import (
@@ -222,6 +224,7 @@ MODEL_PAIRS = [
     (SrvHostInfo, HostInfo),
     (SrvWorkerHardware, WorkerHardware),
     (SrvSSHLimits, SSHLimits),
+    (SrvWorkerCapabilities, WorkerCapabilities),
     # Logs
     (SrvLogEvent, LogEvent),
     (SrvLogEntry, LogEntry),
