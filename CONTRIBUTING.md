@@ -109,6 +109,16 @@ uv run pytest tests/test_core_flow.py  # Single file
 
 If your change touches shared schemas or proto definitions, verify downstream compatibility across Server and Worker packages.
 
+The process SSH backend's suite, `tests/worker/test_ssh_process_backend_root.py`, creates accounts and starts `sshd`, so it runs only as root inside a container and skips anywhere else. CI runs it in its own job. To run it locally:
+
+```bash
+docker run --rm -v "$PWD":/repo:ro python:3.12-slim sh -c '
+  apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server openssh-client acl passwd &&
+  pip install -q uv && mkdir /src && tar -C /repo --exclude=./.venv -cf - . | tar -C /src -xf - && cd /src &&
+  uv sync -q --frozen --group runtime-server --group runtime-worker-core &&
+  uv run --frozen --group runtime-server --group runtime-worker-core pytest tests/worker/test_ssh_process_backend_root.py'
+```
+
 ## CI runners
 
 CI runs on GitHub-hosted `ubuntu-latest`. Pushes to `main` run on `nus-flowmesh`, an ARC scale set on the NUS build farm, when the repository variable `NUS_RUNNERS` is `on`. Every other event, including pull requests from forks, runs on `ubuntu-latest`.

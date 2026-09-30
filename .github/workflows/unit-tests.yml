@@ -85,3 +85,37 @@ jobs:
           uv run pytest tests/
           --ignore=tests/worker/test_mp_executor_cleanup_gpu.py
           -v
+
+  process-ssh-backend:
+    name: Process SSH backend tests (root)
+    runs-on: ${{ github.event_name == 'push' && vars.NUS_RUNNERS == 'on' && 'nus-flowmesh' || 'ubuntu-latest' }}
+    # The process SSH backend creates accounts, applies ACLs and starts sshd, so its
+    # suite runs only as root inside a container, which this job gives it.
+    container:
+      image: python:3.12-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286
+    env:
+      FLOWMESH_TEST_PROCESS_SSH: "1"
+    steps:
+      - name: Install system packages
+        run: >
+          apt-get update
+          && apt-get install -y --no-install-recommends
+          git openssh-server openssh-client acl passwd
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        with:
+          version: "0.11.26"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group runtime-server --group runtime-worker-core
+
+      - name: Run process SSH backend tests
+        run: >
+          uv run --frozen --group runtime-server --group runtime-worker-core
+          pytest tests/worker/test_ssh_process_backend_root.py -v

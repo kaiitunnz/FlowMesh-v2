@@ -31,8 +31,15 @@ from worker.executors.ssh_session import (
 from worker.executors.ssh_session.backends import process as process_module
 from worker.executors.ssh_session.config import SSHOutputConfig
 
+_ROOT_IN_CONTAINER = os.getuid() == 0 and any(
+    Path(marker).exists() for marker in ("/.dockerenv", "/run/.containerenv")
+)
+# Set where the suite must run, so it fails rather than skips there.
+if os.environ.get("FLOWMESH_TEST_PROCESS_SSH") == "1" and not _ROOT_IN_CONTAINER:
+    raise RuntimeError("the process SSH backend suite needs root inside a container")
+
 pytestmark = pytest.mark.skipif(
-    os.getuid() != 0 or not Path("/.dockerenv").exists(),
+    not _ROOT_IN_CONTAINER,
     reason="creates accounts and starts sshd: root inside a container only",
 )
 
