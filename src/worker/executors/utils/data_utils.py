@@ -9,7 +9,9 @@ from urllib.parse import urlparse
 import requests
 
 from shared.utils.http import add_auth_headers
+from shared.utils.redact import redact_url
 
+from ...utils.redaction import redact_urls
 from ..base_executor import ExecutionError
 from .artifacts import is_flowmesh_origin_url
 
@@ -53,7 +55,10 @@ def resolve_jsonl_path(
                             fh.write(chunk)
         except requests.RequestException as exc:
             raise ExecutionError(
-                f"Failed to download JSONL dataset from {value}: {exc}", retryable=True
+                redact_urls(
+                    f"Failed to download JSONL dataset from {value}: {exc}", value
+                ),
+                retryable=True,
             ) from exc
 
         if logger:
@@ -63,7 +68,7 @@ def resolve_jsonl_path(
                 size = None
             logger.info(
                 "Downloaded JSONL dataset from %s to %s%s",
-                value,
+                redact_url(value),
                 target_path,
                 f" ({size} bytes)" if size is not None else "",
             )

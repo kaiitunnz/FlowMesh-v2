@@ -27,7 +27,9 @@ from shared.schemas.result import (
 )
 from shared.tasks.specs import RagSpecStrict
 from shared.tasks.task_type import TaskType
+from shared.utils.redact import redact_url
 
+from ..utils.redaction import redact_urls
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .utils.graph_templates import Message, build_prompts_from_graph_template
 
@@ -132,7 +134,9 @@ class RAGExecutor(Executor):
                 "No queries prepared. Check spec.query or spec.data configuration."
             )
 
-        logger.info("Connecting Qdrant url=%s collection=%s", url, collection)
+        logger.info(
+            "Connecting Qdrant url=%s collection=%s", redact_url(url), collection
+        )
         client = (
             QdrantClient(url=url, api_key=api_key) if api_key else QdrantClient(url=url)
         )
@@ -157,9 +161,10 @@ class RAGExecutor(Executor):
                     host = parsed.netloc
                 except Exception:
                     pass
-                err_msg = f"Qdrant query failed: {e}"
+                err_msg = redact_urls(f"Qdrant query failed: {e}", url)
                 ctx_msg = (
-                    f"url={url} (scheme={scheme}, host={host}), "
+                    f"url={redact_url(url)} (scheme={scheme}, "
+                    f"host={host.rpartition('@')[2]}), "
                     f"collection={collection}, has_api_key={has_api_key}"
                 )
                 logger.error(
@@ -190,7 +195,7 @@ class RAGExecutor(Executor):
             "RAG query completed queries=%d total_results=%d", len(queries), total_items
         )
         return RAGResult(
-            qdrant=RagQdrant(collection=collection, url=url),
+            qdrant=RagQdrant(collection=collection, url=redact_url(url)),
             embedding=RagEmbedding(model=model_name),
             search=RagSearch(top_k=top_k),
             queries=results_per_query,

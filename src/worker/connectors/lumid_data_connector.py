@@ -14,6 +14,7 @@ import httpx
 import pandas as pd
 from PIL import Image
 
+from ..utils.redaction import redact_urls
 from .base_connector import BaseConnector, ConnectorError, ConnectorResult
 
 logger = logging.getLogger(__name__)
@@ -135,14 +136,14 @@ class LumidDataConnector(BaseConnector):
             return {
                 "success": False,
                 "data": None,
-                "error": f"request timed out: {exc}",
+                "error": redact_urls(f"request timed out: {exc}", self._base_url),
                 "metadata": {},
             }
         except httpx.HTTPError as exc:
             return {
                 "success": False,
                 "data": None,
-                "error": f"HTTP error: {exc}",
+                "error": redact_urls(f"HTTP error: {exc}", self._base_url),
                 "metadata": {},
             }
 

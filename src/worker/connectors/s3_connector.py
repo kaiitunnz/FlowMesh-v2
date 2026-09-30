@@ -23,6 +23,7 @@ except ImportError:
 
     _HAS_BOTO3 = False
 
+from ..utils.redaction import redact_urls
 from .base_connector import BaseConnector, ConnectorError, ConnectorResult
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,12 @@ class S3Connector(BaseConnector):
             )
 
         except Exception as e:
-            raise ConnectorError(f"Failed to parse S3 connection string: {e}") from e
+            raise ConnectorError(
+                redact_urls(
+                    f"Failed to parse S3 connection string: {e}",
+                    self._connection_string,
+                )
+            ) from e
 
     def _write_cert_to_temp_file(self) -> str | None:
         """Write certificate data to a temporary file if provided."""
@@ -182,10 +188,15 @@ class S3Connector(BaseConnector):
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "Unknown")
             raise ConnectorError(
-                f"Failed to connect to S3 (Error: {error_code}): {e}"
+                redact_urls(
+                    f"Failed to connect to S3 (Error: {error_code}): {e}",
+                    self._connection_string,
+                )
             ) from e
         except Exception as e:
-            raise ConnectorError(f"Failed to connect to S3: {e}") from e
+            raise ConnectorError(
+                redact_urls(f"Failed to connect to S3: {e}", self._connection_string)
+            ) from e
 
     def disconnect(self) -> None:
         """Close S3 connection and cleanup temporary files."""

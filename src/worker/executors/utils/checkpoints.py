@@ -18,7 +18,9 @@ from shared.telemetry.propagation import inject_ambient_traceparent
 from shared.utils.atomic import atomic_write_text
 from shared.utils.http import add_auth_headers
 from shared.utils.parsing import parse_bool_env
+from shared.utils.redact import redact_url
 
+from ...utils.redaction import redact_urls
 from ..base_executor import ExecutionError, TaskReference
 from .artifacts import is_flowmesh_origin_url
 
@@ -131,7 +133,9 @@ def resolve_checkpoint_load(
                 )
         log = logger or load_cfg.get("_logger")
         if log:
-            log.info("Downloading checkpoint from %s", load_cfg.get("url"))
+            log.info(
+                "Downloading checkpoint from %s", redact_url(str(load_cfg.get("url")))
+            )
         return download_and_unpack(load_cfg, out_dir)
 
     raise ExecutionError(f"Unsupported checkpoint load type '{source_type}'")
@@ -176,7 +180,8 @@ def download_and_unpack(load_cfg: dict[str, Any], out_dir: Path) -> Path:
                         fh.write(chunk)
     except requests.RequestException as exc:
         raise ExecutionError(
-            f"Failed to download checkpoint from {url}: {exc}", retryable=True
+            redact_urls(f"Failed to download checkpoint from {url}: {exc}", url),
+            retryable=True,
         ) from exc
 
     archive_format = str(load_cfg.get("archive_format", "auto")).lower()
@@ -411,7 +416,7 @@ def build_artifact_context(spec: TaskSpecStrictBase, out_dir: Path) -> ArtifactC
     if destination is not None:
         parsed = urlparse(destination.url)
         if parsed.scheme and parsed.netloc:
-            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            base_url = f"{parsed.scheme}://{parsed.netloc.rpartition('@')[2]}"
     return ArtifactContext(base_dir=base_dir, base_url=base_url)
 
 
@@ -421,6 +426,9 @@ def write_executor_result(
     """Stamp ``_artifacts`` onto ``result``, persist the envelope, and return it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     result.artifacts_ = build_artifact_context(spec, path.parent)
+    # A model identifier may be a URL whose credential the dispatch restored.
+    if isinstance(model := getattr(result, "model", None), str):
+        setattr(result, "model", redact_url(model))
     envelope = ResultEnvelope(task_id=task_id, result=result).model_dump_json(indent=2)
     atomic_write_text(path, envelope)
     return envelope
@@ -464,10 +472,17 @@ def maybe_upload_artifacts(
         except Exception as exc:
             if not skip_errors:
                 raise ExecutionError(
-                    f"Artifact upload failed for {file_path}: {exc}", retryable=True
+                    redact_urls(
+                        f"Artifact upload failed for {file_path}: {exc}", upload_url
+                    ),
+                    retryable=True,
                 ) from exc
             if logger:
-                logger.warning("Failed to upload artifact %s: %s", rel_name, exc)
+                logger.warning(
+                    "Failed to upload artifact %s: %s",
+                    rel_name,
+                    redact_urls(str(exc), upload_url),
+                )
             continue
         if logger:
             logger.info(
@@ -517,10 +532,17 @@ def maybe_upload_traces(
         except Exception as exc:
             if not skip_errors:
                 raise ExecutionError(
-                    f"Trace upload failed for {file_path}: {exc}", retryable=True
+                    redact_urls(
+                        f"Trace upload failed for {file_path}: {exc}", upload_url
+                    ),
+                    retryable=True,
                 ) from exc
             if logger:
-                logger.warning("Failed to upload trace %s: %s", trace_type, exc)
+                logger.warning(
+                    "Failed to upload trace %s: %s",
+                    trace_type,
+                    redact_urls(str(exc), upload_url),
+                )
             continue
         if logger:
             logger.info(

@@ -12,6 +12,7 @@ from shared.tasks.specs import ApiSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils.redact import is_credential_key, redact_url
 
+from ..utils.redaction import redact_urls
 from .base_executor import ExecutionError, Executor, ExecutorTask
 
 logger = logging.getLogger(__name__)
@@ -42,12 +43,10 @@ class APIExecutor(Executor):
 
     Without ``spec.api.url`` it calls ``NEBULA_API_BASE_URL`` with ``NEBULA_API_TOKEN``,
     unless ``spec.api.headers`` carries a credential header of its own. A request
-    carrying the Nebula token drops any author header that overrides its host or URL at
-    an ingress (``Host``, ``Forwarded``, ``X-Forwarded-*``, ``X-Host``,
-    ``X-Original-Host``, ``X-Original-URL``, ``X-Rewrite-URL``), so none routes the
-    token past the configured Nebula host. A
-    ``spec.api.url`` is called with its own headers alone; the Nebula token is never
-    sent to it.
+    carrying the Nebula token drops any author header an ingress may route on and
+    always verifies TLS, so neither routes nor exposes the token past the configured
+    Nebula host. A ``spec.api.url`` is called with its own headers alone; the Nebula
+    token is never sent to it.
     """
 
     name = "api"
@@ -130,6 +129,7 @@ class APIExecutor(Executor):
         if not isinstance(headers, dict):
             raise ExecutionError("spec.api.headers must be a mapping")
 
+        carries_deployment_token = False
         if url is None:
             url = os.getenv("NEBULA_API_BASE_URL")
             if not url:
@@ -149,6 +149,7 @@ class APIExecutor(Executor):
                     if not _is_routing_header(str(name))
                 }
                 headers["Authorization"] = f"Bearer {token}"
+                carries_deployment_token = True
 
         params = api_cfg.get("params")
         if params is not None and not isinstance(params, dict):
@@ -159,7 +160,7 @@ class APIExecutor(Executor):
             raise ExecutionError("spec.api.timeout_sec must be a number")
         timeout = httpx.Timeout(timeout_sec)
 
-        verify_tls = api_cfg.get("verify_tls", True)
+        verify_tls = carries_deployment_token or api_cfg.get("verify_tls", True)
         follow_redirects = api_cfg.get("follow_redirects", True)
 
         body = api_cfg.get("body")
@@ -204,7 +205,9 @@ class APIExecutor(Executor):
                 **request_kwargs,
             )
         except httpx.RequestError as exc:
-            raise ExecutionError(f"API request failed: {exc}", retryable=True) from exc
+            raise ExecutionError(
+                redact_urls(f"API request failed: {exc}", str(url)), retryable=True
+            ) from exc
 
         body_bytes = resp.content
         truncated = False

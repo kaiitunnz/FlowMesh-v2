@@ -9,6 +9,8 @@ launcher; this module just shapes the argv and scopes the launcher env.
 :func:`deepspeed_available` reports whether the DeepSpeed package can be
 imported in the current environment, so callers can fall back to torchrun
 when DeepSpeed is absent (CPU worker image) or unusable (no CUDA toolchain).
+
+:func:`launcher_task_file` writes the task the ranks read for the span of a launch.
 """
 
 import importlib.util
@@ -36,8 +38,11 @@ def launcher_task_file(out_dir: Path, task: BaseModel) -> Iterator[Path]:
     launcher_dir = scratch_dir(out_dir) / "launcher"
     launcher_dir.mkdir(parents=True, exist_ok=True)
     path = launcher_dir / "task_spec.json"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.fchmod(fd, 0o600)
+    # A file a crashed launch left behind is replaced; anything planted at the path in
+    # its place, such as a symlink, is refused rather than written through.
+    if not path.is_symlink():
+        path.unlink(missing_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(task.model_dump_json(by_alias=True))
     try:

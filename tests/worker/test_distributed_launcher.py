@@ -298,3 +298,31 @@ def test_the_launch_task_file_is_private_and_outlives_only_its_launch(tmp_path: 
         with distributed.launcher_task_file(tmp_path, task) as path:
             raise RuntimeError("launch failed")
     assert not path.exists()
+
+
+def test_the_launch_task_file_refuses_a_symlink_planted_at_its_path(tmp_path: Path):
+    task = make_worker_task_message(
+        task_type=TaskType.ECHO, spec=EchoSpecStrict(taskType=TaskType.ECHO)
+    )
+    target = tmp_path / "elsewhere.json"
+    target.write_text("untouched")
+    planted = distributed.scratch_dir(tmp_path) / "launcher" / "task_spec.json"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.symlink_to(target)
+
+    with pytest.raises(OSError):
+        with distributed.launcher_task_file(tmp_path, task):
+            pass
+    assert target.read_text() == "untouched"
+
+
+def test_the_launch_task_file_replaces_one_a_crashed_launch_left(tmp_path: Path):
+    task = make_worker_task_message(
+        task_type=TaskType.ECHO, spec=EchoSpecStrict(taskType=TaskType.ECHO)
+    )
+    stale = distributed.scratch_dir(tmp_path) / "launcher" / "task_spec.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("stale")
+
+    with distributed.launcher_task_file(tmp_path, task) as path:
+        assert WorkerTaskMessage.model_validate(json.loads(path.read_text())) == task

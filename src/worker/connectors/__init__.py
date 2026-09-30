@@ -1,5 +1,6 @@
 """Connectors for external systems (databases, APIs, etc.)."""
 
+from ..utils.redaction import redact_urls
 from .base_connector import BaseConnector, ConnectorError, ConnectorResult
 from .lumid_data_connector import LumidDataConnector
 from .postgresql_connector import PostgreSQLConnector
@@ -27,4 +28,6 @@ def get_connector_from_spec(connection_string: str, **kwargs) -> BaseConnector:
     elif connection_string.startswith("s3://"):
         return S3Connector(connection_string=connection_string, **kwargs)
     else:
-        raise ConnectorError(f"Unsupported connector type: {connection_string}")
+        raise ConnectorError(
+            f"Unsupported connector type: {redact_urls(connection_string)}"
+        )

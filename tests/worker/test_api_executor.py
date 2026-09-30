@@ -161,6 +161,23 @@ class TestNebulaPath:
         assert transport.request.headers["X-Forwarded-For"] == "10.0.0.1"
         assert transport.request.headers["Authorization"] == "Bearer custom"
 
+    @pytest.mark.parametrize(
+        ("headers", "verified"),
+        [({}, True), ({"Authorization": "Bearer custom"}, False)],
+    )
+    def test_the_deployment_token_is_sent_only_over_verified_tls(
+        self, monkeypatch: pytest.MonkeyPatch, headers: dict[str, str], verified: bool
+    ) -> None:
+        monkeypatch.setenv("NEBULA_API_BASE_URL", "https://nebula.example.com")
+        monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
+        task = _task_message(headers=headers, verify_tls=False)
+        transport = _RecordingTransport()
+        with patch.object(
+            APIExecutor, "_get_client", return_value=httpx.Client(transport=transport)
+        ) as get_client:
+            APIExecutor.__new__(APIExecutor).run(task, Path(tempfile.gettempdir()))
+        assert get_client.call_args.args[2] is verified
+
     def test_no_url_no_header_without_token_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -289,3 +306,21 @@ def test_the_stored_url_carries_no_credential_the_request_sent() -> None:
     assert transport.request is not None
     assert "query-secret" in str(transport.request.url)
     assert result.url == "https://api.example/v1/chat?api_key=[REDACTED]&limit=3"
+
+
+def test_a_failed_request_quotes_no_url_credential() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(f"cannot reach {request.url}", request=request)
+
+    task = _task_message(
+        url="https://user:pw-inline-SECRET@api.example/v1?api_key=q-inline-SECRET"
+    )
+    with patch.object(
+        APIExecutor,
+        "_get_client",
+        return_value=httpx.Client(transport=httpx.MockTransport(refuse)),
+    ):
+        with pytest.raises(ExecutionError) as raised:
+            APIExecutor.__new__(APIExecutor).run(task, Path(tempfile.gettempdir()))
+    assert "inline-SECRET" not in str(raised.value)
+    assert "api.example" in str(raised.value)
