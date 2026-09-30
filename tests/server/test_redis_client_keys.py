@@ -49,10 +49,11 @@ def test_a_sync_persistent_write_clears_a_leftover_expiry(live: redis.Redis):
 
 
 def test_an_async_persistent_write_clears_a_leftover_expiry(live: redis.Redis):
-    assert _LIVE_URL is not None
+    url = _LIVE_URL
+    assert url is not None
 
     async def write() -> list[str]:
-        client = AsyncRedisClient(_LIVE_URL, _LIVE_URL, _LOGGER)
+        client = AsyncRedisClient(url, url, _LOGGER)
         await client.hash_set_persistent(_KEY, {"new": "2"})
         return await client.scan_keys("test:redis-client:*")
 

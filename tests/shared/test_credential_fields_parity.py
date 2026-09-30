@@ -4,12 +4,15 @@ import typing
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from shared.tasks.envelope import TaskSpecStrict, TaskSpecTemplate
 from shared.tasks.specs import TaskSpecStrictBase, TaskSpecTemplateBase
 
 
-def _by_task_type[T](union: typing.TypeAliasType, base: type[T]) -> dict[Any, type[T]]:
+def _by_task_type[T: BaseModel](
+    union: typing.TypeAliasType, base: type[T]
+) -> dict[Any, type[T]]:
     members = typing.get_args(typing.get_args(union.__value__)[0])
     found: dict[Any, type[T]] = {}
     for member in members:
