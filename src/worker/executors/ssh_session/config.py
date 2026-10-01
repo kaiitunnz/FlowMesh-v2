@@ -109,6 +109,7 @@ class SSHConfig:
         spec: SSHSpecStrict,
         worker_cfg: WorkerConfig,
         hardware: WorkerHardware | None = None,
+        available_uuids: frozenset[str] | None = None,
     ) -> "SSHConfig":
         """Build a resolved config from a task spec, env vars, and defaults."""
         has_gpu = bool(os.getenv("WORKER_HOST_GPU_ID", "").strip())
@@ -127,7 +128,9 @@ class SSHConfig:
         cpu_limit, memory_limit_bytes, pids_limit = _resolve_resource_limits(
             spec, worker_cfg
         )
-        gpu_device_ids = _resolve_gpu_devices(spec, worker_cfg, hardware)
+        gpu_device_ids = _resolve_gpu_devices(
+            spec, worker_cfg, hardware, available_uuids
+        )
         ttl_sec = min(spec.ttlSeconds or default_ttl_sec, max_ttl_sec)
         idle_sec = (
             default_idle_sec
@@ -242,7 +245,10 @@ def _min_or_none[T: (int, float)](a: T | None, b: T | None) -> T | None:
 
 
 def _resolve_gpu_devices(
-    spec: SSHSpecStrict, config: WorkerConfig, hardware: WorkerHardware | None
+    spec: SSHSpecStrict,
+    config: WorkerConfig,
+    hardware: WorkerHardware | None,
+    available_uuids: frozenset[str] | None = None,
 ) -> list[str]:
     """Pick the smallest subset of the worker's GPUs that satisfies the spec.
 
@@ -276,6 +282,22 @@ def _resolve_gpu_devices(
     # passed them or the worker detected them. When metadata is missing or
     # misaligned, fall back to count-only slicing.
     devices = hardware.gpu.devices if hardware is not None else []
+    if devices and len(devices) == len(host_gpu_ids) and available_uuids is not None:
+        # Drop held devices from both lists together: selection returns positions, so
+        # the two stay aligned, and a held first match never hides a free one.
+        paired = [
+            (device, host_id)
+            for device, host_id in zip(devices, host_gpu_ids, strict=True)
+            if device.uuid in available_uuids
+        ]
+        devices = [device for device, _ in paired]
+        host_gpu_ids = [host_id for _, host_id in paired]
+        if len(host_gpu_ids) < requested:
+            raise ExecutionError(
+                f"SSH task requested {requested} GPU(s) but only "
+                f"{len(host_gpu_ids)} of this worker's devices are free",
+                retryable=True,
+            )
     if devices and len(devices) != len(host_gpu_ids):
         logger.warning(
             "WORKER_HOST_GPU_ID (%d) and worker hardware.gpu.devices (%d) "

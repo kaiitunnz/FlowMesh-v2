@@ -24,6 +24,7 @@ from typing import Any
 from shared.schemas.result import SSHResult
 from shared.tasks.specs.ssh import RELAYED_SSH_ACCESS_MODES, SSHSpecStrict
 from shared.tasks.task_type import TaskType
+from shared.tasks.worker_message import GpuInfo
 from shared.utils import new_ssh_session_id
 from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir
 from worker.config import WorkerConfig
@@ -39,12 +40,28 @@ from worker.executors.ssh_session import (
 from worker.executors.ssh_session.config import output_limit, raise_if_exceeded
 from worker.executors.ssh_session.inputs import resolve_inputs
 from worker.executors.utils.checkpoints import maybe_upload_artifacts
+from worker.gpu_availability import DeviceAvailability
 
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 
 logger = logging.getLogger(__name__)
 
 _SESSION_READY_TIMEOUT_SEC = 30.0
+
+
+def _available_uuids(
+    reported: dict[str, DeviceAvailability], devices: list[GpuInfo]
+) -> frozenset[str] | None:
+    """The devices an SSH session may be given, or None when the worker took no
+    reading, which leaves the device set untouched. A device the reading did not cover
+    is no opinion rather than held, so it stays in the set."""
+    if not reported:
+        return None
+    return frozenset(
+        device.uuid
+        for device in devices
+        if (seen := reported.get(device.uuid)) is None or seen.available
+    )
 
 
 class SSHExecutor(Executor):
@@ -114,7 +131,17 @@ class SSHExecutor(Executor):
 
     def _run_session(self, task: ExecutorTask, out_dir: Path) -> SSHResult:
         spec = self.require_spec(task, SSHSpecStrict)
-        cfg = SSHConfig.from_spec(spec, self._config, self._hardware)
+        # A session holds its devices for as long as it lives, so it is never handed
+        # one another tenant is on.
+        cfg = SSHConfig.from_spec(
+            spec,
+            self._config,
+            self._hardware,
+            _available_uuids(
+                self._lifecycle.live_gpu_availability() if self._lifecycle else {},
+                self._hardware.gpu.devices if self._hardware else [],
+            ),
+        )
         access_mode = cfg.access_mode
         interactive = cfg.interactive
 
