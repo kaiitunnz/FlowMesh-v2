@@ -35,9 +35,13 @@ class _Relay(RelayService):
     def __init__(self) -> None:
         super().__init__(cast(SyncRedisClient, None), _LOGGER)
         self.events: list[dict[str, Any]] = []
+        self.logs: list[dict[str, Any]] = []
 
     def add_event(self, event_data: Any) -> None:
         self.events.append(dict(event_data))
+
+    def add_log(self, log_data: Any) -> None:
+        self.logs.append(dict(log_data))
 
     def unregisters(self) -> list[str]:
         return [e["worker_id"] for e in self.events if e["type"] == "UNREGISTER"]
@@ -288,3 +292,18 @@ async def test_a_stream_of_an_earlier_registration_leaves_the_new_one_alone() ->
     await stream
 
     assert harness.adapter.worker_id == new_id
+
+
+@pytest.mark.asyncio
+async def test_a_log_is_attributed_to_the_worker_its_stream_authenticated() -> None:
+    harness = _Harness()
+    worker_id = await harness.register()
+
+    async def logs() -> AsyncIterator[supervisor_pb2.LogMessage]:
+        message = supervisor_pb2.LogMessage()
+        message.payload.update({"line": "hello", "worker_id": "wkr-other"})
+        yield message
+
+    await harness.servicer.PushLogs(logs(), cast(Any, _Context()))
+
+    assert [log["worker_id"] for log in harness.relay.logs] == [worker_id]

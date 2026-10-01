@@ -430,8 +430,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
 
         async for msg in request_iterator:
             payload = _payload_from_struct(msg.payload)
-            if isinstance(payload, dict):
-                payload.setdefault("worker_id", worker_id)
+            # Control attributes a log to the worker this stream authenticated.
+            payload["worker_id"] = worker_id
             self._relay_service.add_log(payload)
         self._logger.debug("Log stream closed for worker %s", worker_id)
         return Empty()
