@@ -9,21 +9,38 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from server.services.port_forward import PortForwardService, forward_sessions
+from server.services.port_forward import PortForwardService
 from server.ssh import SshRelayTarget
-from server.task.models import TaskStatus
+from server.task.models import TaskRecord, TaskStatus
+from shared.tasks import TaskEnvelopeTemplate
 from tests.server.test_ssh_forward_ports import _free_port_range, _make_service
 
 
-def _session(task_id: str, port: int) -> tuple[str, str, str, dict[str, Any]]:
+def _session(
+    task_id: str,
+    port: int,
+    status: str = TaskStatus.DISPATCHED,
+    mode: str = "forward",
+) -> TaskRecord:
     endpoint = {
         "session_id": f"ssn-{task_id}",
         "username": "flowmesh",
-        "mode": "forward",
+        "mode": mode,
         "host": "lum.id",
         "port": port,
     }
-    return (task_id, "wfl-1", "wkr-1", endpoint)
+    return TaskRecord(
+        task_id=task_id,
+        workflow_id="wfl-1",
+        owner_id="admin",
+        raw_yaml="",
+        task=TaskEnvelopeTemplate.model_validate(
+            {"apiVersion": "mloc/v1", "kind": "Task", "spec": {"taskType": "ssh"}}
+        ),
+        status=status,
+        assigned_worker="wkr-1",
+        latest_update={"ssh": endpoint},
+    )
 
 
 def _port_of(svc: PortForwardService, task_id: str) -> int | None:
@@ -93,22 +110,20 @@ async def test_a_connection_is_relayed_to_the_workers_current_node() -> None:
         await svc.stop()
 
 
-def test_only_running_tasks_forward_sessions_are_restored() -> None:
-    def record(task_id: str, status: str, mode: str) -> Any:
-        return SimpleNamespace(
-            task_id=task_id,
-            workflow_id="wfl-1",
-            assigned_worker="wkr-1",
-            status=status,
-            latest_update={"ssh": {"mode": mode, "port": 1}},
+@pytest.mark.anyio
+async def test_only_a_running_task_s_forward_session_is_restored() -> None:
+    start, end = _free_port_range(3)
+    svc = _make_service(start, end, persistent_listeners=False)
+    await svc.start()
+    try:
+        await svc.restore_sessions(
+            [
+                _session("tsk-forward", start),
+                _session("tsk-proxy", start + 1, mode="proxy"),
+                _session("tsk-done", end, status=TaskStatus.DONE),
+            ]
         )
 
-    records = [
-        record("tsk-forward", TaskStatus.DISPATCHED, "forward"),
-        record("tsk-proxy", TaskStatus.DISPATCHED, "proxy"),
-        record("tsk-done", TaskStatus.DONE, "forward"),
-    ]
-
-    sessions = forward_sessions(records)
-
-    assert [task_id for task_id, *_ in sessions] == ["tsk-forward"]
+        assert set(svc._port_to_task.values()) == {"tsk-forward"}
+    finally:
+        await svc.stop()
