@@ -7,24 +7,20 @@ from unittest.mock import MagicMock
 import fakeredis
 import pytest
 
-from server.clients.redis import WORKER_ID_SEQ_KEY, WORKERS_SET_KEY
+from server.clients.redis import WORKER_ID_SEQ_KEY, WORKERS_SET_KEY, worker_key
+from server.hooks import PrincipalContext
 from server.registries.worker import WorkerRegistry as RootWorkerRegistry
-from server.supervisor.adapters.base import WorkerAdapter, WorkerTokenType
+from server.supervisor.adapters.base import WorkerTokenType
+from server.supervisor.adapters.external import (
+    ExternalWorkerAdapter,
+    ExternalWorkerConfig,
+)
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from shared.grpc.supervisor.v1 import supervisor_pb2
 from tests.server.redis_helpers import fake_redis_client, fake_sync_client
 
 _LOGGER = logging.getLogger("test.worker_id_allocation")
-
-
-class _Adapter:
-    def __init__(self, token: str) -> None:
-        self.token = cast(WorkerTokenType, token)
-        self.alias = token
-
-    def set_worker_id(self, worker_id: str) -> None:
-        pass
 
 
 class _Context:
@@ -39,17 +35,34 @@ class _Context:
 
 
 def _servicer(
-    server: fakeredis.FakeServer, released: list[str]
+    server: fakeredis.FakeServer,
+    released: list[str],
+    node_id: str = "nod-1",
+    node_alias: str = "box",
 ) -> tuple[SupervisorServicer, WorkerRegistry]:
     client = fake_sync_client(server)
-    registry = WorkerRegistry(on_worker_id_released=released.append)
+    servicer: SupervisorServicer | None = None
+
+    def on_released(worker_id: str) -> None:
+        released.append(worker_id)
+        assert servicer is not None
+        servicer.worker_id_released(worker_id)
+
+    registry = WorkerRegistry(on_worker_id_released=on_released)
     for token in ("tok-a", "tok-b"):
-        registry.add(cast(WorkerAdapter, _Adapter(token)))
+        registry.add(
+            ExternalWorkerAdapter(
+                cast(WorkerTokenType, token),
+                token,
+                ExternalWorkerConfig(),
+                MagicMock(spec=PrincipalContext),
+            )
+        )
     servicer = SupervisorServicer(
         registry,
         client,
-        "nod-1",
-        "box",
+        node_id,
+        node_alias,
         MagicMock(),
         MagicMock(),
         MagicMock(),
@@ -117,3 +130,37 @@ async def test_a_worker_the_root_registers_skips_the_ids_recorded_workers_hold(
     assert (first, second) == ("wkr-3", "wkr-4")
     assert rds.hget("worker:wkr-1", "node_alias") == "box"
     assert rds.smembers(WORKERS_SET_KEY) == {"wkr-1", "wkr-2", "wkr-3", "wkr-4"}
+
+
+@pytest.mark.asyncio
+async def test_after_a_wipe_a_node_releases_the_id_another_node_took(
+    server: fakeredis.FakeServer, rds: fakeredis.FakeRedis
+) -> None:
+    a, _ = _servicer(server, [], "nod-a", "box-a")
+    b, _ = _servicer(server, [], "nod-b", "box-b")
+    held = await _register(a, "tok-a")
+    rds.flushall()
+
+    taken = await _register(b, "tok-a")
+    a.reconcile_workers()
+    a.rebind_node("nod-a2")
+
+    assert taken == held
+    assert taken not in a._registry.bound_worker_ids()
+    assert rds.hget(worker_key(taken), "node_id") == "nod-b"
+
+
+@pytest.mark.asyncio
+async def test_a_worker_released_after_a_wipe_registers_under_a_fresh_id(
+    server: fakeredis.FakeServer, rds: fakeredis.FakeRedis
+) -> None:
+    released: list[str] = []
+    servicer, _ = _servicer(server, released)
+    first = await _register(servicer, "tok-a")
+    rds.flushall()
+
+    servicer.reconcile_workers()
+    again = await _register(servicer, "tok-a")
+
+    assert released == [first]
+    assert again != first

@@ -4,49 +4,30 @@ over by the worker's next stream."""
 import asyncio
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator
-from threading import Lock
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import fakeredis
 import pytest
 from google.protobuf.empty_pb2 import Empty
 
 from server.clients.redis import SyncRedisClient
-from server.supervisor.adapters.base import WorkerAdapter, WorkerTokenType
+from server.hooks import PrincipalContext
+from server.supervisor.adapters.base import WorkerTokenType
+from server.supervisor.adapters.external import (
+    ExternalWorkerAdapter,
+    ExternalWorkerConfig,
+)
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from server.supervisor.services.relay_service import RelayService
 from server.supervisor.services.task_listener import TaskListener
 from shared.grpc.supervisor.v1 import supervisor_pb2
+from tests.server.redis_helpers import fake_sync_client
 
 _LOGGER = logging.getLogger("test.stream_tasks")
 _TOKEN = "tok-1"
 _NAME = "worker-1"
-
-
-class _FakeRedis:
-    def __init__(self) -> None:
-        self._seq = 0
-
-    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
-        """Allocate a worker id as the registration script does."""
-        self._seq += 1
-        return self._seq
-
-    def sadd(self, key: str, *members: str) -> None:
-        pass
-
-    def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
-        pass
-
-
-class _FakeAdapter:
-    def __init__(self) -> None:
-        self.token = cast(WorkerTokenType, _TOKEN)
-        self.alias = _NAME
-
-    def set_worker_id(self, worker_id: str) -> None:
-        pass
 
 
 class _FakeContext:
@@ -59,16 +40,24 @@ class _FakeContext:
 
 def _servicer(listener: TaskListener) -> tuple[SupervisorServicer, WorkerRegistry]:
     registry = WorkerRegistry(on_worker_id_released=listener.remove_worker)
-    registry.add(cast(WorkerAdapter, _FakeAdapter()))
-    servicer = SupervisorServicer.__new__(SupervisorServicer)
-    servicer._registry = registry
-    servicer._task_listener = listener
-    servicer._relay_service = cast(RelayService, MagicMock())
-    servicer._redis = cast(SyncRedisClient, _FakeRedis())
-    servicer._node_id = "nde-1"
-    servicer._node_alias = "box"
-    servicer._logger = _LOGGER
-    servicer._lock = Lock()
+    registry.add(
+        ExternalWorkerAdapter(
+            cast(WorkerTokenType, _TOKEN),
+            _NAME,
+            ExternalWorkerConfig(),
+            MagicMock(spec=PrincipalContext),
+        )
+    )
+    servicer = SupervisorServicer(
+        registry,
+        fake_sync_client(fakeredis.FakeServer()),
+        "nde-1",
+        "box",
+        listener,
+        cast(RelayService, MagicMock()),
+        MagicMock(),
+        _LOGGER,
+    )
     return servicer, registry
 
 

@@ -36,14 +36,15 @@ from ..services.task_listener import TaskListener
 # Longer than a worker waits before reconnecting a closed event stream.
 _REATTACH_GRACE_SEC = 10.0
 # Far more ids than a supervisor releases while their unregisters are in flight.
-_UNREGISTERED_MEMORY = 4096
+_RELEASED_ID_MEMORY = 4096
 
-# Rewrite node_id for each worker key that still exists, atomically. KEYS are
-# worker keys; ARGV[1] is the new node id. Returns the count actually rewritten.
+# Rewrite node_id for each worker key that still exists and this node wrote,
+# atomically. KEYS are worker keys; ARGV[1] is the new node id, ARGV[2] this node's
+# alias. Returns the count actually rewritten.
 _REHOME_LUA = """
 local rehomed = 0
 for _, key in ipairs(KEYS) do
-  if redis.call('EXISTS', key) == 1 then
+  if redis.call('HGET', key, 'node_alias') == ARGV[2] then
     redis.call('HSET', key, 'node_id', ARGV[1])
     rehomed = rehomed + 1
   end
@@ -123,31 +124,45 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # RegisterWorker (grpc loop thread) and rebind_node (heartbeat thread).
         self._lock = Lock()
         # Worker ids already unregistered with the root; each is unregistered once.
-        self._unregistered: RecentSet[str] = RecentSet(_UNREGISTERED_MEMORY)
+        self._unregistered: RecentSet[str] = RecentSet(_RELEASED_ID_MEMORY)
+        # Worker ids released here, which a fresh registration never takes: the root
+        # may still be about to apply their unregister.
+        self._released: RecentSet[str] = RecentSet(_RELEASED_ID_MEMORY)
         self._unregistered_lock = Lock()
         self._pending_unregisters: set[asyncio.Task[None]] = set()
 
     def reconcile_workers(self) -> None:
-        """Release every binding whose worker the root no longer records, so the worker
-        registers again rather than running unseen."""
+        """Release every binding whose record the root does not hold for this node, so
+        the worker registers again."""
         with self._lock:
-            recorded = self._redis.set_members(WORKERS_SET_KEY)
-            gone = [
-                worker_id
-                for worker_id in self._registry.bound_worker_ids()
-                if worker_id not in recorded
-            ]
+            gone = self._unowned_bindings_locked()
             released = sum(self._registry.retire(worker_id) for worker_id in gone)
         if released:
             self._logger.warning(
-                "Released %d worker(s) the root no longer records: %s",
+                "Released %d worker(s) the root does not record for this node: %s",
                 released,
                 ", ".join(gone),
             )
 
+    def _unowned_bindings_locked(self) -> list[str]:
+        # A record another node wrote under the same id, as after a store wipe, is not
+        # this binding's.
+        bound = self._registry.bound_worker_ids()
+        recorded = self._redis.set_members(WORKERS_SET_KEY)
+        with self._redis.control_pipeline() as pipe:
+            for worker_id in bound:
+                pipe.hget(worker_key(worker_id), "node_alias")
+            aliases = pipe.execute()
+        return [
+            worker_id
+            for worker_id, alias in zip(bound, aliases)
+            if worker_id not in recorded or alias != self._node_alias
+        ]
+
     def worker_id_released(self, worker_id: str) -> None:
         """Tell the root a worker id ended, unless its own unregister already did."""
         with self._unregistered_lock:
+            self._released.add(worker_id)
             if worker_id in self._unregistered:
                 self._unregistered.discard(worker_id)
                 return
@@ -169,8 +184,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         Future registrations stamp the new id, and every already-registered
         worker's ``node_id`` field is rewritten in Redis so the dispatcher
         routes tasks to them on the node's new dispatch channel. A worker whose
-        record no longer exists (e.g. Redis was wiped) is skipped rather than
-        resurrected as a partial record.
+        record no longer exists (e.g. Redis was wiped), or that another node wrote
+        under the same id, is skipped.
         """
         with self._lock:
             if node_id == self._node_id:
@@ -184,7 +199,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             ]
             rehomed, skipped = self._rehome_workers(worker_ids, node_id)
             self._logger.info(
-                "Re-homed %d worker(s) (%d skipped: no record) from node %s to %s",
+                "Re-homed %d worker(s) (%d not recorded here) from node %s to %s",
                 rehomed,
                 skipped,
                 old_node_id,
@@ -192,13 +207,15 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             )
 
     def _rehome_workers(self, worker_ids: list[str], node_id: str) -> tuple[int, int]:
-        """Rewrite node_id only for workers whose record still exists, atomically
-        so a worker deleted mid-rebind is skipped rather than resurrected as a
+        """Rewrite node_id only for workers whose record still exists and this node
+        wrote, atomically, so a worker deleted mid-rebind is never resurrected as a
         partial record. Returns (rehomed, skipped)."""
         if not worker_ids:
             return 0, 0
         keys = [worker_key(worker_id) for worker_id in worker_ids]
-        rehomed = int(self._redis.eval(_REHOME_LUA, len(keys), *keys, node_id))
+        rehomed = int(
+            self._redis.eval(_REHOME_LUA, len(keys), *keys, node_id, self._node_alias)
+        )
         return rehomed, len(worker_ids) - rehomed
 
     async def RegisterWorker(
@@ -231,8 +248,10 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # concurrent rebind_node either sees this worker in its snapshot or stamps
         # it with the new id.
         with self._lock:
+            with self._unregistered_lock:
+                released = list(self._released)
             incarnation = allocate_worker_seq(
-                self._redis, self._registry.bound_worker_ids()
+                self._redis, [*self._registry.bound_worker_ids(), *released]
             )
             worker_id = new_worker_id(incarnation)
             worker_meta["id"] = worker_id

@@ -6,43 +6,28 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import fakeredis
 import grpc
 import pytest
 
-from server.clients.redis import WORKERS_SET_KEY, SyncRedisClient
-from server.supervisor.adapters.base import WorkerAdapter, WorkerTokenType
+from server.clients.redis import WORKERS_SET_KEY, SyncRedisClient, worker_key
+from server.hooks import PrincipalContext
+from server.supervisor.adapters.base import WorkerTokenType
+from server.supervisor.adapters.external import (
+    ExternalWorkerAdapter,
+    ExternalWorkerConfig,
+)
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services import grpc_server as grpc_server_module
 from server.supervisor.services.grpc_server import SupervisorServicer
 from server.supervisor.services.relay_service import RelayService
 from shared.grpc.supervisor.v1 import supervisor_pb2
+from tests.server.redis_helpers import fake_sync_client
 
 _LOGGER = logging.getLogger("test.worker_binding_reconcile")
 _TOKEN = "tok-1"
 _ALIAS = "worker-1"
-
-
-class _Redis:
-    def __init__(self) -> None:
-        self._seq = 0
-        self.workers: set[str] = set()
-
-    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
-        """Allocate a worker id as the registration script does."""
-        self._seq += 1
-        self.workers.add(f"{keys_and_args[numkeys]}{self._seq}")
-        return self._seq
-
-    def sadd(self, key: str, *members: str) -> None:
-        assert key == WORKERS_SET_KEY
-        self.workers.update(members)
-
-    def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
-        pass
-
-    def set_members(self, key: str) -> set[str]:
-        assert key == WORKERS_SET_KEY
-        return set(self.workers)
+_NODE_ALIAS = "box"
 
 
 class _Relay(RelayService):
@@ -55,32 +40,6 @@ class _Relay(RelayService):
 
     def unregisters(self) -> list[str]:
         return [e["worker_id"] for e in self.events if e["type"] == "UNREGISTER"]
-
-
-class _Adapter:
-    def __init__(self) -> None:
-        self.token = cast(WorkerTokenType, _TOKEN)
-        self.alias = _ALIAS
-        self._streams = 0
-
-    @property
-    def has_event_stream(self) -> bool:
-        return self._streams > 0
-
-    def attach_event_stream(self) -> None:
-        self._streams += 1
-
-    def detach_event_stream(self) -> None:
-        self._streams -= 1
-
-    def set_worker_id(self, worker_id: str) -> None:
-        pass
-
-    def clear_worker_id(self) -> None:
-        pass
-
-    def set_status(self, status: Any) -> None:
-        pass
 
 
 class _Aborted(Exception):
@@ -98,18 +57,24 @@ class _Context:
 
 class _Harness:
     def __init__(self) -> None:
-        self.redis = _Redis()
+        server = fakeredis.FakeServer()
+        self.rds = fakeredis.FakeRedis(server=server, decode_responses=True)
         self.relay = _Relay()
         self.released: list[str] = []
         self.registry = WorkerRegistry(on_worker_id_released=self._released)
-        self.adapter = _Adapter()
-        self.registry.add(cast(WorkerAdapter, self.adapter))
+        self.adapter = ExternalWorkerAdapter(
+            cast(WorkerTokenType, _TOKEN),
+            _ALIAS,
+            ExternalWorkerConfig(),
+            MagicMock(spec=PrincipalContext),
+        )
+        self.registry.add(self.adapter)
         listener = MagicMock()
         self.servicer = SupervisorServicer(
             self.registry,
-            cast(SyncRedisClient, self.redis),
+            fake_sync_client(server),
             "nod-1",
-            "box",
+            _NODE_ALIAS,
             listener,
             self.relay,
             MagicMock(),
@@ -154,14 +119,39 @@ async def test_a_worker_the_root_no_longer_records_is_released() -> None:
     worker_id = await harness.register()
     other = cast(WorkerTokenType, "tok-2")
     harness.registry.set_worker_id(other, "wkr-live")
-    harness.redis.workers.add("wkr-live")
-    harness.redis.workers.discard(worker_id)
+    harness.rds.sadd(WORKERS_SET_KEY, "wkr-live")
+    harness.rds.hset(worker_key("wkr-live"), mapping={"node_alias": _NODE_ALIAS})
+    harness.rds.srem(WORKERS_SET_KEY, worker_id)
 
     harness.servicer.reconcile_workers()
 
     assert harness.released == [worker_id]
     assert harness.registry.get_worker_id(harness.adapter.token) is None
     assert harness.registry.get_worker_id(other) == "wkr-live"
+
+
+@pytest.mark.asyncio
+async def test_a_binding_whose_record_another_node_wrote_is_released() -> None:
+    harness = _Harness()
+    worker_id = await harness.register()
+    harness.rds.hset(worker_key(worker_id), mapping={"node_alias": "elsewhere"})
+
+    harness.servicer.reconcile_workers()
+
+    assert harness.released == [worker_id]
+
+
+@pytest.mark.asyncio
+async def test_rehoming_leaves_a_record_another_node_wrote() -> None:
+    harness = _Harness()
+    worker_id = await harness.register()
+    harness.rds.hset(
+        worker_key(worker_id), mapping={"node_alias": "elsewhere", "node_id": "nod-9"}
+    )
+
+    harness.servicer.rebind_node("nod-2")
+
+    assert harness.rds.hget(worker_key(worker_id), "node_id") == "nod-9"
 
 
 @pytest.mark.asyncio
