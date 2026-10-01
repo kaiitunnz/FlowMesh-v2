@@ -25,12 +25,13 @@ from server.services.port_forward import PortForwardService
 from server.ssh import SSH_EDGE_STREAM_ID, SshRelayOrigin, SshRelayTarget
 from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
 from shared.network.byte_stream import StreamClosed
-from shared.network.relay_frame import RelayFrame
+from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from worker.executors.ssh_session.base import (
     count_established_connections,
     read_local_proc_net_tcp,
 )
 from worker.ssh_relay import SshEndpointRegistry, SshRelayLane
+from worker.ssh_relay.lane import SSH_FRAME_KIND
 
 from ._relay_fakes import FakeBinaryRedis
 
@@ -363,5 +364,35 @@ def test_a_reforwarded_opening_frame_of_an_ended_session_opens_nothing() -> None
             await sink.send(sent[0])
             await asyncio.sleep(0.3)
             assert sshd.accepted == 1
+
+    _run(run())
+
+
+def test_a_cancel_overtaking_its_opening_frame_opens_nothing() -> None:
+    """The bridge moves control frames ahead of data, so a client that leaves at once
+    can have its cancel reach the worker before its open."""
+
+    async def run() -> None:
+        async with _fabric() as fabric, _listener(_echo) as sshd:
+            fabric.registry.publish(ENDPOINT, sshd.port)
+            held: list[RelayFrame] = []
+
+            async def hold(frame: RelayFrame) -> None:
+                held.append(frame)
+
+            fabric.origin._sink.send = hold  # type: ignore[method-assign]
+            await fabric.origin.open(TARGET)
+            (opening,) = held
+            cancel = RelayFrame(
+                kind=RelayFrameKind.CANCEL,
+                session_id=opening.session_id,
+                direction=RelayDirection.ORIGIN_TO_TARGET,
+            )
+
+            fabric.lane.route(SSH_FRAME_KIND, cancel.to_wire())
+            fabric.lane.route(SSH_FRAME_KIND, opening.to_wire())
+            await asyncio.sleep(0.3)
+
+            assert sshd.accepted == 0
 
     _run(run())

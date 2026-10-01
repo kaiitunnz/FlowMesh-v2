@@ -27,7 +27,8 @@ from .registry import SshEndpointRegistry
 LOOPBACK_HOST = "127.0.0.1"
 SSH_FRAME_KIND = "ssh_frame"
 # The bridge may re-forward a frame after a restart, so a session's opening frame can
-# arrive again once the session has ended; the lane remembers that many ended sessions.
+# arrive again once the session has ended or been cancelled; the lane remembers that
+# many ended sessions.
 _ENDED_MEMORY = 4096
 
 
@@ -89,7 +90,10 @@ class SshRelayLane:
         connection = self._connections.get(frame.session_id)
         if connection is None:
             # Only a session's opening frame starts a connection; anything else is
-            # left over from one that already ended.
+            # left over from one that already ended. The bridge moves a cancel ahead
+            # of data, so one can arrive before the opening frame it ends.
+            if frame.kind is RelayFrameKind.CANCEL:
+                self._remember_ended(frame.session_id)
             if (
                 frame.kind is not RelayFrameKind.DATA
                 or frame.seq != 1
@@ -148,13 +152,16 @@ class SshRelayLane:
             await channel.abort()
         finally:
             self._connections.pop(channel.session_id, None)
-            self._ended[channel.session_id] = None
-            if len(self._ended) > _ENDED_MEMORY:
-                self._ended.popitem(last=False)
+            self._remember_ended(channel.session_id)
             if writer is not None:
                 writer.close()
                 with contextlib.suppress(Exception):
                     await writer.wait_closed()
+
+    def _remember_ended(self, session_id: str) -> None:
+        self._ended[session_id] = None
+        if len(self._ended) > _ENDED_MEMORY:
+            self._ended.popitem(last=False)
 
     def _on_withdraw(self, endpoint_id: str) -> None:
         if self._thread.is_alive():
