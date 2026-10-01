@@ -1,5 +1,6 @@
 """Tests for the worker artifact helpers in checkpoints."""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -81,6 +82,37 @@ class TestMaybeUploadArtifacts:
             "images/nested/a.png",
             "final_model.tar.gz",
         }
+
+    def test_links_are_never_followed(self, tmp_path: Path, monkeypatch) -> None:
+        """A session writing into artifacts/ cannot make the worker upload its own
+        files, through a file link or a directory link."""
+        secret = tmp_path / "worker-secret"
+        secret.write_text("worker environment", encoding="utf-8")
+        (tmp_path / "worker-dir").mkdir()
+        (tmp_path / "worker-dir" / "token").write_text("t", encoding="utf-8")
+        out_dir = tmp_path / "task-1"
+        artifacts_dir = out_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "report.txt").write_text("ok", encoding="utf-8")
+        (artifacts_dir / "environ").symlink_to(secret)
+        (artifacts_dir / "linked").symlink_to(tmp_path / "worker-dir")
+        os.mkfifo(artifacts_dir / "pipe")
+
+        bodies: dict[str, bytes] = {}
+
+        class _Response:
+            def raise_for_status(self) -> None:
+                return None
+
+        def fake_request(method, url, files, headers, timeout):
+            name, fh, _ = files["file"]
+            bodies[name] = fh.read()
+            return _Response()
+
+        monkeypatch.setattr(checkpoints.requests, "request", fake_request)
+
+        assert checkpoints.maybe_upload_artifacts(_task(), out_dir) == ["report.txt"]
+        assert bodies == {"report.txt": b"ok"}
 
     def test_local_destination_is_noop(self, tmp_path: Path, monkeypatch) -> None:
         out_dir = tmp_path / "task-1"
