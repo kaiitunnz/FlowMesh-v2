@@ -32,13 +32,16 @@ def credential_overrides(role: NodeRole) -> dict[str, str]:
     }
 
 
+def _network_plane_off(env: dict[str, str]) -> bool:
+    """Whether the network plane is explicitly disabled; it is on when unset."""
+    return parse_bool(env.get("NETWORK_PLANE_ENABLED", "")) is False
+
+
 def _require_network_plane_for_resident(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
     """Resident capacity runs on the network plane and must be enabled with it."""
-    if parse_bool(env.get("RESIDENT_CAPACITY_ENABLED", "")) and not parse_bool(
-        env.get("NETWORK_PLANE_ENABLED", "")
-    ):
+    if parse_bool(env.get("RESIDENT_CAPACITY_ENABLED", "")) and _network_plane_off(env):
         errors.append(
             "RESIDENT_CAPACITY_ENABLED requires NETWORK_PLANE_ENABLED: resident "
             "capacity runs on the network plane and has no in-server execution path"
@@ -49,9 +52,7 @@ def _require_network_plane_for_content(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
     """Worker-to-worker content hydration is carried by the network plane."""
-    if parse_bool(env.get("CONTENT_HYDRATION_ENABLED", "")) and not parse_bool(
-        env.get("NETWORK_PLANE_ENABLED", "")
-    ):
+    if parse_bool(env.get("CONTENT_HYDRATION_ENABLED", "")) and _network_plane_off(env):
         errors.append(
             "CONTENT_HYDRATION_ENABLED requires NETWORK_PLANE_ENABLED: a content "
             "transfer is carried by the network plane's relay"
@@ -68,7 +69,7 @@ def _require_peer_trust(
     """
     if not parse_bool(env.get("NETWORK_PLANE_PEER_ENABLED", "")):
         return
-    if not parse_bool(env.get("NETWORK_PLANE_ENABLED", "")):
+    if _network_plane_off(env):
         errors.append(
             "NETWORK_PLANE_PEER_ENABLED requires NETWORK_PLANE_ENABLED: a peer "
             "transport substitutes for a network-plane transport"
@@ -805,7 +806,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             vars=[
                 EnvVar(
                     "NETWORK_PLANE_ENABLED",
-                    "false",
+                    "true",
                     description="Enable the route-discovery and relay substrate.",
                     var_type=EnvVarType.BOOL,
                 ),

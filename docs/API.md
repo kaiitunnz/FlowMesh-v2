@@ -137,8 +137,8 @@ logs via its `serve_task_id` through `GET /api/v1/tasks/{id}/logs`.
 
 ## Network
 
-SYSTEM/ADMIN-gated route-discovery diagnostics and a test echo. Present only when
-`NETWORK_PLANE_ENABLED=true`; otherwise these paths return 404. The echo carries no
+SYSTEM/ADMIN-gated route-discovery diagnostics and a test echo. With
+`NETWORK_PLANE_ENABLED=false` these paths return 404. The echo carries no
 resident traffic. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 
 | Method | Path | Description |

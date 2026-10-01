@@ -10,8 +10,8 @@ workers never scan addresses or discover peers.
 The plane is a routing substrate only. It carries no resident traffic, exposes no resident
 engine listener, and never mints a `ServiceClaim`, releases a credit, or issues a
 `RouteAuthorization`. A route observation is network evidence; it can never promote,
-release, or overwrite a capacity credit. Enable it with `NETWORK_PLANE_ENABLED=true`
-(`docs/ENV.md` lists the knobs).
+release, or overwrite a capacity credit. It is on by default, and
+`NETWORK_PLANE_ENABLED=false` turns it off (`docs/ENV.md` lists the knobs).
 
 ## The four facts
 

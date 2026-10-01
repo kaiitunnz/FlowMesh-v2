@@ -364,7 +364,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   cursor, or window; a lost or ambiguous delivery is `UNCERTAIN`, holds the credit, and
   re-drives from the materialized manifest, releasing only on the fenced terminal, and a
   cancellation reaps both ends. Enable with `RESIDENT_CAPACITY_ENABLED=true` (which
-  requires `NETWORK_PLANE_ENABLED=true`). See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
+  requires the network plane). See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Unified task-ID-gated resident serve surface.** Every public user-declared `serve`
   task is a resident-gated standing allocation reached only by its task ID, over one
   FlowMesh-authenticated, claim-gated endpoint
@@ -379,7 +379,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   exposure fails closed. At start the task is adopted as its own standing replica,
   validated under `RESIDENT_ALLOWED_MODELS`. Both modes carry traffic over `control_relay`;
   trusted direct target legs resolve behind the shared carriage seam. Available
-  when `RESIDENT_CAPACITY_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`). See
+  when `RESIDENT_CAPACITY_ENABLED=true` (which requires the network plane). See
   [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
   turns trusted node endpoint advertisements and directional reachability evidence into an
@@ -389,8 +389,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   forward-dial `worker_direct` / `node_relay` peer transport for a reachable pair. The
   substrate holds no admission authority — it mints no `ServiceClaim` or `RouteAuthorization`
   and its transports carry only what a caller frames over them; resident-capacity control
-  binds it to carry claim-gated resident invocation traffic. Enable with
-  `NETWORK_PLANE_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+  binds it to carry claim-gated resident invocation traffic. It is on by default;
+  `NETWORK_PLANE_ENABLED=false` turns it off. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Trusted peer transports.** Where a deployment declares the origin-to-target pair
   trusted, an admitted resident invocation leaves the reverse-rendezvous relay for a
   direct socket the route's own origin opens: `worker_direct` reaches the selected
@@ -484,7 +484,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   frames and never holds, assembles, or resolves the payload. A refused, expired, or
   replayed grant, an evicted copy, or a holder that is gone costs a read from the shared
   store, not a failure. Enable the cache and its transfers with
-  `CONTENT_HYDRATION_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`).
+  `CONTENT_HYDRATION_ENABLED=true` (which requires the network plane).
 - **Task results.** A task's result lives in the shared content store: its worker writes
   the result envelope there under the task's store access before it reports success, and
   the success binds that reference once, at the commit that settles the task, so a retry,
