@@ -41,7 +41,9 @@ class FramedRelaySession:
     its window in flight. Cancellation wakes a blocked receiver so a phase returns.
 
     ``correlation_id`` and ``operation_id`` are the identities the protocol above this
-    session correlates its frames by; the session only stamps them.
+    session correlates its frames by; the session only stamps them. A
+    ``strict_sequence`` session carries a byte stream that cannot survive a lost frame,
+    so a sequence gap ends it as a cancel does and sets ``broken``.
     """
 
     def __init__(
@@ -53,6 +55,7 @@ class FramedRelaySession:
         correlation_id: str = "",
         operation_id: str = "",
         window_bytes: int = 65536,
+        strict_sequence: bool = False,
     ) -> None:
         self._session_id = session_id
         self._correlation_id = correlation_id
@@ -69,6 +72,8 @@ class FramedRelaySession:
         self._send_seq = 0
         self._recv_seq = 0
         self._recv_consumed = 0
+        self._strict_sequence = strict_sequence
+        self._broken = False
 
     @property
     def session_id(self) -> str:
@@ -77,6 +82,14 @@ class FramedRelaySession:
     @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
+
+    @property
+    def broken(self) -> bool:
+        return self._broken
+
+    async def wait_cancelled(self) -> None:
+        """Return once the session is cancelled, by either end or a sequence gap."""
+        await self._cancelled.wait()
 
     async def send_wire(self, kind: str, **fields: Any) -> None:
         """Frame and send one wire message, blocking on a full send window."""
@@ -150,6 +163,10 @@ class FramedRelaySession:
         if frame.seq <= self._recv_seq:
             # A bridge re-forward re-delivers a data frame with a fresh entry id; drop
             # it by sequence so it lands once within this session's lifetime.
+            return
+        if self._strict_sequence and frame.seq != self._recv_seq + 1:
+            self._broken = True
+            self._cancelled.set()
             return
         self._recv_seq = frame.seq
         self._recv.put_nowait(frame.payload)

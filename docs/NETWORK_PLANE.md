@@ -147,7 +147,7 @@ capacity credit. Recovery is a durable cursor lease rather than a consumer group
 has one logical receiver that resumes from its stored cursor, and a restarted receiver
 reclaims an owner-fenced lease. Unacknowledged frames are never trimmed — a stream is
 trimmed only at or below the acknowledged id. The relay uses its own traffic namespace and
-Redis endpoint, distinct from the event/log relay and the legacy proxy streams.
+Redis endpoint, distinct from the event/log relay.
 
 ## Echo seam
 
@@ -173,3 +173,11 @@ correlated by the `chg-*` grant that authorized the read rather than by an invoc
 bridge treats them as any other opaque frames — it never holds, assembles, or resolves the
 object — and the transfer mints no claim, credit, or route authorization. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+Relayed SSH connections reuse it on a keyspace of their own. The root's SSH ingresses are
+the origin, on a dedicated stream rather than a worker node, and the worker serving the
+session is the target: it connects only to a loopback endpoint its SSH executor
+published, never to an address a frame names. Each connection is one strictly sequenced
+session, so a lost frame ends it at both ends rather than corrupting the stream. The
+connection mints no claim, credit, or route authorization; who may open one is the SSH
+route's permission check. See [`EXECUTORS.md`](EXECUTORS.md#ssh-executor-access-modes).

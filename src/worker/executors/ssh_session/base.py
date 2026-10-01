@@ -36,10 +36,8 @@ from .config import (
 
 logger = logging.getLogger(__name__)
 
-LOOPBACK_RELAY_HOST = "127.0.0.1"
-
 # Tailscale hands every node an address out of the CGNAT range, which is how a
-# rented box advertises an address a remote supervisor can dial.
+# rented box advertises an address a client can dial.
 TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 _TCP_STATE_ESTABLISHED = "01"
@@ -168,10 +166,6 @@ class SSHSessionBackend(ABC):
     @abstractmethod
     def teardown(self, worker_name: str) -> None:
         """Reap any sessions ``worker_name`` still owns."""
-
-    def relay_host(self) -> str:
-        """Address the supervisor dials to reach this worker's session ports."""
-        return self._config.ssh_relay_host or LOOPBACK_RELAY_HOST
 
     def session_host(self) -> str:
         """Host name reported to the user as the session's location."""

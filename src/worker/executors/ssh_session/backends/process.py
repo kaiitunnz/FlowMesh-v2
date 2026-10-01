@@ -197,12 +197,6 @@ class ProcessSessionBackend(SSHSessionBackend):
                 "reap what a session orphans (install tini in the worker image)"
             )
             return False
-        if not (config.ssh_relay_host or resolve_tailnet_address()):
-            logger.info(
-                "Process SSH backend unavailable: the worker has no tailnet address "
-                "and SSH_RELAY_HOST is unset, so its supervisor cannot reach a session"
-            )
-            return False
         if not _acquire_backend_lock():
             logger.info(
                 "Process SSH backend unavailable: another worker sharing this root "
@@ -230,16 +224,6 @@ class ProcessSessionBackend(SSHSessionBackend):
             idle = self._active is None
         if idle:
             self.reap_stale()
-
-    def relay_host(self) -> str:
-        if override := self._config.ssh_relay_host:
-            return override
-        if (address := resolve_tailnet_address()) is None:
-            raise ExecutionError(
-                "Cannot publish a relay target for this SSH session: the worker has "
-                "no tailnet address and SSH_RELAY_HOST is unset"
-            )
-        return address
 
     def session_host(self) -> str:
         if override := self._config.ssh_relay_host:

@@ -101,6 +101,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         logger: logging.Logger,
         resident_bridge: RelayWorkerBridge | None = None,
         content_bridge: RelayWorkerBridge | None = None,
+        ssh_bridge: RelayWorkerBridge | None = None,
     ) -> None:
         self._registry = registry
         self._task_listener = task_listener
@@ -110,6 +111,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self._node_alias = node_alias
         self._resident_bridge = resident_bridge
         self._content_bridge = content_bridge
+        self._ssh_bridge = ssh_bridge
         self._logger = logger
         # Guards _node_id and the registry-vs-rehome window against concurrent
         # RegisterWorker (grpc loop thread) and rebind_node (heartbeat thread).
@@ -284,6 +286,10 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                     frame = RelayFrame.from_wire(payload["payload"]["frame"])
                     await self._content_bridge.publish_up(frame)
                     continue
+                case "SSH_FRAME" if self._ssh_bridge is not None:
+                    frame = RelayFrame.from_wire(payload["payload"]["frame"])
+                    await self._ssh_bridge.publish_up(frame)
+                    continue
             self._relay_service.add_event(payload)
         self._logger.info("Event stream closed for worker %s", worker_id)
         if registered and not unregistered:
@@ -346,6 +352,7 @@ class GrpcServer:
         logger: logging.Logger,
         resident_bridge: RelayWorkerBridge | None = None,
         content_bridge: RelayWorkerBridge | None = None,
+        ssh_bridge: RelayWorkerBridge | None = None,
     ) -> None:
         self._logger = logger
         self._server: grpc.aio.Server | None = None
@@ -359,6 +366,7 @@ class GrpcServer:
             logger,
             resident_bridge=resident_bridge,
             content_bridge=content_bridge,
+            ssh_bridge=ssh_bridge,
         )
         self._listen_addr = f"{host}:{port}"
 

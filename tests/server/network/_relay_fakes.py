@@ -5,6 +5,9 @@ uses — stream append / cursor read / MINID trim, hash CRUD, and ``SET NX PX`` 
 test-driven clock — so the relay and its recovery path are proven without a live Redis.
 """
 
+import asyncio
+import fnmatch
+from collections.abc import AsyncIterator
 from typing import Any
 
 from server.network.reverse_relay import RelayDirection, RelayFrame, RelayFrameKind
@@ -19,6 +22,7 @@ class FakeBinaryRedis:
         self._hashes: dict[str, dict[bytes, bytes]] = {}
         self._strings: dict[str, tuple[str, float]] = {}  # value, expires_at
         self.now = 0.0
+        self.ttls: dict[str, int] = {}
         self.blocks: list[int | None] = (
             []
         )  # the block arg of each xread, for assertions
@@ -43,6 +47,9 @@ class FakeBinaryRedis:
             ][:count]
             if items:
                 out.append((key.encode(), items))
+        if not out and block is not None:
+            # Yield as a blocking read would, so a standing consumer loop cannot spin.
+            await asyncio.sleep(0.001)
         return out
 
     async def xtrim(self, name: str, minid: str, approximate: bool) -> int:
@@ -62,7 +69,16 @@ class FakeBinaryRedis:
 
     async def pexpire(self, name: str, ms: int) -> int:
         # The substrate only sets a leak-backstop TTL; presence is what the tests check.
-        return 1 if name in self._hashes or name in self._strings else 0
+        if name in self._hashes or name in self._strings:
+            self.ttls[name] = ms
+            return 1
+        return 0
+
+    async def scan_iter(self, match: str) -> AsyncIterator[bytes]:
+        keys = [*self._streams, *self._hashes, *self._strings]
+        for key in keys:
+            if fnmatch.fnmatchcase(key, match):
+                yield key.encode()
 
     async def set(self, name: str, value: str, nx: bool, px: int) -> bool | None:
         live = self._live(name)

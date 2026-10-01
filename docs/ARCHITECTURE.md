@@ -108,6 +108,7 @@ src/
     routers/v1/           workflows, tasks, results, workers, nodes, ssh, stack, system
     schemas/              REST API request and response schemas
     services/             monitoring, log streaming, ssh forwarding, runtime
+    ssh/                  Root origin of relayed SSH connections
     supervisor/           Per-node agent (gRPC server, adapters, lifecycle)
     task/                 parser, runtime, models, merge / epoch helpers
       v2/                   versioned representations, compiler
@@ -127,6 +128,7 @@ src/
       utils/                artifacts, checkpoints, data_utils, distributed,
                             graph_templates, huggingface, safe_eval
     runner.py             Task lifecycle (execute, write results, upload artifacts)
+    ssh_relay/            Endpoint registry and lane serving relayed SSH connections
 cli/                    Typer CLI (`flowmesh`)
 hook/                   Plugin hook protocol interfaces
 sdk/                    Public Python SDK

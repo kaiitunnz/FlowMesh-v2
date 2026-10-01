@@ -20,6 +20,7 @@ from shared.utils.time import now_iso
 from .egress import PendingEgressRequestStore
 from .power import PowerMonitor
 from .resident import ResidentRequestStore
+from .ssh_relay import SshEndpointRegistry, SshRelayLane
 from .supervisor_client import SupervisorClient
 
 if TYPE_CHECKING:
@@ -56,6 +57,10 @@ class Lifecycle:
         # This worker's content plane: started once the worker id is known, read by
         # whatever reaches fabric content, and stopped when the worker shuts down.
         self.content_plane: WorkerContentPlane | None = None
+        # The loopback endpoints this worker's executors published for relaying, and
+        # the lane that serves relayed SSH connections against them.
+        self.ssh_endpoints = SshEndpointRegistry()
+        self.ssh_relay: SshRelayLane | None = None
         self._stop_event = threading.Event()
         self._started_ts: float | None = None
         # What this worker last reported: its status and the dispatch it concerns.
@@ -263,6 +268,11 @@ class Lifecycle:
         if plane is not None:
             plane.start()
 
+    def start_ssh_relay(self, lane: SshRelayLane) -> None:
+        """Own the worker's SSH relay lane from here to shutdown."""
+        self.ssh_relay = lane
+        lane.start()
+
     def shutdown(self, graceful: bool, deadline: float | None = None) -> None:
         """Unregister the worker; `graceful` marks a shutdown it was asked for, and
         `deadline` is the monotonic time by which it must have unregistered."""
@@ -271,6 +281,12 @@ class Lifecycle:
             return None if deadline is None else max(0.0, deadline - time.monotonic())
 
         self._stop_event.set()
+        if self.ssh_relay is not None:
+            # Its connections' cancels leave over the attachment unregistering closes.
+            try:
+                self.ssh_relay.stop()
+            except Exception:
+                pass
         if self.content_plane is not None:
             # Before unregistering: draining the lane cancels the transfers it serves,
             # and those frames leave over the attachment unregistering closes.

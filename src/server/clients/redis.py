@@ -170,16 +170,8 @@ def workflow_log_closed_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:logs:closed"
 
 
-def relay_up_key(relay_token: str) -> str:
-    return f"relay:{relay_token}:up"
-
-
-def relay_down_key(relay_token: str) -> str:
-    return f"relay:{relay_token}:down"
-
-
 # Resident-relay namespace (rr:*): per-node standing reverse-attachment streams and
-# per-session records, isolated from the control/telemetry/legacy-proxy relay keys.
+# per-session records, isolated from the control and telemetry keys.
 def resident_relay_up_key(node_id: str) -> str:
     return f"rr:node:{node_id}:up"
 
@@ -220,6 +212,27 @@ def content_relay_down_cursor_key(node_id: str) -> str:
 
 
 CONTENT_RELAY_ROOT_CURSOR_KEY = "ct:root:up_cursor"
+
+
+# SSH-relay namespace (sh:*): the same reverse-attachment shape for relayed SSH
+# connections, disjoint from the resident and content streams.
+def ssh_relay_up_key(node_id: str) -> str:
+    return f"sh:node:{node_id}:up"
+
+
+def ssh_relay_down_key(node_id: str) -> str:
+    return f"sh:node:{node_id}:down"
+
+
+def ssh_relay_session_key(session_id: str) -> str:
+    return f"sh:sess:{session_id}"
+
+
+def ssh_relay_down_cursor_key(node_id: str) -> str:
+    return f"sh:node:{node_id}:down_cursor"
+
+
+SSH_RELAY_ROOT_CURSOR_KEY = "sh:root:up_cursor"
 
 
 def content_holders_key(scope: str, digest: str) -> str:

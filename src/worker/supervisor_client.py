@@ -715,6 +715,10 @@ class SupervisorClient:
         """Send one content transfer frame up for the supervisor to bridge onward."""
         self._push_event("CONTENT_FRAME", {"frame": frame})
 
+    def push_ssh_frame(self, frame: dict[str, Any]) -> None:
+        """Send one relayed SSH frame up for the supervisor to bridge onward."""
+        self._push_event("SSH_FRAME", {"frame": frame})
+
     def push_content_holding(self, held: Sequence[tuple[str, str]]) -> None:
         """Report the objects this worker holds, so control can resolve them."""
         self._push_event(

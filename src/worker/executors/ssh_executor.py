@@ -205,6 +205,8 @@ class SSHExecutor(Executor):
             session.collect_output(out_dir / ARTIFACTS_DIR, max_bytes)
             maybe_upload_artifacts(task, out_dir, logger=logger, skip_errors=True)
         finally:
+            # Its relayed connections end first, so none outlives the session's sshd.
+            self.withdraw_endpoint(session_id)
             # A log stream ends only once its session stops. A cancel or stop stops
             # it at once, inside the worker's own stop timeout.
             session.stop(1 if self._signals.interrupted else cfg.stop_timeout_sec)
@@ -270,18 +272,17 @@ class SSHExecutor(Executor):
             "port": host_port,
         }
         if access_mode in ("proxy", "forward"):
-            relay_host = self._backend.relay_host()
+            # The root relays to the session by this id; the port never leaves here.
+            self.publish_endpoint(session_id, host_port)
             if access_mode == "forward":
                 # Forward-mode sessions need separate direct connection info
                 ssh_info["directHost"] = host_name
                 ssh_info["directPort"] = host_port
-            ssh_info["_relay_target"] = {"host": relay_host, "port": host_port}
             logger.info(
-                "SSH %s session ready: host=%s port=%s relay=%s (task=%s)",
+                "SSH %s session ready: host=%s port=%s (task=%s)",
                 access_mode,
                 host_name,
                 host_port,
-                relay_host,
                 task.task_id,
             )
         else:

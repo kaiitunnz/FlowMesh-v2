@@ -67,6 +67,7 @@ from .executors.utils.checkpoints import write_executor_result
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
+from .ssh_relay import SSH_FRAME_KIND
 from .telemetry import otel
 from .utils.logging import TaskLogEmitter
 
@@ -410,6 +411,10 @@ class Runner:
         if frame_kind.startswith("resident_"):
             if (host := self._ensure_resident_host()) is not None:
                 host.route(frame_kind, frame)
+            return
+        if frame_kind == SSH_FRAME_KIND:
+            if (lane := self.lifecycle.ssh_relay) is not None:
+                lane.route(frame_kind, frame)
             return
         if frame_kind.startswith("content_"):
             if (plane := self.lifecycle.content_plane) is not None:

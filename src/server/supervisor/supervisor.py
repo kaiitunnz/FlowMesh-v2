@@ -344,6 +344,7 @@ def _run_supervisor(
     from ..network.reverse_relay import (
         CONTENT_RELAY_KEYSPACE,
         RESIDENT_RELAY_KEYSPACE,
+        SSH_RELAY_KEYSPACE,
         BinaryRedis,
     )
     from ..network.worker_bridge import RelayWorkerBridge
@@ -357,7 +358,6 @@ def _run_supervisor(
     from .services.lifecycle import Lifecycle
     from .services.peer_listener import NodePeerListener
     from .services.relay_service import RelayService
-    from .services.relay_uplink import RelayUplinkService
     from .services.reverse_relay_attachment import ReverseRelayAttachment
     from .services.task_listener import TaskListener
 
@@ -441,7 +441,6 @@ def _run_supervisor(
         on_worker_id_released=task_listener.remove_worker
     )
     relay_service = RelayService(redis=redis_client.sync, logger=logger)
-    relay_uplink = RelayUplinkService(logger=logger)
     worker_manager = WorkerManager(
         system_principal,
         wm_cfg.config_path,
@@ -453,6 +452,8 @@ def _run_supervisor(
     resident_attachment: ReverseRelayAttachment | None = None
     content_bridge: RelayWorkerBridge | None = None
     content_attachment: ReverseRelayAttachment | None = None
+    ssh_bridge: RelayWorkerBridge | None = None
+    ssh_attachment: ReverseRelayAttachment | None = None
     if network_cfg.enabled:
         relay_redis = cast(
             BinaryRedis,
@@ -471,6 +472,22 @@ def _run_supervisor(
             resident_bridge,
             owner=f"{node_id}:{os.getpid()}",
             keyspace=RESIDENT_RELAY_KEYSPACE,
+            logger=logger,
+        )
+        ssh_bridge = RelayWorkerBridge(
+            relay_redis,
+            node_id,
+            task_listener.enqueue_local,
+            keyspace=SSH_RELAY_KEYSPACE,
+            frame_kind="ssh_frame",
+            logger=logger,
+        )
+        ssh_attachment = ReverseRelayAttachment(
+            relay_redis,
+            node_id,
+            ssh_bridge,
+            owner=f"{node_id}:{os.getpid()}:ssh",
+            keyspace=SSH_RELAY_KEYSPACE,
             logger=logger,
         )
         if content_cfg.hydration_enabled:
@@ -496,7 +513,6 @@ def _run_supervisor(
         worker_manager=worker_manager,
         logger=logger,
         cmd_receiver=cmd_receiver,
-        relay_uplink=relay_uplink,
     )
     grpc_server = GrpcServer(
         grpc_cfg.host,
@@ -510,6 +526,7 @@ def _run_supervisor(
         logger=logger,
         resident_bridge=resident_bridge,
         content_bridge=content_bridge,
+        ssh_bridge=ssh_bridge,
     )
 
     peer_listener: NodePeerListener | None = None
@@ -573,7 +590,6 @@ def _run_supervisor(
 
     async def _run() -> None:
         # Startup — lifecycle already started above (registration is synchronous)
-        relay_uplink.start()
         relay_service.start()
         task_listener.start()
         await worker_manager.start()
@@ -585,6 +601,8 @@ def _run_supervisor(
             resident_attachment.start(loop)
         if content_attachment is not None:
             content_attachment.start(loop)
+        if ssh_attachment is not None:
+            ssh_attachment.start(loop)
         if peer_listener is not None:
             await peer_listener.start()
         # Wire the re-register callback only once the reader threads are up
@@ -601,6 +619,8 @@ def _run_supervisor(
         lifecycle.publish_unregister()
         if peer_listener is not None:
             await peer_listener.stop()
+        if ssh_attachment is not None:
+            await ssh_attachment.stop()
         if content_attachment is not None:
             await content_attachment.stop()
         if resident_attachment is not None:
@@ -611,7 +631,6 @@ def _run_supervisor(
         await command_listener.stop()
         await worker_manager.stop()
         relay_service.stop()
-        await relay_uplink.stop()
         task_listener.stop()
         lifecycle.stop()
         logger.info("Supervisor stopped for node %s", node_id)

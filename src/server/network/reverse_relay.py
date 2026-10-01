@@ -17,7 +17,7 @@ trimmed — a stream is trimmed only at or below the cumulative-acknowledged id.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -30,6 +30,7 @@ from shared.network.relay_frame import (
 from ..clients.redis import (
     CONTENT_RELAY_ROOT_CURSOR_KEY,
     RESIDENT_RELAY_ROOT_CURSOR_KEY,
+    SSH_RELAY_ROOT_CURSOR_KEY,
     content_relay_down_cursor_key,
     content_relay_down_key,
     content_relay_session_key,
@@ -38,6 +39,10 @@ from ..clients.redis import (
     resident_relay_down_key,
     resident_relay_session_key,
     resident_relay_up_key,
+    ssh_relay_down_cursor_key,
+    ssh_relay_down_key,
+    ssh_relay_session_key,
+    ssh_relay_up_key,
 )
 
 # A crashed origin can never trim its own session record; a generous TTL bounds the leak
@@ -81,6 +86,14 @@ CONTENT_RELAY_KEYSPACE = RelayKeyspace(
     down_cursor=content_relay_down_cursor_key,
 )
 
+SSH_RELAY_KEYSPACE = RelayKeyspace(
+    up=ssh_relay_up_key,
+    down=ssh_relay_down_key,
+    session=ssh_relay_session_key,
+    root_cursor=SSH_RELAY_ROOT_CURSOR_KEY,
+    down_cursor=ssh_relay_down_cursor_key,
+)
+
 
 class BinaryRedis(Protocol):
     """The binary-safe async Redis surface the substrate uses (no decoded responses)."""
@@ -97,6 +110,7 @@ class BinaryRedis(Protocol):
     async def get(self, name: str) -> bytes | None: ...
     async def delete(self, name: str) -> int: ...
     async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Any: ...
+    def scan_iter(self, match: str) -> AsyncIterator[bytes]: ...
 
 
 @dataclass
@@ -192,6 +206,22 @@ class RelaySessionStore:
     async def delete(self, session_id: str) -> None:
         await self._redis.delete(self._ks.session(session_id))
 
+    async def touch(self, session_id: str, ttl_ms: int = _SESSION_TTL_MS) -> None:
+        """Reset the record's expiry, keeping a long-lived session's routing alive."""
+        await self._redis.pexpire(self._ks.session(session_id), ttl_ms)
+
+    async def list_ids(self) -> list[str]:
+        """Return the id of every session record in this keyspace."""
+        prefix = self._ks.session("")
+        ids: list[str] = []
+        async for raw in self._redis.scan_iter(match=f"{prefix}*"):
+            key = raw.decode() if isinstance(raw, bytes) else str(raw)
+            session_id = key[len(prefix) :]
+            # A leg's ownership lease is keyed under its node's record prefix.
+            if ":" not in session_id:
+                ids.append(session_id)
+        return ids
+
 
 # Owner-fenced compare-and-act: refresh or drop the lease only while this owner still
 # holds it, atomically, so a lapsed owner that wakes after a successor took over cannot
@@ -251,6 +281,7 @@ class RelayLease:
 __all__ = [
     "CONTENT_RELAY_KEYSPACE",
     "RESIDENT_RELAY_KEYSPACE",
+    "SSH_RELAY_KEYSPACE",
     "BinaryRedis",
     "RelayDirection",
     "RelayFrame",

@@ -24,7 +24,6 @@ from ...utils.concurrent import Sentinel, TaskReceiver
 from ..adapters.docker import DockerWorkerConfig
 from ..manager import WorkerInitConfig, WorkerManager
 from .pubsub_reader import RebindableReader
-from .relay_uplink import RelayUplinkService
 
 type ResponseHandler = Callable[[CommandResponse], None]
 
@@ -139,14 +138,12 @@ class CommandListener:
         worker_manager: WorkerManager,
         logger: logging.Logger,
         cmd_receiver: TaskReceiver[CommandMessage, CommandResponse] | None = None,
-        relay_uplink: RelayUplinkService | None = None,
         max_inflight: int = _MAX_INFLIGHT_CMDS,
     ) -> None:
         self.logger = logger
         self._redis = redis
         self._node_id = node_id
         self._wm = worker_manager
-        self._relay_uplink = relay_uplink
         self._cmd_receiver = cmd_receiver
         self._max_inflight = max_inflight
 
@@ -356,8 +353,6 @@ class CommandListener:
                 return await self._handle_destroy_worker_cmd(cmd)
             case CommandType.DESTROY_WORKERS:
                 return await self._handle_destroy_workers_cmd(cmd)
-            case CommandType.START_RELAY:
-                return self._handle_start_relay_cmd(cmd)
             case CommandType.DELIVER_ROUTE_PLAN:
                 return await self._handle_deliver_route_plan_cmd(cmd)
             case _:
@@ -424,33 +419,6 @@ class CommandListener:
             )
         except Exception as exc:
             return CommandResponse.error(cmd, f"Failed to get workers: {exc}")
-
-    def _handle_start_relay_cmd(self, cmd: CommandMessage) -> CommandResponse:
-        if self._relay_uplink is None:
-            return CommandResponse.error(cmd, "Relay uplink service not available")
-        if cmd.payload is None:
-            return CommandResponse.error(cmd, "Missing payload for START_RELAY command")
-        relay_token = cmd.payload.get("relay_token")
-        target_host = cmd.payload.get("target_host")
-        target_port = cmd.payload.get("target_port")
-        session_id = cmd.payload.get("session_id")
-        if not (relay_token and target_host and target_port and session_id):
-            return CommandResponse.error(
-                cmd,
-                "Missing relay_token, target_host, target_port, or session_id "
-                "for START_RELAY command",
-            )
-        try:
-            self._relay_uplink.start_uplink(
-                self._redis.telemetry_client,
-                str(relay_token),
-                str(target_host),
-                int(target_port),
-                str(session_id),
-            )
-            return CommandResponse.ok(cmd)
-        except Exception as exc:
-            return CommandResponse.error(cmd, f"Failed to start relay uplink: {exc}")
 
     async def _handle_deliver_route_plan_cmd(
         self, cmd: CommandMessage

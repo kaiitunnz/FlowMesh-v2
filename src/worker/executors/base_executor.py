@@ -193,6 +193,19 @@ class Executor(ABC):
         if self._lifecycle is not None:
             self._lifecycle.notify_task_update(task_id, payload)
 
+    def publish_endpoint(self, endpoint_id: str, port: int) -> None:
+        """Offer a loopback port for the root to relay connections to.
+
+        Calls the lifecycle if one was injected; otherwise a no-op.
+        """
+        if self._lifecycle is not None:
+            self._lifecycle.ssh_endpoints.publish(endpoint_id, port)
+
+    def withdraw_endpoint(self, endpoint_id: str) -> None:
+        """Stop offering a port and end its relayed connections; safe if unpublished."""
+        if self._lifecycle is not None:
+            self._lifecycle.ssh_endpoints.withdraw(endpoint_id)
+
     def _pending_egress_requests(self) -> "PendingEgressRequestStore":
         """The worker-private store for captured, not-yet-executed egress requests.
 

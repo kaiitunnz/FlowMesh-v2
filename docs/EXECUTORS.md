@@ -399,6 +399,17 @@ teardown only when a retain window or serve TTL is configured (not the default) 
 than serving without the reclaim. One tradeoff is known: every chat resident replica enables
 runtime LoRA, so a base model incompatible with `--enable-lora` would fail to serve.
 
+## SSH executor access modes
+
+A `direct` session is reached at the address its worker advertises. A `proxy` or
+`forward` session is reached through the server: the WebSocket proxy at
+`/api/v1/ssh/tasks/{task_id}/proxy`, or a port the server's forward listener allocates.
+Each client connection rides the network plane's `control_relay` to the worker serving
+the session, which connects only to the loopback port its SSH executor published for
+that session; the port is withdrawn, and its connections end, when the session stops.
+Root and supervisors relay the bytes without reading them, and each direction of a
+connection half-closes on its own.
+
 ## SSH executor (process backend)
 
 On a root worker, a `process` session runs under its own account and group,

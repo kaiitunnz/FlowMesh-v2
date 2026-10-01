@@ -124,7 +124,7 @@ def _servable(**patches: Any) -> Any:
 def test_a_worker_that_cannot_isolate_or_lock_serves_no_process_session(
     tmp_path: Path, unready: str
 ) -> None:
-    config = make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+    config = make_live_worker_config(tmp_path)
     with _servable():
         assert ProcessSessionBackend.is_available(config)
     with _servable(**{unready: False}):
@@ -137,7 +137,7 @@ def test_a_worker_that_cannot_isolate_or_lock_serves_no_process_session(
 def test_a_worker_missing_a_tool_serves_no_process_session(
     tmp_path: Path, missing: str
 ) -> None:
-    config = make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+    config = make_live_worker_config(tmp_path)
     with _servable(**{missing: None}):
         assert not ProcessSessionBackend.is_available(config)
 
@@ -180,17 +180,15 @@ def test_a_state_dir_someone_else_owns_is_refused(tmp_path: Path) -> None:
         process_module._make_private_dir(tmp_path / "state", 0o711)
 
 
-def test_a_root_worker_its_supervisor_cannot_reach_serves_no_process_session(
+def test_a_root_worker_with_no_routable_address_serves_process_sessions(
     tmp_path: Path,
 ) -> None:
+    """The worker reaches a relayed session itself, so nothing needs to dial it."""
     with (
         _servable(),
         patch.object(process_module, "resolve_tailnet_address", return_value=None),
     ):
-        assert not ProcessSessionBackend.is_available(make_live_worker_config(tmp_path))
-        assert ProcessSessionBackend.is_available(
-            make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
-        )
+        assert ProcessSessionBackend.is_available(make_live_worker_config(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -706,7 +704,7 @@ def test_a_run_dir_another_account_can_write_takes_no_lock(
 
 
 def test_the_lock_is_taken_before_any_state_root_is_touched(tmp_path: Path) -> None:
-    config = make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+    config = make_live_worker_config(tmp_path)
     with (
         _servable(_acquire_backend_lock=False),
         patch.object(process_module, "_release_backend_lock") as release,
