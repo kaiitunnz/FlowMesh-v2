@@ -274,6 +274,8 @@ def test_a_restarted_root_reaps_the_connections_its_predecessor_left_open() -> N
             while established() == 0:
                 await asyncio.sleep(0.005)
             assert await fabric.new_origin().reap_orphans() >= 1
+            # The relay Redis may hold every other key too.
+            assert min(fabric.redis.scan_counts) >= 1000
             await asyncio.wait_for(sshd.closed.wait(), 5)
             while established() > 0:
                 await asyncio.sleep(0.005)

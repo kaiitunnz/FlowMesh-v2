@@ -23,6 +23,7 @@ class FakeBinaryRedis:
         self._strings: dict[str, tuple[str, float]] = {}  # value, expires_at
         self.now = 0.0
         self.ttls: dict[str, int] = {}
+        self.scan_counts: list[int] = []
         self.blocks: list[int | None] = (
             []
         )  # the block arg of each xread, for assertions
@@ -74,7 +75,8 @@ class FakeBinaryRedis:
             return 1
         return 0
 
-    async def scan_iter(self, match: str) -> AsyncIterator[bytes]:
+    async def scan_iter(self, match: str, count: int) -> AsyncIterator[bytes]:
+        self.scan_counts.append(count)
         keys = [*self._streams, *self._hashes, *self._strings]
         for key in keys:
             if fnmatch.fnmatchcase(key, match):

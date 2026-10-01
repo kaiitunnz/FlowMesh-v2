@@ -49,6 +49,8 @@ from ..clients.redis import (
 # A crashed origin can never trim its own session record; a generous TTL bounds the leak
 # without expiring an active one — a single invocation's session lives far under it.
 _SESSION_TTL_MS = 1_800_000
+# The relay may share its Redis with every other key, so a scan walks it in big steps.
+_SCAN_COUNT = 1000
 
 _logger = logging.getLogger("reverse-relay")
 
@@ -111,7 +113,7 @@ class BinaryRedis(Protocol):
     async def get(self, name: str) -> bytes | None: ...
     async def delete(self, name: str) -> int: ...
     async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Any: ...
-    def scan_iter(self, match: str) -> AsyncIterator[bytes]: ...
+    def scan_iter(self, match: str, count: int) -> AsyncIterator[bytes]: ...
 
 
 @dataclass
@@ -253,10 +255,10 @@ class RelaySessionStore:
         """Return the id of every session record in this keyspace."""
         prefix = self._ks.session("")
         ids: list[str] = []
-        async for raw in self._redis.scan_iter(match=f"{prefix}*"):
+        async for raw in self._redis.scan_iter(match=f"{prefix}*", count=_SCAN_COUNT):
             key = raw.decode() if isinstance(raw, bytes) else str(raw)
             session_id = key[len(prefix) :]
-            # A leg's ownership lease is keyed under its node's record prefix.
+            # A leg's ownership lease is keyed below a record, as ``<id>:lease:<leg>``.
             if ":" not in session_id:
                 ids.append(session_id)
         return ids
