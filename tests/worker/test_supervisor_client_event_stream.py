@@ -37,3 +37,15 @@ def test_an_event_a_closed_stream_pulls_goes_to_the_next_stream() -> None:
         MessageToDict(message.payload, preserving_proto_field_name=True)["type"]
         for message in sent
     ] == ["HEARTBEAT"]
+
+
+def test_a_heartbeat_names_the_task_of_its_dispatch() -> None:
+    client = _client()
+    client._shutdown.clear()
+
+    client.heartbeat(dispatch_id="dsp-1", task_id="tsk-1")
+    client._event_queue.put(client._EVENT_SENTINEL)
+    [sent] = list(client._event_messages(threading.Event()))
+
+    event = MessageToDict(sent.payload, preserving_proto_field_name=True)
+    assert (event["dispatch_id"], event["payload"]["task_id"]) == ("dsp-1", "tsk-1")

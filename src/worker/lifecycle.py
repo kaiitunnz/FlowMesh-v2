@@ -69,12 +69,13 @@ class Lifecycle:
         self.ssh_relay: SshRelayLane | None = None
         self._stop_event = threading.Event()
         self._started_ts: float | None = None
-        # What this worker last reported: its status and the dispatch it concerns.
-        # Heartbeats repeat it, so a report the registry missed or took out of order
-        # is restored within one heartbeat.
+        # What this worker last reported: its status, and the dispatch it concerns
+        # with that dispatch's task. Heartbeats repeat it, so a report the registry
+        # missed or took out of order is restored within one heartbeat.
         self._status_lock = threading.Lock()
         self._status = WorkerStatus.STARTING
         self._dispatch_id: str | None = None
+        self._task_id: str | None = None
         self._draining = threading.Event()
         self._last_task_end = 0.0
         self._gpu_monitor = gpu_monitor
@@ -190,7 +191,7 @@ class Lifecycle:
             power_metrics=initial_power,
         )
         self.client.start()
-        self._report(WorkerStatus.IDLE, None, {})
+        self._report(WorkerStatus.IDLE, None, None, {})
         self.client.on_event_stream_ready(self._report_again)
         self.client.on_reregistered(self._on_reregistered)
         self._touch_hb_file()
@@ -214,6 +215,7 @@ class Lifecycle:
                         metrics=metrics,
                         status=self._status,
                         dispatch_id=self._dispatch_id,
+                        task_id=self._task_id,
                     )
             except Exception:
                 pass
@@ -241,14 +243,20 @@ class Lifecycle:
 
     def set_busy(self, task_id: str) -> None:
         self._report(
-            WorkerStatus.BUSY, self.client.dispatch_id(task_id), {"task_id": task_id}
+            WorkerStatus.BUSY,
+            self.client.dispatch_id(task_id),
+            task_id,
+            {"task_id": task_id},
         )
 
     def set_idle(self, task_id: str) -> None:
         with self._status_lock:
             self._last_task_end = time.time()
         self._report(
-            WorkerStatus.IDLE, self.client.dispatch_id(task_id), {"last_task": task_id}
+            WorkerStatus.IDLE,
+            self.client.dispatch_id(task_id),
+            task_id,
+            {"last_task": task_id},
         )
 
     def begin_draining(self) -> None:
@@ -260,24 +268,34 @@ class Lifecycle:
         while it shuts down."""
         self._draining.set()
         with self._status_lock:
-            self._report_locked(WorkerStatus.BUSY, self._dispatch_id, {})
+            # A drain is no run: past its last task it names that task's dispatch only.
+            running = self._task_id if self._status is WorkerStatus.BUSY else None
+            self._report_locked(WorkerStatus.BUSY, self._dispatch_id, running, {})
 
     def _report_again(self) -> None:
         """Report the last status again, which an outage may have dropped."""
         with self._status_lock:
-            self._report_locked(self._status, self._dispatch_id, {})
+            self._report_locked(self._status, self._dispatch_id, self._task_id, {})
 
     def _report(
-        self, status: WorkerStatus, dispatch_id: str | None, extra: dict[str, Any]
+        self,
+        status: WorkerStatus,
+        dispatch_id: str | None,
+        task_id: str | None,
+        extra: dict[str, Any],
     ) -> None:
         with self._status_lock:
             if not self._draining.is_set():
-                self._report_locked(status, dispatch_id, extra)
+                self._report_locked(status, dispatch_id, task_id, extra)
 
     def _report_locked(
-        self, status: WorkerStatus, dispatch_id: str | None, extra: dict[str, Any]
+        self,
+        status: WorkerStatus,
+        dispatch_id: str | None,
+        task_id: str | None,
+        extra: dict[str, Any],
     ) -> None:
-        self._status, self._dispatch_id = status, dispatch_id
+        self._status, self._dispatch_id, self._task_id = status, dispatch_id, task_id
         try:
             self.client.set_status(status, extra, dispatch_id)
         except Exception:

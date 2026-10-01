@@ -1,5 +1,5 @@
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field
 
@@ -72,6 +72,16 @@ class InterruptMessage(BaseModel):
     reason: str = "cancelled"
     # The one dispatch of the task it ends; None for whichever dispatch runs it.
     dispatch_id: str | None = None
+
+    @classmethod
+    def revoking(cls, task_id: str, worker_id: str, dispatch_id: str) -> Self:
+        """The interrupt that revokes one dispatch on its worker."""
+        return cls(
+            task_id=task_id,
+            worker_id=worker_id,
+            reason="revoked",
+            dispatch_id=dispatch_id,
+        )
 
 
 class StopMessage(BaseModel):

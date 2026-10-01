@@ -439,13 +439,6 @@ def _failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
     return record.max_attempts < 0 or record.attempts < record.max_attempts
 
 
-def _revocation(task_id: str, worker_id: str, dispatch_id: str) -> InterruptMessage:
-    """The interrupt that revokes one dispatch on its worker."""
-    return InterruptMessage(
-        task_id=task_id, worker_id=worker_id, reason="revoked", dispatch_id=dispatch_id
-    )
-
-
 def _settle_outcome(
     effect: EventEffect,
     record: TaskRecord | None,
@@ -1599,7 +1592,10 @@ class TaskRuntime:
         ]
         self._release_terminated_work(
             _Termination(
-                [_revocation(r.task_id, r.worker_id, r.dispatch_id) for r in ended],
+                [
+                    InterruptMessage.revoking(r.task_id, r.worker_id, r.dispatch_id)
+                    for r in ended
+                ],
                 [],
             )
         )
@@ -5945,7 +5941,9 @@ class TaskRuntime:
         if dispatch_id is None:
             return
         self._pending_terminations.append(
-            _Termination([_revocation(task_id, worker_id, dispatch_id)], [])
+            _Termination(
+                [InterruptMessage.revoking(task_id, worker_id, dispatch_id)], []
+            )
         )
 
     def _interrupt_cancelling_locked(self, workflow_id: str) -> None:

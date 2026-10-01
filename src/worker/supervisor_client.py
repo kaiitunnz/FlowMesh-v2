@@ -251,8 +251,12 @@ class SupervisorClient:
         ttl_sec: int = 120,
         status: WorkerStatus | None = None,
         dispatch_id: str | None = None,
+        task_id: str | None = None,
     ) -> None:
         ts = ts or now_iso()
+        payload: dict[str, Any] = {"ttl_sec": ttl_sec}
+        if task_id is not None:
+            payload["task_id"] = task_id
         event = WorkerEvent(
             type="HEARTBEAT",
             worker_id=self.worker_id,
@@ -260,7 +264,7 @@ class SupervisorClient:
             status=status,
             dispatch_id=dispatch_id,
             metrics=metrics or {},
-            payload={"ttl_sec": ttl_sec},
+            payload=payload,
         )
         self._offer_event(event)
 

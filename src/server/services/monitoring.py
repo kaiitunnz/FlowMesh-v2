@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future
 from datetime import UTC, datetime
@@ -90,6 +91,10 @@ _GIVEN_UP_ENDS = {
 
 TASK_EVENT_HANDLER_MAX_ATTEMPTS = 5
 
+# How many revoked runs the monitor remembers, so a worker's repeated BUSY reports of
+# one revoked dispatch publish one revoke.
+_REVOKED_RUN_MEMORY = 4096
+
 
 def _stream_id_tuple(entry_id: str) -> tuple[int, int]:
     """Parse a Redis stream id (``<ms>-<seq>``) into a comparable tuple."""
@@ -168,6 +173,8 @@ class EventMonitor:
 
         # Per-entry handler-failure counts backing the consumer's retry budget.
         self._event_handler_attempts: dict[str, int] = {}
+        # Each (worker, dispatch) already revoked as an orphan run.
+        self._revoked_runs: OrderedDict[tuple[str, str], None] = OrderedDict()
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._threads: list[threading.Thread] | None = None
@@ -837,6 +844,8 @@ class EventMonitor:
                     worker_id, event.ts, ttl_sec, event.status, event.dispatch_id
                 )
                 self._took_status_report(worker_id, report, "Heartbeat", ttl_sec)
+                if report.outcome is ReportOutcome.APPLIED:
+                    self._revoke_orphan_run(worker_id, event)
                 if report.outcome is not ReportOutcome.UNKNOWN:
                     self._record_gpu_availability(worker_id, event.metrics)
             case "STATUS" if event.origin == "worker":
@@ -852,6 +861,8 @@ class EventMonitor:
                     event.dispatch_id,
                 )
                 self._took_status_report(worker_id, report, "Status update")
+                if report.outcome is ReportOutcome.APPLIED:
+                    self._revoke_orphan_run(worker_id, event)
             case "MEDIATED_OP_OUTCOME":
                 self._runtime.settle_mediated_operation(
                     MediatedOperationOutcome.model_validate(event.payload["outcome"])
@@ -979,6 +990,46 @@ class EventMonitor:
                         dispatch_id,
                         task_id,
                     )
+
+    def _revoke_orphan_run(self, worker_id: str, event: WorkerEvent) -> None:
+        """Revoke a dispatch a worker reports running that control does not hold, once
+        per worker and dispatch.
+
+        A dispatch control resolved without its worker ending it may still have
+        reached the worker and started; the revoke ends it there.
+        """
+        dispatch_id, task_id = event.dispatch_id, event.payload.get("task_id")
+        if (
+            event.status is not WorkerStatus.BUSY
+            or not dispatch_id
+            or not isinstance(task_id, str)
+            or (worker_id, dispatch_id) in self._revoked_runs
+            or self._runtime.dispatch_in_flight(task_id, dispatch_id, worker_id)
+        ):
+            return
+        self._revoked_runs[(worker_id, dispatch_id)] = None
+        if len(self._revoked_runs) > _REVOKED_RUN_MEMORY:
+            self._revoked_runs.popitem(last=False)
+        if (worker := self._worker_registry.get_worker(worker_id)) is None:
+            return
+        self._logger.warning(
+            "Worker %s runs dispatch %s of task %s that control does not hold; "
+            "revoking it",
+            worker_id,
+            dispatch_id,
+            task_id,
+        )
+        try:
+            self._worker_registry.publish_interrupt(
+                worker, InterruptMessage.revoking(task_id, worker_id, dispatch_id)
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to revoke dispatch %s on worker %s: %s",
+                dispatch_id,
+                worker_id,
+                exc,
+            )
 
     def _resolve_disowned_dispatch(
         self, worker_id: str, task_id: str, dispatch_id: str, ttl_sec: float

@@ -120,3 +120,21 @@ def test_a_reconnected_event_stream_gets_the_last_status_again(
     on_ready()
 
     assert client.set_status.call_args.args == (WorkerStatus.BUSY, {}, "dsp-tsk-1")
+
+
+def test_a_heartbeat_names_the_task_of_the_dispatch_it_runs(tmp_path: Path) -> None:
+    lifecycle, client = _lifecycle(tmp_path)
+
+    lifecycle.set_busy("tsk-1")
+
+    assert _heartbeat(lifecycle, client)["task_id"] == "tsk-1"
+
+
+def test_a_drain_past_its_last_task_names_no_running_task(tmp_path: Path) -> None:
+    lifecycle, client = _lifecycle(tmp_path)
+    lifecycle.set_busy("tsk-1")
+    lifecycle.set_idle("tsk-1")
+
+    lifecycle.set_draining()
+
+    assert _heartbeat(lifecycle, client)["task_id"] is None

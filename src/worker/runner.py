@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import traceback
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,15 @@ _STOP_BUDGET_SEC = 25.0
 # the rest is left to the teardown.
 _BOUNDARY_DRAIN_SEC = 15.0
 _BOUNDARY_DRAIN_POLL_SEC = 0.1
+# A revoke or stop may name a dispatch that never reaches this worker, so only the
+# most recent are remembered.
+_ENDED_DISPATCH_MEMORY = 1024
+
+
+def _remember_dispatch(memory: OrderedDict[str, None], dispatch_id: str) -> None:
+    memory[dispatch_id] = None
+    if len(memory) > _ENDED_DISPATCH_MEMORY:
+        memory.popitem(last=False)
 
 
 def _declared_result(
@@ -174,8 +184,8 @@ class Runner:
         # The dispatch the task loop holds; the dispatches control ended or a
         # re-registration gave up, which never run; and those control stopped.
         self._current_dispatch_id: str | None = None
-        self._revoked_dispatches: set[str] = set()
-        self._stopped_dispatches: set[str] = set()
+        self._revoked_dispatches: OrderedDict[str, None] = OrderedDict()
+        self._stopped_dispatches: OrderedDict[str, None] = OrderedDict()
         self._pending_stops: set[str] = set()
         self._cancel_lock = threading.Lock()
         self._shutdown_requested = threading.Event()
@@ -878,7 +888,7 @@ class Runner:
         """
         with self._cancel_lock:
             if dispatch_id is not None:
-                self._revoked_dispatches.add(dispatch_id)
+                _remember_dispatch(self._revoked_dispatches, dispatch_id)
             task_id = (
                 self._current_task_id
                 if self._current_dispatch_id == dispatch_id
@@ -919,7 +929,9 @@ class Runner:
                             if dispatch_id is None:
                                 self._pending_cancels.add(task_id)
                             else:
-                                self._revoked_dispatches.add(dispatch_id)
+                                _remember_dispatch(
+                                    self._revoked_dispatches, dispatch_id
+                                )
                             running = self._runs_locked(task_id, dispatch_id)
                         if not running:
                             continue
@@ -942,7 +954,9 @@ class Runner:
                             if dispatch_id is None:
                                 self._pending_stops.add(task_id)
                             else:
-                                self._stopped_dispatches.add(dispatch_id)
+                                _remember_dispatch(
+                                    self._stopped_dispatches, dispatch_id
+                                )
                             running = self._runs_locked(task_id, dispatch_id)
                         if not running:
                             continue
@@ -1298,8 +1312,8 @@ class Runner:
                         self._pending_cancels.discard(task_id)
                         self._pending_stops.discard(task_id)
                         if (dispatch_id := msg.dispatch_id) is not None:
-                            self._revoked_dispatches.discard(dispatch_id)
-                            self._stopped_dispatches.discard(dispatch_id)
+                            self._revoked_dispatches.pop(dispatch_id, None)
+                            self._stopped_dispatches.pop(dispatch_id, None)
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()
                     self.lifecycle.set_idle(task_id)
