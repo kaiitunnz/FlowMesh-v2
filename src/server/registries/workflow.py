@@ -13,6 +13,8 @@ from pydantic import (
     model_serializer,
 )
 
+from shared.tasks import PERSISTED_LOAD_CONTEXT
+
 from ..clients.redis import (
     WORKFLOWS_SET_KEY,
     RedisClient,
@@ -409,7 +411,12 @@ class WorkflowRegistry:
             return []
         blobs = self._rds.sync.mget([task_state_key(task_id) for task_id in task_ids])
         return [
-            PersistedTask.model_validate_json(blob) if blob else None for blob in blobs
+            (
+                PersistedTask.model_validate_json(blob, context=PERSISTED_LOAD_CONTEXT)
+                if blob
+                else None
+            )
+            for blob in blobs
         ]
 
     async def load_task_states_async(
@@ -421,7 +428,12 @@ class WorkflowRegistry:
             [task_state_key(task_id) for task_id in task_ids]
         )
         return [
-            PersistedTask.model_validate_json(blob) if blob else None for blob in blobs
+            (
+                PersistedTask.model_validate_json(blob, context=PERSISTED_LOAD_CONTEXT)
+                if blob
+                else None
+            )
+            for blob in blobs
         ]
 
     async def save_workflow_sched_async(

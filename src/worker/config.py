@@ -7,12 +7,13 @@ code can depend on a structured config object.
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from shared.content.config import ObjectStoreConfig
-from shared.schemas.worker import SSHLimits
+from shared.schemas.worker import SSHBackendName, SSHLimits
 from shared.telemetry.config import TelemetryConfig
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import (
@@ -23,6 +24,21 @@ from shared.utils.parsing import (
 )
 
 from .utils.health import get_hb_config
+
+# Env vars that name the cache directories of the worker's libraries.
+_STATE_DIR_ENV_VARS = (
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "HUGGINGFACE_HUB_CACHE",
+    "HF_DATASETS_CACHE",
+    "TRANSFORMERS_CACHE",
+    "TORCH_HOME",
+    "XDG_CACHE_HOME",
+    "VLLM_CACHE_ROOT",
+    "FASTEMBED_CACHE_PATH",
+)
+# Directories that worker-side tools create under the temp dir.
+_TEMP_STATE_DIR_NAMES = ("fastembed_cache",)
 
 
 @dataclass(frozen=True)
@@ -75,6 +91,10 @@ class WorkerConfig:
     peer_tls_ca_b64: str | None = None
     peer_tls_cert_b64: str | None = None
     peer_tls_key_b64: str | None = None
+    ssh_session_backend: SSHBackendName = SSHBackendName.DOCKER
+    ssh_relay_host: str | None = None
+    ssh_stop_timeout_sec: float = 30.0
+    state_dirs: tuple[Path, ...] = ()
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -212,7 +232,24 @@ class WorkerConfig:
                 max_pids=ssh_max_pids,
             )
         )
-        enable_ssh_gpu_limit = parse_bool_env("ENABLE_SSH_GPU_LIMIT", False)
+        enable_ssh_gpu_limit = parse_bool_env("ENABLE_SSH_GPU_LIMIT", True)
+        # A worker never falls back to a process session on its own: the supervisor
+        # that turns SSH on names the backend.
+        ssh_session_backend_raw = (
+            os.getenv("SSH_SESSION_BACKEND", "").strip().lower()
+            or SSHBackendName.DOCKER
+        )
+        try:
+            ssh_session_backend = SSHBackendName(ssh_session_backend_raw)
+        except ValueError:
+            raise SystemExit(
+                f"SSH_SESSION_BACKEND={ssh_session_backend_raw!r} is not one of "
+                f"{', '.join(sorted(SSHBackendName))}"
+            ) from None
+        ssh_relay_host = os.getenv("SSH_RELAY_HOST", "").strip() or None
+        ssh_stop_timeout_sec = parse_float_env(
+            "SSH_STOP_TIMEOUT_SEC", WorkerConfig.ssh_stop_timeout_sec
+        )
 
         telemetry = TelemetryConfig.from_env()
 
@@ -269,4 +306,21 @@ class WorkerConfig:
             network_mode=network_mode,
             container_name=container_name,
             ssh_network_name=ssh_network_name,
+            ssh_session_backend=ssh_session_backend,
+            ssh_relay_host=ssh_relay_host,
+            ssh_stop_timeout_sec=ssh_stop_timeout_sec,
+            state_dirs=_state_dirs_from_env(),
         )
+
+
+def _state_dirs_from_env() -> tuple[Path, ...]:
+    """Return the worker's home, each library cache directory set in the
+    environment, and the tool directories under the temp dir, as absolute paths."""
+    dirs = [Path.home()]
+    dirs.extend(
+        Path(value)
+        for name in _STATE_DIR_ENV_VARS
+        if (value := os.getenv(name, "").strip())
+    )
+    dirs.extend(Path(tempfile.gettempdir()) / name for name in _TEMP_STATE_DIR_NAMES)
+    return tuple(Path(os.path.abspath(path)) for path in dirs)

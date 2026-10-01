@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Final
+from unittest.mock import patch
 
 from lumid_hooks import PrincipalContext
 
@@ -21,6 +22,8 @@ from shared.tasks.worker_message import (
 )
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from worker.config import ObjectStoreConfig, WorkerConfig
+from worker.executors.ssh_executor import SSHExecutor
+from worker.executors.ssh_session import DockerSessionBackend
 
 DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     owner_principal=PrincipalContext(
@@ -103,6 +106,13 @@ def make_live_worker_config(tmp_path: Path, **overrides: Any) -> WorkerConfig:
         enable_mp_executors=True,
         **overrides,
     )
+
+
+def make_ssh_executor(config: WorkerConfig, **kwargs: Any) -> SSHExecutor:
+    """Build an SSH executor on the Docker session backend, whether or not a Docker
+    daemon is reachable from the test."""
+    with patch.object(DockerSessionBackend, "is_available", return_value=True):
+        return SSHExecutor(config, **kwargs)
 
 
 def make_worker_task_message(

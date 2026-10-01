@@ -542,9 +542,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Worker capabilities.** Beyond hardware fit, each worker advertises the set
   of task types it can service, and the dispatcher routes a task only to workers
   that advertise its type. A worker advertises a type only when its executor came
-  up — e.g. SSH requires a reachable Docker daemon, and training or omni types
-  require their (often GPU-only) dependencies — so a worker missing that executor
-  isn't a candidate, rather than being handed a task it would fail.
+  up — e.g. SSH requires a reachable Docker daemon or, on a root worker, `sshd`
+  and POSIX ACLs, and training or omni types require their (often GPU-only)
+  dependencies — so a worker missing that executor isn't a candidate, rather than
+  being handed a task it would fail. A worker that serves only interactive SSH
+  sessions receives no non-interactive SSH task.
 - **Worker status.** A worker reports whether it is busy, naming the dispatch the
   report concerns, and repeats it on every heartbeat. The dispatcher reserves a
   worker for a dispatch before publishing it. An idle report frees the worker only

@@ -1045,7 +1045,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             vars=[
                 EnvVar("ENABLE_SERVER_SSH_PROXY", "true", var_type=EnvVarType.BOOL),
                 EnvVar(
-                    "ENABLE_SERVER_SSH_CONNECTION_AUDIT",
+                    "ENABLE_SERVER_SSH_CONNECTION_REGISTRY",
                     "true",
                     var_type=EnvVarType.BOOL,
                 ),
@@ -1057,9 +1057,24 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar("ENABLE_SSH_BY_DEFAULT", "true", var_type=EnvVarType.BOOL),
                 EnvVar("SSH_DEFAULT_IMAGE"),
                 EnvVar("SSH_DEFAULT_USER"),
-                EnvVar("SSH_DEFAULT_TTL_SEC", var_type=EnvVarType.FLOAT, min_value=0),
-                EnvVar("SSH_DEFAULT_IDLE_SEC", var_type=EnvVarType.FLOAT, min_value=0),
-                EnvVar("SSH_MAX_TTL_SEC", var_type=EnvVarType.FLOAT, min_value=0),
+                EnvVar(
+                    "SSH_DEFAULT_TTL_SEC",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    description="SSH session TTL when spec.ttlSeconds is unset.",
+                ),
+                EnvVar(
+                    "SSH_DEFAULT_IDLE_SEC",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    description="Idle timeout when spec.idleTimeoutSeconds is unset.",
+                ),
+                EnvVar(
+                    "SSH_MAX_TTL_SEC",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    description="Upper bound on SSH session TTL.",
+                ),
                 EnvVar("SSH_POLL_INTERVAL_SEC", var_type=EnvVarType.FLOAT, min_value=0),
                 EnvVar("SSH_STOP_TIMEOUT_SEC", var_type=EnvVarType.FLOAT, min_value=0),
                 EnvVar(
@@ -1072,13 +1087,19 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar("SSH_MAX_PIDS", var_type=EnvVarType.INT, min_value=1),
                 EnvVar(
                     "ENABLE_SSH_GPU_LIMIT",
-                    "false",
+                    "true",
                     var_type=EnvVarType.BOOL,
                     description=[
                         "Whether to apply requested GPU limits to SSH tasks.",
                         "If false, SSH tasks are allocated all available GPUs",
                         "regardless of their resource requests.",
                     ],
+                ),
+                EnvVar(
+                    "SSH_SESSION_BACKEND",
+                    "auto",
+                    description="Sandbox an SSH session runs in.",
+                    choices=["auto", "docker", "process", "off"],
                 ),
             ],
         ),

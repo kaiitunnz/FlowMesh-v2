@@ -12,6 +12,15 @@ class WorkerStatus(StrEnum):
     BUSY = "BUSY"
 
 
+class SSHBackendName(StrEnum):
+    """Sandbox an SSH session runs in, as named by ``SSH_SESSION_BACKEND``."""
+
+    AUTO = "auto"
+    DOCKER = "docker"
+    PROCESS = "process"
+    OFF = "off"
+
+
 class SSHLimits(BaseModel):
     """Per-worker ceiling for resources accessible by SSH session containers.
 
@@ -39,6 +48,10 @@ class WorkerCapabilities(BaseModel):
         default_factory=frozenset,
         description="Types of tasks this worker can service.",
     )
+    ssh_noninteractive: bool = Field(
+        default=True,
+        description="Whether the worker's SSH sessions run non-interactive tasks.",
+    )
     resident_listener_port: int = Field(
         default=0,
         description=(
@@ -48,4 +61,4 @@ class WorkerCapabilities(BaseModel):
     )
 
 
-__all__ = ["SSHLimits", "WorkerCapabilities", "WorkerStatus"]
+__all__ = ["SSHBackendName", "SSHLimits", "WorkerCapabilities", "WorkerStatus"]

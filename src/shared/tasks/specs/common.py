@@ -5,7 +5,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
 from ...schemas.result import BaseExecutorResult
-from .._base import StrictBaseModel, TemplateBaseModel
+from .._base import RetiredFieldsModel, StrictBaseModel, TemplateBaseModel
 from ..components import (
     AdapterConfig,
     AdapterConfigTemplate,
@@ -163,7 +163,7 @@ def _merge_key_in(key: str | None, context: dict[str, Any]) -> str | None:
     return json.dumps([key, context], ensure_ascii=False, sort_keys=True)
 
 
-class TaskSpecStrictBase(StrictBaseModel):
+class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
     credential_fields: ClassVar[tuple[str, ...]] = ("output",)
@@ -210,7 +210,7 @@ class TaskSpecStrictBase(StrictBaseModel):
         return None
 
 
-class TaskSpecTemplateBase(TemplateBaseModel):
+class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
     credential_fields: ClassVar[tuple[str, ...]] = ("output",)

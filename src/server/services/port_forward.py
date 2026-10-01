@@ -18,7 +18,7 @@ from ..clients.redis import RedisClient, relay_down_key, relay_up_key
 from ..registries.node import NodeRegistry
 from ..registries.worker import WorkerRegistry
 from ..schemas.ssh import SSHConnectionInfo
-from .ssh_audit import SshAuditService
+from .ssh_connections import SshConnectionRegistry
 
 _STREAM_MAXLEN = 1000
 _READ_CHUNK = 16384
@@ -26,11 +26,9 @@ _DEFAULT_TIMEOUT_SEC = 5.0
 
 
 @dataclass(slots=True)
-class _AuditContext:
-    """Connection-audit metadata for a forwarded session.
-
-    Fed to the audit service when a client connects; not used by the forwarding path.
-    """
+class _ConnectionContext:
+    """Connection-registry metadata for a forwarded session, recorded when a client
+    connects."""
 
     workflow_id: str | None
     worker_id: str
@@ -62,7 +60,7 @@ class PortForwardSession:
     port: int
     """The local port on which the port-forward service listens for this session."""
     server: asyncio.AbstractServer | None
-    audit: _AuditContext
+    connection: _ConnectionContext
     registration: _Registration
 
 
@@ -72,7 +70,7 @@ class PortForwardService:
         redis_client: RedisClient,
         node_registry: NodeRegistry,
         worker_registry: WorkerRegistry,
-        ssh_audit: SshAuditService | None,
+        ssh_connections: SshConnectionRegistry | None,
         bind_host: str,
         public_host: str,
         port_start: int,
@@ -83,7 +81,7 @@ class PortForwardService:
         self._redis = redis_client
         self._node_registry = node_registry
         self._worker_registry = worker_registry
-        self._ssh_audit = ssh_audit
+        self._ssh_connections = ssh_connections
         self._logger = logger
         self._bind_host = bind_host
         self._public_host = public_host
@@ -261,7 +259,7 @@ class PortForwardService:
             await self._invalidate_registration(task_id, registration)
             raise RuntimeError(f"Assigned worker not found: {assigned_worker}")
 
-        audit = _AuditContext(
+        connection = _ConnectionContext(
             workflow_id=workflow_id,
             worker_id=assigned_worker,
             username=username,
@@ -276,9 +274,9 @@ class PortForwardService:
                 session.session_id = str(session_id)
                 session.target_host = str(target_host)
                 session.target_port = int(target_port)
-                session.audit.workflow_id = workflow_id
-                session.audit.worker_id = assigned_worker
-                session.audit.username = username
+                session.connection.workflow_id = workflow_id
+                session.connection.worker_id = assigned_worker
+                session.connection.username = username
                 session.registration = registration
             elif self._persistent_listeners:
                 session = self._create_persistent_session_locked(
@@ -287,7 +285,7 @@ class PortForwardService:
                     str(session_id),
                     str(target_host),
                     int(target_port),
-                    audit,
+                    connection,
                     registration,
                 )
                 self._sessions[task_id] = session
@@ -301,7 +299,7 @@ class PortForwardService:
                 str(session_id),
                 str(target_host),
                 int(target_port),
-                audit,
+                connection,
                 registration,
             )
             created = True
@@ -342,7 +340,7 @@ class PortForwardService:
         session_id: str,
         target_host: str,
         target_port: int,
-        audit: _AuditContext,
+        connection: _ConnectionContext,
         registration: _Registration,
     ) -> PortForwardSession:
         for port in range(self._port_start, self._port_end + 1):
@@ -354,7 +352,7 @@ class PortForwardService:
                     target_host=target_host,
                     target_port=target_port,
                     port=port,
-                    audit=audit,
+                    connection=connection,
                     registration=registration,
                     server=None,
                 )
@@ -367,7 +365,7 @@ class PortForwardService:
         session_id: str,
         target_host: str,
         target_port: int,
-        audit: _AuditContext,
+        connection: _ConnectionContext,
         registration: _Registration,
     ) -> PortForwardSession:
         unavailable_ports: set[int] = set()
@@ -418,7 +416,7 @@ class PortForwardService:
                         target_host=target_host,
                         target_port=target_port,
                         port=port,
-                        audit=audit,
+                        connection=connection,
                         registration=registration,
                         server=server,
                     )
@@ -550,20 +548,20 @@ class PortForwardService:
                 pass
             return
 
-        if self._ssh_audit is not None:
+        if self._ssh_connections is not None:
             try:
-                await self._ssh_audit.register_connection(
+                await self._ssh_connections.register_connection(
                     SSHConnectionInfo(
                         connection_id=connection_id,
                         access_mode="forward",
                         task_id=task_id,
-                        workflow_id=session.audit.workflow_id,
-                        worker_id=session.audit.worker_id,
+                        workflow_id=session.connection.workflow_id,
+                        worker_id=session.connection.worker_id,
                         node_id=session.node_id,
                         session_id=session.session_id,
                         username=(
                             username
-                            if (username := session.audit.username) is not None
+                            if (username := session.connection.username) is not None
                             else "flowmesh"
                         ),
                         source_ip=source_ip,
@@ -573,7 +571,7 @@ class PortForwardService:
                 )
             except Exception:
                 self._logger.debug(
-                    "Failed to register SSH audit connection %s",
+                    "Failed to register SSH connection %s",
                     connection_id,
                     exc_info=True,
                 )
@@ -635,12 +633,12 @@ class PortForwardService:
                 except (asyncio.CancelledError, Exception):
                     pass
         finally:
-            if self._ssh_audit is not None:
+            if self._ssh_connections is not None:
                 try:
-                    await self._ssh_audit.unregister_connection(connection_id)
+                    await self._ssh_connections.unregister_connection(connection_id)
                 except Exception:
                     self._logger.debug(
-                        "Failed to unregister SSH audit connection %s",
+                        "Failed to unregister SSH connection %s",
                         connection_id,
                         exc_info=True,
                     )

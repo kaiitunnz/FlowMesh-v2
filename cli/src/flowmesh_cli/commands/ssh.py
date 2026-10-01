@@ -402,7 +402,7 @@ def list_connections(
         None, "--query", "-q", help="Filter connections by key=value pairs"
     ),
 ) -> None:
-    """List active SSH connections audited by the server."""
+    """List active SSH connections in the server's connection registry."""
     client = FlowMesh()
     query_params = parse_query_filters(query)
     append_param(query_params, "connection_id", connection_id)

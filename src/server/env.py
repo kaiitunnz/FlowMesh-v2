@@ -3,6 +3,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from shared.schemas.worker import SSHBackendName
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils import parse_bool_env, parse_float_env, parse_int_env
 
@@ -86,7 +87,16 @@ SSH_STOP_TIMEOUT_SEC: float | None = parse_float_env("SSH_STOP_TIMEOUT_SEC")
 SSH_MAX_CPU: float | None = parse_float_env("SSH_MAX_CPU")
 SSH_MAX_MEMORY: str | None = os.getenv("SSH_MAX_MEMORY", "").strip() or None
 SSH_MAX_PIDS: int | None = parse_int_env("SSH_MAX_PIDS")
-ENABLE_SSH_GPU_LIMIT: bool = parse_bool_env("ENABLE_SSH_GPU_LIMIT", False)
+ENABLE_SSH_GPU_LIMIT: bool = parse_bool_env("ENABLE_SSH_GPU_LIMIT", True)
+_ssh_session_backend = os.getenv("SSH_SESSION_BACKEND", "").strip().lower() or None
+if _ssh_session_backend is not None and _ssh_session_backend not in set(SSHBackendName):
+    raise RuntimeError(
+        f"SSH_SESSION_BACKEND={_ssh_session_backend!r} is not one of "
+        f"{', '.join(sorted(SSHBackendName))}"
+    )
+SSH_SESSION_BACKEND: SSHBackendName | None = (
+    SSHBackendName(_ssh_session_backend) if _ssh_session_backend else None
+)
 
 LOG_FILE: str = os.getenv("LOG_FILE", "server.log")
 LOG_MAX_BYTES: int = int(os.getenv("LOG_MAX_BYTES", 5_242_880))

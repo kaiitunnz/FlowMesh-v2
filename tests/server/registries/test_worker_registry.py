@@ -1,5 +1,7 @@
 """Tests for worker hardware satisfaction and sorting."""
 
+import pytest
+
 from server.registries.worker import (
     Worker,
     _parse_worker_from_redis,
@@ -267,6 +269,45 @@ class TestCapabilitySatisfies:
         )
         assert capability_satisfies(w, _task(cpu=2)) is True
         assert capability_satisfies(w, _ssh_task()) is False
+
+
+def _interactive_ssh_task() -> TaskEnvelopeStrict:
+    return TaskEnvelopeStrict.model_validate(
+        {
+            "apiVersion": "flowmesh/v1",
+            "kind": "Task",
+            "spec": {"taskType": "ssh", "authorizedKeys": ["ssh-ed25519 AAAA key"]},
+        }
+    )
+
+
+class TestSSHInteractivity:
+    @pytest.mark.parametrize(
+        ("noninteractive", "places_batch"), [(True, True), (False, False)]
+    )
+    def test_a_batch_ssh_task_goes_only_where_sessions_run_one(
+        self, noninteractive: bool, places_batch: bool
+    ) -> None:
+        w = _worker(
+            capabilities=WorkerCapabilities(
+                supported_task_types=frozenset({TaskType.SSH}),
+                ssh_noninteractive=noninteractive,
+            )
+        )
+
+        assert capability_satisfies(w, _ssh_task()) is places_batch
+        assert capability_satisfies(w, _interactive_ssh_task()) is True
+
+    def test_a_worker_that_reports_no_interactivity_runs_both(self) -> None:
+        raw = {
+            "status": "IDLE",
+            "capabilities_json": '{"supported_task_types": ["ssh"]}',
+        }
+
+        w = _parse_worker_from_redis("w-1", raw)
+
+        assert w is not None
+        assert capability_satisfies(w, _ssh_task()) is True
 
 
 class TestParseCapabilities:

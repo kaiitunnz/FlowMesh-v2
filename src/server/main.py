@@ -81,7 +81,7 @@ from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
-from .services.ssh_audit import SshAuditService
+from .services.ssh_connections import SshConnectionRegistry
 from .services.task_events import TaskEventPublisher
 from .services.watchdog import WorkerWatchdog
 from .startup import (
@@ -168,7 +168,7 @@ WORKER_REGISTRY = None
 FINALIZATION_INDEX: FinalizationIndex | None = None
 RUNTIME = None
 DISPATCHER = None
-SSH_AUDIT_SERVICE = None
+SSH_CONNECTION_REGISTRY = None
 PORT_FORWARD_SERVICE = None
 WATCHDOG = None
 EVENT_MONITOR = None
@@ -382,15 +382,15 @@ if IS_ROOT_NODE:
     )
 
     _pf_cfg = config.port_forward
-    if _pf_cfg.ssh_audit_enabled:
-        SSH_AUDIT_SERVICE = SshAuditService(REDIS_CLIENT)
+    if _pf_cfg.ssh_connection_registry_enabled:
+        SSH_CONNECTION_REGISTRY = SshConnectionRegistry(REDIS_CLIENT)
 
     if _pf_cfg.enabled:
         PORT_FORWARD_SERVICE = PortForwardService(
             redis_client=REDIS_CLIENT,
             node_registry=NODE_REGISTRY,
             worker_registry=WORKER_REGISTRY,
-            ssh_audit=SSH_AUDIT_SERVICE,
+            ssh_connections=SSH_CONNECTION_REGISTRY,
             bind_host=_pf_cfg.bind_host,
             public_host=_pf_cfg.public_host,
             port_start=_pf_cfg.port_start,
@@ -765,7 +765,7 @@ app.state.workflow_registry = WORKFLOW_REGISTRY
 app.state.worker_registry = WORKER_REGISTRY
 app.state.watchdog = WATCHDOG
 app.state.port_forward = PORT_FORWARD_SERVICE
-app.state.ssh_audit = SSH_AUDIT_SERVICE
+app.state.ssh_connections = SSH_CONNECTION_REGISTRY
 app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_NODE
 app.state.resident_control = RESIDENT_CONTROL
 app.state.gated_serve = GATED_SERVE

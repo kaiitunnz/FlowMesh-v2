@@ -17,7 +17,7 @@ from shared.tasks.worker_message import (
 )
 from tests.worker.factories import make_worker_config, make_worker_hardware
 from worker.config import WorkerConfig
-from worker.executors.ssh_executor import SSHConfig
+from worker.executors.ssh_session import SSHConfig
 
 
 def _spec(resources: dict[str, object] | None = None) -> SSHSpecStrict:
@@ -74,7 +74,7 @@ class TestSSHConfigResolveLimits:
     def test_spec_above_cap_clamps_and_warns(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        caplog.set_level(logging.WARNING, logger="worker.executors.ssh_executor")
+        caplog.set_level(logging.WARNING, logger="worker.executors.ssh_session.config")
         cfg = SSHConfig.from_spec(
             _spec({"hardware": {"cpu": 8, "memory": "16Gi"}}),
             make_worker_config(
@@ -175,6 +175,32 @@ class TestSSHConfigResolveGpuDevices:
         monkeypatch.setenv("WORKER_HOST_GPU_ID", "2,3")
         cfg = SSHConfig.from_spec(_spec(), _worker_config_gpu_limit())
         assert cfg.gpu_device_ids == ["2", "3"]
+
+    def test_a_worker_without_passed_ids_serves_its_detected_gpus(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("WORKER_HOST_GPU_ID", raising=False)
+        hardware = make_worker_hardware(
+            [
+                GpuInfo(
+                    index=0, name="T4", uuid="GPU-t4", memory_total_bytes=16 * 1024**3
+                ),
+                GpuInfo(
+                    index=1,
+                    name="A100",
+                    uuid="GPU-a100",
+                    memory_total_bytes=80 * 1024**3,
+                ),
+            ]
+        )
+
+        cfg = SSHConfig.from_spec(
+            _spec({"hardware": {"gpu": {"count": 1, "type": "A100"}}}),
+            _worker_config_gpu_limit(),
+            hardware=hardware,
+        )
+
+        assert cfg.gpu_device_ids == ["GPU-a100"]
 
     def test_count_only_slices_first_n(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("WORKER_HOST_GPU_ID", "2,3,4,5")
