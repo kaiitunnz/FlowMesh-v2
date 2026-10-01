@@ -8,7 +8,7 @@ from typing import Any, cast
 import pytest
 
 from shared.schemas.artifact import ArtifactContext
-from worker.executors.base_executor import TaskReference
+from worker.executors.base_executor import ExecutionError, TaskReference
 from worker.executors.utils import checkpoints
 
 
@@ -113,6 +113,36 @@ class TestMaybeUploadArtifacts:
 
         assert checkpoints.maybe_upload_artifacts(_task(), out_dir) == ["report.txt"]
         assert bodies == {"report.txt": b"ok"}
+
+    @pytest.mark.skipif(os.getuid() == 0, reason="root reads any file")
+    @pytest.mark.parametrize("skip_errors", [False, True])
+    def test_a_file_that_cannot_be_read_follows_the_error_policy(
+        self, tmp_path: Path, monkeypatch, skip_errors: bool
+    ) -> None:
+        out_dir = tmp_path / "task-1"
+        artifacts_dir = out_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "report.txt").write_text("ok", encoding="utf-8")
+        (artifacts_dir / "unreadable.bin").write_text("x", encoding="utf-8")
+        (artifacts_dir / "unreadable.bin").chmod(0)
+
+        class _Response:
+            def raise_for_status(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            checkpoints.requests, "request", lambda *args, **kwargs: _Response()
+        )
+
+        if skip_errors:
+            uploaded = checkpoints.maybe_upload_artifacts(
+                _task(), out_dir, skip_errors=True
+            )
+            assert uploaded == ["report.txt"]
+        else:
+            with pytest.raises(ExecutionError, match="unreadable.bin") as raised:
+                checkpoints.maybe_upload_artifacts(_task(), out_dir)
+            assert raised.value.retryable
 
     def test_local_destination_is_noop(self, tmp_path: Path, monkeypatch) -> None:
         out_dir = tmp_path / "task-1"
