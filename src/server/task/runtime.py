@@ -2645,6 +2645,12 @@ class TaskRuntime:
     def _settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         with self._cv:
             pending = self._pending_ops.pop(outcome.permit_id, None)
+            # A re-mint of the same operation is settled by this outcome too.
+            occurrence = (outcome.agent_task_id, outcome.call_correlation)
+            for permit_id, op in list(self._pending_ops.items()):
+                if op[:2] == occurrence:
+                    pending = pending or op
+                    del self._pending_ops[permit_id]
             worker_id = (
                 pending[2]
                 if pending

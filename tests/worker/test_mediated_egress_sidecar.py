@@ -194,6 +194,23 @@ def test_permit_replay_is_ignored() -> None:
     h.stop()
 
 
+def test_a_re_minted_permit_gets_the_outcome_already_produced() -> None:
+    out = ToolOutcome(status=ToolOutcomeStatus.QUOTA, value="q")
+    h = _Harness(out)
+    h.stash()
+    h.sidecar.submit_permit(_permit())
+    first = h.report()
+
+    again = _permit(invocation_id="inv-2")
+    h.sidecar.submit_permit(again)
+    second = h.report()
+
+    assert h.egress.calls == 1
+    assert (second.permit_id, second.invocation_id) == (again.permit_id, "inv-2")
+    assert second.outcome == first.outcome == out
+    h.stop()
+
+
 def test_redrive_after_materialize_recovers_the_prior_outcome() -> None:
     store = InMemoryContentStore()
     h = _Harness(

@@ -12,6 +12,11 @@ from google.protobuf.empty_pb2 import Empty
 
 from server.task.models import TaskStatus
 from shared.schemas.event import parse_event
+from shared.tools.contract import (
+    MediatedOperationOutcome,
+    ToolOutcome,
+    ToolOutcomeStatus,
+)
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import LINEAR, FakeRegistry
@@ -46,6 +51,31 @@ def test_an_attached_worker_gets_its_pending_operation_re_minted() -> None:
             first["call_correlation"],
         )
         assert list(runtime._pending_ops) == [again["permit_id"]]
+
+    asyncio.run(run())
+
+
+def test_the_first_permit_s_outcome_settles_its_re_mint_too() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _dispatch_agent(runtime, writer)
+        [first] = _permit_frames(runtime)
+        runtime.redeliver_to_worker("wkr-1")
+
+        runtime.settle_mediated_operation(
+            MediatedOperationOutcome(
+                permit_id=first["permit_id"],
+                agent_task_id=writer,
+                call_correlation=first["call_correlation"],
+                invocation_id=first["invocation_id"],
+                idempotency_key=first["idempotency_key"],
+                outcome=ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value="sunny"),
+            )
+        )
+
+        assert runtime._pending_ops == {}
 
     asyncio.run(run())
 
