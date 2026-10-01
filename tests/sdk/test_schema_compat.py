@@ -326,3 +326,8 @@ def test_worker_status_superset() -> None:
     expected = {"STARTING", "IDLE", "BUSY", "STOPPING", "STOPPED", "UNKNOWN"}
     sdk_values = {m.value for m in WorkerStatus}
     assert expected <= sdk_values
+
+
+def test_worker_status_tolerates_unknown_values() -> None:
+    """A status from a newer server reads as UNKNOWN rather than failing."""
+    assert WorkerStatus("SOME_FUTURE_STATE") is WorkerStatus.UNKNOWN
