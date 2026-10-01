@@ -70,6 +70,8 @@ class InterruptMessage(BaseModel):
     task_id: str
     worker_id: str
     reason: str = "cancelled"
+    # The one dispatch of the task it ends; None for whichever dispatch runs it.
+    dispatch_id: str | None = None
 
 
 class StopMessage(BaseModel):
@@ -77,6 +79,8 @@ class StopMessage(BaseModel):
     task_id: str
     worker_id: str
     reason: str = "stopped"
+    # The one dispatch of the task it stops; None for whichever dispatch runs it.
+    dispatch_id: str | None = None
 
 
 class TaskMessage(BaseModel):

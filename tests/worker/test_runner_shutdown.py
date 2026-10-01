@@ -197,13 +197,13 @@ class _Recording(_Echo):
 def test_a_stop_landing_before_the_executor_binds_reaches_it(tmp_path: Path) -> None:
     executor = _Recording()
     runner = _runner(tmp_path, executor, "tsk-1")
-    stops: list[tuple[str, str]] = []
+    stops: list[tuple[str, str, str | None]] = []
     runner.lifecycle.client.iter_stops.side_effect = lambda: (  # type: ignore[attr-defined]
         [stops.pop()] if stops else []
     )
 
     def stop_while_hydrating(_msg: Any) -> None:
-        stops.append(("tsk-1", "user"))
+        stops.append(("tsk-1", "user", None))
         # The interrupt monitor polls every half second.
         time.sleep(1.2)
 

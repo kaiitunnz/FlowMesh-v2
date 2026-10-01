@@ -1,11 +1,12 @@
-"""A worker that re-registers gives up the dispatch it was running."""
+"""A worker never runs a dispatch control ended or its re-registration gave up."""
 
 import subprocess  # nosec B404
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
@@ -108,6 +109,67 @@ def test_abandoning_another_dispatch_leaves_the_running_one(tmp_path: Path) -> N
     assert executor.running.wait(timeout=10)
 
     runner.abandon_running("dsp-1")
+
+    assert executor.child is not None and executor.child.poll() is None
+    executor.child.terminate()
+    loop.join(timeout=10)
+
+
+class _Recording(Executor):
+    name = "echo"
+
+    def __init__(self) -> None:
+        self.ran: list[str | None] = []
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        self.ran.append(task.dispatch_id)
+        return BaseExecutorResult()
+
+
+def _deliver_interrupt(runner: Runner, interrupt: tuple[str, str, str | None]) -> None:
+    pending = [interrupt]
+    runner.lifecycle.client.iter_interrupts.side_effect = lambda: (  # type: ignore[attr-defined]
+        [pending.pop()] if pending else []
+    )
+
+
+def _until(condition: Any, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_an_interrupt_for_a_received_dispatch_ends_only_that_dispatch(
+    tmp_path: Path,
+) -> None:
+    executor = _Recording()
+    runner = _runner(tmp_path, executor, ["dsp-1", "dsp-2"])
+    _deliver_interrupt(runner, ("tsk-1", "lost", "dsp-1"))
+
+    def revoked_while_hydrating(msg: Any) -> None:
+        if msg.dispatch_id == "dsp-1":
+            _until(lambda: "dsp-1" in runner._revoked_dispatches)
+
+    with patch.object(
+        runner._input_hydrator, "hydrate", side_effect=revoked_while_hydrating
+    ):
+        runner.start()
+
+    assert executor.ran == ["dsp-2"]
+
+
+def test_an_interrupt_for_another_dispatch_leaves_the_running_one(
+    tmp_path: Path,
+) -> None:
+    executor = _ChildProcess()
+    runner = _runner(tmp_path, executor, ["dsp-2"])
+    _deliver_interrupt(runner, ("tsk-1", "lost", "dsp-1"))
+    loop = threading.Thread(target=runner.start, daemon=True)
+    loop.start()
+    assert executor.running.wait(timeout=10)
+
+    _until(lambda: "dsp-1" in runner._revoked_dispatches)
 
     assert executor.child is not None and executor.child.poll() is None
     executor.child.terminate()

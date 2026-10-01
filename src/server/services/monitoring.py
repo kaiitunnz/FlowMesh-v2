@@ -1132,6 +1132,8 @@ class EventMonitor:
 
     def _fail_ssh_task(self, task_id: str, worker_id: str | None, reason: str) -> None:
         """Fail a task whose session cannot be reached and stop its executor."""
+        record = self._runtime.get_record(task_id)
+        dispatch_id = record.dispatch_id if record is not None else None
         self._dispatcher.fail_task(task_id, reason, worker_id=worker_id)
         if (
             not worker_id
@@ -1141,7 +1143,12 @@ class EventMonitor:
         try:
             self._worker_registry.publish_interrupt(
                 worker,
-                InterruptMessage(task_id=task_id, worker_id=worker.id, reason=reason),
+                InterruptMessage(
+                    task_id=task_id,
+                    worker_id=worker.id,
+                    reason=reason,
+                    dispatch_id=dispatch_id,
+                ),
             )
         except Exception as exc:
             self._logger.warning(

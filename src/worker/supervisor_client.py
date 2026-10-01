@@ -98,8 +98,9 @@ class SupervisorClient:
         # The task being run and its dispatch id: tasks run one at a time, in the order
         # this client yields them, so the task's events name the dispatch running it.
         self._running_dispatch: tuple[str, str] | None = None
-        self._interrupt_queue: queue.Queue[tuple[str, str]] = queue.Queue()
-        self._stop_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        # (task id, reason, dispatch id or None for whichever dispatch runs the task)
+        self._interrupt_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
+        self._stop_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
         self._mediated_op_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
         self._event_queue: queue.Queue[tuple[int, dict[str, Any]] | object] = (
             queue.Queue()
@@ -439,14 +440,14 @@ class SupervisorClient:
         before the task stream takes any work under the new registration."""
         self._on_reregistered = callback
 
-    def iter_interrupts(self) -> Iterable[tuple[str, str]]:
+    def iter_interrupts(self) -> Iterable[tuple[str, str, str | None]]:
         while True:
             try:
                 yield self._interrupt_queue.get_nowait()
             except queue.Empty:
                 break
 
-    def iter_stops(self) -> Iterable[tuple[str, str]]:
+    def iter_stops(self) -> Iterable[tuple[str, str, str | None]]:
         while True:
             try:
                 yield self._stop_queue.get_nowait()
@@ -645,12 +646,18 @@ class SupervisorClient:
                 self._task_ready.set()
                 for message in self._stub.StreamTasks(Empty(), metadata=metadata):
                     if message.HasField("interrupt"):
+                        interrupt = message.interrupt
                         self._interrupt_queue.put(
-                            (message.interrupt.task_id, message.interrupt.reason)
+                            (
+                                interrupt.task_id,
+                                interrupt.reason,
+                                interrupt.dispatch_id or None,
+                            )
                         )
                     elif message.HasField("stop"):
+                        stop = message.stop
                         self._stop_queue.put(
-                            (message.stop.task_id, message.stop.reason)
+                            (stop.task_id, stop.reason, stop.dispatch_id or None)
                         )
                     elif message.HasField("mediated_op"):
                         self._mediated_op_queue.put(

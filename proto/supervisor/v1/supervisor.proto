@@ -34,12 +34,16 @@ message RegisterResponse {
 message InterruptMessage {
   string task_id = 1;
   string reason = 2;
+  // The one dispatch of the task it ends; empty for whichever dispatch runs it.
+  string dispatch_id = 3;
 }
 
 // Graceful stop payload emitted by the supervisor.
 message StopMessage {
   string task_id = 1;
   string reason = 2;
+  // The one dispatch of the task it stops; empty for whichever dispatch runs it.
+  string dispatch_id = 3;
 }
 
 // Task payload emitted by the supervisor.

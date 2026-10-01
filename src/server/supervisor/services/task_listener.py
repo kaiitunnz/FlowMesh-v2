@@ -9,6 +9,7 @@ from shared.schemas.command import (
     StopMessage,
     TaskMessage,
 )
+from shared.tasks.worker_message import WorkerTaskMessage
 
 from ...clients.redis import SyncRedisClient, node_dispatch_channel
 from .pubsub_reader import RebindableReader
@@ -157,6 +158,10 @@ class TaskListener(RebindableReader):
                 "Dropping dispatch for unregistered worker: %s", worker_id
             )
             return False
+        if payload.get("kind") in ("interrupt", "stop") and (
+            dispatch_id := payload.get("dispatch_id")
+        ):
+            _withdraw_dispatch(q, dispatch_id)
         q.put_nowait(payload)
         return True
 
@@ -188,6 +193,7 @@ class TaskListener(RebindableReader):
                     "kind": "interrupt",
                     "task_id": interrupt_message.task_id,
                     "reason": interrupt_message.reason,
+                    "dispatch_id": interrupt_message.dispatch_id,
                 }
             case "stop":
                 stop_message = StopMessage.model_validate(data)
@@ -196,6 +202,7 @@ class TaskListener(RebindableReader):
                     "kind": "stop",
                     "task_id": stop_message.task_id,
                     "reason": stop_message.reason,
+                    "dispatch_id": stop_message.dispatch_id,
                 }
             case "mediated_op":
                 op_message = MediatedOpMessage.model_validate(data)
@@ -211,3 +218,20 @@ class TaskListener(RebindableReader):
                 )
                 return
         loop.call_soon_threadsafe(self._deliver, worker_id, payload)
+
+
+def _withdraw_dispatch(q: DispatchQueue, dispatch_id: str) -> None:
+    """Remove the still-queued task frame of one dispatch, so a dispatch ended before
+    its worker took it never reaches the worker."""
+    kept: list[dict[str, Any] | None] = []
+    while not q.empty():
+        item = q.get_nowait()
+        if (
+            item is not None
+            and "kind" not in item
+            and WorkerTaskMessage.wire_dispatch_id(item) == dispatch_id
+        ):
+            continue
+        kept.append(item)
+    for item in kept:
+        q.put_nowait(item)

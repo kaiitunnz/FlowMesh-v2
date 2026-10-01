@@ -5918,7 +5918,10 @@ class TaskRuntime:
         if not record.assigned_worker or record.merged_parent_id:
             return None
         return InterruptMessage(
-            task_id=record.task_id, worker_id=record.assigned_worker, reason=reason
+            task_id=record.task_id,
+            worker_id=record.assigned_worker,
+            reason=reason,
+            dispatch_id=record.dispatch_id,
         )
 
     def _interrupt_cancelling_locked(self, workflow_id: str) -> None:

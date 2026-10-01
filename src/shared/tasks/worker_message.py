@@ -25,7 +25,7 @@ from shared.tasks import (
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
-from shared.utils.json import dedup_json, restore_json
+from shared.utils.json import dedup_json, lookup_deduped_json, restore_json
 
 
 class WorkerTaskMessage(BaseModel):
@@ -157,6 +157,14 @@ class WorkerTaskMessage(BaseModel):
         """Whether this dispatch runs no local model: an input preparation, or a
         resident service episode that carries its invocation to a replica."""
         return self.input_preparation or self.service_episode is not None
+
+    @staticmethod
+    def wire_dispatch_id(payload: dict[str, Any]) -> str | None:
+        """Read the dispatch id from a message as it travels, without parsing it."""
+        if set(payload) == {"content", "data"}:
+            ref = payload["data"].get("dispatch_id")
+            return None if ref is None else lookup_deduped_json(payload, "dispatch_id")
+        return payload.get("dispatch_id")
 
     @model_validator(mode="before")
     @classmethod

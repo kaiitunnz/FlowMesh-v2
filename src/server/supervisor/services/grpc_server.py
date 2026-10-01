@@ -298,6 +298,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                         interrupt=supervisor_pb2.InterruptMessage(
                             task_id=str(event["task_id"]),
                             reason=str(event["reason"]),
+                            dispatch_id=str(event.get("dispatch_id") or ""),
                         )
                     )
                 elif event.get("kind") == "stop":
@@ -305,6 +306,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                         stop=supervisor_pb2.StopMessage(
                             task_id=str(event["task_id"]),
                             reason=str(event["reason"]),
+                            dispatch_id=str(event.get("dispatch_id") or ""),
                         )
                     )
                 elif event.get("kind") == "mediated_op":
