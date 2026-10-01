@@ -918,6 +918,8 @@ class EventMonitor:
                         event.payload["observation"]
                     )
                 )
+            case "ATTACHED":
+                self._runtime.redeliver_to_worker((event.worker_id or "").strip())
             case "UNREGISTER":
                 worker_id = (event.worker_id or "").strip()
                 self._worker_registry.unregister_workers(worker_id)

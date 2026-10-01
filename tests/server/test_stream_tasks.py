@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from threading import Lock
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from google.protobuf.empty_pb2 import Empty
@@ -14,6 +15,7 @@ from server.clients.redis import SyncRedisClient
 from server.supervisor.adapters.base import WorkerAdapter, WorkerTokenType
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
+from server.supervisor.services.relay_service import RelayService
 from server.supervisor.services.task_listener import TaskListener
 from shared.grpc.supervisor.v1 import supervisor_pb2
 
@@ -61,6 +63,7 @@ def _servicer(listener: TaskListener) -> tuple[SupervisorServicer, WorkerRegistr
     servicer = SupervisorServicer.__new__(SupervisorServicer)
     servicer._registry = registry
     servicer._task_listener = listener
+    servicer._relay_service = cast(RelayService, MagicMock())
     servicer._redis = cast(SyncRedisClient, _FakeRedis())
     servicer._node_id = "nde-1"
     servicer._node_alias = "box"

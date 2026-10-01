@@ -2275,6 +2275,38 @@ class TaskRuntime:
         finally:
             self._release_pending_terminations()
 
+    def redeliver_to_worker(self, worker_id: str) -> None:
+        """Re-relay what control holds for a worker whose task stream attached.
+
+        A frame relayed while the worker had no stream attached may be lost. Each
+        pending mediated operation the worker originated is re-minted, and the worker
+        drops one it already runs; each task being cancelled there is interrupted
+        again, keyed to its dispatch. Task dispatches are not re-relayed: a lost one
+        resolves as lost.
+        """
+        with self._cv:
+            pending = {
+                (task_id, call)
+                for task_id, call, op_worker in self._pending_ops.values()
+                if op_worker == worker_id
+            }
+            interrupts = [
+                interrupt
+                for record in self._tasks.values()
+                if record.assigned_worker == worker_id
+                and record.status == TaskStatus.CANCELLING
+                and (
+                    interrupt := self._interrupt_for(
+                        record, record.error or "cancelled"
+                    )
+                )
+            ]
+            if interrupts:
+                self._pending_terminations.append(_Termination(interrupts, []))
+        self._release_pending_terminations()
+        for task_id, call in sorted(pending):
+            self.redispatch_episode_invocation(task_id, call)
+
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
 
