@@ -791,11 +791,13 @@ class TestLoginEnvironment:
             {
                 "BAD NAME": "x",
                 "EVIL\nPermitRootLogin": "yes",
+                "TRAILING\n": "x",
                 "QUOTED": 'a"b',
                 "OK": "fine",
             },
         )
         assert env["FLOWMESH_PERMIT_ENV"] == "OK"
+        assert "TRAILING" not in env["AUTHORIZED_KEYS"]
         assert "PermitRootLogin" not in env["AUTHORIZED_KEYS"]
         assert 'a"b' not in env["AUTHORIZED_KEYS"]
 

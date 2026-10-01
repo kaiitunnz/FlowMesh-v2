@@ -47,7 +47,7 @@ NETWORK_SCOPE = "network"
 TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 _TCP_STATE_ESTABLISHED = "01"
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ENV_VALUE_FORBIDDEN = ('"', "\\", "\n", "\r")
 _DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # A directory removed or swapped for a link mid-walk.
@@ -494,7 +494,7 @@ def render_authorized_keys(
 
 def is_safe_env_entry(name: str, value: str) -> bool:
     """Return whether an env entry can ride an ``environment=`` key option."""
-    if not _ENV_NAME_RE.match(name):
+    if not _ENV_NAME_RE.fullmatch(name):
         logger.warning("Dropping SSH session env var with unsupported name %r", name)
         return False
     if any(ch in value for ch in _ENV_VALUE_FORBIDDEN):
