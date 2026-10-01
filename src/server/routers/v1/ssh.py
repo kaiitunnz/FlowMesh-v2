@@ -125,7 +125,15 @@ async def _relay_websocket(websocket: WebSocket, channel: ByteStreamChannel) -> 
 
     async def client_to_relay() -> None:
         while True:
-            await channel.send(await websocket.receive_bytes())
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            if (data := message.get("bytes")) is None:
+                await websocket.close(
+                    code=status.WS_1003_UNSUPPORTED_DATA, reason="binary frames only"
+                )
+                return
+            await channel.send(data)
 
     tasks = {
         asyncio.ensure_future(relay_to_client()),

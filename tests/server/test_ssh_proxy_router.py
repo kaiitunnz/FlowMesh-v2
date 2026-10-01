@@ -144,6 +144,21 @@ def test_an_aborted_relay_closes_the_websocket() -> None:
     relay.release.assert_awaited_once()
 
 
+def test_a_text_frame_closes_the_websocket_as_unsupported_data(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    channel = _Channel()
+    relay = _relay(channel)
+    client = TestClient(_make_app(_record(), relay))
+    with client.websocket_connect(f"{PREFIX}/ssh/tasks/tsk-abc/proxy") as websocket:
+        websocket.send_text("not ssh")
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_bytes()
+    assert closed.value.code == 1003
+    relay.release.assert_awaited_once_with(channel, abort=True)
+    assert "Traceback" not in caplog.text
+
+
 def test_a_relayed_connection_is_listed_while_it_lasts() -> None:
     channel = _Channel()
     connections = MagicMock()
