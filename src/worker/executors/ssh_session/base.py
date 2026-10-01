@@ -11,6 +11,7 @@ import io
 import ipaddress
 import logging
 import os
+import re
 import shutil
 import socket
 import tarfile
@@ -46,6 +47,8 @@ NETWORK_SCOPE = "network"
 TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 _TCP_STATE_ESTABLISHED = "01"
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_VALUE_FORBIDDEN = ('"', "\\", "\n", "\r")
 _DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # A directory removed or swapped for a link mid-walk.
 _GONE_ERRNOS = frozenset({errno.ENOENT, errno.ELOOP, errno.ENOTDIR})
@@ -223,8 +226,15 @@ class SSHSessionBackend(ABC):
         env: dict[str, str] = {}
         if bootstrap_entrypoint:
             env["SSH_USER"] = user
-            if authorized_keys:
-                env["AUTHORIZED_KEYS"] = "\n".join(authorized_keys)
+            # sshd starts a login with a clean environment, so the task's env rides
+            # each key as an option, under the names the entrypoint permits.
+            rendered, exported = render_authorized_keys(
+                authorized_keys, {str(k): str(v) for k, v in extra_env.items()}
+            )
+            if rendered:
+                env["AUTHORIZED_KEYS"] = rendered.rstrip("\n")
+            if exported:
+                env["FLOWMESH_PERMIT_ENV"] = ",".join(exported)
             env["SSH_UID"] = str(os.getuid())
             env["SSH_GID"] = str(os.getgid())
         if gpu_device_ids and (visible := self._cuda_visible_devices(gpu_device_ids)):
@@ -456,3 +466,38 @@ def resolve_tailnet_address() -> str | None:
             if parsed in TAILNET_NETWORK:
                 return str(parsed)
     return None
+
+
+def render_authorized_keys(
+    authorized_keys: list[str], environment: dict[str, str]
+) -> tuple[str, list[str]]:
+    """Render authorized_keys, carrying session env as per-key options.
+
+    sshd does not pass its own environment into a login shell, so the values the
+    session is supposed to see travel as ``environment=`` options on each key.
+    Returns the rendered file and the names exported, which
+    ``PermitUserEnvironment`` must list.
+    """
+    exported = [
+        name
+        for name, value in sorted(environment.items())
+        if is_safe_env_entry(name, value)
+    ]
+    options = ",".join(f'environment="{name}={environment[name]}"' for name in exported)
+    lines = [
+        f"{options} {key}" if options else key
+        for raw_key in authorized_keys
+        if (key := raw_key.strip())
+    ]
+    return ("\n".join(lines) + "\n" if lines else "", exported if lines else [])
+
+
+def is_safe_env_entry(name: str, value: str) -> bool:
+    """Return whether an env entry can ride an ``environment=`` key option."""
+    if not _ENV_NAME_RE.match(name):
+        logger.warning("Dropping SSH session env var with unsupported name %r", name)
+        return False
+    if any(ch in value for ch in _ENV_VALUE_FORBIDDEN):
+        logger.warning("Dropping SSH session env var %s: unsupported value", name)
+        return False
+    return True

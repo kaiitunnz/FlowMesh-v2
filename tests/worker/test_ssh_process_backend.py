@@ -53,6 +53,7 @@ from worker.executors.ssh_session.base import (
     extract_output_archive,
     iter_tree,
     path_size_bytes,
+    render_authorized_keys,
 )
 from worker.executors.ssh_session.config import SSHOutputConfig
 from worker.main import build_capabilities
@@ -1027,7 +1028,7 @@ def test_helpers_start_from_a_scrubbed_environment(
 
 
 def test_the_session_env_travels_on_its_keys() -> None:
-    rendered, exported = process_module._render_authorized_keys(
+    rendered, exported = render_authorized_keys(
         ["ssh-ed25519 AAAA one", " "],
         {"TOKEN": "abc", "BAD NAME": "x", "QUOTED": 'a"b'},
     )

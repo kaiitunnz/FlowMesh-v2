@@ -58,6 +58,7 @@ from ..base import (
     is_ssh_ready,
     path_size_bytes,
     read_local_proc_net_tcp,
+    render_authorized_keys,
     resolve_tailnet_address,
 )
 from ..config import SAFE_MOUNT_ROOT, normalize_mount_path
@@ -91,8 +92,6 @@ _TERMINATE_GRACE_SEC = 5.0
 _KILL_POLL_SEC = 0.05
 # The reader streams without pause, so this long without a byte means it is stuck.
 _ARCHIVE_IDLE_TIMEOUT_SEC = 60.0
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_ENV_VALUE_FORBIDDEN = ('"', "\\", "\n", "\r")
 _PORT_ATTEMPTS = 3
 _READY_PROBE_SEC = 2.0
 _READY_POLL_SEC = 0.5
@@ -344,7 +343,7 @@ class ProcessSessionBackend(SSHSessionBackend):
             bin_dir = _install_finish_helper(session_dir, finish_sentinel)
             environment["PATH"] = f"{bin_dir.as_posix()}:{_DEFAULT_SESSION_PATH}"
             authorized_keys = session_dir / _AUTHORIZED_KEYS_NAME
-            rendered, exported = _render_authorized_keys(
+            rendered, exported = render_authorized_keys(
                 cfg.authorized_keys, environment
             )
             # It carries the session's env; sshd reads it as the session user.
@@ -1475,40 +1474,6 @@ def _render_sshd_config(
             "",
         )
     )
-
-
-def _render_authorized_keys(
-    authorized_keys: list[str], environment: dict[str, str]
-) -> tuple[str, list[str]]:
-    """Render authorized_keys, carrying session env as per-key options.
-
-    sshd does not pass its own environment into a login shell, so the values the
-    session is supposed to see travel as ``environment=`` options on each key.
-    Returns the rendered file and the names exported, which
-    ``PermitUserEnvironment`` must list.
-    """
-    exported = [
-        name
-        for name, value in sorted(environment.items())
-        if _is_safe_env_entry(name, value)
-    ]
-    options = ",".join(f'environment="{name}={environment[name]}"' for name in exported)
-    lines = [
-        f"{options} {key}" if options else key
-        for raw_key in authorized_keys
-        if (key := raw_key.strip())
-    ]
-    return ("\n".join(lines) + "\n" if lines else "", exported if lines else [])
-
-
-def _is_safe_env_entry(name: str, value: str) -> bool:
-    if not _ENV_NAME_RE.match(name):
-        logger.warning("Dropping SSH session env var with unsupported name %r", name)
-        return False
-    if any(ch in value for ch in _ENV_VALUE_FORBIDDEN):
-        logger.warning("Dropping SSH session env var %s: unsupported value", name)
-        return False
-    return True
 
 
 def _pick_free_port() -> int:
