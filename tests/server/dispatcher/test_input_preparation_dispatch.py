@@ -17,7 +17,7 @@ from shared.inference import (
 from shared.tasks.specs import InferenceEmbodimentKind
 from shared.utils.time import now_iso
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
-from tests.server.dispatch_helpers import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch, resolved_embodiment
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
     make_capturing_dispatcher,
@@ -80,7 +80,7 @@ def _commit(runtime: TaskRuntime, task_id: str, cardinality: int) -> None:
 async def test_an_unprepared_leaf_resolves_no_embodiment_yet() -> None:
     _dispatcher, runtime, task_id = await _setup()
     assert runtime.prepares_inputs(task_id) is True
-    assert runtime.resolved_embodiment(task_id) is None
+    assert resolved_embodiment(runtime, task_id) is None
 
 
 @pytest.mark.anyio
@@ -91,7 +91,7 @@ async def test_a_prepared_leaf_selects_on_the_count_it_materialized() -> None:
     assert record is not None
 
     assert dispatcher._resolve_embodiment(task_id, record) is True
-    resolved = runtime.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(runtime, task_id)
     assert resolved is not None
     assert resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
 
@@ -108,7 +108,7 @@ async def test_a_batch_past_the_admission_bound_runs_the_other_embodiment() -> N
     assert record is not None
 
     assert dispatcher._resolve_embodiment(task_id, record) is True
-    resolved = runtime.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(runtime, task_id)
     assert resolved is not None
     assert resolved.kind is InferenceEmbodimentKind.SELF_CONTAINED
 
@@ -124,7 +124,7 @@ async def test_an_unknown_count_binds_no_embodiment() -> None:
     assert record is not None
 
     assert dispatcher._resolve_embodiment(task_id, record) is False
-    assert runtime.resolved_embodiment(task_id) is None
+    assert resolved_embodiment(runtime, task_id) is None
     [(failed, _message, kwargs)] = dispatcher.failed
     assert failed == task_id
     assert "unknown_batch_size" in kwargs["payload"]["reason"]
@@ -139,7 +139,7 @@ async def test_a_declared_bound_still_screens_before_any_value_exists() -> None:
     assert record is not None
 
     assert dispatcher._resolve_embodiment(task_id, record) is True
-    resolved = runtime.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(runtime, task_id)
     assert resolved is not None
     assert resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
 

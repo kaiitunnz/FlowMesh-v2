@@ -3027,15 +3027,6 @@ class TaskRuntime:
             engine = self._engines.get(record.workflow_id) if record else None
             return engine.embodiment_pinned(task_id) if engine else False
 
-    def resolved_embodiment(self, task_id: str) -> ResolvedEmbodiment | None:
-        """The embodiment a menu node's task is bound to, for its worker message."""
-        with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is None:
-                return None
-            return self._resolved_embodiment_locked(engine, task_id)
-
     def embodiment_menu(self, task_id: str) -> InferenceEmbodimentMenu | None:
         """The embodiments a ready task's plan node offers, if it offers a menu."""
         with self._lock:

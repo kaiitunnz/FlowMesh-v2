@@ -25,6 +25,7 @@ from shared.tasks import TaskEnvelope
 from shared.tasks.specs import InferenceEmbodimentKind
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import GpuInfo
+from tests.server.dispatch_helpers import resolved_embodiment
 from tests.server.registries.test_worker_status_fence import _Rds, _Sync
 from tests.server.task.test_v2_embodiment_fence import (
     LOCAL_ELIGIBLE,
@@ -243,7 +244,7 @@ class TestPlacementOnAHeldWorker:
         assert [w.id for w in registry.satisfying_workers(_task(runtime, task_id))] == [
             _WORKER
         ]
-        resolved = runtime.resolved_embodiment(task_id)
+        resolved = resolved_embodiment(runtime, task_id)
         assert resolved is not None
         assert resolved.kind is InferenceEmbodimentKind.SELF_CONTAINED
 
@@ -274,7 +275,7 @@ class TestPlacementOnAHeldWorker:
 
         dispatcher.dispatch_once(task_id)
 
-        resolved = runtime.resolved_embodiment(task_id)
+        resolved = resolved_embodiment(runtime, task_id)
         assert resolved is not None
         assert resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
         assert registry.offered == [[_WORKER]]

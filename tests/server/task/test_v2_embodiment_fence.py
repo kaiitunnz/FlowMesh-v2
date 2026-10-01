@@ -10,7 +10,7 @@ from server.task.runtime import TaskRuntime
 from shared.inference import InputResolutionBinding, UpstreamProvenance
 from shared.tasks.specs import InferenceEmbodimentKind
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
-from tests.server.dispatch_helpers import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch, resolved_embodiment
 from tests.server.result_store import make_result_reader
 
 from .test_v2_orchestration import (
@@ -64,7 +64,7 @@ async def _menu_task(
 async def test_an_unresolved_menu_task_carries_no_embodiment() -> None:
     runtime = _runtime(FakeRegistry())
     task_id, _primary = await _menu_task(runtime)
-    assert runtime.resolved_embodiment(task_id) is None
+    assert resolved_embodiment(runtime, task_id) is None
     # Nothing routes resident until an embodiment is bound.
     assert runtime.service_episode_dispatch(task_id) is None
 
@@ -78,7 +78,7 @@ async def test_a_recorded_selection_is_readable_and_durable() -> None:
     assert runtime.record_embodiment_selection(task_id, primary, "primary", "e") == (
         primary
     )
-    resolved = runtime.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(runtime, task_id)
     assert resolved is not None
     assert resolved.alternative_id == primary
     assert resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
@@ -145,7 +145,7 @@ async def test_an_issued_embodiment_is_pinned_against_re_resolution() -> None:
     record_dispatch(runtime, task_id, _worker())
     # The dispatch issued the work item's invocation, so the embodiment is committed.
     assert runtime.record_embodiment_selection(task_id, other, "test", "e") == primary
-    pinned = runtime.resolved_embodiment(task_id)
+    pinned = resolved_embodiment(runtime, task_id)
     assert pinned is not None and pinned.alternative_id == primary
 
 
@@ -159,7 +159,7 @@ async def test_a_restart_resumes_the_recorded_embodiment() -> None:
 
     restored = _runtime(registry)
     await restored.rehydrate()
-    resolved = restored.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(restored, task_id)
     assert resolved is not None and resolved.alternative_id == primary
 
 
