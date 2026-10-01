@@ -1,6 +1,7 @@
 import base64
 import binascii
 import collections
+import concurrent.futures
 import json
 import logging
 import queue
@@ -86,6 +87,11 @@ class SupervisorClient:
         # Dispatches a re-registration gave up: their reports never reach control.
         self._abandoned_dispatches: set[str] = set()
         self._on_reregistered: Callable[[str | None], None] | None = None
+        # The re-registration callback waits on the event stream, so it runs on its own
+        # thread, in order; the task stream reattaches once the latest one finished.
+        self._rebinder = _rebinder()
+        self._rebound = threading.Event()
+        self._rebound.set()
         self._drain = threading.Event()
         self._shutdown = threading.Event()
         self._shutdown.set()  # Initially shutdown
@@ -199,6 +205,7 @@ class SupervisorClient:
             return
         self._shutdown.clear()
         self._stop.clear()
+        self._rebinder = _rebinder()
         self._channel = self._create_grpc_channel()
         self._stub = supervisor_pb2_grpc.SupervisorStub(self._channel)
         self._start_event_stream()
@@ -235,6 +242,7 @@ class SupervisorClient:
         if self._task_thread:
             self._task_thread.join(timeout=5)
             self._task_thread = None
+        self._rebinder.shutdown(wait=False, cancel_futures=True)
         self._event_ready.clear()
         self._task_ready.clear()
         self._worker_id = None
@@ -523,18 +531,36 @@ class SupervisorClient:
                 self._incarnation = incarnation
                 self._register_generation += 1
                 gen = self._register_generation
+                rebound = threading.Event()
+                self._rebound = rebound
             # What control sent the previous registration is for a dispatch this one
             # does not run.
             for stale in (self._interrupt_queue, self._stop_queue):
                 _drain(stale)
             self._rearm_register_event()
             self.logger.info("Re-registered worker as %s", new_id)
-            if (on_reregistered := self._on_reregistered) is not None:
-                on_reregistered(abandoned)
+            self._rebinder.submit(self._rebind, abandoned, rebound)
             return gen
         finally:
             with self._register_lock:
                 self._reregistering = False
+
+    def _rebind(self, abandoned: str | None, rebound: threading.Event) -> None:
+        try:
+            if (on_reregistered := self._on_reregistered) is not None:
+                on_reregistered(abandoned)
+        except Exception:
+            self.logger.exception("Moving to the new registration failed")
+        finally:
+            rebound.set()
+
+    def _await_rebound(self) -> bool:
+        """Wait until the latest re-registration's callback finished; False on
+        shutdown."""
+        while not self._rebound.wait(1.0):
+            if self._shutdown.is_set():
+                return False
+        return True
 
     def _retry_register_grpc(self) -> tuple[str, int] | None:
         """Retry the unary `RegisterWorker` with backoff until it succeeds.
@@ -644,6 +670,8 @@ class SupervisorClient:
             return
         metadata = self._grpc_metadata()
         while not self._shutdown.is_set():
+            if not self._await_rebound():
+                break
             seen_gen = self._register_generation
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=10)
@@ -878,9 +906,19 @@ class SupervisorClient:
         self._push_event("SSH_FRAME", {"frame": frame})
 
     def push_content_holding(self, held: Sequence[tuple[str, str]]) -> None:
-        """Report the objects this worker holds, so control can resolve them."""
-        self._push_event(
-            "CONTENT_HOLDING", {"held": [[scope, digest] for scope, digest in held]}
+        """Report the objects this worker holds, so control can resolve them.
+
+        The report queues while the event stream is down, so a re-registration's
+        report reaches control once the stream is back.
+        """
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        self._enqueue_event(
+            WorkerEvent(
+                type="CONTENT_HOLDING",
+                worker_id=self.worker_id,
+                payload={"held": [[scope, digest] for scope, digest in held]},
+            )
         )
 
     def push_content_hydration_request(
@@ -971,6 +1009,12 @@ class SupervisorClient:
                 if self._worker_id is not None:
                     event.worker_id = self._worker_id
             self._event_queue.put((self._register_generation, serialize_event(event)))
+
+
+def _rebinder() -> concurrent.futures.ThreadPoolExecutor:
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="SupervisorRebind"
+    )
 
 
 def _drain(stale: queue.Queue[Any]) -> None:

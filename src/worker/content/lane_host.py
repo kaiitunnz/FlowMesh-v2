@@ -30,6 +30,9 @@ from .client import AnnounceHolding, ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
 from .store import WorkerContentCache
 
+# A lane busy sending waits on the event stream; a re-registration waits this long.
+_REBIND_WAIT_SEC = 30.0
+
 
 class ContentLaneHost:
     """Hosts this worker's holder and hydration client on one loop."""
@@ -147,7 +150,10 @@ class ContentLaneHost:
             if self._holder is not None:
                 self._holder.rebind(holder_id, generation)
 
-        self._call(rebind_holder).result()
+        try:
+            self._call(rebind_holder).result(_REBIND_WAIT_SEC)
+        except concurrent.futures.TimeoutError:
+            self._logger.warning("The cache lane did not rebind its holder in time")
         self.report_held()
 
     def report_held(self) -> int:
