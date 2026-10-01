@@ -35,6 +35,7 @@ from server.supervisor.schemas import WorkerStatus
 from server.supervisor.services.grpc_server import SupervisorServicer
 from server.supervisor.services.task_listener import TaskListener
 from shared.grpc.supervisor.v1 import supervisor_pb2
+from shared.utils.recent import RecentSet
 
 SECRET = "s3cret-shared-across-the-fleet"
 
@@ -282,6 +283,8 @@ def _build_servicer(
     servicer._node_alias = node_alias
     servicer._logger = logging.getLogger("test.external.enroll")
     servicer._lock = Lock()
+    servicer._unregistered_lock = Lock()
+    servicer._released = RecentSet(16)
     servicer._task_listener = cast(TaskListener, _FakeTaskListener())
     servicer._worker_manager = manager
     return servicer, redis
