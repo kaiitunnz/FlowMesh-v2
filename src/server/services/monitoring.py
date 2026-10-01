@@ -837,6 +837,8 @@ class EventMonitor:
                     worker_id, event.ts, ttl_sec, event.status, event.dispatch_id
                 )
                 self._took_status_report(worker_id, report, "Heartbeat", ttl_sec)
+                if report.outcome is not ReportOutcome.UNKNOWN:
+                    self._record_gpu_availability(worker_id, event.metrics)
             case "STATUS" if event.origin == "worker":
                 # A server-origin event announces a write the registry already applied
                 # inline; replaying it would land that value again on top of whatever
@@ -921,6 +923,20 @@ class EventMonitor:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
                 )
+
+    def _record_gpu_availability(self, worker_id: str, metrics: dict[str, Any]) -> None:
+        """Store the GPU availability a heartbeat carried, never at the cost of the
+        heartbeat itself. An empty map clears a stale reading, so only an absent key
+        means the worker offered no opinion."""
+        availability = metrics.get("gpu_availability")
+        if not isinstance(availability, dict):
+            return
+        try:
+            self._worker_registry.record_gpu_availability(worker_id, availability)
+        except Exception:
+            self._logger.debug(
+                "Could not record GPU availability for %s", worker_id, exc_info=True
+            )
 
     def _took_status_report(
         self,

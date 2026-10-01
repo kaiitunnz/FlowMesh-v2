@@ -413,6 +413,12 @@ class Dispatcher:
         # model, so it needs no accelerator either.
         relays_only = preparing or self._relays_only(task_id)
         placement_task = relay_placement_task(task) if relays_only else task
+        # GPU availability reads the two facts the worker's message carries, so the
+        # worker never refuses what placement let onto a held card. They also mark a
+        # resident leaf with no embodiment menu as loading no model.
+        message_relays_only = (
+            preparing or self._runtime.service_episode_dispatch(task_id) is not None
+        )
 
         model_names, dataset_names = extract_model_dataset_names(task)
         task_category = (
@@ -425,7 +431,9 @@ class Dispatcher:
             task_age = max(0.0, time.time() - record.last_queue_ts)
 
         # 1. Get idle worker pool
-        pool = self._worker_registry.idle_satisfying_pool(placement_task)
+        pool = self._worker_registry.idle_satisfying_pool(
+            placement_task, message_relays_only
+        )
 
         # 2. Filter by selected_worker hint if present
         if record.selected_worker:

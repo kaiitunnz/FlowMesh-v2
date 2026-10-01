@@ -16,13 +16,16 @@ from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks import TaskEnvelope
 from shared.tasks.components.resources import GPURequirements
 from shared.tasks.specs import SSHSpecStrict, SSHSpecTemplate
+from shared.tasks.specs.common import declared_gpu_requirements
 from shared.tasks.worker_message import (
     WorkerHardware,
     WorkerStatus,
     WorkerTaskMessage,
+    dispatch_uses_gpu,
 )
 from shared.utils import new_worker_id, now_iso, parse_mem_to_bytes
 from shared.utils.hardware import (
+    available_devices,
     normalize_gpu_type,
     parse_gpu_memory_bytes,
     select_matching_gpu_indices,
@@ -143,6 +146,30 @@ class Reservation(NamedTuple):
     worker_id: str
     task_id: str
     dispatch_id: str
+
+
+def _merge_gpu_availability(
+    hardware: WorkerHardware | None, availability: dict[str, Any]
+) -> None:
+    """Apply a worker's reported per-device availability onto its device list.
+
+    ``hardware_json`` is the worker's registration-time description of itself and is
+    never rewritten, while availability changes every heartbeat, so the two live in
+    separate fields and are joined by UUID here. A device the worker said nothing
+    about keeps ``None`` and schedules as it would unread.
+    """
+    if hardware is None or not availability:
+        return
+    for device in hardware.gpu.devices:
+        reported = availability.get(device.uuid)
+        if not isinstance(reported, dict):
+            continue
+        available = reported.get("available")
+        if isinstance(available, bool):
+            device.gpu_available = available
+        free_bytes = reported.get("free_bytes")
+        if isinstance(free_bytes, int):
+            device.memory_free_bytes = free_bytes
 
 
 def _flatten_fields(mapping: dict[str, str]) -> list[str]:
@@ -555,7 +582,11 @@ class WorkerRegistry:
         except Exception:
             return
 
-    def idle_satisfying_pool(self, task: TaskEnvelope) -> list[Worker]:
+    def idle_satisfying_pool(
+        self, task: TaskEnvelope, relays_only: bool
+    ) -> list[Worker]:
+        """Idle, non-stale workers that can run a dispatch of ``task`` now: those
+        ``satisfying_workers`` returns, less any whose free GPUs fall short."""
         available: list[Worker] = []
         for worker_id in self.get_worker_ids():
             worker = self.get_worker(worker_id)
@@ -563,7 +594,11 @@ class WorkerRegistry:
                 continue
             if self.is_worker_stale(worker.id):
                 continue
-            if hw_satisfies(worker, task) and capability_satisfies(worker, task):
+            if (
+                hw_satisfies(worker, task)
+                and capability_satisfies(worker, task)
+                and gpu_available_for(worker, task, relays_only)
+            ):
                 available.append(worker)
         return self.sort_workers(available)
 
@@ -654,6 +689,21 @@ class WorkerRegistry:
         message = payload.model_dump_json()
         channel = node_dispatch_channel(worker.node_id)
         return await self._rds.asyncio.publish_control(channel, message)
+
+    def record_gpu_availability(
+        self, worker_id: str, availability: dict[str, Any]
+    ) -> bool:
+        """Store the per-device availability a heartbeat reported.
+
+        Latched rather than expiring: a worker that stops reporting is already
+        filtered as stale, while one alive but unable to take a reading keeps what it
+        last knew rather than silently reading as free. An empty map is written: it is
+        how a worker whose probe failed clears a stale reading.
+        """
+        return self._set_worker_fields(
+            worker_id,
+            {"gpu_availability_json": json.dumps(availability, ensure_ascii=False)},
+        )
 
     def _set_worker_fields(self, worker_id: str, mapping: dict[str, str]) -> bool:
         wrote = self._rds.sync.eval(
@@ -753,6 +803,32 @@ def hw_satisfies(worker: Worker, task: TaskEnvelope) -> bool:
             return False
 
     return True
+
+
+def gpu_available_for(
+    worker: Worker, task: TaskEnvelope, relays_only: bool = False
+) -> bool:
+    """Whether this worker has GPUs for a dispatch of ``task`` that nothing else holds.
+
+    Applied when choosing among idle workers, never in ``hw_satisfies``: a held card
+    is transient, so its worker stays in ``satisfying_workers`` and the task waits
+    rather than failing as unschedulable. It only ever subtracts: a worker reporting
+    no devices or no held device, or a dispatch that uses no GPU, passes untouched.
+    """
+    hw = worker.hardware
+    if hw is None or not hw.gpu.devices:
+        return True
+    if all(device.is_available for device in hw.gpu.devices):
+        return True
+    if not dispatch_uses_gpu(task.spec, relays_only):
+        return True
+    free = available_devices(hw.gpu.devices)
+    if not free:
+        return False
+    free_hw = hw.model_copy(update={"gpu": hw.gpu.model_copy(update={"devices": free})})
+    return _gpu_meets_requirements(
+        free_hw, declared_gpu_requirements(task.spec) or GPURequirements(count=1)
+    )
 
 
 def capability_satisfies(worker: Worker, task: TaskEnvelope) -> bool:
@@ -862,6 +938,7 @@ def _parse_worker_from_redis(
         if hardware_json is None
         else WorkerHardware.model_validate_json(hardware_json)
     )
+    _merge_gpu_availability(hardware, _loads(value.get("gpu_availability_json"), {}))
     capabilities_json = value.get("capabilities_json")
     capabilities = (
         WorkerCapabilities()

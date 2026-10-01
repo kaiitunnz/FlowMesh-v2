@@ -148,3 +148,52 @@ def test_a_heartbeat_carries_the_workers_status_to_the_registry() -> None:
     registry.update_worker_hb.assert_called_once_with(
         "wkr-1", event.ts, 90, WorkerStatus.BUSY, "dsp-1"
     )
+
+
+class TestHeartbeatCarriesGpuAvailability:
+    def _availability_heartbeat(self, worker_id: str) -> WorkerEvent:
+        return WorkerEvent(
+            type="HEARTBEAT",
+            worker_id=worker_id,
+            payload={"ttl_sec": 120},
+            metrics={
+                "gpu_availability": {"GPU-held": {"available": False, "free_bytes": 8}}
+            },
+        )
+
+    def test_availability_is_recorded(self) -> None:
+        registry = MagicMock()
+        registry.update_worker_hb.return_value = StatusReport(ReportOutcome.APPLIED)
+        _monitor(registry)._handle_worker_event(self._availability_heartbeat("wkr-1"))
+        registry.record_gpu_availability.assert_called_once_with(
+            "wkr-1", {"GPU-held": {"available": False, "free_bytes": 8}}
+        )
+
+    def test_an_empty_map_is_recorded(self) -> None:
+        # It clears a stale reading; only an absent key means no opinion.
+        registry = MagicMock()
+        registry.update_worker_hb.return_value = StatusReport(ReportOutcome.APPLIED)
+        event = self._availability_heartbeat("wkr-1")
+        event.metrics["gpu_availability"] = {}
+        _monitor(registry)._handle_worker_event(event)
+        registry.record_gpu_availability.assert_called_once_with("wkr-1", {})
+
+    def test_unknown_worker_records_nothing(self) -> None:
+        registry = MagicMock()
+        registry.update_worker_hb.return_value = StatusReport(ReportOutcome.UNKNOWN)
+        _monitor(registry)._handle_worker_event(self._availability_heartbeat("wkr-1"))
+        registry.record_gpu_availability.assert_not_called()
+
+    def test_a_recording_failure_does_not_escape(self) -> None:
+        # Scheduling advice must never cost the worker its liveness update.
+        registry = MagicMock()
+        registry.update_worker_hb.return_value = StatusReport(ReportOutcome.APPLIED)
+        registry.record_gpu_availability.side_effect = RuntimeError("redis down")
+        _monitor(registry)._handle_worker_event(self._availability_heartbeat("wkr-1"))
+        registry.update_worker_hb.assert_called_once()
+
+    def test_heartbeat_without_availability_records_nothing(self) -> None:
+        registry = MagicMock()
+        registry.update_worker_hb.return_value = StatusReport(ReportOutcome.APPLIED)
+        _monitor(registry)._handle_worker_event(_heartbeat("wkr-1"))
+        registry.record_gpu_availability.assert_not_called()
