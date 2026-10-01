@@ -34,9 +34,8 @@ def dispatch_uses_gpu(spec: TaskSpecBase, relays_only: bool) -> bool:
 
     The dispatcher and the worker both decide through this, so a task the dispatcher
     places on a held device's worker is never one that worker refuses. A dispatch that
-    relays only loads no model. Otherwise a declared GPU request counts unless it asks
-    for no devices, and a declared count of zero never exempts a spec that allocates
-    GPU memory regardless.
+    relays only loads no model. Otherwise a declared request counts unless it asks for
+    no devices, and a spec that loads onto a GPU counts whatever it declares.
     """
     if relays_only:
         return False

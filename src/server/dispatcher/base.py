@@ -403,9 +403,7 @@ class Dispatcher:
             return False
 
         task = record.task
-        # A dispatch that runs no model on its worker places without the accelerator
-        # its leaf declares, and is neither withheld from nor refused on a held card;
-        # the worker reads the same answer off its message.
+        # The worker reads the same answer off WorkerTaskMessage.relays_only.
         relays_only = self._relays_only(task_id, preparing)
         placement_task = relay_placement_task(task) if relays_only else task
 

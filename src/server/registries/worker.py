@@ -684,13 +684,8 @@ class WorkerRegistry:
     def record_gpu_availability(
         self, worker_id: str, availability: dict[str, Any]
     ) -> bool:
-        """Store the per-device availability a heartbeat reported.
-
-        Latched rather than expiring: a worker that stops reporting is already
-        filtered as stale, while one alive but unable to take a reading keeps what it
-        last knew rather than silently reading as free. An empty map is written: it is
-        how a worker whose probe failed clears a stale reading.
-        """
+        """Store a heartbeat's per-device availability, latched until the worker
+        reports again; an empty map clears it."""
         return self._set_worker_fields(
             worker_id,
             {"gpu_availability_json": json.dumps(availability, ensure_ascii=False)},
