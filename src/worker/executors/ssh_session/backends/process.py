@@ -415,9 +415,9 @@ def prepare_state_roots(config: WorkerConfig) -> list[Path]:
     each missing one root-owned ``0700``; raise if one cannot be denied safely.
 
     A missing root inside another that exists is left out: a session cannot reach
-    anything below a denied root. A filesystem content store is shared across
-    nodes, so the content plane creates its root, and a missing root below a store
-    root that does not exist yet is left out too rather than creating it.
+    anything below a denied root. A filesystem content store's root is the content
+    plane's to create, so a missing root below one that does not exist yet is left
+    out too.
     """
     if problem := _state_problem(config):
         raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
@@ -1142,9 +1142,9 @@ def _kill_sshd_of(session_dir: Path, account: str | None) -> None:
     the session's port it holds or by a title naming ``account``.
 
     A connection runs as root until it authenticates, so the account's uid kill
-    misses it, and once its listener or subreaper has exited it is no longer below
-    them either; left running, it could still start the account's shell. One
-    accepted before it authenticates has a title that names nobody.
+    misses it, and once its listener or subreaper has exited it is outside their
+    tree too; left running, it could still start the account's shell. One accepted
+    before it authenticates has a title that names nobody.
     """
     config_path = session_dir / "sshd_config"
     port = _configured_port(config_path)

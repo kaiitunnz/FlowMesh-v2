@@ -1,12 +1,10 @@
 """The root's SSH relay origin: carries each ingress connection over ``control_relay``.
 
-Both SSH ingresses — the WebSocket proxy and the forward listener — open a relay
-session here per client connection. The origin rides one dedicated reverse-relay
-stream id, not a worker node: it publishes its frames on that stream's up leg and
-consumes its down leg through a root-internal attachment, and the root bridge pump
-forwards both directions by the session record. Each session names its target only
-by worker and the endpoint id the worker's SSH executor published; the worker
-resolves the port itself. Root and supervisors carry the bytes opaquely.
+Both SSH ingresses, the WebSocket proxy and the forward listener, open one relay
+session here per client connection. The origin publishes on and consumes a dedicated
+reverse-relay stream id, and the root bridge pump forwards both directions by the
+session record. A session names its target by worker and the endpoint id the worker's
+SSH executor published; the worker resolves the port.
 """
 
 import asyncio
@@ -160,9 +158,8 @@ class SshRelayOrigin:
     async def reap_orphans(self) -> int:
         """Cancel every session a previous root opened; return how many.
 
-        The connections died with that root's process, but their worker ends would
-        hold the session's sshd connection open — and its idle timer from firing —
-        until the task ended.
+        A worker end left open would hold its session's sshd connection, and so keep
+        the session from idling out.
         """
         reaped = 0
         for session_id in await self._sessions.list_ids():

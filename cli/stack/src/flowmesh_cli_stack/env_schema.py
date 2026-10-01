@@ -33,7 +33,7 @@ def credential_overrides(role: NodeRole) -> dict[str, str]:
 
 
 def _network_plane_off(env: dict[str, str]) -> bool:
-    """Whether the network plane is explicitly disabled; it is on when unset."""
+    """Return whether ``env`` turns the network plane off; unset means on."""
     return parse_bool(env.get("NETWORK_PLANE_ENABLED", "")) is False
 
 

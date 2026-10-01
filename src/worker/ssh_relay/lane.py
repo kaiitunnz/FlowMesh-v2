@@ -1,11 +1,9 @@
-"""Runs this worker's SSH relay lane on a dedicated asyncio loop.
+"""This worker's SSH relay lane, on a dedicated asyncio loop.
 
-The root's SSH ingresses open one relay session per client connection. Each session's
-first message names an endpoint this worker's SSH executor published; the lane resolves
-it in the worker's own registry and connects to that loopback port, never to an address
-a frame names. An unknown or withdrawn endpoint is refused without a connection.
-Produced frames leave as ``SSH_FRAME`` events over the authenticated attachment, which
-the supervisor bridges onward opaquely.
+Each relay session's first message names an endpoint this worker's SSH executor
+published; the lane resolves it in the worker's own registry and connects to that
+loopback port. An unknown or withdrawn endpoint is refused without a connection.
+Produced frames leave as ``SSH_FRAME`` events over the worker's attachment.
 """
 
 import asyncio

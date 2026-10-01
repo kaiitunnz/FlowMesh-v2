@@ -7,11 +7,10 @@ of three transports. It is control-resolved and data-direct: the resolver runs i
 control plane and the origin-side deputy executes only the resolved candidate ladder —
 workers never scan addresses or discover peers.
 
-The plane is a routing substrate only. It carries no resident traffic, exposes no resident
-engine listener, and never mints a `ServiceClaim`, releases a credit, or issues a
-`RouteAuthorization`. A route observation is network evidence; it can never promote,
-release, or overwrite a capacity credit. It is on by default, and
-`NETWORK_PLANE_ENABLED=false` turns it off (`docs/ENV.md` lists the knobs).
+The plane is a routing substrate: it carries what a caller frames over it and holds no
+admission or credit authority, so a route observation never promotes, releases, or
+overwrites a capacity credit. It is on by default; `NETWORK_PLANE_ENABLED=false` turns it
+off ([`ENV.md`](ENV.md) lists the knobs).
 
 ## The four facts
 
@@ -174,9 +173,7 @@ bridge treats them as any other opaque frames — it never holds, assembles, or 
 object — and the transfer mints no claim, credit, or route authorization. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-Relayed SSH connections reuse it on a keyspace of their own. The root's SSH ingresses are
-the origin, on a dedicated stream of their own, and the worker serving the session is
-the target: it connects only to a loopback endpoint its SSH executor published. Each
-connection is one strictly sequenced session, so a lost frame ends it at both ends. The
-connection mints no claim, credit, or route authorization; who may open one is the SSH
-route's permission check. See [`EXECUTORS.md`](EXECUTORS.md#ssh-executor-access-modes).
+Relayed SSH connections reuse it on a keyspace of their own: the root's SSH ingresses are
+the origin, and the worker serving the session the target, which connects only to a
+loopback endpoint its SSH executor published. The SSH route's permission check decides who
+may open one. See [`EXECUTORS.md`](EXECUTORS.md#ssh-executor-access-modes).

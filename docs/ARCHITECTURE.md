@@ -383,17 +383,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   trusted direct target legs resolve behind the shared carriage seam. Available
   when `RESIDENT_CAPACITY_ENABLED=true` (which requires the network plane). See
   [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
-- **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
-  turns trusted node endpoint advertisements and directional reachability evidence into an
-  ordered route resolved by a pure resolver, carried by an origin-side deputy that never
-  peer-discovers over the universal reverse-rendezvous `control_relay` — both ends attach
-  outward to a root bridge, so neither needs an inbound connection — or a verified
-  forward-dial `worker_direct` / `node_relay` peer transport for a reachable pair. The
-  substrate holds no admission authority — it mints no `ServiceClaim` or `RouteAuthorization`
-  and its transports carry only what a caller frames over them; resident-capacity control
-  binds it to carry claim-gated resident invocation traffic, and the root's SSH proxy and
-  forward ingresses carry each client connection over it. It is on by default;
-  `NETWORK_PLANE_ENABLED=false` turns it off. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+- **Network-plane route substrate.** A control-resolved routing substrate turns trusted
+  node endpoint advertisements and directional reachability evidence into an ordered route,
+  carried over the reverse-rendezvous `control_relay` — both ends attach outward to a root
+  bridge, so neither needs an inbound connection — or, for a reachable pair, a forward-dial
+  `worker_direct` / `node_relay` transport. It carries what a caller frames over it and
+  holds no admission authority: resident-capacity control binds it to claim-gated resident
+  invocations, and the root's SSH proxy and forward ingresses carry each client connection
+  over it. It is on by default; `NETWORK_PLANE_ENABLED=false` turns it off. See
+  [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Trusted peer transports.** Where a deployment declares the origin-to-target pair
   trusted, an admitted resident invocation leaves the reverse-rendezvous relay for a
   direct socket the route's own origin opens: `worker_direct` reaches the selected

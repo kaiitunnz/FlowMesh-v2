@@ -104,7 +104,7 @@ calls.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| WS | `/api/v1/ssh/tasks/{task_id}/proxy` | WebSocket SSH proxy for proxy-mode SSH tasks. |
+| WS | `/api/v1/ssh/tasks/{task_id}/proxy` | WebSocket SSH proxy for proxy- and forward-mode SSH tasks. |
 | GET | `/api/v1/ssh/connections` | List active SSH proxy/forward connections the server is relaying. |
 
 Server policy toggles: `ENABLE_SERVER_SSH_PROXY`,

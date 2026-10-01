@@ -4,7 +4,7 @@ A relayed TCP connection rides one ``rly-*`` session: the origin opens it by nam
 endpoint the target published, then each side sends its bytes as ``data`` messages and
 ends its direction with ``eof``. Every message is a data frame, ordered behind the bytes
 before it, so a half-close never overtakes data still in flight; a cancel aborts the
-whole stream. The servers relay the frames opaquely and never read these messages.
+whole stream.
 """
 
 import asyncio

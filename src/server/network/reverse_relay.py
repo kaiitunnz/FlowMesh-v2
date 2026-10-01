@@ -152,11 +152,8 @@ class RelayStreamStore:
     async def read_up_many(
         self, after_ids: dict[str, str], count: int, block_ms: int | None
     ) -> dict[str, tuple[list[StreamEntry], str | None]]:
-        """Read every named node's up stream from its cursor in one call.
-
-        A blocking read returns as soon as any of the streams has a frame, so one
-        reader serves every node without polling.
-        """
+        """Read every named node's up stream from its cursor in one call, returning
+        as soon as any of them has a frame."""
         by_key = {self._ks.up(node_id): node_id for node_id in after_ids}
         result = await self._redis.xread(
             {key: after_ids[node_id] for key, node_id in by_key.items()},

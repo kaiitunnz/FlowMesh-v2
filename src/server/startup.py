@@ -60,10 +60,10 @@ def start_relay_bridge_pump(
 ) -> asyncio.Task[None]:
     """Start one root bridge's pump loop over its own namespace.
 
-    Waits on every attached node's up stream at once — plus any ``extra_node_ids`` such
-    as the gated serve edge's dedicated stream, which is not a worker node — and
-    forwards each frame to its peer's down stream as it arrives. The node list is
-    refreshed about once a second, which bounds how long a newly attached node waits.
+    Waits on every attached node's up stream at once, plus any ``extra_node_ids`` such
+    as an ingress edge's stream, and forwards each frame to its peer's down stream as it
+    arrives. The node list refreshes about once a second, which bounds how long a newly
+    attached node waits.
     """
 
     async def _pump() -> None:

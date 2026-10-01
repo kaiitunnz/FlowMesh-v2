@@ -40,7 +40,7 @@ class SSHConfig(BaseModel):
     session_backend: SSHBackendName | None = env.SSH_SESSION_BACKEND
     """Session backend the worker uses"""
     direct_host: str | None = None
-    """Address a ``direct`` session on this worker is advertised at"""
+    """Host this worker's sessions are advertised at"""
 
     @field_validator("session_backend", mode="before")
     @classmethod

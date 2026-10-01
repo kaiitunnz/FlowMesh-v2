@@ -264,5 +264,6 @@ flowmesh ssh run <tsk-id> -- <cmd>     # one-shot exec
 flowmesh ssh connections               # list active proxy/forward connections
 ```
 
-`--direct` prints the route it dials and its scope: `loopback on worker <id>` reaches the
-session only from that worker's host, and `network` from wherever the host is routable.
+A direct connection prints the route it dials and its scope: `loopback on worker <id>`
+reaches the session only from that worker's host, and `network` from wherever the host is
+routable.

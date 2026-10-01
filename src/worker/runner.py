@@ -862,11 +862,7 @@ class Runner:
             self._interrupt_stop_event = None
 
     def _route_mediated_ops(self) -> None:
-        """Route each relayed mediated-op frame as it arrives.
-
-        Relay frames carry interactive and bulk traffic, so they are not left for a
-        polling loop; one consumer keeps their arrival order.
-        """
+        """Route each mediated op as it arrives, in arrival order."""
         client = self.lifecycle.client
         while not self._mediated_op_stop.is_set():
             if (item := client.next_mediated_op(0.5)) is None:

@@ -113,9 +113,8 @@ the worker:
    (`inputs`), and optionally a writable output path (`sshOutput`).
 4. Emits a `TASK_UPDATE` event with SSH connection metadata:
    - **direct**: worker-published `host`/`port` (random host port for `22/tcp`)
-   - **proxy/forward**: the session's port is published to the worker's relay
-     lane, through which the server reaches it, plus `directHost`/`directPort`
-     for optional `--direct` fallback
+   - **proxy/forward**: the server's route, plus the session's own
+     `directHost`/`directPort` for `flowmesh ssh connect --direct`
 5. Blocks until the container exits, the TTL expires, or the task is cancelled.
 6. Cleans up the SSH container and copies back `sshOutput` artifacts.
 

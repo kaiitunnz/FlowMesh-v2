@@ -401,21 +401,19 @@ runtime LoRA, so a base model incompatible with `--enable-lora` would fail to se
 
 ## SSH executor access modes
 
-A `direct` session is reached at the address its worker advertises. A `proxy` or
-`forward` session is reached through the server: the WebSocket proxy at
-`/api/v1/ssh/tasks/{task_id}/proxy`, or a port the server's forward listener allocates.
-Each client connection rides the network plane's `control_relay` to the worker serving
-the session, which connects only to the loopback port its SSH executor published for
-that session; the port is withdrawn, and its connections end, when the session stops.
-Root and supervisors relay the bytes without reading them, and each direction of a
-connection half-closes on its own.
+A `direct` session is reached at its worker's address: the worker's `ssh.direct_host`
+(`SSH_DIRECT_HOST`) when set, else, on `process`, its tailnet address, else its host
+name. A `proxy` or `forward` session is reached through the server, at the WebSocket
+proxy `/api/v1/ssh/tasks/{task_id}/proxy` or at a port the server's forward listener
+allocates, which relays each connection over the network plane to the worker serving
+the session. Its connections end when the session stops. A server with the network
+plane off refuses a `proxy` or `forward` task at submission.
 
-A relayed session on the `process` backend listens on loopback only; a Docker session's
-port is published on every address of the worker's host. Every relayed session reports
-its own route as `directHost`, `directPort`, `directScope` (`loopback` or `network`) and
-`workerId`. A relayed mode the server cannot carry falls back from `forward` to `proxy`,
-then to `direct` at the session's own address, keeping its scope. A server whose network
-plane is off refuses a `proxy` or `forward` task at submission.
+A relayed session also reports its own address as `directHost` and `directPort`, with
+`directScope` and `workerId`. On `process` it listens on loopback only (`loopback`:
+reachable only from that worker's host); a Docker session's port is published on every
+address of the worker's host (`network`). When the server cannot carry a relayed mode,
+`forward` falls back to `proxy`, then to `direct` at that address.
 
 ## SSH executor (process backend)
 
