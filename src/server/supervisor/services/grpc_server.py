@@ -26,6 +26,7 @@ from ...clients.redis import (
 )
 from ...network.worker_bridge import RelayWorkerBridge
 from ..adapters.base import WorkerAdapter, WorkerTokenType
+from ..manager import WorkerManager
 from ..registry import WorkerRegistry
 from ..schemas import WorkerStatus
 from ..services.relay_service import RelayService
@@ -98,6 +99,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         node_alias: str,
         task_listener: TaskListener,
         relay_service: RelayService,
+        worker_manager: WorkerManager,
         logger: logging.Logger,
         relay_bridges: dict[str, RelayWorkerBridge] | None = None,
     ) -> None:
@@ -107,6 +109,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self._redis = redis
         self._node_id = node_id
         self._node_alias = node_alias
+        self._worker_manager = worker_manager
         # Each relay namespace's bridge, by the event type its frames push up as.
         self._relay_bridges = relay_bridges or {}
         self._logger = logger
@@ -157,23 +160,30 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         request: supervisor_pb2.RegisterRequest,
         context: grpc.aio.ServicerContext,
     ) -> supervisor_pb2.RegisterResponse:
-        worker = self._get_worker_from_context(context)
+        token = _token_from_context(context)
+        if not token:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid worker token")
+        worker = self._registry.try_get(token)
+        if worker is None:
+            # Unknown token: try admitting an external worker.
+            await self._worker_manager.admit_worker(token)
+            worker = self._registry.try_get(token)
         if worker is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid worker token")
         worker_meta = _payload_from_struct(request.meta)
-        incarnation = self._redis.incr(WORKER_ID_SEQ_KEY)
-        worker_id = new_worker_id(incarnation)
-        worker_meta["id"] = worker_id
-        worker_meta["incarnation"] = incarnation
-        worker_meta["node_alias"] = self._node_alias
-        # Stamp node_id, persist the record, and insert into the registry as one unit so
-        # a concurrent rebind_node either sees this worker in its snapshot or stamps it
-        # with the new id.
+        # Stamp node_id, persist the record and set the worker id as one unit so a
+        # concurrent rebind_node either sees this worker in its snapshot or stamps
+        # it with the new id.
         with self._lock:
+            incarnation = self._redis.incr(WORKER_ID_SEQ_KEY)
+            worker_id = new_worker_id(incarnation)
+            worker_meta["id"] = worker_id
+            worker_meta["incarnation"] = incarnation
+            worker_meta["node_alias"] = self._node_alias
             worker_meta["node_id"] = self._node_id
             self._redis.sadd(WORKERS_SET_KEY, worker_id)
             self._redis.hash_set(worker_key(worker_id), worker_meta)
-            self._registry.set_worker_id(worker.token, worker_id)
+            self._registry.set_worker_id(token, worker_id)
         self._task_listener.add_worker(worker_id)
         try:
             worker.set_worker_id(worker_id)
@@ -339,6 +349,7 @@ class GrpcServer:
         node_alias: str,
         task_listener: TaskListener,
         relay_service: RelayService,
+        worker_manager: WorkerManager,
         logger: logging.Logger,
         relay_bridges: dict[str, RelayWorkerBridge] | None = None,
     ) -> None:
@@ -351,6 +362,7 @@ class GrpcServer:
             node_alias,
             task_listener,
             relay_service,
+            worker_manager,
             logger,
             relay_bridges=relay_bridges,
         )

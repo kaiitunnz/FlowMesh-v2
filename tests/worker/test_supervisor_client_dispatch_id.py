@@ -60,7 +60,9 @@ _REPORTS: dict[str, Callable[[SupervisorClient, str], None]] = {
 
 def _reported_dispatch(client: SupervisorClient, event_type: str, task_id: str) -> Any:
     _REPORTS[event_type](client, task_id)
-    frame = cast(dict[str, Any], client._event_queue.get_nowait())
+    _generation, frame = cast(
+        tuple[int, dict[str, Any]], client._event_queue.get_nowait()
+    )
     assert frame["type"] == event_type
     return frame.get("dispatch_id")
 

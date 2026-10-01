@@ -77,6 +77,11 @@ class SupervisorClient:
         self._worker_id: str | None = None
         self._incarnation: int = 0
         self._worker_register_event: WorkerEvent | None = None
+        self._register_meta: dict[str, Any] | None = None
+        self._last_status: WorkerStatus = WorkerStatus.STARTING
+        self._register_lock = threading.Lock()
+        self._register_generation: int = 0
+        self._reregistering: bool = False
         self._drain = threading.Event()
         self._shutdown = threading.Event()
         self._shutdown.set()  # Initially shutdown
@@ -92,7 +97,9 @@ class SupervisorClient:
         self._interrupt_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._stop_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._mediated_op_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
-        self._event_queue: queue.Queue[dict[str, Any] | object] = queue.Queue()
+        self._event_queue: queue.Queue[tuple[int, dict[str, Any]] | object] = (
+            queue.Queue()
+        )
         self._event_thread: threading.Thread | None = None
         self._task_thread: threading.Thread | None = None
         self._channel: grpc.Channel | None = None
@@ -152,7 +159,7 @@ class SupervisorClient:
         self._register_grpc(worker_meta)
         self.logger.info("Worker connected via supervisor at %s", self.grpc_target)
 
-        # Create a temporary register event for later use
+        # Build the REGISTER event and cache for potential re-registration.
         payload: dict[str, Any] = {
             "env": env,
             "hardware": hardware.model_dump(mode="python"),
@@ -169,6 +176,8 @@ class SupervisorClient:
             payload=payload,
             actor=self.owner_principal,
         )
+        self._register_meta = worker_meta
+        self._last_status = status
 
     def start(self) -> None:
         """Start background threads to handle events and tasks.
@@ -251,6 +260,7 @@ class SupervisorClient:
         extra: dict[str, Any] | None = None,
         dispatch_id: str | None = None,
     ) -> None:
+        self._last_status = status
         event = WorkerEvent(
             type="STATUS",
             worker_id=self.worker_id,
@@ -446,7 +456,6 @@ class SupervisorClient:
         if event is None:
             raise RuntimeError("Worker not registered with supervisor")
         self._send_event(event)
-        self._worker_register_event = None
 
     def _register_grpc(self, worker_meta: dict[str, Any]) -> None:
         self.logger.info(
@@ -469,6 +478,75 @@ class SupervisorClient:
             raise SystemExit("Supervisor registration response missing worker_id")
         self._worker_id = resp.worker_id
         self._incarnation = int(resp.incarnation)
+
+    def _reregister(self, seen_gen: int) -> int:
+        """Re-enrol the worker after the supervisor forgot its token.
+
+        Coordinated across the two stream threads: the generation counter and
+        the `_reregistering` claim ensure exactly one unary `RegisterWorker` runs
+        per outage. Returns the current generation; the caller fast-retries its
+        stream only when the value advanced past `seen_gen`.
+        """
+        with self._register_lock:
+            if self._register_generation != seen_gen or self._reregistering:
+                return self._register_generation
+            self._reregistering = True
+        try:
+            registration = self._retry_register_grpc()
+            if registration is None:
+                return self._register_generation
+            new_id, incarnation = registration
+            with self._register_lock:
+                self._worker_id = new_id
+                self._incarnation = incarnation
+                self._register_generation += 1
+                gen = self._register_generation
+            self._rearm_register_event()
+            self.logger.info("Re-registered worker as %s", new_id)
+            return gen
+        finally:
+            with self._register_lock:
+                self._reregistering = False
+
+    def _retry_register_grpc(self) -> tuple[str, int] | None:
+        """Retry the unary `RegisterWorker` with backoff until it succeeds.
+
+        Unlike `_register_grpc`, never raises `SystemExit`: a token that can
+        never be re-admitted (a runtime-minted provider token whose supervisor
+        restarted) just keeps backing off until the worker stops.
+        """
+        if self._stub is None or self._register_meta is None:
+            return None
+        meta = self._register_meta.copy()
+        meta["status"] = self._last_status.value
+        meta["last_seen"] = now_iso()
+        request = supervisor_pb2.RegisterRequest(meta=self._struct_from_payload(meta))
+        metadata = self._grpc_metadata()
+        delay = 1.0
+        while not (self._shutdown.is_set() or self._stop.is_set()):
+            try:
+                resp = self._stub.RegisterWorker(request, metadata=metadata)
+            except grpc.RpcError as exc:
+                self.logger.warning(
+                    "Re-registration failed, retrying in %.0fs: %s", delay, exc
+                )
+            else:
+                if resp.worker_id:
+                    return resp.worker_id, int(resp.incarnation)
+                self.logger.warning("Re-registration response missing worker_id")
+            if self._shutdown.wait(delay):
+                return None
+            delay = min(delay * 2, 30.0)
+        return None
+
+    def _rearm_register_event(self) -> None:
+        template = self._worker_register_event
+        if template is None:
+            return
+        event = template.model_copy(
+            update={"worker_id": self.worker_id, "status": self._last_status}
+        )
+        self._enqueue_event(event)
 
     def _start_event_stream(self) -> None:
         self._event_ready.clear()
@@ -498,6 +576,7 @@ class SupervisorClient:
             return
         metadata = self._grpc_metadata()
         while not self._shutdown.is_set() or self._drain.is_set():
+            seen_gen = self._register_generation
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=10)
                 self._event_ready.set()
@@ -519,6 +598,9 @@ class SupervisorClient:
                 if self._shutdown.is_set():
                     break
                 self._event_ready.clear()
+                if exc.code() is grpc.StatusCode.UNAUTHENTICATED:
+                    if self._reregister(seen_gen) != seen_gen:
+                        continue
                 self.logger.error("Supervisor event stream error: %s", exc)
                 time.sleep(3)
 
@@ -528,6 +610,7 @@ class SupervisorClient:
             return
         metadata = self._grpc_metadata()
         while not self._shutdown.is_set():
+            seen_gen = self._register_generation
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=10)
                 self._task_ready.set()
@@ -582,6 +665,9 @@ class SupervisorClient:
                 if self._shutdown.is_set():
                     break
                 self._task_ready.clear()
+                if exc.code() is grpc.StatusCode.UNAUTHENTICATED:
+                    if self._reregister(seen_gen) != seen_gen:
+                        continue
                 self.logger.error("Supervisor task stream error: %s", exc)
                 time.sleep(3)
 
@@ -593,8 +679,15 @@ class SupervisorClient:
                 continue
             if item is self._EVENT_SENTINEL:
                 break
-            assert isinstance(item, dict)
-            yield supervisor_pb2.EventMessage(payload=self._struct_from_payload(item))
+            assert isinstance(item, tuple)
+            gen, payload = item
+            # Drop events serialized under a superseded worker_id so a ghost id
+            # never gets its heartbeat refreshed after re-registration.
+            if gen < self._register_generation:
+                continue
+            yield supervisor_pb2.EventMessage(
+                payload=self._struct_from_payload(payload)
+            )
 
     # ---- Networking helpers ----------------------------------------- #
 
@@ -651,7 +744,7 @@ class SupervisorClient:
             raise RuntimeError("Supervisor gRPC client not started")
         if not self._event_ready.wait(timeout):
             raise RuntimeError("Supervisor event stream not ready")
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def on_event_stream_ready(self, callback: Callable[[], None]) -> None:
         """Run ``callback`` each time the event stream (re)connects, before the stream
@@ -670,7 +763,7 @@ class SupervisorClient:
         if not self._event_ready.is_set():
             self.logger.debug("Event stream not ready; dropping %s", event.type)
             return
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_mediated_outcome(self, outcome: MediatedOperationOutcome) -> None:
         """Report one fenced mediated-operation outcome over the event stream."""
@@ -683,7 +776,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"outcome": outcome.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_mediated_propose(self, proposal: AgentModelTurnProposal) -> None:
         """Propose a held in-turn model egress for a one-use permit, digest-only."""
@@ -696,7 +789,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"proposal": proposal.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_resident_frame(self, frame: dict[str, Any]) -> None:
         """Send one resident relay frame up for the supervisor to bridge onward."""
@@ -709,7 +802,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"frame": frame},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_content_frame(self, frame: dict[str, Any]) -> None:
         """Send one content transfer frame up for the supervisor to bridge onward."""
@@ -758,10 +851,8 @@ class SupervisorClient:
             raise RuntimeError("Supervisor gRPC client not started")
         if not self._event_ready.wait(ready_timeout_sec):
             raise RuntimeError("Supervisor event stream not ready")
-        self._event_queue.put(
-            serialize_event(
-                WorkerEvent(type=event_type, worker_id=self.worker_id, payload=payload)
-            )
+        self._enqueue_event(
+            WorkerEvent(type=event_type, worker_id=self.worker_id, payload=payload)
         )
 
     def push_resident_ack(self, ack: ResidentBootstrapAck) -> None:
@@ -775,7 +866,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"ack": ack.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_resident_route_observation(
         self, observation: ResidentRouteObservation
@@ -790,7 +881,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"observation": observation.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_resident_outcome(self, outcome: ResidentOpOutcome) -> None:
         """Report the fenced resident terminal outcome to control."""
@@ -803,4 +894,12 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"outcome": outcome.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
+
+    def _enqueue_event(self, event: Event) -> None:
+        with self._register_lock:
+            if self._worker_id is not None and isinstance(
+                event, (TaskEvent, WorkerEvent)
+            ):
+                event.worker_id = self._worker_id
+            self._event_queue.put((self._register_generation, serialize_event(event)))

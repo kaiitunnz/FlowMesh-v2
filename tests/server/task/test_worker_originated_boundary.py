@@ -282,7 +282,10 @@ def _serialize_outcome_frame(outcome: MediatedOperationOutcome) -> dict[str, Any
     client._stub = cast(Any, object())
     client._event_ready.set()
     client.push_mediated_outcome(outcome)
-    return cast(dict[str, Any], client._event_queue.get_nowait())
+    _generation, frame = cast(
+        tuple[int, dict[str, Any]], client._event_queue.get_nowait()
+    )
+    return frame
 
 
 def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() -> None:
