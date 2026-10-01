@@ -439,6 +439,13 @@ def _failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
     return record.max_attempts < 0 or record.attempts < record.max_attempts
 
 
+def _revocation(task_id: str, worker_id: str, dispatch_id: str) -> InterruptMessage:
+    """The interrupt that revokes one dispatch on its worker."""
+    return InterruptMessage(
+        task_id=task_id, worker_id=worker_id, reason="revoked", dispatch_id=dispatch_id
+    )
+
+
 def _settle_outcome(
     effect: EventEffect,
     record: TaskRecord | None,
@@ -1582,16 +1589,21 @@ class TaskRuntime:
 
     def release_ended_reservations(self) -> None:
         """Release every worker reserved for a dispatch not in flight, such as one
-        whose task settled just before a restart."""
-        self._release_workers(
-            [
-                (reservation.worker_id, reservation.dispatch_id)
-                for reservation in self._worker_registry.reservations()
-                if not self.dispatch_in_flight(
-                    reservation.task_id, reservation.dispatch_id, reservation.worker_id
-                )
-            ]
+        whose task settled just before a restart, and revoke the dispatch."""
+        ended = [
+            reservation
+            for reservation in self._worker_registry.reservations()
+            if not self.dispatch_in_flight(
+                reservation.task_id, reservation.dispatch_id, reservation.worker_id
+            )
+        ]
+        self._release_terminated_work(
+            _Termination(
+                [_revocation(r.task_id, r.worker_id, r.dispatch_id) for r in ended],
+                [],
+            )
         )
+        self._release_workers([(r.worker_id, r.dispatch_id) for r in ended])
 
     def _write_locked(
         self, write: Callable[[], None], hold: Callable[[_HeldWrites], None]
@@ -5924,6 +5936,18 @@ class TaskRuntime:
             dispatch_id=record.dispatch_id,
         )
 
+    def _revoke_locked(
+        self, task_id: str, worker_id: str, dispatch_id: str | None
+    ) -> None:
+        """Queue a dispatch-keyed interrupt for a dispatch that resolved without its
+        worker ending it, so a frame of it still queued for the worker is withdrawn and
+        a run of it is cancelled."""
+        if dispatch_id is None:
+            return
+        self._pending_terminations.append(
+            _Termination([_revocation(task_id, worker_id, dispatch_id)], [])
+        )
+
     def _interrupt_cancelling_locked(self, workflow_id: str) -> None:
         """Queue an interrupt for each task a restart found still being cancelled,
         whose worker may never have received one."""
@@ -6402,14 +6426,15 @@ class TaskRuntime:
     ) -> WorkerRecovery:
         """Recover the tasks a departed worker held.
 
-        A dispatch to the worker published and not yet recorded is lost here: its
-        tasks go back to the head of the queue, a merged batch's to run alone, spending
-        no attempt, and the dispatch is never recorded. A v2 task resolves as its
-        worker's loss here, spending an attempt unless ``spend_attempt`` is False, as
-        for a worker that gave its tasks up; a v1 task is left for the caller to return
-        or settle. A task whose dispatch ended at a suspension holds nothing on the
-        worker and waits on its boundary, unless the worker originated that boundary
-        and holds its request.
+        Every dispatch recovered here is revoked on the worker, in case it is still
+        reachable. A dispatch to the worker published and not yet recorded is lost
+        here: its tasks go back to the head of the queue, a merged batch's to run
+        alone, spending no attempt, and the dispatch is never recorded. A v2 task
+        resolves as its worker's loss here, spending an attempt unless
+        ``spend_attempt`` is False, as for a worker that gave its tasks up; a v1 task
+        is left for the caller to return or settle. A task whose dispatch ended at a
+        suspension holds nothing on the worker and waits on its boundary, unless the
+        worker originated that boundary and holds its request.
         """
         try:
             return self._recover_tasks_for_worker(worker_id, spend_attempt)
@@ -6426,6 +6451,7 @@ class TaskRuntime:
                 publish = self._publishing.get(task_id)
                 if publish and not publish.recorded and publish.worker_id == worker_id:
                     self._publishing[task_id] = None
+                    self._revoke_locked(task_id, worker_id, publish.dispatch_id)
                     children = self._merge_children_map.pop(task_id, [])
                     record.merged_children = None
                     self._commit_locked(
@@ -6446,6 +6472,8 @@ class TaskRuntime:
                 ):
                     continue
                 self._rehydrated_dispatched.pop(task_id, None)
+                if not record.merged_parent_id:
+                    self._revoke_locked(task_id, worker_id, record.dispatch_id)
                 if (
                     record.status == TaskStatus.DISPATCHED
                     and record.workflow_id in self._engines
@@ -6469,14 +6497,15 @@ class TaskRuntime:
         """Resolve a dispatch its live worker keeps reporting it does not hold as lost.
 
         Only a dispatch recorded at least ``bound_sec`` ago with no event of it applied
-        resolves: the bound a silent worker gets before it is declared dead. Nothing
-        revokes the dispatch, so it may still reach its worker and run; it resolves as
-        a lost dispatch does. A task being cancelled settles CANCELLED; any other
-        returns without spending an attempt, or fails as on its worker's loss when it
-        is a v2 task that cannot safely re-run. The worker is excluded from the task's
-        next placement, so a worker that cannot take the task never gets it back. A
-        task bound to that worker's private state goes back to it, and its return
-        spends an attempt. Returns None when the dispatch does not resolve.
+        resolves: the bound a silent worker gets before it is declared dead. The
+        dispatch is revoked, so a frame of it still queued for the worker never runs,
+        and it resolves as a lost dispatch does. A task being cancelled settles
+        CANCELLED; any other returns without spending an attempt, or fails as on its
+        worker's loss when it is a v2 task that cannot safely re-run. The worker is
+        excluded from the task's next placement, so a worker that cannot take the task
+        never gets it back. A task bound to that worker's private state goes back to
+        it, and its return spends an attempt. Returns None when the dispatch does not
+        resolve.
         """
         try:
             with self._cv:
@@ -6497,6 +6526,7 @@ class TaskRuntime:
                 )
                 if time.time() - since < bound_sec:
                     return None
+                self._revoke_locked(task_id, worker_id, dispatch_id)
                 if worker_id not in record.failed_workers:
                     record.failed_workers.append(worker_id)
                 record.last_error = (
@@ -6519,9 +6549,9 @@ class TaskRuntime:
         """Return a task bound to its worker's private state, spending an attempt.
 
         The task can run only on that worker, so the attempt budget bounds how often
-        the worker disowns it. A late delivery of the disowned dispatch may still run
-        there: its events are fenced, and a retry that finds the private state it
-        changed fails closed.
+        the worker disowns it. The disowned dispatch is revoked; should a delivery of
+        it still run, its events are fenced, and a retry that finds the private state
+        it changed fails closed.
         """
         end = self._return_dispatch_locked(record, increment_retry=True, front=True)
         if end is DispatchEnd.RETURNED:

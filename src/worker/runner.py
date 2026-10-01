@@ -598,9 +598,7 @@ class Runner:
         with self._cancel_lock:
             revoked = self._current_dispatch_id in self._revoked_dispatches
         if revoked:
-            raise TaskCancelledError(
-                f"Task {task_id} was given up by the worker re-registering"
-            )
+            raise TaskCancelledError(f"Task {task_id} was revoked before execution")
         if self._shutdown_requested.is_set():
             raise TaskCancelledError(
                 f"Task {task_id} was given up by the worker shutting down"
