@@ -371,16 +371,6 @@ class SyncRedisClient:
             telemetry_url, "telemetry", telemetry_tls_ca_file
         )
 
-    @property
-    def control_client(self) -> redis.Redis:
-        """Return the raw control Redis client."""
-        return self._control
-
-    @property
-    def telemetry_client(self) -> redis.Redis:
-        """Return the raw telemetry Redis client."""
-        return self._telemetry
-
     def _redis_ssl_kwargs(self, tls_ca_file: str | None) -> dict[str, Any]:
         if not tls_ca_file:
             return {}
@@ -599,16 +589,6 @@ class AsyncRedisClient:
         self._telemetry = self._connect(
             telemetry_url, "telemetry", telemetry_tls_ca_file
         )
-
-    @property
-    def control_client(self) -> async_redis.Redis:
-        """Return the raw control Redis client."""
-        return self._control
-
-    @property
-    def telemetry_client(self) -> async_redis.Redis:
-        """Return the raw telemetry Redis client."""
-        return self._telemetry
 
     def _redis_ssl_kwargs(self, tls_ca_file: str | None) -> dict[str, Any]:
         if not tls_ca_file:
