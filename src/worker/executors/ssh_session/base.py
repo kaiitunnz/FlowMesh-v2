@@ -182,7 +182,7 @@ class SSHSessionBackend(ABC):
 
     def session_host(self) -> str:
         """Return the host name a client reaches a network-bound session at."""
-        if override := self._config.ssh_relay_host:
+        if override := self._config.ssh_direct_host:
             return override
         return self._default_session_host()
 

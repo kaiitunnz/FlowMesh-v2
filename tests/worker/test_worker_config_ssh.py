@@ -69,3 +69,16 @@ def test_a_session_config_keeps_what_the_spec_itself_named(
     assert defaulted.image and defaulted.user
     assert (defaulted.requested_image, defaulted.requested_user) == (None, None)
     assert (chosen.requested_image, chosen.requested_user) == ("img", "alice")
+
+
+def test_a_direct_session_is_advertised_at_the_configured_host(
+    worker_env: pytest.MonkeyPatch,
+) -> None:
+    worker_env.setenv("SSH_DIRECT_HOST", "ssh.example.com")
+    assert WorkerConfig.from_env().ssh_direct_host == "ssh.example.com"
+
+
+def test_the_retired_relay_host_is_not_read(worker_env: pytest.MonkeyPatch) -> None:
+    worker_env.delenv("SSH_DIRECT_HOST", raising=False)
+    worker_env.setenv("SSH_RELAY_HOST", "10.0.0.9")
+    assert WorkerConfig.from_env().ssh_direct_host is None

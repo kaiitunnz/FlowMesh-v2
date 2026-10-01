@@ -95,13 +95,13 @@ class TestVastAISessionBackend:
 
 
 class TestSSHEnvironment:
-    def test_the_session_backend_and_relay_host_reach_the_worker(self) -> None:
+    def test_the_session_backend_and_direct_host_reach_the_worker(self) -> None:
         env = SSHConfig(
-            session_backend=SSHBackendName.PROCESS, relay_host="100.64.0.7"
+            session_backend=SSHBackendName.PROCESS, direct_host="100.64.0.7"
         ).to_env(True)
 
         assert env["SSH_SESSION_BACKEND"] == "process"
-        assert env["SSH_RELAY_HOST"] == "100.64.0.7"
+        assert env["SSH_DIRECT_HOST"] == "100.64.0.7"
         assert env["ENABLE_SSH_GPU_LIMIT"] == "1"
 
     def test_a_vastai_worker_with_ssh_gets_the_ssh_environment(self) -> None:
@@ -113,8 +113,8 @@ class TestSSHEnvironment:
 
         assert adapter._base_environment()["SSH_SESSION_BACKEND"] == "process"
 
-    def test_a_relay_host_reaches_only_the_worker_it_is_set_for(self) -> None:
-        assert "SSH_RELAY_HOST" not in SSHConfig().to_env(True)
+    def test_a_direct_host_reaches_only_the_worker_it_is_set_for(self) -> None:
+        assert "SSH_DIRECT_HOST" not in SSHConfig().to_env(True)
 
     def test_an_enabled_worker_with_no_backend_named_gets_auto(self) -> None:
         env = SSHConfig(session_backend=None).to_env(True)

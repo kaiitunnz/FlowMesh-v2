@@ -92,7 +92,7 @@ class WorkerConfig:
     peer_tls_cert_b64: str | None = None
     peer_tls_key_b64: str | None = None
     ssh_session_backend: SSHBackendName = SSHBackendName.DOCKER
-    ssh_relay_host: str | None = None
+    ssh_direct_host: str | None = None
     ssh_stop_timeout_sec: float = 30.0
     state_dirs: tuple[Path, ...] = ()
 
@@ -246,7 +246,7 @@ class WorkerConfig:
                 f"SSH_SESSION_BACKEND={ssh_session_backend_raw!r} is not one of "
                 f"{', '.join(sorted(SSHBackendName))}"
             ) from None
-        ssh_relay_host = os.getenv("SSH_RELAY_HOST", "").strip() or None
+        ssh_direct_host = os.getenv("SSH_DIRECT_HOST", "").strip() or None
         ssh_stop_timeout_sec = parse_float_env(
             "SSH_STOP_TIMEOUT_SEC", WorkerConfig.ssh_stop_timeout_sec
         )
@@ -307,7 +307,7 @@ class WorkerConfig:
             container_name=container_name,
             ssh_network_name=ssh_network_name,
             ssh_session_backend=ssh_session_backend,
-            ssh_relay_host=ssh_relay_host,
+            ssh_direct_host=ssh_direct_host,
             ssh_stop_timeout_sec=ssh_stop_timeout_sec,
             state_dirs=_state_dirs_from_env(),
         )

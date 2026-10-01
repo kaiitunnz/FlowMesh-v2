@@ -56,3 +56,11 @@ def test_withdrawing_tells_every_listener_and_forgets_the_port() -> None:
     registry.withdraw("ssn-never")
     assert registry.resolve("ssn-1") is None
     assert seen == ["ssn-1", "ssn-never"]
+
+
+def test_a_direct_session_is_advertised_at_the_configured_host(tmp_path: Path) -> None:
+    executor = make_ssh_executor(
+        make_live_worker_config(tmp_path, ssh_direct_host="ssh.example.com"),
+        lifecycle=MagicMock(ssh_endpoints=SshEndpointRegistry()),
+    )
+    assert executor.backend.session_address("direct") == "ssh.example.com"

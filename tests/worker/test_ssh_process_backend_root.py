@@ -93,7 +93,7 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> Iterator[WorkerConfig]:
         content_dir=roots["content"],
         hb_file=hb_file,
         state_dirs=(Path("/root"), roots["hf"], hub),
-        ssh_relay_host="127.0.0.1",
+        ssh_direct_host="127.0.0.1",
     )
     yield config
     shutil.rmtree(base, ignore_errors=True)

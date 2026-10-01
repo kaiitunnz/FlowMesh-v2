@@ -225,8 +225,8 @@ advisory, and `ssh -L` forwarding is refused. What a `process` session is denied
 and where its data lives are in
 [`EXECUTORS.md`](EXECUTORS.md#ssh-executor-process-backend).
 
-A `process` worker needs a tailnet address, or an `ssh.relay_host` set on it,
-for its supervisor to reach its sessions; with neither it serves none.
+A `direct` session is advertised at the worker's tailnet address on `process`, else
+its host name; a worker's `ssh.direct_host` (`SSH_DIRECT_HOST`) overrides it.
 
 ## SSH session resource caps
 

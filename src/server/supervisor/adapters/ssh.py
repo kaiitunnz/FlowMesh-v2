@@ -39,8 +39,8 @@ class SSHConfig(BaseModel):
     resource requests."""
     session_backend: SSHBackendName | None = env.SSH_SESSION_BACKEND
     """Session backend the worker uses"""
-    relay_host: str | None = None
-    """Address the supervisor reaches this worker's sessions at"""
+    direct_host: str | None = None
+    """Address a ``direct`` session on this worker is advertised at"""
 
     @field_validator("session_backend", mode="before")
     @classmethod
@@ -70,7 +70,7 @@ class SSHConfig(BaseModel):
             "SSH_MAX_PIDS": self.max_pids,
             "ENABLE_SSH_GPU_LIMIT": self.enable_gpu_limit,
             "SSH_SESSION_BACKEND": self.session_backend or SSHBackendName.AUTO,
-            "SSH_RELAY_HOST": self.relay_host,
+            "SSH_DIRECT_HOST": self.direct_host,
         }
         return {k: to_env_str(v) for k, v in mapping.items() if v is not None}
 
