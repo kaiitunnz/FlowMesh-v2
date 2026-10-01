@@ -37,6 +37,8 @@ from .registry import LOOPBACK_HOST, SshEndpointRegistry
 # arrive again once the session has ended or been cancelled; the lane remembers that
 # many ended sessions.
 _ENDED_MEMORY = 4096
+# A stop with its budget spent still gives every connection this long to end.
+_MIN_ABORT_SEC = 0.2
 
 
 @dataclass(eq=False)
@@ -81,7 +83,7 @@ class SshRelayLane:
         deadline = time.monotonic() + timeout
         future = asyncio.run_coroutine_threadsafe(self._abort_all(), self._loop)
         with contextlib.suppress(Exception):
-            future.result(timeout=max(0.0, deadline - time.monotonic()))
+            future.result(timeout=max(_MIN_ABORT_SEC, deadline - time.monotonic()))
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
 

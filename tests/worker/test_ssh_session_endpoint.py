@@ -110,3 +110,42 @@ def test_a_lane_whose_frames_cannot_leave_stops_within_its_timeout() -> None:
     finally:
         released.set()
         listener.close()
+
+
+def test_a_lane_stopped_with_no_time_left_still_ends_its_connections() -> None:
+    """A worker's shutdown may have spent its whole deadline by the time it stops the
+    lane, and a connection left open would hold its session's sshd."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(5)
+    registry = SshEndpointRegistry()
+    registry.publish("ssn-1", listener.getsockname()[1])
+    lane = SshRelayLane(registry=registry, push_frame=lambda wire: None)
+    openings: list[RelayFrame] = []
+
+    async def capture(frame: RelayFrame) -> None:
+        openings.append(frame)
+
+    async def open_frames() -> None:
+        sink = MagicMock(send=capture)
+        for session_id in ("rly-1", "rly-2", "rly-3"):
+            await ByteStreamChannel(
+                session_id, RelaySessionRole.ORIGIN, sink
+            ).send_open("ssn-1")
+
+    asyncio.run(open_frames())
+    lane.start()
+    accepted: list[socket.socket] = []
+    try:
+        for frame in openings:
+            lane.route(SSH_FRAME_KIND, frame.to_wire())
+            accepted.append(listener.accept()[0])
+
+        lane.stop(0)
+
+        for conn in accepted:
+            conn.settimeout(5)
+            assert conn.recv(1) == b""
+    finally:
+        for conn in accepted:
+            conn.close()
+        listener.close()
