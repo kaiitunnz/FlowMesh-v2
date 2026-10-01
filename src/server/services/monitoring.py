@@ -26,7 +26,6 @@ from shared.schemas.event import (
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import TaskType
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
-from shared.utils.recent import RecentSet
 
 from ..auth import default_principal, deregister_resource, register_resource
 from ..clients.redis import (
@@ -92,8 +91,10 @@ _GIVEN_UP_ENDS = {
 TASK_EVENT_HANDLER_MAX_ATTEMPTS = 5
 
 # How many revoked runs the monitor remembers, so a worker's repeated BUSY reports of
-# one revoked dispatch publish one revoke.
+# one revoked dispatch publish one revoke each interval.
 _REVOKED_RUN_MEMORY = 4096
+# A run still reported after its revoke is revoked again, in case the revoke was lost.
+_REVOKE_RESEND_SEC = 120.0
 
 
 def _stream_id_tuple(entry_id: str) -> tuple[int, int]:
@@ -173,8 +174,8 @@ class EventMonitor:
 
         # Per-entry handler-failure counts backing the consumer's retry budget.
         self._event_handler_attempts: dict[str, int] = {}
-        # Each (worker, dispatch) already revoked as an orphan run.
-        self._revoked_runs: RecentSet[tuple[str, str]] = RecentSet(_REVOKED_RUN_MEMORY)
+        # When each (worker, dispatch) was last revoked as an orphan run.
+        self._revoked_runs: dict[tuple[str, str], float] = {}
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._threads: list[threading.Thread] | None = None
@@ -1007,21 +1008,27 @@ class EventMonitor:
 
     def _revoke_orphan_run(self, worker_id: str, event: WorkerEvent) -> None:
         """Revoke a dispatch a worker reports running that control does not hold, once
-        per worker and dispatch.
+        per worker and dispatch in each resend interval.
 
         A dispatch control resolved without its worker ending it may still have
         reached the worker and started; the revoke ends it there.
         """
         dispatch_id, task_id = event.dispatch_id, event.payload.get("task_id")
+        run = (worker_id, dispatch_id or "")
+        now = time.monotonic()
         if (
             event.status is not WorkerStatus.BUSY
             or not dispatch_id
             or not isinstance(task_id, str)
-            or (worker_id, dispatch_id) in self._revoked_runs
+            or now - self._revoked_runs.get(run, -_REVOKE_RESEND_SEC)
+            < _REVOKE_RESEND_SEC
             or self._runtime.dispatch_in_flight(task_id, dispatch_id, worker_id)
         ):
             return
-        self._revoked_runs.add((worker_id, dispatch_id))
+        self._revoked_runs.pop(run, None)
+        self._revoked_runs[run] = now
+        if len(self._revoked_runs) > _REVOKED_RUN_MEMORY:
+            del self._revoked_runs[next(iter(self._revoked_runs))]
         self._logger.warning(
             "Worker %s runs dispatch %s of task %s that control does not hold; "
             "revoking it",

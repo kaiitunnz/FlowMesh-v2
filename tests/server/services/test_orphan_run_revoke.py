@@ -11,6 +11,7 @@ import pytest
 
 from server.clients.redis import WORKERS_SET_KEY, worker_hb_key, worker_key
 from server.registries.worker import WorkerRegistry
+from server.services import monitoring as monitoring_module
 from server.services.monitoring import EventMonitor
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import WorkerEvent
@@ -116,3 +117,18 @@ def test_an_unregister_revokes_what_its_worker_held(sync: _RecordingSync) -> Non
     )
 
     assert _revokes(sync) == [(task_id, "dsp-1")]
+
+
+def test_a_run_still_reported_past_the_resend_interval_is_revoked_again(
+    sync: _RecordingSync, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, monitor, task_id = _setup(sync)
+    record_dispatch(runtime, task_id, _WORKER, "dsp-1")
+    assert runtime.resolve_disowned_dispatch(task_id, "dsp-1", _WORKER, 0)
+    sync.published.clear()
+    monkeypatch.setattr(monitoring_module, "_REVOKE_RESEND_SEC", 0.0)
+
+    monitor._handle_worker_event(_busy("HEARTBEAT", task_id, "dsp-1"))
+    monitor._handle_worker_event(_busy("HEARTBEAT", task_id, "dsp-1"))
+
+    assert _revokes(sync) == [(task_id, "dsp-1"), (task_id, "dsp-1")]
