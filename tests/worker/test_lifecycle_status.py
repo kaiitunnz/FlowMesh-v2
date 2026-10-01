@@ -119,7 +119,11 @@ def test_a_reconnected_event_stream_gets_the_last_status_again(
 
     on_ready()
 
-    assert client.set_status.call_args.args == (WorkerStatus.BUSY, {}, "dsp-tsk-1")
+    assert client.set_status.call_args.args == (
+        WorkerStatus.BUSY,
+        {"task_id": "tsk-1"},
+        "dsp-tsk-1",
+    )
 
 
 def test_a_heartbeat_names_the_task_of_the_dispatch_it_runs(tmp_path: Path) -> None:

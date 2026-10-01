@@ -242,12 +242,7 @@ class Lifecycle:
         monitor.observe(idle and past_grace and probe is not None and not probe())
 
     def set_busy(self, task_id: str) -> None:
-        self._report(
-            WorkerStatus.BUSY,
-            self.client.dispatch_id(task_id),
-            task_id,
-            {"task_id": task_id},
-        )
+        self._report(WorkerStatus.BUSY, self.client.dispatch_id(task_id), task_id, {})
 
     def set_idle(self, task_id: str) -> None:
         with self._status_lock:
@@ -301,6 +296,8 @@ class Lifecycle:
         extra: dict[str, Any],
     ) -> None:
         self._status, self._dispatch_id, self._task_id = status, dispatch_id, task_id
+        if status is WorkerStatus.BUSY and task_id is not None:
+            extra = {**extra, "task_id": task_id}
         try:
             self.client.set_status(status, extra, dispatch_id)
         except Exception:
