@@ -973,13 +973,12 @@ def test_only_a_direct_session_listens_beyond_loopback(
     session = ProcessSessionBackend(worker).start_session(request)
     try:
         port = session.wait_ready(30)
-        listening = {
-            address.ip
-            for conn in psutil.net_connections("tcp")
-            if conn.status == psutil.CONN_LISTEN
-            and isinstance(address := conn.laddr, psutil._common.addr)
-            and address.port == port
-        }
+        listening: set[str] = set()
+        for conn in psutil.net_connections("tcp"):
+            # A listening socket always has a local address.
+            address: Any = conn.laddr
+            if conn.status == psutil.CONN_LISTEN and address.port == port:
+                listening.add(address.ip)
         assert listening == {bind}
     finally:
         session.stop(1)

@@ -114,7 +114,7 @@ the worker:
 4. Emits a `TASK_UPDATE` event with SSH connection metadata:
    - **direct**: worker-published `host`/`port` (random host port for `22/tcp`)
    - **proxy/forward**: the session's port is published to the worker's relay
-     lane, which the server reaches it through, plus `directHost`/`directPort`
+     lane, through which the server reaches it, plus `directHost`/`directPort`
      for optional `--direct` fallback
 5. Blocks until the container exits, the TTL expires, or the task is cancelled.
 6. Cleans up the SSH container and copies back `sshOutput` artifacts.

@@ -36,7 +36,7 @@ from ..task.models import TaskRecord, TaskStatus
 SSH_EDGE_STREAM_ID = "ssh-edge"
 RELAYED_MODES = frozenset({"proxy", "forward"})
 
-# The bridge still routes a session's last frames — an abort's cancel, a close's final
+# The bridge routes a session's last frames — an abort's cancel, a close's final
 # window grants — by its record, so the record outlives the session by this much.
 _ENDED_RECORD_TTL_MS = 60_000
 

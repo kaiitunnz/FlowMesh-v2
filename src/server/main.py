@@ -798,7 +798,7 @@ app.state.telemetry_store = TELEMETRY_STORE
 app.state.resident_bridge_task = None
 # Likewise for the content plane's own relay bridge.
 app.state.content_bridge_task = None
-# And for relayed SSH connections'.
+# Likewise for the relayed SSH connections' bridge.
 app.state.ssh_bridge_task = None
 
 # Routers — shared

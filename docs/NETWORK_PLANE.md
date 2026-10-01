@@ -175,9 +175,8 @@ object — and the transfer mints no claim, credit, or route authorization. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 Relayed SSH connections reuse it on a keyspace of their own. The root's SSH ingresses are
-the origin, on a dedicated stream rather than a worker node, and the worker serving the
-session is the target: it connects only to a loopback endpoint its SSH executor
-published, never to an address a frame names. Each connection is one strictly sequenced
-session, so a lost frame ends it at both ends rather than corrupting the stream. The
+the origin, on a dedicated stream of their own, and the worker serving the session is
+the target: it connects only to a loopback endpoint its SSH executor published. Each
+connection is one strictly sequenced session, so a lost frame ends it at both ends. The
 connection mints no claim, credit, or route authorization; who may open one is the SSH
 route's permission check. See [`EXECUTORS.md`](EXECUTORS.md#ssh-executor-access-modes).

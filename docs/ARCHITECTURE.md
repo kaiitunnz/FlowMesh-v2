@@ -391,7 +391,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   forward-dial `worker_direct` / `node_relay` peer transport for a reachable pair. The
   substrate holds no admission authority — it mints no `ServiceClaim` or `RouteAuthorization`
   and its transports carry only what a caller frames over them; resident-capacity control
-  binds it to carry claim-gated resident invocation traffic. It is on by default;
+  binds it to carry claim-gated resident invocation traffic, and the root's SSH proxy and
+  forward ingresses carry each client connection over it. It is on by default;
   `NETWORK_PLANE_ENABLED=false` turns it off. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Trusted peer transports.** Where a deployment declares the origin-to-target pair
   trusted, an admitted resident invocation leaves the reverse-rendezvous relay for a
