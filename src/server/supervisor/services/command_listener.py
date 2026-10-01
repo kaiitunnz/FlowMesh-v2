@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from shared.schemas.command import (
+    CommandErrorCode,
     CommandMessage,
     CommandResponse,
     CommandType,
@@ -22,7 +23,12 @@ from ...network.deputy import run_echo
 from ...network.state import ResolvedRoute
 from ...utils.concurrent import Sentinel, TaskReceiver
 from ..adapters.docker import DockerWorkerConfig
-from ..manager import WorkerInitConfig, WorkerManager
+from ..manager import (
+    ManagerNotStartedError,
+    ProviderUnavailableError,
+    WorkerInitConfig,
+    WorkerManager,
+)
 from .pubsub_reader import RebindableReader
 
 type ResponseHandler = Callable[[CommandResponse], None]
@@ -265,10 +271,14 @@ class CommandListener:
             try:
                 resp = fut.result()
             except futures.CancelledError:
-                resp = CommandResponse.error(cmd, "Command cancelled during shutdown")
+                resp = CommandResponse.error(
+                    cmd, "Command cancelled during shutdown", CommandErrorCode.CANCELLED
+                )
             except Exception as exc:
                 self.logger.exception("Command dispatch raised: %s", cmd.command)
-                resp = CommandResponse.error(cmd, f"Dispatch failed: {exc}")
+                resp = CommandResponse.error(
+                    cmd, f"Dispatch failed: {exc}", CommandErrorCode.INTERNAL
+                )
             loop = self._loop
             if loop is None or loop.is_closed():
                 # Loop is gone (shutdown). Send synchronously so we don't drop
@@ -296,7 +306,9 @@ class CommandListener:
     async def _dispatch(self, cmd: CommandMessage) -> CommandResponse:
         sem = self._sem
         if sem is None:
-            return CommandResponse.error(cmd, "Command listener not initialized")
+            return CommandResponse.error(
+                cmd, "Command listener not initialized", CommandErrorCode.NOT_READY
+            )
         try:
             async with sem:
                 names = self._target_worker_names(cmd)
@@ -313,7 +325,9 @@ class CommandListener:
                     return await self._invoke(cmd)
         except Exception as exc:
             self.logger.exception("Command dispatch failed: %s", cmd.command)
-            return CommandResponse.error(cmd, f"Dispatch failed: {exc}")
+            return CommandResponse.error(
+                cmd, f"Dispatch failed: {exc}", CommandErrorCode.INTERNAL
+            )
 
     @staticmethod
     def _target_worker_names(cmd: CommandMessage) -> list[str]:
@@ -347,6 +361,8 @@ class CommandListener:
                 return await self._handle_create_worker_on_node_cmd(cmd)
             case CommandType.GET_WORKERS:
                 return self._handle_get_workers_cmd(cmd)
+            case CommandType.GET_PROVIDERS:
+                return self._handle_get_providers_cmd(cmd)
             case CommandType.STOP_WORKER:
                 return await self._handle_stop_worker_cmd(cmd)
             case CommandType.DESTROY_WORKER:
@@ -356,7 +372,11 @@ class CommandListener:
             case CommandType.DELIVER_ROUTE_PLAN:
                 return await self._handle_deliver_route_plan_cmd(cmd)
             case _:
-                return CommandResponse.error(cmd, f"Unknown command: {cmd.command}")
+                return CommandResponse.error(
+                    cmd,
+                    f"Unknown command: {cmd.command}",
+                    CommandErrorCode.UNKNOWN_COMMAND,
+                )
 
     # ------------------------------------------------------------------ #
     # Handlers
@@ -365,13 +385,17 @@ class CommandListener:
     async def _handle_start_worker_cmd(self, cmd: CommandMessage) -> CommandResponse:
         if cmd.payload is None:
             return CommandResponse.error(
-                cmd, "Missing payload for START_WORKER command"
+                cmd,
+                "Missing payload for START_WORKER command",
+                CommandErrorCode.INTERNAL,
             )
 
         worker_name = cmd.payload.get("worker_name")
         if worker_name is None:
             return CommandResponse.error(
-                cmd, "Missing worker_name in payload for START_WORKER command"
+                cmd,
+                "Missing worker_name in payload for START_WORKER command",
+                CommandErrorCode.INTERNAL,
             )
 
         try:
@@ -379,17 +403,27 @@ class CommandListener:
                 self._wm.start_worker(worker_name), timeout=_START_WORKER_TIMEOUT
             )
             return CommandResponse.ok(cmd, data={"success": result})
+        except ManagerNotStartedError as exc:
+            return CommandResponse.error(cmd, str(exc), CommandErrorCode.NOT_READY)
         except Exception as exc:
-            return CommandResponse.error(cmd, f"Failed to start worker: {exc}")
+            return CommandResponse.error(
+                cmd, f"Failed to start worker: {exc}", CommandErrorCode.INTERNAL
+            )
 
     async def _handle_stop_worker_cmd(self, cmd: CommandMessage) -> CommandResponse:
         if cmd.payload is None:
-            return CommandResponse.error(cmd, "Missing payload for STOP_WORKER command")
+            return CommandResponse.error(
+                cmd,
+                "Missing payload for STOP_WORKER command",
+                CommandErrorCode.INTERNAL,
+            )
 
         worker_name = cmd.payload.get("worker_name")
         if worker_name is None:
             return CommandResponse.error(
-                cmd, "Missing worker_name in payload for STOP_WORKER command"
+                cmd,
+                "Missing worker_name in payload for STOP_WORKER command",
+                CommandErrorCode.INTERNAL,
             )
 
         try:
@@ -397,15 +431,21 @@ class CommandListener:
                 self._wm.stop_worker(worker_name), timeout=_STOP_WORKER_TIMEOUT
             )
             return CommandResponse.ok(cmd, data={"success": result})
+        except ManagerNotStartedError as exc:
+            return CommandResponse.error(cmd, str(exc), CommandErrorCode.NOT_READY)
         except Exception as exc:
-            return CommandResponse.error(cmd, f"Failed to stop worker: {exc}")
+            return CommandResponse.error(
+                cmd, f"Failed to stop worker: {exc}", CommandErrorCode.INTERNAL
+            )
 
     def _handle_get_workers_cmd(self, cmd: CommandMessage) -> CommandResponse:
         try:
             if payload := cmd.payload:
                 if (worker_name := payload.get("worker_name")) is None:
                     return CommandResponse.error(
-                        cmd, "Missing worker_name in payload for GET_WORKERS command"
+                        cmd,
+                        "Missing worker_name in payload for GET_WORKERS command",
+                        CommandErrorCode.INTERNAL,
                     )
                 workers = (
                     [worker]
@@ -418,7 +458,19 @@ class CommandListener:
                 cmd, data={"workers": [worker.model_dump() for worker in workers]}
             )
         except Exception as exc:
-            return CommandResponse.error(cmd, f"Failed to get workers: {exc}")
+            return CommandResponse.error(
+                cmd, f"Failed to get workers: {exc}", CommandErrorCode.INTERNAL
+            )
+
+    def _handle_get_providers_cmd(self, cmd: CommandMessage) -> CommandResponse:
+        try:
+            return CommandResponse.ok(
+                cmd, data={"providers": self._wm.available_providers()}
+            )
+        except Exception as exc:
+            return CommandResponse.error(
+                cmd, f"Failed to get providers: {exc}", CommandErrorCode.INTERNAL
+            )
 
     async def _handle_deliver_route_plan_cmd(
         self, cmd: CommandMessage
@@ -430,7 +482,9 @@ class CommandListener:
             echo_payload = base64.b64decode(payload["payload_b64"])
             budget = float(payload.get("connect_budget_sec", 5.0))
         except (KeyError, ValidationError, ValueError) as exc:
-            return CommandResponse.error(cmd, f"Invalid route plan: {exc}")
+            return CommandResponse.error(
+                cmd, f"Invalid route plan: {exc}", CommandErrorCode.INTERNAL
+            )
         outcome = await run_echo(resolved, echo_payload, connect_budget_sec=budget)
         return CommandResponse.ok(
             cmd,
@@ -460,8 +514,22 @@ class CommandListener:
                 self._wm.create_worker(init_config), timeout=_CREATE_WORKER_TIMEOUT
             )
             return CommandResponse.ok(cmd, data=info.model_dump())
+        except ProviderUnavailableError as exc:
+            return CommandResponse.error(
+                cmd,
+                str(exc),
+                error_code=CommandErrorCode.PROVIDER_UNAVAILABLE,
+            )
+        except ManagerNotStartedError as exc:
+            return CommandResponse.error(cmd, str(exc), CommandErrorCode.NOT_READY)
+        except ValidationError as exc:
+            return CommandResponse.error(
+                cmd, f"Invalid worker config: {exc}", CommandErrorCode.INVALID_PAYLOAD
+            )
         except Exception as exc:
-            return CommandResponse.error(cmd, f"Failed to create worker: {exc}")
+            return CommandResponse.error(
+                cmd, f"Failed to create worker: {exc}", CommandErrorCode.INTERNAL
+            )
 
     async def _handle_create_worker_on_node_cmd(
         self, cmd: CommandMessage
@@ -481,6 +549,7 @@ class CommandListener:
                         cmd,
                         f"Invalid worker_type {worker_type} for gpu_count > 0; "
                         "must be 'gpu'",
+                        CommandErrorCode.INTERNAL,
                     )
                 cuda_devices = payload.get("cuda_devices")
                 if cuda_devices is None:
@@ -490,6 +559,7 @@ class CommandListener:
                         cmd,
                         f"Length of cuda_devices list must match gpu_count; got "
                         f"{len(cuda_devices)} devices for gpu_count {gpu_count}",
+                        CommandErrorCode.INTERNAL,
                     )
 
             if not payload.get("worker_alias"):
@@ -509,21 +579,37 @@ class CommandListener:
                 self._wm.create_worker(init_config), timeout=_CREATE_WORKER_TIMEOUT
             )
             return CommandResponse.ok(cmd, data={"worker_name": info.name})
+        except ProviderUnavailableError as exc:
+            return CommandResponse.error(
+                cmd,
+                str(exc),
+                error_code=CommandErrorCode.PROVIDER_UNAVAILABLE,
+            )
+        except ManagerNotStartedError as exc:
+            return CommandResponse.error(cmd, str(exc), CommandErrorCode.NOT_READY)
         except Exception as exc:
-            return CommandResponse.error(cmd, f"Failed to create worker: {exc}")
+            return CommandResponse.error(
+                cmd, f"Failed to create worker: {exc}", CommandErrorCode.INTERNAL
+            )
 
     async def _handle_destroy_worker_cmd(self, cmd: CommandMessage) -> CommandResponse:
         worker_name = (cmd.payload or {}).get("worker_name")
         if not worker_name:
-            return CommandResponse.error(cmd, "Missing worker_name")
+            return CommandResponse.error(
+                cmd, "Missing worker_name", CommandErrorCode.INTERNAL
+            )
         try:
             success = await asyncio.wait_for(
                 self._wm.destroy_worker(worker_name), timeout=_DESTROY_WORKER_TIMEOUT
             )
             self._worker_locks.pop(worker_name, None)
             return CommandResponse.ok(cmd, data={"success": success})
+        except ManagerNotStartedError as exc:
+            return CommandResponse.error(cmd, str(exc), CommandErrorCode.NOT_READY)
         except Exception as exc:
-            return CommandResponse.error(cmd, f"Failed to destroy worker: {exc}")
+            return CommandResponse.error(
+                cmd, f"Failed to destroy worker: {exc}", CommandErrorCode.INTERNAL
+            )
 
     async def _handle_destroy_workers_cmd(self, cmd: CommandMessage) -> CommandResponse:
         raw_names = (cmd.payload or {}).get("worker_names")
@@ -538,5 +624,9 @@ class CommandListener:
             else:
                 self._worker_locks.clear()
             return CommandResponse.ok(cmd)
+        except ManagerNotStartedError as exc:
+            return CommandResponse.error(cmd, str(exc), CommandErrorCode.NOT_READY)
         except Exception as exc:
-            return CommandResponse.error(cmd, f"Failed to destroy workers: {exc}")
+            return CommandResponse.error(
+                cmd, f"Failed to destroy workers: {exc}", CommandErrorCode.INTERNAL
+            )

@@ -100,6 +100,11 @@ The outcome-finalization index: the binding from a fabric idempotency key to the
 container lifecycle and is what `flowmesh stack worker {up,down,...}`
 calls.
 
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/stack/workers/providers` | Worker providers available on this node (e.g. `docker`, `external`, `vastai`). |
+| POST | `/api/v1/stack/workers` | Create a worker on this node; `409 Conflict` when the requested `provider` is unavailable here. |
+
 ## SSH
 
 | Method | Path | Description |
