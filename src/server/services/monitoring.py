@@ -828,9 +828,9 @@ class EventMonitor:
         log_worker_event(self._logger, event)
         self._metrics.record_worker_event(event)
         event_type = event.type
+        worker_id = (event.worker_id or "").strip()
         match event_type:
             case "REGISTER":
-                worker_id = (event.worker_id or "").strip()
                 if worker_id:
                     self._schedule_register(
                         ResourceKind.WORKER,
@@ -839,7 +839,6 @@ class EventMonitor:
                         {"tags": list(event.tags or [])},
                     )
             case "HEARTBEAT":
-                worker_id = (event.worker_id or "").strip()
                 ttl_sec = event.payload.get("ttl_sec", 120)
                 report = self._worker_registry.update_worker_hb(
                     worker_id, event.ts, ttl_sec, event.status, event.dispatch_id
@@ -853,7 +852,6 @@ class EventMonitor:
                 # A server-origin event announces a write the registry already applied
                 # inline; replaying it would land that value again on top of whatever
                 # has since replaced it.
-                worker_id = (event.worker_id or "").strip()
                 report = self._worker_registry.set_worker_status(
                     worker_id,
                     event.status or WorkerStatus.UNKNOWN,
@@ -871,7 +869,7 @@ class EventMonitor:
             case "MEDIATED_OP_PROPOSE":
                 self._runtime.authorize_model_turn(
                     AgentModelTurnProposal.model_validate(event.payload["proposal"]),
-                    (event.worker_id or "").strip(),
+                    worker_id,
                 )
             case "RESIDENT_BOOTSTRAP_ACK":
                 self._runtime.on_resident_bootstrap_ack(
@@ -883,14 +881,13 @@ class EventMonitor:
                 )
             case "CONTENT_HOLDING" if self._content_authority is not None:
                 self._content_authority.record_holding(
-                    (event.worker_id or "").strip(),
+                    worker_id,
                     [
                         (str(scope), str(digest))
                         for scope, digest in event.payload["held"]
                     ],
                 )
             case "CONTENT_ACCESS_REQUEST" if self._content_access is not None:
-                worker_id = (event.worker_id or "").strip()
                 task_id = str(event.payload["task_id"])
                 dispatch_id = event.payload.get("dispatch_id")
                 if (
@@ -909,7 +906,7 @@ class EventMonitor:
                     self._content_access.issue(worker_id, task_id, scope)
             case "CONTENT_HYDRATION_REQUEST" if self._content_authority is not None:
                 self._content_authority.authorize(
-                    (event.worker_id or "").strip(),
+                    worker_id,
                     str(event.payload["task_id"]),
                     ContentReference.model_validate(event.payload["reference"]),
                 )
@@ -920,9 +917,8 @@ class EventMonitor:
                     )
                 )
             case "ATTACHED":
-                self._runtime.redeliver_to_worker((event.worker_id or "").strip())
+                self._runtime.redeliver_to_worker(worker_id)
             case "UNREGISTER":
-                worker_id = (event.worker_id or "").strip()
                 # A revoke routes by the node the record names, which this deletes.
                 departing = self._worker_registry.get_worker(worker_id)
                 self._worker_registry.unregister_workers(worker_id)
