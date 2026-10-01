@@ -9,16 +9,22 @@ whole stream. The servers relay the frames opaquely and never read these message
 
 import asyncio
 from collections.abc import Awaitable
+from enum import StrEnum
 from typing import Any
 
 from .frame_stream import FrameSink
 from .relay_frame import RelayFrame
 from .session import FramedRelaySession, RelaySessionRole
 
-OPEN = "open"
-DATA = "data"
-EOF = "eof"
-REFUSED = "refused"
+
+class StreamMessage(StrEnum):
+    """The kind of one message on a byte stream."""
+
+    OPEN = "open"
+    DATA = "data"
+    EOF = "eof"
+    REFUSED = "refused"
+
 
 CHUNK_BYTES = 32 * 1024
 WINDOW_BYTES = 256 * 1024
@@ -63,12 +69,16 @@ class ByteStreamChannel:
         await self._session.on_frame(frame)
 
     async def send_open(self, endpoint_id: str) -> None:
-        await self._guard(self._session.send_wire(OPEN, endpoint_id=endpoint_id))
+        await self._guard(
+            self._session.send_wire(StreamMessage.OPEN, endpoint_id=endpoint_id)
+        )
 
     async def refuse(self, reason: str) -> None:
         """Tell the origin the stream cannot be served, then abort it."""
         try:
-            await self._guard(self._session.send_wire(REFUSED, reason=reason))
+            await self._guard(
+                self._session.send_wire(StreamMessage.REFUSED, reason=reason)
+            )
         finally:
             await self.abort()
 
@@ -76,10 +86,10 @@ class ByteStreamChannel:
         """Send bytes in window-bounded chunks, blocking while the window is full."""
         for start in range(0, len(data), CHUNK_BYTES):
             chunk = data[start : start + CHUNK_BYTES]
-            await self._guard(self._session.send_body_wire(DATA, chunk))
+            await self._guard(self._session.send_body_wire(StreamMessage.DATA, chunk))
 
     async def send_eof(self) -> None:
-        await self._guard(self._session.send_wire(EOF))
+        await self._guard(self._session.send_wire(StreamMessage.EOF))
 
     async def recv_message(self) -> tuple[dict[str, Any], bytes]:
         """Return the next message and its body; raise once the stream is aborted."""
@@ -97,11 +107,11 @@ class ByteStreamChannel:
         """Return the next bytes, or None once the peer ended its direction."""
         header, body = await self.recv_message()
         match header.get("kind"):
-            case "data":
+            case StreamMessage.DATA:
                 return body
-            case "eof":
+            case StreamMessage.EOF:
                 return None
-            case "refused":
+            case StreamMessage.REFUSED:
                 raise StreamClosed(f"relay refused: {header.get('reason', '')}")
         raise StreamClosed(f"unexpected relay message {header.get('kind')!r}")
 
@@ -184,12 +194,9 @@ async def splice(
 
 __all__ = [
     "CHUNK_BYTES",
-    "DATA",
-    "EOF",
-    "OPEN",
-    "REFUSED",
     "WINDOW_BYTES",
     "ByteStreamChannel",
     "StreamClosed",
+    "StreamMessage",
     "splice",
 ]

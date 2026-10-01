@@ -18,7 +18,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from shared.network.byte_stream import OPEN, ByteStreamChannel, StreamClosed, splice
+from shared.network.byte_stream import (
+    ByteStreamChannel,
+    StreamClosed,
+    StreamMessage,
+    splice,
+)
 from shared.network.frame_stream import WireFrameSink
 from shared.network.relay_frame import (
     SSH_FRAME_KIND,
@@ -122,7 +127,7 @@ class SshRelayLane:
                 channel.recv_message(), self._open_timeout_sec
             )
             endpoint_id = str(header.get("endpoint_id") or "")
-            if header.get("kind") != OPEN or not endpoint_id:
+            if header.get("kind") != StreamMessage.OPEN or not endpoint_id:
                 await channel.abort()
                 return
             port = self._registry.resolve(endpoint_id)
