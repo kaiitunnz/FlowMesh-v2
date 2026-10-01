@@ -55,6 +55,7 @@ class Lifecycle:
         self._system_principal = system_principal
         self._current_gpu_count_getter = current_gpu_count_getter
         self._on_reregister = on_reregister
+        self._on_heartbeat: Callable[[], None] | None = None
         self._endpoint_advertisement_provider = endpoint_advertisement_provider
 
         self._node_id: str | None = None
@@ -75,6 +76,10 @@ class Lifecycle:
     def set_reregister_callback(self, callback: Callable[[str], None]) -> None:
         """Register a hook invoked with the new node id after a re-register."""
         self._on_reregister = callback
+
+    def set_heartbeat_callback(self, callback: Callable[[], None]) -> None:
+        """Register a hook run after each node heartbeat."""
+        self._on_heartbeat = callback
 
     # ------------------------------------------------------------------ #
     # Registration
@@ -244,6 +249,8 @@ class Lifecycle:
             try:
                 self._reregister_if_lost()
                 self.heartbeat_now()
+                if (on_heartbeat := self._on_heartbeat) is not None:
+                    on_heartbeat()
             except Exception as exc:
                 self.logger.warning(
                     "Node heartbeat failed for %s: %s", self._node_id, exc

@@ -57,6 +57,10 @@ class RelayService:
     def add_event(self, event_data: Any) -> None:
         self._q.put(event_data)
 
+    def add_unregister(self, worker_id: str) -> None:
+        """Relay an unregister on behalf of a worker that will not send its own."""
+        self.add_event({"type": "UNREGISTER", "worker_id": worker_id, "payload": {}})
+
     def add_log(self, log_data: Any) -> None:
         self._q.put(_LogData(log_data))
 

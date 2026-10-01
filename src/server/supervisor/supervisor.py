@@ -459,10 +459,15 @@ def _run_supervisor(
     task_listener = TaskListener(
         redis=redis_client.sync, node_id=node_id, logger=logger
     )
-    worker_adapter_registry = WorkerAdapterRegistry(
-        on_worker_id_released=task_listener.remove_worker
-    )
     relay_service = RelayService(redis=redis_client.sync, logger=logger)
+
+    def on_worker_id_released(worker_id: str) -> None:
+        task_listener.remove_worker(worker_id)
+        grpc_server.worker_id_released(worker_id)
+
+    worker_adapter_registry = WorkerAdapterRegistry(
+        on_worker_id_released=on_worker_id_released
+    )
     worker_manager = WorkerManager(
         system_principal,
         wm_cfg.config_path,
@@ -585,6 +590,7 @@ def _run_supervisor(
             await peer_listener.start()
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
+        lifecycle.set_heartbeat_callback(grpc_server.reconcile_workers)
         logger.info("Supervisor ready for node %s", node_id)
 
         # Wait for termination signal

@@ -571,14 +571,18 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   taken is refused and retried. Disable with `WORKER_FOREIGN_GPU_GATE=false`.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
   dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
-  recreates a deleted record.
+  recreates a deleted record. A worker whose record is gone, as after a partition
+  longer than that or a Redis wipe, is released by its supervisor on its next node
+  heartbeat and registers again as a new incarnation.
 - **Dispatch queues.** A supervisor keeps one dispatch queue per registered worker id
   and frees it when the worker's token registers again under a new id or is removed,
   dropping the frames still queued and ending any task stream still reading it. A new
   `StreamTasks` on an id takes over the frames still queued, in order, and ends every
   older stream on that id, so a half-open stream receives nothing once the worker's new
   stream attaches. A worker whose task stream ends reconnects, and its new stream reads
-  the queue of the id its token then holds.
+  the queue of the id its token then holds. An id the supervisor frees is unregistered
+  with the root, and a worker whose event stream closes without it unregistering is
+  unregistered unless it reconnects within a few seconds.
 - **Worker and node identity.** A worker's alias is assigned by its
   supervisor: the supervisor passes it as `WORKER_ALIAS` to the workers it
   launches, an external worker reads it from its token, and registration

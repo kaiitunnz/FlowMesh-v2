@@ -12,7 +12,11 @@ from unittest.mock import MagicMock
 import fakeredis
 import pytest
 
-from server.clients.redis import SyncRedisClient, node_dispatch_channel
+from server.clients.redis import (
+    WORKERS_SET_KEY,
+    SyncRedisClient,
+    node_dispatch_channel,
+)
 from server.hooks import PrincipalContext
 from server.supervisor.adapters.external import mint_external_token
 from server.supervisor.manager import WorkerManager
@@ -94,6 +98,32 @@ class _Supervisor:
         self.listener.stop()
 
 
+def _client(port: int) -> SupervisorClient:
+    return SupervisorClient(
+        worker_token=mint_external_token(_SECRET, _ALIAS),
+        owner_principal=None,
+        grpc_target=f"127.0.0.1:{port}",
+        worker_namespace="ns",
+        worker_cluster="cl",
+        worker_alias=_ALIAS,
+        logger=_LOGGER,
+    )
+
+
+def _register(client: SupervisorClient) -> None:
+    client.register(
+        WorkerStatus.IDLE,
+        "2026-10-02T00:00:00Z",
+        1,
+        {},
+        make_worker_hardware(),
+        WorkerCapabilities(supported_task_types=frozenset({TaskType.ECHO})),
+        None,
+        [],
+        1.0,
+    )
+
+
 async def _until(condition: Callable[[], bool], timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     while not condition():
@@ -111,29 +141,10 @@ async def test_a_supervisor_restart_re_admits_the_worker_and_abandons_its_dispat
     first = _Supervisor(redis, port)
     await first.start()
 
-    client = SupervisorClient(
-        worker_token=mint_external_token(_SECRET, _ALIAS),
-        owner_principal=None,
-        grpc_target=f"127.0.0.1:{port}",
-        worker_namespace="ns",
-        worker_cluster="cl",
-        worker_alias=_ALIAS,
-        logger=_LOGGER,
-    )
+    client = _client(port)
     abandoned: list[str | None] = []
     client.on_reregistered(abandoned.append)
-    await asyncio.to_thread(
-        client.register,
-        WorkerStatus.IDLE,
-        "2026-10-02T00:00:00Z",
-        1,
-        {},
-        make_worker_hardware(),
-        WorkerCapabilities(supported_task_types=frozenset({TaskType.ECHO})),
-        None,
-        [],
-        1.0,
-    )
+    await asyncio.to_thread(_register, client)
     old_id, old_incarnation = client.worker_id, client.incarnation
     await asyncio.to_thread(client.start)
     try:
@@ -180,3 +191,28 @@ async def test_a_supervisor_restart_re_admits_the_worker_and_abandons_its_dispat
     assert {e["worker_id"] for e in relayed} == {new_id}
     status = next(e for e in relayed if e.get("type") == "STATUS")
     assert status.get("dispatch_id") is None
+
+
+@pytest.mark.asyncio
+async def test_a_worker_the_root_reaped_registers_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
+    redis = _redis(fakeredis.FakeServer())
+    port = _free_port()
+    supervisor = _Supervisor(redis, port)
+    await supervisor.start()
+    client = _client(port)
+    await asyncio.to_thread(_register, client)
+    old_id = client.worker_id
+    await asyncio.to_thread(client.start)
+    try:
+        redis.srem(WORKERS_SET_KEY, old_id)
+
+        await asyncio.to_thread(supervisor.server.reconcile_workers)
+
+        await _until(lambda: client.worker_id != old_id)
+        assert redis.set_members(WORKERS_SET_KEY) == {client.worker_id}
+    finally:
+        await asyncio.to_thread(client.shutdown)
+        await supervisor.stop()

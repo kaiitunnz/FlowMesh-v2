@@ -132,6 +132,24 @@ class WorkerRegistry:
         with self._get_state() as state:
             return list(state.registry.values())
 
+    def bound_worker_ids(self) -> list[str]:
+        with self._get_state() as state:
+            return list(state.token_id_map.values())
+
+    def retire(self, worker_id: str) -> bool:
+        """Unbind the token still bound to ``worker_id``, so its worker registers again;
+        return whether one was."""
+        with self._get_state() as state:
+            token = next(
+                (t for t, bound in state.token_id_map.items() if bound == worker_id),
+                None,
+            )
+            if token is None:
+                return False
+            del state.token_id_map[token]
+        self._release([worker_id])
+        return True
+
     def set_worker_id(self, token: WorkerTokenType, worker_id: str) -> None:
         with self._get_state() as state:
             previous = state.token_id_map.get(token)

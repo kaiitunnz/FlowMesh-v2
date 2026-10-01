@@ -34,6 +34,9 @@ from ..services.task_listener import TaskListener
 
 # Rewrite node_id for each worker key that still exists, atomically. KEYS are
 # worker keys; ARGV[1] is the new node id. Returns the count actually rewritten.
+# Longer than a worker waits before reconnecting a closed event stream.
+_REATTACH_GRACE_SEC = 10.0
+
 _REHOME_LUA = """
 local rehomed = 0
 for _, key in ipairs(KEYS) do
@@ -116,6 +119,47 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # Guards _node_id and the registry-vs-rehome window against concurrent
         # RegisterWorker (grpc loop thread) and rebind_node (heartbeat thread).
         self._lock = Lock()
+        # Worker ids whose unregister already reached the root, so their release sends
+        # none.
+        self._unregistered: set[str] = set()
+        self._unregistered_lock = Lock()
+        self._pending_unregisters: set[asyncio.Task[None]] = set()
+
+    def reconcile_workers(self) -> None:
+        """Release every binding whose worker the root no longer records, so the worker
+        registers again rather than running unseen."""
+        with self._lock:
+            recorded = self._redis.set_members(WORKERS_SET_KEY)
+            gone = [
+                worker_id
+                for worker_id in self._registry.bound_worker_ids()
+                if worker_id not in recorded
+            ]
+            released = sum(self._registry.retire(worker_id) for worker_id in gone)
+        if released:
+            self._logger.warning(
+                "Released %d worker(s) the root no longer records: %s",
+                released,
+                ", ".join(gone),
+            )
+
+    def worker_id_released(self, worker_id: str) -> None:
+        """Tell the root a worker id ended, unless its own unregister already did."""
+        with self._unregistered_lock:
+            if worker_id in self._unregistered:
+                self._unregistered.discard(worker_id)
+                return
+            self._unregistered.add(worker_id)
+        self._relay_service.add_unregister(worker_id)
+
+    def _note_unregistered(self, worker_id: str) -> bool:
+        """Record that the root heard ``worker_id`` unregister; return whether it is the
+        first to."""
+        with self._unregistered_lock:
+            if worker_id in self._unregistered:
+                return False
+            self._unregistered.add(worker_id)
+            return True
 
     def rebind_node(self, node_id: str) -> None:
         """Re-home this node's workers under a new node id.
@@ -271,7 +315,9 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
 
         worker.attach_event_stream()
         try:
-            return await self._relay_events(worker, worker_id, request_iterator)
+            return await self._relay_events(
+                worker, worker_id, request_iterator, context
+            )
         finally:
             worker.detach_event_stream()
 
@@ -280,10 +326,15 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         worker: WorkerAdapter,
         worker_id: str,
         request_iterator: AsyncIterator[supervisor_pb2.EventMessage],
+        context: grpc.aio.ServicerContext,
     ) -> Empty:
         registered: bool = False
         unregistered: bool = False
         async for message in request_iterator:
+            if self._registry.get_worker_id(worker.token) != worker_id:
+                await context.abort(
+                    grpc.StatusCode.UNAUTHENTICATED, "Worker registration ended"
+                )
             payload = _payload_from_struct(message.payload)
             event_type = payload.get("type")
             if (bridge := self._relay_bridges.get(str(event_type))) is not None:
@@ -300,18 +351,35 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                     worker.set_status(WorkerStatus.RUNNING)
                 case "UNREGISTER":
                     unregistered = True
+                    if not self._note_unregistered(worker_id):
+                        continue
             self._relay_service.add_event(payload)
         self._logger.info("Event stream closed for worker %s", worker_id)
         if registered and not unregistered:
-            # Manually send unregister event if not sent by worker
-            payload = dict(type="UNREGISTER", worker_id=worker_id, payload={})
-            self._relay_service.add_event(payload)
+            task = asyncio.ensure_future(
+                self._unregister_unless_reattached(worker, worker_id)
+            )
+            self._pending_unregisters.add(task)
+            task.add_done_callback(self._pending_unregisters.discard)
         try:
             worker.clear_worker_id()
         except RuntimeError as exc:
             self._logger.warning(exc)
         worker.set_status(WorkerStatus.STOPPED)
         return Empty()
+
+    async def _unregister_unless_reattached(
+        self, worker: WorkerAdapter, worker_id: str
+    ) -> None:
+        """Unregister a worker whose event stream closed without it unregistering,
+        unless it re-attaches first, as a worker reconnecting after a blip does."""
+        await asyncio.sleep(_REATTACH_GRACE_SEC)
+        if worker.has_event_stream:
+            return
+        if self._registry.get_worker_id(worker.token) != worker_id:
+            return
+        if self._note_unregistered(worker_id):
+            self._relay_service.add_unregister(worker_id)
 
     async def PushLogs(
         self,
@@ -428,3 +496,11 @@ class GrpcServer:
     def rebind_node(self, node_id: str) -> None:
         """Re-home registered workers under a new node id."""
         self._servicer.rebind_node(node_id)
+
+    def reconcile_workers(self) -> None:
+        """Release the workers the root no longer records."""
+        self._servicer.reconcile_workers()
+
+    def worker_id_released(self, worker_id: str) -> None:
+        """Tell the root a worker id's binding ended."""
+        self._servicer.worker_id_released(worker_id)
