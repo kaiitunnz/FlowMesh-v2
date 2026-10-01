@@ -16,6 +16,7 @@ from shared.grpc.supervisor.v1 import (
 )
 from shared.network.relay_frame import RelayFrame
 from shared.utils import new_worker_id
+from shared.utils.recent import RecentSet
 
 from ... import env
 from ...clients.redis import (
@@ -34,6 +35,8 @@ from ..services.task_listener import TaskListener
 
 # Longer than a worker waits before reconnecting a closed event stream.
 _REATTACH_GRACE_SEC = 10.0
+# Far more ids than a supervisor releases while their unregisters are in flight.
+_UNREGISTERED_MEMORY = 4096
 
 # Rewrite node_id for each worker key that still exists, atomically. KEYS are
 # worker keys; ARGV[1] is the new node id. Returns the count actually rewritten.
@@ -119,9 +122,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # Guards _node_id and the registry-vs-rehome window against concurrent
         # RegisterWorker (grpc loop thread) and rebind_node (heartbeat thread).
         self._lock = Lock()
-        # Worker ids whose unregister already reached the root, so their release sends
-        # none.
-        self._unregistered: set[str] = set()
+        # Worker ids already unregistered with the root; each is unregistered once.
+        self._unregistered: RecentSet[str] = RecentSet(_UNREGISTERED_MEMORY)
         self._unregistered_lock = Lock()
         self._pending_unregisters: set[asyncio.Task[None]] = set()
 

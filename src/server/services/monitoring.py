@@ -3,7 +3,6 @@ import json
 import logging
 import threading
 import time
-from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future
 from datetime import UTC, datetime
@@ -27,6 +26,7 @@ from shared.schemas.event import (
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import TaskType
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
+from shared.utils.recent import RecentSet
 
 from ..auth import default_principal, deregister_resource, register_resource
 from ..clients.redis import (
@@ -174,7 +174,7 @@ class EventMonitor:
         # Per-entry handler-failure counts backing the consumer's retry budget.
         self._event_handler_attempts: dict[str, int] = {}
         # Each (worker, dispatch) already revoked as an orphan run.
-        self._revoked_runs: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._revoked_runs: RecentSet[tuple[str, str]] = RecentSet(_REVOKED_RUN_MEMORY)
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._threads: list[threading.Thread] | None = None
@@ -1015,9 +1015,7 @@ class EventMonitor:
             or self._runtime.dispatch_in_flight(task_id, dispatch_id, worker_id)
         ):
             return
-        self._revoked_runs[(worker_id, dispatch_id)] = None
-        if len(self._revoked_runs) > _REVOKED_RUN_MEMORY:
-            self._revoked_runs.popitem(last=False)
+        self._revoked_runs.add((worker_id, dispatch_id))
         if (worker := self._worker_registry.get_worker(worker_id)) is None:
             return
         self._logger.warning(
