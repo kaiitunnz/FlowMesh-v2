@@ -19,13 +19,17 @@ from typing import Any
 
 from shared.network.byte_stream import OPEN, ByteStreamChannel, StreamClosed, splice
 from shared.network.frame_stream import WireFrameSink
-from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
+from shared.network.relay_frame import (
+    SSH_FRAME_KIND,
+    RelayDirection,
+    RelayFrame,
+    RelayFrameKind,
+)
 from shared.network.session import RelaySessionRole
 
 from .registry import SshEndpointRegistry
 
 LOOPBACK_HOST = "127.0.0.1"
-SSH_FRAME_KIND = "ssh_frame"
 # The bridge may re-forward a frame after a restart, so a session's opening frame can
 # arrive again once the session has ended or been cancelled; the lane remembers that
 # many ended sessions.
@@ -191,4 +195,4 @@ class SshRelayLane:
         self._loop.run_forever()
 
 
-__all__ = ["LOOPBACK_HOST", "SSH_FRAME_KIND", "SshRelayLane"]
+__all__ = ["LOOPBACK_HOST", "SshRelayLane"]

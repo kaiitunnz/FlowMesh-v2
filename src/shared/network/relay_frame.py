@@ -30,6 +30,11 @@ class RelayDirection(StrEnum):
 
 _CONTROL_KINDS = frozenset({RelayFrameKind.WINDOW, RelayFrameKind.CANCEL})
 
+# The mediated-op kind each relay namespace's frames reach a worker as.
+RESIDENT_FRAME_KIND = "resident_frame"
+CONTENT_FRAME_KIND = "content_frame"
+SSH_FRAME_KIND = "ssh_frame"
+
 
 @dataclass(frozen=True)
 class RelayFrame:
@@ -172,6 +177,9 @@ class DirectionWindow:
 
 
 __all__ = [
+    "CONTENT_FRAME_KIND",
+    "RESIDENT_FRAME_KIND",
+    "SSH_FRAME_KIND",
     "DirectionWindow",
     "RelayDirection",
     "RelayFrame",

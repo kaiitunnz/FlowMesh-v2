@@ -27,6 +27,7 @@ from shared.inference import (
     write_resolved_input,
 )
 from shared.network.mtls import MutualTlsMaterial
+from shared.network.relay_frame import SSH_FRAME_KIND
 from shared.outcome import FabricContentStore
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
 from shared.tasks.credentials import dispatched_credentials
@@ -67,7 +68,6 @@ from .executors.utils.checkpoints import write_executor_result
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
-from .ssh_relay import SSH_FRAME_KIND
 from .telemetry import otel
 from .utils.logging import TaskLogEmitter
 

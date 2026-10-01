@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from shared.network.relay_frame import SSH_FRAME_KIND
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerStatus
@@ -290,7 +291,7 @@ def test_a_relayed_frame_is_routed_as_it_arrives(tmp_path: Path) -> None:
         delays = []
         for _ in range(5):
             sent = time.monotonic()
-            ops.put(("ssh_frame", {}))
+            ops.put((SSH_FRAME_KIND, {}))
             delays.append(routed.get(timeout=2) - sent)
             time.sleep(0.07)
         assert max(delays) < 0.1, delays

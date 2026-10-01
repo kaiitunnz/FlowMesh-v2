@@ -25,13 +25,17 @@ from server.services.port_forward import PortForwardService
 from server.ssh import SSH_EDGE_STREAM_ID, SshRelayOrigin, SshRelayTarget
 from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
 from shared.network.byte_stream import StreamClosed
-from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
+from shared.network.relay_frame import (
+    SSH_FRAME_KIND,
+    RelayDirection,
+    RelayFrame,
+    RelayFrameKind,
+)
 from worker.executors.ssh_session.base import (
     count_established_connections,
     read_local_proc_net_tcp,
 )
 from worker.ssh_relay import SshEndpointRegistry, SshRelayLane
-from worker.ssh_relay.lane import SSH_FRAME_KIND
 
 from ._relay_fakes import FakeBinaryRedis
 
@@ -92,7 +96,7 @@ async def _fabric() -> AsyncIterator[_Fabric]:
         NODE,
         enqueue_local,
         keyspace=SSH_RELAY_KEYSPACE,
-        frame_kind="ssh_frame",
+        frame_kind=SSH_FRAME_KIND,
     )
     attachment = ReverseRelayAttachment(
         redis, NODE, node_bridge, owner="test", keyspace=SSH_RELAY_KEYSPACE, poll_ms=5

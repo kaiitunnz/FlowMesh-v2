@@ -341,13 +341,7 @@ def _run_supervisor(
     from ..clients import RedisClient
     from ..clients.redis import resident_relay_client
     from ..network.listeners import NetworkPlaneListeners
-    from ..network.reverse_relay import (
-        CONTENT_RELAY_KEYSPACE,
-        RESIDENT_RELAY_KEYSPACE,
-        SSH_RELAY_KEYSPACE,
-        BinaryRedis,
-    )
-    from ..network.worker_bridge import RelayWorkerBridge
+    from ..network.reverse_relay import BinaryRedis
     from ..registries.node import NodeRegistry
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
@@ -356,9 +350,14 @@ def _run_supervisor(
     from .services.command_listener import CommandListener
     from .services.grpc_server import GrpcServer
     from .services.lifecycle import Lifecycle
+    from .services.node_relays import (
+        CONTENT_NAMESPACE,
+        RESIDENT_NAMESPACE,
+        SSH_NAMESPACE,
+        NodeRelays,
+    )
     from .services.peer_listener import NodePeerListener
     from .services.relay_service import RelayService
-    from .services.reverse_relay_attachment import ReverseRelayAttachment
     from .services.task_listener import TaskListener
 
     # --- logging (child has its own logger) ---
@@ -448,65 +447,22 @@ def _run_supervisor(
         logger,
         capacity_change_callback=lifecycle.heartbeat_now,
     )
-    resident_bridge: RelayWorkerBridge | None = None
-    resident_attachment: ReverseRelayAttachment | None = None
-    content_bridge: RelayWorkerBridge | None = None
-    content_attachment: ReverseRelayAttachment | None = None
-    ssh_bridge: RelayWorkerBridge | None = None
-    ssh_attachment: ReverseRelayAttachment | None = None
+    node_relays: NodeRelays | None = None
     if network_cfg.enabled:
-        relay_redis = cast(
-            BinaryRedis,
-            resident_relay_client(redis_cfg),
-        )
-        resident_bridge = RelayWorkerBridge(
-            relay_redis,
-            node_id,
-            task_listener.enqueue_local,
-            keyspace=RESIDENT_RELAY_KEYSPACE,
-            logger=logger,
-        )
-        resident_attachment = ReverseRelayAttachment(
-            relay_redis,
-            node_id,
-            resident_bridge,
-            owner=f"{node_id}:{os.getpid()}",
-            keyspace=RESIDENT_RELAY_KEYSPACE,
-            logger=logger,
-        )
-        ssh_bridge = RelayWorkerBridge(
-            relay_redis,
-            node_id,
-            task_listener.enqueue_local,
-            keyspace=SSH_RELAY_KEYSPACE,
-            frame_kind="ssh_frame",
-            logger=logger,
-        )
-        ssh_attachment = ReverseRelayAttachment(
-            relay_redis,
-            node_id,
-            ssh_bridge,
-            owner=f"{node_id}:{os.getpid()}:ssh",
-            keyspace=SSH_RELAY_KEYSPACE,
-            logger=logger,
-        )
+        namespaces = [RESIDENT_NAMESPACE, SSH_NAMESPACE]
         if content_cfg.hydration_enabled:
-            content_bridge = RelayWorkerBridge(
-                relay_redis,
-                node_id,
-                task_listener.enqueue_local,
-                keyspace=CONTENT_RELAY_KEYSPACE,
-                frame_kind="content_frame",
-                logger=logger,
-            )
-            content_attachment = ReverseRelayAttachment(
-                relay_redis,
-                node_id,
-                content_bridge,
-                owner=f"{node_id}:{os.getpid()}:content",
-                keyspace=CONTENT_RELAY_KEYSPACE,
-                logger=logger,
-            )
+            namespaces.append(CONTENT_NAMESPACE)
+        node_relays = NodeRelays(
+            cast(BinaryRedis, resident_relay_client(redis_cfg)),
+            node_id,
+            task_listener.enqueue_local,
+            namespaces,
+            owner=f"{node_id}:{os.getpid()}",
+            logger=logger,
+        )
+    resident_bridge = (
+        None if node_relays is None else node_relays.bridge(RESIDENT_NAMESPACE)
+    )
     command_listener = CommandListener(
         redis=redis_client.sync,
         node_id=node_id,
@@ -524,9 +480,9 @@ def _run_supervisor(
         task_listener=task_listener,
         relay_service=relay_service,
         logger=logger,
-        resident_bridge=resident_bridge,
-        content_bridge=content_bridge,
-        ssh_bridge=ssh_bridge,
+        relay_bridges=(
+            {} if node_relays is None else node_relays.bridges_by_event_type()
+        ),
     )
 
     peer_listener: NodePeerListener | None = None
@@ -573,6 +529,8 @@ def _run_supervisor(
                 _REBIND_APPLY_TIMEOUT_SEC,
             )
         grpc_server.rebind_node(new_node_id)
+        if node_relays is not None:
+            node_relays.rebind(new_node_id)
         # Propagate the new id to the parent process (non-blocking: this runs on
         # the heartbeat thread, which must not stall on a full queue).
         _enqueue_latest_node_id(node_id_queue, new_node_id, logger)
@@ -597,12 +555,8 @@ def _run_supervisor(
         await grpc_server.start()
         if network_listeners is not None:
             await network_listeners.start()
-        if resident_attachment is not None:
-            resident_attachment.start(loop)
-        if content_attachment is not None:
-            content_attachment.start(loop)
-        if ssh_attachment is not None:
-            ssh_attachment.start(loop)
+        if node_relays is not None:
+            node_relays.start(loop)
         if peer_listener is not None:
             await peer_listener.start()
         # Wire the re-register callback only once the reader threads are up
@@ -619,12 +573,8 @@ def _run_supervisor(
         lifecycle.publish_unregister()
         if peer_listener is not None:
             await peer_listener.stop()
-        if ssh_attachment is not None:
-            await ssh_attachment.stop()
-        if content_attachment is not None:
-            await content_attachment.stop()
-        if resident_attachment is not None:
-            await resident_attachment.stop()
+        if node_relays is not None:
+            await node_relays.stop()
         if network_listeners is not None:
             await network_listeners.stop()
         await grpc_server.stop()
