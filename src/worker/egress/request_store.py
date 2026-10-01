@@ -57,3 +57,8 @@ class PendingEgressRequestStore:
         """The occurrences whose requests the store holds."""
         with self._lock:
             return list(self._store)
+
+    def clear(self) -> None:
+        """Drop every request, as the incarnation that captured them has ended."""
+        with self._lock:
+            self._store.clear()

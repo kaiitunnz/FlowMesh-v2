@@ -206,6 +206,15 @@ class ResidentLaneHost:
     ) -> "concurrent.futures.Future[Any]":
         return asyncio.run_coroutine_threadsafe(coro_fn(), self._loop)
 
+    def unbind_replicas(self) -> None:
+        """Refuse every claim to a replica served before the worker re-registered."""
+
+        async def unbind() -> None:
+            if self._replica is not None:
+                self._replica.unbind_all()
+
+        self._call(unbind).result()
+
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one resident control frame onto the lane loop; return handled."""
         if frame_kind == "resident_handoff":

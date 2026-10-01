@@ -171,6 +171,9 @@ class Runner:
         self._mediated_op_stop = threading.Event()
         self._current_task_id: str | None = None
         self._pending_cancels: set[str] = set()
+        # The dispatch the task loop holds, and those a re-registration gave up.
+        self._current_dispatch_id: str | None = None
+        self._abandoned_dispatches: set[str] = set()
         self._pending_stops: set[str] = set()
         self._cancel_lock = threading.Lock()
         self._shutdown_requested = threading.Event()
@@ -583,13 +586,19 @@ class Runner:
             raise ExecutionError(str(exc), retryable=False) from exc
 
     def _raise_if_cancel_pending(self, task_id: str) -> None:
-        """Honor a cancel, or the worker's shutdown, that landed before the task's
-        executor runs it, such as while it read its inputs from the store."""
+        """Honor a cancel, the worker's shutdown, or its re-registration, that landed
+        before the task's executor runs it, such as while it read its inputs."""
         with self._cancel_lock:
             cancelled = task_id in self._pending_cancels
             self._pending_cancels.discard(task_id)
         if cancelled:
             raise TaskCancelledError(f"Task {task_id} was cancelled before execution")
+        with self._cancel_lock:
+            abandoned = self._current_dispatch_id in self._abandoned_dispatches
+        if abandoned:
+            raise TaskCancelledError(
+                f"Task {task_id} was given up by the worker re-registering"
+            )
         if self._shutdown_requested.is_set():
             raise TaskCancelledError(
                 f"Task {task_id} was given up by the worker shutting down"
@@ -860,6 +869,36 @@ class Runner:
             self._idle_checker_thread = None
             self._idle_checker_stop_event = None
 
+    def abandon_running(self, dispatch_id: str | None) -> None:
+        """Give up the dispatch this worker runs, as its registration has ended.
+
+        Control resolves the dispatch through the previous registration's loss, so the
+        task's executor is cancelled to end what it started, and its reports go
+        nowhere. A serve task's replica stops admitting claims.
+        """
+        with self._cancel_lock:
+            if dispatch_id is not None:
+                self._abandoned_dispatches.add(dispatch_id)
+            task_id = (
+                self._current_task_id
+                if self._current_dispatch_id == dispatch_id
+                else None
+            )
+        with self._boundary_lanes_lock:
+            resident_host = self._resident_host
+        if resident_host is not None:
+            resident_host.unbind_replicas()
+        if task_id is None:
+            return
+        self.logger.warning("Abandoning task %s: this worker re-registered", task_id)
+        with self._active_executor_lock:
+            executor = self._active_executor
+        if executor is not None:
+            try:
+                executor.cancel(task_id)
+            except Exception as exc:
+                self.logger.warning("Executor cancel() raised: %s", exc)
+
     def _interrupt_monitor_loop(self, stop_event: threading.Event) -> None:
         try:
             while not stop_event.wait(0.5):
@@ -976,6 +1015,8 @@ class Runner:
                     continue
 
                 task_id = msg.task_id
+                with self._cancel_lock:
+                    self._current_dispatch_id = msg.dispatch_id
                 spec = msg.spec
                 task_type = spec.taskType
                 scrub = _task_scrubber(msg)

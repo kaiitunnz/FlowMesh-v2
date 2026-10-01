@@ -75,6 +75,10 @@ class ContentHolder:
         self._serving: frozenset[str] = frozenset()
         self._arrivals: dict[str, asyncio.Event] = {}
 
+    def rebind(self, holder_id: str, generation: int) -> None:
+        """Serve only grants minted for this worker's new registration."""
+        self._gate = HolderGrantGate(holder_id=holder_id, generation=generation)
+
     @property
     def in_transfer(self) -> frozenset[str]:
         """The digests a transfer is serving right now, which eviction leaves alone.

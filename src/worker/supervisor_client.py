@@ -83,6 +83,9 @@ class SupervisorClient:
         self._register_lock = threading.Lock()
         self._register_generation: int = 0
         self._reregistering: bool = False
+        # Dispatches a re-registration gave up: their reports never reach control.
+        self._abandoned_dispatches: set[str] = set()
+        self._on_reregistered: Callable[[str | None], None] | None = None
         self._drain = threading.Event()
         self._shutdown = threading.Event()
         self._shutdown.set()  # Initially shutdown
@@ -431,6 +434,11 @@ class SupervisorClient:
         running = self._running_dispatch
         return running[1] if running is not None and running[0] == task_id else None
 
+    def on_reregistered(self, callback: Callable[[str | None], None]) -> None:
+        """Run ``callback`` after each re-registration with the dispatch it gave up,
+        before the task stream takes any work under the new registration."""
+        self._on_reregistered = callback
+
     def iter_interrupts(self) -> Iterable[tuple[str, str]]:
         while True:
             try:
@@ -503,12 +511,21 @@ class SupervisorClient:
                 return self._register_generation
             new_id, incarnation = registration
             with self._register_lock:
+                abandoned = running[1] if (running := self._running_dispatch) else None
+                if abandoned is not None:
+                    self._abandoned_dispatches.add(abandoned)
                 self._worker_id = new_id
                 self._incarnation = incarnation
                 self._register_generation += 1
                 gen = self._register_generation
+            # What control sent the previous registration is for a dispatch this one
+            # does not run.
+            for stale in (self._interrupt_queue, self._stop_queue):
+                _drain(stale)
             self._rearm_register_event()
             self.logger.info("Re-registered worker as %s", new_id)
+            if (on_reregistered := self._on_reregistered) is not None:
+                on_reregistered(abandoned)
             return gen
         finally:
             with self._register_lock:
@@ -932,8 +949,19 @@ class SupervisorClient:
 
     def _enqueue_event(self, event: Event) -> None:
         with self._register_lock:
-            if self._worker_id is not None and isinstance(
-                event, (TaskEvent, WorkerEvent)
-            ):
-                event.worker_id = self._worker_id
+            if isinstance(event, (TaskEvent, WorkerEvent)):
+                if event.dispatch_id in self._abandoned_dispatches:
+                    if isinstance(event, TaskEvent):
+                        return
+                    event.dispatch_id = None
+                if self._worker_id is not None:
+                    event.worker_id = self._worker_id
             self._event_queue.put((self._register_generation, serialize_event(event)))
+
+
+def _drain(stale: queue.Queue[Any]) -> None:
+    while True:
+        try:
+            stale.get_nowait()
+        except queue.Empty:
+            return

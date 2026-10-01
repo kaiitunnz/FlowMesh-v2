@@ -458,6 +458,7 @@ def main() -> None:
         telemetry=cfg.telemetry,
     )
     lifecycle.set_gpu_executor_probe(runner.has_active_gpu_executor)
+    lifecycle.set_abandon_handler(runner.abandon_running)
 
     # Install signal handlers to allow graceful shutdown
     def handle_exit_signal(_signum: int, _) -> None:

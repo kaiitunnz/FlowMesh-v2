@@ -175,6 +175,41 @@ async def test_a_grant_for_a_superseded_holder_incarnation_serves_nothing(
 
 
 @pytest.mark.asyncio
+async def test_a_rebound_holder_serves_its_new_registration_s_grants(
+    tmp_path,
+) -> None:
+    pair = _Pair(tmp_path)
+    reference = pair.store.write("local", _BODY, media_type="application/json")
+    pair.holder.rebind("wkr-3", 2)
+    grant = _grant(reference, holder_id="wkr-3", holder_generation=2)
+    pair.holder.accept_grant(grant)
+
+    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    await asyncio.sleep(0)
+    pair.client.deliver_grant(grant)
+
+    assert await hydration == _BODY
+
+
+@pytest.mark.asyncio
+async def test_a_rebound_holder_refuses_its_previous_registration_s_grants(
+    tmp_path,
+) -> None:
+    pair = _Pair(tmp_path)
+    reference = pair.store.write("local", _BODY, media_type="application/json")
+    pair.holder.rebind("wkr-3", 2)
+    grant = _grant(reference)
+    pair.holder.accept_grant(grant)
+
+    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    await asyncio.sleep(0)
+    pair.client.deliver_grant(grant)
+
+    with pytest.raises(ContentHydrationError):
+        await hydration
+
+
+@pytest.mark.asyncio
 async def test_an_object_the_holder_lost_is_a_typed_failure(tmp_path) -> None:
     pair = _Pair(tmp_path)
     reference = reference_for("local", _BODY, media_type="application/json")

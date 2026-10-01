@@ -78,6 +78,7 @@ class Lifecycle:
         self._draining = threading.Event()
         self._last_task_end = 0.0
         self._gpu_monitor = gpu_monitor
+        self._abandon_running: Callable[[str | None], None] | None = None
         self._gpu_executor_probe: Callable[[], bool] | None = None
         if gpu_monitor is not None:
             cfg = gpu_monitor.config
@@ -93,6 +94,21 @@ class Lifecycle:
     @property
     def worker_id(self) -> str:
         return self.client.worker_id
+
+    def set_abandon_handler(self, abandon: Callable[[str | None], None]) -> None:
+        """Register how the dispatch running when the worker re-registers is given
+        up."""
+        self._abandon_running = abandon
+
+    def _on_reregistered(self, abandoned_dispatch: str | None) -> None:
+        """Leave everything bound to the previous registration behind: the dispatch it
+        ran, the requests its boundaries captured, and the content it held."""
+        if (abandon := self._abandon_running) is not None:
+            abandon(abandoned_dispatch)
+        self.pending_egress_requests.clear()
+        self.resident_requests.clear()
+        if (plane := self.content_plane) is not None:
+            plane.rebind(self.client.worker_id, self.client.incarnation)
 
     def set_gpu_executor_probe(self, probe: Callable[[], bool]) -> None:
         """Register a probe reporting whether a GPU-using executor is loaded; a
@@ -176,6 +192,7 @@ class Lifecycle:
         self.client.start()
         self._report(WorkerStatus.IDLE, None, {})
         self.client.on_event_stream_ready(self._report_again)
+        self.client.on_reregistered(self._on_reregistered)
         self._touch_hb_file()
         threading.Thread(target=self._hb_loop, daemon=True).start()
 

@@ -138,6 +138,18 @@ class ContentLaneHost:
         in_transfer = self._holder.in_transfer if self._holder else frozenset()
         return self._store.evict(in_transfer=in_transfer)
 
+    def rebind(self, holder_id: str, generation: int) -> None:
+        """Hold this worker's copies under its new registration, and report them."""
+        self._worker_id = holder_id
+        self._generation = generation
+
+        async def rebind_holder() -> None:
+            if self._holder is not None:
+                self._holder.rebind(holder_id, generation)
+
+        self._call(rebind_holder).result()
+        self.report_held()
+
     def report_held(self) -> int:
         """Report every copy this worker holds, and return how many.
 
