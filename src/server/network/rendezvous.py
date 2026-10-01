@@ -41,9 +41,14 @@ class RootCursorStore:
         self._key = keyspace.root_cursor
 
     async def get(self, node_id: str) -> str:
+        return (await self.get_many([node_id]))[node_id]
+
+    async def get_many(self, node_ids: list[str]) -> dict[str, str]:
         raw = await self._redis.hgetall(self._key)
-        value = raw.get(node_id.encode())
-        return value.decode() if value else "0"
+        return {
+            node_id: value.decode() if (value := raw.get(node_id.encode())) else "0"
+            for node_id in node_ids
+        }
 
     async def set(self, node_id: str, entry_id: str) -> None:
         await self._redis.hset(self._key, mapping={node_id: entry_id})
@@ -68,15 +73,32 @@ class RootRendezvousBridge:
         self._logger = logger or logging.getLogger("network-rendezvous")
 
     async def pump_node(self, node_id: str) -> int:
-        """Forward one bounded batch from a node's up stream; return the count read.
-
-        The read is non-blocking: this driver multiplexes every node's up stream on one
-        loop, so a blocking read on an idle node would wedge the whole cluster's bridge.
-        """
+        """Forward one bounded batch from a node's up stream; return the count read."""
         after = await self._cursors.get(node_id)
         entries, last_id = await self._streams.read_up(
             node_id, after, count=self._batch, block_ms=None
         )
+        return await self._drain(node_id, entries, last_id)
+
+    async def pump_ready(self, node_ids: list[str], block_ms: int) -> int:
+        """Wait up to ``block_ms`` for any node's up stream, then forward one bounded
+        batch from each stream that has frames; return the count read.
+
+        One read covers every node, so a frame on any stream wakes the bridge at once
+        and an idle node never holds the others up.
+        """
+        cursors = await self._cursors.get_many(node_ids)
+        batches = await self._streams.read_up_many(
+            cursors, count=self._batch, block_ms=block_ms
+        )
+        read = 0
+        for node_id, (entries, last_id) in batches.items():
+            read += await self._drain(node_id, entries, last_id)
+        return read
+
+    async def _drain(
+        self, node_id: str, entries: list[StreamEntry], last_id: str | None
+    ) -> int:
         if last_id is None:
             return 0
         for entry in self._fair_order(entries):

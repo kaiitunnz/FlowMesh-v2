@@ -103,9 +103,7 @@ async def _fabric() -> AsyncIterator[_Fabric]:
 
     async def pump() -> None:
         while True:
-            for node_id in (NODE, SSH_EDGE_STREAM_ID):
-                await root_bridge.pump_node(node_id)
-            await asyncio.sleep(0.001)
+            await root_bridge.pump_ready([NODE, SSH_EDGE_STREAM_ID], 1000)
 
     origin = SshRelayOrigin(redis, refresh_interval_sec=3600)
     lane.start()

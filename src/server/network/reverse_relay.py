@@ -146,6 +146,27 @@ class RelayStreamStore:
     ) -> tuple[list[StreamEntry], str | None]:
         return await self._read(self._ks.down(node_id), after_id, count, block_ms)
 
+    async def read_up_many(
+        self, after_ids: dict[str, str], count: int, block_ms: int | None
+    ) -> dict[str, tuple[list[StreamEntry], str | None]]:
+        """Read every named node's up stream from its cursor in one call.
+
+        A blocking read returns as soon as any of the streams has a frame, so one
+        reader serves every node without polling.
+        """
+        by_key = {self._ks.up(node_id): node_id for node_id in after_ids}
+        result = await self._redis.xread(
+            {key: after_ids[node_id] for key, node_id in by_key.items()},
+            count=count,
+            block=block_ms,
+        )
+        batches: dict[str, tuple[list[StreamEntry], str | None]] = {}
+        for stream, items in result or []:
+            key = stream.decode() if isinstance(stream, bytes) else str(stream)
+            if (node_id := by_key.get(key)) is not None:
+                batches[node_id] = self._decode(items)
+        return batches
+
     async def _read(
         self, key: str, after_id: str, count: int, block_ms: int | None
     ) -> tuple[list[StreamEntry], str | None]:
@@ -160,15 +181,20 @@ class RelayStreamStore:
         entries: list[StreamEntry] = []
         last_id: str | None = None
         for _stream, items in result or []:
-            for entry_id, fields in items:
-                eid = (
-                    entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
-                )
-                last_id = eid
-                try:
-                    entries.append(StreamEntry(eid, RelayFrame.from_fields(fields)))
-                except (KeyError, ValueError):
-                    _logger.warning("skipping undecodable relay frame %s", eid)
+            entries, last_id = self._decode(items)
+        return entries, last_id
+
+    @staticmethod
+    def _decode(items: list[Any]) -> tuple[list[StreamEntry], str | None]:
+        entries: list[StreamEntry] = []
+        last_id: str | None = None
+        for entry_id, fields in items:
+            eid = entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
+            last_id = eid
+            try:
+                entries.append(StreamEntry(eid, RelayFrame.from_fields(fields)))
+            except (KeyError, ValueError):
+                _logger.warning("skipping undecodable relay frame %s", eid)
         return entries, last_id
 
     async def trim_up_to(

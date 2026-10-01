@@ -184,3 +184,27 @@ def test_a_frame_read_off_a_node_that_is_not_its_sender_is_dropped() -> None:
             assert down == []
 
     asyncio.run(run())
+
+
+def test_one_blocking_read_serves_every_node() -> None:
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+        bridge, streams, sessions = await _bridge(redis)
+        o2t = RelayDirection.ORIGIN_TO_TARGET
+        await sessions.update("rly-1", origin_node="nde-a", target_node="nde-t")
+        await sessions.update("rly-2", origin_node="nde-b", target_node="nde-t")
+        for node, session in (("nde-a", "rly-1"), ("nde-b", "rly-2")):
+            await streams.publish_up(
+                node,
+                relay_frame(
+                    RelayFrameKind.DATA, session_id=session, direction=o2t, seq=1
+                ),
+            )
+        assert await bridge.pump_ready(["nde-a", "nde-b", "nde-idle"], 1000) == 2
+        assert redis.blocks == [1000]
+        down, _ = await streams.read_down("nde-t", "0", count=10, block_ms=None)
+        assert sorted(e.frame.session_id for e in down) == ["rly-1", "rly-2"]
+        # Each node's cursor advanced, so nothing is forwarded twice.
+        assert await bridge.pump_ready(["nde-a", "nde-b"], 1000) == 0
+
+    asyncio.run(run())
