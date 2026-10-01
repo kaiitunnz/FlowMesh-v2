@@ -579,6 +579,18 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   older stream on that id, so a half-open stream receives nothing once the worker's new
   stream attaches. A worker whose task stream ends reconnects, and its new stream reads
   the queue of the id its token then holds.
+- **Worker and node identity.** A worker's alias is assigned by its
+  supervisor: the supervisor passes it as `WORKER_ALIAS` to the workers it
+  launches, an external worker reads it from its token, and registration
+  records the alias the supervisor verified from the worker's token. Aliases
+  are unique per node. A node takes a Redis lease on its `NODE_ALIAS` at registration
+  (`nodes:alias:{alias}`), refreshes it with its heartbeat, and releases it on
+  unregister; while another live node holds the alias, registration fails with
+  `409`. A lease its holder has not refreshed for half its TTL can be taken
+  over, so a crash-restarted node reclaims its alias. Taking the lease removes
+  any other node record with the alias, so a node that crashed or was taken
+  over does not linger beside its replacement. `(node_alias, alias)` is
+  therefore a worker's durable, unique address.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side.

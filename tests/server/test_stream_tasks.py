@@ -40,7 +40,7 @@ class _FakeRedis:
 class _FakeAdapter:
     def __init__(self) -> None:
         self.token = cast(WorkerTokenType, _TOKEN)
-        self.name = _NAME
+        self.alias = _NAME
 
     def set_worker_id(self, worker_id: str) -> None:
         pass
@@ -103,7 +103,7 @@ async def test_a_destroyed_worker_s_stream_finishes(listener: TaskListener) -> N
     reader = asyncio.ensure_future(_read_until_closed(_stream_tasks(servicer)))
     await asyncio.sleep(0)
 
-    registry.try_pop_by_name(_NAME)
+    registry.try_pop_by_alias(_NAME)
 
     assert await asyncio.wait_for(reader, timeout=2) == []
     assert worker_id not in listener._qs

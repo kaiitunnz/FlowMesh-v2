@@ -16,7 +16,7 @@ async def _launched_image(gpu_name: str | None) -> str:
     client.create_instance.return_value = {"success": True, "new_contract": 70}
     adapter = VastAIWorkerAdapter(
         token=WorkerTokenType("vast_0.token"),
-        name="vast_0",
+        alias="vast_0",
         config=VastAIWorkerConfig(docker_registry="reg", version="v1"),
         vastai_client=client,
         instance_pool=ResourcePool(),

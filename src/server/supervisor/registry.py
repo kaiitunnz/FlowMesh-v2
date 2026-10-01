@@ -10,12 +10,12 @@ from .adapters.base import WorkerAdapter, WorkerTokenType
 @dataclass(slots=True)
 class _WorkerRegistryState:
     registry: dict[WorkerTokenType, WorkerAdapter] = field(default_factory=dict)
-    name_token_map: dict[str, WorkerTokenType] = field(default_factory=dict)
+    alias_token_map: dict[str, WorkerTokenType] = field(default_factory=dict)
     token_id_map: dict[WorkerTokenType, str] = field(default_factory=dict)
 
 
 class WorkerRegistry:
-    """Thread-safe map of worker adapters by token and name, and of each token's
+    """Thread-safe map of worker adapters by token and alias, and of each token's
     current worker id.
 
     ``on_worker_id_released`` is called with every worker id whose token binding is
@@ -47,14 +47,14 @@ class WorkerRegistry:
 
     def add(self, worker: WorkerAdapter) -> None:
         token = worker.token
-        name = worker.name
+        alias = worker.alias
         with self._get_state() as state:
             if token in state.registry:
                 raise ValueError(f"Worker with token '{token}' already exists")
-            if name in state.name_token_map:
-                raise ValueError(f"Worker with name '{name}' already exists")
+            if alias in state.alias_token_map:
+                raise ValueError(f"Worker with alias '{alias}' already exists")
             state.registry[token] = worker
-            state.name_token_map[name] = token
+            state.alias_token_map[alias] = token
 
     def exists(self, token: WorkerTokenType) -> bool:
         with self._get_state() as state:
@@ -71,7 +71,7 @@ class WorkerRegistry:
     def pop(self, token: WorkerTokenType) -> WorkerAdapter:
         with self._get_state() as state:
             worker = state.registry.pop(token)
-            del state.name_token_map[worker.name]
+            del state.alias_token_map[worker.alias]
             released = state.token_id_map.pop(token, None)
         self._release([released])
         return worker
@@ -81,7 +81,7 @@ class WorkerRegistry:
             worker = state.registry.pop(token, None)
             if worker is None:
                 return None
-            del state.name_token_map[worker.name]
+            del state.alias_token_map[worker.alias]
             released = state.token_id_map.pop(token, None)
         self._release([released])
         return worker
@@ -89,38 +89,38 @@ class WorkerRegistry:
     def clear(self) -> None:
         with self._get_state() as state:
             state.registry.clear()
-            state.name_token_map.clear()
+            state.alias_token_map.clear()
             released = list(state.token_id_map.values())
             state.token_id_map.clear()
         self._release(released)
 
-    def exists_by_name(self, name: str) -> bool:
+    def exists_by_alias(self, alias: str) -> bool:
         with self._get_state() as state:
-            return name in state.name_token_map
+            return alias in state.alias_token_map
 
-    def get_by_name(self, name: str) -> WorkerAdapter:
+    def get_by_alias(self, alias: str) -> WorkerAdapter:
         with self._get_state() as state:
-            token = state.name_token_map[name]
+            token = state.alias_token_map[alias]
             return state.registry[token]
 
-    def try_get_by_name(self, name: str) -> WorkerAdapter | None:
+    def try_get_by_alias(self, alias: str) -> WorkerAdapter | None:
         with self._get_state() as state:
-            token = state.name_token_map.get(name)
+            token = state.alias_token_map.get(alias)
             if token is None:
                 return None
             return state.registry.get(token)
 
-    def pop_by_name(self, name: str) -> WorkerAdapter:
+    def pop_by_alias(self, alias: str) -> WorkerAdapter:
         with self._get_state() as state:
-            token = state.name_token_map.pop(name)
+            token = state.alias_token_map.pop(alias)
             worker = state.registry.pop(token)
             released = state.token_id_map.pop(token, None)
         self._release([released])
         return worker
 
-    def try_pop_by_name(self, name: str) -> WorkerAdapter | None:
+    def try_pop_by_alias(self, alias: str) -> WorkerAdapter | None:
         with self._get_state() as state:
-            token = state.name_token_map.pop(name, None)
+            token = state.alias_token_map.pop(alias, None)
             if token is None:
                 return None
             released = state.token_id_map.pop(token, None)

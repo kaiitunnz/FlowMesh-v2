@@ -8,7 +8,11 @@ from docker.errors import DockerException
 
 from server.hooks import PrincipalContext
 from server.supervisor import manager as manager_module
-from server.supervisor.manager import WorkerInitConfig, WorkerManager
+from server.supervisor.manager import (
+    ProviderUnavailableError,
+    WorkerInitConfig,
+    WorkerManager,
+)
 from server.supervisor.registry import WorkerRegistry
 
 
@@ -35,7 +39,8 @@ def test_an_unavailable_docker_provider_leaves_the_others(
     with caplog.at_level(logging.WARNING, logger="test.supervisor"):
         wm = _manager()
 
-    assert wm._providers == {"vastai": vastai_spec}
+    assert wm._providers.keys() == {"external", "vastai"}
+    assert wm._providers["vastai"] is vastai_spec
     assert any(
         "Docker worker provider unavailable" in r.getMessage() for r in caplog.records
     )
@@ -53,5 +58,5 @@ async def test_a_worker_of_an_unavailable_provider_is_refused(
     wm = _manager()
     wm._is_started = True
 
-    with pytest.raises(ValueError, match="Unsupported worker provider: docker"):
+    with pytest.raises(ProviderUnavailableError, match="'docker' is not available"):
         await wm.create_worker(WorkerInitConfig(provider="docker"))

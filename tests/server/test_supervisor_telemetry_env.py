@@ -31,6 +31,7 @@ def _docker_worker() -> DockerWorkerAdapter:
     worker.config = DockerWorkerConfig(worker_type=WorkerType.CPU)
     worker.token = WorkerTokenType("worker-token")
     worker.owner = _OWNER
+    worker.alias = "worker-cpu-0"
     worker.container_name = "worker-cpu-0"
     return worker
 
@@ -39,6 +40,7 @@ def _vastai_worker() -> VastAIWorkerAdapter:
     worker = object.__new__(VastAIWorkerAdapter)
     worker.config = VastAIWorkerConfig()
     worker.token = WorkerTokenType("worker-token")
+    worker.alias = "vast-0"
     worker.owner = _OWNER
     return worker
 

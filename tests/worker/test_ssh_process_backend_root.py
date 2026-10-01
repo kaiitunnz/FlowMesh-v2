@@ -128,7 +128,7 @@ def _request(
     return SessionRequest(
         task_id="tsk-ssh",
         session_id=new_ssh_session_id(),
-        worker_name="worker-1",
+        owner="worker-1",
         cfg=cfg,
         out_dir=tmp_path / "out",
         resolved_inputs=inputs or [],

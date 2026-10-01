@@ -515,7 +515,7 @@ def test_a_duplicate_mount_path_fails_before_staging_anything(
     request = SessionRequest(
         task_id=_TASK_ID,
         session_id="ssn-12345678",
-        worker_name="worker-1",
+        owner="worker-1",
         cfg=MagicMock(output=None),
         out_dir=tmp_path / "out",
         resolved_inputs=upstreams,

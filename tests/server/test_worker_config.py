@@ -185,7 +185,7 @@ def test_a_docker_worker_gets_the_socket_only_for_docker_sessions(
 def _vastai_adapter(config: VastAIWorkerConfig) -> VastAIWorkerAdapter:
     return VastAIWorkerAdapter(
         token=WorkerTokenType("vast_0.token"),
-        name="vast_0",
+        alias="vast_0",
         config=config,
         vastai_client=MagicMock(),
         instance_pool=ResourcePool(),

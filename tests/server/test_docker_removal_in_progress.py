@@ -35,7 +35,7 @@ def _api_error(status_code: int, explanation: str | None) -> APIError:
 def _adapter(docker_client: MagicMock) -> DockerWorkerAdapter:
     adapter = DockerWorkerAdapter(
         token=WorkerTokenType("worker-token"),
-        name="gpu_0",
+        alias="gpu_0",
         container_name="gpu_0",
         cuda_devices=None,
         gpu_arch=None,

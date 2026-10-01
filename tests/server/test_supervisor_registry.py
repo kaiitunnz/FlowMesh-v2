@@ -11,13 +11,13 @@ from server.supervisor.registry import WorkerRegistry
 
 
 class _FakeAdapter:
-    def __init__(self, token: str, name: str) -> None:
+    def __init__(self, token: str, alias: str) -> None:
         self.token = cast(WorkerTokenType, token)
-        self.name = name
+        self.alias = alias
 
 
-def _adapter(token: str, name: str) -> WorkerAdapter:
-    return cast(WorkerAdapter, _FakeAdapter(token, name))
+def _adapter(token: str, alias: str) -> WorkerAdapter:
+    return cast(WorkerAdapter, _FakeAdapter(token, alias))
 
 
 def test_add_get_pop_roundtrip() -> None:
@@ -26,7 +26,7 @@ def test_add_get_pop_roundtrip() -> None:
 
     registry.add(worker)
     assert registry.try_get(cast(WorkerTokenType, "tok-1")) is worker
-    assert registry.try_get_by_name("worker-1") is worker
+    assert registry.try_get_by_alias("worker-1") is worker
     assert registry.all_workers() == [worker]
 
     registry.set_worker_id(cast(WorkerTokenType, "tok-1"), "wrk-1")
@@ -39,13 +39,13 @@ def test_add_get_pop_roundtrip() -> None:
     assert registry.get_worker_id(cast(WorkerTokenType, "tok-1")) is None
 
 
-def test_add_rejects_duplicate_token_and_name() -> None:
+def test_add_rejects_duplicate_token_and_alias() -> None:
     registry = WorkerRegistry()
     registry.add(_adapter("tok-1", "worker-1"))
 
     with pytest.raises(ValueError, match="token"):
         registry.add(_adapter("tok-1", "worker-2"))
-    with pytest.raises(ValueError, match="name"):
+    with pytest.raises(ValueError, match="alias"):
         registry.add(_adapter("tok-2", "worker-1"))
 
 
@@ -128,10 +128,10 @@ _POPS = pytest.mark.parametrize(
     [
         lambda r: r.pop(_tok("tok-1")),
         lambda r: r.try_pop(_tok("tok-1")),
-        lambda r: r.pop_by_name("worker-1"),
-        lambda r: r.try_pop_by_name("worker-1"),
+        lambda r: r.pop_by_alias("worker-1"),
+        lambda r: r.try_pop_by_alias("worker-1"),
     ],
-    ids=["pop", "try_pop", "pop_by_name", "try_pop_by_name"],
+    ids=["pop", "try_pop", "pop_by_alias", "try_pop_by_alias"],
 )
 
 
@@ -164,7 +164,7 @@ def test_release_skips_missing_tokens() -> None:
     registry, released = _registry_with_release_log()
 
     assert registry.try_pop(_tok("tok-missing")) is None
-    assert registry.try_pop_by_name("worker-missing") is None
+    assert registry.try_pop_by_alias("worker-missing") is None
     with pytest.raises(KeyError):
         registry.pop(_tok("tok-missing"))
 

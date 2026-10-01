@@ -27,7 +27,7 @@ class WorkerConfig(BaseModel):
     hb_interval: int = env.SERVER_HEARTBEAT_INTERVAL
     """Interval between heartbeats in seconds"""
     worker_alias: str | None = None
-    """Optional worker alias"""
+    """Requested worker alias"""
     tags: str = env.WORKER_TAGS
     """Comma-separated tags used by the scheduler"""
     hb_file: str | None = None
@@ -102,13 +102,13 @@ class WorkerAdapter(ABC):
     def __init__(
         self,
         token: WorkerTokenType,
-        name: str,
+        alias: str,
         config: WorkerConfig,
         owner: PrincipalContext,
     ) -> None:
         self._worker_id: str | None = None
         self.token = token
-        self.name = name
+        self.alias = alias
         self.config = config
         self.owner = owner
         # The last start or stop accepted; each waits for the one accepted before it.
@@ -267,7 +267,7 @@ class WorkerAdapter(ABC):
         if not starting.cancelled() and (exc := starting.exception()) is not None:
             logger.warning(
                 "Worker %s failed to start after its start was cancelled: %r",
-                self.name,
+                self.alias,
                 exc,
             )
 
@@ -320,7 +320,7 @@ class WorkerAdapter(ABC):
             "WORKER_HB_FILE": hb_file,
             "WORKER_NAMESPACE": env.NODE_NAMESPACE,
             "WORKER_CLUSTER": env.NODE_CLUSTER,
-            "WORKER_ALIAS": config.worker_alias or "",
+            "WORKER_ALIAS": self.alias,
             "WORKER_TAGS": config.tags,
             "LOG_LEVEL": config.log_level,
             "WORKER_COST_PER_HOUR": to_env_str(config.worker_cost_per_hour),

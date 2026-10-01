@@ -55,7 +55,7 @@ def _request(
     return SessionRequest(
         task_id="task-ssh",
         session_id=session_id,
-        worker_name="worker-1",
+        owner="worker-1",
         cfg=cfg if cfg is not None else MagicMock(output=None),
         out_dir=tmp_path / "task-ssh",
         resolved_inputs=resolved_inputs,

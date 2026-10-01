@@ -12,6 +12,7 @@ from worker.executors.ssh_session import SSHConfig
 @pytest.fixture
 def worker_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     monkeypatch.setenv("WORKER_TOKEN", "tok")
+    monkeypatch.setenv("WORKER_ALIAS", "worker-0")
     monkeypatch.setenv("SUPERVISOR_GRPC_TARGET", "127.0.0.1:50051")
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
     monkeypatch.setenv("WORKER_HB_FILE", str(tmp_path / "worker.hb"))

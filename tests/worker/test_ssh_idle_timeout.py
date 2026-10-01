@@ -84,7 +84,7 @@ class _FakeBackend(SSHSessionBackend):
     def start_session(self, request: SessionRequest) -> SSHSession:
         return self.session
 
-    def teardown(self, worker_name: str) -> None:
+    def teardown(self, owner: str) -> None:
         return None
 
 
