@@ -29,7 +29,7 @@ class _Registry:
     def __init__(self, alias_held: bool) -> None:
         self.alias_held = alias_held
 
-    async def register_node_async(self, node_info: Any) -> str:
+    async def register_node_async(self, node_info: Any, actor: Any = None) -> str:
         if self.alias_held:
             raise NodeAliasInUseError(node_info.alias)
         return "nde-1"

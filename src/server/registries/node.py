@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from threading import Thread
 from typing import Any, cast
 
+from lumid_hooks import PrincipalContext
 from pydantic import (
     BaseModel,
     Field,
@@ -294,10 +295,13 @@ class NodeRegistry:
     # Node lifecycle helpers
     # ------------------------------------------------------------------ #
 
-    def register_node(self, node_info: NodeInfo) -> str:
+    def register_node(
+        self, node_info: NodeInfo, actor: PrincipalContext | None = None
+    ) -> str:
         """Register a node under a fresh id, taking its alias lease.
 
-        Raises `NodeAliasInUseError` when another live node holds the alias.
+        Raises `NodeAliasInUseError` when another live node holds the alias. A node
+        record the registration removes is announced as unregistered by ``actor``.
         """
         node_id = self._allocate_node_id()
         keys, args = _register_script_args(node_id, node_info, self._lease_ttl_ms)
@@ -307,11 +311,13 @@ class NodeRegistry:
         )
         if removed is None:
             raise NodeAliasInUseError(node_info.alias)
-        for message in _unregister_messages(removed):
+        for message in _unregister_messages(removed, actor):
             self._rds.sync.publish_telemetry(NODE_EVENT_CHANNEL, message)
         return node_id
 
-    async def register_node_async(self, node_info: NodeInfo) -> str:
+    async def register_node_async(
+        self, node_info: NodeInfo, actor: PrincipalContext | None = None
+    ) -> str:
         node_id = await self._allocate_node_id_async()
         keys, args = _register_script_args(node_id, node_info, self._lease_ttl_ms)
         removed = cast(
@@ -320,7 +326,7 @@ class NodeRegistry:
         )
         if removed is None:
             raise NodeAliasInUseError(node_info.alias)
-        for message in _unregister_messages(removed):
+        for message in _unregister_messages(removed, actor):
             await self._rds.asyncio.publish_telemetry(NODE_EVENT_CHANNEL, message)
         return node_id
 
@@ -521,15 +527,27 @@ class NodeRegistry:
         return new_node_id(seq)
 
 
-def _unregister_messages(node_ids: Sequence[str]) -> list[str]:
+def node_event(
+    event_type: str, node_id: str, actor: PrincipalContext | None
+) -> NodeEvent:
+    """A node lifecycle event, attributed to ``actor``."""
+    return NodeEvent(
+        type=event_type,
+        ts=now_iso(),
+        node_id=node_id,
+        tags=[],
+        payload={},
+        actor=actor.model_dump() if actor is not None else None,
+    )
+
+
+def _unregister_messages(
+    node_ids: Sequence[str], actor: PrincipalContext | None
+) -> list[str]:
     """Announce each node record a registration removed as that node's unregister,
     so the root forgets it as it does a node that stopped."""
     return [
-        json.dumps(
-            serialize_event(
-                NodeEvent(type="SV_UNREGISTER", ts=now_iso(), node_id=str(node_id))
-            )
-        )
+        json.dumps(serialize_event(node_event("SV_UNREGISTER", node_id, actor)))
         for node_id in node_ids
     ]
 

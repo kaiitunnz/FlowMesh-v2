@@ -7,7 +7,7 @@ from collections.abc import Callable
 import httpx
 from lumid_hooks import PrincipalContext
 
-from shared.schemas.event import NodeEvent, serialize_event
+from shared.schemas.event import serialize_event
 from shared.schemas.network import NetworkEndpointAdvertisement
 from shared.schemas.node import NodeInfo
 from shared.utils.http import auth_headers
@@ -15,7 +15,7 @@ from shared.utils.time import now_iso
 
 from ...clients.redis import NODE_EVENT_CHANNEL, SyncRedisClient
 from ...config import NodeRole
-from ...registries.node import NodeAliasInUseError, NodeRegistry
+from ...registries.node import NodeAliasInUseError, NodeRegistry, node_event
 
 _REGISTER_RETRY_INITIAL_SEC = 2.0
 
@@ -119,7 +119,9 @@ class Lifecycle:
     def _register_direct(self) -> str:
         """Root node: register directly via NodeRegistry (Redis)."""
         try:
-            node_id = self._node_registry.register_node(self._node_info)
+            node_id = self._node_registry.register_node(
+                self._node_info, self._system_principal
+            )
         except NodeAliasInUseError as exc:
             raise AliasHeldError(str(exc)) from exc
         self.logger.info("Node registered (direct): %s", node_id)
@@ -148,14 +150,7 @@ class Lifecycle:
     # ------------------------------------------------------------------ #
 
     def _publish_event(self, event_type: str, **extra: object) -> None:
-        event = NodeEvent(
-            type=event_type,
-            ts=now_iso(),
-            node_id=self.node_id,
-            tags=[],
-            payload={},
-            actor=self._system_principal.model_dump(),
-        )
+        event = node_event(event_type, self.node_id, self._system_principal)
         payload = serialize_event(event) | extra
         self._redis.publish_telemetry(NODE_EVENT_CHANNEL, json.dumps(payload))
 

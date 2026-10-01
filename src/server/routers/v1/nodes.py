@@ -122,7 +122,7 @@ async def register_node(
         principal, ResourceKind.NODE, None, ResourceAction.WRITE, logger
     )
     try:
-        node_id = await node_registry.register_node_async(node_info)
+        node_id = await node_registry.register_node_async(node_info, principal)
     except NodeAliasInUseError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     return NodeRegisterResponse(node_id=node_id)

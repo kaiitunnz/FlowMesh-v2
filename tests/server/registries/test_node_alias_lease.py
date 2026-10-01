@@ -17,10 +17,18 @@ from server.clients.redis import (
     node_hb_key,
     node_key,
 )
+from server.hooks import PrincipalContext
 from server.registries.node import NodeAliasInUseError, NodeRegistry
 from shared.schemas.node import NodeInfo
 
 TTL_SEC = 120
+_ACTOR = PrincipalContext(
+    principal_id="system",
+    org_id="org-1",
+    external_id="system",
+    principal_type="service",
+    scopes=[],
+)
 LEASE = node_alias_lease_key("gpu-a")
 
 
@@ -208,14 +216,15 @@ async def test_a_takeover_announces_each_record_it_removed(
     pubsub.get_message(timeout=1)
 
     if use_async:
-        await registry.register_node_async(_info())
+        await registry.register_node_async(_info(), _ACTOR)
     else:
-        registry.register_node(_info())
+        registry.register_node(_info(), _ACTOR)
 
     message = pubsub.get_message(timeout=1)
     assert message is not None
     event = json.loads(message["data"])
     assert (event["type"], event["node_id"]) == ("SV_UNREGISTER", old_id)
+    assert event["actor"]["principal_id"] == "system"
     assert pubsub.get_message(timeout=0.1) is None
 
 
