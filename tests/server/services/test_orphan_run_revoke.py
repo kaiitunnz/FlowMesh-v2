@@ -30,7 +30,8 @@ class _RecordingSync(_Sync):
         super().__init__(client)
         self.published: list[dict[str, Any]] = []
 
-    def publish_control(self, _channel: str, message: str) -> int:
+    def publish_control(self, *args: Any) -> int:
+        _channel, message = args
         self.published.append(json.loads(message))
         return 1
 
