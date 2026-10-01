@@ -210,6 +210,11 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
         """
         return False
 
+    def gpu_requirements(self) -> GPURequirements | None:
+        """The GPU block the spec declares under ``resources.hardware``, if any."""
+        hardware = self.resources.hardware if self.resources is not None else None
+        return hardware.gpu if hardware is not None else None
+
     def merge_key(self, **context: Any) -> str | None:
         """The key a task merges with its siblings under within ``context``, or None if
         it never merges."""
@@ -266,6 +271,11 @@ class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
         """
         return False
 
+    def gpu_requirements(self) -> GPURequirements | None:
+        """The GPU block the spec declares under ``resources.hardware``, if any."""
+        hardware = self.resources.hardware if self.resources is not None else None
+        return hardware.gpu if hardware is not None else None
+
     def merge_key(self, **context: Any) -> str | None:
         """The key a task merges with its siblings under within ``context``, or None if
         it never merges."""
@@ -277,13 +287,6 @@ class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
 
 
 type TaskSpecBase = TaskSpecStrictBase | TaskSpecTemplateBase
-
-
-def declared_gpu_requirements(spec: TaskSpecBase) -> GPURequirements | None:
-    """The GPU block a spec declares under ``resources.hardware``, if any."""
-    resources = spec.resources
-    hardware = resources.hardware if resources is not None else None
-    return hardware.gpu if hardware is not None else None
 
 
 def _model_uses_gpu(

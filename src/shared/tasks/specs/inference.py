@@ -147,8 +147,7 @@ def _validate_inference_dispatchable(
 
     if spec.backend() is not InferenceBackend.VLLM:
         return
-    hardware = spec.resources.hardware if spec.resources else None
-    gpu = hardware.gpu if hardware else None
+    gpu = spec.gpu_requirements()
     if gpu and gpu.count is not None and gpu.count >= 1:
         return
     raise ValueError(

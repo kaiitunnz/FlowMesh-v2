@@ -25,7 +25,7 @@ from shared.tasks import (
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
-from shared.tasks.specs.common import TaskSpecBase, declared_gpu_requirements
+from shared.tasks.specs.common import TaskSpecBase
 from shared.utils.json import dedup_json, restore_json
 
 
@@ -39,7 +39,7 @@ def dispatch_uses_gpu(spec: TaskSpecBase, relays_only: bool) -> bool:
     """
     if relays_only:
         return False
-    declared = declared_gpu_requirements(spec)
+    declared = spec.gpu_requirements()
     return (declared is not None and declared.count != 0) or spec.uses_gpu()
 
 

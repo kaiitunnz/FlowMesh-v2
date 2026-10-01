@@ -6,11 +6,7 @@ from .._base import StrictBaseModel, TemplateBaseModel
 from ..components.resources import GPURequirements
 from ..placeholders import TemplateInt
 from ..task_type import TaskType
-from .common import (
-    TaskSpecStrictBase,
-    TaskSpecTemplateBase,
-    declared_gpu_requirements,
-)
+from .common import TaskSpecStrictBase, TaskSpecTemplateBase
 
 # The access modes whose connections the server relays to the session's worker.
 RELAYED_SSH_ACCESS_MODES = frozenset({"proxy", "forward"})
@@ -184,7 +180,7 @@ def _ssh_uses_gpu(spec: SSHSpecStrict | SSHSpecTemplate) -> bool:
     """A session uses the GPU exactly when it asks for devices: a ``type`` or
     ``memory`` without ``count`` still resolves to one device, and only an explicit
     ``count: 0`` asks for none."""
-    gpu = declared_gpu_requirements(spec)
+    gpu = spec.gpu_requirements()
     return gpu is not None and gpu.count != 0
 
 
@@ -196,7 +192,7 @@ def ssh_gpu_selection(
     A block naming no ``count``, ``type`` or ``memory`` selects nothing, so the session
     is handed every device its worker exposes.
     """
-    gpu = declared_gpu_requirements(spec)
+    gpu = spec.gpu_requirements()
     if gpu is None or (gpu.count is None and not gpu.type and not gpu.memory):
         return None
     return gpu

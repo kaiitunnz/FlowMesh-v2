@@ -6621,11 +6621,7 @@ class TaskRuntime:
                 record = self._tasks.get(task_id)
                 if record is None:
                     continue
-                resources = record.task.spec.resources
-                if resources is None or resources.hardware is None:
-                    counts.add(0)
-                    continue
-                gpu = resources.hardware.gpu
+                gpu = record.task.spec.gpu_requirements()
                 if gpu:
                     # Default to 1 if a GPU is required but count is unspecified
                     counts.add(int(gpu.count) if gpu.count else 1)
