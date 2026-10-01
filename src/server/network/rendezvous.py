@@ -80,7 +80,7 @@ class RootRendezvousBridge:
         if last_id is None:
             return 0
         for entry in self._fair_order(entries):
-            await self._forward(entry)
+            await self._forward(node_id, entry)
         await self._cursors.set(node_id, last_id)
         # Trim the forwarded prefix of this node's up stream at or below the recorded
         # cursor so it stays bounded; unforwarded frames past the cursor are never cut.
@@ -106,16 +106,29 @@ class RootRendezvousBridge:
                     del buckets[session_id]
         return control + rotated
 
-    async def _forward(self, entry: StreamEntry) -> None:
+    async def _forward(self, source_node: str, entry: StreamEntry) -> None:
+        """Forward one frame to its peer node, only from the end that may send it.
+
+        A frame travels origin-to-target only off the record's origin node stream and
+        target-to-origin only off its target node stream, so a frame another node
+        writes naming a live session is dropped rather than injected into it.
+        """
         frame = entry.frame
         record = await self._sessions.load(frame.session_id)
         if not record:
             self._logger.warning("relay frame for unknown session %s", frame.session_id)
             return
         if frame.direction is RelayDirection.ORIGIN_TO_TARGET:
-            destination = record.get("target_node")
+            sender, destination = record.get("origin_node"), record.get("target_node")
         else:
-            destination = record.get("origin_node")
+            sender, destination = record.get("target_node"), record.get("origin_node")
+        if sender != source_node:
+            self._logger.warning(
+                "dropping relay frame for session %s read from node %s, not its sender",
+                frame.session_id,
+                source_node,
+            )
+            return
         if destination:
             await self._streams.publish_down(destination, frame)
 

@@ -151,3 +151,36 @@ def test_durable_cursor_resumes_and_does_not_reforward() -> None:
         assert len(down) == 1
 
     asyncio.run(run())
+
+
+def test_a_frame_read_off_a_node_that_is_not_its_sender_is_dropped() -> None:
+    """A third node naming a live session cannot inject into either direction."""
+
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+        bridge, streams, sessions = await _bridge(redis)
+        await sessions.update("rly-1", origin_node="nde-o", target_node="nde-t")
+        for direction in RelayDirection:
+            await streams.publish_up(
+                "nde-x",
+                relay_frame(
+                    RelayFrameKind.DATA, direction=direction, seq=1, payload=b"forged"
+                ),
+            )
+        assert await bridge.pump_node("nde-x") == 2
+        # Nor may an end send the other end's direction.
+        await streams.publish_up(
+            "nde-t",
+            relay_frame(
+                RelayFrameKind.DATA,
+                direction=RelayDirection.ORIGIN_TO_TARGET,
+                seq=1,
+                payload=b"reflected",
+            ),
+        )
+        assert await bridge.pump_node("nde-t") == 1
+        for node in ("nde-o", "nde-t"):
+            down, _ = await streams.read_down(node, "0", count=10, block_ms=None)
+            assert down == []
+
+    asyncio.run(run())
