@@ -151,6 +151,8 @@ class Runner:
         self._active_executor: Executor | None = None
         self._active_executor_key: str | None = None
         self._active_executor_last_used_at: float | None = None
+        # Whether the loaded executor has run anything GPU-bound since it came up.
+        self._active_executor_used_gpu = False
         # Lock to protect concurrent access to active executor state
         self._active_executor_lock = threading.Lock()
 
@@ -196,6 +198,27 @@ class Runner:
         # attachment (once the worker id is known).
         self._resident_host: ResidentLaneHost | None = None
 
+    def has_active_gpu_executor(self) -> bool:
+        """Whether the loaded executor may still hold GPU memory.
+
+        Executors stay warm between tasks, so a reading taken while one is resident
+        includes the worker's own model. The flag comes from each task's own dispatch
+        rather than the executor class: the wrapper an executor loads behind carries no
+        such attribute, and a transformers executor's device depends on the spec it
+        ran. Read lock-free, since the availability monitor needs only a best-effort
+        snapshot.
+        """
+        return self._active_executor is not None and self._active_executor_used_gpu
+
+    def _note_gpu_usage(self, msg: WorkerTaskMessage) -> None:
+        """Record that the loaded executor has run something GPU-bound.
+
+        Called for every task, since one reusing a warm executor never re-enters the
+        load branch and the memory it allocates outlives it. Monotone until teardown:
+        a later CPU task does not free what an earlier GPU task allocated.
+        """
+        self._active_executor_used_gpu |= msg.uses_gpu()
+
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
             executor = self._active_executor
@@ -239,6 +262,7 @@ class Runner:
                 self._active_executor = None
                 self._active_executor_key = None
                 self._active_executor_last_used_at = None
+                self._active_executor_used_gpu = False
 
     @property
     def shutdown_requested(self) -> bool:
@@ -740,6 +764,7 @@ class Runner:
                 self._active_executor = None
                 self._active_executor_key = None
                 self._active_executor_last_used_at = None
+                self._active_executor_used_gpu = False
 
     def _idle_check_loop(self, stop_event: threading.Event) -> None:
         """Background loop that periodically checks for idle executors.
@@ -1017,6 +1042,7 @@ class Runner:
                             self._active_executor.cleanup_after_run()
                             self._active_executor = None
                             self._active_executor_key = None
+                            self._active_executor_used_gpu = False
 
                         if not self._active_executor:
                             if (
@@ -1036,6 +1062,7 @@ class Runner:
                                 desired_key, self.default_executor
                             )
                             self._active_executor_key = desired_key
+                        self._note_gpu_usage(msg)
 
                         (
                             task_log_emitter,

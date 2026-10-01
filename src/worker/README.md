@@ -66,6 +66,10 @@ At startup the worker:
 | `WORKER_HB_FILE` | – | Full path to the worker heartbeat file. |
 | `WORKER_UPLOAD_RESULTS` | `false` | Whether the worker should always upload artifacts to the server if spec.output.destination is unspecified. |
 | `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` | `60` | Seconds a worker waits before unloading an idle executor to release the resources it holds; higher values avoid reload thrash between tasks but keep those resources reserved while idle. |
+| `WORKER_FOREIGN_GPU_GATE` | `true` | Report a GPU as unavailable while a process outside FlowMesh uses it. |
+| `WORKER_FOREIGN_GPU_MEM_MIB` | `1024` | Foreign GPU-memory threshold in MiB. |
+| `WORKER_FOREIGN_GPU_CONSECUTIVE` | `2` | Readings needed before a device changes availability. |
+| `WORKER_FOREIGN_GPU_GRACE_SEC` | `90` | Seconds after a task before a GPU reading counts. |
 
 > The heartbeat TTL is computed automatically as `max(HEARTBEAT_INTERVAL_SEC * 4, 120)`.
 

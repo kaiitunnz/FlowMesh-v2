@@ -23,6 +23,7 @@ from shared.utils.parsing import (
     parse_mem_to_bytes,
 )
 
+from .gpu_availability import GpuGateConfig
 from .utils.health import get_hb_config
 
 # Env vars that name the cache directories of the worker's libraries.
@@ -95,6 +96,7 @@ class WorkerConfig:
     ssh_direct_host: str | None = None
     ssh_stop_timeout_sec: float = 30.0
     state_dirs: tuple[Path, ...] = ()
+    foreign_gpu_gate: GpuGateConfig = GpuGateConfig()
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -203,6 +205,12 @@ class WorkerConfig:
         executor_idle_cleanup_sec = parse_float_env(
             "WORKER_EXECUTOR_IDLE_CLEANUP_SEC", 60
         )
+        foreign_gpu_gate = GpuGateConfig(
+            enabled=parse_bool_env("WORKER_FOREIGN_GPU_GATE", True),
+            threshold_mib=max(1, parse_int_env("WORKER_FOREIGN_GPU_MEM_MIB", 1024)),
+            consecutive=max(1, parse_int_env("WORKER_FOREIGN_GPU_CONSECUTIVE", 2)),
+            grace_sec=max(0.0, parse_float_env("WORKER_FOREIGN_GPU_GRACE_SEC", 90.0)),
+        )
 
         ssh_max_cpu = parse_float_env("SSH_MAX_CPU")
         if ssh_max_cpu is not None and ssh_max_cpu <= 0:
@@ -310,6 +318,7 @@ class WorkerConfig:
             ssh_direct_host=ssh_direct_host,
             ssh_stop_timeout_sec=ssh_stop_timeout_sec,
             state_dirs=_state_dirs_from_env(),
+            foreign_gpu_gate=foreign_gpu_gate,
         )
 
 

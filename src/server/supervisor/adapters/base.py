@@ -63,6 +63,15 @@ class WorkerConfig(BaseModel):
     is unspecified."""
     executor_idle_cleanup_sec: float = env.WORKER_EXECUTOR_IDLE_CLEANUP_SEC
     """Seconds an executor may sit idle before the worker unloads it"""
+    foreign_gpu_gate: bool = env.WORKER_FOREIGN_GPU_GATE
+    """Whether the worker reports a GPU as unavailable while a process outside
+    FlowMesh holds it"""
+    foreign_gpu_mem_mib: int = env.WORKER_FOREIGN_GPU_MEM_MIB
+    """Foreign GPU-memory threshold in MiB"""
+    foreign_gpu_consecutive: int = env.WORKER_FOREIGN_GPU_CONSECUTIVE
+    """Consecutive readings required before a device changes availability"""
+    foreign_gpu_grace_sec: float = env.WORKER_FOREIGN_GPU_GRACE_SEC
+    """Seconds to wait after a task ends before trusting a reading"""
     enable_dev_model: bool = env.WORKER_ENABLE_DEV_MODEL
     """Whether the worker advertises the GPU-free dev_model serving executor"""
     dev_model_forward_url: str = env.DEV_MODEL_FORWARD_URL
@@ -330,6 +339,12 @@ class WorkerAdapter(ABC):
             "WORKER_EXECUTOR_IDLE_CLEANUP_SEC": to_env_str(
                 config.executor_idle_cleanup_sec
             ),
+            "WORKER_FOREIGN_GPU_GATE": to_env_str(config.foreign_gpu_gate),
+            "WORKER_FOREIGN_GPU_MEM_MIB": to_env_str(config.foreign_gpu_mem_mib),
+            "WORKER_FOREIGN_GPU_CONSECUTIVE": to_env_str(
+                config.foreign_gpu_consecutive
+            ),
+            "WORKER_FOREIGN_GPU_GRACE_SEC": to_env_str(config.foreign_gpu_grace_sec),
             "WORKER_ENABLE_DEV_MODEL": to_env_str(config.enable_dev_model),
             "DEV_MODEL_FORWARD_URL": config.dev_model_forward_url,
             "DEV_MODEL_RESPONSE_DELAY_SEC": to_env_str(

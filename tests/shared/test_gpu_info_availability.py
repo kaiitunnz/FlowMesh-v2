@@ -95,7 +95,7 @@ class TestFreeMemoryIsInformationalOnly:
         )
 
     def test_exhausted_free_memory_alone_does_not_reject_a_device(self) -> None:
-        # 19 MiB free -- the measured value from the 2026-09-19 incident. Only
+        # 19 MiB free: a card another tenant has nearly filled. Only
         # gpu_available may gate; wiring free bytes into the matcher would
         # also reject a worker holding its own warm model.
         starved = self._device(memory_free_bytes=19 * 1024**2)
