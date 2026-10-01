@@ -36,6 +36,9 @@ from ..task.models import TaskRecord, TaskStatus
 SSH_EDGE_STREAM_ID = "ssh-edge"
 RELAYED_MODES = frozenset({"proxy", "forward"})
 
+# sshd speaks first, so a target that sends nothing this long after the opening
+# message never received it.
+_OPEN_ANSWER_TIMEOUT_SEC = 30.0
 # The bridge routes a session's last frames — an abort's cancel, a close's final
 # window grants — by its record, so the record outlives the session by this much.
 _ENDED_RECORD_TTL_MS = 60_000
@@ -92,6 +95,7 @@ class SshRelayOrigin:
         *,
         window_bytes: int = WINDOW_BYTES,
         refresh_interval_sec: float = 300.0,
+        open_timeout_sec: float = _OPEN_ANSWER_TIMEOUT_SEC,
         logger: logging.Logger | None = None,
     ) -> None:
         self._streams = RelayStreamStore(relay_redis, SSH_RELAY_KEYSPACE)
@@ -99,6 +103,7 @@ class SshRelayOrigin:
         self._sink = EdgeStreamSink(self._streams, SSH_EDGE_STREAM_ID)
         self._window_bytes = window_bytes
         self._refresh_interval_sec = refresh_interval_sec
+        self._open_timeout_sec = open_timeout_sec
         self._logger = logger or logging.getLogger("ssh-relay-origin")
         self._attachment = ReverseRelayAttachment(
             relay_redis,
@@ -110,6 +115,8 @@ class SshRelayOrigin:
         )
         self._channels: dict[str, ByteStreamChannel] = {}
         self._by_task: defaultdict[str, set[str]] = defaultdict(set)
+        self._unanswered: dict[str, asyncio.TimerHandle] = {}
+        self._expiries: set[asyncio.Task[None]] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._refresher: asyncio.Task[None] | None = None
 
@@ -132,6 +139,9 @@ class SshRelayOrigin:
                 await self._refresher
         channels, self._channels = self._channels, {}
         self._by_task.clear()
+        for timer in self._unanswered.values():
+            timer.cancel()
+        self._unanswered.clear()
         for session_id, channel in channels.items():
             try:
                 await self._cancel_at_target(
@@ -182,6 +192,8 @@ class SshRelayOrigin:
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one frame from the edge stream to its connection."""
+        if (timer := self._unanswered.pop(frame.session_id, None)) is not None:
+            timer.cancel()
         if (channel := self._channels.get(frame.session_id)) is not None:
             await channel.on_frame(frame)
 
@@ -204,6 +216,9 @@ class SshRelayOrigin:
         )
         self._channels[session_id] = channel
         self._by_task[target.task_id].add(session_id)
+        self._unanswered[session_id] = asyncio.get_running_loop().call_later(
+            self._open_timeout_sec, self._expire_unanswered, session_id
+        )
         try:
             await channel.send_open(target.endpoint_id)
         except BaseException:
@@ -211,9 +226,20 @@ class SshRelayOrigin:
             raise
         return channel
 
+    def _expire_unanswered(self, session_id: str) -> None:
+        self._unanswered.pop(session_id, None)
+        self._logger.warning(
+            "SSH relay session %s got no answer from its worker; ending it", session_id
+        )
+        task = asyncio.ensure_future(self._abort(session_id))
+        self._expiries.add(task)
+        task.add_done_callback(self._expiries.discard)
+
     async def release(self, channel: ByteStreamChannel, *, abort: bool) -> None:
         """Forget a connection once it ends, aborting it at both ends if asked."""
         session_id = channel.session_id
+        if (timer := self._unanswered.pop(session_id, None)) is not None:
+            timer.cancel()
         if self._channels.pop(session_id, None) is None:
             return
         for task_id, ids in list(self._by_task.items()):

@@ -431,3 +431,46 @@ def test_a_stopping_root_ends_its_connections_at_the_worker_without_the_bridge()
                 writer.close()
 
     _run(run())
+
+
+def test_a_relay_its_worker_never_answers_ends() -> None:
+    """A lost opening frame, such as one sent to a node id the node has left, would
+    otherwise hold the client open forever."""
+
+    async def run() -> None:
+        origin = SshRelayOrigin(
+            FakeBinaryRedis(), refresh_interval_sec=3600, open_timeout_sec=0.2
+        )
+        await origin.start()
+        try:
+            channel = await origin.open(TARGET)
+            with pytest.raises(StreamClosed):
+                await asyncio.wait_for(channel.recv(), 5)
+            assert origin._channels == {}
+        finally:
+            await origin.stop()
+
+    _run(run())
+
+
+async def _speaks_first(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    writer.write(b"SSH-2.0-test\r\n")
+    await writer.drain()
+    await _echo(reader, writer)
+
+
+def test_a_relay_whose_worker_answers_outlives_the_open_timeout() -> None:
+    async def run() -> None:
+        async with _fabric() as fabric, _listener(_speaks_first) as sshd:
+            fabric.registry.publish(ENDPOINT, sshd.port)
+            fabric.origin._open_timeout_sec = 0.2
+            channel = await fabric.origin.open(TARGET)
+            assert await channel.recv() == b"SSH-2.0-test\r\n"
+            await asyncio.sleep(0.5)
+            await channel.send(b"still here")
+            assert await channel.recv() == b"still here"
+            await fabric.origin.release(channel, abort=True)
+
+    _run(run())
