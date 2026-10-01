@@ -158,9 +158,12 @@ def test_only_a_running_task_on_the_asking_worker_renews_its_access() -> None:
         runtime.register("owner", _ORG, _ECHO_WORKFLOW, format="native")
     )
     task_id = results[0].task_id
-    record_dispatch(runtime, task_id, cast(Any, _worker()))
+    record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
 
-    assert runtime.renewable_content_scope(task_id, "wkr-1") == _ORG
-    assert runtime.renewable_content_scope(task_id, "wkr-other") is None
-    runtime.mark_succeeded(task_id, "wkr-1", {}, "2026-06-01T00:00:00Z")
-    assert runtime.renewable_content_scope(task_id, "wkr-1") is None
+    assert runtime.renewable_content_scope(task_id, "wkr-1", "dsp-1") == _ORG
+    assert runtime.renewable_content_scope(task_id, "wkr-other", "dsp-1") is None
+    # A superseded dispatch of the task on the same worker is given nothing.
+    assert runtime.renewable_content_scope(task_id, "wkr-1", "dsp-0") is None
+    assert runtime.renewable_content_scope(task_id, "wkr-1", None) is None
+    runtime.mark_succeeded(task_id, "wkr-1", {}, "2026-06-01T00:00:00Z", "dsp-1")
+    assert runtime.renewable_content_scope(task_id, "wkr-1", "dsp-1") is None

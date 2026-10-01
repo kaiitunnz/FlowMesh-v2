@@ -846,6 +846,9 @@ class SupervisorClient:
             raise RuntimeError("Supervisor gRPC client not started")
         if not self._event_ready.wait():
             raise RuntimeError("Supervisor event stream not ready")
+        proposal = proposal.model_copy(
+            update={"dispatch_id": self.dispatch_id(proposal.agent_task_id)}
+        )
         event = WorkerEvent(
             type="MEDIATED_OP_PROPOSE",
             worker_id=self.worker_id,
@@ -898,7 +901,7 @@ class SupervisorClient:
         """
         self._push_event(
             "CONTENT_ACCESS_REQUEST",
-            {"task_id": task_id},
+            {"task_id": task_id, "dispatch_id": self.dispatch_id(task_id)},
             ready_timeout_sec=ready_timeout_sec,
         )
 

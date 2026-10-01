@@ -869,7 +869,8 @@ class EventMonitor:
                 )
             case "MEDIATED_OP_PROPOSE":
                 self._runtime.authorize_model_turn(
-                    AgentModelTurnProposal.model_validate(event.payload["proposal"])
+                    AgentModelTurnProposal.model_validate(event.payload["proposal"]),
+                    (event.worker_id or "").strip(),
                 )
             case "RESIDENT_BOOTSTRAP_ACK":
                 self._runtime.on_resident_bootstrap_ack(
@@ -890,8 +891,13 @@ class EventMonitor:
             case "CONTENT_ACCESS_REQUEST" if self._content_access is not None:
                 worker_id = (event.worker_id or "").strip()
                 task_id = str(event.payload["task_id"])
+                dispatch_id = event.payload.get("dispatch_id")
                 if (
-                    scope := self._runtime.renewable_content_scope(task_id, worker_id)
+                    scope := self._runtime.renewable_content_scope(
+                        task_id,
+                        worker_id,
+                        dispatch_id if isinstance(dispatch_id, str) else None,
+                    )
                 ) is None:
                     self._logger.warning(
                         "Refusing to renew content store access for %s on %s",

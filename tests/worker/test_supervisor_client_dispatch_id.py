@@ -10,6 +10,7 @@ from google.protobuf.struct_pb2 import Struct
 
 from shared.grpc.supervisor.v1 import supervisor_pb2
 from shared.tasks.worker_message import WorkerTaskMessage
+from shared.tools.contract import AgentModelTurnProposal
 from worker.supervisor_client import SupervisorClient
 
 
@@ -130,3 +131,34 @@ def test_an_unparseable_task_frame_logs_no_payload(monkeypatch, caplog) -> None:
     assert "Failed to parse task message tsk-a" in caplog.text
     assert "frame-secret" not in caplog.text
     assert client._task_queue.empty()
+
+
+def _pushed_payload(client: SupervisorClient) -> dict[str, Any]:
+    _generation, frame = cast(
+        tuple[int, dict[str, Any]], client._event_queue.get_nowait()
+    )
+    return cast(dict[str, Any], frame["payload"])
+
+
+def test_a_model_turn_proposal_names_the_dispatch_running_its_agent() -> None:
+    client = _client()
+    client._task_queue.put(_message("tsk-a", "dsp-1"))
+    next(iter(client.iter_tasks()))
+
+    client.push_mediated_propose(
+        AgentModelTurnProposal(
+            agent_task_id="tsk-a", call_correlation="t0", request_digest="d"
+        )
+    )
+
+    assert _pushed_payload(client)["proposal"]["dispatch_id"] == "dsp-1"
+
+
+def test_a_content_access_request_names_the_dispatch_running_its_task() -> None:
+    client = _client()
+    client._task_queue.put(_message("tsk-a", "dsp-1"))
+    next(iter(client.iter_tasks()))
+
+    client.push_content_access_request("tsk-a")
+
+    assert _pushed_payload(client) == {"task_id": "tsk-a", "dispatch_id": "dsp-1"}

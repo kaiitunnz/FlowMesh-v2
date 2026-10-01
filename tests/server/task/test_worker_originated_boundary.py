@@ -251,6 +251,9 @@ def _deny_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
     return [payload for _, kind, payload in frames if kind == "deny"]
 
 
+HELD_DISPATCH = "dsp-held"
+
+
 def _hold_dispatch(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") -> Any:
     """Pin a worker and hold the agent mid-turn without running the episode.
 
@@ -263,6 +266,7 @@ def _hold_dispatch(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") ->
     engine.on_dispatched(task_id, worker)
     record = runtime._tasks[task_id]
     record.assigned_worker = worker
+    record.dispatch_id = HELD_DISPATCH
     record.status = TaskStatus.DISPATCHED
     return engine
 
@@ -431,8 +435,12 @@ def test_held_model_turn_mints_a_worker_permit_without_a_settle() -> None:
         _hold_dispatch(runtime, writer)
         runtime.authorize_model_turn(
             AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="deadbeef"
-            )
+                agent_task_id=writer,
+                call_correlation="t0",
+                request_digest="deadbeef",
+                dispatch_id=HELD_DISPATCH,
+            ),
+            "wkr-1",
         )
 
         permits = _permit_frames(runtime)
@@ -460,8 +468,12 @@ def test_held_model_turn_permit_carries_the_workflow_key() -> None:
         _hold_dispatch(runtime, writer)
         runtime.authorize_model_turn(
             AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="d"
-            )
+                agent_task_id=writer,
+                call_correlation="t0",
+                request_digest="d",
+                dispatch_id=HELD_DISPATCH,
+            ),
+            "wkr-1",
         )
 
         permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
@@ -486,8 +498,12 @@ def test_held_model_turn_denied_relays_a_deny_frame() -> None:
         _hold_dispatch(runtime, writer)
         runtime.authorize_model_turn(
             AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="d"
-            )
+                agent_task_id=writer,
+                call_correlation="t0",
+                request_digest="d",
+                dispatch_id=HELD_DISPATCH,
+            ),
+            "wkr-1",
         )
 
         assert not _permit_frames(runtime)
@@ -782,8 +798,12 @@ def test_only_the_deployment_model_url_is_granted_the_deployment_key(
         _hold_dispatch(runtime, writer)
         runtime.authorize_model_turn(
             AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="d"
-            )
+                agent_task_id=writer,
+                call_correlation="t0",
+                request_digest="d",
+                dispatch_id=HELD_DISPATCH,
+            ),
+            "wkr-1",
         )
 
         permits = [
@@ -861,8 +881,12 @@ def test_a_gone_vaulted_key_denies_the_held_model_turn() -> None:
         _hold_dispatch(runtime, writer)
         runtime.authorize_model_turn(
             AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="d"
-            )
+                agent_task_id=writer,
+                call_correlation="t0",
+                request_digest="d",
+                dispatch_id=HELD_DISPATCH,
+            ),
+            "wkr-1",
         )
 
         assert not _permit_frames(runtime)

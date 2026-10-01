@@ -23,6 +23,7 @@ from tests.server.task.test_v2_orchestration import (
 from tests.server.task.test_worker_originated_boundary import (
     _MODEL_WF,
     _SEARCH_WF,
+    HELD_DISPATCH,
     _dispatch_agent,
     _hold_dispatch,
     _permit_frames,
@@ -96,8 +97,12 @@ def test_held_model_turn_permit_carries_a_traceparent_to_the_worker() -> None:
         _hold_dispatch(runtime, writer)
         runtime.authorize_model_turn(
             AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="deadbeef"
-            )
+                agent_task_id=writer,
+                call_correlation="t0",
+                request_digest="deadbeef",
+                dispatch_id=HELD_DISPATCH,
+            ),
+            "wkr-1",
         )
 
         permits = _permit_frames(runtime)
@@ -126,8 +131,12 @@ def test_held_model_turn_permit_carries_no_traceparent_key_when_off() -> None:
         _hold_dispatch(runtime, writer)
         runtime.authorize_model_turn(
             AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="d"
-            )
+                agent_task_id=writer,
+                call_correlation="t0",
+                request_digest="d",
+                dispatch_id=HELD_DISPATCH,
+            ),
+            "wkr-1",
         )
 
         permits = _permit_frames(runtime)

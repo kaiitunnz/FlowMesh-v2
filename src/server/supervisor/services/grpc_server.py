@@ -372,6 +372,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                     RelayFrame.from_wire(payload["payload"]["frame"])
                 )
                 continue
+            # Control attributes an event to the worker this stream authenticated.
+            payload["worker_id"] = worker_id
             # Trap register/unregister events
             match event_type:
                 case "REGISTER":

@@ -2505,7 +2505,9 @@ class TaskRuntime:
             ),
         )
 
-    def authorize_model_turn(self, proposal: AgentModelTurnProposal) -> None:
+    def authorize_model_turn(
+        self, proposal: AgentModelTurnProposal, proposer_id: str
+    ) -> None:
         """Authorize a held agent's in-turn model egress and relay a one-use permit.
 
         The agent's own worker holds the model request privately and proposes only its
@@ -2515,12 +2517,19 @@ class TaskRuntime:
         binding, or an authority failure — relays a deny frame so the held turn fails
         fast rather than waiting out its deadline. No settle is expected: the held turn
         consumes the outcome in-worker and its durable progress rests on its
-        turn-completion boundaries.
+        turn-completion boundaries. Only the dispatch holding the agent's task, on the
+        worker whose stream relayed the proposal, is authorized; any other proposer is
+        denied.
         """
         with self._cv:
             agent = self._tasks.get(proposal.agent_task_id)
             engine = self._engines.get(agent.workflow_id) if agent else None
             if agent is None or engine is None:
+                return
+            if proposal.dispatch_id is None or not self._holds_dispatch_locked(
+                agent, proposer_id, proposal.dispatch_id
+            ):
+                self._deny_model_turn(proposal, proposer_id, "model turn not held")
                 return
             worker_id = agent.assigned_worker
             worker = self._worker_registry.get_worker(worker_id) if worker_id else None
@@ -2553,18 +2562,7 @@ class TaskRuntime:
                         deployment_credential=op_credential.deployment_credential,
                     )
             if permit is None:
-                self._worker_registry.publish_mediated_op(
-                    worker,
-                    MediatedOpMessage(
-                        worker_id=worker_id,
-                        frame_kind="deny",
-                        payload={
-                            "agent_task_id": proposal.agent_task_id,
-                            "call_correlation": proposal.call_correlation,
-                            "reason": reason,
-                        },
-                    ),
-                )
+                self._deny_model_turn(proposal, worker_id, reason)
                 return
             self._worker_registry.publish_mediated_op(
                 worker,
@@ -2574,6 +2572,26 @@ class TaskRuntime:
                     payload=self._stamped_permit_payload(permit, agent),
                 ),
             )
+
+    def _deny_model_turn(
+        self, proposal: AgentModelTurnProposal, worker_id: str, reason: str
+    ) -> None:
+        """Relay a deny frame so a held turn fails fast rather than waiting out its
+        deadline."""
+        if (worker := self._worker_registry.get_worker(worker_id)) is None:
+            return
+        self._worker_registry.publish_mediated_op(
+            worker,
+            MediatedOpMessage(
+                worker_id=worker_id,
+                frame_kind="deny",
+                payload={
+                    "agent_task_id": proposal.agent_task_id,
+                    "call_correlation": proposal.call_correlation,
+                    "reason": reason,
+                },
+            ),
+        )
 
     def settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         """Settle an agent boundary from its origin worker's fenced outcome report.
@@ -3307,11 +3325,13 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
         return record.org_id if record is not None else ""
 
-    def renewable_content_scope(self, task_id: str, worker_id: str) -> str | None:
+    def renewable_content_scope(
+        self, task_id: str, worker_id: str, dispatch_id: str | None
+    ) -> str | None:
         """The scope a task's store access renews in, or None when it may not renew.
 
-        Renewal serves a task still running on the worker asking for it; a task that
-        has settled or moved to another worker is given nothing, so a superseded
+        Renewal serves the dispatch holding a task, on the worker asking for it; a task
+        that has settled or moved to another dispatch is given nothing, so a superseded
         attempt's late write fails rather than landing under fresh access.
         """
         with self._lock:
@@ -3320,6 +3340,8 @@ class TaskRuntime:
                 record is None
                 or record.status in TERMINAL_TASK_STATUSES
                 or record.assigned_worker != worker_id
+                or dispatch_id is None
+                or not self._holds_dispatch_locked(record, worker_id, dispatch_id)
             ):
                 return None
             return record.org_id
