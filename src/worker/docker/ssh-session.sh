@@ -87,6 +87,8 @@ AllowTcpForwarding no
 X11Forwarding no
 AllowAgentForwarding no
 GatewayPorts no
+ClientAliveInterval 60
+ClientAliveCountMax 3
 EOF
 
 # The task's env rides authorized_keys as environment= options; sshd honours only

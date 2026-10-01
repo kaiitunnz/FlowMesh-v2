@@ -23,6 +23,7 @@ from worker.executors.ssh_session import (
     SSHSession,
     SSHSessionBackend,
 )
+from worker.executors.ssh_session.backends import process as process_module
 from worker.executors.ssh_session.backends.docker import DockerSession
 from worker.executors.ssh_session.base import count_established_connections
 
@@ -230,3 +231,30 @@ def test_a_docker_session_reads_its_own_connection_table() -> None:
     assert session.established_connections() == 1
     container.exec_run.return_value = MagicMock(exit_code=1, output=b"")
     assert session.established_connections() is None
+
+
+def _docker_sshd_config() -> str:
+    script = Path("src/worker/docker/ssh-session.sh").read_text(encoding="utf-8")
+    body = script.split("flowmesh.conf << 'EOF'\n", 1)[1]
+    return body.split("\nEOF\n", 1)[0]
+
+
+def _process_sshd_config() -> str:
+    return process_module._render_sshd_config(
+        port=2222,
+        session_dir=Path("/s"),
+        host_key=Path("/s/key"),
+        authorized_keys=Path("/s/keys"),
+        login_user="fmssn61000",
+        exported_env=[],
+        bind_host="127.0.0.1",
+    )
+
+
+@pytest.mark.parametrize("render", [_docker_sshd_config, _process_sshd_config])
+def test_sshd_ends_a_connection_whose_peer_stops_answering(render: Any) -> None:
+    """A relayed connection whose origin vanished must not hold the session open."""
+    options = dict(line.split(" ", 1) for line in render().splitlines() if " " in line)
+
+    assert int(options["ClientAliveInterval"]) > 0
+    assert int(options["ClientAliveCountMax"]) > 0

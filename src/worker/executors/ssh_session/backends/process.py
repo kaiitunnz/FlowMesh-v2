@@ -96,6 +96,10 @@ _PORT_ATTEMPTS = 3
 # OpenSSH titles a connection's processes "sshd-session: <user> [priv]" and
 # "sshd-session: <user>@<tty>"; releases before 9.8 use "sshd:".
 _SSHD_CONNECTION_TITLES = ("sshd-session:", "sshd:")
+# A connection whose peer stops answering ends, so a relay leg its origin lost
+# never keeps the session from going idle.
+_CLIENT_ALIVE_INTERVAL_SEC = 60
+_CLIENT_ALIVE_COUNT_MAX = 3
 _READY_PROBE_SEC = 2.0
 _READY_POLL_SEC = 0.5
 _BIND_FAILURE_MARKERS = ("cannot bind", "address already in use", "bind to port")
@@ -1543,6 +1547,8 @@ def _render_sshd_config(
             "X11Forwarding no",
             "AllowAgentForwarding no",
             "GatewayPorts no",
+            f"ClientAliveInterval {_CLIENT_ALIVE_INTERVAL_SEC}",
+            f"ClientAliveCountMax {_CLIENT_ALIVE_COUNT_MAX}",
             "Subsystem sftp internal-sftp",
             "",
         )

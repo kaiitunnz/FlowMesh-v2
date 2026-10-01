@@ -8,6 +8,7 @@ import contextlib
 import dataclasses
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1098,6 +1099,60 @@ def test_a_listener_whose_subreaper_died_is_ended_at_stop(
         )
     finally:
         _kill_all([listener])
+
+
+def test_sshd_closes_a_connection_whose_peer_stops_answering(
+    worker: WorkerConfig,
+    tmp_path: Path,
+    client_key: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(process_module, "_CLIENT_ALIVE_INTERVAL_SEC", 1, raising=False)
+    monkeypatch.setattr(process_module, "_CLIENT_ALIVE_COUNT_MAX", 2, raising=False)
+    session = ProcessSessionBackend(worker).start_session(
+        _request(tmp_path, client_key)
+    )
+    port = session.wait_ready(30)
+    assert port is not None
+    client = subprocess.Popen(  # nosec B603 - argv list, test-only
+        [
+            "ssh",
+            "-i",
+            client_key.as_posix(),
+            "-p",
+            str(port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "BatchMode=yes",
+            f"{session.login_user()}@127.0.0.1",
+            "sleep 600",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while (
+            session.established_connections() or 0
+        ) < 1 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert session.established_connections() == 1
+        # The kernel still acknowledges its segments; only the client is silent.
+        client.send_signal(signal.SIGSTOP)
+        deadline = time.monotonic() + 20
+        while session.established_connections() and time.monotonic() < deadline:
+            time.sleep(0.2)
+
+        assert session.established_connections() == 0
+    finally:
+        client.kill()
+        client.wait()
+        session.stop(1)
+        session.cleanup()
 
 
 @pytest.mark.parametrize(
