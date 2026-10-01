@@ -5,7 +5,6 @@ import re
 from shared.tasks.components.resources import GPURequirements
 from shared.tasks.specs import SSHSpecStrict, SSHSpecTemplate
 from shared.tasks.specs.common import TaskSpecBase
-from shared.tasks.specs.ssh import ssh_gpu_selection
 from shared.tasks.worker_message import GpuInfo, WorkerHardware, dispatch_uses_gpu
 from shared.utils.parsing import parse_mem_to_bytes
 
@@ -179,7 +178,7 @@ def gpus_fit_dispatch(
         return True
     if not isinstance(spec, SSHSpecStrict | SSHSpecTemplate):
         return False
-    if (selection := ssh_gpu_selection(spec)) is None:
+    if (selection := spec.gpu_selection()) is None:
         return False
     if not (free := available_devices(devices)):
         return False

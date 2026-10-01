@@ -140,6 +140,9 @@ class SSHSpecStrict(TaskSpecStrictBase):
     def uses_gpu(self) -> bool:
         return _ssh_uses_gpu(self)
 
+    def gpu_selection(self) -> GPURequirements | None:
+        return _ssh_gpu_selection(self)
+
 
 class SSHSpecTemplate(TaskSpecTemplateBase):
     credential_fields: ClassVar[tuple[str, ...]] = (
@@ -175,6 +178,9 @@ class SSHSpecTemplate(TaskSpecTemplateBase):
     def uses_gpu(self) -> bool:
         return _ssh_uses_gpu(self)
 
+    def gpu_selection(self) -> GPURequirements | None:
+        return _ssh_gpu_selection(self)
+
 
 def _ssh_uses_gpu(spec: SSHSpecStrict | SSHSpecTemplate) -> bool:
     """A session uses the GPU exactly when it asks for devices: a ``type`` or
@@ -184,7 +190,7 @@ def _ssh_uses_gpu(spec: SSHSpecStrict | SSHSpecTemplate) -> bool:
     return gpu is not None and gpu.count != 0
 
 
-def ssh_gpu_selection(
+def _ssh_gpu_selection(
     spec: SSHSpecStrict | SSHSpecTemplate,
 ) -> GPURequirements | None:
     """The GPU block a session's devices are chosen by, or None when it chooses none.

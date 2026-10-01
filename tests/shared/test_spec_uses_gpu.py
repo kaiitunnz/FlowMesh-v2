@@ -20,6 +20,7 @@ from shared.tasks.specs import (
     InferenceSpecStrict,
     InferenceSpecTemplate,
     SSHSpecStrict,
+    SSHSpecTemplate,
 )
 from shared.tasks.specs.common import TaskSpecStrictBase, TaskSpecTemplateBase
 from shared.tasks.task_type import TaskType
@@ -179,6 +180,29 @@ class TestSSH:
 
     def test_no_gpu_block_is_not(self) -> None:
         assert _ssh(None).uses_gpu() is False
+
+
+class TestSSHGpuSelection:
+    @pytest.mark.parametrize(
+        ("gpu", "selects"),
+        [
+            (None, False),
+            (GPURequirements(), False),
+            (GPURequirements(count=1), True),
+            (GPURequirements(type="A100"), True),
+            (GPURequirements(memory="40Gi"), True),
+        ],
+    )
+    @pytest.mark.parametrize("spec_cls", [SSHSpecStrict, SSHSpecTemplate])
+    def test_only_a_count_type_or_memory_selects_devices(
+        self,
+        spec_cls: type[SSHSpecStrict] | type[SSHSpecTemplate],
+        gpu: GPURequirements | None,
+        selects: bool,
+    ) -> None:
+        resources = ResourcesSpec(hardware=HardwareRequirements(gpu=gpu))
+        spec = spec_cls(taskType=TaskType.SSH, resources=resources)
+        assert (spec.gpu_selection() is not None) is selects
 
 
 class TestDispatchUsesGpu:
