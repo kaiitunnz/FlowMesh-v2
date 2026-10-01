@@ -1,20 +1,36 @@
 import asyncio
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from threading import Event, Lock
 from typing import Any
 
 from shared.network.byte_stream import splice
+from shared.utils.json import safe_get
 
 from ..registries.worker import WorkerRegistry
 from ..ssh import SshRelayOrigin, SshRelayTarget
 from ..ssh.connections import tracked_ssh_connection
+from ..task.models import TaskRecord, TaskStatus
 from .ssh_connections import SshConnectionRegistry
 
 _DEFAULT_TIMEOUT_SEC = 5.0
+
+
+def forward_sessions(
+    records: Iterable[TaskRecord],
+) -> list[tuple[str, str | None, str, dict[str, Any]]]:
+    """The forward sessions of running tasks, as their records last published them."""
+    return [
+        (record.task_id, record.workflow_id, record.assigned_worker, dict(ssh))
+        for record in records
+        if record.status == TaskStatus.DISPATCHED
+        and record.assigned_worker
+        and isinstance(ssh := safe_get(record.latest_update, "ssh"), dict)
+        and ssh.get("mode") == "forward"
+    ]
 
 
 @dataclass(slots=True)
@@ -191,6 +207,33 @@ class PortForwardService:
             self._schedule_registration_invalidation(task_id, registration, loop)
             raise
 
+    async def restore_sessions(
+        self, sessions: list[tuple[str, str | None, str, dict[str, Any]]]
+    ) -> None:
+        """Serve each persisted forward session again on the port it was published on.
+
+        Each entry is a task id, its workflow id, its assigned worker, and its
+        published endpoint. A session whose port cannot be claimed again stays
+        unreachable rather than moving to another port or mode its clients do not
+        know.
+        """
+        for task_id, workflow_id, assigned_worker, endpoint in sessions:
+            port = endpoint.get("port")
+            try:
+                if not isinstance(port, int):
+                    raise RuntimeError("the session published no port")
+                await self._register_task_async(
+                    task_id, workflow_id, assigned_worker, endpoint, None, port
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "Cannot restore forward port %s of task %s; leaving the session "
+                    "unreachable: %s",
+                    port,
+                    task_id,
+                    exc,
+                )
+
     def unregister_task(self, task_id: str) -> None:
         loop = self._get_loop()
         if loop is None:
@@ -217,6 +260,7 @@ class PortForwardService:
         assigned_worker: str,
         endpoint: dict[str, Any],
         registration: _Registration | None = None,
+        requested_port: int | None = None,
     ) -> dict[str, Any]:
         if registration is None:
             registration = _Registration()
@@ -269,6 +313,7 @@ class PortForwardService:
                     target,
                     connection,
                     registration,
+                    requested_port,
                 )
                 self._sessions[task_id] = session
                 self._port_to_task[session.port] = task_id
@@ -280,6 +325,7 @@ class PortForwardService:
                 target,
                 connection,
                 registration,
+                requested_port,
             )
             created = True
         if created:
@@ -318,8 +364,14 @@ class PortForwardService:
         target: SshRelayTarget,
         connection: _ConnectionContext,
         registration: _Registration,
+        requested_port: int | None,
     ) -> PortForwardSession:
-        for port in range(self._port_start, self._port_end + 1):
+        candidates = (
+            range(self._port_start, self._port_end + 1)
+            if requested_port is None
+            else (requested_port,)
+        )
+        for port in candidates:
             if port in self._servers and port not in self._port_to_task:
                 return PortForwardSession(
                     task_id=task_id,
@@ -337,7 +389,13 @@ class PortForwardService:
         target: SshRelayTarget,
         connection: _ConnectionContext,
         registration: _Registration,
+        requested_port: int | None,
     ) -> PortForwardSession:
+        candidates = (
+            range(self._port_start, self._port_end + 1)
+            if requested_port is None
+            else (requested_port,)
+        )
         unavailable_ports: set[int] = set()
         while True:
             pending_drained: asyncio.Event | None = None
@@ -346,14 +404,14 @@ class PortForwardService:
                 port = next(
                     (
                         candidate
-                        for candidate in range(self._port_start, self._port_end + 1)
+                        for candidate in candidates
                         if candidate not in self._used_ports
                         and candidate not in unavailable_ports
                     ),
                     None,
                 )
                 if port is None:
-                    if not self._pending_dynamic:
+                    if requested_port is not None or not self._pending_dynamic:
                         raise RuntimeError("No available forward ports")
                     pending_drained = self._no_pending_dynamic
                 else:
@@ -481,6 +539,19 @@ class PortForwardService:
             except Exception:
                 pass
 
+    async def _current_target(self, target: SshRelayTarget) -> SshRelayTarget:
+        """Where a connection is relayed now: the session's worker on the node it is
+        registered under, which a node's re-registration changes."""
+        worker = await self._worker_registry.get_worker_async(target.worker_id)
+        if worker is None:
+            raise RuntimeError(f"worker {target.worker_id} is not registered")
+        return SshRelayTarget(
+            task_id=target.task_id,
+            worker_id=target.worker_id,
+            node_id=worker.node_id,
+            endpoint_id=target.endpoint_id,
+        )
+
     async def _handle_client(
         self,
         port: int,
@@ -513,7 +584,8 @@ class PortForwardService:
                 except Exception:
                     source_port = None
         try:
-            channel = await self._relay.open(session.target)
+            target = await self._current_target(session.target)
+            channel = await self._relay.open(target)
         except Exception as exc:
             self._logger.warning(
                 "Failed to open the SSH relay for task %s: %s", task_id, exc
@@ -535,7 +607,7 @@ class PortForwardService:
             async with tracked_ssh_connection(
                 self._ssh_connections,
                 "forward",
-                session.target,
+                target,
                 session.connection.workflow_id,
                 (
                     username

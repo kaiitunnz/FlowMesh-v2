@@ -80,7 +80,7 @@ from .services.fleet_metrics import build_fleet_sampler
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
 from .services.monitoring import EventMonitor
-from .services.port_forward import PortForwardService
+from .services.port_forward import PortForwardService, forward_sessions
 from .services.ssh_connections import SshConnectionRegistry
 from .services.task_events import TaskEventPublisher
 from .services.watchdog import WorkerWatchdog
@@ -681,6 +681,10 @@ async def _lifespan(_: FastAPI):
                 GATED_SERVE.rebind_forward_exposures()
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
+                if RUNTIME is not None:
+                    await PORT_FORWARD_SERVICE.restore_sessions(
+                        forward_sessions(list(RUNTIME.tasks.values()))
+                    )
             _start_root_threads()
             if FLEET_SAMPLER is not None:
                 FLEET_SAMPLER.start(asyncio.get_running_loop())
