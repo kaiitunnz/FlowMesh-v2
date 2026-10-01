@@ -8,7 +8,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from shared.tasks.components.resources import GPURequirements
-from shared.tasks.specs.ssh import SSHInputSpec, SSHOutputSpec, SSHSpecStrict
+from shared.tasks.specs.ssh import (
+    SSHInputSpec,
+    SSHOutputSpec,
+    SSHSpecStrict,
+    ssh_gpu_selection,
+)
 from shared.tasks.worker_message import GpuInfo, WorkerHardware
 from shared.utils import parse_float_env, parse_mem_to_bytes
 from shared.utils.hardware import (
@@ -272,12 +277,7 @@ def _resolve_gpu_devices(
     if not config.enable_ssh_gpu_limit:
         return host_gpu_ids
 
-    gpu_req: GPURequirements | None = None
-    if (res := spec.resources) and (hw := res.hardware):
-        gpu_req = hw.gpu
-    if gpu_req is None or (
-        gpu_req.count is None and not gpu_req.type and not gpu_req.memory
-    ):
+    if (gpu_req := ssh_gpu_selection(spec)) is None:
         return host_gpu_ids
 
     requested = gpu_req.count if gpu_req.count is not None else 1

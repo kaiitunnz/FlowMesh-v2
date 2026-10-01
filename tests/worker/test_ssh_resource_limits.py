@@ -472,6 +472,20 @@ class TestSSHConfigSkipsHeldDevices:
         )
         assert cfg.gpu_device_ids == ["5", "7"]
 
+    def test_a_block_selecting_nothing_takes_every_device(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Placement keeps such a session off a worker with a held device, because
+        # nothing here narrows it to the free ones.
+        monkeypatch.setenv("WORKER_HOST_GPU_ID", "0,1,2,3")
+        cfg = SSHConfig.from_spec(
+            _spec({"hardware": {"gpu": {}}}),
+            _worker_config_gpu_limit(),
+            self._hardware(),
+            _both(frozenset({"a100-1", "a100-2", "a100-3"})),
+        )
+        assert cfg.gpu_device_ids == ["0", "1", "2", "3"]
+
     def test_refuses_when_too_few_are_free(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -514,7 +514,7 @@ class TestAdmission:
     def _gpu_spec(self, **message: Any) -> Any:
         return make_worker_task_message(_gpu_spec(), **message)
 
-    def _ssh_spec(self, count: int) -> Any:
+    def _ssh_spec(self, count: int | None) -> Any:
         return make_worker_task_message(
             SSHSpecStrict(
                 taskType=TaskType.SSH,
@@ -554,6 +554,15 @@ class TestAdmission:
         runner = self._runner(tmp_path, self._held("GPU-0"), devices=2)
         with pytest.raises(ExecutionError):
             runner._refuse_if_gpu_is_held(self._ssh_spec(count=2))
+
+    def test_refuses_an_ssh_session_selecting_no_device_beside_a_free_one(
+        self, tmp_path: Path
+    ) -> None:
+        # A gpu block naming nothing hands the session every device, the held one too.
+        runner = self._runner(tmp_path, self._held("GPU-0"), devices=2)
+        with pytest.raises(ExecutionError) as excinfo:
+            runner._refuse_if_gpu_is_held(self._ssh_spec(count=None))
+        assert excinfo.value.retryable is True
 
     def test_admits_a_cpu_task_onto_a_fully_held_worker(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path, self._held("GPU-0"))

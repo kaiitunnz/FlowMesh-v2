@@ -4,7 +4,8 @@ import re
 
 from shared.tasks.components.resources import GPURequirements
 from shared.tasks.specs import SSHSpecStrict, SSHSpecTemplate
-from shared.tasks.specs.common import TaskSpecBase, declared_gpu_requirements
+from shared.tasks.specs.common import TaskSpecBase
+from shared.tasks.specs.ssh import ssh_gpu_selection
 from shared.tasks.worker_message import GpuInfo, WorkerHardware, dispatch_uses_gpu
 from shared.utils.parsing import parse_mem_to_bytes
 
@@ -167,9 +168,9 @@ def gpus_fit_dispatch(
 ) -> bool:
     """Whether ``hw``'s devices, with their reported availability, fit a dispatch.
 
-    An SSH session is handed only the devices it selects, so it needs enough free ones.
-    Any other GPU dispatch runs on every device its worker sees, so one held device
-    makes the worker unavailable to it.
+    An SSH session that selects devices is handed only those, so it needs enough free
+    ones. Any other GPU dispatch runs on every device its worker sees, so one held
+    device makes the worker unavailable to it.
     """
     devices = hw.gpu.devices
     if all(device.is_available for device in devices):
@@ -178,9 +179,9 @@ def gpus_fit_dispatch(
         return True
     if not isinstance(spec, SSHSpecStrict | SSHSpecTemplate):
         return False
+    if (selection := ssh_gpu_selection(spec)) is None:
+        return False
     if not (free := available_devices(devices)):
         return False
     free_hw = hw.model_copy(update={"gpu": hw.gpu.model_copy(update={"devices": free})})
-    return gpu_meets_requirements(
-        free_hw, declared_gpu_requirements(spec) or GPURequirements(count=1)
-    )
+    return gpu_meets_requirements(free_hw, selection)

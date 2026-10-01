@@ -3,6 +3,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import model_validator
 
 from .._base import StrictBaseModel, TemplateBaseModel
+from ..components.resources import GPURequirements
 from ..placeholders import TemplateInt
 from ..task_type import TaskType
 from .common import (
@@ -185,3 +186,17 @@ def _ssh_uses_gpu(spec: SSHSpecStrict | SSHSpecTemplate) -> bool:
     ``count: 0`` asks for none."""
     gpu = declared_gpu_requirements(spec)
     return gpu is not None and gpu.count != 0
+
+
+def ssh_gpu_selection(
+    spec: SSHSpecStrict | SSHSpecTemplate,
+) -> GPURequirements | None:
+    """The GPU block a session's devices are chosen by, or None when it chooses none.
+
+    A block naming no ``count``, ``type`` or ``memory`` selects nothing, so the session
+    is handed every device its worker exposes.
+    """
+    gpu = declared_gpu_requirements(spec)
+    if gpu is None or (gpu.count is None and not gpu.type and not gpu.memory):
+        return None
+    return gpu

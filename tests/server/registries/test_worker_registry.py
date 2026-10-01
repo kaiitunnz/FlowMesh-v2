@@ -184,8 +184,9 @@ def _ssh_task(
     memory: str | None = None,
     gpu_count: int | None = None,
     gpu_memory: str | None = None,
+    gpu: GPURequirements | None = None,
 ) -> TaskEnvelopeStrict:
-    gpu_req = None
+    gpu_req = gpu
     if gpu_count is not None or gpu_memory:
         gpu_req = GPURequirements(count=gpu_count, memory=gpu_memory)
     hw_req = None
@@ -470,6 +471,14 @@ class TestGpuAvailableFor:
     def test_a_free_sibling_still_serves_an_ssh_session(self) -> None:
         # A session is handed only the devices it selects.
         worker = _held(_worker(gpu_count=4, gpu_mem=48 * 1024**3), 0)
+        assert gpu_available_for(worker, _ssh_task(gpu_count=1), False) is True
+
+    def test_an_ssh_session_selecting_no_device_waits_like_a_model(self) -> None:
+        # A gpu block naming nothing hands the session every device, the held one too.
+        worker = _held(_worker(gpu_count=2, gpu_mem=48 * 1024**3), 0)
+        assert (
+            gpu_available_for(worker, _ssh_task(gpu=GPURequirements()), False) is False
+        )
         assert gpu_available_for(worker, _ssh_task(gpu_count=1), False) is True
 
     def test_not_enough_free_devices_for_an_ssh_session(self) -> None:

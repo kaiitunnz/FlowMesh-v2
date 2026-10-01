@@ -340,8 +340,16 @@ class TestPlacementBesideAHeldDevice:
         assert registry.offered == [[]]
         assert [kw["reason"] for _, kw in requeued] == ["no_idle_worker"]
 
-    def test_an_ssh_session_still_places_on_the_free_device(
-        self, two_card_client: redis.Redis
+    @pytest.mark.parametrize(
+        ("gpu", "placed"),
+        [
+            ({"count": 1}, [_WORKER]),
+            # A block selecting nothing hands the session both devices.
+            ({}, []),
+        ],
+    )
+    def test_an_ssh_session_places_only_when_it_selects_free_devices(
+        self, two_card_client: redis.Redis, gpu: dict[str, Any], placed: list[str]
     ) -> None:
         registry = _held(two_card_client)
         session = TaskEnvelopeStrict.model_validate(
@@ -353,14 +361,14 @@ class TestPlacementBesideAHeldDevice:
                     "interactive": False,
                     "image": "x",
                     "command": ["true"],
-                    "resources": {"hardware": {"gpu": {"count": 1}}},
+                    "resources": {"hardware": {"gpu": gpu}},
                 },
             }
         )
 
         pool = registry.idle_satisfying_pool(session, False)
 
-        assert [worker.id for worker in pool] == [_WORKER]
+        assert [worker.id for worker in pool] == placed
 
 
 class TestRelayingDispatchOnACpuWorker:
