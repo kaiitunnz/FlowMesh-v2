@@ -249,12 +249,17 @@ class Lifecycle:
             try:
                 self._reregister_if_lost()
                 self.heartbeat_now()
-                if (on_heartbeat := self._on_heartbeat) is not None:
-                    on_heartbeat()
             except Exception as exc:
                 self.logger.warning(
                     "Node heartbeat failed for %s: %s", self._node_id, exc
                 )
+            if (on_heartbeat := self._on_heartbeat) is not None:
+                try:
+                    on_heartbeat()
+                except Exception as exc:
+                    self.logger.warning(
+                        "Node heartbeat callback failed for %s: %s", self._node_id, exc
+                    )
             self._stop_event.wait(self.hb_sec)
 
     def publish_unregister(self) -> None:
