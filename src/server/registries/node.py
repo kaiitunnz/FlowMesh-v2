@@ -1,9 +1,10 @@
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Sequence
 from threading import Thread
-from typing import Any
+from typing import Any, cast
 
 from pydantic import (
     BaseModel,
@@ -19,12 +20,14 @@ from shared.schemas.command import (
     CommandResponse,
     CommandType,
 )
+from shared.schemas.event import NodeEvent, serialize_event
 from shared.schemas.network import NetworkEndpointAdvertisement
 from shared.schemas.node import NodeInfo
-from shared.utils import new_node_id
+from shared.utils import new_node_id, now_iso
 
 from ..clients.redis import (
     NODE_ALIAS_LEASE_PREFIX,
+    NODE_EVENT_CHANNEL,
     NODE_ID_SEQ_KEY,
     NODE_KEY_PREFIX,
     NODE_RESPONSE_CHANNEL,
@@ -47,30 +50,32 @@ _RECONNECT_BACKOFF_SEC = 1.0
 # KEYS: [lease, nodes set, node hash]
 # ARGV: [node_id, alias, lease ttl_ms, node key prefix, node hash field, value,
 #        field, value, ...]
-# Returns 1 once the lease is taken and the node written, else 0 with nothing
-# written. Taking the lease removes any other record with the alias, left by a
-# node that crashed or was taken over.
+# Returns the ids of the records it removed once the lease is taken and the node
+# written, else nil with nothing written. Taking the lease removes any other record
+# with the alias, left by a node that crashed or was taken over.
 _REGISTER_LUA = """
 local holder = redis.call('HGET', KEYS[1], 'node_id')
 if holder and holder ~= ARGV[1] then
   local held_ttl = tonumber(redis.call('HGET', KEYS[1], 'ttl_ms')) or 0
   local remaining = redis.call('PTTL', KEYS[1])
   if remaining >= 0 and remaining * 2 >= held_ttl then
-    return 0
+    return false
   end
 end
 redis.call('DEL', KEYS[1])
 redis.call('HSET', KEYS[1], 'node_id', ARGV[1], 'ttl_ms', ARGV[3])
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
+local removed = {}
 for _, other in ipairs(redis.call('SMEMBERS', KEYS[2])) do
   if redis.call('HGET', ARGV[4] .. other, 'alias') == ARGV[2] then
     redis.call('SREM', KEYS[2], other)
     redis.call('DEL', ARGV[4] .. other)
+    table.insert(removed, other)
   end
 end
 redis.call('SADD', KEYS[2], ARGV[1])
 redis.call('HSET', KEYS[3], unpack(ARGV, 5))
-return 1
+return removed
 """
 
 # KEYS: [nodes set, node hash, node heartbeat key]
@@ -296,15 +301,27 @@ class NodeRegistry:
         """
         node_id = self._allocate_node_id()
         keys, args = _register_script_args(node_id, node_info, self._lease_ttl_ms)
-        if not self._rds.sync.eval(_REGISTER_LUA, len(keys), *keys, *args):
+        removed = cast(
+            list[str] | None,
+            self._rds.sync.eval(_REGISTER_LUA, len(keys), *keys, *args),
+        )
+        if removed is None:
             raise NodeAliasInUseError(node_info.alias)
+        for message in _unregister_messages(removed):
+            self._rds.sync.publish_telemetry(NODE_EVENT_CHANNEL, message)
         return node_id
 
     async def register_node_async(self, node_info: NodeInfo) -> str:
         node_id = await self._allocate_node_id_async()
         keys, args = _register_script_args(node_id, node_info, self._lease_ttl_ms)
-        if not await self._rds.asyncio.eval(_REGISTER_LUA, len(keys), *keys, *args):
+        removed = cast(
+            list[str] | None,
+            await self._rds.asyncio.eval(_REGISTER_LUA, len(keys), *keys, *args),
+        )
+        if removed is None:
             raise NodeAliasInUseError(node_info.alias)
+        for message in _unregister_messages(removed):
+            await self._rds.asyncio.publish_telemetry(NODE_EVENT_CHANNEL, message)
         return node_id
 
     def update_node_hb(
@@ -502,6 +519,19 @@ class NodeRegistry:
     async def _allocate_node_id_async(self) -> str:
         seq = await self._rds.asyncio.incr(NODE_ID_SEQ_KEY)
         return new_node_id(seq)
+
+
+def _unregister_messages(node_ids: Sequence[str]) -> list[str]:
+    """Announce each node record a registration removed as that node's unregister,
+    so the root forgets it as it does a node that stopped."""
+    return [
+        json.dumps(
+            serialize_event(
+                NodeEvent(type="SV_UNREGISTER", ts=now_iso(), node_id=str(node_id))
+            )
+        )
+        for node_id in node_ids
+    ]
 
 
 def _register_script_args(

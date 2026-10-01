@@ -1,5 +1,6 @@
 """Node alias leases keep `node_alias` unique among live nodes."""
 
+import json
 import logging
 from typing import Any, cast
 
@@ -7,6 +8,7 @@ import fakeredis
 import pytest
 
 from server.clients.redis import (
+    NODE_EVENT_CHANNEL,
     NODES_SET_KEY,
     AsyncRedisClient,
     RedisClient,
@@ -49,10 +51,12 @@ def rds(server: fakeredis.FakeServer) -> fakeredis.FakeRedis:
 def registry(server: fakeredis.FakeServer) -> NodeRegistry:
     sync = SyncRedisClient.__new__(SyncRedisClient)
     sync._control = fakeredis.FakeRedis(server=server, decode_responses=True)
+    sync._telemetry = sync._control
     async_client = AsyncRedisClient.__new__(AsyncRedisClient)
     cast(Any, async_client)._control = fakeredis.FakeAsyncRedis(
         server=server, decode_responses=True
     )
+    cast(Any, async_client)._telemetry = cast(Any, async_client)._control
     client = RedisClient.__new__(RedisClient)
     client.sync = sync
     client.asyncio = async_client
@@ -189,6 +193,30 @@ async def test_register_removes_record_left_by_expired_lease(
 
     assert rds.smembers(NODES_SET_KEY) == {other_id, new_id}
     assert not rds.exists(node_key(old_id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True])
+async def test_a_takeover_announces_each_record_it_removed(
+    registry: NodeRegistry, rds: fakeredis.FakeRedis, use_async: bool
+) -> None:
+    old_id = registry.register_node(_info())
+    registry.register_node(_info("gpu-b"))
+    _age_lease(rds, TTL_SEC)
+    pubsub = rds.pubsub()
+    pubsub.subscribe(NODE_EVENT_CHANNEL)
+    pubsub.get_message(timeout=1)
+
+    if use_async:
+        await registry.register_node_async(_info())
+    else:
+        registry.register_node(_info())
+
+    message = pubsub.get_message(timeout=1)
+    assert message is not None
+    event = json.loads(message["data"])
+    assert (event["type"], event["node_id"]) == ("SV_UNREGISTER", old_id)
+    assert pubsub.get_message(timeout=0.1) is None
 
 
 def test_heartbeat_reports_alias_held_by_another_node(
