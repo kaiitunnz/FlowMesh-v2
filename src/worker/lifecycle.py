@@ -248,8 +248,9 @@ class Lifecycle:
         with self._status_lock:
             self._last_task_end = time.time()
             if self._draining.is_set():
-                # A draining worker stays busy, though it no longer runs the task.
-                self._report_locked(WorkerStatus.BUSY, self._dispatch_id, None, {})
+                # A draining worker sends no report, but its heartbeat stops naming
+                # the task it no longer runs.
+                self._task_id = None
                 return
         self._report(
             WorkerStatus.IDLE,
