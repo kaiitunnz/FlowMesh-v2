@@ -27,6 +27,7 @@ from worker.executors.ssh_session.backends import process as process_module
 from worker.executors.ssh_session.backends.docker import DockerSession
 from worker.executors.ssh_session.base import count_established_connections
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _TASK_ID = "tsk-idle"
 
 
@@ -234,7 +235,9 @@ def test_a_docker_session_reads_its_own_connection_table() -> None:
 
 
 def _docker_sshd_config() -> str:
-    script = Path("src/worker/docker/ssh-session.sh").read_text(encoding="utf-8")
+    script = (_REPO_ROOT / "src/worker/docker/ssh-session.sh").read_text(
+        encoding="utf-8"
+    )
     body = script.split("flowmesh.conf << 'EOF'\n", 1)[1]
     return body.split("\nEOF\n", 1)[0]
 

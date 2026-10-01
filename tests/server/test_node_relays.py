@@ -8,6 +8,7 @@ import pytest
 from server.network.reverse_relay import (
     RelayDirection,
     RelayFrameKind,
+    RelayLease,
     RelaySessionStore,
     RelayStreamStore,
 )
@@ -66,6 +67,56 @@ def test_a_re_registered_node_carries_each_namespace_under_its_new_id(
             new_up, _ = await streams.read_up("nde-new", "0", count=10, block_ms=None)
             old_up, _ = await streams.read_up("nde-old", "0", count=10, block_ms=None)
             assert (len(new_up), len(old_up)) == (1, 0)
+        finally:
+            await relays.stop()
+
+    asyncio.run(run())
+
+
+def test_a_re_registered_node_hands_its_lease_to_its_new_id() -> None:
+    """The old id's lease is released, so whatever holds that id next can consume
+    it, and the new id's lease is taken."""
+
+    async def run() -> None:
+        namespace = SSH_NAMESPACE
+        redis = FakeBinaryRedis()
+        lease = RelayLease(redis, keyspace=namespace.keyspace)
+        owner = f"supervisor{namespace.owner_suffix}"
+        delivered: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def enqueue_local(worker_id: str, payload: dict[str, Any]) -> bool:
+            await delivered.put(payload)
+            return True
+
+        relays = NodeRelays(
+            redis, "nde-old", enqueue_local, [namespace], owner="supervisor"
+        )
+        relays.start(asyncio.get_running_loop())
+        try:
+            async with asyncio.timeout(5):
+                while not await lease.owns("nde-old", "down", owner):
+                    await asyncio.sleep(0.01)
+
+            relays.rebind("nde-new")
+            await RelaySessionStore(redis, namespace.keyspace).update(
+                "rly-1",
+                origin_node="ssh-edge",
+                target_node="nde-new",
+                target_worker="wkr-1",
+            )
+            await RelayStreamStore(redis, namespace.keyspace).publish_down(
+                "nde-new",
+                relay_frame(
+                    RelayFrameKind.DATA,
+                    direction=RelayDirection.ORIGIN_TO_TARGET,
+                    seq=1,
+                ),
+            )
+            await asyncio.wait_for(delivered.get(), 5)
+
+            assert not await lease.owns("nde-old", "down", owner)
+            assert await lease.acquire("nde-old", "down", "next-holder")
+            assert await lease.owns("nde-new", "down", owner)
         finally:
             await relays.stop()
 
