@@ -39,7 +39,7 @@ def test_add_get_pop_roundtrip() -> None:
     assert registry.get_worker_id(cast(WorkerTokenType, "tok-1")) is None
 
 
-def test_add_rejects_duplicate_token_and_alias() -> None:
+def test_add_rejects_duplicate_token_and_name() -> None:
     registry = WorkerRegistry()
     registry.add(_adapter("tok-1", "worker-1"))
 
