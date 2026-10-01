@@ -163,6 +163,8 @@ class Runner:
         # Interrupt monitoring thread and control event
         self._interrupt_thread: threading.Thread | None = None
         self._interrupt_stop_event: threading.Event | None = None
+        self._mediated_op_thread: threading.Thread | None = None
+        self._mediated_op_stop = threading.Event()
         self._current_task_id: str | None = None
         self._pending_cancels: set[str] = set()
         self._pending_stops: set[str] = set()
@@ -828,8 +830,6 @@ class Runner:
                                 executor.stop(task_id)
                             except Exception as exc:
                                 self.logger.warning("Executor stop() raised: %s", exc)
-                    for frame_kind, frame in self.lifecycle.client.iter_mediated_ops():
-                        self._route_mediated_op(frame_kind, frame)
                 except Exception as exc:
                     self.logger.warning("Interrupt monitor encountered error: %s", exc)
         except Exception:
@@ -861,9 +861,44 @@ class Runner:
             self._interrupt_thread = None
             self._interrupt_stop_event = None
 
+    def _route_mediated_ops(self) -> None:
+        """Route each relayed mediated-op frame as it arrives.
+
+        Relay frames carry interactive and bulk traffic, so they are not left for a
+        polling loop; one consumer keeps their arrival order.
+        """
+        client = self.lifecycle.client
+        while not self._mediated_op_stop.is_set():
+            if (item := client.next_mediated_op(0.5)) is None:
+                continue
+            try:
+                self._route_mediated_op(*item)
+            except Exception as exc:
+                self.logger.warning("Mediated-op routing failed: %s", exc)
+
+    def _start_mediated_op_router(self) -> None:
+        if self._mediated_op_thread and self._mediated_op_thread.is_alive():
+            return
+        self._mediated_op_stop.clear()
+        thread = threading.Thread(
+            target=self._route_mediated_ops,
+            daemon=True,
+            name="flowmesh-mediated-ops",
+        )
+        self._mediated_op_thread = thread
+        thread.start()
+
+    def _stop_mediated_op_router(self, timeout: float = 2.0) -> None:
+        if self._mediated_op_thread is None:
+            return
+        self._mediated_op_stop.set()
+        self._mediated_op_thread.join(timeout=timeout)
+        self._mediated_op_thread = None
+
     def start(self) -> None:
         self._start_idle_checker()
         self._start_interrupt_monitor()
+        self._start_mediated_op_router()
         try:
             for msg in self.task_stream:
                 if self._shutdown_requested.is_set():
@@ -1150,6 +1185,7 @@ class Runner:
                 self._shutdown_thread.join()
             self._cleanup_active_executor_in_budget()
             self._stop_interrupt_monitor(min(2.0, self._stop_time_left()))
+            self._stop_mediated_op_router(min(2.0, self._stop_time_left()))
             self._stop_idle_checker(min(2.0, self._stop_time_left()))
 
     def _create_task_logger(

@@ -1,5 +1,6 @@
 """Shared dummy constructors for test modules."""
 
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -175,3 +176,9 @@ class FakeContentPlane:
         if self.error is not None:
             raise self.error
         return self.store.hydrate(reference)
+
+
+def no_mediated_op(timeout: float) -> None:
+    """Stand in for an empty mediated-op queue: wait briefly, then return nothing."""
+    time.sleep(min(timeout, 0.01))
+    return None

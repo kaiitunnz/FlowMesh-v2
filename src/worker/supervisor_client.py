@@ -429,13 +429,13 @@ class SupervisorClient:
             except queue.Empty:
                 break
 
-    def iter_mediated_ops(self) -> Iterable[tuple[str, dict[str, Any]]]:
-        """Yield ``(frame_kind, payload)`` mediated-op frames the supervisor relayed."""
-        while True:
-            try:
-                yield self._mediated_op_queue.get_nowait()
-            except queue.Empty:
-                break
+    def next_mediated_op(self, timeout: float) -> tuple[str, dict[str, Any]] | None:
+        """Return the next ``(frame_kind, payload)`` mediated-op frame the supervisor
+        relayed, waiting up to ``timeout``; None when none arrived."""
+        try:
+            return self._mediated_op_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
 
     # ------------------------------------------------------------------ #
     # Internal helpers

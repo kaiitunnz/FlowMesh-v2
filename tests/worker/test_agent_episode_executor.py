@@ -40,6 +40,7 @@ from tests.worker.factories import (
     make_worker_config,
     make_worker_hardware,
     make_worker_task_message,
+    no_mediated_op,
 )
 from worker.egress import PendingEgressRequestStore
 from worker.executors import EXECUTOR_REGISTRY
@@ -197,6 +198,7 @@ def _runner(tmp_path: Path, executors: dict[str, Executor]) -> Runner:
     lifecycle.client.create_task_log_emitter.return_value = None
     lifecycle.client.iter_interrupts.return_value = []
     lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
     return Runner(
         lifecycle=lifecycle,
         task_stream=[],
@@ -524,7 +526,7 @@ def test_a_step_whose_report_fails_holds_no_request_for_control(
     client.create_task_log_emitter.return_value = None
     client.iter_interrupts.return_value = []
     client.iter_stops.return_value = []
-    client.iter_mediated_ops.return_value = []
+    client.next_mediated_op.side_effect = no_mediated_op
     executor = _CapturingExecutor(lifecycle, kind)
     runner = Runner(
         lifecycle=lifecycle,

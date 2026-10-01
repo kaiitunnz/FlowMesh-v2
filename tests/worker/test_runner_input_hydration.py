@@ -20,6 +20,7 @@ from tests.worker.factories import (
     FakeContentPlane,
     make_worker_hardware,
     make_worker_task_message,
+    no_mediated_op,
 )
 from worker.executors.base_executor import Executor
 from worker.runner import Runner
@@ -63,6 +64,7 @@ def _runner(
     lifecycle.client.create_task_log_emitter.return_value = None
     lifecycle.client.iter_interrupts.return_value = []
     lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
     lifecycle.content_plane = plane
     msg = make_worker_task_message(
         spec, task_id="tsk-1", content_scope="org-a", **message

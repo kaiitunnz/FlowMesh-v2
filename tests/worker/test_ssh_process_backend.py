@@ -32,6 +32,7 @@ from tests.worker.factories import (
     make_worker_config,
     make_worker_hardware,
     make_worker_task_message,
+    no_mediated_op,
 )
 from worker.config import WorkerConfig
 from worker.executors.base_executor import (
@@ -1641,6 +1642,7 @@ def test_a_session_failure_reports_no_restored_credential(tmp_path: Path) -> Non
     lifecycle.client.create_task_log_emitter.return_value = None
     lifecycle.client.iter_interrupts.return_value = []
     lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
     lifecycle.content_plane = FakeContentPlane(MagicMock())
     msg = make_worker_task_message(
         {

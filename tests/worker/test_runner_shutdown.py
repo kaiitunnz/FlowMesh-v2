@@ -1,6 +1,7 @@
 """Runner shutdown and the bookkeeping of cancels and stops it was sent."""
 
 import logging
+import queue
 import threading
 import time
 from pathlib import Path
@@ -12,7 +13,11 @@ import pytest
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerStatus
-from tests.worker.factories import make_worker_hardware, make_worker_task_message
+from tests.worker.factories import (
+    make_worker_hardware,
+    make_worker_task_message,
+    no_mediated_op,
+)
 from worker.executors.base_executor import Executor
 from worker.lifecycle import Lifecycle
 from worker.main import run_until_exit
@@ -39,6 +44,7 @@ def _runner(tmp_path: Path, executor: Executor, *task_ids: str) -> Runner:
     lifecycle.client.create_task_log_emitter.return_value = None
     lifecycle.client.iter_interrupts.return_value = []
     lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
     lifecycle.held_boundaries.return_value = []
     return Runner(
         lifecycle=lifecycle,
@@ -254,3 +260,40 @@ def test_a_stop_refuses_reports_before_its_shutdown_thread_runs(
     runner.lifecycle.set_idle("tsk-1")
 
     client.set_status.assert_not_called()
+
+
+def test_a_relayed_frame_is_routed_as_it_arrives(tmp_path: Path) -> None:
+    """Relay frames carry keystrokes, so none waits for a polling interval."""
+    ops: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
+    routed: queue.Queue[float] = queue.Queue()
+
+    def next_op(timeout: float) -> tuple[str, dict[str, Any]] | None:
+        try:
+            return ops.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    executor_started = threading.Event()
+    release = threading.Event()
+
+    def hold(_task_id: str) -> None:
+        executor_started.set()
+        release.wait(5)
+
+    runner = _runner(tmp_path, _Echo(on_run=hold), "tsk-1")
+    runner.lifecycle.client.next_mediated_op.side_effect = next_op  # type: ignore[attr-defined]
+    runner._route_mediated_op = lambda *_: routed.put(time.monotonic())  # type: ignore[method-assign]
+    worker = threading.Thread(target=runner.start, daemon=True)
+    worker.start()
+    try:
+        assert executor_started.wait(5)
+        delays = []
+        for _ in range(5):
+            sent = time.monotonic()
+            ops.put(("ssh_frame", {}))
+            delays.append(routed.get(timeout=2) - sent)
+            time.sleep(0.07)
+        assert max(delays) < 0.1, delays
+    finally:
+        release.set()
+        worker.join(5)
