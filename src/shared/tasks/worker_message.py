@@ -25,22 +25,7 @@ from shared.tasks import (
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
-from shared.tasks.specs.common import TaskSpecBase
 from shared.utils.json import dedup_json, restore_json
-
-
-def dispatch_uses_gpu(spec: TaskSpecBase, relays_only: bool) -> bool:
-    """Whether a dispatch of ``spec`` allocates GPU memory on its worker.
-
-    The dispatcher and the worker both decide through this, so a task the dispatcher
-    places on a held device's worker is never one that worker refuses. A dispatch that
-    relays only loads no model. Otherwise a declared request counts unless it asks for
-    no devices, and a spec that loads onto a GPU counts whatever it declares.
-    """
-    if relays_only:
-        return False
-    declared = spec.gpu_requirements()
-    return (declared is not None and declared.count != 0) or spec.uses_gpu()
 
 
 class WorkerTaskMessage(BaseModel):

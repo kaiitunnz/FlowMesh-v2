@@ -5,7 +5,7 @@ import re
 from shared.tasks.components.resources import GPURequirements
 from shared.tasks.specs import SSHSpecStrict, SSHSpecTemplate
 from shared.tasks.specs.common import TaskSpecBase
-from shared.tasks.worker_message import GpuInfo, WorkerHardware, dispatch_uses_gpu
+from shared.tasks.worker_message import GpuInfo, WorkerHardware
 from shared.utils.parsing import parse_mem_to_bytes
 
 _GPU_TYPE_WILDCARDS = frozenset({"", "any", "auto", "*"})
@@ -162,19 +162,34 @@ def gpu_meets_requirements(hw: WorkerHardware, gpu_req: GPURequirements) -> bool
     return True
 
 
+def _dispatch_uses_gpu(spec: TaskSpecBase, relays_only: bool) -> bool:
+    """Whether a dispatch of ``spec`` allocates GPU memory on its worker.
+
+    A dispatch that relays only loads no model. Otherwise a declared request counts
+    unless it asks for no devices, and a spec that loads onto a GPU counts whatever it
+    declares.
+    """
+    if relays_only:
+        return False
+    declared = spec.gpu_requirements()
+    return (declared is not None and declared.count != 0) or spec.uses_gpu()
+
+
 def gpus_fit_dispatch(
     hw: WorkerHardware, spec: TaskSpecBase, relays_only: bool
 ) -> bool:
     """Whether ``hw``'s devices, with their reported availability, fit a dispatch.
 
-    An SSH session that selects devices is handed only those, so it needs enough free
-    ones. Any other GPU dispatch runs on every device its worker sees, so one held
-    device makes the worker unavailable to it.
+    The dispatcher and the worker both decide through this, so a task the dispatcher
+    places is never one its worker refuses on the same reading. An SSH session that
+    selects devices is handed only those, so it needs enough free ones. Any other GPU
+    dispatch runs on every device its worker sees, so one held device makes the worker
+    unavailable to it.
     """
     devices = hw.gpu.devices
     if all(device.is_available for device in devices):
         return True
-    if not dispatch_uses_gpu(spec, relays_only):
+    if not _dispatch_uses_gpu(spec, relays_only):
         return True
     if not isinstance(spec, SSHSpecStrict | SSHSpecTemplate):
         return False

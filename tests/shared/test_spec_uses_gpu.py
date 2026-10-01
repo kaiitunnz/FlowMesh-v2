@@ -24,7 +24,15 @@ from shared.tasks.specs import (
 )
 from shared.tasks.specs.common import TaskSpecStrictBase, TaskSpecTemplateBase
 from shared.tasks.task_type import TaskType
-from shared.tasks.worker_message import dispatch_uses_gpu
+from shared.tasks.worker_message import (
+    CPUInfo,
+    GpuInfo,
+    GpuPlatformInfo,
+    MemoryInfo,
+    NetworkInfo,
+    WorkerHardware,
+)
+from shared.utils.hardware import gpus_fit_dispatch
 
 _DATA = {"type": "list", "items": ["hi"]}
 
@@ -205,13 +213,32 @@ class TestSSHGpuSelection:
         assert (spec.gpu_selection() is not None) is selects
 
 
+def _uses_gpu(spec: TaskSpecStrictBase, relays_only: bool) -> bool:
+    """Whether the dispatch is withheld from a worker whose only device is held, which
+    happens exactly when it uses the GPU."""
+    held = GpuInfo(
+        index=0,
+        name="A100",
+        uuid="GPU-0",
+        memory_total_bytes=80 * 1024**3,
+        gpu_available=False,
+    )
+    hardware = WorkerHardware(
+        cpu=CPUInfo(logical_cores=2, model="x"),
+        memory=MemoryInfo(total_bytes=1024**3),
+        gpu=GpuPlatformInfo(driver_version=None, cuda_version=None, devices=[held]),
+        network=NetworkInfo(ip=None, bandwidth_bytes_per_sec=None),
+    )
+    return not gpus_fit_dispatch(hardware, spec, relays_only)
+
+
 class TestDispatchUsesGpu:
     def test_a_relaying_dispatch_uses_no_gpu(self) -> None:
         # A resident service episode or an input preparation loads no local model,
         # whatever its spec would load on its own.
         spec = _inference(model=_model(vllm={"dtype": "auto"}))
-        assert dispatch_uses_gpu(spec, relays_only=False) is True
-        assert dispatch_uses_gpu(spec, relays_only=True) is False
+        assert _uses_gpu(spec, relays_only=False) is True
+        assert _uses_gpu(spec, relays_only=True) is False
 
     def test_a_declared_gpu_counts_for_any_spec(self) -> None:
         spec = EchoSpecStrict(
@@ -220,16 +247,12 @@ class TestDispatchUsesGpu:
                 hardware=HardwareRequirements(gpu=GPURequirements(count=1))
             ),
         )
-        assert dispatch_uses_gpu(spec, relays_only=False) is True
+        assert _uses_gpu(spec, relays_only=False) is True
 
     def test_a_declared_zero_count_exempts_only_a_cpu_spec(self) -> None:
         zero = ResourcesSpec(
             hardware=HardwareRequirements(gpu=GPURequirements(count=0))
         )
-        assert (
-            dispatch_uses_gpu(
-                EchoSpecStrict(taskType=TaskType.ECHO, resources=zero), False
-            )
-            is False
-        )
-        assert dispatch_uses_gpu(_inference(resources=zero), False) is True
+        echo = EchoSpecStrict(taskType=TaskType.ECHO, resources=zero)
+        assert _uses_gpu(echo, relays_only=False) is False
+        assert _uses_gpu(_inference(resources=zero), relays_only=False) is True
