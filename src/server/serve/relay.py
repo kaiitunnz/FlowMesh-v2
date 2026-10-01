@@ -16,7 +16,6 @@ import asyncio
 import logging
 import os
 
-from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame
 from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
@@ -26,6 +25,7 @@ from shared.resident.serve_drive import ServeControl, ServeOriginDrive
 from ..network.reverse_relay import (
     RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
+    EdgeStreamSink,
     RelayStreamStore,
 )
 from ..supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
@@ -37,17 +37,6 @@ from ..supervisor.services.reverse_relay_attachment import ReverseRelayAttachmen
 SERVE_EDGE_STREAM_ID = "serve-edge"
 
 __all__ = ["SERVE_EDGE_STREAM_ID", "ServeControl", "ServeRelayExecutor"]
-
-
-class _EdgeSink(FrameSink):
-    """Publishes one origin-produced frame to the edge stream for the root to bridge."""
-
-    def __init__(self, streams: RelayStreamStore, edge_id: str) -> None:
-        self._streams = streams
-        self._edge_id = edge_id
-
-    async def send(self, frame: RelayFrame) -> None:
-        await self._streams.publish_up(self._edge_id, frame)
 
 
 class ServeRelayExecutor:
@@ -76,7 +65,7 @@ class ServeRelayExecutor:
         # The root cannot dial a worker, so its frames always ride control_relay over
         # the internal rendezvous attachment; the carriage realizes that one transport.
         self._drive = ServeOriginDrive(
-            carriage=ControlRelayCarriage(_EdgeSink(self._streams, edge_id)),
+            carriage=ControlRelayCarriage(EdgeStreamSink(self._streams, edge_id)),
             control=control,
             window_bytes=window_bytes,
             stream_deadline_sec=stream_deadline_sec,

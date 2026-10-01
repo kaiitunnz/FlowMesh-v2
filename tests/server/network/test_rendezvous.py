@@ -44,7 +44,7 @@ def test_forwards_each_direction_to_the_peer_node_opaquely() -> None:
                 payload=b"\x00req\xff",
             ),
         )
-        assert await bridge.pump_node("nde-o") == 1
+        assert await bridge.pump_ready(["nde-o"], None) == 1
         down_t, _ = await streams.read_down("nde-t", "0", count=10, block_ms=None)
         assert [e.frame.payload for e in down_t] == [b"\x00req\xff"]  # opaque, intact
 
@@ -58,7 +58,7 @@ def test_forwards_each_direction_to_the_peer_node_opaquely() -> None:
                 payload=b"resp",
             ),
         )
-        assert await bridge.pump_node("nde-t") == 1
+        assert await bridge.pump_ready(["nde-t"], None) == 1
         down_o, _ = await streams.read_down("nde-o", "0", count=10, block_ms=None)
         assert [e.frame.payload for e in down_o] == [b"resp"]
 
@@ -81,7 +81,7 @@ def test_priority_control_frames_drain_before_data() -> None:
         await streams.publish_up(
             "nde-o", relay_frame(RelayFrameKind.CANCEL, direction=o2t)
         )
-        await bridge.pump_node("nde-o")
+        await bridge.pump_ready(["nde-o"], None)
         down, _ = await streams.read_down("nde-t", "0", 10, None)
         kinds = [e.frame.kind for e in down]
         assert kinds[0] is RelayFrameKind.CANCEL  # priority lane, ahead of the backlog
@@ -108,7 +108,7 @@ def test_round_robin_interleaves_busy_and_quiet_sessions() -> None:
             "nde-o",
             relay_frame(RelayFrameKind.DATA, session_id="rly-B", direction=o2t, seq=1),
         )
-        await bridge.pump_node("nde-o")
+        await bridge.pump_ready(["nde-o"], None)
         down, _ = await streams.read_down("nde-t", "0", 10, None)
         order = [e.frame.session_id for e in down]
         # First round takes one from each session before A's backlog drains.
@@ -117,20 +117,19 @@ def test_round_robin_interleaves_busy_and_quiet_sessions() -> None:
     asyncio.run(run())
 
 
-def test_bridge_reads_non_blocking_so_an_idle_node_does_not_wedge() -> None:
+def test_an_idle_node_does_not_hold_up_another_s_frames() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
         bridge, streams, sessions = await _bridge(redis)
         await sessions.update("rly-1", origin_node="nde-b", target_node="nde-t")
         o2t = RelayDirection.ORIGIN_TO_TARGET
-        # nde-a is idle; nde-b has a frame. A blocking read on the idle node would wedge
-        # this serial multi-node driver, so nde-b would never be bridged.
+        # nde-a is idle; nde-b has a frame, and one read covers both.
         await streams.publish_up(
             "nde-b", relay_frame(RelayFrameKind.DATA, direction=o2t, seq=1)
         )
-        assert await bridge.pump_node("nde-a") == 0  # idle: returns at once
-        assert await bridge.pump_node("nde-b") == 1  # still served
-        assert redis.blocks == [None, None]  # every bridge read is non-blocking
+        assert await bridge.pump_ready(["nde-a"], None) == 0  # idle: returns at once
+        assert await bridge.pump_ready(["nde-a", "nde-b"], None) == 1
+        assert redis.blocks == [None, None]
 
     asyncio.run(run())
 
@@ -144,9 +143,9 @@ def test_durable_cursor_resumes_and_does_not_reforward() -> None:
         await streams.publish_up(
             "nde-o", relay_frame(RelayFrameKind.DATA, direction=o2t, seq=1)
         )
-        assert await bridge.pump_node("nde-o") == 1
+        assert await bridge.pump_ready(["nde-o"], None) == 1
         # A second pump with nothing new forwards nothing (cursor advanced durably).
-        assert await bridge.pump_node("nde-o") == 0
+        assert await bridge.pump_ready(["nde-o"], None) == 0
         down, _ = await streams.read_down("nde-t", "0", 10, None)
         assert len(down) == 1
 
@@ -167,7 +166,7 @@ def test_a_frame_read_off_a_node_that_is_not_its_sender_is_dropped() -> None:
                     RelayFrameKind.DATA, direction=direction, seq=1, payload=b"forged"
                 ),
             )
-        assert await bridge.pump_node("nde-x") == 2
+        assert await bridge.pump_ready(["nde-x"], None) == 2
         # Nor may an end send the other end's direction.
         await streams.publish_up(
             "nde-t",
@@ -178,7 +177,7 @@ def test_a_frame_read_off_a_node_that_is_not_its_sender_is_dropped() -> None:
                 payload=b"reflected",
             ),
         )
-        assert await bridge.pump_node("nde-t") == 1
+        assert await bridge.pump_ready(["nde-t"], None) == 1
         for node in ("nde-o", "nde-t"):
             down, _ = await streams.read_down(node, "0", count=10, block_ms=None)
             assert down == []

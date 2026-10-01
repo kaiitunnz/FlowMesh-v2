@@ -53,14 +53,13 @@ from .content import (
 )
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
-from .network.rendezvous import RootCursorStore, RootRendezvousBridge
+from .network.rendezvous import RootRendezvousBridge
 from .network.reverse_relay import (
     CONTENT_RELAY_KEYSPACE,
     RESIDENT_RELAY_KEYSPACE,
     SSH_RELAY_KEYSPACE,
     BinaryRedis,
     RelaySessionStore,
-    RelayStreamStore,
 )
 from .network.service import NetworkPlane
 from .orchestration.telemetry import build_workflow_span_emitter
@@ -292,25 +291,16 @@ if IS_ROOT_NODE:
             BinaryRedis,
             resident_relay_client(config.redis),
         )
-        RESIDENT_BRIDGE = RootRendezvousBridge(
-            RelayStreamStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
-            RelaySessionStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
-            RootCursorStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
-            logger=logger,
+        RESIDENT_BRIDGE = RootRendezvousBridge.for_keyspace(
+            _relay_redis, RESIDENT_RELAY_KEYSPACE, logger
         )
-        SSH_BRIDGE = RootRendezvousBridge(
-            RelayStreamStore(_relay_redis, SSH_RELAY_KEYSPACE),
-            RelaySessionStore(_relay_redis, SSH_RELAY_KEYSPACE),
-            RootCursorStore(_relay_redis, SSH_RELAY_KEYSPACE),
-            logger=logger,
+        SSH_BRIDGE = RootRendezvousBridge.for_keyspace(
+            _relay_redis, SSH_RELAY_KEYSPACE, logger
         )
         SSH_RELAY = SshRelayOrigin(_relay_redis, logger=logger)
         if config.content_store.hydration_enabled:
-            CONTENT_BRIDGE = RootRendezvousBridge(
-                RelayStreamStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
-                RelaySessionStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
-                RootCursorStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
-                logger=logger,
+            CONTENT_BRIDGE = RootRendezvousBridge.for_keyspace(
+                _relay_redis, CONTENT_RELAY_KEYSPACE, logger
             )
 
     FLEET_SAMPLER = build_fleet_sampler(

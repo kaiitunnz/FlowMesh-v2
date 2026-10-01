@@ -17,7 +17,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from shared.network.byte_stream import WINDOW_BYTES, ByteStreamChannel
-from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.network.session import RelaySessionRole
 from shared.utils.ids import new_relay_session_id
@@ -26,6 +25,7 @@ from shared.utils.json import safe_get
 from ..network.reverse_relay import (
     SSH_RELAY_KEYSPACE,
     BinaryRedis,
+    EdgeStreamSink,
     RelaySessionStore,
     RelayStreamStore,
 )
@@ -83,14 +83,6 @@ async def resolve_relay_target(
     )
 
 
-class _EdgeSink(FrameSink):
-    def __init__(self, streams: RelayStreamStore) -> None:
-        self._streams = streams
-
-    async def send(self, frame: RelayFrame) -> None:
-        await self._streams.publish_up(SSH_EDGE_STREAM_ID, frame)
-
-
 class SshRelayOrigin:
     """Opens and tracks the root end of every relayed SSH connection."""
 
@@ -104,7 +96,7 @@ class SshRelayOrigin:
     ) -> None:
         self._streams = RelayStreamStore(relay_redis, SSH_RELAY_KEYSPACE)
         self._sessions = RelaySessionStore(relay_redis, SSH_RELAY_KEYSPACE)
-        self._sink = _EdgeSink(self._streams)
+        self._sink = EdgeStreamSink(self._streams, SSH_EDGE_STREAM_ID)
         self._window_bytes = window_bytes
         self._refresh_interval_sec = refresh_interval_sec
         self._logger = logger or logging.getLogger("ssh-relay-origin")

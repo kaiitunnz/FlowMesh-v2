@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import (
     RelayDirection,
     RelayFrame,
@@ -210,6 +211,18 @@ class RelayStreamStore:
         await self._redis.xtrim(key, minid=min_id, approximate=False)
 
 
+class EdgeStreamSink(FrameSink):
+    """Publishes a root ingress edge's frames on its dedicated up stream for the
+    root bridge to forward."""
+
+    def __init__(self, streams: RelayStreamStore, edge_id: str) -> None:
+        self._streams = streams
+        self._edge_id = edge_id
+
+    async def send(self, frame: RelayFrame) -> None:
+        await self._streams.publish_up(self._edge_id, frame)
+
+
 class RelaySessionStore:
     """The durable per-session routing record: origin/target nodes and sidecar route."""
 
@@ -309,6 +322,7 @@ __all__ = [
     "RESIDENT_RELAY_KEYSPACE",
     "SSH_RELAY_KEYSPACE",
     "BinaryRedis",
+    "EdgeStreamSink",
     "RelayDirection",
     "RelayFrame",
     "RelayFrameKind",

@@ -40,9 +40,6 @@ class RootCursorStore:
         self._redis = redis
         self._key = keyspace.root_cursor
 
-    async def get(self, node_id: str) -> str:
-        return (await self.get_many([node_id]))[node_id]
-
     async def get_many(self, node_ids: list[str]) -> dict[str, str]:
         raw = await self._redis.hgetall(self._key)
         return {
@@ -72,21 +69,23 @@ class RootRendezvousBridge:
         self._batch = batch
         self._logger = logger or logging.getLogger("network-rendezvous")
 
-    async def pump_node(self, node_id: str) -> int:
-        """Forward one bounded batch from a node's up stream; return the count read."""
-        after = await self._cursors.get(node_id)
-        entries, last_id = await self._streams.read_up(
-            node_id, after, count=self._batch, block_ms=None
+    @classmethod
+    def for_keyspace(
+        cls,
+        redis: BinaryRedis,
+        keyspace: RelayKeyspace,
+        logger: logging.Logger | None = None,
+    ) -> "RootRendezvousBridge":
+        return cls(
+            RelayStreamStore(redis, keyspace),
+            RelaySessionStore(redis, keyspace),
+            RootCursorStore(redis, keyspace),
+            logger=logger,
         )
-        return await self._drain(node_id, entries, last_id)
 
-    async def pump_ready(self, node_ids: list[str], block_ms: int) -> int:
-        """Wait up to ``block_ms`` for any node's up stream, then forward one bounded
-        batch from each stream that has frames; return the count read.
-
-        One read covers every node, so a frame on any stream wakes the bridge at once
-        and an idle node never holds the others up.
-        """
+    async def pump_ready(self, node_ids: list[str], block_ms: int | None) -> int:
+        """Forward one bounded batch from each node's up stream that has frames,
+        waiting up to ``block_ms`` for the first; return the count read."""
         cursors = await self._cursors.get_many(node_ids)
         batches = await self._streams.read_up_many(
             cursors, count=self._batch, block_ms=block_ms
@@ -129,12 +128,8 @@ class RootRendezvousBridge:
         return control + rotated
 
     async def _forward(self, source_node: str, entry: StreamEntry) -> None:
-        """Forward one frame to its peer node, only from the end that may send it.
-
-        A frame travels origin-to-target only off the record's origin node stream and
-        target-to-origin only off its target node stream, so a frame another node
-        writes naming a live session is dropped rather than injected into it.
-        """
+        """Forward one frame to its peer node if ``source_node`` is the session end
+        that sends in its direction; drop it otherwise."""
         frame = entry.frame
         record = await self._sessions.load(frame.session_id)
         if not record:
