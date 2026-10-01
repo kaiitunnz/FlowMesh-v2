@@ -94,7 +94,8 @@ class _Supervisor:
         await self.server.start()
 
     async def stop(self) -> None:
-        await self.server.stop()
+        # A crash: the worker's streams are cut, not drained.
+        await self.server.stop(grace=0)
         self.listener.stop()
 
 
