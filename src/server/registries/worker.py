@@ -22,18 +22,69 @@ from shared.tasks.worker_message import (
 )
 from shared.utils import new_worker_id, now_iso, parse_mem_to_bytes
 from shared.utils.hardware import gpu_meets_requirements, gpus_fit_dispatch
+from shared.utils.ids import PREFIX_WORKER
 
 from ..clients.redis import (
     WORKER_EVENT_CHANNEL,
     WORKER_ID_SEQ_KEY,
     WORKERS_SET_KEY,
+    AsyncRedisClient,
     RedisClient,
+    SyncRedisClient,
     node_dispatch_channel,
     worker_hb_key,
     worker_key,
 )
 
 logger = logging.getLogger(__name__)
+
+# KEYS: [worker id counter, workers set]
+# ARGV: [worker id prefix, worker id to skip, ...]
+# Returns the next counter value whose worker id neither a recorded worker holds nor
+# ARGV skips, and records that id, so a counter the store lost never hands out an id
+# still in use.
+_ALLOCATE_WORKER_LUA = """
+local skip = {}
+for i = 2, #ARGV do skip[ARGV[i]] = true end
+while true do
+  local seq = redis.call('INCR', KEYS[1])
+  local id = ARGV[1] .. seq
+  if not skip[id] and redis.call('SADD', KEYS[2], id) == 1 then
+    return seq
+  end
+end
+"""
+
+
+def allocate_worker_seq(redis: SyncRedisClient, skip: Iterable[str] = ()) -> int:
+    """Record a fresh worker id and return its sequence number."""
+    return int(
+        redis.eval(
+            _ALLOCATE_WORKER_LUA,
+            2,
+            WORKER_ID_SEQ_KEY,
+            WORKERS_SET_KEY,
+            f"{PREFIX_WORKER}-",
+            *skip,
+        )
+    )
+
+
+async def allocate_worker_seq_async(
+    redis: AsyncRedisClient, skip: Iterable[str] = ()
+) -> int:
+    """Record a fresh worker id and return its sequence number."""
+    return int(
+        await redis.eval(
+            _ALLOCATE_WORKER_LUA,
+            2,
+            WORKER_ID_SEQ_KEY,
+            WORKERS_SET_KEY,
+            f"{PREFIX_WORKER}-",
+            *skip,
+        )
+    )
+
 
 # A write for a worker that is no longer a set member must not recreate a partial
 # record. A read-then-write cannot promise that, since the watchdog can reap
@@ -235,16 +286,13 @@ class WorkerRegistry:
         node_alias: str,
         worker_meta: dict[str, Any],
     ) -> str:
-        seq = self._rds.sync.incr(WORKER_ID_SEQ_KEY)
+        seq = allocate_worker_seq(self._rds.sync)
         worker_id = new_worker_id(seq)
         worker_meta["id"] = worker_id
         worker_meta["incarnation"] = seq
         worker_meta["node_id"] = node_id
         worker_meta["node_alias"] = node_alias
-        with self._rds.sync.control_pipeline() as pipe:
-            pipe.sadd(WORKERS_SET_KEY, worker_id)
-            pipe.hset(worker_key(worker_id), mapping=worker_meta)
-            pipe.execute()
+        self._rds.sync.hash_set(worker_key(worker_id), worker_meta)
         return worker_id
 
     async def register_worker_async(
@@ -253,16 +301,13 @@ class WorkerRegistry:
         node_alias: str,
         worker_meta: dict[str, Any],
     ) -> str:
-        seq = await self._rds.asyncio.incr(WORKER_ID_SEQ_KEY)
+        seq = await allocate_worker_seq_async(self._rds.asyncio)
         worker_id = new_worker_id(seq)
         worker_meta["id"] = worker_id
         worker_meta["incarnation"] = seq
         worker_meta["node_id"] = node_id
         worker_meta["node_alias"] = node_alias
-        async with self._rds.asyncio.control_pipeline() as pipe:
-            pipe.sadd(WORKERS_SET_KEY, worker_id)
-            pipe.hset(worker_key(worker_id), mapping=worker_meta)
-            await pipe.execute()
+        await self._rds.asyncio.hash_set(worker_key(worker_id), worker_meta)
         return worker_id
 
     def update_worker_hb(

@@ -16,16 +16,15 @@ from shared.grpc.supervisor.v1 import (
 )
 from shared.network.relay_frame import RelayFrame
 from shared.utils import new_worker_id
-from shared.utils.ids import PREFIX_WORKER
 
 from ... import env
 from ...clients.redis import (
-    WORKER_ID_SEQ_KEY,
     WORKERS_SET_KEY,
     SyncRedisClient,
     worker_key,
 )
 from ...network.worker_bridge import RelayWorkerBridge
+from ...registries.worker import allocate_worker_seq
 from ..adapters.base import WorkerAdapter, WorkerTokenType
 from ..manager import WorkerManager
 from ..registry import WorkerRegistry
@@ -33,28 +32,11 @@ from ..schemas import WorkerStatus
 from ..services.relay_service import RelayService
 from ..services.task_listener import TaskListener
 
-# Rewrite node_id for each worker key that still exists, atomically. KEYS are
-# worker keys; ARGV[1] is the new node id. Returns the count actually rewritten.
-# KEYS: [worker id counter, workers set]
-# ARGV: [worker id prefix, worker id bound on this supervisor, ...]
-# Returns the next counter value whose worker id neither a recorded worker nor a
-# binding here holds, and records that id, so a counter the store lost never hands out
-# an id still in use.
-_ALLOCATE_WORKER_LUA = """
-local bound = {}
-for i = 2, #ARGV do bound[ARGV[i]] = true end
-while true do
-  local seq = redis.call('INCR', KEYS[1])
-  local id = ARGV[1] .. seq
-  if not bound[id] and redis.call('SADD', KEYS[2], id) == 1 then
-    return seq
-  end
-end
-"""
-
 # Longer than a worker waits before reconnecting a closed event stream.
 _REATTACH_GRACE_SEC = 10.0
 
+# Rewrite node_id for each worker key that still exists, atomically. KEYS are
+# worker keys; ARGV[1] is the new node id. Returns the count actually rewritten.
 _REHOME_LUA = """
 local rehomed = 0
 for _, key in ipairs(KEYS) do
@@ -247,15 +229,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # concurrent rebind_node either sees this worker in its snapshot or stamps
         # it with the new id.
         with self._lock:
-            incarnation = int(
-                self._redis.eval(
-                    _ALLOCATE_WORKER_LUA,
-                    2,
-                    WORKER_ID_SEQ_KEY,
-                    WORKERS_SET_KEY,
-                    f"{PREFIX_WORKER}-",
-                    *self._registry.bound_worker_ids(),
-                )
+            incarnation = allocate_worker_seq(
+                self._redis, self._registry.bound_worker_ids()
             )
             worker_id = new_worker_id(incarnation)
             worker_meta["id"] = worker_id

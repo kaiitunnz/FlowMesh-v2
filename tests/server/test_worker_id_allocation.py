@@ -7,11 +7,13 @@ from unittest.mock import MagicMock
 import fakeredis
 import pytest
 
-from server.clients.redis import WORKER_ID_SEQ_KEY, WORKERS_SET_KEY, SyncRedisClient
+from server.clients.redis import WORKER_ID_SEQ_KEY, WORKERS_SET_KEY
+from server.registries.worker import WorkerRegistry as RootWorkerRegistry
 from server.supervisor.adapters.base import WorkerAdapter, WorkerTokenType
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from shared.grpc.supervisor.v1 import supervisor_pb2
+from tests.server.redis_helpers import fake_redis_client, fake_sync_client
 
 _LOGGER = logging.getLogger("test.worker_id_allocation")
 
@@ -37,10 +39,9 @@ class _Context:
 
 
 def _servicer(
-    rds: fakeredis.FakeRedis, released: list[str]
+    server: fakeredis.FakeServer, released: list[str]
 ) -> tuple[SupervisorServicer, WorkerRegistry]:
-    client = SyncRedisClient.__new__(SyncRedisClient)
-    client._control = rds
+    client = fake_sync_client(server)
     registry = WorkerRegistry(on_worker_id_released=released.append)
     for token in ("tok-a", "tok-b"):
         registry.add(cast(WorkerAdapter, _Adapter(token)))
@@ -65,15 +66,20 @@ async def _register(servicer: SupervisorServicer, token: str) -> str:
 
 
 @pytest.fixture
-def rds() -> fakeredis.FakeRedis:
-    return fakeredis.FakeRedis(decode_responses=True)
+def server() -> fakeredis.FakeServer:
+    return fakeredis.FakeServer()
+
+
+@pytest.fixture
+def rds(server: fakeredis.FakeServer) -> fakeredis.FakeRedis:
+    return fakeredis.FakeRedis(server=server, decode_responses=True)
 
 
 @pytest.mark.asyncio
 async def test_a_lost_counter_skips_the_ids_recorded_workers_hold(
-    rds: fakeredis.FakeRedis,
+    server: fakeredis.FakeServer, rds: fakeredis.FakeRedis
 ) -> None:
-    servicer, _ = _servicer(rds, [])
+    servicer, _ = _servicer(server, [])
     rds.sadd(WORKERS_SET_KEY, "wkr-1", "wkr-2")
 
     assert await _register(servicer, "tok-a") == "wkr-3"
@@ -82,10 +88,10 @@ async def test_a_lost_counter_skips_the_ids_recorded_workers_hold(
 
 @pytest.mark.asyncio
 async def test_a_wiped_store_never_hands_out_an_id_bound_here(
-    rds: fakeredis.FakeRedis,
+    server: fakeredis.FakeServer, rds: fakeredis.FakeRedis
 ) -> None:
     released: list[str] = []
-    servicer, _ = _servicer(rds, released)
+    servicer, _ = _servicer(server, released)
     first = await _register(servicer, "tok-a")
     rds.flushall()
 
@@ -95,3 +101,19 @@ async def test_a_wiped_store_never_hands_out_an_id_bound_here(
     assert second != first
     assert released == [first]
     assert again not in (first, second)
+
+
+@pytest.mark.asyncio
+async def test_a_worker_the_root_registers_skips_the_ids_recorded_workers_hold(
+    server: fakeredis.FakeServer, rds: fakeredis.FakeRedis
+) -> None:
+    registry = RootWorkerRegistry(fake_redis_client(server))
+    rds.sadd(WORKERS_SET_KEY, "wkr-1", "wkr-2")
+    rds.hset("worker:wkr-1", mapping={"node_alias": "box"})
+
+    first = await registry.register_worker_async("nod-1", "box", {})
+    second = registry.register_worker("nod-1", "box", {})
+
+    assert (first, second) == ("wkr-3", "wkr-4")
+    assert rds.hget("worker:wkr-1", "node_alias") == "box"
+    assert rds.smembers(WORKERS_SET_KEY) == {"wkr-1", "wkr-2", "wkr-3", "wkr-4"}

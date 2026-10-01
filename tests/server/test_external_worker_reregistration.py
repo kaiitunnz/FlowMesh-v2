@@ -30,6 +30,7 @@ from shared.content import BACKEND_FILESYSTEM, ObjectStoreConfig
 from shared.schemas.command import TaskMessage
 from shared.schemas.worker import WorkerCapabilities, WorkerStatus
 from shared.tasks import TaskType
+from tests.server.redis_helpers import fake_sync_client
 from tests.worker.factories import (
     make_worker_config,
     make_worker_hardware,
@@ -71,11 +72,7 @@ def _free_port() -> int:
 
 
 def _redis(server: fakeredis.FakeServer) -> SyncRedisClient:
-    client = SyncRedisClient.__new__(SyncRedisClient)
-    client._control = fakeredis.FakeRedis(server=server, decode_responses=True)
-    client._telemetry = client._control
-    client.logger = _LOGGER
-    return client
+    return fake_sync_client(server)
 
 
 class _Supervisor:
