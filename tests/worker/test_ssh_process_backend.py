@@ -1347,7 +1347,7 @@ def test_collection_bars_logins_before_it_ends_sshd_and_the_session(
             side_effect=lambda name: order.append(("lock", keys.exists())),
         ),
         patch.object(
-            process_module, "_end_sshd", side_effect=lambda _: order.append("end")
+            process_module, "_end_sshd", side_effect=lambda *_: order.append("end")
         ),
         patch.object(process_module, "kill_processes", side_effect=kill),
         patch.object(process_module, "_archive_as", return_value=_archiver("exit")),
@@ -1357,23 +1357,33 @@ def test_collection_bars_logins_before_it_ends_sshd_and_the_session(
     assert order == [("lock", False), "end", "kill"]
 
 
-def test_the_session_is_stopped_before_its_sshd_and_again_after() -> None:
-    order: list[str] = []
+def test_a_stop_bars_logins_then_stops_the_session_before_its_sshd_and_after(
+    tmp_path: Path,
+) -> None:
+    order: list[Any] = []
     session = _session(RunSignals(), MagicMock())
+    session._session_dir = tmp_path
+    keys = tmp_path / process_module._AUTHORIZED_KEYS_NAME
+    keys.write_text("key\n")
 
     def kill(uid: int) -> bool:
         order.append("kill")
         return True
 
     with (
+        patch.object(
+            process_module,
+            "lock_account",
+            side_effect=lambda name: order.append(("lock", keys.exists())),
+        ),
         patch.object(process_module, "kill_processes", side_effect=kill),
         patch.object(
-            process_module, "_end_sshd", side_effect=lambda _: order.append("end")
+            process_module, "_end_sshd", side_effect=lambda *_: order.append("end")
         ),
     ):
         session.stop(1)
 
-    assert order == ["kill", "end", "kill"]
+    assert order == [("lock", False), "kill", "end", "kill"]
 
 
 @pytest.mark.parametrize("clean", [True, False])
@@ -1443,21 +1453,83 @@ def test_ending_sshd_kills_its_whole_tree() -> None:
     with (
         patch.object(process_module.psutil, "Process", return_value=root) as find,
         patch.object(process_module, "_kill_tree") as kill_tree,
+        patch.object(process_module, "_kill_sshd_of") as strays,
     ):
-        process_module._end_sshd(process)
+        process_module._end_sshd(process, Path("/s"), "fmssn61000")
 
     find.assert_called_once_with(4321)
     kill_tree.assert_called_once_with(root)
     process.wait.assert_called_once()
+    strays.assert_called_once_with(Path("/s"), "fmssn61000")
 
 
-def test_an_ended_sshd_is_left_alone() -> None:
+def test_a_session_whose_subreaper_is_gone_has_its_sshd_found_by_attribution() -> None:
     process = MagicMock()
     process.poll.return_value = 0
-    with patch.object(process_module, "_kill_tree") as kill_tree:
-        process_module._end_sshd(process)
+    with (
+        patch.object(process_module, "_kill_tree") as kill_tree,
+        patch.object(process_module, "_kill_sshd_of") as strays,
+    ):
+        process_module._end_sshd(process, Path("/s"), "fmssn61000")
 
     kill_tree.assert_not_called()
+    strays.assert_called_once_with(Path("/s"), "fmssn61000")
+
+
+def _sshd_proc(name: str, title: str, ports: list[int]) -> MagicMock:
+    proc = MagicMock()
+    proc.name.return_value = name
+    proc.cmdline.return_value = title.split(" ")
+    proc.net_connections.return_value = [
+        MagicMock(laddr=MagicMock(port=port)) for port in ports
+    ]
+    return proc
+
+
+def test_a_session_s_sshd_is_found_by_its_config_its_port_or_its_account(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "sshd_config"
+    config.write_text("Port 40123\nListenAddress 127.0.0.1\n")
+    listener = _sshd_proc(
+        "sshd", f"sshd: /usr/sbin/sshd -D -e -f {config.as_posix()}", [40123]
+    )
+    accepted = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40123])
+    monitor = _sshd_proc("sshd-session", "sshd-session: fmssn61000 [priv]", [])
+    other_session = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40124])
+    client = _sshd_proc("ssh", "ssh -p 40123 host", [51000])
+    impostor = _sshd_proc("python3", "python3 serve.py", [40123])
+    with (
+        patch.object(
+            process_module.psutil,
+            "process_iter",
+            return_value=[listener, accepted, monitor, other_session, client, impostor],
+        ),
+        patch.object(process_module, "_kill_tree") as kill_tree,
+    ):
+        process_module._kill_sshd_of(tmp_path, "fmssn61000")
+
+    assert [call.args[0] for call in kill_tree.call_args_list] == [
+        listener,
+        accepted,
+        monitor,
+    ]
+
+
+def test_a_session_with_no_config_left_is_found_by_its_account_alone(
+    tmp_path: Path,
+) -> None:
+    accepted = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40123])
+    monitor = _sshd_proc("sshd-session", "sshd-session: fmssn61000 [priv]", [])
+    with (
+        patch.object(
+            process_module.psutil, "process_iter", return_value=[accepted, monitor]
+        ),
+        patch.object(process_module, "_kill_tree") as kill_tree,
+    ):
+        process_module._kill_sshd_of(tmp_path, "fmssn61000")
+
+    kill_tree.assert_called_once_with(monitor)
 
 
 def test_sshd_runs_niced_and_under_tini_as_a_subreaper() -> None:
@@ -1780,10 +1852,8 @@ def test_a_connection_process_is_matched_by_its_account_as_a_whole_word(
 
 def test_stopping_a_session_whose_listener_is_gone_kills_its_connections() -> None:
     """A privileged connection process outlives a listener that exited on its own."""
-    monitor = MagicMock()
-    monitor.cmdline.return_value = ["sshd-session: fmssn61000 [priv]"]
-    other = MagicMock()
-    other.cmdline.return_value = ["sshd-session: fmssn61001 [priv]"]
+    monitor = _sshd_proc("sshd-session", "sshd-session: fmssn61000 [priv]", [])
+    other = _sshd_proc("sshd-session", "sshd-session: fmssn61001 [priv]", [])
     process = MagicMock()
     process.poll.return_value = 0
     session = _session(RunSignals(), process)

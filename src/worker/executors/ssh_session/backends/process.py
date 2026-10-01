@@ -1012,17 +1012,23 @@ class ProcessSession(SSHSession):
 
     def stop(self, timeout_sec: float) -> None:
         # While the output is collected, the only process left is the reader: a
-        # stop lets it finish and a cancel kills it. Otherwise the session's own
-        # processes go first, while sshd's subreaper still lives to reap what they
-        # leave; those forked while sshd ends go after it.
+        # stop lets it finish and a cancel kills it. Otherwise no connection may
+        # authenticate from here on, the session's own processes go while sshd's
+        # subreaper still lives to reap what they leave, and those forked while
+        # sshd ends go after it.
         with self._stop_lock:
             if self._collecting:
                 if self._signals.cancelled and self._archiver is not None:
                     self._archiver.kill()
                 return
+        try:
+            self._bar_logins()
+        except OSError:
+            logger.warning(
+                "Could not bar logins to the stopped SSH session", exc_info=True
+            )
         self._kill_unless_collecting()
-        _end_sshd(self._process)
-        _kill_connections_of(self.account.name)
+        _end_sshd(self._process, self._session_dir, self.account.name)
         self._kill_unless_collecting()
 
     def _kill_unless_collecting(self) -> None:
@@ -1034,14 +1040,18 @@ class ProcessSession(SSHSession):
         """Bar the account from logging in, then end sshd and every connection it
         holds, so no process of the session starts from here on."""
         try:
-            (self._session_dir / _AUTHORIZED_KEYS_NAME).unlink(missing_ok=True)
+            self._bar_logins()
         except OSError as exc:
             raise ExecutionError(
                 f"Could not bar logins to the SSH session to collect its output: {exc}"
             ) from exc
+        _end_sshd(self._process, self._session_dir, self.account.name)
+
+    def _bar_logins(self) -> None:
+        """Remove the session's authorized keys and lock its account, so no
+        connection authenticates from here on."""
+        (self._session_dir / _AUTHORIZED_KEYS_NAME).unlink(missing_ok=True)
         lock_account(self.account.name)
-        _end_sshd(self._process)
-        _kill_connections_of(self.account.name)
 
     def cleanup(self) -> None:
         with self._stop_lock:
@@ -1095,13 +1105,9 @@ def reap_session(session_dir: Path) -> bool:
     The sshd is found by its config path, so one a worker started and died before
     it could record is found too.
     """
-    config_path = (session_dir / "sshd_config").as_posix()
-    for proc in psutil.process_iter():
-        if _is_our_sshd(proc, config_path):
-            _kill_tree(proc)
     manifest = SessionManifest.read(session_dir)
+    _kill_sshd_of(session_dir, None if manifest is None else manifest.account)
     if manifest is not None:
-        _kill_connections_of(manifest.account)
         try:
             uid = pwd.getpwnam(manifest.account).pw_uid
         except KeyError:
@@ -1126,16 +1132,48 @@ def _is_our_sshd(proc: psutil.Process, config_path: str) -> bool:
     return runs_sshd and config_path in args
 
 
-def _kill_connections_of(account: str) -> None:
-    """SIGKILL every sshd connection process whose title names ``account``.
+def _kill_sshd_of(session_dir: Path, account: str | None) -> None:
+    """SIGKILL every sshd process of the session in ``session_dir``, with what runs
+    below it: its listener, found by its config path, and each connection, found by
+    the session's port it holds or by a title naming ``account``.
 
-    A connection's privileged monitor runs as root, so the account's uid kill misses
-    it, and once its listener has exited on its own it is no longer below sshd
-    either; left running, it could still start the account's shell.
+    A connection runs as root until it authenticates, so the account's uid kill
+    misses it, and once its listener or subreaper has exited it is no longer below
+    them either; left running, it could still start the account's shell. One
+    accepted before it authenticates has a title that names nobody.
     """
+    config_path = session_dir / "sshd_config"
+    port = _configured_port(config_path)
     for proc in psutil.process_iter():
-        if _serves_account(proc, account):
+        if (
+            _is_our_sshd(proc, config_path.as_posix())
+            or (port is not None and _holds_port(proc, port))
+            or (account is not None and _serves_account(proc, account))
+        ):
             _kill_tree(proc)
+
+
+def _configured_port(config_path: Path) -> int | None:
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        key, _, value = line.partition(" ")
+        if key == "Port" and value.isdigit():
+            return int(value)
+    return None
+
+
+def _holds_port(proc: psutil.Process, port: int) -> bool:
+    """Return whether ``proc`` is an sshd process with a socket bound to ``port``."""
+    if not _name(proc).startswith("sshd"):
+        return False
+    try:
+        connections = proc.net_connections("tcp")
+    except psutil.Error:
+        return False
+    return any(conn.laddr and conn.laddr.port == port for conn in connections)
 
 
 def _serves_account(proc: psutil.Process, account: str) -> bool:
@@ -1151,20 +1189,20 @@ def _serves_account(proc: psutil.Process, account: str) -> bool:
     return False
 
 
-def _end_sshd(process: subprocess.Popen[bytes]) -> None:
-    """SIGKILL sshd, its subreaper and every connection process below them, so none
-    outlives the session to log in to it later."""
-    if process.poll() is not None:
-        return
-    try:
-        root = psutil.Process(process.pid)
-    except psutil.Error:
-        return
-    _kill_tree(root)
-    try:
-        process.wait(timeout=_TERMINATE_GRACE_SEC)
-    except subprocess.TimeoutExpired:
-        logger.warning("sshd did not exit after SIGKILL")
+def _end_sshd(
+    process: subprocess.Popen[bytes], session_dir: Path, account: str | None
+) -> None:
+    """SIGKILL sshd's subreaper with everything below it, then every sshd process
+    of the session that has left that tree, so none outlives the session to log in
+    to it later."""
+    if process.poll() is None:
+        with contextlib.suppress(psutil.Error):
+            _kill_tree(psutil.Process(process.pid))
+        try:
+            process.wait(timeout=_TERMINATE_GRACE_SEC)
+        except subprocess.TimeoutExpired:
+            logger.warning("sshd did not exit after SIGKILL")
+    _kill_sshd_of(session_dir, account)
 
 
 def _kill_tree(root: psutil.Process) -> None:
@@ -1320,7 +1358,11 @@ def _discard_session(
     account are gone."""
     steps: list[Callable[[], Any]] = []
     if process is not None:
-        steps.append(lambda: _end_sshd(process))
+        steps.append(
+            lambda: _end_sshd(
+                process, session_dir, None if account is None else account.name
+            )
+        )
     if account is not None:
         steps.append(account.release)
     clean = True
