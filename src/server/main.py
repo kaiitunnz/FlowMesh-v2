@@ -85,6 +85,7 @@ from .services.ssh_connections import SshConnectionRegistry
 from .services.task_events import TaskEventPublisher
 from .services.watchdog import WorkerWatchdog
 from .ssh import SSH_EDGE_STREAM_ID, SshRelayOrigin
+from .ssh.shutdown import stop_ssh_ingresses
 from .startup import (
     rehydrate_root_state,
     start_relay_bridge_pump,
@@ -720,11 +721,7 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
-            # The SSH ingresses' last cancels still ride the bridge pumps.
-            if PORT_FORWARD_SERVICE is not None:
-                await PORT_FORWARD_SERVICE.stop()
-            if SSH_RELAY is not None:
-                await SSH_RELAY.stop()
+            await stop_ssh_ingresses(SSH_RELAY, PORT_FORWARD_SERVICE)
             for _bridge_task in (
                 app.state.resident_bridge_task,
                 app.state.content_bridge_task,

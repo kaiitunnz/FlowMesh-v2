@@ -23,6 +23,8 @@ from server.network.reverse_relay import (
 from server.network.worker_bridge import RelayWorkerBridge
 from server.services.port_forward import PortForwardService
 from server.ssh import SSH_EDGE_STREAM_ID, SshRelayOrigin, SshRelayTarget
+from server.ssh.relay import SshRelayUnavailable
+from server.ssh.shutdown import stop_ssh_ingresses
 from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
 from shared.network.byte_stream import StreamClosed
 from shared.network.relay_frame import (
@@ -429,6 +431,37 @@ def test_a_stopping_root_ends_its_connections_at_the_worker_without_the_bridge()
                 await asyncio.wait_for(sshd.closed.wait(), 5)
                 record = SSH_RELAY_KEYSPACE.session(session_id)
                 assert fabric.redis.ttls.get(record) != 60_000
+                writer.close()
+
+    _run(run())
+
+
+def test_a_root_shutdown_ends_a_forward_connection_at_the_worker() -> None:
+    """In the root's shutdown order, the bridge pump stops right after the
+    ingresses, so a forward connection must end at its worker without it and keep
+    its record for the next root to reap."""
+
+    async def run() -> None:
+        async with _fabric() as fabric, _listener(_hold) as sshd:
+            fabric.registry.publish(ENDPOINT, sshd.port)
+            async with _forward(fabric) as (service, port):
+                _, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.write(b"x")
+                await writer.drain()
+                while sshd.accepted == 0:
+                    await asyncio.sleep(0.005)
+                (session_id,) = fabric.origin._channels
+
+                await stop_ssh_ingresses(fabric.origin, service)
+                fabric.pump.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await fabric.pump
+
+                await asyncio.wait_for(sshd.closed.wait(), 5)
+                record = SSH_RELAY_KEYSPACE.session(session_id)
+                assert fabric.redis.ttls.get(record) != 60_000
+                with pytest.raises(SshRelayUnavailable):
+                    await fabric.origin.open(TARGET)
                 writer.close()
 
     _run(run())

@@ -120,6 +120,7 @@ class SshRelayOrigin:
         self._expiries: set[asyncio.Task[None]] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._refresher: asyncio.Task[None] | None = None
+        self._stopping = False
 
     async def start(self) -> None:
         """Reap what a previous root left open, then begin consuming the edge stream."""
@@ -132,8 +133,11 @@ class SshRelayOrigin:
         """End every live connection at its worker, then stop consuming the edge.
 
         The root's bridge stops with it, so each cancel goes straight to its target's
-        down stream, and each record keeps its TTL for the next root to reap.
+        down stream, and each record keeps its TTL for the next root to reap. Once
+        stopping, the origin opens nothing, and a connection that ends leaves its
+        record alone.
         """
+        self._stopping = True
         if self._refresher is not None:
             self._refresher.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -153,7 +157,12 @@ class SshRelayOrigin:
                 self._logger.warning(
                     "Failed to end SSH relay session %s", session_id, exc_info=True
                 )
-        await self._attachment.stop()
+        try:
+            await self._attachment.stop()
+        except Exception:
+            self._logger.warning(
+                "Failed to stop consuming the SSH relay edge", exc_info=True
+            )
 
     async def reap_orphans(self) -> int:
         """Cancel every session a previous root opened; return how many.
@@ -199,6 +208,8 @@ class SshRelayOrigin:
 
     async def open(self, target: SshRelayTarget) -> ByteStreamChannel:
         """Open a relay session to ``target`` and send its opening message."""
+        if self._stopping:
+            raise SshRelayUnavailable("the root is stopping")
         session_id = new_relay_session_id()
         await self._sessions.update(
             session_id,
