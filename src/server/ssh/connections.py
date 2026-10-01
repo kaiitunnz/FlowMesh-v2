@@ -1,8 +1,9 @@
 """Records each relayed SSH client connection while it lasts."""
 
+import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 
 from shared.utils import new_ssh_connection_id, now_iso
 
@@ -27,8 +28,8 @@ async def tracked_ssh_connection(
         return
     connection_id = new_ssh_connection_id()
     source_ip, source_port = peer
-    try:
-        await registry.register_connection(
+    registration = asyncio.ensure_future(
+        registry.register_connection(
             SSHConnectionInfo(
                 connection_id=connection_id,
                 access_mode=access_mode,
@@ -43,16 +44,29 @@ async def tracked_ssh_connection(
                 connected_at=now_iso(),
             )
         )
-    except Exception:
-        logger.debug(
-            "Failed to register SSH connection %s", connection_id, exc_info=True
-        )
+    )
     try:
+        try:
+            await asyncio.shield(registration)
+        except Exception:
+            logger.debug(
+                "Failed to register SSH connection %s", connection_id, exc_info=True
+            )
         yield
     finally:
+        # Shielded, so a cancel that ends the connection cannot strand its record.
         try:
-            await registry.unregister_connection(connection_id)
+            await asyncio.shield(_unregister(registry, registration, connection_id))
         except Exception:
             logger.debug(
                 "Failed to unregister SSH connection %s", connection_id, exc_info=True
             )
+
+
+async def _unregister(
+    registry: SshConnectionRegistry, registration: Awaitable[None], connection_id: str
+) -> None:
+    # A registration still in flight lands first, so the removal never precedes it.
+    with contextlib.suppress(Exception):
+        await registration
+    await registry.unregister_connection(connection_id)
