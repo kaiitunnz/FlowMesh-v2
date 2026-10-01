@@ -179,6 +179,7 @@ class Runner:
         # re-registration gave up, which never run; and those control stopped.
         self._current_dispatch_id: str | None = None
         self._revoked_dispatches: RecentSet[str] = RecentSet(_ENDED_DISPATCH_MEMORY)
+        self._cancelled_dispatches: RecentSet[str] = RecentSet(_ENDED_DISPATCH_MEMORY)
         self._stopped_dispatches: RecentSet[str] = RecentSet(_ENDED_DISPATCH_MEMORY)
         self._pending_stops: set[str] = set()
         self._cancel_lock = threading.Lock()
@@ -592,15 +593,17 @@ class Runner:
             raise ExecutionError(str(exc), retryable=False) from exc
 
     def _raise_if_cancel_pending(self, task_id: str) -> None:
-        """Honor a cancel, the worker's shutdown, or its re-registration, that landed
-        before the task's executor runs it, such as while it read its inputs."""
+        """Honor a cancel, a revoke of its dispatch, or the worker's shutdown that
+        landed before the task's executor runs it, such as while it read its inputs."""
         with self._cancel_lock:
-            cancelled = task_id in self._pending_cancels
+            cancelled = (
+                task_id in self._pending_cancels
+                or self._current_dispatch_id in self._cancelled_dispatches
+            )
             self._pending_cancels.discard(task_id)
+            revoked = self._current_dispatch_id in self._revoked_dispatches
         if cancelled:
             raise TaskCancelledError(f"Task {task_id} was cancelled before execution")
-        with self._cancel_lock:
-            revoked = self._current_dispatch_id in self._revoked_dispatches
         if revoked:
             raise TaskCancelledError(f"Task {task_id} was revoked before execution")
         if self._shutdown_requested.is_set():
@@ -923,12 +926,30 @@ class Runner:
                             if dispatch_id is None:
                                 self._pending_cancels.add(task_id)
                             else:
-                                self._revoked_dispatches.add(dispatch_id)
+                                self._cancelled_dispatches.add(dispatch_id)
                             running = self._runs_locked(task_id, dispatch_id)
                         if not running:
                             continue
                         self.logger.info(
                             "Interrupt for running task %s (reason=%s)", task_id, reason
+                        )
+                        with self._active_executor_lock:
+                            executor = self._active_executor
+                        if executor is not None:
+                            try:
+                                executor.cancel(task_id)
+                            except Exception as exc:
+                                self.logger.warning("Executor cancel() raised: %s", exc)
+                    for task_id, dispatch_id in self.lifecycle.client.iter_revokes():
+                        with self._cancel_lock:
+                            self._revoked_dispatches.add(dispatch_id)
+                            running = self._runs_locked(task_id, dispatch_id)
+                        if not running:
+                            continue
+                        self.logger.info(
+                            "Revoked dispatch %s of running task %s",
+                            dispatch_id,
+                            task_id,
                         )
                         with self._active_executor_lock:
                             executor = self._active_executor
@@ -1303,6 +1324,7 @@ class Runner:
                         self._pending_stops.discard(task_id)
                         if (dispatch_id := msg.dispatch_id) is not None:
                             self._revoked_dispatches.discard(dispatch_id)
+                            self._cancelled_dispatches.discard(dispatch_id)
                             self._stopped_dispatches.discard(dispatch_id)
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()

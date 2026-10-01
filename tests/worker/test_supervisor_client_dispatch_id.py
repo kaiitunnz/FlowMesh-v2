@@ -133,6 +133,28 @@ def test_an_unparseable_task_frame_logs_no_payload(monkeypatch, caplog) -> None:
     assert client._task_queue.empty()
 
 
+def test_a_revoke_frame_reaches_the_worker_s_revokes(monkeypatch) -> None:
+    client = _client()
+    client._channel = cast(Any, object())
+    client._shutdown.clear()
+
+    def stream(*args: Any, **kwargs: Any) -> Any:
+        client._shutdown.set()
+        yield supervisor_pb2.DispatchMessage(
+            revoke=supervisor_pb2.RevokeMessage(task_id="tsk-a", dispatch_id="dsp-1")
+        )
+
+    client._stub = cast(Any, SimpleNamespace(StreamTasks=stream))
+    monkeypatch.setattr(
+        "worker.supervisor_client.grpc.channel_ready_future",
+        lambda channel: SimpleNamespace(result=lambda timeout: None),
+    )
+    client._run_task_stream()
+
+    assert list(client.iter_revokes()) == [("tsk-a", "dsp-1")]
+    assert list(client.iter_interrupts()) == []
+
+
 def _pushed_payload(client: SupervisorClient) -> dict[str, Any]:
     _generation, frame = cast(
         tuple[int, dict[str, Any]], client._event_queue.get_nowait()

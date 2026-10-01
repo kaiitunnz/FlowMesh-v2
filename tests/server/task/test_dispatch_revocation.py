@@ -14,7 +14,7 @@ from server.clients.redis import SyncRedisClient
 from server.registries.worker import Reservation, Worker
 from server.supervisor.services.task_listener import TaskListener
 from server.task.runtime import TaskRuntime
-from shared.schemas.command import InterruptMessage, TaskMessage
+from shared.schemas.command import RevokeMessage, TaskMessage
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.server.dispatch_helpers import record_dispatch
@@ -32,14 +32,14 @@ class _Registry:
 
     def __init__(self, listener: TaskListener | None = None) -> None:
         self.listener = listener
-        self.interrupts: list[InterruptMessage] = []
+        self.revokes: list[RevokeMessage] = []
         self.reserved: list[Reservation] = []
 
     def get_worker(self, worker_id: str) -> Any:
         return SimpleNamespace(id=worker_id, node_id="nod-1")
 
-    def publish_interrupt(self, worker: Any, payload: InterruptMessage) -> int:
-        self.interrupts.append(payload)
+    def publish_revoke(self, node_id: str, payload: RevokeMessage) -> int:
+        self.revokes.append(payload)
         if self.listener is not None:
             self.listener._handle_message(json.loads(payload.model_dump_json()))
         return 1
@@ -59,8 +59,8 @@ def _runtime(registry: _Registry) -> tuple[TaskRuntime, str]:
     return runtime, ids["a"]
 
 
-def _revocations(registry: _Registry) -> list[tuple[str, str, str | None]]:
-    return [(i.task_id, i.worker_id, i.dispatch_id) for i in registry.interrupts]
+def _revocations(registry: _Registry) -> list[tuple[str, str, str]]:
+    return [(r.task_id, r.worker_id, r.dispatch_id) for r in registry.revokes]
 
 
 def _frame(task_id: str, dispatch_id: str) -> dict[str, Any]:
@@ -151,4 +151,4 @@ def test_a_restart_leaves_a_dispatch_in_flight_alone() -> None:
 
     runtime.release_ended_reservations()
 
-    assert registry.interrupts == []
+    assert registry.revokes == []

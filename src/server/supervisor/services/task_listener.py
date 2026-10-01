@@ -6,6 +6,7 @@ from typing import Any, Final
 from shared.schemas.command import (
     InterruptMessage,
     MediatedOpMessage,
+    RevokeMessage,
     StopMessage,
     TaskMessage,
 )
@@ -158,10 +159,8 @@ class TaskListener(RebindableReader):
                 "Dropping dispatch for unregistered worker: %s", worker_id
             )
             return False
-        if payload.get("kind") in ("interrupt", "stop") and (
-            dispatch_id := payload.get("dispatch_id")
-        ):
-            _withdraw_dispatch(q, dispatch_id)
+        if payload.get("kind") == "revoke":
+            _withdraw_dispatch(q, payload["dispatch_id"])
         q.put_nowait(payload)
         return True
 
@@ -203,6 +202,14 @@ class TaskListener(RebindableReader):
                     "task_id": stop_message.task_id,
                     "reason": stop_message.reason,
                     "dispatch_id": stop_message.dispatch_id,
+                }
+            case "revoke":
+                revoke_message = RevokeMessage.model_validate(data)
+                worker_id = revoke_message.worker_id
+                payload = {
+                    "kind": "revoke",
+                    "task_id": revoke_message.task_id,
+                    "dispatch_id": revoke_message.dispatch_id,
                 }
             case "mediated_op":
                 op_message = MediatedOpMessage.model_validate(data)

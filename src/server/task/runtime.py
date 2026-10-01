@@ -56,7 +56,7 @@ from shared.sandbox import (
     LocalSandboxCapability,
     SandboxEgressMode,
 )
-from shared.schemas.command import InterruptMessage, MediatedOpMessage
+from shared.schemas.command import InterruptMessage, MediatedOpMessage, RevokeMessage
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import collection_elements, value_text
@@ -324,6 +324,7 @@ class _Termination:
     # Each pending mediated operation's worker, agent task, and call.
     reaps: list[tuple[str, str, str]]
     resident_invocation_ids: list[str] = field(default_factory=list)
+    revokes: list[RevokeMessage] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1592,11 +1593,16 @@ class TaskRuntime:
         ]
         self._release_terminated_work(
             _Termination(
-                [
-                    InterruptMessage.revoking(r.task_id, r.worker_id, r.dispatch_id)
+                [],
+                [],
+                revokes=[
+                    RevokeMessage(
+                        task_id=r.task_id,
+                        worker_id=r.worker_id,
+                        dispatch_id=r.dispatch_id,
+                    )
                     for r in ended
                 ],
-                [],
             )
         )
         self._release_workers([(r.worker_id, r.dispatch_id) for r in ended])
@@ -5989,14 +5995,19 @@ class TaskRuntime:
     def _revoke_locked(
         self, task_id: str, worker_id: str, dispatch_id: str | None
     ) -> None:
-        """Queue a dispatch-keyed interrupt for a dispatch that resolved without its
-        worker ending it, so a frame of it still queued for the worker is withdrawn and
-        a run of it is cancelled."""
+        """Queue the revocation of a dispatch that resolved without its worker ending
+        it."""
         if dispatch_id is None:
             return
         self._pending_terminations.append(
             _Termination(
-                [InterruptMessage.revoking(task_id, worker_id, dispatch_id)], []
+                [],
+                [],
+                revokes=[
+                    RevokeMessage(
+                        task_id=task_id, worker_id=worker_id, dispatch_id=dispatch_id
+                    )
+                ],
             )
         )
 
@@ -6041,6 +6052,24 @@ class TaskRuntime:
                     "Interrupting %s on %s failed",
                     interrupt.task_id,
                     interrupt.worker_id,
+                )
+        for revoke in termination.revokes:
+            try:
+                worker = self._worker_registry.get_worker(revoke.worker_id)
+                if worker is None:
+                    self._logger.warning(
+                        "Cannot revoke dispatch %s of %s; worker %s missing",
+                        revoke.dispatch_id,
+                        revoke.task_id,
+                        revoke.worker_id,
+                    )
+                else:
+                    self._worker_registry.publish_revoke(worker.node_id, revoke)
+            except Exception:
+                self._logger.exception(
+                    "Revoking dispatch %s on %s failed",
+                    revoke.dispatch_id,
+                    revoke.worker_id,
                 )
         # The worker drops a reaped operation and its custody.
         for worker_id, agent_task_id, call in termination.reaps:

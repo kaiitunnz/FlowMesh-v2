@@ -121,8 +121,11 @@ async def test_a_second_stream_ends_the_first_and_takes_every_frame_kind(
         worker_id,
         {"kind": "mediated_op", "frame_kind": "permit", "payload": {"n": 1}},
     )
+    listener._deliver(
+        worker_id, {"kind": "revoke", "task_id": "tsk-1", "dispatch_id": "dsp-9"}
+    )
     messages = [await asyncio.wait_for(read, timeout=2)]
-    messages += [await asyncio.wait_for(anext(second), timeout=2) for _ in range(2)]
+    messages += [await asyncio.wait_for(anext(second), timeout=2) for _ in range(3)]
     await second.aclose()
 
     assert await asyncio.wait_for(first, timeout=2) == []
@@ -130,9 +133,11 @@ async def test_a_second_stream_ends_the_first_and_takes_every_frame_kind(
         "task",
         "stop",
         "mediated_op",
+        "revoke",
     ]
     assert messages[0].task.payload["task_id"] == "tsk-1"
     assert messages[2].mediated_op.kind == "permit"
+    assert messages[3].revoke.dispatch_id == "dsp-9"
 
 
 @pytest.mark.asyncio

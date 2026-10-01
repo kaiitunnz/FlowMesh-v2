@@ -15,7 +15,7 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.schemas.command import InterruptMessage
+from shared.schemas.command import InterruptMessage, RevokeMessage
 from shared.schemas.event import (
     Event,
     NodeEvent,
@@ -1026,8 +1026,11 @@ class EventMonitor:
             task_id,
         )
         try:
-            self._worker_registry.publish_interrupt(
-                worker, InterruptMessage.revoking(task_id, worker_id, dispatch_id)
+            self._worker_registry.publish_revoke(
+                worker.node_id,
+                RevokeMessage(
+                    task_id=task_id, worker_id=worker_id, dispatch_id=dispatch_id
+                ),
             )
         except Exception as exc:
             self._logger.warning(

@@ -116,6 +116,7 @@ class SupervisorClient:
         # (task id, reason, dispatch id or None for whichever dispatch runs the task)
         self._interrupt_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
         self._stop_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
+        self._revoke_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._mediated_op_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
         self._event_queue: queue.Queue[tuple[int, dict[str, Any]] | object] = (
             queue.Queue()
@@ -481,6 +482,14 @@ class SupervisorClient:
             except queue.Empty:
                 break
 
+    def iter_revokes(self) -> Iterable[tuple[str, str]]:
+        """Yield each ``(task_id, dispatch_id)`` control revoked."""
+        while True:
+            try:
+                yield self._revoke_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def iter_stops(self) -> Iterable[tuple[str, str, str | None]]:
         while True:
             try:
@@ -557,7 +566,7 @@ class SupervisorClient:
                 self._rebound = rebound
             # What control sent the previous registration is for a dispatch this one
             # does not run.
-            for stale in (self._interrupt_queue, self._stop_queue):
+            for stale in (self._interrupt_queue, self._stop_queue, self._revoke_queue):
                 _drain(stale)
             self._rearm_register_event()
             self.logger.info("Re-registered worker as %s", new_id)
@@ -712,6 +721,10 @@ class SupervisorClient:
                         stop = message.stop
                         self._stop_queue.put(
                             (stop.task_id, stop.reason, stop.dispatch_id or None)
+                        )
+                    elif message.HasField("revoke"):
+                        self._revoke_queue.put(
+                            (message.revoke.task_id, message.revoke.dispatch_id)
                         )
                     elif message.HasField("mediated_op"):
                         self._mediated_op_queue.put(

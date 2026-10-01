@@ -1,5 +1,5 @@
-"""A dispatch-keyed interrupt withdraws its dispatch from the worker's queue, and a
-worker never starts a dispatch control ended."""
+"""A revoke withdraws its dispatch from the worker's queue; a cancel or a stop is
+delivered behind the frame it ends."""
 
 import asyncio
 import json
@@ -10,7 +10,12 @@ import pytest
 
 from server.clients.redis import SyncRedisClient
 from server.supervisor.services.task_listener import TaskListener
-from shared.schemas.command import InterruptMessage, StopMessage, TaskMessage
+from shared.schemas.command import (
+    InterruptMessage,
+    RevokeMessage,
+    StopMessage,
+    TaskMessage,
+)
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.worker.factories import make_worker_task_message
@@ -60,8 +65,8 @@ async def _publish(listener: TaskListener, *messages: dict[str, Any]) -> None:
 @pytest.mark.asyncio
 async def test_a_revoked_dispatch_queued_while_the_stream_was_down_never_runs() -> None:
     listener = _listener()
-    revoke = InterruptMessage(
-        task_id="tsk-1", worker_id="wkr-1", reason="lost", dispatch_id="dsp-1"
+    revoke = RevokeMessage(
+        task_id="tsk-1", worker_id="wkr-1", dispatch_id="dsp-1"
     ).model_dump()
 
     await _publish(listener, _task("dsp-1"), _task("dsp-2"), revoke)
@@ -70,7 +75,7 @@ async def test_a_revoked_dispatch_queued_while_the_stream_was_down_never_runs() 
     assert [
         WorkerTaskMessage.wire_dispatch_id(f) for f in frames if "kind" not in f
     ] == ["dsp-2"]
-    assert [f["kind"] for f in frames if "kind" in f] == ["interrupt"]
+    assert [f["kind"] for f in frames if "kind" in f] == ["revoke"]
 
 
 @pytest.mark.asyncio
@@ -86,3 +91,22 @@ async def test_a_task_keyed_interrupt_leaves_the_queue_alone() -> None:
         f["kind"] if "kind" in f else WorkerTaskMessage.wire_dispatch_id(f)
         for f in frames
     ] == ["dsp-1", "interrupt", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_a_dispatch_keyed_stop_or_cancel_reaches_the_frame_it_ends() -> None:
+    listener = _listener()
+    stop = StopMessage(
+        task_id="tsk-1", worker_id="wkr-1", dispatch_id="dsp-1"
+    ).model_dump()
+    cancel = InterruptMessage(
+        task_id="tsk-1", worker_id="wkr-1", dispatch_id="dsp-1"
+    ).model_dump()
+
+    await _publish(listener, _task("dsp-1"), stop, cancel)
+    frames = await _frames(listener)
+
+    assert [
+        f["kind"] if "kind" in f else WorkerTaskMessage.wire_dispatch_id(f)
+        for f in frames
+    ] == ["dsp-1", "stop", "interrupt"]

@@ -5,7 +5,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from shared.schemas.result import BaseExecutorResult
@@ -44,12 +44,17 @@ class _ChildProcess(Executor):
             self.child.terminate()
 
 
+def _lifecycle(runner: Runner) -> MagicMock:
+    return cast(MagicMock, runner.lifecycle)
+
+
 def _runner(tmp_path: Path, executor: Executor, dispatches: list[str]) -> Runner:
     lifecycle = MagicMock()
     lifecycle.worker_id = "wrk-test"
     lifecycle.cost_per_hour = 1.0
     lifecycle.client.create_task_log_emitter.return_value = None
     lifecycle.client.iter_interrupts.return_value = []
+    lifecycle.client.iter_revokes.return_value = []
     lifecycle.client.iter_stops.return_value = []
     lifecycle.client.next_mediated_op.side_effect = no_mediated_op
     lifecycle.held_boundaries.return_value = []
@@ -86,8 +91,8 @@ def test_abandoning_the_running_dispatch_ends_its_child_process(
 
     assert not loop.is_alive()
     assert executor.child is not None and executor.child.poll() is not None
-    runner.lifecycle.set_cancelled.assert_called_once()  # type: ignore[attr-defined]
-    runner.lifecycle.set_succeeded.assert_not_called()  # type: ignore[attr-defined]
+    _lifecycle(runner).set_cancelled.assert_called_once()
+    _lifecycle(runner).set_succeeded.assert_not_called()
 
 
 def test_a_dispatch_given_up_before_it_starts_never_runs(tmp_path: Path) -> None:
@@ -98,7 +103,7 @@ def test_a_dispatch_given_up_before_it_starts_never_runs(tmp_path: Path) -> None
     runner.start()
 
     assert executor.ran == []
-    runner.lifecycle.set_cancelled.assert_called_once()  # type: ignore[attr-defined]
+    _lifecycle(runner).set_cancelled.assert_called_once()
 
 
 def test_abandoning_another_dispatch_leaves_the_running_one(tmp_path: Path) -> None:
@@ -126,9 +131,16 @@ class _Recording(Executor):
         return BaseExecutorResult()
 
 
+def _deliver_revoke(runner: Runner, revoke: tuple[str, str]) -> None:
+    pending = [revoke]
+    _lifecycle(runner).client.iter_revokes.side_effect = lambda: (
+        [pending.pop()] if pending else []
+    )
+
+
 def _deliver_interrupt(runner: Runner, interrupt: tuple[str, str, str | None]) -> None:
     pending = [interrupt]
-    runner.lifecycle.client.iter_interrupts.side_effect = lambda: (  # type: ignore[attr-defined]
+    _lifecycle(runner).client.iter_interrupts.side_effect = lambda: (
         [pending.pop()] if pending else []
     )
 
@@ -140,12 +152,12 @@ def _until(condition: Any, timeout: float = 10.0) -> None:
         time.sleep(0.01)
 
 
-def test_an_interrupt_for_a_received_dispatch_ends_only_that_dispatch(
+def test_a_revoke_for_a_received_dispatch_ends_only_that_dispatch(
     tmp_path: Path,
 ) -> None:
     executor = _Recording()
     runner = _runner(tmp_path, executor, ["dsp-1", "dsp-2"])
-    _deliver_interrupt(runner, ("tsk-1", "lost", "dsp-1"))
+    _deliver_revoke(runner, ("tsk-1", "dsp-1"))
 
     def revoked_while_hydrating(msg: Any) -> None:
         if msg.dispatch_id == "dsp-1":
@@ -159,12 +171,12 @@ def test_an_interrupt_for_a_received_dispatch_ends_only_that_dispatch(
     assert executor.ran == ["dsp-2"]
 
 
-def test_an_interrupt_for_another_dispatch_leaves_the_running_one(
+def test_a_revoke_for_another_dispatch_leaves_the_running_one(
     tmp_path: Path,
 ) -> None:
     executor = _ChildProcess()
     runner = _runner(tmp_path, executor, ["dsp-2"])
-    _deliver_interrupt(runner, ("tsk-1", "lost", "dsp-1"))
+    _deliver_revoke(runner, ("tsk-1", "dsp-1"))
     loop = threading.Thread(target=runner.start, daemon=True)
     loop.start()
     assert executor.running.wait(timeout=10)
@@ -174,3 +186,26 @@ def test_an_interrupt_for_another_dispatch_leaves_the_running_one(
     assert executor.child is not None and executor.child.poll() is None
     executor.child.terminate()
     loop.join(timeout=10)
+
+
+def test_a_dispatch_cancelled_before_it_starts_is_reported_cancelled(
+    tmp_path: Path,
+) -> None:
+    executor = _Recording()
+    runner = _runner(tmp_path, executor, ["dsp-1"])
+    _deliver_interrupt(runner, ("tsk-1", "cancelled", "dsp-1"))
+
+    def cancelled_while_hydrating(msg: Any) -> None:
+        # A second poll of the interrupts follows the handling of the first.
+        _until(lambda: _lifecycle(runner).client.iter_interrupts.call_count >= 2)
+
+    with patch.object(
+        runner._input_hydrator, "hydrate", side_effect=cancelled_while_hydrating
+    ):
+        runner.start()
+
+    assert executor.ran == []
+    _lifecycle(runner).set_cancelled.assert_called_once()
+    cast(MagicMock, runner.logger).info.assert_any_call(
+        "Task %s cancelled: %s", "tsk-1", "Task tsk-1 was cancelled before execution"
+    )

@@ -306,6 +306,13 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                             dispatch_id=str(event.get("dispatch_id") or ""),
                         )
                     )
+                elif event.get("kind") == "revoke":
+                    yield supervisor_pb2.DispatchMessage(
+                        revoke=supervisor_pb2.RevokeMessage(
+                            task_id=str(event["task_id"]),
+                            dispatch_id=str(event["dispatch_id"]),
+                        )
+                    )
                 elif event.get("kind") == "mediated_op":
                     yield supervisor_pb2.DispatchMessage(
                         mediated_op=supervisor_pb2.MediatedOperationFrame(

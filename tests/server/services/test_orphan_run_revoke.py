@@ -70,11 +70,11 @@ def _busy(kind: str, task_id: str, dispatch_id: str) -> WorkerEvent:
     )
 
 
-def _revokes(sync: _RecordingSync) -> list[tuple[str, str | None, str]]:
+def _revokes(sync: _RecordingSync) -> list[tuple[str, str]]:
     return [
-        (m["task_id"], m.get("dispatch_id"), m["reason"])
+        (m["task_id"], m["dispatch_id"])
         for m in sync.published
-        if m.get("kind") == "interrupt"
+        if m.get("kind") == "revoke"
     ]
 
 
@@ -90,7 +90,7 @@ def test_a_run_of_a_resolved_dispatch_is_revoked_once(sync: _RecordingSync) -> N
     monitor._handle_worker_event(_busy("HEARTBEAT", task_id, "dsp-1"))
     monitor._handle_worker_event(_busy("HEARTBEAT", task_id, "dsp-1"))
 
-    assert _revokes(sync) == [(task_id, "dsp-1", "revoked")]
+    assert _revokes(sync) == [(task_id, "dsp-1")]
 
 
 def test_a_run_of_the_held_dispatch_is_left_alone(sync: _RecordingSync) -> None:
