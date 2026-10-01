@@ -238,8 +238,10 @@ class _FakeRedis:
         self.hashes: dict[str, dict[str, Any]] = {}
         self.worker_ids: set[str] = set()
 
-    def incr(self, key: str) -> int:
+    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        """Allocate a worker id as the registration script does."""
         self._seq += 1
+        self.worker_ids.add(f"{keys_and_args[numkeys]}{self._seq}")
         return self._seq
 
     def sadd(self, key: str, *members: str) -> None:

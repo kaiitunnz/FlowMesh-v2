@@ -27,8 +27,10 @@ class _Redis:
         self._seq = 0
         self.workers: set[str] = set()
 
-    def incr(self, key: str) -> int:
+    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        """Allocate a worker id as the registration script does."""
         self._seq += 1
+        self.workers.add(f"{keys_and_args[numkeys]}{self._seq}")
         return self._seq
 
     def sadd(self, key: str, *members: str) -> None:

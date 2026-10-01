@@ -16,6 +16,7 @@ from shared.grpc.supervisor.v1 import (
 )
 from shared.network.relay_frame import RelayFrame
 from shared.utils import new_worker_id
+from shared.utils.ids import PREFIX_WORKER
 
 from ... import env
 from ...clients.redis import (
@@ -34,6 +35,23 @@ from ..services.task_listener import TaskListener
 
 # Rewrite node_id for each worker key that still exists, atomically. KEYS are
 # worker keys; ARGV[1] is the new node id. Returns the count actually rewritten.
+# KEYS: [worker id counter, workers set]
+# ARGV: [worker id prefix, worker id bound on this supervisor, ...]
+# Returns the next counter value whose worker id neither a recorded worker nor a
+# binding here holds, and records that id, so a counter the store lost never hands out
+# an id still in use.
+_ALLOCATE_WORKER_LUA = """
+local bound = {}
+for i = 2, #ARGV do bound[ARGV[i]] = true end
+while true do
+  local seq = redis.call('INCR', KEYS[1])
+  local id = ARGV[1] .. seq
+  if not bound[id] and redis.call('SADD', KEYS[2], id) == 1 then
+    return seq
+  end
+end
+"""
+
 # Longer than a worker waits before reconnecting a closed event stream.
 _REATTACH_GRACE_SEC = 10.0
 
@@ -229,13 +247,21 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # concurrent rebind_node either sees this worker in its snapshot or stamps
         # it with the new id.
         with self._lock:
-            incarnation = self._redis.incr(WORKER_ID_SEQ_KEY)
+            incarnation = int(
+                self._redis.eval(
+                    _ALLOCATE_WORKER_LUA,
+                    2,
+                    WORKER_ID_SEQ_KEY,
+                    WORKERS_SET_KEY,
+                    f"{PREFIX_WORKER}-",
+                    *self._registry.bound_worker_ids(),
+                )
+            )
             worker_id = new_worker_id(incarnation)
             worker_meta["id"] = worker_id
             worker_meta["incarnation"] = incarnation
             worker_meta["node_alias"] = self._node_alias
             worker_meta["node_id"] = self._node_id
-            self._redis.sadd(WORKERS_SET_KEY, worker_id)
             self._redis.hash_set(worker_key(worker_id), worker_meta)
             self._registry.set_worker_id(token, worker_id)
         self._task_listener.add_worker(worker_id)

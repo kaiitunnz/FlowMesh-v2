@@ -26,7 +26,8 @@ class _FakeRedis:
     def __init__(self) -> None:
         self._seq = 0
 
-    def incr(self, key: str) -> int:
+    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        """Allocate a worker id as the registration script does."""
         self._seq += 1
         return self._seq
 
