@@ -249,13 +249,13 @@ async def test_placement_relaxes_the_accelerator_only_for_a_relaying_embodiment(
         embodiment_selector=_ForcedSelector(kind)
     )
     assert _resolve(dispatcher, runtime, task_id) is True
-    assert dispatcher._relays_only(task_id) is relaxed
+    assert dispatcher._relays_only(task_id, preparing=False) is relaxed
 
 
 @pytest.mark.anyio
 async def test_a_task_with_no_resolved_embodiment_places_as_declared() -> None:
     dispatcher, runtime, task_id = await _setup()
-    assert dispatcher._relays_only(task_id) is False
+    assert dispatcher._relays_only(task_id, preparing=False) is False
 
 
 def test_the_snapshot_reports_the_deployments_admission_bound() -> None:

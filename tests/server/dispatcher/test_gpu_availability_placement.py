@@ -82,16 +82,13 @@ class _SpyRegistry(WorkerRegistry):
         return pool
 
 
-@pytest.fixture
-def client() -> Iterator[redis.Redis]:
+def _live_worker(devices: list[GpuInfo]) -> Iterator[redis.Redis]:
     assert _LIVE_URL is not None
     live = redis.Redis.from_url(_LIVE_URL, decode_responses=True)
     keys = (worker_key(_WORKER), worker_hb_key(_WORKER))
     live.delete(*keys)
     live.sadd(WORKERS_SET_KEY, _WORKER)
-    hardware = make_worker_hardware(
-        [GpuInfo(index=0, name="NVIDIA L4", uuid=_HELD, memory_total_bytes=24 << 30)]
-    )
+    hardware = make_worker_hardware(devices)
     capabilities = WorkerCapabilities(
         supported_task_types=frozenset({TaskType.INFERENCE, TaskType.ECHO})
     )
@@ -114,6 +111,18 @@ def client() -> Iterator[redis.Redis]:
     live.delete(*keys)
     live.srem(WORKERS_SET_KEY, _WORKER)
     live.close()
+
+
+@pytest.fixture
+def client() -> Iterator[redis.Redis]:
+    yield from _live_worker(
+        [GpuInfo(index=0, name="NVIDIA L4", uuid=_HELD, memory_total_bytes=24 << 30)]
+    )
+
+
+@pytest.fixture
+def cpu_client() -> Iterator[redis.Redis]:
+    yield from _live_worker([])
 
 
 def _report(registry: WorkerRegistry, availability: dict[str, Any]) -> None:
@@ -295,6 +304,57 @@ class TestPlacementOnAHeldWorker:
         runtime = _runtime(FakeRegistry())
         task_id = await _upstream_task(runtime, max_items=None)
         assert runtime.prepares_inputs(task_id) is True
+        dispatcher, _ = _dispatcher(runtime, registry)
+
+        dispatcher.dispatch_once(task_id)
+
+        assert registry.offered == [[_WORKER]]
+
+
+class TestRelayingDispatchOnACpuWorker:
+    """A dispatch that runs no model needs no accelerator its leaf declares."""
+
+    @pytest.mark.anyio
+    async def test_a_pinned_resident_leaf_declaring_a_gpu_places_on_a_cpu_worker(
+        self, cpu_client: redis.Redis
+    ) -> None:
+        registry = _SpyRegistry(cast(Any, _LiveRds(cpu_client)))
+        runtime = _runtime(FakeRegistry())
+        task_id = await _upstream_task(runtime, service="{mode: resident}")
+        declared = _task(runtime, task_id).spec.resources
+        assert declared is not None and declared.hardware is not None
+        assert declared.hardware.gpu is not None and declared.hardware.gpu.count == 1
+        dispatcher, requeued = _dispatcher(
+            runtime, registry, resident_capacity_enabled=True
+        )
+
+        dispatcher.dispatch_once(task_id)
+
+        assert registry.offered == [[_WORKER]]
+        assert all(kw["reason"] != "no_eligible_worker" for _, kw in requeued)
+
+    @pytest.mark.anyio
+    async def test_a_resident_served_menu_dispatch_places_on_a_cpu_worker(
+        self, cpu_client: redis.Redis
+    ) -> None:
+        registry = _SpyRegistry(cast(Any, _LiveRds(cpu_client)))
+        runtime = _runtime(FakeRegistry())
+        _wfl, ids = await _register(
+            runtime, LOCAL_ELIGIBLE.replace("PRIMARY", "resident_served")
+        )
+        dispatcher, _ = _dispatcher(runtime, registry, resident_capacity_enabled=True)
+
+        dispatcher.dispatch_once(ids["gen"])
+
+        assert registry.offered == [[_WORKER]]
+
+    @pytest.mark.anyio
+    async def test_an_input_preparation_places_on_a_cpu_worker(
+        self, cpu_client: redis.Redis
+    ) -> None:
+        registry = _SpyRegistry(cast(Any, _LiveRds(cpu_client)))
+        runtime = _runtime(FakeRegistry())
+        task_id = await _upstream_task(runtime, max_items=None)
         dispatcher, _ = _dispatcher(runtime, registry)
 
         dispatcher.dispatch_once(task_id)

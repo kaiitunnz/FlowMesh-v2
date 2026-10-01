@@ -25,7 +25,6 @@ from shared.tasks.placeholders import PLACEHOLDER_PATTERN
 from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import (
     ConditionSpec,
-    InferenceEmbodimentKind,
     SSHSpecStrict,
     SSHSpecTemplate,
 )
@@ -340,18 +339,15 @@ class Dispatcher:
             resident_admission_slots=self._resident_admission_slots,
         )
 
-    def _relays_only(self, task_id: str) -> bool:
-        """Whether this dispatch carries an invocation rather than running a model.
+    def _relays_only(self, task_id: str, preparing: bool) -> bool:
+        """Whether this dispatch runs no model on its worker.
 
-        A resident-served embodiment runs its model on a replica, so the local model
-        requirement its leaf declares for the other embodiment does not apply to the
-        worker that carries the invocation.
+        An input preparation reads an upstream value, and a resident-served dispatch,
+        menu-resolved or pinned, carries its invocation to a replica that runs the
+        model. Neither needs the accelerator its leaf declares, nor allocates GPU
+        memory on the worker that carries it.
         """
-        resolved = self._runtime.resolved_embodiment(task_id)
-        return (
-            resolved is not None
-            and resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
-        )
+        return preparing or self._runtime.serves_from_replica(task_id)
 
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker.
@@ -407,18 +403,11 @@ class Dispatcher:
             return False
 
         task = record.task
-        # Placement reads the resolved embodiment, never the leaf's own binding: a
-        # resident-served dispatch carries the invocation and loads no model locally.
-        # A preparation places the same way: it reads an upstream value and runs no
-        # model, so it needs no accelerator either.
-        relays_only = preparing or self._relays_only(task_id)
+        # A dispatch that runs no model on its worker places without the accelerator
+        # its leaf declares, and is neither withheld from nor refused on a held card;
+        # the worker reads the same answer off its message.
+        relays_only = self._relays_only(task_id, preparing)
         placement_task = relay_placement_task(task) if relays_only else task
-        # GPU availability reads the two facts the worker's message carries, so the
-        # worker never refuses what placement let onto a held card. They also mark a
-        # resident leaf with no embodiment menu as loading no model.
-        message_relays_only = (
-            preparing or self._runtime.service_episode_dispatch(task_id) is not None
-        )
 
         model_names, dataset_names = extract_model_dataset_names(task)
         task_category = (
@@ -431,9 +420,7 @@ class Dispatcher:
             task_age = max(0.0, time.time() - record.last_queue_ts)
 
         # 1. Get idle worker pool
-        pool = self._worker_registry.idle_satisfying_pool(
-            placement_task, message_relays_only
-        )
+        pool = self._worker_registry.idle_satisfying_pool(placement_task, relays_only)
 
         # 2. Filter by selected_worker hint if present
         if record.selected_worker:
