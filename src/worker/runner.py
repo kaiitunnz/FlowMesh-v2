@@ -30,6 +30,7 @@ from shared.network.mtls import MutualTlsMaterial
 from shared.network.relay_frame import SSH_FRAME_KIND
 from shared.outcome import FabricContentStore
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
+from shared.tasks.components.resources import GPURequirements
 from shared.tasks.credentials import dispatched_credentials
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
@@ -37,6 +38,7 @@ from shared.tasks.specs import (
     InferenceSpecStrict,
     TaskSpecStrictBase,
 )
+from shared.tasks.specs.common import declared_gpu_requirements
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
 from shared.telemetry.config import (
     DISABLED_TELEMETRY_CONFIG,
@@ -54,6 +56,7 @@ from shared.telemetry.semconv import (
 from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
+from shared.utils.hardware import available_devices, select_matching_gpu_indices
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.redact import credential_scrubber
 from shared.utils.time import now_iso
@@ -209,6 +212,42 @@ class Runner:
         snapshot.
         """
         return self._active_executor is not None and self._active_executor_used_gpu
+
+    def _refuse_if_gpu_is_held(self, msg: WorkerTaskMessage) -> None:
+        """Refuse a dispatch whose GPUs another tenant holds.
+
+        The dispatcher filters on what this worker last reported, so a task can still
+        arrive for a device taken since; refusing beats dying in executor init. Only a
+        reading just taken counts: a latched one advises the dispatcher, but a latch
+        cannot clear while a GPU executor stays warm.
+        """
+        if not msg.uses_gpu():
+            return
+        availability = self.lifecycle.live_gpu_availability()
+        devices = self.hardware.gpu.devices
+        if not availability or not devices:
+            return
+        overlaid = [
+            (
+                device.model_copy(update={"gpu_available": reported.available})
+                if (reported := availability.get(device.uuid)) is not None
+                else device
+            )
+            for device in devices
+        ]
+        free = available_devices(overlaid)
+        if len(free) == len(overlaid):
+            return
+        requirement = declared_gpu_requirements(msg.spec) or GPURequirements(count=1)
+        if len(select_matching_gpu_indices(free, requirement)) >= (
+            requirement.count or 1
+        ):
+            return
+        raise ExecutionError(
+            f"{len(overlaid) - len(free)} of this worker's {len(overlaid)} GPU(s) are "
+            "held by a process outside FlowMesh; the rest do not satisfy the task",
+            retryable=True,
+        )
 
     def _note_gpu_usage(self, msg: WorkerTaskMessage) -> None:
         """Record that the loaded executor has run something GPU-bound.
@@ -1027,6 +1066,7 @@ class Runner:
                         desired_key = "agent_episode"
                     else:
                         desired_key = "default" if task_type is None else task_type
+                    self._refuse_if_gpu_is_held(msg)
                     # Acquire lock before accessing/modifying active executor
                     with self._active_executor_lock:
                         if (

@@ -7,13 +7,28 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from shared.content import SharedFilesystemObjectStore
 from shared.harness import ServiceLeafEpisodeDispatch
+from shared.schemas.result import BaseExecutorResult
 from shared.schemas.worker import WorkerStatus
 from shared.tasks.components.model import ModelConfig, ModelSource
 from shared.tasks.specs import EchoSpecStrict, InferenceSpecStrict
 from shared.tasks.task_type import TaskType
-from tests.worker.factories import make_worker_task_message
+from shared.tasks.worker_message import (
+    CPUInfo,
+    GpuInfo,
+    GpuPlatformInfo,
+    MemoryInfo,
+    NetworkInfo,
+    WorkerHardware,
+)
+from tests.worker.factories import (
+    make_worker_hardware,
+    make_worker_task_message,
+    no_mediated_op,
+)
 from worker import nvml
+from worker.executors.base_executor import ExecutionError, Executor
 from worker.gpu_availability import (
     MIB,
     DeviceAvailability,
@@ -413,6 +428,174 @@ class TestWarmExecutorGpuFlag:
         runner._active_executor = MagicMock()
         runner._note_gpu_usage(self._spec(gpu=True, **relay))
         assert runner.has_active_gpu_executor() is False
+
+
+class TestAdmission:
+    """``_refuse_if_gpu_is_held``: the worker's own veto on a held card."""
+
+    def _runner(
+        self,
+        tmp_path: Path,
+        availability: dict[str, DeviceAvailability],
+        devices: int = 1,
+    ) -> Runner:
+        lifecycle = MagicMock()
+        lifecycle.live_gpu_availability.return_value = availability
+        hardware = WorkerHardware(
+            cpu=CPUInfo(logical_cores=8, model="CPU"),
+            memory=MemoryInfo(total_bytes=64 * 1024**3),
+            gpu=GpuPlatformInfo(
+                driver_version=None,
+                cuda_version=None,
+                devices=[
+                    GpuInfo(
+                        index=i,
+                        name="NVIDIA RTX 6000 Ada Generation",
+                        uuid=f"GPU-{i}",
+                        memory_total_bytes=48 * 1024**3,
+                    )
+                    for i in range(devices)
+                ],
+            ),
+            network=NetworkInfo(ip=None, bandwidth_bytes_per_sec=None),
+        )
+        return Runner(
+            lifecycle=lifecycle,
+            task_stream=[],
+            results_dir=tmp_path,
+            hardware=hardware,
+            executors={},
+            default_executor=MagicMock(),
+            logger=MagicMock(),
+        )
+
+    def _gpu_spec(self, **message: Any) -> Any:
+        return make_worker_task_message(_gpu_spec(), **message)
+
+    def _held(self, *uuids: str) -> dict[str, DeviceAvailability]:
+        return {u: DeviceAvailability(available=False, free_bytes=0) for u in uuids}
+
+    def test_refuses_a_gpu_task_when_the_only_device_is_held(
+        self, tmp_path: Path
+    ) -> None:
+        runner = self._runner(tmp_path, self._held("GPU-0"))
+        with pytest.raises(ExecutionError) as excinfo:
+            runner._refuse_if_gpu_is_held(self._gpu_spec())
+        assert excinfo.value.retryable is True, "must reroute, not fail the task"
+
+    def test_admits_when_a_free_device_remains(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path, self._held("GPU-0"), devices=4)
+        runner._refuse_if_gpu_is_held(self._gpu_spec())
+
+    def test_admits_a_cpu_task_onto_a_fully_held_worker(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path, self._held("GPU-0"))
+        runner._refuse_if_gpu_is_held(
+            make_worker_task_message(EchoSpecStrict(taskType=TaskType.ECHO))
+        )
+
+    def test_a_stale_latch_does_not_refuse(self, tmp_path: Path) -> None:
+        # live_gpu_availability returns {} when the last reading was suppressed.
+        runner = self._runner(tmp_path, {})
+        runner._refuse_if_gpu_is_held(self._gpu_spec())
+
+    def test_nothing_held_admits(self, tmp_path: Path) -> None:
+        runner = self._runner(
+            tmp_path, {"GPU-0": DeviceAvailability(available=True, free_bytes=1)}
+        )
+        runner._refuse_if_gpu_is_held(self._gpu_spec())
+
+    @pytest.mark.parametrize(
+        "relay",
+        [
+            {"input_preparation": True},
+            {"service_episode": ServiceLeafEpisodeDispatch(interface="chat")},
+        ],
+        ids=["input_preparation", "service_episode"],
+    )
+    def test_admits_a_relaying_dispatch_onto_a_fully_held_worker(
+        self, tmp_path: Path, relay: dict[str, Any]
+    ) -> None:
+        # Its spec would load a model on its own, but this dispatch loads none.
+        runner = self._runner(tmp_path, self._held("GPU-0"))
+        runner._refuse_if_gpu_is_held(self._gpu_spec(**relay))
+
+
+class _Recording(Executor):
+    name = "recording"
+
+    def __init__(self) -> None:  # noqa: D107
+        self.ran: list[str] = []
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        self.ran.append(task.task_id)
+        return BaseExecutorResult()
+
+    def cancel(self, task_id: str) -> None:
+        return None
+
+
+class _Plane:
+    def __init__(self, root: Path) -> None:
+        self.store = SharedFilesystemObjectStore(root)
+
+    def for_task(self, task_id: str) -> SharedFilesystemObjectStore:
+        return self.store
+
+
+class TestRefusalInTheTaskLoop:
+    """The refusal runs where every controlled failure runs: inside the per-task
+    ``try`` after ``set_busy``, so the failure is reported and ``set_idle`` follows."""
+
+    def _run(self, tmp_path: Path, **message: Any) -> tuple[MagicMock, _Recording]:
+        lifecycle = MagicMock()
+        lifecycle.worker_id = "wrk-test"
+        lifecycle.client.create_task_log_emitter.return_value = None
+        lifecycle.client.iter_interrupts.return_value = []
+        lifecycle.client.iter_stops.return_value = []
+        lifecycle.client.next_mediated_op.side_effect = no_mediated_op
+        lifecycle.content_plane = _Plane(tmp_path / "cas")
+        lifecycle.live_gpu_availability.return_value = {
+            "GPU-0": DeviceAvailability(available=False, free_bytes=0)
+        }
+        executor = _Recording()
+        Runner(
+            lifecycle=lifecycle,
+            task_stream=[
+                make_worker_task_message(
+                    _gpu_spec(),
+                    task_type=TaskType.INFERENCE,
+                    task_id="tsk-1",
+                    **message,
+                )
+            ],
+            results_dir=tmp_path / "out",
+            hardware=make_worker_hardware(
+                [GpuInfo(index=0, name="L4", uuid="GPU-0", memory_total_bytes=1 << 34)]
+            ),
+            executors={"vllm": executor, "service_leaf": executor},
+            default_executor=executor,
+            logger=MagicMock(),
+        ).start()
+        return lifecycle, executor
+
+    def test_a_gpu_dispatch_on_a_held_card_is_refused_and_the_worker_idles(
+        self, tmp_path: Path
+    ) -> None:
+        lifecycle, executor = self._run(tmp_path)
+        assert executor.ran == []
+        lifecycle.set_busy.assert_called_once_with("tsk-1")
+        lifecycle.set_failed.assert_called_once()
+        assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
+        lifecycle.set_idle.assert_called_once_with("tsk-1")
+
+    def test_a_resident_service_episode_on_a_held_card_runs(
+        self, tmp_path: Path
+    ) -> None:
+        lifecycle, executor = self._run(
+            tmp_path, service_episode=ServiceLeafEpisodeDispatch(interface="chat")
+        )
+        lifecycle.set_failed.assert_not_called()
+        assert executor.ran == ["tsk-1"]
 
 
 class TestClearingReachesTheServer:
