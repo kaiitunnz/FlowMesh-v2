@@ -614,7 +614,9 @@ class TestRefusalInTheTaskLoop:
     """The refusal runs where every controlled failure runs: inside the per-task
     ``try`` after ``set_busy``, so the failure is reported and ``set_idle`` follows."""
 
-    def _run(self, tmp_path: Path, **message: Any) -> tuple[MagicMock, _Recording]:
+    def _run(
+        self, tmp_path: Path, **message: Any
+    ) -> tuple[MagicMock, _Recording, MagicMock]:
         lifecycle = MagicMock()
         lifecycle.worker_id = "wrk-test"
         lifecycle.client.create_task_log_emitter.return_value = None
@@ -626,7 +628,7 @@ class TestRefusalInTheTaskLoop:
             "GPU-0": DeviceAvailability(available=False, free_bytes=0)
         }
         executor = _Recording()
-        Runner(
+        runner = Runner(
             lifecycle=lifecycle,
             task_stream=[
                 make_worker_task_message(
@@ -643,23 +645,28 @@ class TestRefusalInTheTaskLoop:
             executors={"vllm": executor, "service_leaf": executor},
             default_executor=executor,
             logger=MagicMock(),
-        ).start()
-        return lifecycle, executor
+        )
+        hydrator = MagicMock(wraps=runner._input_hydrator)
+        runner._input_hydrator = hydrator
+        runner.start()
+        return lifecycle, executor, hydrator
 
     def test_a_gpu_dispatch_on_a_held_card_is_refused_and_the_worker_idles(
         self, tmp_path: Path
     ) -> None:
-        lifecycle, executor = self._run(tmp_path)
+        lifecycle, executor, hydrator = self._run(tmp_path)
         assert executor.ran == []
         lifecycle.set_busy.assert_called_once_with("tsk-1")
         lifecycle.set_failed.assert_called_once()
         assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
         lifecycle.set_idle.assert_called_once_with("tsk-1")
+        # Refused on what the worker can see now, before it pays to read any input.
+        hydrator.hydrate.assert_not_called()
 
     def test_a_resident_service_episode_on_a_held_card_runs(
         self, tmp_path: Path
     ) -> None:
-        lifecycle, executor = self._run(
+        lifecycle, executor, _ = self._run(
             tmp_path, service_episode=ServiceLeafEpisodeDispatch(interface="chat")
         )
         lifecycle.set_failed.assert_not_called()

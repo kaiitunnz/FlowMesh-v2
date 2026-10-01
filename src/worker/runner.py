@@ -1015,6 +1015,7 @@ class Runner:
                 try:
                     self._raise_if_cancel_pending(task_id)
                     self._current_task_id = task_id
+                    self._refuse_if_gpu_is_held(msg)
                     self._input_hydrator.hydrate(msg)
                     if msg.input_preparation:
                         self._raise_if_cancel_pending(task_id)
@@ -1068,7 +1069,6 @@ class Runner:
                         desired_key = "agent_episode"
                     else:
                         desired_key = "default" if task_type is None else task_type
-                    self._refuse_if_gpu_is_held(msg)
                     # Acquire lock before accessing/modifying active executor
                     with self._active_executor_lock:
                         if (
