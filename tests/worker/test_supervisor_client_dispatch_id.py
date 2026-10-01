@@ -162,3 +162,16 @@ def test_a_content_access_request_names_the_dispatch_running_its_task() -> None:
     client.push_content_access_request("tsk-a")
 
     assert _pushed_payload(client) == {"task_id": "tsk-a", "dispatch_id": "dsp-1"}
+
+
+def test_off_lane_work_renews_access_under_its_task_s_dispatch() -> None:
+    client = _client()
+    client._task_queue.put(_message("tsk-a", "dsp-1"))
+    client._task_queue.put(_message("tsk-b", "dsp-2"))
+    tasks = iter(client.iter_tasks())
+    next(tasks)
+    next(tasks)
+
+    client.push_content_access_request("tsk-a")
+
+    assert _pushed_payload(client) == {"task_id": "tsk-a", "dispatch_id": "dsp-1"}

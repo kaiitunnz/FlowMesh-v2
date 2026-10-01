@@ -87,7 +87,9 @@ def _adapter() -> ScriptedHarnessAdapter:
     return ScriptedHarnessAdapter(_SCRIPT, "v1")
 
 
-def _step(runtime, adapter, task_id: str, worker: str = "wkr-1") -> None:
+def _step(
+    runtime, adapter, task_id: str, worker: str = "wkr-1", dispatch_id=None
+) -> None:
     """Simulate one dispatch: give the episode its context, run and report it."""
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
     dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
@@ -97,7 +99,7 @@ def _step(runtime, adapter, task_id: str, worker: str = "wkr-1") -> None:
         if dispatch.capsule_blob is not None
         else None
     )
-    record_dispatch(runtime, task_id, worker)
+    record_dispatch(runtime, task_id, worker, dispatch_id)
     result = adapter.start(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
@@ -654,7 +656,7 @@ _MODEL_HELD_SCRIPT = [
 ]
 
 
-async def _held_boundary(runtime):
+async def _held_boundary(runtime, dispatch_id=None):
     """Drive an agent to a suspended, unsettled model boundary; return its held env."""
     captured: list[ToolInvocationEnvelope] = []
     runtime.set_model_settler(
@@ -665,10 +667,22 @@ async def _held_boundary(runtime):
     adapter = ScriptedHarnessAdapter(_MODEL_HELD_SCRIPT, "v1")
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
-    _step(runtime, adapter, writer)
+    _step(runtime, adapter, writer, dispatch_id=dispatch_id)
     assert engine.work_item(writer).status is WorkItemStatus.BLOCKED
     assert len(captured) == 1
     return workflow_id, writer, engine, captured[0]
+
+
+def test_a_suspended_episode_renews_store_access_under_its_dispatch() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        _, writer, _, _ = await _held_boundary(runtime, "dsp-1")
+
+        assert runtime.renewable_content_scope(writer, "wkr-1", "dsp-1") is not None
+        assert runtime.renewable_content_scope(writer, "wkr-1", "dsp-0") is None
+        assert runtime.renewable_content_scope(writer, "wkr-2", "dsp-1") is None
+
+    asyncio.run(run())
 
 
 def _boundary_env(engine, writer, call: str):
