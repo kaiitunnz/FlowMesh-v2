@@ -254,6 +254,19 @@ def _deny_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
 HELD_DISPATCH = "dsp-held"
 
 
+def _propose_held_turn(runtime: TaskRuntime, writer: str, digest: str) -> None:
+    """Propose the held agent's turn ``t0`` from its dispatch on its worker."""
+    runtime.authorize_model_turn(
+        AgentModelTurnProposal(
+            agent_task_id=writer,
+            call_correlation="t0",
+            request_digest=digest,
+            dispatch_id=HELD_DISPATCH,
+        ),
+        "wkr-1",
+    )
+
+
 def _hold_dispatch(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") -> Any:
     """Pin a worker and hold the agent mid-turn without running the episode.
 
@@ -433,15 +446,7 @@ def test_held_model_turn_mints_a_worker_permit_without_a_settle() -> None:
         writer = ids["writer"]
 
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer,
-                call_correlation="t0",
-                request_digest="deadbeef",
-                dispatch_id=HELD_DISPATCH,
-            ),
-            "wkr-1",
-        )
+        _propose_held_turn(runtime, writer, "deadbeef")
 
         permits = _permit_frames(runtime)
         assert len(permits) == 1 and not _deny_frames(runtime)
@@ -466,15 +471,7 @@ def test_held_model_turn_permit_carries_the_workflow_key() -> None:
         writer = ids["writer"]
 
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer,
-                call_correlation="t0",
-                request_digest="d",
-                dispatch_id=HELD_DISPATCH,
-            ),
-            "wkr-1",
-        )
+        _propose_held_turn(runtime, writer, "d")
 
         permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
         assert permit.credential == "sk-byok-abc"
@@ -496,15 +493,7 @@ def test_held_model_turn_denied_relays_a_deny_frame() -> None:
         writer = ids["writer"]
 
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer,
-                call_correlation="t0",
-                request_digest="d",
-                dispatch_id=HELD_DISPATCH,
-            ),
-            "wkr-1",
-        )
+        _propose_held_turn(runtime, writer, "d")
 
         assert not _permit_frames(runtime)
         denies = _deny_frames(runtime)
@@ -796,15 +785,7 @@ def test_only_the_deployment_model_url_is_granted_the_deployment_key(
 
         _dispatch_agent(runtime, writer, script=_MODEL_SCRIPT)
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer,
-                call_correlation="t0",
-                request_digest="d",
-                dispatch_id=HELD_DISPATCH,
-            ),
-            "wkr-1",
-        )
+        _propose_held_turn(runtime, writer, "d")
 
         permits = [
             MediatedOperationPermit.model_validate(p) for p in _permit_frames(runtime)
@@ -879,15 +860,7 @@ def test_a_gone_vaulted_key_denies_the_held_model_turn() -> None:
         vault.expire_all()
 
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer,
-                call_correlation="t0",
-                request_digest="d",
-                dispatch_id=HELD_DISPATCH,
-            ),
-            "wkr-1",
-        )
+        _propose_held_turn(runtime, writer, "d")
 
         assert not _permit_frames(runtime)
         (deny,) = _deny_frames(runtime)

@@ -13,7 +13,7 @@ from typing import Any, cast
 from server.config import OrchestrationConfig
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
-from shared.tools.contract import AgentModelTurnProposal, MediatedOperationPermit
+from shared.tools.contract import MediatedOperationPermit
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
@@ -23,10 +23,10 @@ from tests.server.task.test_v2_orchestration import (
 from tests.server.task.test_worker_originated_boundary import (
     _MODEL_WF,
     _SEARCH_WF,
-    HELD_DISPATCH,
     _dispatch_agent,
     _hold_dispatch,
     _permit_frames,
+    _propose_held_turn,
     _WorkerStub,
 )
 from tests.server.telemetry_helpers import recording_control_tracer
@@ -95,15 +95,7 @@ def test_held_model_turn_permit_carries_a_traceparent_to_the_worker() -> None:
         _wfl, ids = await _register(runtime, _MODEL_WF)
         writer = ids["writer"]
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer,
-                call_correlation="t0",
-                request_digest="deadbeef",
-                dispatch_id=HELD_DISPATCH,
-            ),
-            "wkr-1",
-        )
+        _propose_held_turn(runtime, writer, "deadbeef")
 
         permits = _permit_frames(runtime)
         assert len(permits) == 1
@@ -129,15 +121,7 @@ def test_held_model_turn_permit_carries_no_traceparent_key_when_off() -> None:
         _wfl, ids = await _register(runtime, _MODEL_WF)
         writer = ids["writer"]
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer,
-                call_correlation="t0",
-                request_digest="d",
-                dispatch_id=HELD_DISPATCH,
-            ),
-            "wkr-1",
-        )
+        _propose_held_turn(runtime, writer, "d")
 
         permits = _permit_frames(runtime)
         assert len(permits) == 1
