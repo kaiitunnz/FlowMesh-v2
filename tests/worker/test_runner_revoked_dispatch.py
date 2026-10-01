@@ -15,7 +15,7 @@ from tests.worker.factories import (
     make_worker_task_message,
     no_mediated_op,
 )
-from worker.executors.base_executor import Executor, TaskCancelledError
+from worker.executors.base_executor import Executor, RunSignals, TaskCancelledError
 from worker.runner import Runner
 
 
@@ -209,3 +209,41 @@ def test_a_dispatch_cancelled_before_it_starts_is_reported_cancelled(
     cast(MagicMock, runner.logger).info.assert_any_call(
         "Task %s cancelled: %s", "tsk-1", "Task tsk-1 was cancelled before execution"
     )
+
+
+class _Signalled(Executor):
+    """Records whether each run began cancelled, as a signal-aware executor sees it."""
+
+    name = "echo"
+
+    def __init__(self) -> None:
+        self._signals = RunSignals()
+        self.ran: list[tuple[str | None, bool]] = []
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        with self._signals.running(task.task_id):
+            self.ran.append((task.dispatch_id, self._signals.cancelled))
+        return BaseExecutorResult()
+
+    def cancel(self, task_id: str) -> None:
+        self._signals.cancel(task_id)
+
+
+def test_a_revoke_landing_before_its_run_leaves_the_next_dispatch_uncancelled(
+    tmp_path: Path,
+) -> None:
+    executor = _Signalled()
+    runner = _runner(tmp_path, executor, ["dsp-0", "dsp-1", "dsp-2"])
+    _deliver_revoke(runner, ("tsk-1", "dsp-1"))
+
+    def revoked_while_hydrating(msg: Any) -> None:
+        if msg.dispatch_id == "dsp-1":
+            # A second poll of the revokes follows the handling of the first.
+            _until(lambda: _lifecycle(runner).client.iter_revokes.call_count >= 2)
+
+    with patch.object(
+        runner._input_hydrator, "hydrate", side_effect=revoked_while_hydrating
+    ):
+        runner.start()
+
+    assert executor.ran == [("dsp-0", False), ("dsp-2", False)]
