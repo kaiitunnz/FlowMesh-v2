@@ -98,6 +98,20 @@ _BOUNDARY_DRAIN_POLL_SEC = 0.1
 _ENDED_DISPATCH_MEMORY = 1024
 
 
+def _note_end(
+    by_task: set[str],
+    by_dispatch: RecentSet[str],
+    task_id: str,
+    dispatch_id: str | None,
+) -> None:
+    """Record a cancel or stop for the dispatch it names, or for the task when it
+    names none."""
+    if dispatch_id is None:
+        by_task.add(task_id)
+    else:
+        by_dispatch.add(dispatch_id)
+
+
 def _declared_result(
     result: BaseExecutorResult, request: CanonicalInferenceRequest | None
 ) -> BaseExecutorResult | None:
@@ -953,10 +967,12 @@ class Runner:
                         dispatch_id,
                     ) in self.lifecycle.client.iter_interrupts():
                         with self._cancel_lock:
-                            if dispatch_id is None:
-                                self._pending_cancels.add(task_id)
-                            else:
-                                self._cancelled_dispatches.add(dispatch_id)
+                            _note_end(
+                                self._pending_cancels,
+                                self._cancelled_dispatches,
+                                task_id,
+                                dispatch_id,
+                            )
                             running = self._runs_locked(task_id, dispatch_id)
                         if not running:
                             continue
@@ -982,10 +998,12 @@ class Runner:
                         dispatch_id,
                     ) in self.lifecycle.client.iter_stops():
                         with self._cancel_lock:
-                            if dispatch_id is None:
-                                self._pending_stops.add(task_id)
-                            else:
-                                self._stopped_dispatches.add(dispatch_id)
+                            _note_end(
+                                self._pending_stops,
+                                self._stopped_dispatches,
+                                task_id,
+                                dispatch_id,
+                            )
                             running = self._runs_locked(task_id, dispatch_id)
                         if not running:
                             continue
@@ -1333,6 +1351,7 @@ class Runner:
                     self._current_task_id = None
                     with self._cancel_lock:
                         self._executing = None
+                        self._current_dispatch_id = None
                         self._pending_cancels.discard(task_id)
                         self._pending_stops.discard(task_id)
                         if (dispatch_id := msg.dispatch_id) is not None:
