@@ -410,17 +410,23 @@ def prepare_state_roots(config: WorkerConfig) -> list[Path]:
 
     A missing root inside another that exists is left out: a session cannot reach
     anything below a denied root. A filesystem content store is shared across
-    nodes, so the content plane creates its root.
+    nodes, so the content plane creates its root, and a missing root below a store
+    root that does not exist yet is left out too rather than creating it.
     """
     if problem := _state_problem(config):
         raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
     roots = denied_roots(config)
     existing = [root for root in roots if os.path.lexists(root)]
     shared = _shared_roots(config)
+    missing_shared = [root for root in shared if not os.path.lexists(root)]
     ready: list[Path] = []
     for root in roots:
         if not os.path.lexists(root):
-            if _inside_any(root, existing) or root in shared:
+            if (
+                _inside_any(root, existing)
+                or root in shared
+                or _inside_any(root, missing_shared)
+            ):
                 continue
             try:
                 _create_state_root(root)

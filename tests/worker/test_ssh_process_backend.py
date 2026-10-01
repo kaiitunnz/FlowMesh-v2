@@ -389,6 +389,32 @@ def test_a_shared_store_root_is_never_created_and_refuses_sessions_until_it_exis
     assert store in process_module.ensure_state_roots(config)
 
 
+def test_a_state_root_below_a_missing_store_root_never_creates_the_store(
+    tmp_path: Path,
+) -> None:
+    """The store is the content plane's to create; a local stand-in made as some
+    nested root's parent would pass for the shared mount."""
+    store = tmp_path / "store"
+    config = _with_store(_state_config(tmp_path, content_dir=store / "cache"), store)
+
+    with (
+        patch.object(process_module.acl, "tools_available", return_value=True),
+        patch.object(process_module.acl, "probe"),
+        patch.object(process_module.acl, "STATE_DIR", tmp_path / "flowmesh"),
+    ):
+        assert process_module._acl_ready(config)
+    assert not store.exists()
+    with pytest.raises(ExecutionError, match="does not exist yet") as refused:
+        process_module.ensure_state_roots(config)
+    assert refused.value.retryable
+    assert not store.exists()
+
+    store.mkdir()
+    roots = process_module.ensure_state_roots(config)
+    assert store in roots and store / "cache" not in roots
+    assert not (store / "cache").exists()
+
+
 def test_a_missing_store_root_inside_the_results_dir_is_left_out(
     tmp_path: Path,
 ) -> None:
