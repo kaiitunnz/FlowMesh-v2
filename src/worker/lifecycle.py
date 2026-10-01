@@ -252,6 +252,10 @@ class Lifecycle:
     def set_idle(self, task_id: str) -> None:
         with self._status_lock:
             self._last_task_end = time.time()
+            if self._draining.is_set():
+                # A draining worker stays busy, though it no longer runs the task.
+                self._report_locked(WorkerStatus.BUSY, self._dispatch_id, None, {})
+                return
         self._report(
             WorkerStatus.IDLE,
             self.client.dispatch_id(task_id),

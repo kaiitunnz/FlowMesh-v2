@@ -138,3 +138,14 @@ def test_a_drain_past_its_last_task_names_no_running_task(tmp_path: Path) -> Non
     lifecycle.set_draining()
 
     assert _heartbeat(lifecycle, client)["task_id"] is None
+
+
+def test_a_task_ending_during_a_drain_is_no_longer_named(tmp_path: Path) -> None:
+    lifecycle, client = _lifecycle(tmp_path)
+    lifecycle.set_busy("tsk-1")
+    lifecycle.set_draining()
+
+    lifecycle.set_idle("tsk-1")
+
+    heartbeat = _heartbeat(lifecycle, client)
+    assert (heartbeat["status"], heartbeat["task_id"]) == (WorkerStatus.BUSY, None)
