@@ -1,5 +1,6 @@
 import base64
 import binascii
+import collections
 import json
 import logging
 import queue
@@ -100,6 +101,11 @@ class SupervisorClient:
         self._event_queue: queue.Queue[tuple[int, dict[str, Any]] | object] = (
             queue.Queue()
         )
+        # Events a closed PushEvents call took but never sent, oldest first.
+        self._carried_events: collections.deque[tuple[int, dict[str, Any]] | object] = (
+            collections.deque()
+        )
+        self._carried_lock = threading.Lock()
         self._event_thread: threading.Thread | None = None
         self._task_thread: threading.Thread | None = None
         self._channel: grpc.Channel | None = None
@@ -582,7 +588,13 @@ class SupervisorClient:
                 self._event_ready.set()
                 if (on_ready := self._on_event_stream_ready) is not None:
                     on_ready()
-                self._stub.PushEvents(self._event_messages(), metadata=metadata)
+                stream_done = threading.Event()
+                try:
+                    self._stub.PushEvents(
+                        self._event_messages(stream_done), metadata=metadata
+                    )
+                finally:
+                    stream_done.set()
                 if self._shutdown.is_set():
                     break
                 self._event_ready.clear()
@@ -671,12 +683,25 @@ class SupervisorClient:
                 self.logger.error("Supervisor task stream error: %s", exc)
                 time.sleep(3)
 
-    def _event_messages(self) -> Iterable[supervisor_pb2.EventMessage]:
-        while not self._shutdown.is_set() or self._drain.is_set():
-            try:
-                item = self._event_queue.get(timeout=1.0)
-            except queue.Empty:
+    def _event_messages(
+        self, stream_done: threading.Event
+    ) -> Iterable[supervisor_pb2.EventMessage]:
+        """Yield queued events to one PushEvents call until it ends.
+
+        gRPC keeps pulling a call's request iterator on its own thread after the call
+        ends and drops what it pulls, so an event taken once the call is done goes
+        back for the next call.
+        """
+        while (
+            not self._shutdown.is_set() or self._drain.is_set()
+        ) and not stream_done.is_set():
+            item = self._next_event()
+            if item is None:
                 continue
+            if stream_done.is_set():
+                with self._carried_lock:
+                    self._carried_events.appendleft(item)
+                return
             if item is self._EVENT_SENTINEL:
                 break
             assert isinstance(item, tuple)
@@ -688,6 +713,15 @@ class SupervisorClient:
             yield supervisor_pb2.EventMessage(
                 payload=self._struct_from_payload(payload)
             )
+
+    def _next_event(self) -> tuple[int, dict[str, Any]] | object | None:
+        with self._carried_lock:
+            if self._carried_events:
+                return self._carried_events.popleft()
+        try:
+            return self._event_queue.get(timeout=1.0)
+        except queue.Empty:
+            return None
 
     # ---- Networking helpers ----------------------------------------- #
 

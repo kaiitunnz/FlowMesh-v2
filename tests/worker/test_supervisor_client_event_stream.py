@@ -1,29 +1,39 @@
-"""A worker's event stream runs its ready callback on each connect, before anything
-queued is sent."""
+"""An event stream that closes keeps the events it had not sent for the next one."""
 
-from typing import Any, cast
-from unittest.mock import MagicMock, patch
+import threading
+from typing import Any
 
+from google.protobuf.json_format import MessageToDict
+
+from shared.schemas.event import WorkerEvent
 from tests.worker.test_supervisor_client_dispatch_id import _client
-from worker import supervisor_client as supervisor_module
 
 
-def test_the_ready_callback_runs_before_the_stream_sends() -> None:
+def _heartbeat(worker_id: str) -> WorkerEvent:
+    return WorkerEvent(type="HEARTBEAT", worker_id=worker_id, ts="t")
+
+
+def test_an_event_a_closed_stream_pulls_goes_to_the_next_stream() -> None:
     client = _client()
-    order: list[str] = []
-    client._channel = cast(Any, object())
     client._shutdown.clear()
+    closed = threading.Event()
+    stale = client._event_messages(closed)
+    # gRPC pulls a call's request iterator on its own thread, which is still waiting
+    # on the queue when the call ends.
+    pulled: list[Any] = []
+    puller = threading.Thread(target=lambda: pulled.extend(stale), daemon=True)
+    puller.start()
+    closed.set()
 
-    def push(*_: Any, **__: Any) -> None:
-        order.append("sent")
-        client._shutdown.set()
+    client._enqueue_event(_heartbeat("wkr-1"))
+    puller.join(timeout=5)
+    assert not puller.is_alive()
 
-    stub = MagicMock()
-    stub.PushEvents.side_effect = push
-    client._stub = cast(Any, stub)
-    client.on_event_stream_ready(lambda: order.append("ready"))
+    client._event_queue.put(client._EVENT_SENTINEL)
+    sent = list(client._event_messages(threading.Event()))
 
-    with patch.object(supervisor_module.grpc, "channel_ready_future"):
-        client._run_event_stream()
-
-    assert order == ["ready", "sent"]
+    assert pulled == []
+    assert [
+        MessageToDict(message.payload, preserving_proto_field_name=True)["type"]
+        for message in sent
+    ] == ["HEARTBEAT"]

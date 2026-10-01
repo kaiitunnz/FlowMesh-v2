@@ -173,7 +173,7 @@ def test_event_messages_drops_superseded_generations() -> None:
     client._event_queue.put((1, {"type": "HEARTBEAT", "worker_id": "wrk-new"}))
     client._event_queue.put(client._EVENT_SENTINEL)
 
-    messages = list(client._event_messages())
+    messages = list(client._event_messages(threading.Event()))
 
     assert len(messages) == 1
     payload = MessageToDict(messages[0].payload, preserving_proto_field_name=True)
