@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.schemas.result import SSHResult
-from shared.tasks.specs.ssh import SSHSpecStrict
+from shared.tasks.specs.ssh import RELAYED_SSH_ACCESS_MODES, SSHSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils import new_ssh_session_id
 from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir
@@ -271,7 +271,7 @@ class SSHExecutor(Executor):
             "host": host_name,
             "port": host_port,
         }
-        if access_mode in ("proxy", "forward"):
+        if access_mode in RELAYED_SSH_ACCESS_MODES:
             # The root relays to the session by this id; the port never leaves here.
             self.publish_endpoint(session_id, host_port)
             # The session's own address, for a client on a host that can reach it;

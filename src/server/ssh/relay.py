@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from shared.network.byte_stream import WINDOW_BYTES, ByteStreamChannel
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.network.session import RelaySessionRole
+from shared.tasks.specs import RELAYED_SSH_ACCESS_MODES
 from shared.utils.ids import new_relay_session_id
 from shared.utils.json import safe_get
 
@@ -34,7 +35,6 @@ from ..supervisor.services.reverse_relay_attachment import ReverseRelayAttachmen
 from ..task.models import TaskRecord, TaskStatus
 
 SSH_EDGE_STREAM_ID = "ssh-edge"
-RELAYED_MODES = frozenset({"proxy", "forward"})
 
 # sshd speaks first, so a target that sends nothing this long after the opening
 # message never received it.
@@ -69,7 +69,10 @@ async def resolve_relay_target(
     if record.status != TaskStatus.DISPATCHED:
         raise SshRelayUnavailable("the task is not running")
     ssh_info = safe_get(record.latest_update, "ssh")
-    if not isinstance(ssh_info, dict) or ssh_info.get("mode") not in RELAYED_MODES:
+    if (
+        not isinstance(ssh_info, dict)
+        or ssh_info.get("mode") not in RELAYED_SSH_ACCESS_MODES
+    ):
         raise SshRelayUnavailable("the task has no relayed SSH session")
     if not (endpoint_id := ssh_info.get("session_id")):
         raise SshRelayUnavailable("the session published no id")
@@ -281,7 +284,6 @@ class SshRelayOrigin:
 
 
 __all__ = [
-    "RELAYED_MODES",
     "SSH_EDGE_STREAM_ID",
     "SshRelayOrigin",
     "SshRelayTarget",

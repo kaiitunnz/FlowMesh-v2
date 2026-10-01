@@ -620,9 +620,6 @@ class TrustedPeerConfig:
         return bool(self.tls_ca_file and self.tls_cert_file and self.tls_key_file)
 
 
-NETWORK_PLANE_ENABLED_DEFAULT = True
-
-
 @dataclass
 class NetworkPlaneConfig:
     """Network-plane route substrate knobs.
@@ -633,7 +630,7 @@ class NetworkPlaneConfig:
     the echo relay session's bounded in-flight buffer.
     """
 
-    enabled: bool = NETWORK_PLANE_ENABLED_DEFAULT
+    enabled: bool = True
     endpoint_url: str | None = None
     sidecar_url: str | None = None
     trust_domain: str = "flowmesh"
@@ -658,7 +655,7 @@ class NetworkPlaneConfig:
             else ("echo",)
         )
         return cls(
-            enabled=parse_bool_env(f"{prefix}ENABLED", NETWORK_PLANE_ENABLED_DEFAULT),
+            enabled=parse_bool_env(f"{prefix}ENABLED", True),
             endpoint_url=_env_or_none(f"{prefix}ENDPOINT_URL"),
             sidecar_url=_env_or_none(f"{prefix}SIDECAR_URL"),
             trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh",

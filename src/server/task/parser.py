@@ -9,11 +9,15 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from shared.tasks import TaskEnvelopeTemplate, TaskType
 from shared.tasks.components import TaskAnnotations
 from shared.tasks.credentials import find_spec_strings
-from shared.tasks.specs import DevModelSpecTemplate, ServeSpecTemplate
+from shared.tasks.specs import (
+    RELAYED_SSH_ACCESS_MODES,
+    DevModelSpecTemplate,
+    ServeSpecTemplate,
+)
 from shared.utils import new_task_id, parse_bool_env
 from shared.utils.json import safe_get
 
-from ..config import NETWORK_PLANE_ENABLED_DEFAULT
+from ..config import NetworkPlaneConfig
 from .n8n_parser import translate_n8n_workflow
 
 _ALLOWED_TASK_TYPES = ", ".join(member.value for member in TaskType)
@@ -21,9 +25,7 @@ _ENABLE_SERVER_SSH_PROXY = parse_bool_env("ENABLE_SERVER_SSH_PROXY", True)
 _ENABLE_SERVER_SERVE_PROXY = parse_bool_env("ENABLE_SERVER_SERVE_PROXY", True)
 _ENABLE_SERVER_SERVE_FORWARD = parse_bool_env("ENABLE_SERVER_SERVE_FORWARD", False)
 _ENABLE_SERVER_PORT_FORWARD = parse_bool_env("ENABLE_SERVER_PORT_FORWARD", True)
-_NETWORK_PLANE_ENABLED = parse_bool_env(
-    "NETWORK_PLANE_ENABLED", NETWORK_PLANE_ENABLED_DEFAULT
-)
+_NETWORK_PLANE_ENABLED = NetworkPlaneConfig.from_env().enabled
 
 
 class _WorkflowMetadataInput(BaseModel):
@@ -712,7 +714,7 @@ def _validate_ssh_access_mode(task: TaskEnvelopeTemplate, context: str) -> None:
     if task.spec.interactive is False:
         return
     access_mode = task.spec.accessMode or "direct"
-    if access_mode in ("proxy", "forward") and not _NETWORK_PLANE_ENABLED:
+    if access_mode in RELAYED_SSH_ACCESS_MODES and not _NETWORK_PLANE_ENABLED:
         raise ValueError(
             f"Invalid task payload{context}: SSH accessMode {access_mode!r} "
             "needs the network plane on this server"
