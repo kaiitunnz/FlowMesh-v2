@@ -204,9 +204,8 @@ the form `<alias>.<hex HMAC-SHA256 of the alias keyed by EXTERNAL_WORKER_TOKEN>`
 `SUPERVISOR_GRPC_TARGET` with `SUPERVISOR_GRPC_TLS_CA_B64`, and the deployment's
 network-plane peer (`NETWORK_PLANE_PEER_*`), content cache and store
 (`WORKER_CONTENT_DIR`, `CONTENT_*`), `WORKER_PRIVATE_STATE_DIR`, and telemetry
-(`SERVER_METRICS_*`) settings. A peer reaches its
-listener at its node's endpoint host, so a worker on another host carries
-resident traffic over `control_relay`.
+(`SERVER_METRICS_*`) settings. A peer reaches its listener at its node's endpoint
+host, so a worker on another host carries resident traffic over `control_relay`.
 
 ## Supervisor
 

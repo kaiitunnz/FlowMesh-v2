@@ -338,8 +338,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and Chat Completions, injects the agent's pinned fabric facades, and runs the held
   egress — it proposes the request digest to control, awaits the one-use
   `MediatedOperationPermit` over the worker's attachment, and egresses synchronously
-  through the `MediatedEgressSidecar`, returning the model's whole message inline. The
-  per-workflow model credential rides the permit to the worker. A binding without one
+  through the `MediatedEgressSidecar`, returning the model's whole message inline.
+  Control authorizes a turn only for the dispatch holding the agent's task, on the
+  worker whose stream proposed it. The per-workflow model credential rides the permit to the worker. A binding without one
   uses the worker's deployment key only for the deployment's default model URL, and
   calls any other URL without a credential; a pinned credential missing from the vault
   fails the call. A fabric facade the model calls on the turn is captured into
@@ -470,8 +471,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   control store, manifest, frame, or log. A scope is the widest a task can reach, cut as a
   short-lived session over that scope's prefix, and the grant carries no list, delete, or
   binding operation — which references a task may use is still decided by the consumer
-  bindings control checks. A fresh dispatch or recovery gets fresh access; expiry or a
-  policy rotation fences what came before.
+  bindings control checks. A fresh dispatch or recovery gets fresh access, and renewal
+  serves only the dispatch holding the task; expiry or a policy rotation fences what
+  came before.
 - **Worker content cache and granted hydration.** What a worker holds is a cache over that
   store, so a copy may be dropped at any time: a deployment can bound the cache by how
   long a copy goes unused and by disk, least recently used first, and leaves both
@@ -556,8 +558,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   status it last reported. When a live worker keeps reporting that it does not hold
   a dispatch, the dispatch resolves as lost after the bound a silent worker gets, and
   the task's next placement avoids that worker; a task bound to that worker's private
-  state goes back to it, spending an attempt. A worker shutting down reports itself
-  busy until it leaves.
+  state goes back to it, spending an attempt. A dispatch control resolves without its
+  worker ending it, whether disowned, lost with its worker, or ended across a restart,
+  is revoked on that worker, so a frame of it still queued never runs, and a worker
+  reporting itself busy on a dispatch control does not hold has that dispatch revoked.
+  A worker shutting down reports itself busy until it leaves.
 - **Per-device GPU availability.** A GPU worker reads each device's memory on every
   heartbeat and reports any device a process outside FlowMesh holds. The worker stays
   `IDLE` and keeps taking CPU work. A model dispatch waits while any device of its
@@ -582,7 +587,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   stream attaches. A worker whose task stream ends reconnects, and its new stream reads
   the queue of the id its token then holds. An id the supervisor frees is unregistered
   with the root, and a worker whose event stream closes without it unregistering is
-  unregistered unless it reconnects within a few seconds.
+  unregistered unless it reconnects within a few seconds. When a worker's task stream
+  attaches, control sends it again each pending mediated operation it originated,
+  under a fresh permit, and an interrupt for each task it is cancelling.
 - **Worker and node identity.** A worker's alias is assigned by its
   supervisor: the supervisor passes it as `WORKER_ALIAS` to the workers it
   launches, an external worker reads it from its token, and registration
