@@ -1049,12 +1049,8 @@ class EventMonitor:
     def _handle_ssh_task_update(
         self, task_id: str, worker_id: str | None, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        """Serve an SSH session in the best relayed mode this server can carry.
-
-        A forward session registers a server-allocated relay port and falls back to
-        proxy. A relayed session no mode can carry is reported as direct at the address
-        it listens on, which reaches it from the worker's own host.
-        """
+        """Serve an SSH session in the best mode this server can carry: `forward`,
+        then `proxy`, then `direct` at the session's own address."""
         inner = payload.get("ssh")
         if not isinstance(inner, dict):
             return payload
@@ -1079,7 +1075,7 @@ class EventMonitor:
                     task_id,
                     exc,
                 )
-                normalized_mode = "proxy" if self._ssh_proxy_available else "direct"
+                normalized_mode = self._ssh_fallback_mode
         if normalized_mode == "direct" and mode != "direct":
             return self._report_ssh_direct(payload, inner, task_id, worker_id, mode)
         if normalized_mode != mode:
@@ -1120,9 +1116,7 @@ class EventMonitor:
 
     def _fail_ssh_task(self, task_id: str, worker_id: str | None, reason: str) -> None:
         """Fail a task whose session cannot be reached and stop its executor."""
-        self._dispatcher.fail_task(
-            task_id, reason, worker_id=worker_id, payload={"error": reason}
-        )
+        self._dispatcher.fail_task(task_id, reason, worker_id=worker_id)
         if (
             not worker_id
             or (worker := self._worker_registry.get_worker(worker_id)) is None
@@ -1410,8 +1404,12 @@ class EventMonitor:
             )
 
     @property
-    def _ssh_proxy_available(self) -> bool:
-        return self._ssh_proxy_enabled and self._ssh_relay is not None
+    def _ssh_fallback_mode(self) -> str:
+        """Return the mode a session degrades to: ``proxy`` where this server can
+        carry it, else ``direct``."""
+        if self._ssh_proxy_enabled and self._ssh_relay is not None:
+            return "proxy"
+        return "direct"
 
     def _normalize_ssh_mode(self, mode: str, worker_id: str | None) -> str:
         """Pick the best mode this server can carry the session in.
@@ -1419,17 +1417,17 @@ class EventMonitor:
         `forward` falls back to `proxy`, and `direct` is always the last one.
         """
         if mode == "proxy":
-            return "proxy" if self._ssh_proxy_available else "direct"
+            return self._ssh_fallback_mode
         if mode == "forward":
             if not worker_id:
                 self._logger.warning(
                     "Cannot keep SSH forward mode without worker_id; "
                     "degrading access mode"
                 )
-                return "proxy" if self._ssh_proxy_available else "direct"
+                return self._ssh_fallback_mode
             if self._port_forward is not None:
                 return "forward"
-            return "proxy" if self._ssh_proxy_available else "direct"
+            return self._ssh_fallback_mode
         return "direct"
 
     # ------------------------------------------------------------------ # Helper
