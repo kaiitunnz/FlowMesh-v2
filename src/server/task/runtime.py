@@ -2292,8 +2292,7 @@ class TaskRuntime:
         A frame relayed while the worker had no stream attached may be lost. Each
         pending mediated operation the worker originated is re-minted, and the worker
         drops one it already runs; each task being cancelled there is interrupted
-        again, keyed to its dispatch. Task dispatches are not re-relayed: a lost one
-        resolves as lost.
+        again, keyed to its dispatch. A lost task dispatch resolves as lost.
         """
         with self._cv:
             pending = {
@@ -2611,8 +2610,7 @@ class TaskRuntime:
     def _deny_model_turn(
         self, proposal: AgentModelTurnProposal, worker_id: str, reason: str
     ) -> None:
-        """Relay a deny frame so a held turn fails fast rather than waiting out its
-        deadline."""
+        """Relay a deny frame that fails a held turn before its deadline."""
         if (worker := self._worker_registry.get_worker(worker_id)) is None:
             return
         self._worker_registry.publish_mediated_op(

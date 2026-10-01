@@ -547,7 +547,7 @@ class GrpcServer:
         self._servicer.rebind_node(node_id)
 
     def reconcile_workers(self) -> None:
-        """Release the workers the root no longer records."""
+        """Release the workers the root does not record for this node."""
         self._servicer.reconcile_workers()
 
     def worker_id_released(self, worker_id: str) -> None:

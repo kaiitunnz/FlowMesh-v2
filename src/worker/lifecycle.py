@@ -272,7 +272,8 @@ class Lifecycle:
         while it shuts down."""
         self._draining.set()
         with self._status_lock:
-            # A drain is no run: past its last task it names that task's dispatch only.
+            # Past its last task, a drain report names that task's dispatch but no
+            # running task.
             running = self._task_id if self._status is WorkerStatus.BUSY else None
             self._report_locked(WorkerStatus.BUSY, self._dispatch_id, running, {})
 

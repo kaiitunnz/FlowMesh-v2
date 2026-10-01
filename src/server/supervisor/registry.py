@@ -136,9 +136,8 @@ class WorkerRegistry:
         with self._get_state() as state:
             return list(state.token_id_map.values())
 
+    # Unbinding makes the worker register again; returns whether a token was bound.
     def retire(self, worker_id: str) -> bool:
-        """Unbind the token still bound to ``worker_id``, so its worker registers again;
-        return whether one was."""
         with self._get_state() as state:
             token = next(
                 (t for t, bound in state.token_id_map.items() if bound == worker_id),

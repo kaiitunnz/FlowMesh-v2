@@ -58,12 +58,10 @@ class RelayService:
         self._q.put(event_data)
 
     def add_unregister(self, worker_id: str) -> None:
-        """Relay an unregister on behalf of a worker that will not send its own."""
         self.add_event({"type": "UNREGISTER", "worker_id": worker_id, "payload": {}})
 
+    # The root re-relays what a detached stream may have lost.
     def add_attached(self, worker_id: str) -> None:
-        """Relay that a worker's task stream attached, so the root re-relays what a
-        detached stream may have lost."""
         self.add_event({"type": "ATTACHED", "worker_id": worker_id, "payload": {}})
 
     def add_log(self, log_data: Any) -> None:

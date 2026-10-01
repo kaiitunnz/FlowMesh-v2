@@ -559,8 +559,8 @@ class SupervisorClient:
                 gen = self._register_generation
                 rebound = threading.Event()
                 self._rebound = rebound
-            # What control sent the previous registration is for a dispatch this one
-            # does not run.
+            # Interrupts, stops and revokes queued under the previous registration
+            # target the dispatch it gave up.
             for stale in (self._interrupt_queue, self._stop_queue, self._revoke_queue):
                 _drain(stale)
             self._rearm_register_event()

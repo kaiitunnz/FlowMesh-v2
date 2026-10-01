@@ -1,5 +1,5 @@
-"""A worker reporting itself busy on a dispatch control no longer holds has that
-dispatch revoked, once."""
+"""A worker reporting itself busy on a dispatch control does not hold has that
+dispatch revoked, once in each resend interval."""
 
 import asyncio
 import json
