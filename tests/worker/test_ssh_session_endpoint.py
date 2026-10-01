@@ -30,10 +30,16 @@ def _ready(tmp_path: Path, mode: str) -> tuple[SshEndpointRegistry, dict]:
 
 
 @pytest.mark.parametrize("mode", ["proxy", "forward"])
-def test_a_relayed_session_publishes_its_port(tmp_path: Path, mode: str) -> None:
+def test_a_relayed_session_publishes_its_port_and_its_own_route(
+    tmp_path: Path, mode: str
+) -> None:
     registry, update = _ready(tmp_path, mode)
     assert registry.resolve("ssn-1") == 2222
     assert not any(key.startswith("_") for key in update)
+    # The Docker backend publishes the port on every host address.
+    assert update["directScope"] == "network"
+    assert (update["directHost"], update["directPort"]) == (update["host"], 2222)
+    assert update["workerId"] == "wkr-1"
 
 
 def test_a_direct_session_publishes_nothing(tmp_path: Path) -> None:

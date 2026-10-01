@@ -410,6 +410,12 @@ that session; the port is withdrawn, and its connections end, when the session s
 Root and supervisors relay the bytes without reading them, and each direction of a
 connection half-closes on its own.
 
+A relayed session on the `process` backend listens on loopback only; a Docker session's
+port is published on every address of the worker's host. Every relayed session reports
+its own route as `directHost`, `directPort`, `directScope` (`loopback` or `network`) and
+`workerId`. A relayed mode the server cannot carry falls back from `forward` to `proxy`,
+then to `direct` at the session's own address, keeping its scope.
+
 ## SSH executor (process backend)
 
 On a root worker, a `process` session runs under its own account and group,

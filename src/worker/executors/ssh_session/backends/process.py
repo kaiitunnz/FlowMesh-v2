@@ -225,9 +225,7 @@ class ProcessSessionBackend(SSHSessionBackend):
         if idle:
             self.reap_stale()
 
-    def session_host(self) -> str:
-        if override := self._config.ssh_relay_host:
-            return override
+    def _default_session_host(self) -> str:
         return resolve_tailnet_address() or socket.getfqdn()
 
     def start_session(self, request: SessionRequest) -> "ProcessSession":
@@ -353,7 +351,13 @@ class ProcessSessionBackend(SSHSessionBackend):
             _write_private(authorized_keys, rendered)
             account.grant_read(authorized_keys)
             process, port, log_path = _start_sshd(
-                sshd_path, session_dir, host_key, authorized_keys, account, exported
+                sshd_path,
+                session_dir,
+                host_key,
+                authorized_keys,
+                account,
+                exported,
+                self.session_bind_host(cfg.access_mode),
             )
         except BaseException:
             if not _discard_session(process, account, session_dir):
@@ -1285,6 +1289,7 @@ def _start_sshd(
     authorized_keys: Path,
     account: SessionAccount,
     exported_env: list[str],
+    bind_host: str,
 ) -> tuple[subprocess.Popen[bytes], int, Path]:
     """Start sshd, retrying on another port when it loses the race to bind.
 
@@ -1304,6 +1309,7 @@ def _start_sshd(
                 authorized_keys=authorized_keys,
                 login_user=account.name,
                 exported_env=exported_env,
+                bind_host=bind_host,
             ),
             encoding="utf-8",
         )
@@ -1419,12 +1425,13 @@ def _render_sshd_config(
     authorized_keys: Path,
     login_user: str,
     exported_env: list[str],
+    bind_host: str,
 ) -> str:
     permit_env = ",".join(exported_env) if exported_env else "no"
     return "\n".join(
         (
             f"Port {port}",
-            "ListenAddress 0.0.0.0",
+            f"ListenAddress {bind_host}",
             f"HostKey {host_key.as_posix()}",
             f"PidFile {(session_dir / 'sshd.pid').as_posix()}",
             f"AuthorizedKeysFile {authorized_keys.as_posix()}",

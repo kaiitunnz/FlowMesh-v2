@@ -262,7 +262,7 @@ class SSHExecutor(Executor):
         host_port = session.wait_ready(_SESSION_READY_TIMEOUT_SEC)
         if host_port is None:
             return {}
-        host_name = self._backend.session_host()
+        host_name = self._backend.session_address(access_mode)
         ssh_info: dict[str, Any] = {
             "session_id": session_id,
             "mode": access_mode,
@@ -274,10 +274,12 @@ class SSHExecutor(Executor):
         if access_mode in ("proxy", "forward"):
             # The root relays to the session by this id; the port never leaves here.
             self.publish_endpoint(session_id, host_port)
-            if access_mode == "forward":
-                # Forward-mode sessions need separate direct connection info
-                ssh_info["directHost"] = host_name
-                ssh_info["directPort"] = host_port
+            # The session's own address, for a client on a host that can reach it;
+            # the server may rewrite `host` and `port` to its route, never these.
+            ssh_info["directHost"] = host_name
+            ssh_info["directPort"] = host_port
+            ssh_info["directScope"] = self._backend.session_scope(access_mode)
+            ssh_info["workerId"] = task.assigned_worker
             logger.info(
                 "SSH %s session ready: host=%s port=%s (task=%s)",
                 access_mode,

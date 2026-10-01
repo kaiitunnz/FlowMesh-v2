@@ -1016,6 +1016,7 @@ def test_sshd_admits_only_the_session_account_by_key() -> None:
         authorized_keys=Path("/run/s/authorized_keys"),
         login_user="fmssnabc",
         exported_env=["TOKEN"],
+        bind_host="127.0.0.1",
     )
 
     for line in (
@@ -1676,3 +1677,31 @@ def test_a_session_failure_reports_no_restored_credential(tmp_path: Path) -> Non
 
     reported = lifecycle.set_failed.call_args.args[1]
     assert _SECRET not in reported and "[REDACTED]" in reported
+
+
+@pytest.mark.parametrize(
+    ("mode", "bind", "scope"),
+    [
+        ("direct", "0.0.0.0", "network"),
+        ("proxy", "127.0.0.1", "loopback"),
+        ("forward", "127.0.0.1", "loopback"),
+    ],
+)
+def test_only_a_direct_session_listens_beyond_loopback(
+    tmp_path: Path, mode: str, bind: str, scope: str
+) -> None:
+    backend = ProcessSessionBackend(make_live_worker_config(tmp_path))
+    assert backend.session_bind_host(mode) == bind
+    assert backend.session_scope(mode) == scope
+    config = process_module._render_sshd_config(
+        port=2222,
+        session_dir=Path("/run/s"),
+        host_key=Path("/run/s/key"),
+        authorized_keys=Path("/run/s/authorized_keys"),
+        login_user="fmssnabc",
+        exported_env=[],
+        bind_host=backend.session_bind_host(mode),
+    )
+    assert f"ListenAddress {bind}" in config.splitlines()
+    if scope == "loopback":
+        assert backend.session_address(mode) == "127.0.0.1"

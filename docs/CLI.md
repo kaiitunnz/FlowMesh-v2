@@ -259,6 +259,10 @@ Migration: the former `flowmesh stack purge <version>` (pre-v0.2.0) is replaced 
 
 ```bash
 flowmesh ssh connect <tsk-id>          # interactive shell into an SSH task
+flowmesh ssh connect --direct <tsk-id> # dial a relayed session's own address
 flowmesh ssh run <tsk-id> -- <cmd>     # one-shot exec
 flowmesh ssh connections               # list active proxy/forward connections
 ```
+
+`--direct` prints the route it dials and its scope: `loopback on worker <id>` reaches the
+session only from that worker's host, and `network` from wherever the host is routable.
