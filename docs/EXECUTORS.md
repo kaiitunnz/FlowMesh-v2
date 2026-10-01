@@ -415,6 +415,13 @@ reachable only from that worker's host); a Docker session's port is published on
 address of the worker's host (`network`). When the server cannot carry a relayed mode,
 `forward` falls back to `proxy`, then to `direct` at that address.
 
+## SSH executor GPUs
+
+With `ENABLE_SSH_GPU_LIMIT`, a session that declares a `gpu` block receives the
+smallest matching subset of its worker's devices that no process outside FlowMesh
+holds, and one the free devices cannot satisfy is refused and retried. A session that
+declares no `gpu` block receives every device of its worker.
+
 ## SSH executor (process backend)
 
 On a root worker, a `process` session runs under its own account and group,

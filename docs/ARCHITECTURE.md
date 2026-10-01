@@ -558,6 +558,19 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the task's next placement avoids that worker; a task bound to that worker's private
   state goes back to it, spending an attempt. A worker shutting down reports itself
   busy until it leaves.
+- **Per-device GPU availability.** A GPU worker reads each device's memory on every
+  heartbeat and reports any device a process outside FlowMesh holds. The worker stays
+  `IDLE` and keeps taking CPU work; only its held devices leave placement, so a GPU
+  dispatch waits for a free device rather than failing as unschedulable, and
+  embodiment selection is unchanged. An input preparation or a resident service
+  episode loads no model, so a held device neither withholds nor refuses it. A
+  reading counts only when nothing of the worker's own can be in it: no task running,
+  no GPU-using executor still warm, and past `WORKER_FOREIGN_GPU_GRACE_SEC` after a
+  task, so a device taken while an executor stays warm is seen once it unloads,
+  which `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` bounds. A worker that cannot reach NVML
+  clears its reading, and its devices schedule as unreported. A GPU dispatch that
+  reaches a worker after its device was taken is refused and retried. Disable with
+  `WORKER_FOREIGN_GPU_GATE=false`.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
   dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
   recreates a deleted record.
