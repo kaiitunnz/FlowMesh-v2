@@ -2560,14 +2560,12 @@ class TaskRuntime:
             engine = self._engines.get(agent.workflow_id) if agent else None
             if agent is None or engine is None:
                 return
-            if proposal.dispatch_id is None or not self._holds_dispatch_locked(
-                agent, proposer_id, proposal.dispatch_id
-            ):
+            if not self._dispatch_live_locked(agent, proposer_id, proposal.dispatch_id):
                 self._deny_model_turn(proposal, proposer_id, "model turn not held")
                 return
-            worker_id = agent.assigned_worker
-            worker = self._worker_registry.get_worker(worker_id) if worker_id else None
-            if worker_id is None or worker is None:
+            worker_id = proposer_id
+            worker = self._worker_registry.get_worker(worker_id)
+            if worker is None:
                 # A gone origin worker cannot receive a relay: the held turn fails on
                 # its own permit deadline.
                 return
@@ -3375,12 +3373,8 @@ class TaskRuntime:
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            if (
-                record is None
-                or record.status in TERMINAL_TASK_STATUSES
-                or record.assigned_worker != worker_id
-                or dispatch_id is None
-                or not self._holds_dispatch_locked(record, worker_id, dispatch_id)
+            if record is None or not self._dispatch_live_locked(
+                record, worker_id, dispatch_id
             ):
                 return None
             return record.org_id
@@ -4868,6 +4862,16 @@ class TaskRuntime:
             worker_id == held_worker
             and (dispatch_id is None or dispatch_id == held_dispatch)
             for held_worker, held_dispatch in held
+        )
+
+    def _dispatch_live_locked(
+        self, record: TaskRecord, worker_id: str, dispatch_id: str | None
+    ) -> bool:
+        """Whether the named dispatch, on ``worker_id``, holds a task still running."""
+        return (
+            dispatch_id is not None
+            and record.status not in TERMINAL_TASK_STATUSES
+            and self._holds_dispatch_locked(record, worker_id, dispatch_id)
         )
 
     def _accepts_event_locked(
@@ -6704,7 +6708,7 @@ class TaskRuntime:
                 TaskStatus.DISPATCHED,
                 TaskStatus.CANCELLING,
             ) or (publish is not None and not publish.recorded)
-            return in_flight and self._holds_dispatch_locked(
+            return in_flight and self._dispatch_live_locked(
                 record, worker_id, dispatch_id
             )
 
