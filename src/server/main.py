@@ -730,6 +730,11 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
+            # The SSH ingresses' last cancels still ride the bridge pumps.
+            if PORT_FORWARD_SERVICE is not None:
+                await PORT_FORWARD_SERVICE.stop()
+            if SSH_RELAY is not None:
+                await SSH_RELAY.stop()
             for _bridge_task in (
                 app.state.resident_bridge_task,
                 app.state.content_bridge_task,
@@ -754,10 +759,6 @@ async def _lifespan(_: FastAPI):
                 AGENT_MODEL_GATEWAY.shutdown()
             if FABRIC_TOOL_BROKER is not None:
                 FABRIC_TOOL_BROKER.shutdown()
-            if PORT_FORWARD_SERVICE is not None:
-                await PORT_FORWARD_SERVICE.stop()
-            if SSH_RELAY is not None:
-                await SSH_RELAY.stop()
 
 
 app.router.lifespan_context = _lifespan

@@ -60,6 +60,7 @@ class _Fabric:
     origin: SshRelayOrigin
     registry: SshEndpointRegistry
     lane: SshRelayLane
+    pump: "asyncio.Task[None]"
 
     def new_origin(self) -> SshRelayOrigin:
         return SshRelayOrigin(self.redis, refresh_interval_sec=3600)
@@ -112,7 +113,7 @@ async def _fabric() -> AsyncIterator[_Fabric]:
     pump_task = asyncio.create_task(pump())
     await origin.start()
     try:
-        yield _Fabric(redis, origin, registry, lane)
+        yield _Fabric(redis, origin, registry, lane, pump_task)
     finally:
         await origin.stop()
         pump_task.cancel()
@@ -394,5 +395,35 @@ def test_a_cancel_overtaking_its_opening_frame_opens_nothing() -> None:
             await asyncio.sleep(0.3)
 
             assert sshd.accepted == 0
+
+    _run(run())
+
+
+def test_a_stopping_root_ends_its_connections_at_the_worker_without_the_bridge() -> (
+    None
+):
+    """The root's bridge stops with it, so the cancels its shutdown sends must not
+    need it; the records stay for the next root to reap however long it is down."""
+
+    async def run() -> None:
+        async with _fabric() as fabric, _listener(_hold) as sshd:
+            fabric.registry.publish(ENDPOINT, sshd.port)
+            async with _forward(fabric) as (_, port):
+                _, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.write(b"x")
+                await writer.drain()
+                while sshd.accepted == 0:
+                    await asyncio.sleep(0.005)
+                (session_id,) = fabric.origin._channels
+                fabric.pump.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await fabric.pump
+
+                await fabric.origin.stop()
+
+                await asyncio.wait_for(sshd.closed.wait(), 5)
+                record = SSH_RELAY_KEYSPACE.session(session_id)
+                assert fabric.redis.ttls.get(record) != 60_000
+                writer.close()
 
     _run(run())

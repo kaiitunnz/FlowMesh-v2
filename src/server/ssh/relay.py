@@ -129,12 +129,27 @@ class SshRelayOrigin:
         self._refresher = asyncio.create_task(self._refresh_records())
 
     async def stop(self) -> None:
+        """End every live connection at its worker, then stop consuming the edge.
+
+        The root's bridge stops with it, so each cancel goes straight to its target's
+        down stream, and each record keeps its TTL for the next root to reap.
+        """
         if self._refresher is not None:
             self._refresher.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._refresher
-        for session_id in list(self._channels):
-            await self._abort(session_id)
+        channels, self._channels = self._channels, {}
+        self._by_task.clear()
+        for session_id, channel in channels.items():
+            try:
+                await self._cancel_at_target(
+                    session_id, await self._sessions.load(session_id)
+                )
+                await channel.abort()
+            except Exception:
+                self._logger.warning(
+                    "Failed to end SSH relay session %s", session_id, exc_info=True
+                )
         await self._attachment.stop()
 
     async def reap_orphans(self) -> int:
@@ -149,22 +164,29 @@ class SshRelayOrigin:
             if session_id in self._channels:
                 continue
             record = await self._sessions.load(session_id)
-            if record.get("origin_node") != SSH_EDGE_STREAM_ID:
+            if not await self._cancel_at_target(session_id, record):
                 continue
-            if target_node := record.get("target_node"):
-                await self._streams.publish_down(
-                    target_node,
-                    RelayFrame(
-                        kind=RelayFrameKind.CANCEL,
-                        session_id=session_id,
-                        direction=RelayDirection.ORIGIN_TO_TARGET,
-                    ),
-                )
             await self._sessions.touch(session_id, _ENDED_RECORD_TTL_MS)
             reaped += 1
         if reaped:
             self._logger.info("Reaped %d SSH relay sessions left open", reaped)
         return reaped
+
+    async def _cancel_at_target(self, session_id: str, record: dict[str, str]) -> bool:
+        """Publish a cancel straight to the target of an edge session; return whether
+        ``record`` is one."""
+        if record.get("origin_node") != SSH_EDGE_STREAM_ID:
+            return False
+        if target_node := record.get("target_node"):
+            await self._streams.publish_down(
+                target_node,
+                RelayFrame(
+                    kind=RelayFrameKind.CANCEL,
+                    session_id=session_id,
+                    direction=RelayDirection.ORIGIN_TO_TARGET,
+                ),
+            )
+        return True
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one frame from the edge stream to its connection."""
