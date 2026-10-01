@@ -3,6 +3,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import model_validator
 
 from .._base import StrictBaseModel, TemplateBaseModel
+from ..components.resources import GPURequirements
 from ..placeholders import TemplateInt
 from ..task_type import TaskType
 from .common import TaskSpecStrictBase, TaskSpecTemplateBase
@@ -136,6 +137,12 @@ class SSHSpecStrict(TaskSpecStrictBase):
         _validate_inputs(self)
         return self
 
+    def uses_gpu(self) -> bool:
+        return _ssh_uses_gpu(self)
+
+    def gpu_selection(self) -> GPURequirements | None:
+        return _ssh_gpu_selection(self)
+
 
 class SSHSpecTemplate(TaskSpecTemplateBase):
     credential_fields: ClassVar[tuple[str, ...]] = (
@@ -167,3 +174,31 @@ class SSHSpecTemplate(TaskSpecTemplateBase):
         _resolve_interactive(self)
         _validate_inputs(self)
         return self
+
+    def uses_gpu(self) -> bool:
+        return _ssh_uses_gpu(self)
+
+    def gpu_selection(self) -> GPURequirements | None:
+        return _ssh_gpu_selection(self)
+
+
+def _ssh_uses_gpu(spec: SSHSpecStrict | SSHSpecTemplate) -> bool:
+    """A session uses the GPU exactly when it asks for devices: a ``type`` or
+    ``memory`` without ``count`` still resolves to one device, and only an explicit
+    ``count: 0`` asks for none."""
+    gpu = spec.gpu_requirements()
+    return gpu is not None and gpu.count != 0
+
+
+def _ssh_gpu_selection(
+    spec: SSHSpecStrict | SSHSpecTemplate,
+) -> GPURequirements | None:
+    """The GPU block a session's devices are chosen by, or None when it chooses none.
+
+    A block naming no ``count``, ``type`` or ``memory`` selects nothing, so the session
+    is handed every device its worker exposes.
+    """
+    gpu = spec.gpu_requirements()
+    if gpu is None or (gpu.count is None and not gpu.type and not gpu.memory):
+        return None
+    return gpu

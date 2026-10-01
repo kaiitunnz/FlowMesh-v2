@@ -31,8 +31,9 @@ from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
 from .executors.mp_executor import MPExecutor
 from .executors.ssh_executor import SSHExecutor
+from .gpu_availability import GpuAvailabilityMonitor, NvmlDeviceProbe
 from .gpu_sampler import GpuSampler, build_gpu_sampler
-from .hw import collect_hw
+from .hw import collect_hw, device_uses_unified_memory
 from .lifecycle import Lifecycle
 from .power import PowerMonitor
 from .runner import Runner
@@ -352,6 +353,8 @@ def main() -> None:
         grpc_keepalive_timeout_ms=cfg.grpc_keepalive_timeout_ms,
     )
 
+    hardware = collect_hw(bandwidth_bytes_per_sec=cfg.network_bandwidth_bytes_per_sec)
+    logger.info("Collected hardware info: %s", hardware)
     lifecycle = Lifecycle(
         supervisor_client,
         cfg.hb_interval_sec,
@@ -359,9 +362,14 @@ def main() -> None:
         cfg.hb_file,
         cost_per_hour=cfg.cost_per_hour,
         power_monitor=PowerMonitor(),
+        gpu_monitor=(
+            GpuAvailabilityMonitor(
+                cfg.foreign_gpu_gate, NvmlDeviceProbe(device_uses_unified_memory)
+            )
+            if hardware.gpu.devices and cfg.foreign_gpu_gate.enabled
+            else None
+        ),
     )
-    hardware = collect_hw(bandwidth_bytes_per_sec=cfg.network_bandwidth_bytes_per_sec)
-    logger.info("Collected hardware info: %s", hardware)
 
     def _worker_id_or_none() -> str | None:
         try:
@@ -449,6 +457,7 @@ def main() -> None:
         peer_listener_sock=peer_sock,
         telemetry=cfg.telemetry,
     )
+    lifecycle.set_gpu_executor_probe(runner.has_active_gpu_executor)
 
     # Install signal handlers to allow graceful shutdown
     def handle_exit_signal(_signum: int, _) -> None:

@@ -155,7 +155,7 @@ async def test_a_task_cancelled_while_the_dispatcher_holds_it_stays_cancelled() 
     task_id = _next(runtime)
     worker_registry = mock.MagicMock()
 
-    def cancel_then_find_no_worker(_task: object) -> list[object]:
+    def cancel_then_find_no_worker(_task: object, _relays_only: bool) -> list[object]:
         runtime.cancel_workflow(workflow_id)
         return []
 

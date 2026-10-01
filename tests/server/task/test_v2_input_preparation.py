@@ -18,7 +18,7 @@ from shared.inference import (
 from shared.schemas.event import TaskEvent, WorkerEvent
 from shared.utils.time import now_iso
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
-from tests.server.dispatch_helpers import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch, resolved_embodiment
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_embodiment_fence import (
@@ -151,7 +151,7 @@ async def test_a_preparation_commits_no_embodiment_and_no_attempt() -> None:
     assert work_item.invocation_id is None
     assert engine.embodiment_selection(task_id) is None
     assert engine.embodiment_pinned(task_id) is False
-    assert runtime.resolved_embodiment(task_id) is None
+    assert resolved_embodiment(runtime, task_id) is None
 
 
 @pytest.mark.anyio

@@ -15,7 +15,7 @@ from server.dispatcher.embodiment import (
 from server.task.runtime import TaskRuntime
 from server.task.v2.representations.plan import InferenceEmbodimentMenu
 from shared.tasks.specs import InferenceEmbodimentKind
-from tests.server.dispatch_helpers import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch, resolved_embodiment
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
     make_capturing_dispatcher,
@@ -71,7 +71,7 @@ async def test_the_primary_embodiment_is_bound_before_placement() -> None:
     dispatcher, runtime, task_id = await _setup(resident_capacity_enabled=True)
     assert _resolve(dispatcher, runtime, task_id) is True
 
-    resolved = runtime.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(runtime, task_id)
     assert resolved is not None
     assert resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
     assert dispatcher.requeued == []
@@ -86,7 +86,7 @@ async def test_a_deployment_without_resident_capacity_runs_the_other_embodiment(
     dispatcher, runtime, task_id = await _setup(resident_capacity_enabled=False)
     assert _resolve(dispatcher, runtime, task_id) is True
 
-    resolved = runtime.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(runtime, task_id)
     assert resolved is not None
     assert resolved.kind is InferenceEmbodimentKind.SELF_CONTAINED
     assert runtime.service_episode_dispatch(task_id) is None
@@ -102,7 +102,7 @@ async def test_an_unplaceable_primary_defers_without_binding_anything() -> None:
     assert _resolve(dispatcher, runtime, task_id) is False
 
     # It defers holding no worker: no embodiment bound, no local switch, no retry spent.
-    assert runtime.resolved_embodiment(task_id) is None
+    assert resolved_embodiment(runtime, task_id) is None
     assert runtime.service_episode_dispatch(task_id) is None
     [(deferred, kwargs)] = dispatcher.requeued
     assert deferred == task_id
@@ -123,7 +123,7 @@ async def test_an_injected_selector_can_force_either_legal_candidate(
     )
     assert _resolve(dispatcher, runtime, task_id) is True
 
-    resolved = runtime.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(runtime, task_id)
     assert resolved is not None and resolved.kind is kind
     # Routing follows the resolved embodiment, not the leaf's own service binding.
     routes_resident = runtime.service_episode_dispatch(task_id) is not None
@@ -143,7 +143,7 @@ async def test_an_uncommitted_embodiment_is_re_resolvable() -> None:
     )
 
     assert _resolve(dispatcher, runtime, task_id) is True
-    resolved = runtime.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(runtime, task_id)
     assert resolved is not None
     assert resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
 
@@ -169,7 +169,7 @@ async def test_a_delivered_embodiment_is_pinned(
     other = next(k for k in InferenceEmbodimentKind if k is not kind)
     dispatcher._embodiment_selector = _ForcedSelector(other)
     assert _resolve(dispatcher, runtime, task_id) is True
-    resolved = runtime.resolved_embodiment(task_id)
+    resolved = resolved_embodiment(runtime, task_id)
     assert resolved is not None and resolved.kind is kind
 
 
@@ -187,7 +187,7 @@ async def test_a_permanently_unplaceable_primary_fails_rather_than_hanging() -> 
     assert "declared primary" in message
     assert "resident_served_infeasible" in kwargs["payload"]["reason"]
     # It fails rather than switching to the embodiment the author did not declare.
-    assert runtime.resolved_embodiment(task_id) is None
+    assert resolved_embodiment(runtime, task_id) is None
 
 
 @pytest.mark.anyio
@@ -249,13 +249,13 @@ async def test_placement_relaxes_the_accelerator_only_for_a_relaying_embodiment(
         embodiment_selector=_ForcedSelector(kind)
     )
     assert _resolve(dispatcher, runtime, task_id) is True
-    assert dispatcher._relays_only(task_id) is relaxed
+    assert dispatcher._relays_only(task_id, preparing=False) is relaxed
 
 
 @pytest.mark.anyio
 async def test_a_task_with_no_resolved_embodiment_places_as_declared() -> None:
     dispatcher, runtime, task_id = await _setup()
-    assert dispatcher._relays_only(task_id) is False
+    assert dispatcher._relays_only(task_id, preparing=False) is False
 
 
 def test_the_snapshot_reports_the_deployments_admission_bound() -> None:

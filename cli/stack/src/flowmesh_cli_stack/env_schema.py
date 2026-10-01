@@ -1453,6 +1453,36 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=0,
                 ),
                 EnvVar(
+                    "WORKER_FOREIGN_GPU_GATE",
+                    "true",
+                    description=(
+                        "Report a GPU as unavailable while a process outside "
+                        "FlowMesh uses it."
+                    ),
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "WORKER_FOREIGN_GPU_MEM_MIB",
+                    "1024",
+                    description="Foreign GPU-memory threshold in MiB.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "WORKER_FOREIGN_GPU_CONSECUTIVE",
+                    "2",
+                    description="Readings needed before a device changes availability.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "WORKER_FOREIGN_GPU_GRACE_SEC",
+                    "90",
+                    description="Seconds after a task before a GPU reading counts.",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                ),
+                EnvVar(
                     "MODEL_CLEANUP_AFTER_UPLOAD",
                     "0",
                     var_type=EnvVarType.INT,

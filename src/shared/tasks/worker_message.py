@@ -152,6 +152,12 @@ class WorkerTaskMessage(BaseModel):
     def metadata(self) -> TaskMetadata | None:
         return self.task.metadata
 
+    @property
+    def relays_only(self) -> bool:
+        """Whether this dispatch runs no local model: an input preparation, or a
+        resident service episode that carries its invocation to a replica."""
+        return self.input_preparation or self.service_episode is not None
+
     @model_validator(mode="before")
     @classmethod
     def _restore_deduped(cls, data: Any) -> Any:
@@ -181,6 +187,23 @@ class GpuInfo(BaseModel):
     name: str = Field(description="GPU name.")
     uuid: str = Field(description="GPU UUID.")
     memory_total_bytes: int | None = Field(description="Total GPU memory in bytes.")
+    # Informational only, never a placement input: a reading taken while the worker's
+    # own executor is warm cannot tell its memory from another tenant's.
+    memory_free_bytes: int | None = Field(
+        default=None, description="Free GPU memory in bytes at the last reading."
+    )
+    # The only field that gates placement. None means the worker reported no
+    # observation, and the device schedules as if it had never been read.
+    gpu_available: bool | None = Field(
+        default=None,
+        description="Whether no process outside FlowMesh holds this device.",
+    )
+
+    @property
+    def is_available(self) -> bool:
+        """Whether this device may be scheduled on; only an explicit ``False``
+        withholds it, so a device nobody has read stays schedulable."""
+        return self.gpu_available is not False
 
 
 class GpuPlatformInfo(BaseModel):

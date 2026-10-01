@@ -17,6 +17,9 @@ class ServeSpecStrict(ModelSpecStrict):
     def validate_dispatchable(self) -> None:
         _validate_serve_dispatchable(self)
 
+    def uses_gpu(self) -> bool:
+        return True
+
 
 class ServeSpecTemplate(ModelSpecTemplate):
     taskType: Literal[TaskType.SERVE]
@@ -29,12 +32,14 @@ class ServeSpecTemplate(ModelSpecTemplate):
     def validate_dispatchable(self) -> None:
         _validate_serve_dispatchable(self)
 
+    def uses_gpu(self) -> bool:
+        return True
+
 
 def _validate_serve_dispatchable(spec: "ServeSpecStrict | ServeSpecTemplate") -> None:
     """A serve task always launches a persistent vLLM GPU server, so it must
     request at least one GPU or GPU scheduling and accounting are bypassed."""
-    hardware = spec.resources.hardware if spec.resources else None
-    gpu = hardware.gpu if hardware else None
+    gpu = spec.gpu_requirements()
     if gpu and gpu.count is not None and gpu.count >= 1:
         return
     raise ValueError(

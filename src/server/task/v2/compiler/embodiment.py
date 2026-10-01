@@ -247,8 +247,7 @@ def _reject(task: ParsedTask, code: str, message: str) -> Exception:
 def _declared_gpu_count(
     spec: InferenceSpecStrict | InferenceSpecTemplate,
 ) -> int | None:
-    hardware = spec.resources.hardware if spec.resources else None
-    gpu = hardware.gpu if hardware else None
+    gpu = spec.gpu_requirements()
     return gpu.count if gpu else None
 
 

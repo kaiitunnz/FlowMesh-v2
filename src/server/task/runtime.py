@@ -177,6 +177,7 @@ from .v2.representations.operators import (
     AgentModelGatewayBinding,
     AgentOperator,
     ResolvedEmbodiment,
+    ServiceDependency,
 )
 from .v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 
@@ -2970,21 +2971,41 @@ class TaskRuntime:
             engine = self._engines.get(record.workflow_id) if record else None
             if engine is None:
                 return None
-            dependency = engine.service_dependency(task_id)
-            if dependency is None or engine.agent_operator(task_id) is not None:
+            dependency = self._resident_served_dependency_locked(engine, task_id)
+            if dependency is None:
                 return None
-            if engine.embodiment_menu(task_id) is not None:
-                resolved = self._resolved_embodiment_locked(engine, task_id)
-                if (
-                    resolved is None
-                    or resolved.kind is not InferenceEmbodimentKind.RESIDENT_SERVED
-                ):
-                    return None
             _capsule, outcomes = engine.episode_context(task_id)
             return ServiceLeafEpisodeDispatch(
                 interface=dependency.interface.value,
                 delivered_outcomes=outcomes,
             )
+
+    def serves_from_replica(self, task_id: str) -> bool:
+        """Whether a task's dispatch carries its invocation to a resident replica, a
+        menu-resolved or pinned resident leaf, rather than loading a model locally."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            return (
+                engine is not None
+                and self._resident_served_dependency_locked(engine, task_id) is not None
+            )
+
+    def _resident_served_dependency_locked(
+        self, engine: OrchestrationEngine, task_id: str
+    ) -> ServiceDependency | None:
+        """The resident dependency a leaf's dispatch is served from, or None."""
+        dependency = engine.service_dependency(task_id)
+        if dependency is None or engine.agent_operator(task_id) is not None:
+            return None
+        if engine.embodiment_menu(task_id) is not None:
+            resolved = self._resolved_embodiment_locked(engine, task_id)
+            if (
+                resolved is None
+                or resolved.kind is not InferenceEmbodimentKind.RESIDENT_SERVED
+            ):
+                return None
+        return dependency
 
     def _resolved_embodiment_locked(
         self, engine: OrchestrationEngine, task_id: str
@@ -3005,15 +3026,6 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             return engine.embodiment_pinned(task_id) if engine else False
-
-    def resolved_embodiment(self, task_id: str) -> ResolvedEmbodiment | None:
-        """The embodiment a menu node's task is bound to, for its worker message."""
-        with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is None:
-                return None
-            return self._resolved_embodiment_locked(engine, task_id)
 
     def embodiment_menu(self, task_id: str) -> InferenceEmbodimentMenu | None:
         """The embodiments a ready task's plan node offers, if it offers a menu."""
@@ -6609,11 +6621,7 @@ class TaskRuntime:
                 record = self._tasks.get(task_id)
                 if record is None:
                     continue
-                resources = record.task.spec.resources
-                if resources is None or resources.hardware is None:
-                    counts.add(0)
-                    continue
-                gpu = resources.hardware.gpu
+                gpu = record.task.spec.gpu_requirements()
                 if gpu:
                     # Default to 1 if a GPU is required but count is unspecified
                     counts.add(int(gpu.count) if gpu.count else 1)

@@ -48,6 +48,10 @@ class WorkerStatus(StrEnum):
     STOPPED = "STOPPED"
     UNKNOWN = "UNKNOWN"
 
+    @classmethod
+    def _missing_(cls, value: object) -> Any:
+        return cls.UNKNOWN
+
 
 class TaskType(StrEnum):
     INFERENCE = "inference"

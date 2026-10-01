@@ -15,11 +15,16 @@ class WorkerRegisterResponse(BaseModel):
 
 
 class NodeWorkerStatus(StrEnum):
+    UNKNOWN = "UNKNOWN"
     STARTING = "STARTING"
     IDLE = "IDLE"
     BUSY = "BUSY"
     STOPPING = "STOPPING"
     STOPPED = "STOPPED"
+
+    @classmethod
+    def _missing_(cls, value: object) -> Any:
+        return cls.UNKNOWN
 
 
 class CPUInfo(BaseModel):
@@ -45,6 +50,13 @@ class GpuInfo(BaseModel):
     uuid: str | None = Field(default=None, description="GPU UUID.")
     memory_total_bytes: int | None = Field(
         default=None, description="Total GPU memory in bytes."
+    )
+    memory_free_bytes: int | None = Field(
+        default=None, description="Free GPU memory in bytes at the last reading."
+    )
+    gpu_available: bool | None = Field(
+        default=None,
+        description="Whether no process outside FlowMesh holds this device.",
     )
 
 

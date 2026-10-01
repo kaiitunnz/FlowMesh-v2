@@ -14,6 +14,7 @@ from shared.telemetry.semconv import (
 )
 from worker import gpu_sampler
 from worker.gpu_sampler import build_gpu_sampler
+from worker.utils import nvml
 
 
 class _FakeNvmlError(Exception):
@@ -51,6 +52,7 @@ class _FakePynvml:
     def nvmlDeviceGetMemoryInfo(handle: int):
         class _Mem:
             used = 1024
+            free = 4096
 
         return _Mem()
 
@@ -98,6 +100,7 @@ def test_nvml_shutdown_is_never_called_anywhere_in_the_module():
 
 def test_sample_once_emits_gauges_with_node_and_worker_id(monkeypatch):
     monkeypatch.setattr(gpu_sampler, "pynvml", _FakePynvml)
+    monkeypatch.setattr(nvml, "pynvml", _FakePynvml)
     reader, meter = _meter_with_reader()
     sampler = build_gpu_sampler(
         meter,
@@ -123,6 +126,7 @@ def test_sample_once_emits_gauges_with_node_and_worker_id(monkeypatch):
 
 def test_cpu_only_worker_degrades_silently(monkeypatch, caplog):
     monkeypatch.setattr(gpu_sampler, "pynvml", _CpuOnlyPynvml)
+    monkeypatch.setattr(nvml, "pynvml", _CpuOnlyPynvml)
     reader, meter = _meter_with_reader()
     sampler = build_gpu_sampler(
         meter,
@@ -159,6 +163,7 @@ def test_enabled_sampler_starts_a_thread_and_shuts_down_without_shutdown_call(
     monkeypatch,
 ):
     monkeypatch.setattr(gpu_sampler, "pynvml", _FakePynvml)
+    monkeypatch.setattr(nvml, "pynvml", _FakePynvml)
     _, meter = _meter_with_reader()
     sampler = build_gpu_sampler(
         meter,

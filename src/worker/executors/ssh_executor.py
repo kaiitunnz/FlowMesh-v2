@@ -24,6 +24,7 @@ from typing import Any
 from shared.schemas.result import SSHResult
 from shared.tasks.specs.ssh import RELAYED_SSH_ACCESS_MODES, SSHSpecStrict
 from shared.tasks.task_type import TaskType
+from shared.tasks.worker_message import GpuInfo
 from shared.utils import new_ssh_session_id
 from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir
 from worker.config import WorkerConfig
@@ -36,15 +37,32 @@ from worker.executors.ssh_session import (
     SSHSessionBackend,
     select_backend_cls,
 )
-from worker.executors.ssh_session.config import output_limit, raise_if_exceeded
+from worker.executors.ssh_session.config import (
+    FreeGpus,
+    output_limit,
+    raise_if_exceeded,
+)
 from worker.executors.ssh_session.inputs import resolve_inputs
 from worker.executors.utils.checkpoints import maybe_upload_artifacts
+from worker.gpu_availability import DeviceAvailability
 
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 
 logger = logging.getLogger(__name__)
 
 _SESSION_READY_TIMEOUT_SEC = 30.0
+
+
+def _free_uuids(
+    reported: dict[str, DeviceAvailability], devices: list[GpuInfo]
+) -> frozenset[str]:
+    """The devices a reading does not mark held; one it did not cover is no opinion
+    rather than held, so it counts as free."""
+    return frozenset(
+        device.uuid
+        for device in devices
+        if (seen := reported.get(device.uuid)) is None or seen.available
+    )
 
 
 class SSHExecutor(Executor):
@@ -108,13 +126,24 @@ class SSHExecutor(Executor):
     # Main execution
     # ------------------------------------------------------------------ #
 
+    def _free_gpus(self) -> FreeGpus | None:
+        if self._lifecycle is None or self._hardware is None:
+            return None
+        devices = self._hardware.gpu.devices
+        return FreeGpus(
+            latched=_free_uuids(self._lifecycle.gpu_availability(), devices),
+            fresh=_free_uuids(self._lifecycle.live_gpu_availability(), devices),
+        )
+
     def run(self, task: ExecutorTask, out_dir: Path) -> SSHResult:
         with self._signals.running(task.task_id):
             return self._run_session(task, out_dir)
 
     def _run_session(self, task: ExecutorTask, out_dir: Path) -> SSHResult:
         spec = self.require_spec(task, SSHSpecStrict)
-        cfg = SSHConfig.from_spec(spec, self._config, self._hardware)
+        # A session holds its devices for as long as it lives, so it is never handed
+        # one another tenant is on.
+        cfg = SSHConfig.from_spec(spec, self._config, self._hardware, self._free_gpus())
         access_mode = cfg.access_mode
         interactive = cfg.interactive
 

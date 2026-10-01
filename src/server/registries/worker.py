@@ -14,7 +14,6 @@ from shared.schemas.command import (
 )
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks import TaskEnvelope
-from shared.tasks.components.resources import GPURequirements
 from shared.tasks.specs import SSHSpecStrict, SSHSpecTemplate
 from shared.tasks.worker_message import (
     WorkerHardware,
@@ -22,12 +21,7 @@ from shared.tasks.worker_message import (
     WorkerTaskMessage,
 )
 from shared.utils import new_worker_id, now_iso, parse_mem_to_bytes
-from shared.utils.hardware import (
-    normalize_gpu_type,
-    parse_gpu_memory_bytes,
-    select_matching_gpu_indices,
-    unified_gpu_memory_satisfies,
-)
+from shared.utils.hardware import gpu_meets_requirements, gpus_fit_dispatch
 
 from ..clients.redis import (
     WORKER_EVENT_CHANNEL,
@@ -143,6 +137,30 @@ class Reservation(NamedTuple):
     worker_id: str
     task_id: str
     dispatch_id: str
+
+
+def _merge_gpu_availability(
+    hardware: WorkerHardware | None, availability: dict[str, Any]
+) -> None:
+    """Apply a worker's reported per-device availability onto its device list.
+
+    ``hardware_json`` is the worker's registration-time description of itself and is
+    never rewritten, while availability changes every heartbeat, so the two live in
+    separate fields and are joined by UUID here. A device the worker said nothing
+    about keeps ``None`` and schedules as it would unread.
+    """
+    if hardware is None or not availability:
+        return
+    for device in hardware.gpu.devices:
+        reported = availability.get(device.uuid)
+        if not isinstance(reported, dict):
+            continue
+        available = reported.get("available")
+        if isinstance(available, bool):
+            device.gpu_available = available
+        free_bytes = reported.get("free_bytes")
+        if isinstance(free_bytes, int):
+            device.memory_free_bytes = free_bytes
 
 
 def _flatten_fields(mapping: dict[str, str]) -> list[str]:
@@ -555,7 +573,11 @@ class WorkerRegistry:
         except Exception:
             return
 
-    def idle_satisfying_pool(self, task: TaskEnvelope) -> list[Worker]:
+    def idle_satisfying_pool(
+        self, task: TaskEnvelope, relays_only: bool
+    ) -> list[Worker]:
+        """Idle, non-stale workers that can run a dispatch of ``task`` now: those
+        ``satisfying_workers`` returns, less any whose free GPUs fall short."""
         available: list[Worker] = []
         for worker_id in self.get_worker_ids():
             worker = self.get_worker(worker_id)
@@ -563,7 +585,11 @@ class WorkerRegistry:
                 continue
             if self.is_worker_stale(worker.id):
                 continue
-            if hw_satisfies(worker, task) and capability_satisfies(worker, task):
+            if (
+                hw_satisfies(worker, task)
+                and capability_satisfies(worker, task)
+                and gpu_available_for(worker, task, relays_only)
+            ):
                 available.append(worker)
         return self.sort_workers(available)
 
@@ -654,6 +680,16 @@ class WorkerRegistry:
         message = payload.model_dump_json()
         channel = node_dispatch_channel(worker.node_id)
         return await self._rds.asyncio.publish_control(channel, message)
+
+    def record_gpu_availability(
+        self, worker_id: str, availability: dict[str, Any]
+    ) -> bool:
+        """Store a heartbeat's per-device availability, latched until the worker
+        reports again; an empty map clears it."""
+        return self._set_worker_fields(
+            worker_id,
+            {"gpu_availability_json": json.dumps(availability, ensure_ascii=False)},
+        )
 
     def _set_worker_fields(self, worker_id: str, mapping: dict[str, str]) -> bool:
         wrote = self._rds.sync.eval(
@@ -749,10 +785,21 @@ def hw_satisfies(worker: Worker, task: TaskEnvelope) -> bool:
     if gpu_req:
         if hw is None:
             return False
-        if not _gpu_meets_requirements(hw, gpu_req):
+        if not gpu_meets_requirements(hw, gpu_req):
             return False
 
     return True
+
+
+def gpu_available_for(worker: Worker, task: TaskEnvelope, relays_only: bool) -> bool:
+    """Whether a dispatch of ``task`` fits this worker's GPUs that nothing else holds.
+
+    Applied when choosing among idle workers, never in ``hw_satisfies``: a held card
+    is transient, so its worker stays in ``satisfying_workers`` and the task waits
+    rather than failing as unschedulable.
+    """
+    hw = worker.hardware
+    return hw is None or gpus_fit_dispatch(hw, task.spec, relays_only)
 
 
 def capability_satisfies(worker: Worker, task: TaskEnvelope) -> bool:
@@ -762,62 +809,6 @@ def capability_satisfies(worker: Worker, task: TaskEnvelope) -> bool:
         return False
     if isinstance(spec, SSHSpecStrict | SSHSpecTemplate) and not spec.interactive:
         return capabilities.ssh_noninteractive
-    return True
-
-
-def _gpu_meets_requirements(hw: WorkerHardware, gpu_req: GPURequirements) -> bool:
-    required_count = gpu_req.count
-    if required_count is not None:
-        try:
-            required_count = int(required_count)
-        except Exception:
-            required_count = None
-    required_type = normalize_gpu_type(gpu_req.type)
-    required_memory_bytes = parse_gpu_memory_bytes(gpu_req.memory)
-    needed = required_count or 1
-
-    entries = hw.gpu.devices
-    if entries:
-        if required_count is not None and len(entries) < required_count:
-            return False
-        if len(select_matching_gpu_indices(entries, gpu_req)) >= needed:
-            return True
-        # Unified-memory fallback: when memory is the binding constraint and
-        # the worker exposes a unified GPU/system pool large enough to cover
-        # the request, still admit it.
-        if required_memory_bytes is None:
-            return False
-        type_only_req = GPURequirements(
-            count=gpu_req.count, type=gpu_req.type, memory=None
-        )
-        if len(select_matching_gpu_indices(entries, type_only_req)) < needed:
-            return False
-        return unified_gpu_memory_satisfies(hw, required_memory_bytes, needed)
-
-    # Fallback when workers report aggregate GPU data instead of per-device entries.
-    count = 0 if hw is None else len(hw.gpu.devices)
-    if required_count is not None and count < required_count:
-        return False
-
-    first_gpu = hw.gpu.devices[0] if hw and hw.gpu.devices else None
-    type_value = first_gpu.name if first_gpu else None
-    if required_type and not str(type_value or "").strip().lower().startswith(
-        required_type
-    ):
-        return False
-
-    if required_memory_bytes:
-        total_mem = 0 if first_gpu is None else (first_gpu.memory_total_bytes or 0)
-        if total_mem <= 0 and unified_gpu_memory_satisfies(
-            hw, required_memory_bytes, needed
-        ):
-            return True
-        if total_mem <= 0:
-            return False
-        per_gpu = total_mem / max(needed, 1)
-        if per_gpu < required_memory_bytes:
-            return False
-
     return True
 
 
@@ -862,6 +853,7 @@ def _parse_worker_from_redis(
         if hardware_json is None
         else WorkerHardware.model_validate_json(hardware_json)
     )
+    _merge_gpu_availability(hardware, _loads(value.get("gpu_availability_json"), {}))
     capabilities_json = value.get("capabilities_json")
     capabilities = (
         WorkerCapabilities()

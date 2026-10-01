@@ -5,9 +5,11 @@ Responsible for registration, periodic heartbeats, transitions between
 RUNNING and IDLE, and graceful shutdown/unregister.
 """
 
+import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +20,7 @@ from shared.tasks.worker_message import WorkerHardware, WorkerStatus
 from shared.utils.time import now_iso
 
 from .egress import PendingEgressRequestStore
+from .gpu_availability import DeviceAvailability, GpuAvailabilityMonitor
 from .power import PowerMonitor
 from .resident import ResidentRequestStore
 from .ssh_relay import SshEndpointRegistry, SshRelayLane
@@ -26,6 +29,8 @@ from .supervisor_client import SupervisorClient
 if TYPE_CHECKING:
     from .content import WorkerContentPlane
     from .model_turn import ResponsesFacade
+
+logger = logging.getLogger(__name__)
 
 # The wait an unregister gets for its event stream even once the stop budget is spent;
 # the budget leaves this much before the stop kills the worker.
@@ -41,6 +46,7 @@ class Lifecycle:
         hb_file: Path,
         cost_per_hour: float,
         power_monitor: PowerMonitor | None = None,
+        gpu_monitor: GpuAvailabilityMonitor | None = None,
     ):
         self.client = client
         self.hb_sec = hb_sec
@@ -70,10 +76,40 @@ class Lifecycle:
         self._status = WorkerStatus.STARTING
         self._dispatch_id: str | None = None
         self._draining = threading.Event()
+        self._last_task_end = 0.0
+        self._gpu_monitor = gpu_monitor
+        self._gpu_executor_probe: Callable[[], bool] | None = None
+        if gpu_monitor is not None:
+            cfg = gpu_monitor.config
+            logger.info(
+                "foreign-GPU detection on: a device is reported unavailable above "
+                "%d MiB used with nothing of ours loaded (%d consecutive checks, "
+                "%.0fs grace after a task)",
+                cfg.threshold_mib,
+                cfg.consecutive,
+                cfg.grace_sec,
+            )
 
     @property
     def worker_id(self) -> str:
         return self.client.worker_id
+
+    def set_gpu_executor_probe(self, probe: Callable[[], bool]) -> None:
+        """Register a probe reporting whether a GPU-using executor is loaded; a
+        reading taken while one is warm includes the worker's own model."""
+        self._gpu_executor_probe = probe
+
+    def gpu_availability(self) -> dict[str, DeviceAvailability]:
+        """Per-device availability as this worker last reported it, the reading
+        placement uses."""
+        monitor = self._gpu_monitor
+        return {} if monitor is None else monitor.snapshot()
+
+    def live_gpu_availability(self) -> dict[str, DeviceAvailability]:
+        """Per-device availability from the reading just taken only, so a caller that
+        refuses work on it never refuses on a stale latch."""
+        monitor = self._gpu_monitor
+        return {} if monitor is None else monitor.live_snapshot()
 
     def _metrics(self) -> dict[str, Any]:
         metrics: dict[str, Any] = {}
@@ -102,6 +138,14 @@ class Lifecycle:
             energy_total = power_summary.get("estimated_energy_kwh")
             if isinstance(energy_total, (int, float)):
                 metrics["estimated_energy_kwh"] = energy_total
+        if (monitor := self._gpu_monitor) is not None:
+            # Sent even when empty: an empty map is how the worker says its devices
+            # are no longer known to be held, and omitting it would leave the
+            # server's last reading latched with nothing able to clear it.
+            metrics["gpu_availability"] = {
+                uuid: {"available": device.available, "free_bytes": device.free_bytes}
+                for uuid, device in monitor.snapshot().items()
+            }
         return metrics
 
     def start(
@@ -137,6 +181,12 @@ class Lifecycle:
 
     def _hb_loop(self):
         while not self._stop_event.is_set():
+            # Observed before the metrics, so the heartbeat carries this beat's
+            # reading rather than the previous one's.
+            try:
+                self._observe_gpu()
+            except Exception:
+                logger.debug("GPU availability observation failed", exc_info=True)
             metrics = self._metrics()
             try:
                 # Under the status lock, so no heartbeat carries a status older than
@@ -153,12 +203,33 @@ class Lifecycle:
             self._touch_hb_file()
             self._stop_event.wait(self.hb_sec)
 
+    def _observe_gpu(self) -> None:
+        """Feed the availability monitor one observation.
+
+        A reading is trusted only when nothing of the worker's own can be in it: no
+        task running, no GPU-using executor still warm, and past the grace window in
+        which a finished task's subprocess may still be releasing memory. Before the
+        runner registers its probe nothing is measured. A task starting during the one
+        NVML read can contribute to it, but ``consecutive`` readings must agree before
+        a device flips, so one such reading cannot move its state.
+        """
+        monitor = self._gpu_monitor
+        if monitor is None:
+            return
+        probe = self._gpu_executor_probe
+        with self._status_lock:
+            idle = self._status is WorkerStatus.IDLE and not self._draining.is_set()
+            past_grace = time.time() - self._last_task_end >= monitor.config.grace_sec
+        monitor.observe(idle and past_grace and probe is not None and not probe())
+
     def set_busy(self, task_id: str) -> None:
         self._report(
             WorkerStatus.BUSY, self.client.dispatch_id(task_id), {"task_id": task_id}
         )
 
     def set_idle(self, task_id: str) -> None:
+        with self._status_lock:
+            self._last_task_end = time.time()
         self._report(
             WorkerStatus.IDLE, self.client.dispatch_id(task_id), {"last_task": task_id}
         )

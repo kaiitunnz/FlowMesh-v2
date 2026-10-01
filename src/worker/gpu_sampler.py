@@ -26,6 +26,8 @@ from shared.telemetry.semconv import (
     RESOURCE_WORKER_ID,
 )
 
+from .utils import nvml
+
 __all__ = ["GpuSampler", "build_gpu_sampler"]
 
 logger = logging.getLogger(__name__)
@@ -122,15 +124,11 @@ class GpuSampler:
             RESOURCE_NODE_ID: self._node_id() or "",
             RESOURCE_WORKER_ID: self._worker_id() or "",
         }
-        for idx in range(pynvml.nvmlDeviceGetCount()):
-            handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+        for idx, handle in nvml.device_handles():
             attrs = dict(base_attrs)
             attrs[GPU_INDEX] = str(idx)
             try:
-                uuid_raw = pynvml.nvmlDeviceGetUUID(handle)
-                attrs[GPU_UUID] = (
-                    uuid_raw.decode() if isinstance(uuid_raw, bytes) else uuid_raw
-                )
+                attrs[GPU_UUID] = nvml.device_uuid(handle)
             except pynvml.NVMLError:
                 pass
 
@@ -141,8 +139,7 @@ class GpuSampler:
                 pass
 
             try:
-                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                self._memory_used.set(int(mem.used), attrs)
+                self._memory_used.set(nvml.device_memory(handle).used_bytes, attrs)
             except pynvml.NVMLError:
                 pass
 
