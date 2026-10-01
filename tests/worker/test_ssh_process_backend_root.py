@@ -1128,18 +1128,17 @@ def test_sshd_closes_a_connection_whose_peer_stops_answering(
             "-o",
             "BatchMode=yes",
             f"{session.login_user()}@127.0.0.1",
-            "sleep 600",
+            "echo in; sleep 600",
         ],
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        text=True,
     )
     try:
-        deadline = time.monotonic() + 20
-        while (
-            session.established_connections() or 0
-        ) < 1 and time.monotonic() < deadline:
-            time.sleep(0.1)
+        # sshd probes a client only once it has logged in.
+        assert client.stdout is not None
+        assert client.stdout.readline() == "in\n"
         assert session.established_connections() == 1
         # The kernel still acknowledges its segments; only the client is silent.
         client.send_signal(signal.SIGSTOP)
