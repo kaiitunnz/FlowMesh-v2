@@ -27,6 +27,7 @@ from shared.schemas.worker import SSHBackendName
 from shared.tasks.worker_message import WorkerHardware
 from worker.config import WorkerConfig
 
+from ...ssh_relay.registry import LOOPBACK_HOST
 from ..base_executor import ExecutionError, RunSignals
 from .config import (
     FINISH_SENTINEL_PATH,
@@ -37,7 +38,6 @@ from .config import (
 
 logger = logging.getLogger(__name__)
 
-LOOPBACK_BIND_HOST = "127.0.0.1"
 ANY_BIND_HOST = "0.0.0.0"  # nosec B104 - a direct session must be dialable
 LOOPBACK_SCOPE = "loopback"
 NETWORK_SCOPE = "network"
@@ -181,24 +181,15 @@ class SSHSessionBackend(ABC):
         Only a ``direct`` session is dialled from outside the worker; a relayed one is
         reached over loopback by the worker's own relay lane.
         """
-        return ANY_BIND_HOST if access_mode == "direct" else LOOPBACK_BIND_HOST
-
-    def session_host(self) -> str:
-        """Return the host name a client reaches a network-bound session at."""
-        if override := self._config.ssh_direct_host:
-            return override
-        return self._default_session_host()
+        return ANY_BIND_HOST if access_mode == "direct" else LOOPBACK_HOST
 
     def session_address(self, access_mode: str) -> str:
-        """Return the address a client uses to reach the session.
-
-        Derived from the bind so the two cannot disagree: a session bound to loopback
-        is reachable only from the worker's own host, whatever name the worker
-        otherwise answers to.
-        """
-        if self.session_scope(access_mode) == NETWORK_SCOPE:
-            return self.session_host()
-        return LOOPBACK_BIND_HOST
+        """Return the address a client reaches the session at, derived from its bind:
+        ``ssh.direct_host`` or the worker's own host name when bound beyond loopback,
+        else loopback."""
+        if self.session_scope(access_mode) == LOOPBACK_SCOPE:
+            return LOOPBACK_HOST
+        return self._config.ssh_direct_host or self._default_session_host()
 
     def session_scope(self, access_mode: str) -> str:
         """Return which addresses the session accepts connections on.

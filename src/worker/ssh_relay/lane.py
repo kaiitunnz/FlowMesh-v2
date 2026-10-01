@@ -28,9 +28,8 @@ from shared.network.relay_frame import (
 )
 from shared.network.session import RelaySessionRole
 
-from .registry import SshEndpointRegistry
+from .registry import LOOPBACK_HOST, SshEndpointRegistry
 
-LOOPBACK_HOST = "127.0.0.1"
 # The bridge may re-forward a frame after a restart, so a session's opening frame can
 # arrive again once the session has ended or been cancelled; the lane remembers that
 # many ended sessions.
@@ -198,4 +197,4 @@ class SshRelayLane:
         self._loop.run_forever()
 
 
-__all__ = ["LOOPBACK_HOST", "SshRelayLane"]
+__all__ = ["SshRelayLane"]

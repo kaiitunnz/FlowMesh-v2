@@ -206,7 +206,7 @@ class SSHExecutor(Executor):
             maybe_upload_artifacts(task, out_dir, logger=logger, skip_errors=True)
         finally:
             # Its relayed connections end first, so none outlives the session's sshd.
-            self.withdraw_endpoint(session_id)
+            self.withdraw_ssh_endpoint(session_id)
             # A log stream ends only once its session stops. A cancel or stop stops
             # it at once, inside the worker's own stop timeout.
             session.stop(1 if self._signals.interrupted else cfg.stop_timeout_sec)
@@ -272,8 +272,8 @@ class SSHExecutor(Executor):
             "port": host_port,
         }
         if access_mode in RELAYED_SSH_ACCESS_MODES:
-            # The root relays to the session by this id; the port never leaves here.
-            self.publish_endpoint(session_id, host_port)
+            # The root relays to the session by this id; the lane resolves its port.
+            self.publish_ssh_endpoint(session_id, host_port)
             # The session's own address, for a client on a host that can reach it;
             # the server may rewrite `host` and `port` to its route, never these.
             ssh_info["directHost"] = host_name

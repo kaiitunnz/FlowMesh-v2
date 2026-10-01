@@ -1,10 +1,11 @@
-"""Loopback ports this worker's relay lane may connect to, keyed by endpoint id."""
-
 import logging
 import threading
 from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+# Every published endpoint listens here, the only address the relay lane connects to.
+LOOPBACK_HOST = "127.0.0.1"
 
 
 class SshEndpointRegistry:
