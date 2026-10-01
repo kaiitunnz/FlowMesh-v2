@@ -18,6 +18,7 @@ from server.supervisor.adapters.external import (
     ExternalWorkerConfig,
 )
 from server.supervisor.registry import WorkerRegistry
+from server.supervisor.schemas import WorkerStatus
 from server.supervisor.services import grpc_server as grpc_server_module
 from server.supervisor.services.grpc_server import SupervisorServicer
 from server.supervisor.services.relay_service import RelayService
@@ -128,6 +129,7 @@ async def test_a_worker_the_root_no_longer_records_is_released() -> None:
     assert harness.released == [worker_id]
     assert harness.registry.get_worker_id(harness.adapter.token) is None
     assert harness.registry.get_worker_id(other) == "wkr-live"
+    assert harness.adapter.worker_id is None
 
 
 @pytest.mark.asyncio
@@ -235,3 +237,54 @@ async def test_an_event_stream_that_stays_closed_unregisters_its_worker(
     await asyncio.sleep(0.2)
 
     assert harness.relay.unregisters() == [worker_id]
+
+
+@pytest.mark.asyncio
+async def test_a_reconnected_event_stream_restores_its_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(grpc_server_module, "_REATTACH_GRACE_SEC", 0.2)
+    harness = _Harness()
+    worker_id = await harness.register()
+    await harness.servicer.PushEvents(_events("REGISTER"), cast(Any, _Context()))
+    reattached = asyncio.Event()
+
+    async def held_open() -> AsyncIterator[supervisor_pb2.EventMessage]:
+        async for message in _events("REGISTER", "HEARTBEAT"):
+            yield message
+        reattached.set()
+        await asyncio.sleep(0.5)
+
+    stream = asyncio.ensure_future(
+        harness.servicer.PushEvents(held_open(), cast(Any, _Context()))
+    )
+    await reattached.wait()
+    info = harness.adapter.get_info()
+
+    assert (info.id, info.status) == (worker_id, WorkerStatus.RUNNING)
+    assert [e["type"] for e in harness.relay.events] == ["REGISTER", "HEARTBEAT"]
+    await stream
+
+
+@pytest.mark.asyncio
+async def test_a_stream_of_an_earlier_registration_leaves_the_new_one_alone() -> None:
+    harness = _Harness()
+    await harness.register()
+    opened = asyncio.Event()
+    release = asyncio.Event()
+
+    async def earlier() -> AsyncIterator[supervisor_pb2.EventMessage]:
+        async for message in _events("REGISTER"):
+            yield message
+        opened.set()
+        await release.wait()
+
+    stream = asyncio.ensure_future(
+        harness.servicer.PushEvents(earlier(), cast(Any, _Context()))
+    )
+    await opened.wait()
+    new_id = await harness.register()
+    release.set()
+    await stream
+
+    assert harness.adapter.worker_id == new_id

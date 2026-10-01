@@ -147,6 +147,10 @@ class WorkerRegistry:
             if token is None:
                 return False
             del state.token_id_map[token]
+            if (
+                adapter := state.registry.get(token)
+            ) and adapter.worker_id == worker_id:
+                adapter.clear_worker_id()
         self._release([worker_id])
         return True
 

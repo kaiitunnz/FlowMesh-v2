@@ -218,9 +218,10 @@ class SupervisorClient:
         self._rebinder = _rebinder()
         self._channel = self._create_grpc_channel()
         self._stub = supervisor_pb2_grpc.SupervisorStub(self._channel)
+        if self._worker_register_event is None:
+            raise RuntimeError("Worker not registered with supervisor")
         self._start_event_stream()
         self._start_task_stream()
-        self._send_register_event()
 
     def stop(self) -> None:
         """Stop task pulling without fully shutting down; the task stream keeps
@@ -509,12 +510,6 @@ class SupervisorClient:
     # Internal helpers
     # ------------------------------------------------------------------ #
 
-    def _send_register_event(self) -> None:
-        event = self._worker_register_event
-        if event is None:
-            raise RuntimeError("Worker not registered with supervisor")
-        self._send_event(event)
-
     def _register_grpc(self, worker_meta: dict[str, Any]) -> None:
         self.logger.info(
             "Registering worker %s with supervisor %s",
@@ -670,12 +665,15 @@ class SupervisorClient:
                 stream_done = threading.Event()
                 try:
                     self._stub.PushEvents(
-                        self._event_messages(stream_done), metadata=metadata
+                        self._call_events(stream_done, seen_gen), metadata=metadata
                     )
                 finally:
                     stream_done.set()
                 if self._shutdown.is_set():
                     break
+                if self._register_generation != seen_gen:
+                    # The call ended for the worker's new registration.
+                    continue
                 self._event_ready.clear()
                 self.logger.warning("Event stream closed, retrying in 3 seconds")
                 time.sleep(3)
@@ -774,14 +772,33 @@ class SupervisorClient:
                 self.logger.error("Supervisor task stream error: %s", exc)
                 time.sleep(3)
 
+    def _call_events(
+        self, stream_done: threading.Event, gen: int
+    ) -> Iterable[supervisor_pb2.EventMessage]:
+        """One PushEvents call's messages: the worker's registration under ``gen``
+        first, so the supervisor knows the stream's worker, then the events queued
+        under it."""
+        with self._register_lock:
+            template = self._worker_register_event
+            if gen != self._register_generation or template is None:
+                return
+            register = template.model_copy(
+                update={"worker_id": self._worker_id, "status": self._last_status}
+            )
+        yield supervisor_pb2.EventMessage(
+            payload=self._struct_from_payload(serialize_event(register))
+        )
+        yield from self._event_messages(stream_done, gen)
+
     def _event_messages(
-        self, stream_done: threading.Event
+        self, stream_done: threading.Event, call_gen: int | None = None
     ) -> Iterable[supervisor_pb2.EventMessage]:
         """Yield queued events to one PushEvents call until it ends.
 
         gRPC keeps pulling a call's request iterator on its own thread after the call
         ends and drops what it pulls, so an event taken once the call is done goes
-        back for the next call.
+        back for the next call. A call opened under registration ``call_gen`` ends
+        at the first event of a later registration, which goes to the next call.
         """
         while (
             not self._shutdown.is_set() or self._drain.is_set()
@@ -801,6 +818,14 @@ class SupervisorClient:
             # never gets its heartbeat refreshed after re-registration.
             if gen < self._register_generation:
                 continue
+            if call_gen is not None:
+                if gen > call_gen:
+                    with self._carried_lock:
+                        self._carried_events.appendleft(item)
+                    return
+                if payload.get("type") == "REGISTER":
+                    # The call opened with the registration already.
+                    continue
             yield supervisor_pb2.EventMessage(
                 payload=self._struct_from_payload(payload)
             )

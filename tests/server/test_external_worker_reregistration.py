@@ -397,3 +397,29 @@ async def test_a_worker_streaming_a_resident_session_moves_to_its_new_registrati
         host.stop()
         await asyncio.to_thread(client.shutdown)
     assert registered_by == ["SupervisorEventStream"]
+
+
+@pytest.mark.asyncio
+async def test_a_worker_the_root_reaped_registers_its_new_id_with_the_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
+    redis = _redis(fakeredis.FakeServer())
+    port = _free_port()
+    supervisor = _Supervisor(redis, port)
+    await supervisor.start()
+    client = _client(port)
+    await asyncio.to_thread(_register, client)
+    old_id = client.worker_id
+    await asyncio.to_thread(client.start)
+    try:
+        await _until(lambda: _relayed(supervisor, "REGISTER", old_id))
+        redis.srem(WORKERS_SET_KEY, old_id)
+        await asyncio.to_thread(supervisor.server.reconcile_workers)
+        await _until(lambda: client.worker_id != old_id)
+        new_id = client.worker_id
+
+        await _until(lambda: _relayed(supervisor, "REGISTER", new_id))
+    finally:
+        await asyncio.to_thread(client.shutdown)
+        await supervisor.stop()

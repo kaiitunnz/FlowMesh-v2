@@ -134,6 +134,10 @@ class WorkerAdapter(ABC):
             raise RuntimeError(f"Worker ID is already set to {self._worker_id}")
         self._worker_id = worker_id
 
+    def bind_worker_id(self, worker_id: str) -> None:
+        """Hold the id the worker's current registration took, replacing any other."""
+        self._worker_id = worker_id
+
     def clear_worker_id(self) -> None:
         if self._worker_id is None:
             raise RuntimeError("Worker ID is not set")

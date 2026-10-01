@@ -128,6 +128,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # Worker ids released here, which a fresh registration never takes: the root
         # may still be about to apply their unregister.
         self._released: RecentSet[str] = RecentSet(_RELEASED_ID_MEMORY)
+        # Worker ids whose registration reached the root.
+        self._registered: RecentSet[str] = RecentSet(_RELEASED_ID_MEMORY)
         self._unregistered_lock = Lock()
         self._pending_unregisters: set[asyncio.Task[None]] = set()
 
@@ -261,10 +263,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             self._redis.hash_set(worker_key(worker_id), worker_meta)
             self._registry.set_worker_id(token, worker_id)
         self._task_listener.add_worker(worker_id)
-        try:
-            worker.set_worker_id(worker_id)
-        except RuntimeError as exc:
-            self._logger.warning(exc)
+        worker.bind_worker_id(worker_id)
         self._logger.info("Registered worker %s", worker_id)
         return supervisor_pb2.RegisterResponse(
             worker_id=worker_id, incarnation=incarnation
@@ -352,6 +351,11 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             )
         finally:
             worker.detach_event_stream()
+            # A stream of the worker's current registration still open, or a later
+            # registration, keeps what the adapter holds.
+            if not worker.has_event_stream and worker.worker_id == worker_id:
+                worker.clear_worker_id()
+                worker.set_status(WorkerStatus.STOPPED)
 
     async def _relay_events(
         self,
@@ -381,8 +385,13 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             # Trap register/unregister events
             match event_type:
                 case "REGISTER":
+                    # Every event stream opens with one; the root hears it once.
                     registered = True
+                    worker.bind_worker_id(worker_id)
                     worker.set_status(WorkerStatus.RUNNING)
+                    if worker_id in self._registered:
+                        continue
+                    self._registered.add(worker_id)
                 case "UNREGISTER":
                     unregistered = True
                     if not self._note_unregistered(worker_id):
@@ -395,11 +404,6 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             )
             self._pending_unregisters.add(task)
             task.add_done_callback(self._pending_unregisters.discard)
-        try:
-            worker.clear_worker_id()
-        except RuntimeError as exc:
-            self._logger.warning(exc)
-        worker.set_status(WorkerStatus.STOPPED)
         return Empty()
 
     async def _unregister_unless_reattached(
