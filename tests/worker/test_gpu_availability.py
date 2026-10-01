@@ -17,7 +17,7 @@ from shared.tasks.components.resources import (
     HardwareRequirements,
     ResourcesSpec,
 )
-from shared.tasks.specs import EchoSpecStrict, InferenceSpecStrict
+from shared.tasks.specs import EchoSpecStrict, InferenceSpecStrict, SSHSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import (
     CPUInfo,
@@ -431,6 +431,23 @@ class TestWarmExecutorGpuFlag:
                     taskType=TaskType.ECHO,
                     resources=ResourcesSpec(
                         hardware=HardwareRequirements(gpu=GPURequirements(count=2))
+                    ),
+                )
+            )
+        )
+        assert runner.has_active_gpu_executor() is False
+
+    def test_an_ssh_session_does_not_mark_the_executor(self, tmp_path: Path) -> None:
+        # The session holds its devices only while it lives; the warm SSH executor
+        # holds none afterwards.
+        runner = self._runner(tmp_path)
+        runner._active_executor = MagicMock()
+        runner._note_gpu_usage(
+            make_worker_task_message(
+                SSHSpecStrict(
+                    taskType=TaskType.SSH,
+                    resources=ResourcesSpec(
+                        hardware=HardwareRequirements(gpu=GPURequirements(count=1))
                     ),
                 )
             )

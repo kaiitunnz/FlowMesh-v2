@@ -36,6 +36,7 @@ from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceBackend,
     InferenceSpecStrict,
+    SSHSpecStrict,
     TaskSpecStrictBase,
 )
 from shared.tasks.specs.common import declared_gpu_requirements
@@ -255,9 +256,15 @@ class Runner:
         Called for every task, since one reusing a warm executor never re-enters the
         load branch and the memory it allocates outlives it. Monotone until teardown:
         a later CPU task does not free what an earlier GPU task allocated. A declared
-        GPU request alone allocates nothing, so only what the spec loads counts.
+        GPU request alone allocates nothing, so only what the spec loads counts, and an
+        SSH session releases its devices when it ends, so it leaves nothing warm.
         """
-        self._active_executor_used_gpu |= not msg.relays_only and msg.spec.uses_gpu()
+        spec = msg.spec
+        self._active_executor_used_gpu |= (
+            not msg.relays_only
+            and not isinstance(spec, SSHSpecStrict)
+            and spec.uses_gpu()
+        )
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
