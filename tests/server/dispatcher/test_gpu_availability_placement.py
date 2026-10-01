@@ -140,9 +140,8 @@ def cpu_client() -> Iterator[redis.Redis]:
     yield from _live_worker([])
 
 
-def _report(registry: WorkerRegistry, availability: dict[str, Any]) -> None:
-    """Deliver a heartbeat carrying ``availability`` through the event monitor."""
-    monitor = EventMonitor(
+def _monitor(registry: WorkerRegistry) -> EventMonitor:
+    return EventMonitor(
         redis_client=MagicMock(),
         logger=logging.getLogger("gpu-availability-placement"),
         runtime=MagicMock(),
@@ -152,7 +151,11 @@ def _report(registry: WorkerRegistry, availability: dict[str, Any]) -> None:
         metrics_recorder=MagicMock(),
         watchdog=MagicMock(),
     )
-    monitor._handle_worker_event(
+
+
+def _report(registry: WorkerRegistry, availability: dict[str, Any]) -> None:
+    """Deliver a heartbeat carrying ``availability`` through the event monitor."""
+    _monitor(registry)._handle_worker_event(
         WorkerEvent(
             type="HEARTBEAT",
             worker_id=_WORKER,
@@ -222,16 +225,7 @@ class TestTheHeldReadingReachesTheRegistry:
 
 
 def _report_without_availability(registry: WorkerRegistry) -> None:
-    EventMonitor(
-        redis_client=MagicMock(),
-        logger=logging.getLogger("gpu-availability-placement"),
-        runtime=MagicMock(),
-        dispatcher=MagicMock(),
-        worker_registry=registry,
-        node_registry=MagicMock(),
-        metrics_recorder=MagicMock(),
-        watchdog=MagicMock(),
-    )._handle_worker_event(
+    _monitor(registry)._handle_worker_event(
         WorkerEvent(type="HEARTBEAT", worker_id=_WORKER, payload={"ttl_sec": 120})
     )
 

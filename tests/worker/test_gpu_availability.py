@@ -591,11 +591,15 @@ class TestAdmission:
 class _Recording(Executor):
     name = "recording"
 
-    def __init__(self) -> None:  # noqa: D107
+    def __init__(self) -> None:
         self.ran: list[str] = []
+        self.saw_gpu_executor: list[bool] = []
+        self.runner: Runner | None = None
 
     def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
         self.ran.append(task.task_id)
+        if self.runner is not None:
+            self.saw_gpu_executor.append(self.runner.has_active_gpu_executor())
         return BaseExecutorResult()
 
     def cancel(self, task_id: str) -> None:
@@ -615,7 +619,11 @@ class TestRefusalInTheTaskLoop:
     ``try`` after ``set_busy``, so the failure is reported and ``set_idle`` follows."""
 
     def _run(
-        self, tmp_path: Path, **message: Any
+        self,
+        tmp_path: Path,
+        messages: list[Any] | None = None,
+        held: bool = True,
+        **message: Any,
     ) -> tuple[MagicMock, _Recording, MagicMock]:
         lifecycle = MagicMock()
         lifecycle.worker_id = "wrk-test"
@@ -624,13 +632,14 @@ class TestRefusalInTheTaskLoop:
         lifecycle.client.iter_stops.return_value = []
         lifecycle.client.next_mediated_op.side_effect = no_mediated_op
         lifecycle.content_plane = _Plane(tmp_path / "cas")
-        lifecycle.live_gpu_availability.return_value = {
-            "GPU-0": DeviceAvailability(available=False, free_bytes=0)
-        }
+        lifecycle.live_gpu_availability.return_value = (
+            {"GPU-0": DeviceAvailability(available=False, free_bytes=0)} if held else {}
+        )
         executor = _Recording()
         runner = Runner(
             lifecycle=lifecycle,
-            task_stream=[
+            task_stream=messages
+            or [
                 make_worker_task_message(
                     _gpu_spec(),
                     task_type=TaskType.INFERENCE,
@@ -642,10 +651,11 @@ class TestRefusalInTheTaskLoop:
             hardware=make_worker_hardware(
                 [GpuInfo(index=0, name="L4", uuid="GPU-0", memory_total_bytes=1 << 34)]
             ),
-            executors={"vllm": executor, "service_leaf": executor},
+            executors={"vllm": executor, "service_leaf": executor, "echo": executor},
             default_executor=executor,
             logger=MagicMock(),
         )
+        executor.runner = runner
         hydrator = MagicMock(wraps=runner._input_hydrator)
         runner._input_hydrator = hydrator
         runner.start()
@@ -671,6 +681,29 @@ class TestRefusalInTheTaskLoop:
         )
         lifecycle.set_failed.assert_not_called()
         assert executor.ran == ["tsk-1"]
+
+    def test_switching_executors_forgets_the_gpu_the_last_one_held(
+        self, tmp_path: Path
+    ) -> None:
+        # The model task leaves its executor warm and GPU-bound; the CPU task after it
+        # needs another executor, so the GPU-bound one is torn down first.
+        lifecycle, executor, _ = self._run(
+            tmp_path,
+            messages=[
+                make_worker_task_message(
+                    _gpu_spec(), task_type=TaskType.INFERENCE, task_id="tsk-1"
+                ),
+                make_worker_task_message(
+                    EchoSpecStrict(taskType=TaskType.ECHO),
+                    task_type=TaskType.ECHO,
+                    task_id="tsk-2",
+                ),
+            ],
+            held=False,
+        )
+        lifecycle.set_failed.assert_not_called()
+        assert executor.ran == ["tsk-1", "tsk-2"]
+        assert executor.saw_gpu_executor == [True, False]
 
 
 class TestClearingReachesTheServer:
