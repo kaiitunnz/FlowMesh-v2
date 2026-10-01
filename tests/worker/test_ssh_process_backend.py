@@ -5,6 +5,7 @@ in-container suite does that."""
 import dataclasses
 import fcntl
 import io
+import logging
 import os
 import stat
 import subprocess
@@ -1524,6 +1525,26 @@ def test_a_tree_is_frozen_then_killed_from_the_bottom_up() -> None:
         process_module._kill_tree(root)
 
     assert order == ["suspend", "child", "root"]
+
+
+def test_a_process_that_outlives_the_kill_deadline_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stuck = MagicMock(pid=4242)
+    stuck.status.return_value = psutil.STATUS_RUNNING
+    stuck.name.return_value = "sshd-session"
+    root = MagicMock(pid=4200)
+    root.children.return_value = [stuck]
+    clock = iter(range(0, 1000, 1))
+    with (
+        patch.object(process_module.time, "sleep"),
+        patch.object(process_module.time, "monotonic", side_effect=lambda: next(clock)),
+        caplog.at_level(logging.WARNING, logger=process_module.logger.name),
+    ):
+        process_module._kill_tree(root)
+
+    assert "4242 (sshd-session)" in caplog.text
+    root.kill.assert_called_once()
 
 
 def test_a_tree_s_processes_all_die(tmp_path: Path) -> None:

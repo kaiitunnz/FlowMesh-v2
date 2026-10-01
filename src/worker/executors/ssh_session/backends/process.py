@@ -1142,10 +1142,12 @@ def _kill_tree(root: psutil.Process) -> None:
     with contextlib.suppress(psutil.Error):
         root.suspend()
     deadline = time.monotonic() + _TERMINATE_GRACE_SEC
+    victims: list[psutil.Process] = []
     while time.monotonic() < deadline:
         try:
             victims = [p for p in root.children(recursive=True) if _is_live(p)]
         except psutil.Error:
+            victims = []
             break
         if not victims:
             break
@@ -1153,8 +1155,23 @@ def _kill_tree(root: psutil.Process) -> None:
             with contextlib.suppress(psutil.Error):
                 proc.kill()
         time.sleep(_KILL_POLL_SEC)
+    else:
+        if survivors := [p for p in victims if _is_live(p)]:
+            logger.warning(
+                "Processes below sshd %d outlived %.0fs of SIGKILL: %s",
+                root.pid,
+                _TERMINATE_GRACE_SEC,
+                ", ".join(f"{p.pid} ({_name(p)})" for p in survivors),
+            )
     with contextlib.suppress(psutil.Error):
         root.kill()
+
+
+def _name(proc: psutil.Process) -> str:
+    try:
+        return proc.name()
+    except psutil.Error:
+        return "?"
 
 
 def _is_live(proc: psutil.Process) -> bool:
