@@ -179,10 +179,18 @@ class TestHwSatisfies:
         assert hw_satisfies(w, t) is False
 
 
-def _ssh_task(cpu: int | None = None, memory: str | None = None) -> TaskEnvelopeStrict:
+def _ssh_task(
+    cpu: int | None = None,
+    memory: str | None = None,
+    gpu_count: int | None = None,
+    gpu_memory: str | None = None,
+) -> TaskEnvelopeStrict:
+    gpu_req = None
+    if gpu_count is not None or gpu_memory:
+        gpu_req = GPURequirements(count=gpu_count, memory=gpu_memory)
     hw_req = None
-    if cpu is not None or memory is not None:
-        hw_req = HardwareRequirements(cpu=cpu, memory=memory)
+    if cpu is not None or memory is not None or gpu_req is not None:
+        hw_req = HardwareRequirements(cpu=cpu, memory=memory, gpu=gpu_req)
     resources = ResourcesSpec(hardware=hw_req) if hw_req else None
     return TaskEnvelopeStrict.model_validate(
         {
@@ -450,16 +458,23 @@ def _inference_task() -> TaskEnvelopeStrict:
 class TestGpuAvailableFor:
     def test_held_device_is_not_offered(self) -> None:
         worker = _held(_worker(gpu_count=1, gpu_mem=48 * 1024**3), 0)
-        assert gpu_available_for(worker, _task(gpu_count=1)) is False
+        assert gpu_available_for(worker, _task(gpu_count=1), False) is False
 
-    def test_a_free_sibling_still_is(self) -> None:
-        # The whole point of per-device: one held card must not write off the box.
-        worker = _held(_worker(gpu_count=4, gpu_mem=48 * 1024**3), 0)
-        assert gpu_available_for(worker, _task(gpu_count=1)) is True
-
-    def test_not_enough_free_devices(self) -> None:
+    def test_any_held_device_withholds_a_model_dispatch(self) -> None:
+        # A model runs on every device its worker sees, so a free sibling cannot
+        # keep it off the held one.
         worker = _held(_worker(gpu_count=2, gpu_mem=48 * 1024**3), 0)
-        assert gpu_available_for(worker, _task(gpu_count=2)) is False
+        assert gpu_available_for(worker, _inference_task(), False) is False
+        assert gpu_available_for(worker, _task(gpu_count=1), False) is False
+
+    def test_a_free_sibling_still_serves_an_ssh_session(self) -> None:
+        # A session is handed only the devices it selects.
+        worker = _held(_worker(gpu_count=4, gpu_mem=48 * 1024**3), 0)
+        assert gpu_available_for(worker, _ssh_task(gpu_count=1), False) is True
+
+    def test_not_enough_free_devices_for_an_ssh_session(self) -> None:
+        worker = _held(_worker(gpu_count=2, gpu_mem=48 * 1024**3), 0)
+        assert gpu_available_for(worker, _ssh_task(gpu_count=2), False) is False
 
     def test_undeclared_gpu_task_is_still_filtered(self) -> None:
         # hw_satisfies never reaches a GPU check for this task, which is why the
@@ -467,12 +482,12 @@ class TestGpuAvailableFor:
         worker = _held(_worker(gpu_count=1, gpu_mem=48 * 1024**3), 0)
         task = _inference_task()
         assert hw_satisfies(worker, task) is True
-        assert gpu_available_for(worker, task) is False
+        assert gpu_available_for(worker, task, False) is False
 
     def test_cpu_task_is_unaffected(self) -> None:
         # The worker keeps taking CPU work.
         worker = _held(_worker(gpu_count=1, gpu_mem=48 * 1024**3), 0)
-        assert gpu_available_for(worker, _task(cpu=2)) is True
+        assert gpu_available_for(worker, _task(cpu=2), False) is True
 
     def test_hw_satisfies_is_not_changed_by_availability(self) -> None:
         # satisfying_workers must keep the worker, or the task fails as
@@ -485,13 +500,13 @@ class TestGpuAvailableForOnlySubtracts:
     def test_cpu_only_worker_is_untouched(self) -> None:
         # No devices reported at all: this predicate must never be stricter than
         # hw_satisfies on a worker it knows nothing about.
-        assert gpu_available_for(_worker(gpu_count=0), _inference_task()) is True
+        assert gpu_available_for(_worker(gpu_count=0), _inference_task(), False) is True
 
     def test_worker_reporting_no_availability_is_untouched(self) -> None:
         worker = _worker(gpu_count=1, gpu_mem=48 * 1024**3)
         assert worker.hardware is not None
         assert all(d.gpu_available is None for d in worker.hardware.gpu.devices)
-        assert gpu_available_for(worker, _inference_task()) is True
+        assert gpu_available_for(worker, _inference_task(), False) is True
 
     def test_unified_memory_worker_is_untouched(self) -> None:
         # The probe skips unified devices, so they never report occupied.
@@ -501,9 +516,11 @@ class TestGpuAvailableForOnlySubtracts:
             gpu_memory_is_unified=True,
             gpu_shared_memory_total_bytes=128 * 1024**3,
         )
-        assert gpu_available_for(worker, _task(gpu_memory="40Gi")) is True
+        assert gpu_available_for(worker, _task(gpu_memory="40Gi"), False) is True
 
-    def test_unified_pool_still_reachable_when_another_device_is_held(self) -> None:
+    def test_unified_pool_still_reachable_by_a_session_beside_a_held_device(
+        self,
+    ) -> None:
         worker = _held(
             _worker(
                 gpu_count=2,
@@ -513,7 +530,7 @@ class TestGpuAvailableForOnlySubtracts:
             ),
             0,
         )
-        assert gpu_available_for(worker, _task(gpu_memory="40Gi")) is True
+        assert gpu_available_for(worker, _ssh_task(gpu_memory="40Gi"), False) is True
 
 
 class TestClearedAvailability:
@@ -527,14 +544,14 @@ class TestClearedAvailability:
 
     def test_a_cleared_worker_is_offered_again(self) -> None:
         worker = _worker(gpu_count=1, gpu_mem=48 * 1024**3)
-        assert gpu_available_for(worker, _task(gpu_count=1)) is True
+        assert gpu_available_for(worker, _task(gpu_count=1), False) is True
 
 
 class TestZeroGpusRequested:
     def test_a_task_asking_for_no_gpus_is_unaffected(self) -> None:
         # count: 0 asks for nothing, so a fully held worker can still run it.
         worker = _held(_worker(gpu_count=1, gpu_mem=48 * 1024**3), 0)
-        assert gpu_available_for(worker, _task(gpu_count=0)) is True
+        assert gpu_available_for(worker, _task(gpu_count=0), False) is True
 
 
 class TestZeroCountDoesNotExemptAGpuTask:
@@ -554,7 +571,7 @@ class TestZeroCountDoesNotExemptAGpuTask:
                 },
             }
         )
-        assert gpu_available_for(worker, task) is False
+        assert gpu_available_for(worker, task, False) is False
 
 
 class TestRelayingDispatch:
@@ -562,5 +579,5 @@ class TestRelayingDispatch:
         # An input preparation or a resident service episode loads no model, so a
         # held card is no reason to keep it off the worker.
         worker = _held(_worker(gpu_count=1, gpu_mem=48 * 1024**3), 0)
-        assert gpu_available_for(worker, _inference_task(), relays_only=True) is True
-        assert gpu_available_for(worker, _inference_task(), relays_only=False) is False
+        assert gpu_available_for(worker, _inference_task(), True) is True
+        assert gpu_available_for(worker, _inference_task(), False) is False

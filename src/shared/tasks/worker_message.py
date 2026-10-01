@@ -174,10 +174,6 @@ class WorkerTaskMessage(BaseModel):
         resident service episode that carries its invocation to a replica."""
         return self.input_preparation or self.service_episode is not None
 
-    def uses_gpu(self) -> bool:
-        """Whether running this dispatch allocates GPU memory on its worker."""
-        return dispatch_uses_gpu(self.spec, self.relays_only)
-
     @model_validator(mode="before")
     @classmethod
     def _restore_deduped(cls, data: Any) -> Any:

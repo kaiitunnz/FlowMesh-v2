@@ -30,7 +30,6 @@ from shared.network.mtls import MutualTlsMaterial
 from shared.network.relay_frame import SSH_FRAME_KIND
 from shared.outcome import FabricContentStore
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
-from shared.tasks.components.resources import GPURequirements
 from shared.tasks.credentials import dispatched_credentials
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
@@ -39,7 +38,6 @@ from shared.tasks.specs import (
     SSHSpecStrict,
     TaskSpecStrictBase,
 )
-from shared.tasks.specs.common import declared_gpu_requirements
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
 from shared.telemetry.config import (
     DISABLED_TELEMETRY_CONFIG,
@@ -57,7 +55,7 @@ from shared.telemetry.semconv import (
 from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
-from shared.utils.hardware import available_devices, select_matching_gpu_indices
+from shared.utils.hardware import available_devices, gpus_fit_dispatch
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.redact import credential_scrubber
 from shared.utils.time import now_iso
@@ -222,31 +220,27 @@ class Runner:
         reading just taken counts: a latched one advises the dispatcher, but a latch
         cannot clear while a GPU executor stays warm.
         """
-        if not msg.uses_gpu():
-            return
         availability = self.lifecycle.live_gpu_availability()
-        devices = self.hardware.gpu.devices
-        if not availability or not devices:
+        if not availability:
             return
-        overlaid = [
+        gpu = self.hardware.gpu
+        devices = [
             (
                 device.model_copy(update={"gpu_available": reported.available})
                 if (reported := availability.get(device.uuid)) is not None
                 else device
             )
-            for device in devices
+            for device in gpu.devices
         ]
-        free = available_devices(overlaid)
-        if len(free) == len(overlaid):
+        hardware = self.hardware.model_copy(
+            update={"gpu": gpu.model_copy(update={"devices": devices})}
+        )
+        if gpus_fit_dispatch(hardware, msg.spec, msg.relays_only):
             return
-        requirement = declared_gpu_requirements(msg.spec) or GPURequirements(count=1)
-        if len(select_matching_gpu_indices(free, requirement)) >= (
-            requirement.count or 1
-        ):
-            return
+        held = len(devices) - len(available_devices(devices))
         raise ExecutionError(
-            f"{len(overlaid) - len(free)} of this worker's {len(overlaid)} GPU(s) are "
-            "held by a process outside FlowMesh; the rest do not satisfy the task",
+            f"{held} of this worker's {len(devices)} GPU(s) are held by a process "
+            "outside FlowMesh, so this task cannot run here",
             retryable=True,
         )
 

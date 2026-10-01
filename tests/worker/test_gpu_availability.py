@@ -514,6 +514,16 @@ class TestAdmission:
     def _gpu_spec(self, **message: Any) -> Any:
         return make_worker_task_message(_gpu_spec(), **message)
 
+    def _ssh_spec(self, count: int) -> Any:
+        return make_worker_task_message(
+            SSHSpecStrict(
+                taskType=TaskType.SSH,
+                resources=ResourcesSpec(
+                    hardware=HardwareRequirements(gpu=GPURequirements(count=count))
+                ),
+            )
+        )
+
     def _held(self, *uuids: str) -> dict[str, DeviceAvailability]:
         return {u: DeviceAvailability(available=False, free_bytes=0) for u in uuids}
 
@@ -525,9 +535,25 @@ class TestAdmission:
             runner._refuse_if_gpu_is_held(self._gpu_spec())
         assert excinfo.value.retryable is True, "must reroute, not fail the task"
 
-    def test_admits_when_a_free_device_remains(self, tmp_path: Path) -> None:
-        runner = self._runner(tmp_path, self._held("GPU-0"), devices=4)
-        runner._refuse_if_gpu_is_held(self._gpu_spec())
+    def test_refuses_a_model_task_beside_a_free_device(self, tmp_path: Path) -> None:
+        # The model would see every device, the held one included.
+        runner = self._runner(tmp_path, self._held("GPU-0"), devices=2)
+        with pytest.raises(ExecutionError) as excinfo:
+            runner._refuse_if_gpu_is_held(self._gpu_spec())
+        assert excinfo.value.retryable is True
+
+    def test_admits_an_ssh_session_when_a_free_device_remains(
+        self, tmp_path: Path
+    ) -> None:
+        runner = self._runner(tmp_path, self._held("GPU-0"), devices=2)
+        runner._refuse_if_gpu_is_held(self._ssh_spec(count=1))
+
+    def test_refuses_an_ssh_session_the_free_devices_fall_short_of(
+        self, tmp_path: Path
+    ) -> None:
+        runner = self._runner(tmp_path, self._held("GPU-0"), devices=2)
+        with pytest.raises(ExecutionError):
+            runner._refuse_if_gpu_is_held(self._ssh_spec(count=2))
 
     def test_admits_a_cpu_task_onto_a_fully_held_worker(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path, self._held("GPU-0"))

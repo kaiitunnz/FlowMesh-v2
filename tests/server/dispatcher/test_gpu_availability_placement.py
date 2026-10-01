@@ -21,7 +21,7 @@ from server.services.monitoring import EventMonitor
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import WorkerEvent
 from shared.schemas.worker import WorkerCapabilities
-from shared.tasks import TaskEnvelope
+from shared.tasks import TaskEnvelope, TaskEnvelopeStrict
 from shared.tasks.specs import InferenceEmbodimentKind
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import GpuInfo
@@ -43,6 +43,7 @@ pytestmark = pytest.mark.skipif(
 
 _WORKER = "wkr-gpu-held"
 _HELD = "GPU-held"
+_FREE = "GPU-free"
 
 _ECHO = """
 apiVersion: flowmesh/v2
@@ -91,7 +92,10 @@ def _live_worker(devices: list[GpuInfo]) -> Iterator[redis.Redis]:
     live.sadd(WORKERS_SET_KEY, _WORKER)
     hardware = make_worker_hardware(devices)
     capabilities = WorkerCapabilities(
-        supported_task_types=frozenset({TaskType.INFERENCE, TaskType.ECHO})
+        supported_task_types=frozenset(
+            {TaskType.INFERENCE, TaskType.ECHO, TaskType.SSH}
+        ),
+        ssh_noninteractive=True,
     )
     live.hset(
         worker_key(_WORKER),
@@ -118,6 +122,16 @@ def _live_worker(devices: list[GpuInfo]) -> Iterator[redis.Redis]:
 def client() -> Iterator[redis.Redis]:
     yield from _live_worker(
         [GpuInfo(index=0, name="NVIDIA L4", uuid=_HELD, memory_total_bytes=24 << 30)]
+    )
+
+
+@pytest.fixture
+def two_card_client() -> Iterator[redis.Redis]:
+    yield from _live_worker(
+        [
+            GpuInfo(index=0, name="NVIDIA L4", uuid=_HELD, memory_total_bytes=24 << 30),
+            GpuInfo(index=1, name="NVIDIA L4", uuid=_FREE, memory_total_bytes=24 << 30),
+        ]
     )
 
 
@@ -310,6 +324,49 @@ class TestPlacementOnAHeldWorker:
         dispatcher.dispatch_once(task_id)
 
         assert registry.offered == [[_WORKER]]
+
+
+class TestPlacementBesideAHeldDevice:
+    """A worker with one held card and one free one."""
+
+    @pytest.mark.anyio
+    async def test_a_model_leaf_waits_while_any_device_of_its_worker_is_held(
+        self, two_card_client: redis.Redis
+    ) -> None:
+        # The model would see both devices, so the free one cannot carry it.
+        registry = _held(two_card_client)
+        runtime = _runtime(FakeRegistry())
+        _wfl, ids = await _register(
+            runtime, LOCAL_ELIGIBLE.replace("PRIMARY", "self_contained")
+        )
+        dispatcher, requeued = _dispatcher(runtime, registry)
+
+        assert dispatcher.dispatch_once(ids["gen"]) is False
+
+        assert registry.offered == [[]]
+        assert [kw["reason"] for _, kw in requeued] == ["no_idle_worker"]
+
+    def test_an_ssh_session_still_places_on_the_free_device(
+        self, two_card_client: redis.Redis
+    ) -> None:
+        registry = _held(two_card_client)
+        session = TaskEnvelopeStrict.model_validate(
+            {
+                "apiVersion": "flowmesh/v1",
+                "kind": "Task",
+                "spec": {
+                    "taskType": "ssh",
+                    "interactive": False,
+                    "image": "x",
+                    "command": ["true"],
+                    "resources": {"hardware": {"gpu": {"count": 1}}},
+                },
+            }
+        )
+
+        pool = registry.idle_satisfying_pool(session, False)
+
+        assert [worker.id for worker in pool] == [_WORKER]
 
 
 class TestRelayingDispatchOnACpuWorker:
