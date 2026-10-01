@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import logging
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,6 +26,9 @@ from .registry import SshEndpointRegistry
 
 LOOPBACK_HOST = "127.0.0.1"
 SSH_FRAME_KIND = "ssh_frame"
+# The bridge may re-forward a frame after a restart, so a session's opening frame can
+# arrive again once the session has ended; the lane remembers that many ended sessions.
+_ENDED_MEMORY = 4096
 
 
 @dataclass(eq=False)
@@ -52,6 +56,7 @@ class SshRelayLane:
         self._connect_timeout_sec = connect_timeout_sec
         self._logger = logger or logging.getLogger("ssh-relay-lane")
         self._connections: dict[str, _Connection] = {}
+        self._ended: OrderedDict[str, None] = OrderedDict()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run, name="flowmesh-ssh-relay", daemon=True
@@ -85,7 +90,11 @@ class SshRelayLane:
         if connection is None:
             # Only a session's opening frame starts a connection; anything else is
             # left over from one that already ended.
-            if frame.kind is not RelayFrameKind.DATA or frame.seq != 1:
+            if (
+                frame.kind is not RelayFrameKind.DATA
+                or frame.seq != 1
+                or frame.session_id in self._ended
+            ):
                 return
             channel = ByteStreamChannel(
                 frame.session_id, RelaySessionRole.TARGET, self._sink
@@ -139,6 +148,9 @@ class SshRelayLane:
             await channel.abort()
         finally:
             self._connections.pop(channel.session_id, None)
+            self._ended[channel.session_id] = None
+            if len(self._ended) > _ENDED_MEMORY:
+                self._ended.popitem(last=False)
             if writer is not None:
                 writer.close()
                 with contextlib.suppress(Exception):

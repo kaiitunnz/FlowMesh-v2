@@ -336,3 +336,32 @@ def test_unregistering_a_forward_task_ends_its_live_connections() -> None:
                 writer.close()
 
     _run(run())
+
+
+def test_a_reforwarded_opening_frame_of_an_ended_session_opens_nothing() -> None:
+    """A bridge restart can re-forward a session's first frame after it ended; a
+    connection it opened would keep the session from ever idling out."""
+
+    async def run() -> None:
+        async with _fabric() as fabric, _listener(_echo) as sshd:
+            fabric.registry.publish(ENDPOINT, sshd.port)
+            sent: list[RelayFrame] = []
+            sink = fabric.origin._sink
+            original = sink.send
+
+            async def capture(frame: RelayFrame) -> None:
+                sent.append(frame)
+                await original(frame)
+
+            sink.send = capture  # type: ignore[method-assign]
+            channel = await fabric.origin.open(TARGET)
+            await channel.send_eof()
+            assert await channel.recv() is None
+            await fabric.origin.release(channel, abort=False)
+            await asyncio.wait_for(sshd.closed.wait(), 5)
+
+            await sink.send(sent[0])
+            await asyncio.sleep(0.3)
+            assert sshd.accepted == 1
+
+    _run(run())
