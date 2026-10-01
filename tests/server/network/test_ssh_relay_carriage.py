@@ -10,7 +10,7 @@ import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -463,6 +463,48 @@ def test_a_root_shutdown_ends_a_forward_connection_at_the_worker() -> None:
                 with pytest.raises(SshRelayUnavailable):
                     await fabric.origin.open(TARGET)
                 writer.close()
+
+    _run(run())
+
+
+def test_an_open_racing_a_root_shutdown_is_refused() -> None:
+    """A forward connection still writing its session record when the shutdown starts
+    must not register past the origin's sweep, or the forward listener's stop waits
+    out the open timeout."""
+
+    async def run() -> None:
+        async with _fabric() as fabric, _listener(_hold) as sshd:
+            fabric.registry.publish(ENDPOINT, sshd.port)
+            sessions = fabric.origin._sessions
+            write = sessions.update
+            writing, release = asyncio.Event(), asyncio.Event()
+            written: list[str] = []
+
+            async def slow_update(session_id: str, **fields: Any) -> None:
+                await write(session_id, **fields)
+                written.append(session_id)
+                writing.set()
+                await release.wait()
+
+            with patch.object(sessions, "update", slow_update):
+                async with _forward(fabric) as (service, port):
+                    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                    await asyncio.wait_for(writing.wait(), 5)
+
+                    stopping = asyncio.create_task(
+                        stop_ssh_ingresses(fabric.origin, service)
+                    )
+                    while not fabric.origin._stopping:
+                        await asyncio.sleep(0.005)
+                    release.set()
+                    await asyncio.wait_for(stopping, 5)
+
+                    assert await asyncio.wait_for(reader.read(), 5) == b""
+                    assert fabric.origin._channels == {}
+                    assert sshd.accepted == 0
+                    (session_id,) = written
+                    assert await sessions.load(session_id) == {}
+                    writer.close()
 
     _run(run())
 

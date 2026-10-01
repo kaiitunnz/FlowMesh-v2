@@ -219,6 +219,11 @@ class SshRelayOrigin:
             target_worker=target.worker_id,
             task_id=target.task_id,
         )
+        # A stop that began during the write has already swept the live channels.
+        if self._stopping:
+            with contextlib.suppress(Exception):
+                await self._sessions.delete(session_id)
+            raise SshRelayUnavailable("the root is stopping")
         channel = ByteStreamChannel(
             session_id,
             RelaySessionRole.ORIGIN,
