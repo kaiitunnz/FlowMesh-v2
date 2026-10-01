@@ -99,6 +99,12 @@ class Lifecycle:
         reading taken while one is warm includes the worker's own model."""
         self._gpu_executor_probe = probe
 
+    def gpu_availability(self) -> dict[str, DeviceAvailability]:
+        """Per-device availability as this worker last reported it, the reading
+        placement uses."""
+        monitor = self._gpu_monitor
+        return {} if monitor is None else monitor.snapshot()
+
     def live_gpu_availability(self) -> dict[str, DeviceAvailability]:
         """Per-device availability from the reading just taken only, so a caller that
         refuses work on it never refuses on a stale latch."""

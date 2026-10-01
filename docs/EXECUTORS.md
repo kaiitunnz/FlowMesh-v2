@@ -418,9 +418,10 @@ address of the worker's host (`network`). When the server cannot carry a relayed
 ## SSH executor GPUs
 
 With `ENABLE_SSH_GPU_LIMIT`, a session that declares a `gpu` block receives the
-smallest matching subset of its worker's devices that no process outside FlowMesh
-holds, and one the free devices cannot satisfy is refused and retried. A session that
-declares no `gpu` block receives every device of its worker.
+smallest matching subset of the devices its worker last reported free of processes
+outside FlowMesh. A session the free devices cannot satisfy on a reading just taken is
+refused and retried. A session that declares no `gpu` block receives every device of
+its worker.
 
 ## SSH executor (process backend)
 

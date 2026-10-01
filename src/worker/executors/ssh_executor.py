@@ -37,7 +37,11 @@ from worker.executors.ssh_session import (
     SSHSessionBackend,
     select_backend_cls,
 )
-from worker.executors.ssh_session.config import output_limit, raise_if_exceeded
+from worker.executors.ssh_session.config import (
+    FreeGpus,
+    output_limit,
+    raise_if_exceeded,
+)
 from worker.executors.ssh_session.inputs import resolve_inputs
 from worker.executors.utils.checkpoints import maybe_upload_artifacts
 from worker.gpu_availability import DeviceAvailability
@@ -49,14 +53,11 @@ logger = logging.getLogger(__name__)
 _SESSION_READY_TIMEOUT_SEC = 30.0
 
 
-def _available_uuids(
+def _free_uuids(
     reported: dict[str, DeviceAvailability], devices: list[GpuInfo]
-) -> frozenset[str] | None:
-    """The devices an SSH session may be given, or None when the worker took no
-    reading, which leaves the device set untouched. A device the reading did not cover
-    is no opinion rather than held, so it stays in the set."""
-    if not reported:
-        return None
+) -> frozenset[str]:
+    """The devices a reading does not mark held; one it did not cover is no opinion
+    rather than held, so it counts as free."""
     return frozenset(
         device.uuid
         for device in devices
@@ -125,6 +126,15 @@ class SSHExecutor(Executor):
     # Main execution
     # ------------------------------------------------------------------ #
 
+    def _free_gpus(self) -> FreeGpus | None:
+        if self._lifecycle is None or self._hardware is None:
+            return None
+        devices = self._hardware.gpu.devices
+        return FreeGpus(
+            latched=_free_uuids(self._lifecycle.gpu_availability(), devices),
+            fresh=_free_uuids(self._lifecycle.live_gpu_availability(), devices),
+        )
+
     def run(self, task: ExecutorTask, out_dir: Path) -> SSHResult:
         with self._signals.running(task.task_id):
             return self._run_session(task, out_dir)
@@ -133,15 +143,7 @@ class SSHExecutor(Executor):
         spec = self.require_spec(task, SSHSpecStrict)
         # A session holds its devices for as long as it lives, so it is never handed
         # one another tenant is on.
-        cfg = SSHConfig.from_spec(
-            spec,
-            self._config,
-            self._hardware,
-            _available_uuids(
-                self._lifecycle.live_gpu_availability() if self._lifecycle else {},
-                self._hardware.gpu.devices if self._hardware else [],
-            ),
-        )
+        cfg = SSHConfig.from_spec(spec, self._config, self._hardware, self._free_gpus())
         access_mode = cfg.access_mode
         interactive = cfg.interactive
 

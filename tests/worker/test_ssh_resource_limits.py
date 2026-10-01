@@ -1,7 +1,9 @@
 """Tests for SSH container resource-limit resolution and propagation."""
 
 import logging
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,8 +20,9 @@ from shared.tasks.worker_message import (
 from tests.worker.factories import make_worker_config, make_worker_hardware
 from worker.config import WorkerConfig
 from worker.executors.base_executor import ExecutionError
-from worker.executors.ssh_executor import _available_uuids
+from worker.executors.ssh_executor import SSHExecutor, _free_uuids
 from worker.executors.ssh_session import SSHConfig
+from worker.executors.ssh_session.config import FreeGpus
 from worker.gpu_availability import DeviceAvailability
 
 
@@ -423,6 +426,11 @@ class TestSSHConfigResolveGpuDevices:
             )
 
 
+def _both(free: frozenset[str]) -> FreeGpus:
+    """The same free set by the latched reading and the one just taken."""
+    return FreeGpus(latched=free, fresh=free)
+
+
 class TestSSHConfigSkipsHeldDevices:
     def _hardware(self):
         return make_worker_hardware(
@@ -448,7 +456,7 @@ class TestSSHConfigSkipsHeldDevices:
             _spec({"hardware": {"gpu": {"count": 1}}}),
             _worker_config_gpu_limit(),
             self._hardware(),
-            frozenset({"a100-1", "a100-2", "a100-3"}),
+            _both(frozenset({"a100-1", "a100-2", "a100-3"})),
         )
         assert cfg.gpu_device_ids == ["1"]
 
@@ -460,7 +468,7 @@ class TestSSHConfigSkipsHeldDevices:
             _spec({"hardware": {"gpu": {"count": 2}}}),
             _worker_config_gpu_limit(),
             self._hardware(),
-            frozenset({"a100-1", "a100-3"}),
+            _both(frozenset({"a100-1", "a100-3"})),
         )
         assert cfg.gpu_device_ids == ["5", "7"]
 
@@ -468,13 +476,62 @@ class TestSSHConfigSkipsHeldDevices:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("WORKER_HOST_GPU_ID", "0,1,2,3")
-        with pytest.raises(ExecutionError, match="only 2 of this worker's"):
+        with pytest.raises(ExecutionError, match="too few") as excinfo:
             SSHConfig.from_spec(
                 _spec({"hardware": {"gpu": {"count": 3}}}),
                 _worker_config_gpu_limit(),
                 self._hardware(),
-                frozenset({"a100-2", "a100-3"}),
+                _both(frozenset({"a100-2", "a100-3"})),
             )
+        assert excinfo.value.retryable is True
+
+    def test_a_latched_hold_steers_selection_inside_the_grace_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The reading just taken is suppressed, but the one placement used still
+        # marks device 0 held, so the session gets the free one.
+        monkeypatch.setenv("WORKER_HOST_GPU_ID", "0,1")
+        hardware = make_worker_hardware(self._hardware().gpu.devices[:2])
+        lifecycle = MagicMock()
+        lifecycle.gpu_availability.return_value = {
+            "a100-0": DeviceAvailability(available=False, free_bytes=0),
+            "a100-1": DeviceAvailability(available=True, free_bytes=1),
+        }
+        lifecycle.live_gpu_availability.return_value = {}
+        executor = cast(Any, SimpleNamespace(_lifecycle=lifecycle, _hardware=hardware))
+        cfg = SSHConfig.from_spec(
+            _spec({"hardware": {"gpu": {"count": 1}}}),
+            _worker_config_gpu_limit(),
+            hardware,
+            SSHExecutor._free_gpus(executor),
+        )
+        assert cfg.gpu_device_ids == ["1"]
+
+    def test_a_latch_alone_never_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("WORKER_HOST_GPU_ID", "0,1,2,3")
+        every = frozenset(f"a100-{i}" for i in range(4))
+        cfg = SSHConfig.from_spec(
+            _spec({"hardware": {"gpu": {"count": 2}}}),
+            _worker_config_gpu_limit(),
+            self._hardware(),
+            FreeGpus(latched=frozenset({"a100-3"}), fresh=every),
+        )
+        assert cfg.gpu_device_ids == ["0", "1"]
+
+    def test_a_fresh_hold_is_avoided_when_the_latch_falls_short(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("WORKER_HOST_GPU_ID", "0,1,2,3")
+        cfg = SSHConfig.from_spec(
+            _spec({"hardware": {"gpu": {"count": 2}}}),
+            _worker_config_gpu_limit(),
+            self._hardware(),
+            FreeGpus(
+                latched=frozenset({"a100-3"}),
+                fresh=frozenset({"a100-1", "a100-2", "a100-3"}),
+            ),
+        )
+        assert cfg.gpu_device_ids == ["1", "2"]
 
     def test_no_availability_reported_behaves_as_before(
         self, monkeypatch: pytest.MonkeyPatch
@@ -488,7 +545,7 @@ class TestSSHConfigSkipsHeldDevices:
         assert cfg.gpu_device_ids == ["0"]
 
 
-class TestAvailableUuids:
+class TestFreeUuids:
     """The one place a tri-state availability report becomes a positive set."""
 
     def _devices(self, n: int = 4) -> list[GpuInfo]:
@@ -502,31 +559,30 @@ class TestAvailableUuids:
             for i in range(n)
         ]
 
-    def test_no_reading_at_all_means_no_opinion(self) -> None:
-        # None, not an empty set: an empty set would withhold every device.
-        assert _available_uuids({}, self._devices()) is None
+    def test_no_reading_at_all_withholds_nothing(self) -> None:
+        assert _free_uuids({}, self._devices(2)) == frozenset({"a100-0", "a100-1"})
 
     def test_a_held_device_is_withheld(self) -> None:
         reported = {
             "a100-0": DeviceAvailability(available=False, free_bytes=0),
             "a100-1": DeviceAvailability(available=True, free_bytes=1),
         }
-        assert _available_uuids(reported, self._devices(2)) == frozenset({"a100-1"})
+        assert _free_uuids(reported, self._devices(2)) == frozenset({"a100-1"})
 
     def test_a_device_the_reading_did_not_cover_is_still_offered(self) -> None:
         # A partial probe must not quietly shrink the session's device set.
         reported = {"a100-0": DeviceAvailability(available=False, free_bytes=0)}
-        assert _available_uuids(reported, self._devices(4)) == frozenset(
+        assert _free_uuids(reported, self._devices(4)) == frozenset(
             {"a100-1", "a100-2", "a100-3"}
         )
 
-    def test_every_device_held_yields_an_empty_set_not_none(self) -> None:
+    def test_every_device_held_yields_an_empty_set(self) -> None:
         reported = {
             f"a100-{i}": DeviceAvailability(available=False, free_bytes=0)
             for i in range(2)
         }
-        assert _available_uuids(reported, self._devices(2)) == frozenset()
+        assert _free_uuids(reported, self._devices(2)) == frozenset()
 
     def test_a_reading_for_a_device_the_worker_does_not_have_is_ignored(self) -> None:
         reported = {"a100-9": DeviceAvailability(available=True, free_bytes=1)}
-        assert _available_uuids(reported, self._devices(1)) == frozenset({"a100-0"})
+        assert _free_uuids(reported, self._devices(1)) == frozenset({"a100-0"})
