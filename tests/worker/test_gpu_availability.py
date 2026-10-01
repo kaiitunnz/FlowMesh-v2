@@ -12,6 +12,11 @@ from shared.harness import ServiceLeafEpisodeDispatch
 from shared.schemas.result import BaseExecutorResult
 from shared.schemas.worker import WorkerStatus
 from shared.tasks.components.model import ModelConfig, ModelSource
+from shared.tasks.components.resources import (
+    GPURequirements,
+    HardwareRequirements,
+    ResourcesSpec,
+)
 from shared.tasks.specs import EchoSpecStrict, InferenceSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import (
@@ -410,6 +415,26 @@ class TestWarmExecutorGpuFlag:
         runner._note_gpu_usage(self._spec(gpu=True))
         runner._cleanup_active_executor()
         assert runner._active_executor_used_gpu is False
+        assert runner.has_active_gpu_executor() is False
+
+    def test_a_declared_gpu_alone_does_not_mark_the_executor(
+        self, tmp_path: Path
+    ) -> None:
+        # A CPU executor kept warm after a task that only declared a GPU holds no GPU
+        # memory; marking it would suppress every later reading for as long as it
+        # stays warm.
+        runner = self._runner(tmp_path)
+        runner._active_executor = MagicMock()
+        runner._note_gpu_usage(
+            make_worker_task_message(
+                EchoSpecStrict(
+                    taskType=TaskType.ECHO,
+                    resources=ResourcesSpec(
+                        hardware=HardwareRequirements(gpu=GPURequirements(count=2))
+                    ),
+                )
+            )
+        )
         assert runner.has_active_gpu_executor() is False
 
     @pytest.mark.parametrize(

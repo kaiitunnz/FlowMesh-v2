@@ -254,9 +254,10 @@ class Runner:
 
         Called for every task, since one reusing a warm executor never re-enters the
         load branch and the memory it allocates outlives it. Monotone until teardown:
-        a later CPU task does not free what an earlier GPU task allocated.
+        a later CPU task does not free what an earlier GPU task allocated. A declared
+        GPU request alone allocates nothing, so only what the spec loads counts.
         """
-        self._active_executor_used_gpu |= msg.uses_gpu()
+        self._active_executor_used_gpu |= not msg.relays_only and msg.spec.uses_gpu()
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
