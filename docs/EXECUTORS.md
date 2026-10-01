@@ -414,7 +414,8 @@ A relayed session on the `process` backend listens on loopback only; a Docker se
 port is published on every address of the worker's host. Every relayed session reports
 its own route as `directHost`, `directPort`, `directScope` (`loopback` or `network`) and
 `workerId`. A relayed mode the server cannot carry falls back from `forward` to `proxy`,
-then to `direct` at the session's own address, keeping its scope.
+then to `direct` at the session's own address, keeping its scope. A server whose network
+plane is off refuses a `proxy` or `forward` task at submission.
 
 ## SSH executor (process backend)
 
