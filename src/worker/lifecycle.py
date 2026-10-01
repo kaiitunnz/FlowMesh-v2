@@ -284,7 +284,8 @@ class Lifecycle:
         if self.ssh_relay is not None:
             # Its connections' cancels leave over the attachment unregistering closes.
             try:
-                self.ssh_relay.stop()
+                remaining = left()
+                self.ssh_relay.stop(10.0 if remaining is None else remaining)
             except Exception:
                 pass
         if self.content_plane is not None:

@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import logging
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -71,14 +72,16 @@ class SshRelayLane:
         self._registry.add_withdraw_listener(self._on_withdraw)
         self._thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 10.0) -> None:
+        """End every connection, then the lane, within ``timeout`` seconds."""
         if not self._thread.is_alive():
             return
+        deadline = time.monotonic() + timeout
         future = asyncio.run_coroutine_threadsafe(self._abort_all(), self._loop)
         with contextlib.suppress(Exception):
-            future.result(timeout=timeout)
+            future.result(timeout=max(0.0, deadline - time.monotonic()))
         self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=timeout)
+        self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one relay frame onto the lane loop; return whether it is ours."""

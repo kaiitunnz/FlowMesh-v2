@@ -1,6 +1,10 @@
 """A relayed session's port is published for the worker's relay lane, and only a
 relayed session's."""
 
+import asyncio
+import socket
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -8,8 +12,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from shared.network.byte_stream import ByteStreamChannel
+from shared.network.relay_frame import SSH_FRAME_KIND, RelayFrame, RelayFrameKind
+from shared.network.session import RelaySessionRole
 from tests.worker.factories import make_live_worker_config, make_ssh_executor
-from worker.ssh_relay import SshEndpointRegistry
+from worker.ssh_relay import SshEndpointRegistry, SshRelayLane
 
 
 def _ready(tmp_path: Path, mode: str) -> tuple[SshEndpointRegistry, dict]:
@@ -64,3 +71,42 @@ def test_a_direct_session_is_advertised_at_the_configured_host(tmp_path: Path) -
         lifecycle=MagicMock(ssh_endpoints=SshEndpointRegistry()),
     )
     assert executor.backend.session_address("direct") == "ssh.example.com"
+
+
+def test_a_lane_whose_frames_cannot_leave_stops_within_its_timeout() -> None:
+    """A worker shutting down gives the lane what is left of its deadline, and a
+    push waiting on a reconnecting event stream must not stretch it."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(5)
+    released = threading.Event()
+    registry = SshEndpointRegistry()
+    registry.publish("ssn-1", listener.getsockname()[1])
+
+    def push(wire: dict[str, Any]) -> None:
+        # Only its window grants leave; the cancels of a stop wait.
+        if RelayFrame.from_wire(wire).kind is not RelayFrameKind.WINDOW:
+            released.wait(30)
+
+    lane = SshRelayLane(registry=registry, push_frame=push)
+    opening: list[RelayFrame] = []
+
+    async def capture(frame: RelayFrame) -> None:
+        opening.append(frame)
+
+    async def open_frame() -> None:
+        sink = MagicMock(send=capture)
+        await ByteStreamChannel("rly-1", RelaySessionRole.ORIGIN, sink).send_open(
+            "ssn-1"
+        )
+
+    asyncio.run(open_frame())
+    lane.start()
+    try:
+        lane.route(SSH_FRAME_KIND, opening[0].to_wire())
+        listener.accept()[0].close()
+        started = time.monotonic()
+        lane.stop(0.3)
+        assert time.monotonic() - started < 0.5
+    finally:
+        released.set()
+        listener.close()
