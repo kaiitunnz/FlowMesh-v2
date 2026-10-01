@@ -161,7 +161,7 @@ class WorkerTaskMessage(BaseModel):
     @staticmethod
     def wire_dispatch_id(payload: dict[str, Any]) -> str | None:
         """Read the dispatch id from a message as it travels, without parsing it."""
-        if set(payload) == {"content", "data"}:
+        if _is_deduped(payload):
             ref = payload["data"].get("dispatch_id")
             return None if ref is None else lookup_deduped_json(payload, "dispatch_id")
         return payload.get("dispatch_id")
@@ -169,7 +169,7 @@ class WorkerTaskMessage(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _restore_deduped(cls, data: Any) -> Any:
-        if isinstance(data, dict) and set(data) == {"content", "data"}:
+        if isinstance(data, dict) and _is_deduped(data):
             return restore_json(data)
         return data
 
@@ -179,6 +179,11 @@ class WorkerTaskMessage(BaseModel):
         if info.mode != "json":
             return plain
         return dedup_json(plain)
+
+
+def _is_deduped(payload: dict[str, Any]) -> bool:
+    """Whether a message travels in its deduplicated wire form."""
+    return set(payload) == {"content", "data"}
 
 
 class CPUInfo(BaseModel):
