@@ -172,7 +172,7 @@ async def _hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
 
 
 def _run(coro: Awaitable[None]) -> None:
-    asyncio.run(asyncio.wait_for(coro, 20))  # type: ignore[arg-type]
+    asyncio.run(asyncio.wait_for(coro, 20))
 
 
 def test_bytes_round_trip_and_a_clean_close_needs_no_cancel() -> None:
@@ -261,7 +261,6 @@ def test_a_restarted_root_reaps_the_connections_its_predecessor_left_open() -> N
         async with _fabric() as fabric, _listener(_hold) as sshd:
             fabric.registry.publish(ENDPOINT, sshd.port)
             orphan = fabric.new_origin()
-            orphan._loop = asyncio.get_running_loop()
             channel = await orphan.open(TARGET)
             # The orphan's own attachment never runs: its process is gone.
             await channel.send(b"x")

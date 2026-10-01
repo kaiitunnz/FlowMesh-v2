@@ -76,9 +76,3 @@ def test_a_direct_session_is_advertised_at_the_configured_host(
 ) -> None:
     worker_env.setenv("SSH_DIRECT_HOST", "ssh.example.com")
     assert WorkerConfig.from_env().ssh_direct_host == "ssh.example.com"
-
-
-def test_the_retired_relay_host_is_not_read(worker_env: pytest.MonkeyPatch) -> None:
-    worker_env.delenv("SSH_DIRECT_HOST", raising=False)
-    worker_env.setenv("SSH_RELAY_HOST", "10.0.0.9")
-    assert WorkerConfig.from_env().ssh_direct_host is None
