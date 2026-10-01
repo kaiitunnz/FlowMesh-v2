@@ -85,3 +85,23 @@ def test_a_send_blocked_on_a_full_window_returns_when_the_peer_cancels() -> None
             await asyncio.wait_for(sending, 1)
 
     asyncio.run(run())
+
+
+def test_cancelling_a_send_blocked_on_a_full_window_leaves_nothing_pending() -> None:
+    async def run() -> None:
+        to_target = _Wire()
+        origin = ByteStreamChannel(
+            "rly-1", RelaySessionRole.ORIGIN, to_target, window_bytes=1
+        )
+        to_target.peer = ByteStreamChannel("rly-1", RelaySessionRole.TARGET, _Wire())
+        sending = asyncio.ensure_future(origin.send(b"a" * 100_000))
+        await asyncio.sleep(0.01)
+
+        sending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sending
+        await asyncio.sleep(0)
+
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+
+    asyncio.run(run())

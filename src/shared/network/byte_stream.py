@@ -126,11 +126,11 @@ class ByteStreamChannel:
             await asyncio.wait({sender, waiter}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             waiter.cancel()
-        if sender.done():
-            sender.result()
-            return
-        sender.cancel()
-        raise StreamClosed("relay stream cancelled")
+            if not sender.done():
+                sender.cancel()
+        if sender.cancelled():
+            raise StreamClosed("relay stream cancelled")
+        sender.result()
 
 
 async def splice(
