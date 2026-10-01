@@ -39,6 +39,8 @@ from .registry import LOOPBACK_HOST, SshEndpointRegistry
 _ENDED_MEMORY = 4096
 # A stop with its budget spent still gives every connection this long to end.
 _MIN_ABORT_SEC = 0.2
+# How long a stopped loop waits for its cancelled tasks to unwind.
+_DRAIN_SEC = 1.0
 
 
 @dataclass(eq=False)
@@ -199,7 +201,14 @@ class SshRelayLane:
 
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
-        self._loop.run_forever()
+        try:
+            self._loop.run_forever()
+        finally:
+            if tasks := asyncio.all_tasks(self._loop):
+                for task in tasks:
+                    task.cancel()
+                self._loop.run_until_complete(asyncio.wait(tasks, timeout=_DRAIN_SEC))
+            self._loop.close()
 
 
 __all__ = ["SshRelayLane"]
