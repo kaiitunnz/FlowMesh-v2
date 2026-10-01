@@ -100,7 +100,7 @@ restart safe:
   the first start that loads it.
 - **SSH forward ports.** A running SSH task's `forward` session is served again
   on the port it was published on. A session whose port another process took
-  while the root was down stays unreachable until its task ends.
+  while the root was down is unreachable until its task ends.
 
 Rehydration runs inside the ASGI lifespan **before it yields**, so the server
 does not accept traffic (and its healthcheck does not pass) until scheduling
