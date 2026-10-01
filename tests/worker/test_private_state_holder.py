@@ -129,6 +129,20 @@ def test_a_resume_refuses_an_edited_component(tmp_path: Path) -> None:
     assert raised.value.reason is PrivateStateUnavailableReason.COMPONENT_MISMATCH
 
 
+def test_a_step_cancelled_before_its_seal_fails_its_retry_closed(
+    tmp_path: Path,
+) -> None:
+    holder = PrivateStateHolder(tmp_path)
+    bound, _ = _advance(holder, _binding(), 1)
+    cancelled = holder.open(bound, _attachment(bound, write_epoch=2))
+    (cancelled.workspace / "half-written").write_text("partial")
+
+    with pytest.raises(PrivateStateUnavailable) as raised:
+        holder.open(bound, _attachment(bound, write_epoch=3))
+
+    assert raised.value.reason is PrivateStateUnavailableReason.COMPONENT_MISMATCH
+
+
 def test_a_resume_refuses_a_generation_missing_a_required_component(
     tmp_path: Path,
 ) -> None:
