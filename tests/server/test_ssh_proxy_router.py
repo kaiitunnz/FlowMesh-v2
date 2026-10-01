@@ -142,3 +142,25 @@ def test_an_aborted_relay_closes_the_websocket() -> None:
         with pytest.raises(WebSocketDisconnect):
             websocket.receive_bytes()
     relay.release.assert_awaited_once()
+
+
+def test_a_relayed_connection_is_listed_while_it_lasts() -> None:
+    channel = _Channel()
+    connections = MagicMock()
+    connections.register_connection = AsyncMock()
+    connections.unregister_connection = AsyncMock()
+    app = _make_app(_record(username="flowmesh"), _relay(channel))
+    app.state.ssh_connections = connections
+    with TestClient(app).websocket_connect(
+        f"{PREFIX}/ssh/tasks/tsk-abc/proxy"
+    ) as websocket:
+        websocket.send_bytes(b"x")
+        assert websocket.receive_bytes() == b"x"
+        info = connections.register_connection.call_args.args[0]
+        assert (info.access_mode, info.task_id, info.session_id, info.username) == (
+            "proxy",
+            "tsk-abc",
+            "ssn-1",
+            "flowmesh",
+        )
+    connections.unregister_connection.assert_awaited_once_with(info.connection_id)

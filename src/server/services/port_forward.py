@@ -8,11 +8,10 @@ from threading import Event, Lock
 from typing import Any
 
 from shared.network.byte_stream import splice
-from shared.utils import new_ssh_connection_id, now_iso
 
 from ..registries.worker import WorkerRegistry
-from ..schemas.ssh import SSHConnectionInfo
 from ..ssh import SshRelayOrigin, SshRelayTarget
+from ..ssh.connections import tracked_ssh_connection
 from .ssh_connections import SshConnectionRegistry
 
 _DEFAULT_TIMEOUT_SEC = 5.0
@@ -502,7 +501,6 @@ class PortForwardService:
                 pass
             return
 
-        connection_id = new_ssh_connection_id()
         peer = writer.get_extra_info("peername")
         source_ip: str | None = None
         source_port: int | None = None
@@ -532,37 +530,22 @@ class PortForwardService:
         async with self._lock:
             self._handlers[task_id].add(handler)
 
-        if self._ssh_connections is not None:
-            try:
-                await self._ssh_connections.register_connection(
-                    SSHConnectionInfo(
-                        connection_id=connection_id,
-                        access_mode="forward",
-                        task_id=task_id,
-                        workflow_id=session.connection.workflow_id,
-                        worker_id=session.connection.worker_id,
-                        node_id=session.target.node_id,
-                        session_id=session.target.endpoint_id,
-                        username=(
-                            username
-                            if (username := session.connection.username) is not None
-                            else "flowmesh"
-                        ),
-                        source_ip=source_ip,
-                        source_port=source_port,
-                        connected_at=now_iso(),
-                    )
-                )
-            except Exception:
-                self._logger.debug(
-                    "Failed to register SSH connection %s",
-                    connection_id,
-                    exc_info=True,
-                )
-
         clean = False
         try:
-            clean = await splice(channel, reader, writer)
+            async with tracked_ssh_connection(
+                self._ssh_connections,
+                "forward",
+                session.target,
+                session.connection.workflow_id,
+                (
+                    username
+                    if (username := session.connection.username) is not None
+                    else "flowmesh"
+                ),
+                (source_ip, source_port),
+                self._logger,
+            ):
+                clean = await splice(channel, reader, writer)
         finally:
             await self._relay.release(channel, abort=not clean)
             async with self._lock:
@@ -570,15 +553,6 @@ class PortForwardService:
                     handlers.discard(handler)
                     if not handlers:
                         del self._handlers[task_id]
-            if self._ssh_connections is not None:
-                try:
-                    await self._ssh_connections.unregister_connection(connection_id)
-                except Exception:
-                    self._logger.debug(
-                        "Failed to unregister SSH connection %s",
-                        connection_id,
-                        exc_info=True,
-                    )
             writer.close()
             try:
                 await writer.wait_closed()

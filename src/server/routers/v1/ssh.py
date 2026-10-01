@@ -6,7 +6,6 @@ from fastapi import Path as ApiPath
 from fastapi import Request, WebSocket, WebSocketDisconnect, status
 
 from shared.network.byte_stream import ByteStreamChannel, StreamClosed
-from shared.utils import new_ssh_connection_id, now_iso
 from shared.utils.json import safe_get
 
 from ...app_state import (
@@ -27,8 +26,8 @@ from ...hooks import ResourceAction, ResourceKind
 from ...registries.worker import WorkerRegistry
 from ...schemas.ssh import SSHConnectionInfo
 from ...services.ssh_connections import SshConnectionRegistry
-from ...ssh import SshRelayOrigin, SshRelayTarget, resolve_relay_target
-from ...task.models import TaskRecord
+from ...ssh import SshRelayOrigin, resolve_relay_target
+from ...ssh.connections import tracked_ssh_connection
 from ...task.runtime import TaskRuntime
 from ...utils.misc import filter_models_by_queries
 
@@ -90,25 +89,23 @@ async def ssh_proxy(
         )
         return
 
-    connection_id = new_ssh_connection_id()
+    username = safe_get(record.latest_update, "ssh.username")
+    client = websocket.client
     try:
         await websocket.accept()
-        await _register_connection(
-            ssh_connections, connection_id, websocket, record, target, logger
-        )
-        logger.info("SSH relay started: task=%s", task_id)
-        await _relay_websocket(websocket, channel)
+        async with tracked_ssh_connection(
+            ssh_connections,
+            "proxy",
+            target,
+            record.workflow_id,
+            str(username) if username else None,
+            (None, None) if client is None else (client.host, client.port),
+            logger,
+        ):
+            logger.info("SSH relay started: task=%s", task_id)
+            await _relay_websocket(websocket, channel)
     finally:
         await ssh_relay.release(channel, abort=True)
-        if ssh_connections is not None:
-            try:
-                await ssh_connections.unregister_connection(connection_id)
-            except Exception:
-                logger.debug(
-                    "Failed to unregister SSH connection %s",
-                    connection_id,
-                    exc_info=True,
-                )
         try:
             await websocket.close()
         except Exception:
@@ -145,40 +142,6 @@ async def _relay_websocket(websocket: WebSocket, channel: ByteStreamChannel) -> 
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def _register_connection(
-    ssh_connections: SshConnectionRegistry | None,
-    connection_id: str,
-    websocket: WebSocket,
-    record: TaskRecord,
-    target: SshRelayTarget,
-    logger: logging.Logger,
-) -> None:
-    if ssh_connections is None:
-        return
-    username = safe_get(record.latest_update, "ssh.username")
-    client = websocket.client
-    try:
-        await ssh_connections.register_connection(
-            SSHConnectionInfo(
-                connection_id=connection_id,
-                access_mode="proxy",
-                task_id=record.task_id,
-                workflow_id=record.workflow_id,
-                worker_id=target.worker_id,
-                node_id=target.node_id,
-                session_id=target.endpoint_id,
-                username=str(username) if username else None,
-                source_ip=client.host if client is not None else None,
-                source_port=client.port if client is not None else None,
-                connected_at=now_iso(),
-            )
-        )
-    except Exception:
-        logger.debug(
-            "Failed to register SSH connection %s", connection_id, exc_info=True
-        )
 
 
 @router.get(
