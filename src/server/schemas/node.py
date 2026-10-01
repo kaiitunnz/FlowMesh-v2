@@ -51,6 +51,13 @@ class GpuInfo(BaseModel):
     memory_total_bytes: int | None = Field(
         default=None, description="Total GPU memory in bytes."
     )
+    memory_free_bytes: int | None = Field(
+        default=None, description="Free GPU memory in bytes at the last reading."
+    )
+    gpu_available: bool | None = Field(
+        default=None,
+        description="Whether no process outside FlowMesh holds this device.",
+    )
 
 
 class GpuPlatformInfo(BaseModel):
