@@ -1101,6 +1101,82 @@ def test_a_listener_whose_subreaper_died_is_ended_at_stop(
         _kill_all([listener])
 
 
+def _listening(port: int) -> list[int]:
+    return [
+        conn.pid
+        for conn in psutil.net_connections("tcp")
+        if conn.status == psutil.CONN_LISTEN
+        and cast(Any, conn.laddr).port == port
+        and conn.pid is not None
+    ]
+
+
+def test_a_reap_spares_an_sshd_that_took_the_dead_session_s_port(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    session = ProcessSessionBackend(worker).start_session(
+        _request(tmp_path, client_key)
+    )
+    port = session.wait_ready(30)
+    assert port is not None
+    session_dir = cast(Any, session)._session_dir
+    gate = tmp_path / "gate"
+    login = _held_login(session, client_key, port, gate, tmp_path / "relay.py", "true")
+    other: subprocess.Popen[bytes] | None = None
+    try:
+        deadline = time.monotonic() + 20
+        while (
+            session.established_connections() or 0
+        ) < 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        listener = _listener_of(session)
+        (stranded,) = [p for p in listener.children() if p.is_running()]
+        listener.kill()
+        listener.wait(timeout=10)
+        subreaper = cast(Any, session)._process
+        subreaper.kill()
+        subreaper.wait(timeout=10)
+        assert stranded.is_running()
+
+        host_key = tmp_path / "other_host_key"
+        _run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", host_key.as_posix()])
+        listen = next(
+            line
+            for line in (session_dir / "sshd_config").read_text().splitlines()
+            if line.startswith("ListenAddress ")
+        )
+        other_config = tmp_path / "other_sshd_config"
+        other_config.write_text(
+            f"Port {port}\n{listen}\nHostKey {host_key.as_posix()}\nPidFile none\n"
+        )
+        sshd = shutil.which("sshd") or "/usr/sbin/sshd"
+        other = subprocess.Popen(  # nosec B603 - argv list, test-only
+            [sshd, "-D", "-e", "-f", other_config.as_posix()],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + 20
+        while other.pid not in _listening(port) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert other.pid in _listening(port), "the other sshd never listened"
+
+        assert process_module.reap_session(session_dir)
+
+        assert other.poll() is None
+        assert other.pid in _listening(port)
+        assert not stranded.is_running() or stranded.status() == psutil.STATUS_ZOMBIE
+    finally:
+        gate.touch()
+        login.kill()
+        login.wait()
+        if other is not None:
+            other.kill()
+            other.wait()
+        _kill_all(_sshd_of(session))
+        with contextlib.suppress(Exception):
+            session.cleanup()
+
+
 def test_sshd_closes_a_connection_whose_peer_stops_answering(
     worker: WorkerConfig,
     tmp_path: Path,

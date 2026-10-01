@@ -1516,6 +1516,35 @@ def test_a_session_s_sshd_is_found_by_its_config_its_port_or_its_account(
     ]
 
 
+def test_a_port_another_sshd_listens_on_again_is_left_to_that_sshd(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "sshd_config"
+    config.write_text("Port 40123\nListenAddress 127.0.0.1\n")
+    other_listener = _sshd_proc("sshd", "sshd: /usr/sbin/sshd -D -f /other", [])
+    other_listener.pid = 900
+    other_listener.net_connections.return_value = [
+        MagicMock(laddr=MagicMock(port=40123), status=psutil.CONN_LISTEN)
+    ]
+    other_connection = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40123])
+    other_connection.pid = 901
+    other_connection.parents.return_value = [other_listener]
+    stranded = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40123])
+    stranded.pid = 902
+    stranded.parents.return_value = []
+    with (
+        patch.object(
+            process_module.psutil,
+            "process_iter",
+            return_value=[other_listener, other_connection, stranded],
+        ),
+        patch.object(process_module, "_kill_tree") as kill_tree,
+    ):
+        process_module._kill_sshd_of(tmp_path, None)
+
+    kill_tree.assert_called_once_with(stranded)
+
+
 def test_a_session_with_no_config_left_is_found_by_its_account_alone(
     tmp_path: Path,
 ) -> None:

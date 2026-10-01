@@ -1147,11 +1147,26 @@ def _kill_sshd_of(session_dir: Path, account: str | None) -> None:
     before it authenticates has a title that names nobody.
     """
     config_path = session_dir / "sshd_config"
+    config = config_path.as_posix()
     port = _configured_port(config_path)
-    for proc in psutil.process_iter():
+    procs = list(psutil.process_iter())
+    # Another sshd listening on the port took it after this session's listener
+    # exited, so what runs below that one holds the port for its own session.
+    foreign = {
+        proc.pid
+        for proc in procs
+        if port is not None
+        and _listens_on(proc, port)
+        and not _is_our_sshd(proc, config)
+    }
+    for proc in procs:
         if (
-            _is_our_sshd(proc, config_path.as_posix())
-            or (port is not None and _holds_port(proc, port))
+            _is_our_sshd(proc, config)
+            or (
+                port is not None
+                and _holds_port(proc, port)
+                and not _runs_under(proc, foreign)
+            )
             or (account is not None and _serves_account(proc, account))
         ):
             _kill_tree(proc)
@@ -1169,15 +1184,37 @@ def _configured_port(config_path: Path) -> int | None:
     return None
 
 
-def _holds_port(proc: psutil.Process, port: int) -> bool:
-    """Return whether ``proc`` is an sshd process with a socket bound to ``port``."""
+def _sshd_sockets_on(proc: psutil.Process, port: int) -> list[Any]:
+    """Return the sockets bound to ``port`` that ``proc`` holds if it is an sshd
+    process."""
     if not _name(proc).startswith("sshd"):
-        return False
+        return []
     try:
         connections = proc.net_connections("tcp")
     except psutil.Error:
+        return []
+    return [conn for conn in connections if conn.laddr and conn.laddr.port == port]
+
+
+def _holds_port(proc: psutil.Process, port: int) -> bool:
+    return bool(_sshd_sockets_on(proc, port))
+
+
+def _listens_on(proc: psutil.Process, port: int) -> bool:
+    return any(
+        conn.status == psutil.CONN_LISTEN for conn in _sshd_sockets_on(proc, port)
+    )
+
+
+def _runs_under(proc: psutil.Process, pids: set[int]) -> bool:
+    """Return whether ``proc`` or an ancestor is one of ``pids``; an ancestry that
+    cannot be read counts as one."""
+    if not pids:
         return False
-    return any(conn.laddr and conn.laddr.port == port for conn in connections)
+    try:
+        return proc.pid in pids or any(p.pid in pids for p in proc.parents())
+    except psutil.Error:
+        return True
 
 
 def _serves_account(proc: psutil.Process, account: str) -> bool:
