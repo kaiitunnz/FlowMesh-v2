@@ -1755,3 +1755,46 @@ def test_only_a_direct_session_listens_beyond_loopback(
     assert f"ListenAddress {bind}" in config.splitlines()
     if scope == "loopback":
         assert backend.session_address(mode) == "127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    ("title", "serves"),
+    [
+        (["sshd-session: fmssn61000 [priv]"], True),
+        (["sshd-session: fmssn61000@pts/0"], True),
+        (["sshd: fmssn61000@notty"], True),
+        (["sshd-session:", "fmssn61000", "[priv]"], True),
+        (["sshd-session: fmssn610001 [priv]"], False),
+        (["sshd-session: fmssn6100 [priv]"], False),
+        (["bash", "fmssn61000"], False),
+        (["sshd: /usr/sbin/sshd -D -f /run/s/sshd_config"], False),
+    ],
+)
+def test_a_connection_process_is_matched_by_its_account_as_a_whole_word(
+    title: list[str], serves: bool
+) -> None:
+    proc = MagicMock()
+    proc.cmdline.return_value = title
+    assert process_module._serves_account(proc, "fmssn61000") is serves
+
+
+def test_stopping_a_session_whose_listener_is_gone_kills_its_connections() -> None:
+    """A privileged connection process outlives a listener that exited on its own."""
+    monitor = MagicMock()
+    monitor.cmdline.return_value = ["sshd-session: fmssn61000 [priv]"]
+    other = MagicMock()
+    other.cmdline.return_value = ["sshd-session: fmssn61001 [priv]"]
+    process = MagicMock()
+    process.poll.return_value = 0
+    session = _session(RunSignals(), process)
+    session.account.name = "fmssn61000"
+    with (
+        patch.object(process_module, "kill_processes"),
+        patch.object(
+            process_module.psutil, "process_iter", return_value=[monitor, other]
+        ),
+        patch.object(process_module, "_kill_tree") as kill_tree,
+    ):
+        session.stop(1)
+
+    kill_tree.assert_called_once_with(monitor)

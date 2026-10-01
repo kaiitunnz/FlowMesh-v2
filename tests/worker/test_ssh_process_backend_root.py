@@ -895,3 +895,92 @@ def test_a_session_never_widens_what_a_root_s_acl_grants(
         session.cleanup()
 
     assert _run(["getfacl", "-cp", results]).stdout == before
+
+
+def _connections_of(account: str) -> list[psutil.Process]:
+    return [
+        proc
+        for proc in psutil.process_iter()
+        if process_module._serves_account(proc, account)
+        and proc.is_running()
+        and proc.status() != psutil.STATUS_ZOMBIE
+    ]
+
+
+def test_a_connection_outliving_a_listener_that_died_is_killed_at_stop(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    backend = ProcessSessionBackend(worker)
+    session = backend.start_session(_request(tmp_path, client_key))
+    port = session.wait_ready(30)
+    assert port is not None
+    account = session.account.name
+    held = subprocess.Popen(  # nosec B603 - argv list, test-only
+        [
+            "ssh",
+            "-i",
+            client_key.as_posix(),
+            "-p",
+            str(port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "BatchMode=yes",
+            f"{session.login_user()}@127.0.0.1",
+            "sleep 600",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        monitors: list[psutil.Process] = []
+        while time.monotonic() < deadline and not monitors:
+            monitors = [
+                proc
+                for proc in _connections_of(account)
+                if "[priv]" in " ".join(proc.cmdline())
+            ]
+            time.sleep(0.1)
+        assert monitors, "no privileged connection process appeared"
+        # Frozen, it stands for a monitor that has not yet started the account's
+        # shell when its listener goes.
+        monitors[0].suspend()
+        listener = cast(Any, session)._process
+        listener.kill()
+        listener.wait(timeout=10)
+
+        session.stop(1)
+
+        assert _connections_of(account) == []
+    finally:
+        held.kill()
+        held.wait()
+        session.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("mode", "bind"), [("proxy", "127.0.0.1"), ("direct", "0.0.0.0")]
+)
+def test_only_a_direct_session_listens_beyond_loopback(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path, mode: str, bind: str
+) -> None:
+    request = _request(tmp_path, client_key)
+    request.cfg.access_mode = mode
+    session = ProcessSessionBackend(worker).start_session(request)
+    try:
+        port = session.wait_ready(30)
+        listening = {
+            address.ip
+            for conn in psutil.net_connections("tcp")
+            if conn.status == psutil.CONN_LISTEN
+            and isinstance(address := conn.laddr, psutil._common.addr)
+            and address.port == port
+        }
+        assert listening == {bind}
+    finally:
+        session.stop(1)
+        session.cleanup()

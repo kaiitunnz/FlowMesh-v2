@@ -93,6 +93,9 @@ _KILL_POLL_SEC = 0.05
 # The reader streams without pause, so this long without a byte means it is stuck.
 _ARCHIVE_IDLE_TIMEOUT_SEC = 60.0
 _PORT_ATTEMPTS = 3
+# OpenSSH titles a connection's processes "sshd-session: <user> [priv]" and
+# "sshd-session: <user>@<tty>"; releases before 9.8 use "sshd:".
+_SSHD_CONNECTION_TITLES = ("sshd-session:", "sshd:")
 _READY_PROBE_SEC = 2.0
 _READY_POLL_SEC = 0.5
 _BIND_FAILURE_MARKERS = ("cannot bind", "address already in use", "bind to port")
@@ -1019,6 +1022,7 @@ class ProcessSession(SSHSession):
                 return
         self._kill_unless_collecting()
         _end_sshd(self._process)
+        _kill_connections_of(self.account.name)
         self._kill_unless_collecting()
 
     def _kill_unless_collecting(self) -> None:
@@ -1037,6 +1041,7 @@ class ProcessSession(SSHSession):
             ) from exc
         lock_account(self.account.name)
         _end_sshd(self._process)
+        _kill_connections_of(self.account.name)
 
     def cleanup(self) -> None:
         with self._stop_lock:
@@ -1096,6 +1101,7 @@ def reap_session(session_dir: Path) -> bool:
             _kill_tree(proc)
     manifest = SessionManifest.read(session_dir)
     if manifest is not None:
+        _kill_connections_of(manifest.account)
         try:
             uid = pwd.getpwnam(manifest.account).pw_uid
         except KeyError:
@@ -1118,6 +1124,31 @@ def _is_our_sshd(proc: psutil.Process, config_path: str) -> bool:
         os.path.basename(arg) == "sshd" or arg.startswith("sshd:") for arg in args
     )
     return runs_sshd and config_path in args
+
+
+def _kill_connections_of(account: str) -> None:
+    """SIGKILL every sshd connection process whose title names ``account``.
+
+    A connection's privileged monitor runs as root, so the account's uid kill misses
+    it, and once its listener has exited on its own it is no longer below sshd
+    either; left running, it could still start the account's shell.
+    """
+    for proc in psutil.process_iter():
+        if _serves_account(proc, account):
+            _kill_tree(proc)
+
+
+def _serves_account(proc: psutil.Process, account: str) -> bool:
+    """Return whether ``proc`` is an sshd connection process for ``account``,
+    matching the account as a whole word of its title, never a prefix."""
+    try:
+        title = " ".join(proc.cmdline())
+    except psutil.Error:
+        return False
+    for prefix in _SSHD_CONNECTION_TITLES:
+        if title.startswith(prefix):
+            return account in re.split(r"[\s@]+", title[len(prefix) :].strip())
+    return False
 
 
 def _end_sshd(process: subprocess.Popen[bytes]) -> None:
