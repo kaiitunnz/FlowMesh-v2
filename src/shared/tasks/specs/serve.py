@@ -17,6 +17,9 @@ class ServeSpecStrict(ModelSpecStrict):
     def validate_dispatchable(self) -> None:
         _validate_serve_dispatchable(self)
 
+    def uses_gpu(self) -> bool:
+        return True
+
 
 class ServeSpecTemplate(ModelSpecTemplate):
     taskType: Literal[TaskType.SERVE]
@@ -28,6 +31,9 @@ class ServeSpecTemplate(ModelSpecTemplate):
 
     def validate_dispatchable(self) -> None:
         _validate_serve_dispatchable(self)
+
+    def uses_gpu(self) -> bool:
+        return True
 
 
 def _validate_serve_dispatchable(spec: "ServeSpecStrict | ServeSpecTemplate") -> None:

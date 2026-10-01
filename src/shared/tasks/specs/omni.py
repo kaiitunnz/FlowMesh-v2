@@ -3,101 +3,72 @@ from typing import Any, ClassVar, Literal
 from ..task_type import TaskType
 from .common import ModelInferSpecStrict, ModelInferSpecTemplate
 
-# ── Text-to-Image ────────────────────────────────────────────────────────────
 
-
-class OmniText2ImageSpecStrict(ModelInferSpecStrict):
+class OmniSpecStrict(ModelInferSpecStrict):
     credential_fields: ClassVar[tuple[str, ...]] = (
         *ModelInferSpecStrict.credential_fields,
         "omni",
         "storyboard",
     )
-    taskType: Literal[TaskType.OMNI_TEXT2IMAGE]
     omni: dict[str, Any] | None = None
     storyboard: dict[str, Any] | None = None
 
+    def uses_gpu(self) -> bool:
+        return True
 
-class OmniText2ImageSpecTemplate(ModelInferSpecTemplate):
+
+class OmniSpecTemplate(ModelInferSpecTemplate):
     credential_fields: ClassVar[tuple[str, ...]] = (
         *ModelInferSpecTemplate.credential_fields,
         "omni",
         "storyboard",
     )
-    taskType: Literal[TaskType.OMNI_TEXT2IMAGE]
     omni: dict[str, Any] | None = None
     storyboard: dict[str, Any] | None = None
+
+    def uses_gpu(self) -> bool:
+        return True
+
+
+# ── Text-to-Image ────────────────────────────────────────────────────────────
+
+
+class OmniText2ImageSpecStrict(OmniSpecStrict):
+    taskType: Literal[TaskType.OMNI_TEXT2IMAGE]
+
+
+class OmniText2ImageSpecTemplate(OmniSpecTemplate):
+    taskType: Literal[TaskType.OMNI_TEXT2IMAGE]
 
 
 # ── Text-to-Speech ───────────────────────────────────────────────────────────
 
 
-class OmniText2SpeechSpecStrict(ModelInferSpecStrict):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *ModelInferSpecStrict.credential_fields,
-        "omni",
-        "storyboard",
-    )
+class OmniText2SpeechSpecStrict(OmniSpecStrict):
     taskType: Literal[TaskType.OMNI_TEXT2SPEECH]
-    omni: dict[str, Any] | None = None
-    storyboard: dict[str, Any] | None = None
 
 
-class OmniText2SpeechSpecTemplate(ModelInferSpecTemplate):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *ModelInferSpecTemplate.credential_fields,
-        "omni",
-        "storyboard",
-    )
+class OmniText2SpeechSpecTemplate(OmniSpecTemplate):
     taskType: Literal[TaskType.OMNI_TEXT2SPEECH]
-    omni: dict[str, Any] | None = None
-    storyboard: dict[str, Any] | None = None
 
 
 # ── Text-to-Audio (BGM) ─────────────────────────────────────────────────────
 
 
-class OmniText2AudioSpecStrict(ModelInferSpecStrict):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *ModelInferSpecStrict.credential_fields,
-        "omni",
-        "storyboard",
-    )
+class OmniText2AudioSpecStrict(OmniSpecStrict):
     taskType: Literal[TaskType.OMNI_TEXT2AUDIO]
-    omni: dict[str, Any] | None = None
-    storyboard: dict[str, Any] | None = None
 
 
-class OmniText2AudioSpecTemplate(ModelInferSpecTemplate):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *ModelInferSpecTemplate.credential_fields,
-        "omni",
-        "storyboard",
-    )
+class OmniText2AudioSpecTemplate(OmniSpecTemplate):
     taskType: Literal[TaskType.OMNI_TEXT2AUDIO]
-    omni: dict[str, Any] | None = None
-    storyboard: dict[str, Any] | None = None
 
 
 # ── Text-to-General (Narration) ──────────────────────────────────────────────
 
 
-class OmniText2GeneralSpecStrict(ModelInferSpecStrict):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *ModelInferSpecStrict.credential_fields,
-        "omni",
-        "storyboard",
-    )
+class OmniText2GeneralSpecStrict(OmniSpecStrict):
     taskType: Literal[TaskType.OMNI_TEXT2GENERAL]
-    omni: dict[str, Any] | None = None
-    storyboard: dict[str, Any] | None = None
 
 
-class OmniText2GeneralSpecTemplate(ModelInferSpecTemplate):
-    credential_fields: ClassVar[tuple[str, ...]] = (
-        *ModelInferSpecTemplate.credential_fields,
-        "omni",
-        "storyboard",
-    )
+class OmniText2GeneralSpecTemplate(OmniSpecTemplate):
     taskType: Literal[TaskType.OMNI_TEXT2GENERAL]
-    omni: dict[str, Any] | None = None
-    storyboard: dict[str, Any] | None = None

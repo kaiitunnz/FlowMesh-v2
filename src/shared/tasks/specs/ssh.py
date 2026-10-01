@@ -5,7 +5,11 @@ from pydantic import model_validator
 from .._base import StrictBaseModel, TemplateBaseModel
 from ..placeholders import TemplateInt
 from ..task_type import TaskType
-from .common import TaskSpecStrictBase, TaskSpecTemplateBase
+from .common import (
+    TaskSpecStrictBase,
+    TaskSpecTemplateBase,
+    declared_gpu_requirements,
+)
 
 # The access modes whose connections the server relays to the session's worker.
 RELAYED_SSH_ACCESS_MODES = frozenset({"proxy", "forward"})
@@ -136,6 +140,9 @@ class SSHSpecStrict(TaskSpecStrictBase):
         _validate_inputs(self)
         return self
 
+    def uses_gpu(self) -> bool:
+        return _ssh_uses_gpu(self)
+
 
 class SSHSpecTemplate(TaskSpecTemplateBase):
     credential_fields: ClassVar[tuple[str, ...]] = (
@@ -167,3 +174,14 @@ class SSHSpecTemplate(TaskSpecTemplateBase):
         _resolve_interactive(self)
         _validate_inputs(self)
         return self
+
+    def uses_gpu(self) -> bool:
+        return _ssh_uses_gpu(self)
+
+
+def _ssh_uses_gpu(spec: SSHSpecStrict | SSHSpecTemplate) -> bool:
+    """A session uses the GPU exactly when it asks for devices: a ``type`` or
+    ``memory`` without ``count`` still resolves to one device, and only an explicit
+    ``count: 0`` asks for none."""
+    gpu = declared_gpu_requirements(spec)
+    return gpu is not None and gpu.count != 0

@@ -37,6 +37,9 @@ class InferenceSpecStrict(ModelInferSpecStrict):
     def validate_dispatchable(self) -> None:
         _validate_inference_dispatchable(self)
 
+    def uses_gpu(self) -> bool:
+        return _inference_uses_gpu(self)
+
     def _merge_key(self) -> str | None:
         return _inference_merge_key(self)
 
@@ -54,6 +57,9 @@ class InferenceSpecTemplate(ModelInferSpecTemplate):
 
     def validate_dispatchable(self) -> None:
         _validate_inference_dispatchable(self)
+
+    def uses_gpu(self) -> bool:
+        return _inference_uses_gpu(self)
 
     def _merge_key(self) -> str | None:
         return _inference_merge_key(self)
@@ -79,6 +85,13 @@ def _inference_backend(
     if model.transformers:
         return InferenceBackend.TRANSFORMERS
     return InferenceBackend.AUTO
+
+
+def _inference_uses_gpu(spec: InferenceSpecStrict | InferenceSpecTemplate) -> bool:
+    if spec.backend() is InferenceBackend.TRANSFORMERS:
+        return spec.model_uses_gpu(enforce_cpu=spec.enforce_cpu is True)
+    # VLLM always, and AUTO because the runner prefers vLLM for it.
+    return True
 
 
 def _inference_merge_key(

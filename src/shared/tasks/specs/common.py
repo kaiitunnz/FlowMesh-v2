@@ -19,6 +19,7 @@ from ..components import (
     ShardSpec,
     ShardSpecTemplate,
 )
+from ..components.resources import GPURequirements
 from ..placeholders import TemplateBool, TemplateInt
 
 
@@ -200,6 +201,15 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
         """
         return None
 
+    def uses_gpu(self) -> bool:
+        """Whether executing this spec allocates GPU memory on its worker.
+
+        The dispatcher reads this to keep GPU work off a device another tenant holds,
+        and the worker to refuse such a task and to know whether its warm executor holds
+        GPU memory. Only specs that may reach a GPU override it.
+        """
+        return False
+
     def merge_key(self, **context: Any) -> str | None:
         """The key a task merges with its siblings under within ``context``, or None if
         it never merges."""
@@ -247,6 +257,15 @@ class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
         """
         return None
 
+    def uses_gpu(self) -> bool:
+        """Whether executing this spec allocates GPU memory on its worker.
+
+        The dispatcher reads this to keep GPU work off a device another tenant holds,
+        and the worker to refuse such a task and to know whether its warm executor holds
+        GPU memory. Only specs that may reach a GPU override it.
+        """
+        return False
+
     def merge_key(self, **context: Any) -> str | None:
         """The key a task merges with its siblings under within ``context``, or None if
         it never merges."""
@@ -258,6 +277,27 @@ class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
 
 
 type TaskSpecBase = TaskSpecStrictBase | TaskSpecTemplateBase
+
+
+def declared_gpu_requirements(spec: TaskSpecBase) -> GPURequirements | None:
+    """The GPU block a spec declares under ``resources.hardware``, if any."""
+    resources = spec.resources
+    hardware = resources.hardware if resources is not None else None
+    return hardware.gpu if hardware is not None else None
+
+
+def _model_uses_gpu(
+    model: ModelConfig | ModelConfigTemplate | None, enforce_cpu: bool
+) -> bool:
+    """Mirror ``HFTransformersExecutor._pick_device``: ``enforce_cpu`` outranks
+    ``device_map``, an explicit ``cpu`` map is the only other way off the GPU, and
+    everything else prefers CUDA."""
+    if enforce_cpu:
+        return False
+    config = model.transformers if model is not None else None
+    if not config:
+        return True
+    return config.get("device_map") != "cpu"
 
 
 class ModelSpecStrict(TaskSpecStrictBase):
@@ -286,6 +326,11 @@ class ModelSpecStrict(TaskSpecStrictBase):
         model = self.model
         return None if model is None else model.adapters
 
+    def model_uses_gpu(self, *, enforce_cpu: bool = False) -> bool:
+        """Whether this spec's model would be loaded onto a GPU; ``enforce_cpu`` is a
+        field of the specs that have one, so such a caller passes it in."""
+        return _model_uses_gpu(self.model, enforce_cpu)
+
 
 class ModelSpecTemplate(TaskSpecTemplateBase):
     credential_fields: ClassVar[tuple[str, ...]] = (
@@ -312,6 +357,11 @@ class ModelSpecTemplate(TaskSpecTemplateBase):
     def adapters(self) -> list[AdapterConfigTemplate] | None:
         model = self.model
         return None if model is None else model.adapters
+
+    def model_uses_gpu(self, *, enforce_cpu: bool = False) -> bool:
+        """Whether this spec's model would be loaded onto a GPU; ``enforce_cpu`` is a
+        field of the specs that have one, so such a caller passes it in."""
+        return _model_uses_gpu(self.model, enforce_cpu)
 
 
 class ModelInferSpecStrict(ModelSpecStrict):

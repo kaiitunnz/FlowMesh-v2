@@ -16,6 +16,9 @@ class TrainingSpecStrict(ModelSpecStrict):
     data: dict[str, Any] | None = None
     training: dict[str, Any] | None = None
 
+    def uses_gpu(self) -> bool:
+        return True
+
 
 class TrainingSpecTemplate(ModelSpecTemplate):
     credential_fields: ClassVar[tuple[str, ...]] = (
@@ -25,6 +28,9 @@ class TrainingSpecTemplate(ModelSpecTemplate):
     )
     data: dict[str, Any] | None = None
     training: dict[str, Any] | None = None
+
+    def uses_gpu(self) -> bool:
+        return True
 
 
 class SFTSpecStrict(TrainingSpecStrict):

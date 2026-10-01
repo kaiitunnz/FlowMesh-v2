@@ -343,6 +343,10 @@ class EmbeddingSpecStrict(ModelSpecStrict):
         validate_resident_only_binding(self.service, leaf="embedding")
         validate_adapters_loadable(self.adapters, resident=self.service is not None)
 
+    def uses_gpu(self) -> bool:
+        model = self.model
+        return (model is not None and model.vllm is not None) or self.model_uses_gpu()
+
 
 class EmbeddingSpecTemplate(ModelSpecTemplate):
     credential_fields: ClassVar[tuple[str, ...]] = (
@@ -356,3 +360,7 @@ class EmbeddingSpecTemplate(ModelSpecTemplate):
     def validate_dispatchable(self) -> None:
         validate_resident_only_binding(self.service, leaf="embedding")
         validate_adapters_loadable(self.adapters, resident=self.service is not None)
+
+    def uses_gpu(self) -> bool:
+        model = self.model
+        return (model is not None and model.vllm is not None) or self.model_uses_gpu()

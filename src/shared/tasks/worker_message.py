@@ -25,7 +25,23 @@ from shared.tasks import (
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
+from shared.tasks.specs.common import TaskSpecBase, declared_gpu_requirements
 from shared.utils.json import dedup_json, restore_json
+
+
+def dispatch_uses_gpu(spec: TaskSpecBase, relays_only: bool) -> bool:
+    """Whether a dispatch of ``spec`` allocates GPU memory on its worker.
+
+    The dispatcher and the worker both decide through this, so a task the dispatcher
+    places on a held device's worker is never one that worker refuses. A dispatch that
+    relays only loads no model. Otherwise a declared GPU request counts unless it asks
+    for no devices, and a declared count of zero never exempts a spec that allocates
+    GPU memory regardless.
+    """
+    if relays_only:
+        return False
+    declared = declared_gpu_requirements(spec)
+    return (declared is not None and declared.count != 0) or spec.uses_gpu()
 
 
 class WorkerTaskMessage(BaseModel):
@@ -151,6 +167,16 @@ class WorkerTaskMessage(BaseModel):
     @property
     def metadata(self) -> TaskMetadata | None:
         return self.task.metadata
+
+    @property
+    def relays_only(self) -> bool:
+        """Whether this dispatch runs no local model: an input preparation, or a
+        resident service episode that carries its invocation to a replica."""
+        return self.input_preparation or self.service_episode is not None
+
+    def uses_gpu(self) -> bool:
+        """Whether running this dispatch allocates GPU memory on its worker."""
+        return dispatch_uses_gpu(self.spec, self.relays_only)
 
     @model_validator(mode="before")
     @classmethod
