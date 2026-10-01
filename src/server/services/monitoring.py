@@ -15,7 +15,7 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.schemas.command import InterruptMessage, RevokeMessage
+from shared.schemas.command import InterruptMessage
 from shared.schemas.event import (
     Event,
     NodeEvent,
@@ -922,6 +922,8 @@ class EventMonitor:
                 self._runtime.redeliver_to_worker((event.worker_id or "").strip())
             case "UNREGISTER":
                 worker_id = (event.worker_id or "").strip()
+                # A revoke routes by the node the record names, which this deletes.
+                departing = self._worker_registry.get_worker(worker_id)
                 self._worker_registry.unregister_workers(worker_id)
                 if worker_id:
                     self._schedule_deregister(
@@ -937,7 +939,11 @@ class EventMonitor:
                         )
                         self._watchdog.clear_dead_mark(worker_id)
                         return
-                    self._return_lost_tasks(worker_id, graceful=event.graceful)
+                    self._return_lost_tasks(
+                        worker_id,
+                        graceful=event.graceful,
+                        node_id=departing.node_id if departing else None,
+                    )
             case _:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
@@ -1016,8 +1022,6 @@ class EventMonitor:
         ):
             return
         self._revoked_runs.add((worker_id, dispatch_id))
-        if (worker := self._worker_registry.get_worker(worker_id)) is None:
-            return
         self._logger.warning(
             "Worker %s runs dispatch %s of task %s that control does not hold; "
             "revoking it",
@@ -1025,20 +1029,7 @@ class EventMonitor:
             dispatch_id,
             task_id,
         )
-        try:
-            self._worker_registry.publish_revoke(
-                worker.node_id,
-                RevokeMessage(
-                    task_id=task_id, worker_id=worker_id, dispatch_id=dispatch_id
-                ),
-            )
-        except Exception as exc:
-            self._logger.warning(
-                "Failed to revoke dispatch %s on worker %s: %s",
-                dispatch_id,
-                worker_id,
-                exc,
-            )
+        self._runtime.revoke_dispatch(task_id, worker_id, dispatch_id)
 
     def _resolve_disowned_dispatch(
         self, worker_id: str, task_id: str, dispatch_id: str, ttl_sec: float
@@ -1074,7 +1065,9 @@ class EventMonitor:
                 [],
             )
 
-    def _return_lost_tasks(self, worker_id: str, graceful: bool) -> None:
+    def _return_lost_tasks(
+        self, worker_id: str, graceful: bool, node_id: str | None = None
+    ) -> None:
         """Return the tasks a departed worker held, settling any being cancelled.
 
         A worker that left on its own shutdown gave its tasks up, so they return
@@ -1083,7 +1076,7 @@ class EventMonitor:
         requeued: list[str] = []
         ts = now_iso()
         recovery = self._runtime.recover_tasks_for_worker(
-            worker_id, spend_attempt=not graceful
+            worker_id, spend_attempt=not graceful, node_id=node_id
         )
         self.record_worker_losses(worker_id, recovery.resolved, "worker_unregistered")
         for task_id in recovery.lost:

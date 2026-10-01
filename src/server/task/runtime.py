@@ -316,15 +316,24 @@ class _StagedRegistration:
     v2_engine: OrchestrationEngine | None
 
 
+@dataclass(frozen=True)
+class _Revoke:
+    message: RevokeMessage
+    # The node the dispatch went to, when known apart from the worker's record, which
+    # the worker's unregister deletes.
+    node_id: str | None = None
+
+
 @dataclass
 class _Termination:
-    """What a terminated workflow's work still holds, released after its terminal."""
+    """What control still owes workers off its lock: interrupts and revokes to send,
+    operations to reap, and resident credits to release."""
 
     interrupts: list[InterruptMessage]
     # Each pending mediated operation's worker, agent task, and call.
     reaps: list[tuple[str, str, str]]
     resident_invocation_ids: list[str] = field(default_factory=list)
-    revokes: list[RevokeMessage] = field(default_factory=list)
+    revokes: list[_Revoke] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1591,21 +1600,17 @@ class TaskRuntime:
                 reservation.task_id, reservation.dispatch_id, reservation.worker_id
             )
         ]
-        self._release_terminated_work(
-            _Termination(
-                [],
-                [],
-                revokes=[
-                    RevokeMessage(
-                        task_id=r.task_id,
-                        worker_id=r.worker_id,
-                        dispatch_id=r.dispatch_id,
-                    )
-                    for r in ended
-                ],
-            )
-        )
+        with self._lock:
+            for r in ended:
+                self._revoke_locked(r.task_id, r.worker_id, r.dispatch_id)
+        self._release_pending_terminations()
         self._release_workers([(r.worker_id, r.dispatch_id) for r in ended])
+
+    def revoke_dispatch(self, task_id: str, worker_id: str, dispatch_id: str) -> None:
+        """Revoke one dispatch on its worker, which control does not hold."""
+        with self._lock:
+            self._revoke_locked(task_id, worker_id, dispatch_id)
+        self._release_pending_terminations()
 
     def _write_locked(
         self, write: Callable[[], None], hold: Callable[[_HeldWrites], None]
@@ -2296,19 +2301,11 @@ class TaskRuntime:
                 for task_id, call, op_worker in self._pending_ops.values()
                 if op_worker == worker_id
             }
-            interrupts = [
-                interrupt
-                for record in self._tasks.values()
-                if record.assigned_worker == worker_id
-                and record.status == TaskStatus.CANCELLING
-                and (
-                    interrupt := self._interrupt_for(
-                        record, record.error or "cancelled"
-                    )
+            self._queue_interrupts_locked(
+                self._cancelling_interrupts_locked(
+                    lambda record: record.assigned_worker == worker_id
                 )
-            ]
-            if interrupts:
-                self._pending_terminations.append(_Termination(interrupts, []))
+            )
         self._release_pending_terminations()
         for task_id, call in sorted(pending):
             self.redispatch_episode_invocation(task_id, call)
@@ -5993,36 +5990,47 @@ class TaskRuntime:
         )
 
     def _revoke_locked(
-        self, task_id: str, worker_id: str, dispatch_id: str | None
+        self,
+        task_id: str,
+        worker_id: str,
+        dispatch_id: str | None,
+        node_id: str | None = None,
     ) -> None:
         """Queue the revocation of a dispatch that resolved without its worker ending
         it."""
         if dispatch_id is None:
             return
-        self._pending_terminations.append(
-            _Termination(
-                [],
-                [],
-                revokes=[
-                    RevokeMessage(
-                        task_id=task_id, worker_id=worker_id, dispatch_id=dispatch_id
-                    )
-                ],
-            )
+        message = RevokeMessage(
+            task_id=task_id, worker_id=worker_id, dispatch_id=dispatch_id
         )
+        self._pending_terminations.append(
+            _Termination([], [], revokes=[_Revoke(message, node_id)])
+        )
+
+    def _queue_interrupts_locked(self, interrupts: list[InterruptMessage]) -> None:
+        if interrupts:
+            self._pending_terminations.append(_Termination(interrupts, []))
+
+    def _cancelling_interrupts_locked(
+        self, include: Callable[[TaskRecord], bool]
+    ) -> list[InterruptMessage]:
+        """An interrupt for each task being cancelled that ``include`` selects."""
+        return [
+            interrupt
+            for record in self._tasks.values()
+            if record.status == TaskStatus.CANCELLING
+            and include(record)
+            and (interrupt := self._interrupt_for(record, record.error or "cancelled"))
+        ]
 
     def _interrupt_cancelling_locked(self, workflow_id: str) -> None:
         """Queue an interrupt for each task a restart found still being cancelled,
         whose worker may never have received one."""
-        interrupts = [
-            interrupt
-            for record in self._tasks.values()
-            if record.workflow_id == workflow_id
-            and record.status == TaskStatus.CANCELLING
-            and (interrupt := self._interrupt_for(record, record.error or "cancelled"))
-        ]
-        if interrupts:
-            self._pending_terminations.append(_Termination(interrupts, []))
+        self._queue_interrupts_locked(
+            self._cancelling_interrupts_locked(
+                lambda record: record.workflow_id == workflow_id
+            )
+        )
 
     def _release_terminated_work(self, termination: _Termination) -> None:
         """Release what a terminated workflow's work held, best effort: each resident
@@ -6054,22 +6062,27 @@ class TaskRuntime:
                     interrupt.worker_id,
                 )
         for revoke in termination.revokes:
+            message = revoke.message
             try:
-                worker = self._worker_registry.get_worker(revoke.worker_id)
-                if worker is None:
+                node_id = revoke.node_id
+                if node_id is None and (
+                    worker := self._worker_registry.get_worker(message.worker_id)
+                ):
+                    node_id = worker.node_id
+                if node_id is None:
                     self._logger.warning(
                         "Cannot revoke dispatch %s of %s; worker %s missing",
-                        revoke.dispatch_id,
-                        revoke.task_id,
-                        revoke.worker_id,
+                        message.dispatch_id,
+                        message.task_id,
+                        message.worker_id,
                     )
                 else:
-                    self._worker_registry.publish_revoke(worker.node_id, revoke)
+                    self._worker_registry.publish_revoke(node_id, message)
             except Exception:
                 self._logger.exception(
                     "Revoking dispatch %s on %s failed",
-                    revoke.dispatch_id,
-                    revoke.worker_id,
+                    message.dispatch_id,
+                    message.worker_id,
                 )
         # The worker drops a reaped operation and its custody.
         for worker_id, agent_task_id, call in termination.reaps:
@@ -6503,7 +6516,7 @@ class TaskRuntime:
         return self._tasks
 
     def recover_tasks_for_worker(
-        self, worker_id: str, *, spend_attempt: bool
+        self, worker_id: str, *, spend_attempt: bool, node_id: str | None = None
     ) -> WorkerRecovery:
         """Recover the tasks a departed worker held.
 
@@ -6515,15 +6528,16 @@ class TaskRuntime:
         ``spend_attempt`` is False, as for a worker that gave its tasks up; a v1 task
         is left for the caller to return or settle. A task whose dispatch ended at a
         suspension holds nothing on the worker and waits on its boundary, unless the
-        worker originated that boundary and holds its request.
+        worker originated that boundary and holds its request. ``node_id`` names the
+        worker's node when its record is already gone.
         """
         try:
-            return self._recover_tasks_for_worker(worker_id, spend_attempt)
+            return self._recover_tasks_for_worker(worker_id, spend_attempt, node_id)
         finally:
             self._release_pending_terminations()
 
     def _recover_tasks_for_worker(
-        self, worker_id: str, spend_attempt: bool
+        self, worker_id: str, spend_attempt: bool, node_id: str | None
     ) -> WorkerRecovery:
         recovered: list[str] = []
         resolved: list[LossOutcome] = []
@@ -6532,7 +6546,9 @@ class TaskRuntime:
                 publish = self._publishing.get(task_id)
                 if publish and not publish.recorded and publish.worker_id == worker_id:
                     self._publishing[task_id] = None
-                    self._revoke_locked(task_id, worker_id, publish.dispatch_id)
+                    self._revoke_locked(
+                        task_id, worker_id, publish.dispatch_id, node_id
+                    )
                     children = self._merge_children_map.pop(task_id, [])
                     record.merged_children = None
                     self._commit_locked(
@@ -6554,7 +6570,7 @@ class TaskRuntime:
                     continue
                 self._rehydrated_dispatched.pop(task_id, None)
                 if not record.merged_parent_id:
-                    self._revoke_locked(task_id, worker_id, record.dispatch_id)
+                    self._revoke_locked(task_id, worker_id, record.dispatch_id, node_id)
                 if (
                     record.status == TaskStatus.DISPATCHED
                     and record.workflow_id in self._engines

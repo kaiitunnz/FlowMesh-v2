@@ -56,7 +56,9 @@ def _setup(sync: _RecordingSync) -> tuple[TaskRuntime, EventMonitor, str]:
     task_id = ids["a"]
     assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
     monitor = _monitor(runtime)
-    monitor._worker_registry = WorkerRegistry(cast(Any, _Rds(sync)))
+    registry = WorkerRegistry(cast(Any, _Rds(sync)))
+    runtime._worker_registry = registry
+    monitor._worker_registry = registry
     return runtime, monitor, task_id
 
 
@@ -82,6 +84,8 @@ def test_a_run_of_a_resolved_dispatch_is_revoked_once(sync: _RecordingSync) -> N
     runtime, monitor, task_id = _setup(sync)
     record_dispatch(runtime, task_id, _WORKER, "dsp-1")
     assert runtime.resolve_disowned_dispatch(task_id, "dsp-1", _WORKER, 0)
+    assert _revokes(sync) == [(task_id, "dsp-1")]
+    sync.published.clear()
     assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
     record_dispatch(runtime, task_id, _WORKER, "dsp-2")
 
@@ -101,3 +105,14 @@ def test_a_run_of_the_held_dispatch_is_left_alone(sync: _RecordingSync) -> None:
     monitor._handle_worker_event(_busy("HEARTBEAT", task_id, "dsp-1"))
 
     assert _revokes(sync) == []
+
+
+def test_an_unregister_revokes_what_its_worker_held(sync: _RecordingSync) -> None:
+    runtime, monitor, task_id = _setup(sync)
+    record_dispatch(runtime, task_id, _WORKER, "dsp-1")
+
+    monitor._handle_worker_event(
+        WorkerEvent(type="UNREGISTER", worker_id=_WORKER, payload={})
+    )
+
+    assert _revokes(sync) == [(task_id, "dsp-1")]
