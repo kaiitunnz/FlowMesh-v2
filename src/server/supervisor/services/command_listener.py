@@ -42,19 +42,13 @@ _DESTROY_WORKER_TIMEOUT = 60.0
 _DESTROY_WORKERS_TIMEOUT = 120.0
 
 
-# TODO(deprecate): the `worker_name(s)` fallbacks accept payloads from a root one
-# release behind; remove them in the next minor release.
 def _payload_alias(payload: dict[str, Any] | None) -> str | None:
-    payload = payload or {}
-    if (alias := payload.get("worker_alias")) is None:
-        alias = payload.get("worker_name")
+    alias = (payload or {}).get("worker_alias")
     return None if alias is None else str(alias)
 
 
 def _payload_aliases(payload: dict[str, Any] | None) -> set[str] | None:
-    payload = payload or {}
-    if (aliases := payload.get("worker_aliases")) is None:
-        aliases = payload.get("worker_names")
+    aliases = (payload or {}).get("worker_aliases")
     return None if aliases is None else {str(alias) for alias in aliases}
 
 
@@ -470,16 +464,8 @@ class CommandListener:
                 )
             else:
                 workers = self._wm.list_workers()
-            # TODO(deprecate): `name` is for roots one release behind, whose
-            # NodeWorkerInfo still requires it; remove in the next minor release.
             return CommandResponse.ok(
-                cmd,
-                data={
-                    "workers": [
-                        worker.model_dump() | {"name": worker.alias}
-                        for worker in workers
-                    ]
-                },
+                cmd, data={"workers": [worker.model_dump() for worker in workers]}
             )
         except Exception as exc:
             return CommandResponse.error(

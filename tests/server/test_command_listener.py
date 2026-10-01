@@ -325,64 +325,6 @@ class TestHandleDestroyWorkerCmd:
         self.cl._wm.destroy_worker.assert_called_once_with("worker-abc123")
 
 
-# TODO(deprecate): remove with the legacy-payload shims in command_listener.py.
-class TestLegacyRootPayloads:
-    """A root one release behind sends `worker_name(s)` and reads `name`."""
-
-    def setup_method(self) -> None:
-        self.cl = _listener()
-
-    def test_start_and_stop_accept_worker_name(self) -> None:
-        self.cl._wm.start_worker = AsyncMock(return_value=True)  # type: ignore[method-assign]
-        self.cl._wm.stop_worker = AsyncMock(return_value=True)  # type: ignore[method-assign]
-
-        start = _cmd(CommandType.START_WORKER, {"worker_name": "w-1"})
-        stop = _cmd(CommandType.STOP_WORKER, {"worker_name": "w-1"})
-
-        assert _run(self.cl._handle_start_worker_cmd(start)).success
-        assert _run(self.cl._handle_stop_worker_cmd(stop)).success
-        self.cl._wm.start_worker.assert_called_once_with("w-1")
-        self.cl._wm.stop_worker.assert_called_once_with("w-1")
-
-    def test_destroy_workers_accepts_worker_names(self) -> None:
-        self.cl._wm.destroy_workers = AsyncMock()  # type: ignore[method-assign]
-
-        cmd = _cmd(CommandType.DESTROY_WORKERS, {"worker_names": ["w-1", "w-2"]})
-
-        assert _run(self.cl._handle_destroy_workers_cmd(cmd)).success
-        self.cl._wm.destroy_workers.assert_called_once_with({"w-1", "w-2"})
-
-    def test_destroy_worker_accepts_worker_name(self) -> None:
-        self.cl._wm.destroy_worker = AsyncMock(return_value=True)  # type: ignore[method-assign]
-
-        cmd = _cmd(CommandType.DESTROY_WORKER, {"worker_name": "w-1"})
-
-        assert _run(self.cl._handle_destroy_worker_cmd(cmd)).success
-        self.cl._wm.destroy_worker.assert_called_once_with("w-1")
-
-    def test_get_single_worker_accepts_worker_name(self) -> None:
-        info = MagicMock()
-        info.alias = "w-1"
-        info.model_dump = MagicMock(return_value={"alias": "w-1"})
-        self.cl._wm.get_worker_info = MagicMock(return_value=info)  # type: ignore[method-assign]
-
-        cmd = _cmd(CommandType.GET_WORKERS, {"worker_name": "w-1"})
-        resp = self.cl._handle_get_workers_cmd(cmd)
-
-        assert resp.data == {"workers": [{"alias": "w-1", "name": "w-1"}]}
-        self.cl._wm.get_worker_info.assert_called_once_with("w-1")
-
-    def test_get_workers_reports_alias_as_name(self) -> None:
-        info = MagicMock()
-        info.alias = "w-1"
-        info.model_dump = MagicMock(return_value={"alias": "w-1"})
-        self.cl._wm.list_workers = MagicMock(return_value=[info])  # type: ignore[method-assign]
-
-        resp = self.cl._handle_get_workers_cmd(_cmd(CommandType.GET_WORKERS))
-
-        assert resp.data == {"workers": [{"alias": "w-1", "name": "w-1"}]}
-
-
 # ------------------------------------------------------------------ #
 # Parallel dispatch — different workers run concurrently; same-worker
 # commands serialize via per-worker locks.
@@ -584,11 +526,3 @@ class TestTargetWorkerAliases:
         ):
             payload = {"worker_alias": "w-1"}
             assert CommandListener._target_worker_aliases(_cmd(cmd_type, payload)) == []
-
-    def test_legacy_payload_keys(self) -> None:
-        assert CommandListener._target_worker_aliases(
-            _cmd(CommandType.STOP_WORKER, {"worker_name": "w-1"})
-        ) == ["w-1"]
-        assert CommandListener._target_worker_aliases(
-            _cmd(CommandType.DESTROY_WORKERS, {"worker_names": ["w-2", "w-1"]})
-        ) == ["w-1", "w-2"]
