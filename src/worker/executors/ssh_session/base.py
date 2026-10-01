@@ -11,6 +11,7 @@ import io
 import ipaddress
 import logging
 import os
+import re
 import shutil
 import socket
 import tarfile
@@ -26,6 +27,7 @@ from shared.schemas.worker import SSHBackendName
 from shared.tasks.worker_message import WorkerHardware
 from worker.config import WorkerConfig
 
+from ...ssh_relay.registry import LOOPBACK_HOST
 from ..base_executor import ExecutionError, RunSignals
 from .config import (
     FINISH_SENTINEL_PATH,
@@ -36,13 +38,17 @@ from .config import (
 
 logger = logging.getLogger(__name__)
 
-LOOPBACK_RELAY_HOST = "127.0.0.1"
+ANY_BIND_HOST = "0.0.0.0"  # nosec B104 - a direct session must be dialable
+LOOPBACK_SCOPE = "loopback"
+NETWORK_SCOPE = "network"
 
 # Tailscale hands every node an address out of the CGNAT range, which is how a
-# rented box advertises an address a remote supervisor can dial.
+# rented box advertises an address a client can dial.
 TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 _TCP_STATE_ESTABLISHED = "01"
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ENV_VALUE_FORBIDDEN = ('"', "\\", "\n", "\r")
 _DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # A directory removed or swapped for a link mid-walk.
 _GONE_ERRNOS = frozenset({errno.ENOENT, errno.ELOOP, errno.ENOTDIR})
@@ -169,12 +175,33 @@ class SSHSessionBackend(ABC):
     def teardown(self, worker_name: str) -> None:
         """Reap any sessions ``worker_name`` still owns."""
 
-    def relay_host(self) -> str:
-        """Address the supervisor dials to reach this worker's session ports."""
-        return self._config.ssh_relay_host or LOOPBACK_RELAY_HOST
+    def session_bind_host(self, access_mode: str) -> str:
+        """Return the address the session's sshd listens on.
 
-    def session_host(self) -> str:
-        """Host name reported to the user as the session's location."""
+        Only a ``direct`` session is dialled from outside the worker; a relayed one is
+        reached over loopback by the worker's own relay lane.
+        """
+        return ANY_BIND_HOST if access_mode == "direct" else LOOPBACK_HOST
+
+    def session_address(self, access_mode: str) -> str:
+        """Return the address a client reaches the session at, derived from its bind:
+        ``ssh.direct_host`` or the worker's own host name when bound beyond loopback,
+        else loopback."""
+        if self.session_scope(access_mode) == LOOPBACK_SCOPE:
+            return LOOPBACK_HOST
+        return self._config.ssh_direct_host or self._default_session_host()
+
+    def session_scope(self, access_mode: str) -> str:
+        """Return which addresses the session accepts connections on.
+
+        ``loopback`` reaches it only from the worker's own host; ``network`` says it
+        is bound beyond loopback, not that any given client can route to the worker.
+        """
+        if self.session_bind_host(access_mode) == ANY_BIND_HOST:
+            return NETWORK_SCOPE
+        return LOOPBACK_SCOPE
+
+    def _default_session_host(self) -> str:
         return socket.getfqdn()
 
     def _build_environment(
@@ -190,8 +217,15 @@ class SSHSessionBackend(ABC):
         env: dict[str, str] = {}
         if bootstrap_entrypoint:
             env["SSH_USER"] = user
-            if authorized_keys:
-                env["AUTHORIZED_KEYS"] = "\n".join(authorized_keys)
+            # sshd starts a login with a clean environment, so the task's env rides
+            # each key as an option, under the names the entrypoint permits.
+            rendered, exported = render_authorized_keys(
+                authorized_keys, {str(k): str(v) for k, v in extra_env.items()}
+            )
+            if rendered:
+                env["AUTHORIZED_KEYS"] = rendered.rstrip("\n")
+            if exported:
+                env["FLOWMESH_PERMIT_ENV"] = ",".join(exported)
             env["SSH_UID"] = str(os.getuid())
             env["SSH_GID"] = str(os.getgid())
         if gpu_device_ids and (visible := self._cuda_visible_devices(gpu_device_ids)):
@@ -423,3 +457,38 @@ def resolve_tailnet_address() -> str | None:
             if parsed in TAILNET_NETWORK:
                 return str(parsed)
     return None
+
+
+def render_authorized_keys(
+    authorized_keys: list[str], environment: dict[str, str]
+) -> tuple[str, list[str]]:
+    """Render authorized_keys, carrying session env as per-key options.
+
+    sshd does not pass its own environment into a login shell, so the values the
+    session is supposed to see travel as ``environment=`` options on each key.
+    Returns the rendered file and the names exported, which
+    ``PermitUserEnvironment`` must list.
+    """
+    exported = [
+        name
+        for name, value in sorted(environment.items())
+        if is_safe_env_entry(name, value)
+    ]
+    options = ",".join(f'environment="{name}={environment[name]}"' for name in exported)
+    lines = [
+        f"{options} {key}" if options else key
+        for raw_key in authorized_keys
+        if (key := raw_key.strip())
+    ]
+    return ("\n".join(lines) + "\n" if lines else "", exported if lines else [])
+
+
+def is_safe_env_entry(name: str, value: str) -> bool:
+    """Return whether an env entry can ride an ``environment=`` key option."""
+    if not _ENV_NAME_RE.fullmatch(name):
+        logger.warning("Dropping SSH session env var with unsupported name %r", name)
+        return False
+    if any(ch in value for ch in _ENV_VALUE_FORBIDDEN):
+        logger.warning("Dropping SSH session env var %s: unsupported value", name)
+        return False
+    return True

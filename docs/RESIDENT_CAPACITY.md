@@ -100,7 +100,7 @@ identity, the trusted origin, the selected replica incarnation and listener gene
 an expiry. It carries no route, raw engine endpoint, or credential and is neither a persisted
 control object nor a `RouteAuthorization`.
 
-Resident capacity requires [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md); the invocation runs
+Resident capacity requires the [network plane](NETWORK_PLANE.md); the invocation runs
 in the workers, and control never constructs, parses, or carries engine traffic. The
 consuming episode's own worker — an agent or a service-backed leaf — captures the resident
 model boundary, holds the raw request worker-private, and proposes only its digest. Control admits the claim, binds the replica's **resident-facing
@@ -202,10 +202,9 @@ scheduling, and KV allocation.
 
 ## Configuration
 
-Resident-capacity control is off by default and enabled per deployment. Enablement requires
-[`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md): resident capacity runs in the workers over the
-network plane, so `RESIDENT_CAPACITY_ENABLED` without the network plane fails closed at
-startup. See the `RESIDENT_*` rows in [`ENV.md`](ENV.md) for
+Resident-capacity control is off by default and enabled per deployment. It requires the
+[network plane](NETWORK_PLANE.md): `RESIDENT_CAPACITY_ENABLED` with
+`NETWORK_PLANE_ENABLED=false` fails closed at startup. See the `RESIDENT_*` rows in [`ENV.md`](ENV.md) for
 enablement, the serving substrate (`serve` or `dev_model`), the policy caps, the conservative
 admission-slot count, the cold-start budget, the per-family selection strategy, and the
 base idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0` disables it for every

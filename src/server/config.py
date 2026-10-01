@@ -622,7 +622,7 @@ class TrustedPeerConfig:
 
 @dataclass
 class NetworkPlaneConfig:
-    """Feature-gated network-plane route substrate knobs.
+    """Network-plane route substrate knobs.
 
     ``endpoint_url`` is the operator-configured node-relay endpoint advertised on
     registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to.
@@ -630,7 +630,7 @@ class NetworkPlaneConfig:
     the echo relay session's bounded in-flight buffer.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     endpoint_url: str | None = None
     sidecar_url: str | None = None
     trust_domain: str = "flowmesh"
@@ -655,7 +655,7 @@ class NetworkPlaneConfig:
             else ("echo",)
         )
         return cls(
-            enabled=parse_bool_env(f"{prefix}ENABLED", False),
+            enabled=parse_bool_env(f"{prefix}ENABLED", True),
             endpoint_url=_env_or_none(f"{prefix}ENDPOINT_URL"),
             sidecar_url=_env_or_none(f"{prefix}SIDECAR_URL"),
             trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh",

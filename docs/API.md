@@ -104,7 +104,7 @@ calls.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| WS | `/api/v1/ssh/tasks/{task_id}/proxy` | WebSocket SSH proxy for proxy-mode SSH tasks. |
+| WS | `/api/v1/ssh/tasks/{task_id}/proxy` | WebSocket SSH proxy for proxy- and forward-mode SSH tasks. |
 | GET | `/api/v1/ssh/connections` | List active SSH proxy/forward connections the server is relaying. |
 
 Server policy toggles: `ENABLE_SERVER_SSH_PROXY`,
@@ -137,8 +137,8 @@ logs via its `serve_task_id` through `GET /api/v1/tasks/{id}/logs`.
 
 ## Network
 
-SYSTEM/ADMIN-gated route-discovery diagnostics and a test echo. Present only when
-`NETWORK_PLANE_ENABLED=true`; otherwise these paths return 404. The echo carries no
+SYSTEM/ADMIN-gated route-discovery diagnostics and a test echo. With
+`NETWORK_PLANE_ENABLED=false` these paths return 404. The echo carries no
 resident traffic. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 
 | Method | Path | Description |

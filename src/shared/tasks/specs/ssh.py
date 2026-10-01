@@ -7,6 +7,9 @@ from ..placeholders import TemplateInt
 from ..task_type import TaskType
 from .common import TaskSpecStrictBase, TaskSpecTemplateBase
 
+# The access modes whose connections the server relays to the session's worker.
+RELAYED_SSH_ACCESS_MODES = frozenset({"proxy", "forward"})
+
 
 class SSHInputSpec(StrictBaseModel):
     stage: str

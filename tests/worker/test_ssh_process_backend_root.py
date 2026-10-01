@@ -4,9 +4,11 @@ It creates accounts and starts sshd, so it runs only as root inside a container,
 never on a host.
 """
 
+import contextlib
 import dataclasses
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -93,7 +95,7 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> Iterator[WorkerConfig]:
         content_dir=roots["content"],
         hb_file=hb_file,
         state_dirs=(Path("/root"), roots["hf"], hub),
-        ssh_relay_host="127.0.0.1",
+        ssh_direct_host="127.0.0.1",
     )
     yield config
     shutil.rmtree(base, ignore_errors=True)
@@ -895,3 +897,357 @@ def test_a_session_never_widens_what_a_root_s_acl_grants(
         session.cleanup()
 
     assert _run(["getfacl", "-cp", results]).stdout == before
+
+
+def _connections_of(account: str) -> list[psutil.Process]:
+    return [
+        proc
+        for proc in psutil.process_iter()
+        if process_module._serves_account(proc, account)
+        and proc.is_running()
+        and proc.status() != psutil.STATUS_ZOMBIE
+    ]
+
+
+def _sshd_of(session: process_module.ProcessSession) -> list[psutil.Process]:
+    """Every live process holding the session's port or running its sshd config."""
+    config = (cast(Any, session)._session_dir / "sshd_config").as_posix()
+    port = cast(Any, session)._port
+    found: list[psutil.Process] = []
+    for proc in psutil.process_iter():
+        try:
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                continue
+            if config in proc.cmdline() or any(
+                conn.laddr and conn.laddr.port == port
+                for conn in proc.net_connections("tcp")
+            ):
+                found.append(proc)
+        except psutil.Error:
+            continue
+    return found
+
+
+def _listener_of(session: process_module.ProcessSession) -> psutil.Process:
+    """The sshd listener, which runs below the session's subreaper."""
+    (listener,) = psutil.Process(cast(Any, session)._process.pid).children()
+    return listener
+
+
+def _held_login(
+    session: process_module.ProcessSession,
+    key: Path,
+    port: int,
+    gate: Path,
+    relay: Path,
+    command: str,
+) -> subprocess.Popen[str]:
+    """An ssh login whose connection is accepted at once but held before its first
+    byte until ``gate`` exists."""
+    relay.write_text(_GATED_RELAY)
+    return subprocess.Popen(  # nosec B603 - argv list, test-only
+        [
+            "ssh",
+            "-i",
+            key.as_posix(),
+            "-o",
+            f"ProxyCommand={sys.executable} {relay.as_posix()} "
+            f"{gate.as_posix()} {port}",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "BatchMode=yes",
+            f"{session.login_user()}@127.0.0.1",
+            command,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _kill_all(procs: list[psutil.Process]) -> None:
+    for proc in procs:
+        with contextlib.suppress(psutil.Error):
+            proc.kill()
+
+
+def test_a_connection_outliving_a_listener_that_died_is_killed_at_stop(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    backend = ProcessSessionBackend(worker)
+    session = backend.start_session(_request(tmp_path, client_key))
+    port = session.wait_ready(30)
+    assert port is not None
+    account = session.account.name
+    held = subprocess.Popen(  # nosec B603 - argv list, test-only
+        [
+            "ssh",
+            "-i",
+            client_key.as_posix(),
+            "-p",
+            str(port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "BatchMode=yes",
+            f"{session.login_user()}@127.0.0.1",
+            "sleep 600",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        monitors: list[psutil.Process] = []
+        while time.monotonic() < deadline and not monitors:
+            monitors = [
+                proc
+                for proc in _connections_of(account)
+                if "[priv]" in " ".join(proc.cmdline())
+            ]
+            time.sleep(0.1)
+        assert monitors, "no privileged connection process appeared"
+        # Frozen, it stands for a monitor that has not yet started the account's
+        # shell when its listener goes.
+        monitors[0].suspend()
+        listener = _listener_of(session)
+        listener.kill()
+        listener.wait(timeout=10)
+        cast(Any, session)._process.wait(timeout=10)
+
+        session.stop(1)
+
+        assert _connections_of(account) == []
+        assert _sshd_of(session) == []
+    finally:
+        held.kill()
+        held.wait()
+        _kill_all(_sshd_of(session))
+        session.cleanup()
+
+
+def test_a_connection_not_yet_authenticated_when_its_listener_dies_cannot_log_in(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    session = ProcessSessionBackend(worker).start_session(
+        _request(tmp_path, client_key)
+    )
+    port = session.wait_ready(30)
+    assert port is not None
+    gate, marker = tmp_path / "gate", Path(tempfile.gettempdir()) / "logged-in"
+    marker.unlink(missing_ok=True)
+    login = _held_login(
+        session, client_key, port, gate, tmp_path / "relay.py", f"touch {marker}"
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while (
+            session.established_connections() or 0
+        ) < 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        listener = _listener_of(session)
+        assert [p for p in listener.children() if p.is_running()], "not accepted"
+        listener.kill()
+        listener.wait(timeout=10)
+        cast(Any, session)._process.wait(timeout=10)
+
+        session.stop(1)
+        survivors = _sshd_of(session)
+        gate.touch()
+
+        assert survivors == []
+        assert login.wait(timeout=30) != 0
+        assert not marker.exists()
+    finally:
+        login.kill()
+        login.wait()
+        _kill_all(_sshd_of(session))
+        session.cleanup()
+        marker.unlink(missing_ok=True)
+
+
+def test_a_listener_whose_subreaper_died_is_ended_at_stop(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    session = ProcessSessionBackend(worker).start_session(
+        _request(tmp_path, client_key)
+    )
+    port = session.wait_ready(30)
+    assert port is not None
+    listener = _listener_of(session)
+    subreaper = cast(Any, session)._process
+    try:
+        subreaper.kill()
+        subreaper.wait(timeout=10)
+        assert listener.is_running()
+
+        session.stop(1)
+        session.cleanup()
+
+        assert not listener.is_running() or listener.status() == psutil.STATUS_ZOMBIE
+        # A listening socket always has a local address.
+        assert not any(
+            conn.status == psutil.CONN_LISTEN and cast(Any, conn.laddr).port == port
+            for conn in psutil.net_connections("tcp")
+        )
+    finally:
+        _kill_all([listener])
+
+
+def _listening(port: int) -> list[int]:
+    return [
+        conn.pid
+        for conn in psutil.net_connections("tcp")
+        if conn.status == psutil.CONN_LISTEN
+        and cast(Any, conn.laddr).port == port
+        and conn.pid is not None
+    ]
+
+
+def test_a_reap_spares_an_sshd_that_took_the_dead_session_s_port(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path
+) -> None:
+    session = ProcessSessionBackend(worker).start_session(
+        _request(tmp_path, client_key)
+    )
+    port = session.wait_ready(30)
+    assert port is not None
+    session_dir = cast(Any, session)._session_dir
+    gate = tmp_path / "gate"
+    login = _held_login(session, client_key, port, gate, tmp_path / "relay.py", "true")
+    other: subprocess.Popen[bytes] | None = None
+    try:
+        deadline = time.monotonic() + 20
+        while (
+            session.established_connections() or 0
+        ) < 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        listener = _listener_of(session)
+        (stranded,) = [p for p in listener.children() if p.is_running()]
+        listener.kill()
+        listener.wait(timeout=10)
+        subreaper = cast(Any, session)._process
+        subreaper.kill()
+        subreaper.wait(timeout=10)
+        assert stranded.is_running()
+
+        host_key = tmp_path / "other_host_key"
+        _run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", host_key.as_posix()])
+        listen = next(
+            line
+            for line in (session_dir / "sshd_config").read_text().splitlines()
+            if line.startswith("ListenAddress ")
+        )
+        other_config = tmp_path / "other_sshd_config"
+        other_config.write_text(
+            f"Port {port}\n{listen}\nHostKey {host_key.as_posix()}\nPidFile none\n"
+        )
+        sshd = shutil.which("sshd") or "/usr/sbin/sshd"
+        other = subprocess.Popen(  # nosec B603 - argv list, test-only
+            [sshd, "-D", "-e", "-f", other_config.as_posix()],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + 20
+        while other.pid not in _listening(port) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert other.pid in _listening(port), "the other sshd never listened"
+
+        assert process_module.reap_session(session_dir)
+
+        assert other.poll() is None
+        assert other.pid in _listening(port)
+        assert not stranded.is_running() or stranded.status() == psutil.STATUS_ZOMBIE
+    finally:
+        gate.touch()
+        login.kill()
+        login.wait()
+        if other is not None:
+            other.kill()
+            other.wait()
+        _kill_all(_sshd_of(session))
+        with contextlib.suppress(Exception):
+            session.cleanup()
+
+
+def test_sshd_closes_a_connection_whose_peer_stops_answering(
+    worker: WorkerConfig,
+    tmp_path: Path,
+    client_key: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(process_module, "_CLIENT_ALIVE_INTERVAL_SEC", 1, raising=False)
+    monkeypatch.setattr(process_module, "_CLIENT_ALIVE_COUNT_MAX", 2, raising=False)
+    session = ProcessSessionBackend(worker).start_session(
+        _request(tmp_path, client_key)
+    )
+    port = session.wait_ready(30)
+    assert port is not None
+    client = subprocess.Popen(  # nosec B603 - argv list, test-only
+        [
+            "ssh",
+            "-i",
+            client_key.as_posix(),
+            "-p",
+            str(port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "BatchMode=yes",
+            f"{session.login_user()}@127.0.0.1",
+            "echo in; sleep 600",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        # sshd probes a client only once it has logged in.
+        assert client.stdout is not None
+        assert client.stdout.readline() == "in\n"
+        assert session.established_connections() == 1
+        # The kernel still acknowledges its segments; only the client is silent.
+        client.send_signal(signal.SIGSTOP)
+        deadline = time.monotonic() + 20
+        while session.established_connections() and time.monotonic() < deadline:
+            time.sleep(0.2)
+
+        assert session.established_connections() == 0
+    finally:
+        client.kill()
+        client.wait()
+        session.stop(1)
+        session.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("mode", "bind"), [("proxy", "127.0.0.1"), ("direct", "0.0.0.0")]
+)
+def test_only_a_direct_session_listens_beyond_loopback(
+    worker: WorkerConfig, tmp_path: Path, client_key: Path, mode: str, bind: str
+) -> None:
+    request = _request(tmp_path, client_key)
+    request.cfg.access_mode = mode
+    session = ProcessSessionBackend(worker).start_session(request)
+    try:
+        port = session.wait_ready(30)
+        listening: set[str] = set()
+        for conn in psutil.net_connections("tcp"):
+            # A listening socket always has a local address.
+            address: Any = conn.laddr
+            if conn.status == psutil.CONN_LISTEN and address.port == port:
+                listening.add(address.ip)
+        assert listening == {bind}
+    finally:
+        session.stop(1)
+        session.cleanup()

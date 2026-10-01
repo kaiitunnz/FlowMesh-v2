@@ -53,13 +53,13 @@ from .content import (
 )
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
-from .network.rendezvous import RootCursorStore, RootRendezvousBridge
+from .network.rendezvous import RootRendezvousBridge
 from .network.reverse_relay import (
     CONTENT_RELAY_KEYSPACE,
     RESIDENT_RELAY_KEYSPACE,
+    SSH_RELAY_KEYSPACE,
     BinaryRedis,
     RelaySessionStore,
-    RelayStreamStore,
 )
 from .network.service import NetworkPlane
 from .orchestration.telemetry import build_workflow_span_emitter
@@ -84,6 +84,8 @@ from .services.port_forward import PortForwardService
 from .services.ssh_connections import SshConnectionRegistry
 from .services.task_events import TaskEventPublisher
 from .services.watchdog import WorkerWatchdog
+from .ssh import SSH_EDGE_STREAM_ID, SshRelayOrigin
+from .ssh.shutdown import stop_ssh_ingresses
 from .startup import (
     rehydrate_root_state,
     start_relay_bridge_pump,
@@ -170,6 +172,7 @@ RUNTIME = None
 DISPATCHER = None
 SSH_CONNECTION_REGISTRY = None
 PORT_FORWARD_SERVICE = None
+SSH_RELAY: SshRelayOrigin | None = None
 WATCHDOG = None
 EVENT_MONITOR = None
 LOG_ARCHIVER = None
@@ -280,6 +283,7 @@ if IS_ROOT_NODE:
 
     _relay_redis: BinaryRedis | None = None
     CONTENT_BRIDGE: RootRendezvousBridge | None = None
+    SSH_BRIDGE: RootRendezvousBridge | None = None
     if config.orchestration.network.enabled:
         NETWORK_PLANE = NetworkPlane(
             config.orchestration.network, NODE_REGISTRY, logger
@@ -288,18 +292,16 @@ if IS_ROOT_NODE:
             BinaryRedis,
             resident_relay_client(config.redis),
         )
-        RESIDENT_BRIDGE = RootRendezvousBridge(
-            RelayStreamStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
-            RelaySessionStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
-            RootCursorStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
-            logger=logger,
+        RESIDENT_BRIDGE = RootRendezvousBridge.for_keyspace(
+            _relay_redis, RESIDENT_RELAY_KEYSPACE, logger
         )
+        SSH_BRIDGE = RootRendezvousBridge.for_keyspace(
+            _relay_redis, SSH_RELAY_KEYSPACE, logger
+        )
+        SSH_RELAY = SshRelayOrigin(_relay_redis, logger=logger)
         if config.content_store.hydration_enabled:
-            CONTENT_BRIDGE = RootRendezvousBridge(
-                RelayStreamStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
-                RelaySessionStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
-                RootCursorStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
-                logger=logger,
+            CONTENT_BRIDGE = RootRendezvousBridge.for_keyspace(
+                _relay_redis, CONTENT_RELAY_KEYSPACE, logger
             )
 
     FLEET_SAMPLER = build_fleet_sampler(
@@ -385,10 +387,9 @@ if IS_ROOT_NODE:
     if _pf_cfg.ssh_connection_registry_enabled:
         SSH_CONNECTION_REGISTRY = SshConnectionRegistry(REDIS_CLIENT)
 
-    if _pf_cfg.enabled:
+    if _pf_cfg.enabled and SSH_RELAY is not None:
         PORT_FORWARD_SERVICE = PortForwardService(
-            redis_client=REDIS_CLIENT,
-            node_registry=NODE_REGISTRY,
+            relay=SSH_RELAY,
             worker_registry=WORKER_REGISTRY,
             ssh_connections=SSH_CONNECTION_REGISTRY,
             bind_host=_pf_cfg.bind_host,
@@ -442,6 +443,7 @@ if IS_ROOT_NODE:
         metrics_recorder=METRICS_RECORDER,
         watchdog=WATCHDOG,
         ssh_proxy_enabled=config.port_forward.ssh_proxy_enabled,
+        ssh_relay=SSH_RELAY,
         gated_serve=GATED_SERVE,
         port_forward=PORT_FORWARD_SERVICE,
         log_stream_ttl_sec=config.log_stream.ttl_sec,
@@ -661,6 +663,12 @@ async def _lifespan(_: FastAPI):
                 app.state.content_bridge_task = start_relay_bridge_pump(
                     CONTENT_BRIDGE, NODE_REGISTRY, logger
                 )
+            if SSH_BRIDGE is not None and NODE_REGISTRY is not None:
+                app.state.ssh_bridge_task = start_relay_bridge_pump(
+                    SSH_BRIDGE, NODE_REGISTRY, logger, (SSH_EDGE_STREAM_ID,)
+                )
+            if SSH_RELAY is not None:
+                await SSH_RELAY.start()
             if GATED_SERVE is not None:
                 GATED_SERVE.relay.start(asyncio.get_running_loop())
             if SERVE_FORWARD_INGRESS is not None and GATED_SERVE is not None:
@@ -713,9 +721,11 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
+            await stop_ssh_ingresses(SSH_RELAY, PORT_FORWARD_SERVICE)
             for _bridge_task in (
                 app.state.resident_bridge_task,
                 app.state.content_bridge_task,
+                app.state.ssh_bridge_task,
             ):
                 if _bridge_task is None:
                     continue
@@ -736,8 +746,6 @@ async def _lifespan(_: FastAPI):
                 AGENT_MODEL_GATEWAY.shutdown()
             if FABRIC_TOOL_BROKER is not None:
                 FABRIC_TOOL_BROKER.shutdown()
-            if PORT_FORWARD_SERVICE is not None:
-                await PORT_FORWARD_SERVICE.stop()
 
 
 app.router.lifespan_context = _lifespan
@@ -767,6 +775,7 @@ app.state.watchdog = WATCHDOG
 app.state.port_forward = PORT_FORWARD_SERVICE
 app.state.ssh_connections = SSH_CONNECTION_REGISTRY
 app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_NODE
+app.state.ssh_relay = SSH_RELAY
 app.state.resident_control = RESIDENT_CONTROL
 app.state.gated_serve = GATED_SERVE
 app.state.serve_bindings = SERVE_BINDINGS
@@ -777,6 +786,8 @@ app.state.telemetry_store = TELEMETRY_STORE
 app.state.resident_bridge_task = None
 # Likewise for the content plane's own relay bridge.
 app.state.content_bridge_task = None
+# Likewise for the relayed SSH connections' bridge.
+app.state.ssh_bridge_task = None
 
 # Routers — shared
 app.include_router(health.router)

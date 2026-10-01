@@ -429,13 +429,13 @@ class SupervisorClient:
             except queue.Empty:
                 break
 
-    def iter_mediated_ops(self) -> Iterable[tuple[str, dict[str, Any]]]:
-        """Yield ``(frame_kind, payload)`` mediated-op frames the supervisor relayed."""
-        while True:
-            try:
-                yield self._mediated_op_queue.get_nowait()
-            except queue.Empty:
-                break
+    def next_mediated_op(self, timeout: float) -> tuple[str, dict[str, Any]] | None:
+        """Return the next ``(frame_kind, payload)`` mediated-op frame the supervisor
+        relayed, waiting up to ``timeout``; None when none arrived."""
+        try:
+            return self._mediated_op_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -714,6 +714,10 @@ class SupervisorClient:
     def push_content_frame(self, frame: dict[str, Any]) -> None:
         """Send one content transfer frame up for the supervisor to bridge onward."""
         self._push_event("CONTENT_FRAME", {"frame": frame})
+
+    def push_ssh_frame(self, frame: dict[str, Any]) -> None:
+        """Send one relayed SSH frame up for the supervisor to bridge onward."""
+        self._push_event("SSH_FRAME", {"frame": frame})
 
     def push_content_holding(self, held: Sequence[tuple[str, str]]) -> None:
         """Report the objects this worker holds, so control can resolve them."""

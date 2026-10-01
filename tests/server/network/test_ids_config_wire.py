@@ -24,7 +24,7 @@ def test_relay_session_id_is_prefixed_and_unique() -> None:
     assert first != second
 
 
-def test_config_defaults_to_disabled(monkeypatch) -> None:
+def test_config_defaults_to_enabled(monkeypatch) -> None:
     for name in (
         "NETWORK_PLANE_ENABLED",
         "NETWORK_PLANE_ENDPOINT_URL",
@@ -32,7 +32,7 @@ def test_config_defaults_to_disabled(monkeypatch) -> None:
     ):
         monkeypatch.delenv(name, raising=False)
     cfg = NetworkPlaneConfig.from_env()
-    assert cfg.enabled is False
+    assert cfg.enabled is True
     assert cfg.endpoint_url is None
     assert cfg.protocols == ("echo",)
 

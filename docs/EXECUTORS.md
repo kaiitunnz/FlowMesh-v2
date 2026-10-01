@@ -399,6 +399,22 @@ teardown only when a retain window or serve TTL is configured (not the default) 
 than serving without the reclaim. One tradeoff is known: every chat resident replica enables
 runtime LoRA, so a base model incompatible with `--enable-lora` would fail to serve.
 
+## SSH executor access modes
+
+A `direct` session is reached at its worker's address: the worker's `ssh.direct_host`
+(`SSH_DIRECT_HOST`) when set, else, on `process`, its tailnet address, else its host
+name. A `proxy` or `forward` session is reached through the server, at the WebSocket
+proxy `/api/v1/ssh/tasks/{task_id}/proxy` or at a port the server's forward listener
+allocates, which relays each connection over the network plane to the worker serving
+the session. Its connections end when the session stops. A server with the network
+plane off refuses a `proxy` or `forward` task at submission.
+
+A relayed session also reports its own address as `directHost` and `directPort`, with
+`directScope` and `workerId`. On `process` it listens on loopback only (`loopback`:
+reachable only from that worker's host); a Docker session's port is published on every
+address of the worker's host (`network`). When the server cannot carry a relayed mode,
+`forward` falls back to `proxy`, then to `direct` at that address.
+
 ## SSH executor (process backend)
 
 On a root worker, a `process` session runs under its own account and group,

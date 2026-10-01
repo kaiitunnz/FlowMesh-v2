@@ -24,7 +24,7 @@ from shared.content import (
     ContentReference,
 )
 from shared.network.frame_stream import WireFrameSink
-from shared.network.relay_frame import RelayDirection, RelayFrame
+from shared.network.relay_frame import CONTENT_FRAME_KIND, RelayDirection, RelayFrame
 
 from .client import AnnounceHolding, ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
@@ -189,7 +189,7 @@ class ContentLaneHost:
             self._loop.call_soon_threadsafe(self._on_denial, frame)
         elif frame_kind == "content_serve_grant":
             self._loop.call_soon_threadsafe(self._on_serve_grant, frame)
-        elif frame_kind == "content_frame":
+        elif frame_kind == CONTENT_FRAME_KIND:
             asyncio.run_coroutine_threadsafe(self._on_frame(frame), self._loop)
         else:
             return False

@@ -6,7 +6,6 @@ from worker.config import WorkerConfig
 from .backends.docker import DockerSessionBackend
 from .backends.process import ProcessSessionBackend
 from .base import (
-    LOOPBACK_RELAY_HOST,
     SessionGone,
     SessionInterrupted,
     SessionRequest,
@@ -42,7 +41,6 @@ def select_backend_cls(config: WorkerConfig) -> type[SSHSessionBackend] | None:
 
 __all__ = [
     "BACKENDS",
-    "LOOPBACK_RELAY_HOST",
     "DockerSessionBackend",
     "ProcessSessionBackend",
     "ResolvedSSHInput",

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.schemas.result import SSHResult
-from shared.tasks.specs.ssh import SSHSpecStrict
+from shared.tasks.specs.ssh import RELAYED_SSH_ACCESS_MODES, SSHSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils import new_ssh_session_id
 from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir
@@ -205,6 +205,8 @@ class SSHExecutor(Executor):
             session.collect_output(out_dir / ARTIFACTS_DIR, max_bytes)
             maybe_upload_artifacts(task, out_dir, logger=logger, skip_errors=True)
         finally:
+            # Its relayed connections end first, so none outlives the session's sshd.
+            self.withdraw_ssh_endpoint(session_id)
             # A log stream ends only once its session stops. A cancel or stop stops
             # it at once, inside the worker's own stop timeout.
             session.stop(1 if self._signals.interrupted else cfg.stop_timeout_sec)
@@ -260,7 +262,7 @@ class SSHExecutor(Executor):
         host_port = session.wait_ready(_SESSION_READY_TIMEOUT_SEC)
         if host_port is None:
             return {}
-        host_name = self._backend.session_host()
+        host_name = self._backend.session_address(access_mode)
         ssh_info: dict[str, Any] = {
             "session_id": session_id,
             "mode": access_mode,
@@ -269,19 +271,20 @@ class SSHExecutor(Executor):
             "host": host_name,
             "port": host_port,
         }
-        if access_mode in ("proxy", "forward"):
-            relay_host = self._backend.relay_host()
-            if access_mode == "forward":
-                # Forward-mode sessions need separate direct connection info
-                ssh_info["directHost"] = host_name
-                ssh_info["directPort"] = host_port
-            ssh_info["_relay_target"] = {"host": relay_host, "port": host_port}
+        if access_mode in RELAYED_SSH_ACCESS_MODES:
+            # The root relays to the session by this id; the lane resolves its port.
+            self.publish_ssh_endpoint(session_id, host_port)
+            # The session's own address, for a client on a host that can reach it;
+            # the server may rewrite `host` and `port` to its route, never these.
+            ssh_info["directHost"] = host_name
+            ssh_info["directPort"] = host_port
+            ssh_info["directScope"] = self._backend.session_scope(access_mode)
+            ssh_info["workerId"] = task.assigned_worker
             logger.info(
-                "SSH %s session ready: host=%s port=%s relay=%s (task=%s)",
+                "SSH %s session ready: host=%s port=%s (task=%s)",
                 access_mode,
                 host_name,
                 host_port,
-                relay_host,
                 task.task_id,
             )
         else:

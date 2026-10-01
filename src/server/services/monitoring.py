@@ -15,6 +15,7 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
+from shared.schemas.command import InterruptMessage
 from shared.schemas.event import (
     Event,
     NodeEvent,
@@ -56,6 +57,7 @@ from ..registries.node import NodeRegistry
 from ..registries.worker import ReportOutcome, StatusReport, WorkerRegistry
 from ..schemas.logs import LogEvent
 from ..serve import ServeAccessMode, is_public_base_url
+from ..ssh import SshRelayOrigin
 from ..task.finalizer import WorkflowFinalizer
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import (
@@ -124,6 +126,7 @@ class EventMonitor:
         metrics_recorder: MetricsRecorder,
         watchdog: WorkerWatchdog,
         ssh_proxy_enabled: bool = False,
+        ssh_relay: SshRelayOrigin | None = None,
         gated_serve: "GatedServe | None" = None,
         port_forward: PortForwardService | None = None,
         log_stream_ttl_sec: int = 0,
@@ -144,6 +147,7 @@ class EventMonitor:
         self._metrics = metrics_recorder
         self._watchdog = watchdog
         self._ssh_proxy_enabled = ssh_proxy_enabled
+        self._ssh_relay = ssh_relay
         self._gated_serve = gated_serve
         self._port_forward = port_forward
         self._log_stream_ttl_sec = max(0, int(log_stream_ttl_sec))
@@ -1045,50 +1049,91 @@ class EventMonitor:
     def _handle_ssh_task_update(
         self, task_id: str, worker_id: str | None, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        """Register an SSH forward relay for a task update payload.
-
-        Direct and proxy modes pass through unchanged; a forward mode registers a
-        server-allocated relay port, falling back to direct if registration fails.
-        """
+        """Serve an SSH session in the best mode this server can carry: `forward`,
+        then `proxy`, then `direct` at the session's own address."""
         inner = payload.get("ssh")
         if not isinstance(inner, dict):
             return payload
         payload = payload.copy()
         mode = str(inner.get("mode") or "direct")
         normalized_mode = self._normalize_ssh_mode(mode, worker_id)
+        if normalized_mode == "forward":
+            assert self._port_forward is not None
+            assert worker_id is not None
+            record = self._runtime.get_record(task_id)
+            try:
+                payload["ssh"] = self._port_forward.register_port_forward(
+                    task_id,
+                    record.workflow_id if record is not None else None,
+                    worker_id,
+                    inner.copy(),
+                )
+                return payload
+            except Exception as exc:
+                self._logger.warning(
+                    "Failed to register ssh forward target for task %s: %s",
+                    task_id,
+                    exc,
+                )
+                normalized_mode = self._ssh_fallback_mode
+        if normalized_mode == "direct" and mode != "direct":
+            return self._report_ssh_direct(payload, inner, task_id, worker_id, mode)
         if normalized_mode != mode:
             inner = inner.copy()
             inner["mode"] = normalized_mode
-            if normalized_mode == "direct":
-                inner.pop("directHost", None)
-                inner.pop("directPort", None)
-                inner.pop("_relay_target", None)
             payload["ssh"] = inner
-        if normalized_mode != "forward":
-            return payload
+        return payload
 
-        assert self._port_forward is not None
-        assert worker_id is not None
-        record = self._runtime.get_record(task_id)
-        try:
-            inner = self._port_forward.register_port_forward(
+    def _report_ssh_direct(
+        self,
+        payload: dict[str, Any],
+        inner: dict[str, Any],
+        task_id: str,
+        worker_id: str | None,
+        mode: str,
+    ) -> dict[str, Any]:
+        """Advertise a session no relayed mode can carry at the address it listens on.
+
+        Its scope still describes that address, which is now the only way in. A
+        session that published no address leaves nothing to hand the client, which
+        is the one case that fails the task.
+        """
+        if not inner.get("host") or inner.get("port") is None:
+            payload.pop("ssh", None)
+            self._fail_ssh_task(
                 task_id,
-                record.workflow_id if record is not None else None,
                 worker_id,
-                inner.copy(),
+                f"ssh access mode {mode!r} could not be served and the session "
+                "published no address to reach it at",
+            )
+            return payload
+        inner = inner.copy()
+        inner["mode"] = "direct"
+        inner.pop("directHost", None)
+        inner.pop("directPort", None)
+        payload["ssh"] = inner
+        return payload
+
+    def _fail_ssh_task(self, task_id: str, worker_id: str | None, reason: str) -> None:
+        """Fail a task whose session cannot be reached and stop its executor."""
+        self._dispatcher.fail_task(task_id, reason, worker_id=worker_id)
+        if (
+            not worker_id
+            or (worker := self._worker_registry.get_worker(worker_id)) is None
+        ):
+            return
+        try:
+            self._worker_registry.publish_interrupt(
+                worker,
+                InterruptMessage(task_id=task_id, worker_id=worker.id, reason=reason),
             )
         except Exception as exc:
             self._logger.warning(
-                "Failed to register ssh forward target for task %s: %s", task_id, exc
+                "Failed to publish interrupt for task %s on worker %s: %s",
+                task_id,
+                worker_id,
+                exc,
             )
-            inner = inner.copy()
-            inner["mode"] = "direct"
-            inner.pop("_relay_target", None)
-            payload["ssh"] = inner
-            return payload
-
-        payload["ssh"] = inner
-        return payload
 
     def _handle_serve_task_update(
         self, task_id: str, worker_id: str | None, payload: dict[str, Any]
@@ -1183,8 +1228,11 @@ class EventMonitor:
 
     def _release_task(self, task_id: str) -> None:
         """Release what a task's dispatch exposed, once it ends or returns to the queue:
-        its forward relay and its serve binding, which a re-run registers afresh."""
+        its forward listener, its relayed SSH connections, and its serve binding, which
+        a re-run registers afresh."""
         self._unregister_port_forward(task_id)
+        if self._ssh_relay is not None:
+            self._ssh_relay.close_task(task_id)
         self._maybe_drain_serve(task_id)
 
     def _maybe_drain_serve(self, task_id: str) -> None:
@@ -1355,22 +1403,31 @@ class EventMonitor:
                 "Failed to unregister forward target for task %s: %s", task_id, exc
             )
 
+    @property
+    def _ssh_fallback_mode(self) -> str:
+        """Return the mode a session degrades to: ``proxy`` where this server can
+        carry it, else ``direct``."""
+        if self._ssh_proxy_enabled and self._ssh_relay is not None:
+            return "proxy"
+        return "direct"
+
     def _normalize_ssh_mode(self, mode: str, worker_id: str | None) -> str:
-        # `forward` -> `proxy` -> `direct` fallback
+        """Pick the best mode this server can carry the session in.
+
+        `forward` falls back to `proxy`, and `direct` is always the last one.
+        """
         if mode == "proxy":
-            return "proxy" if self._ssh_proxy_enabled else "direct"
+            return self._ssh_fallback_mode
         if mode == "forward":
             if not worker_id:
                 self._logger.warning(
                     "Cannot keep SSH forward mode without worker_id; "
                     "degrading access mode"
                 )
-                return "proxy" if self._ssh_proxy_enabled else "direct"
+                return self._ssh_fallback_mode
             if self._port_forward is not None:
                 return "forward"
-            if self._ssh_proxy_enabled:
-                return "proxy"
-            return "direct"
+            return self._ssh_fallback_mode
         return "direct"
 
     # ------------------------------------------------------------------ # Helper

@@ -15,7 +15,11 @@ from shared.schemas.result import BaseExecutorResult
 from shared.schemas.result.catalog import InferenceResult
 from shared.schemas.result.payloads import GenerationUsage, InferenceItem
 from shared.tasks.task_type import TaskType
-from tests.worker.factories import make_worker_hardware, make_worker_task_message
+from tests.worker.factories import (
+    make_worker_hardware,
+    make_worker_task_message,
+    no_mediated_op,
+)
 from worker.executors.base_executor import Executor
 from worker.executors.episode_support import EpisodeStepResult
 from worker.runner import Runner
@@ -59,6 +63,7 @@ def _stored(
     lifecycle.client.create_task_log_emitter.return_value = None
     lifecycle.client.iter_interrupts.return_value = []
     lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
     executor = _FixedExecutor(result)
     msg = make_worker_task_message(
         {"taskType": "inference", "data": {"prompt": "name one planet"}},

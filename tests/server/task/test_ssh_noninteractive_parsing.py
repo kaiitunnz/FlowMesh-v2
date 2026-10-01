@@ -177,3 +177,35 @@ def test_parse_noninteractive_ssh_skips_access_mode_validation(
     # Should not raise even though proxy/forward are disabled.
     parsed = parse_workflow(payload, format="native")
     assert len(parsed.tasks) == 1
+
+
+def _interactive_ssh(access_mode: str) -> str:
+    return textwrap.dedent(f"""
+        apiVersion: flowmesh/v1
+        kind: Workflow
+        metadata:
+          name: shell-wf
+        spec:
+          stages:
+            - name: shell
+              spec:
+                taskType: ssh
+                accessMode: {access_mode}
+                authorizedKeys: ["ssh-ed25519 AAAA one"]
+        """).strip()
+
+
+@pytest.mark.parametrize("access_mode", ["proxy", "forward"])
+def test_a_relayed_session_is_refused_without_the_network_plane(
+    monkeypatch: pytest.MonkeyPatch, access_mode: str
+) -> None:
+    monkeypatch.setattr("server.task.parser._NETWORK_PLANE_ENABLED", False)
+    with pytest.raises(ValueError, match="needs the network plane"):
+        parse_workflow(_interactive_ssh(access_mode), format="native")
+
+
+def test_a_direct_session_needs_no_network_plane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("server.task.parser._NETWORK_PLANE_ENABLED", False)
+    assert len(parse_workflow(_interactive_ssh("direct"), format="native").tasks) == 1

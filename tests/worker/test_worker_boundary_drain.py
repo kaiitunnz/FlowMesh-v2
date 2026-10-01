@@ -11,6 +11,7 @@ import pytest
 
 from shared.grpc.supervisor.v1 import supervisor_pb2
 from shared.tools.search.schema import SEARCH_INTERFACE
+from tests.worker.factories import no_mediated_op
 from tests.worker.test_runner_mediated_dispatch import _permit
 from tests.worker.test_runner_shutdown import _Echo, _runner
 from tests.worker.test_supervisor_client_dispatch_id import _client
@@ -51,11 +52,10 @@ def test_a_stopped_client_relays_mediated_operations_until_shutdown() -> None:
     with patch.object(supervisor_module.grpc, "channel_ready_future"):
         client._run_task_stream()
 
-    assert [kind for kind, _ in client.iter_mediated_ops()] == [
-        "permit",
-        "permit",
-        "reap",
-    ]
+    relayed = []
+    while (op := client.next_mediated_op(0)) is not None:
+        relayed.append(op[0])
+    assert relayed == ["permit", "permit", "reap"]
 
 
 def _draining_runner(
@@ -88,20 +88,22 @@ def _draining_runner(
     runner.lifecycle = lifecycle
     reap_at: list[float] = []
 
-    def mediated_ops() -> list[tuple[str, dict[str, Any]]]:
+    def mediated_op(timeout: float) -> tuple[str, dict[str, Any]] | None:
         if reap_after_sec is None or not runner.shutdown_requested:
-            return []
+            no_mediated_op(timeout)
+            return None
         if not reap_at:
             reap_at.append(time.monotonic() + reap_after_sec)
         if reap_at[0] > time.monotonic() or "reaped" in order:
-            return []
+            no_mediated_op(timeout)
+            return None
         order.append("reaped")
-        return [reap]
+        return reap
 
     client = cast(MagicMock, lifecycle.client)
     client.iter_interrupts.return_value = []
     client.iter_stops.return_value = []
-    client.iter_mediated_ops.side_effect = mediated_ops
+    client.next_mediated_op.side_effect = mediated_op
     client.create_task_log_emitter.return_value = None
     client.unregister.side_effect = lambda *_, **__: order.append("unregistered")
     return runner, client

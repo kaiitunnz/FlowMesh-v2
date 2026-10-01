@@ -69,6 +69,9 @@ class ReverseRelayAttachment:
         logger: logging.Logger | None = None,
     ) -> None:
         self._node_id = node_id
+        self._rebind_to: str | None = None
+        self._redis = redis
+        self._keyspace = keyspace
         self._delivery = delivery
         self._owner = owner
         self._batch = batch
@@ -125,6 +128,18 @@ class ReverseRelayAttachment:
             )
         return len(entries)
 
+    def rebind(self, node_id: str) -> None:
+        """Consume the node's new id's down stream from the next pump on; callable
+        from any thread."""
+        self._rebind_to = node_id
+
+    async def _apply_rebind(self) -> None:
+        if (node_id := self._rebind_to) is None or node_id == self._node_id:
+            return
+        await self._lease.release(self._node_id, self._LEG, self._owner)
+        self._node_id = node_id
+        self._cursor = _DownCursor(self._redis, node_id, self._keyspace)
+
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         if self._task is None:
             self._task = loop.create_task(self._run())
@@ -143,6 +158,7 @@ class ReverseRelayAttachment:
         try:
             while True:
                 try:
+                    await self._apply_rebind()
                     count = await self.pump_once()
                 except Exception:
                     self._logger.exception("reverse relay attachment pump failed")

@@ -1,4 +1,3 @@
-from .encoding import decode_base64_text_to_bytes, encode_bytes_to_base64_text
 from .ids import (
     new_activation_id,
     new_attempt_id,
@@ -29,9 +28,7 @@ from .parsing import parse_bool_env, parse_float_env, parse_int_env, parse_mem_t
 from .time import now_iso
 
 __all__ = [
-    "decode_base64_text_to_bytes",
     "dedup_json",
-    "encode_bytes_to_base64_text",
     "lookup_deduped_json",
     "new_activation_id",
     "new_attempt_id",

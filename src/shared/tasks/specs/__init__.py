@@ -40,7 +40,7 @@ from .omni import (
 )
 from .rag import RagSpecStrict, RagSpecTemplate
 from .serve import ServeSpecStrict, ServeSpecTemplate
-from .ssh import SSHSpecStrict, SSHSpecTemplate
+from .ssh import RELAYED_SSH_ACCESS_MODES, SSHSpecStrict, SSHSpecTemplate
 from .training import (
     DPOSpecStrict,
     DPOSpecTemplate,
@@ -55,6 +55,7 @@ from .training import (
 )
 
 __all__ = [
+    "RELAYED_SSH_ACCESS_MODES",
     "AgentHarnessSpec",
     "AgentSandboxSpec",
     "AgentModelBindingSpec",

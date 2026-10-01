@@ -17,10 +17,11 @@ trimmed — a stream is trimmed only at or below the cumulative-acknowledged id.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import (
     RelayDirection,
     RelayFrame,
@@ -30,6 +31,7 @@ from shared.network.relay_frame import (
 from ..clients.redis import (
     CONTENT_RELAY_ROOT_CURSOR_KEY,
     RESIDENT_RELAY_ROOT_CURSOR_KEY,
+    SSH_RELAY_ROOT_CURSOR_KEY,
     content_relay_down_cursor_key,
     content_relay_down_key,
     content_relay_session_key,
@@ -38,11 +40,17 @@ from ..clients.redis import (
     resident_relay_down_key,
     resident_relay_session_key,
     resident_relay_up_key,
+    ssh_relay_down_cursor_key,
+    ssh_relay_down_key,
+    ssh_relay_session_key,
+    ssh_relay_up_key,
 )
 
 # A crashed origin can never trim its own session record; a generous TTL bounds the leak
 # without expiring an active one — a single invocation's session lives far under it.
 _SESSION_TTL_MS = 1_800_000
+# The relay may share its Redis with every other key, so a scan walks it in big steps.
+_SCAN_COUNT = 1000
 
 _logger = logging.getLogger("reverse-relay")
 
@@ -81,6 +89,14 @@ CONTENT_RELAY_KEYSPACE = RelayKeyspace(
     down_cursor=content_relay_down_cursor_key,
 )
 
+SSH_RELAY_KEYSPACE = RelayKeyspace(
+    up=ssh_relay_up_key,
+    down=ssh_relay_down_key,
+    session=ssh_relay_session_key,
+    root_cursor=SSH_RELAY_ROOT_CURSOR_KEY,
+    down_cursor=ssh_relay_down_cursor_key,
+)
+
 
 class BinaryRedis(Protocol):
     """The binary-safe async Redis surface the substrate uses (no decoded responses)."""
@@ -97,6 +113,7 @@ class BinaryRedis(Protocol):
     async def get(self, name: str) -> bytes | None: ...
     async def delete(self, name: str) -> int: ...
     async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Any: ...
+    def scan_iter(self, match: str, count: int) -> AsyncIterator[bytes]: ...
 
 
 @dataclass
@@ -132,6 +149,24 @@ class RelayStreamStore:
     ) -> tuple[list[StreamEntry], str | None]:
         return await self._read(self._ks.down(node_id), after_id, count, block_ms)
 
+    async def read_up_many(
+        self, after_ids: dict[str, str], count: int, block_ms: int | None
+    ) -> dict[str, tuple[list[StreamEntry], str | None]]:
+        """Read every named node's up stream from its cursor in one call, returning
+        as soon as any of them has a frame."""
+        by_key = {self._ks.up(node_id): node_id for node_id in after_ids}
+        result = await self._redis.xread(
+            {key: after_ids[node_id] for key, node_id in by_key.items()},
+            count=count,
+            block=block_ms,
+        )
+        batches: dict[str, tuple[list[StreamEntry], str | None]] = {}
+        for stream, items in result or []:
+            key = stream.decode() if isinstance(stream, bytes) else str(stream)
+            if (node_id := by_key.get(key)) is not None:
+                batches[node_id] = self._decode(items)
+        return batches
+
     async def _read(
         self, key: str, after_id: str, count: int, block_ms: int | None
     ) -> tuple[list[StreamEntry], str | None]:
@@ -146,15 +181,20 @@ class RelayStreamStore:
         entries: list[StreamEntry] = []
         last_id: str | None = None
         for _stream, items in result or []:
-            for entry_id, fields in items:
-                eid = (
-                    entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
-                )
-                last_id = eid
-                try:
-                    entries.append(StreamEntry(eid, RelayFrame.from_fields(fields)))
-                except (KeyError, ValueError):
-                    _logger.warning("skipping undecodable relay frame %s", eid)
+            entries, last_id = self._decode(items)
+        return entries, last_id
+
+    @staticmethod
+    def _decode(items: list[Any]) -> tuple[list[StreamEntry], str | None]:
+        entries: list[StreamEntry] = []
+        last_id: str | None = None
+        for entry_id, fields in items:
+            eid = entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
+            last_id = eid
+            try:
+                entries.append(StreamEntry(eid, RelayFrame.from_fields(fields)))
+            except (KeyError, ValueError):
+                _logger.warning("skipping undecodable relay frame %s", eid)
         return entries, last_id
 
     async def trim_up_to(
@@ -168,6 +208,18 @@ class RelayStreamStore:
             else self._ks.down(node_id)
         )
         await self._redis.xtrim(key, minid=min_id, approximate=False)
+
+
+class EdgeStreamSink(FrameSink):
+    """Publishes a root ingress edge's frames on its dedicated up stream for the
+    root bridge to forward."""
+
+    def __init__(self, streams: RelayStreamStore, edge_id: str) -> None:
+        self._streams = streams
+        self._edge_id = edge_id
+
+    async def send(self, frame: RelayFrame) -> None:
+        await self._streams.publish_up(self._edge_id, frame)
 
 
 class RelaySessionStore:
@@ -191,6 +243,22 @@ class RelaySessionStore:
 
     async def delete(self, session_id: str) -> None:
         await self._redis.delete(self._ks.session(session_id))
+
+    async def touch(self, session_id: str, ttl_ms: int = _SESSION_TTL_MS) -> None:
+        """Reset the record's expiry, keeping a long-lived session's routing alive."""
+        await self._redis.pexpire(self._ks.session(session_id), ttl_ms)
+
+    async def list_ids(self) -> list[str]:
+        """Return the id of every session record in this keyspace."""
+        prefix = self._ks.session("")
+        ids: list[str] = []
+        async for raw in self._redis.scan_iter(match=f"{prefix}*", count=_SCAN_COUNT):
+            key = raw.decode() if isinstance(raw, bytes) else str(raw)
+            session_id = key[len(prefix) :]
+            # A leg's ownership lease is keyed below a record, as ``<id>:lease:<leg>``.
+            if ":" not in session_id:
+                ids.append(session_id)
+        return ids
 
 
 # Owner-fenced compare-and-act: refresh or drop the lease only while this owner still
@@ -251,7 +319,9 @@ class RelayLease:
 __all__ = [
     "CONTENT_RELAY_KEYSPACE",
     "RESIDENT_RELAY_KEYSPACE",
+    "SSH_RELAY_KEYSPACE",
     "BinaryRedis",
+    "EdgeStreamSink",
     "RelayDirection",
     "RelayFrame",
     "RelayFrameKind",

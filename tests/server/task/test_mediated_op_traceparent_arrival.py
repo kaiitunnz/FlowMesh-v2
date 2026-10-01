@@ -244,6 +244,6 @@ def test_the_worker_side_router_recognizes_every_kind_this_test_covers() -> None
         "resident_reap",
         "resident_sidecar_reap",
         "resident_adapter_unload",
-        "resident_frame",
     ):
         assert f'"{kind}"' in route_source, f"lane_host.route no longer routes {kind!r}"
+    assert "RESIDENT_FRAME_KIND" in route_source

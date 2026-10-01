@@ -5,6 +5,7 @@ in-container suite does that."""
 import dataclasses
 import fcntl
 import io
+import logging
 import os
 import stat
 import subprocess
@@ -32,6 +33,7 @@ from tests.worker.factories import (
     make_worker_config,
     make_worker_hardware,
     make_worker_task_message,
+    no_mediated_op,
 )
 from worker.config import WorkerConfig
 from worker.executors.base_executor import (
@@ -51,6 +53,7 @@ from worker.executors.ssh_session.base import (
     extract_output_archive,
     iter_tree,
     path_size_bytes,
+    render_authorized_keys,
 )
 from worker.executors.ssh_session.config import SSHOutputConfig
 from worker.main import build_capabilities
@@ -124,7 +127,7 @@ def _servable(**patches: Any) -> Any:
 def test_a_worker_that_cannot_isolate_or_lock_serves_no_process_session(
     tmp_path: Path, unready: str
 ) -> None:
-    config = make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+    config = make_live_worker_config(tmp_path)
     with _servable():
         assert ProcessSessionBackend.is_available(config)
     with _servable(**{unready: False}):
@@ -137,7 +140,7 @@ def test_a_worker_that_cannot_isolate_or_lock_serves_no_process_session(
 def test_a_worker_missing_a_tool_serves_no_process_session(
     tmp_path: Path, missing: str
 ) -> None:
-    config = make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+    config = make_live_worker_config(tmp_path)
     with _servable(**{missing: None}):
         assert not ProcessSessionBackend.is_available(config)
 
@@ -180,17 +183,15 @@ def test_a_state_dir_someone_else_owns_is_refused(tmp_path: Path) -> None:
         process_module._make_private_dir(tmp_path / "state", 0o711)
 
 
-def test_a_root_worker_its_supervisor_cannot_reach_serves_no_process_session(
+def test_a_root_worker_with_no_routable_address_serves_process_sessions(
     tmp_path: Path,
 ) -> None:
+    """The worker reaches a relayed session itself, so nothing needs to dial it."""
     with (
         _servable(),
         patch.object(process_module, "resolve_tailnet_address", return_value=None),
     ):
-        assert not ProcessSessionBackend.is_available(make_live_worker_config(tmp_path))
-        assert ProcessSessionBackend.is_available(
-            make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
-        )
+        assert ProcessSessionBackend.is_available(make_live_worker_config(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -387,6 +388,32 @@ def test_a_shared_store_root_is_never_created_and_refuses_sessions_until_it_exis
 
     store.mkdir()
     assert store in process_module.ensure_state_roots(config)
+
+
+def test_a_state_root_below_a_missing_store_root_never_creates_the_store(
+    tmp_path: Path,
+) -> None:
+    """The store is the content plane's to create; a local stand-in made as some
+    nested root's parent would pass for the shared mount."""
+    store = tmp_path / "store"
+    config = _with_store(_state_config(tmp_path, content_dir=store / "cache"), store)
+
+    with (
+        patch.object(process_module.acl, "tools_available", return_value=True),
+        patch.object(process_module.acl, "probe"),
+        patch.object(process_module.acl, "STATE_DIR", tmp_path / "flowmesh"),
+    ):
+        assert process_module._acl_ready(config)
+    assert not store.exists()
+    with pytest.raises(ExecutionError, match="does not exist yet") as refused:
+        process_module.ensure_state_roots(config)
+    assert refused.value.retryable
+    assert not store.exists()
+
+    store.mkdir()
+    roots = process_module.ensure_state_roots(config)
+    assert store in roots and store / "cache" not in roots
+    assert not (store / "cache").exists()
 
 
 def test_a_missing_store_root_inside_the_results_dir_is_left_out(
@@ -706,7 +733,7 @@ def test_a_run_dir_another_account_can_write_takes_no_lock(
 
 
 def test_the_lock_is_taken_before_any_state_root_is_touched(tmp_path: Path) -> None:
-    config = make_live_worker_config(tmp_path, ssh_relay_host="10.0.0.9")
+    config = make_live_worker_config(tmp_path)
     with (
         _servable(_acquire_backend_lock=False),
         patch.object(process_module, "_release_backend_lock") as release,
@@ -1001,7 +1028,7 @@ def test_helpers_start_from_a_scrubbed_environment(
 
 
 def test_the_session_env_travels_on_its_keys() -> None:
-    rendered, exported = process_module._render_authorized_keys(
+    rendered, exported = render_authorized_keys(
         ["ssh-ed25519 AAAA one", " "],
         {"TOKEN": "abc", "BAD NAME": "x", "QUOTED": 'a"b'},
     )
@@ -1018,6 +1045,7 @@ def test_sshd_admits_only_the_session_account_by_key() -> None:
         authorized_keys=Path("/run/s/authorized_keys"),
         login_user="fmssnabc",
         exported_env=["TOKEN"],
+        bind_host="127.0.0.1",
     )
 
     for line in (
@@ -1319,7 +1347,7 @@ def test_collection_bars_logins_before_it_ends_sshd_and_the_session(
             side_effect=lambda name: order.append(("lock", keys.exists())),
         ),
         patch.object(
-            process_module, "_end_sshd", side_effect=lambda _: order.append("end")
+            process_module, "_end_sshd", side_effect=lambda *_: order.append("end")
         ),
         patch.object(process_module, "kill_processes", side_effect=kill),
         patch.object(process_module, "_archive_as", return_value=_archiver("exit")),
@@ -1329,23 +1357,33 @@ def test_collection_bars_logins_before_it_ends_sshd_and_the_session(
     assert order == [("lock", False), "end", "kill"]
 
 
-def test_the_session_is_stopped_before_its_sshd_and_again_after() -> None:
-    order: list[str] = []
+def test_a_stop_bars_logins_then_stops_the_session_before_its_sshd_and_after(
+    tmp_path: Path,
+) -> None:
+    order: list[Any] = []
     session = _session(RunSignals(), MagicMock())
+    session._session_dir = tmp_path
+    keys = tmp_path / process_module._AUTHORIZED_KEYS_NAME
+    keys.write_text("key\n")
 
     def kill(uid: int) -> bool:
         order.append("kill")
         return True
 
     with (
+        patch.object(
+            process_module,
+            "lock_account",
+            side_effect=lambda name: order.append(("lock", keys.exists())),
+        ),
         patch.object(process_module, "kill_processes", side_effect=kill),
         patch.object(
-            process_module, "_end_sshd", side_effect=lambda _: order.append("end")
+            process_module, "_end_sshd", side_effect=lambda *_: order.append("end")
         ),
     ):
         session.stop(1)
 
-    assert order == ["kill", "end", "kill"]
+    assert order == [("lock", False), "kill", "end", "kill"]
 
 
 @pytest.mark.parametrize("clean", [True, False])
@@ -1415,21 +1453,112 @@ def test_ending_sshd_kills_its_whole_tree() -> None:
     with (
         patch.object(process_module.psutil, "Process", return_value=root) as find,
         patch.object(process_module, "_kill_tree") as kill_tree,
+        patch.object(process_module, "_kill_sshd_of") as strays,
     ):
-        process_module._end_sshd(process)
+        process_module._end_sshd(process, Path("/s"), "fmssn61000")
 
     find.assert_called_once_with(4321)
     kill_tree.assert_called_once_with(root)
     process.wait.assert_called_once()
+    strays.assert_called_once_with(Path("/s"), "fmssn61000")
 
 
-def test_an_ended_sshd_is_left_alone() -> None:
+def test_a_session_whose_subreaper_is_gone_has_its_sshd_found_by_attribution() -> None:
     process = MagicMock()
     process.poll.return_value = 0
-    with patch.object(process_module, "_kill_tree") as kill_tree:
-        process_module._end_sshd(process)
+    with (
+        patch.object(process_module, "_kill_tree") as kill_tree,
+        patch.object(process_module, "_kill_sshd_of") as strays,
+    ):
+        process_module._end_sshd(process, Path("/s"), "fmssn61000")
 
     kill_tree.assert_not_called()
+    strays.assert_called_once_with(Path("/s"), "fmssn61000")
+
+
+def _sshd_proc(name: str, title: str, ports: list[int]) -> MagicMock:
+    proc = MagicMock()
+    proc.name.return_value = name
+    proc.cmdline.return_value = title.split(" ")
+    proc.net_connections.return_value = [
+        MagicMock(laddr=MagicMock(port=port)) for port in ports
+    ]
+    return proc
+
+
+def test_a_session_s_sshd_is_found_by_its_config_its_port_or_its_account(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "sshd_config"
+    config.write_text("Port 40123\nListenAddress 127.0.0.1\n")
+    listener = _sshd_proc(
+        "sshd", f"sshd: /usr/sbin/sshd -D -e -f {config.as_posix()}", [40123]
+    )
+    accepted = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40123])
+    monitor = _sshd_proc("sshd-session", "sshd-session: fmssn61000 [priv]", [])
+    other_session = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40124])
+    client = _sshd_proc("ssh", "ssh -p 40123 host", [51000])
+    impostor = _sshd_proc("python3", "python3 serve.py", [40123])
+    with (
+        patch.object(
+            process_module.psutil,
+            "process_iter",
+            return_value=[listener, accepted, monitor, other_session, client, impostor],
+        ),
+        patch.object(process_module, "_kill_tree") as kill_tree,
+    ):
+        process_module._kill_sshd_of(tmp_path, "fmssn61000")
+
+    assert [call.args[0] for call in kill_tree.call_args_list] == [
+        listener,
+        accepted,
+        monitor,
+    ]
+
+
+def test_a_port_another_sshd_listens_on_again_is_left_to_that_sshd(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "sshd_config"
+    config.write_text("Port 40123\nListenAddress 127.0.0.1\n")
+    other_listener = _sshd_proc("sshd", "sshd: /usr/sbin/sshd -D -f /other", [])
+    other_listener.pid = 900
+    other_listener.net_connections.return_value = [
+        MagicMock(laddr=MagicMock(port=40123), status=psutil.CONN_LISTEN)
+    ]
+    other_connection = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40123])
+    other_connection.pid = 901
+    other_connection.parents.return_value = [other_listener]
+    stranded = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40123])
+    stranded.pid = 902
+    stranded.parents.return_value = []
+    with (
+        patch.object(
+            process_module.psutil,
+            "process_iter",
+            return_value=[other_listener, other_connection, stranded],
+        ),
+        patch.object(process_module, "_kill_tree") as kill_tree,
+    ):
+        process_module._kill_sshd_of(tmp_path, None)
+
+    kill_tree.assert_called_once_with(stranded)
+
+
+def test_a_session_with_no_config_left_is_found_by_its_account_alone(
+    tmp_path: Path,
+) -> None:
+    accepted = _sshd_proc("sshd-session", "sshd-session: [accepted]", [40123])
+    monitor = _sshd_proc("sshd-session", "sshd-session: fmssn61000 [priv]", [])
+    with (
+        patch.object(
+            process_module.psutil, "process_iter", return_value=[accepted, monitor]
+        ),
+        patch.object(process_module, "_kill_tree") as kill_tree,
+    ):
+        process_module._kill_sshd_of(tmp_path, "fmssn61000")
+
+    kill_tree.assert_called_once_with(monitor)
 
 
 def test_sshd_runs_niced_and_under_tini_as_a_subreaper() -> None:
@@ -1524,6 +1653,26 @@ def test_a_tree_is_frozen_then_killed_from_the_bottom_up() -> None:
         process_module._kill_tree(root)
 
     assert order == ["suspend", "child", "root"]
+
+
+def test_a_process_that_outlives_the_kill_deadline_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stuck = MagicMock(pid=4242)
+    stuck.status.return_value = psutil.STATUS_RUNNING
+    stuck.name.return_value = "sshd-session"
+    root = MagicMock(pid=4200)
+    root.children.return_value = [stuck]
+    clock = iter(range(0, 1000, 1))
+    with (
+        patch.object(process_module.time, "sleep"),
+        patch.object(process_module.time, "monotonic", side_effect=lambda: next(clock)),
+        caplog.at_level(logging.WARNING, logger=process_module.logger.name),
+    ):
+        process_module._kill_tree(root)
+
+    assert "4242 (sshd-session)" in caplog.text
+    root.kill.assert_called_once()
 
 
 def test_a_tree_s_processes_all_die(tmp_path: Path) -> None:
@@ -1642,6 +1791,7 @@ def test_a_session_failure_reports_no_restored_credential(tmp_path: Path) -> Non
     lifecycle.client.create_task_log_emitter.return_value = None
     lifecycle.client.iter_interrupts.return_value = []
     lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
     lifecycle.content_plane = FakeContentPlane(MagicMock())
     msg = make_worker_task_message(
         {
@@ -1678,3 +1828,72 @@ def test_a_session_failure_reports_no_restored_credential(tmp_path: Path) -> Non
 
     reported = lifecycle.set_failed.call_args.args[1]
     assert _SECRET not in reported and "[REDACTED]" in reported
+
+
+@pytest.mark.parametrize(
+    ("mode", "bind", "scope"),
+    [
+        ("direct", "0.0.0.0", "network"),
+        ("proxy", "127.0.0.1", "loopback"),
+        ("forward", "127.0.0.1", "loopback"),
+    ],
+)
+def test_only_a_direct_session_listens_beyond_loopback(
+    tmp_path: Path, mode: str, bind: str, scope: str
+) -> None:
+    backend = ProcessSessionBackend(make_live_worker_config(tmp_path))
+    assert backend.session_bind_host(mode) == bind
+    assert backend.session_scope(mode) == scope
+    config = process_module._render_sshd_config(
+        port=2222,
+        session_dir=Path("/run/s"),
+        host_key=Path("/run/s/key"),
+        authorized_keys=Path("/run/s/authorized_keys"),
+        login_user="fmssnabc",
+        exported_env=[],
+        bind_host=backend.session_bind_host(mode),
+    )
+    assert f"ListenAddress {bind}" in config.splitlines()
+    if scope == "loopback":
+        assert backend.session_address(mode) == "127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    ("title", "serves"),
+    [
+        (["sshd-session: fmssn61000 [priv]"], True),
+        (["sshd-session: fmssn61000@pts/0"], True),
+        (["sshd: fmssn61000@notty"], True),
+        (["sshd-session:", "fmssn61000", "[priv]"], True),
+        (["sshd-session: fmssn610001 [priv]"], False),
+        (["sshd-session: fmssn6100 [priv]"], False),
+        (["bash", "fmssn61000"], False),
+        (["sshd: /usr/sbin/sshd -D -f /run/s/sshd_config"], False),
+    ],
+)
+def test_a_connection_process_is_matched_by_its_account_as_a_whole_word(
+    title: list[str], serves: bool
+) -> None:
+    proc = MagicMock()
+    proc.cmdline.return_value = title
+    assert process_module._serves_account(proc, "fmssn61000") is serves
+
+
+def test_stopping_a_session_whose_listener_is_gone_kills_its_connections() -> None:
+    """A privileged connection process outlives a listener that exited on its own."""
+    monitor = _sshd_proc("sshd-session", "sshd-session: fmssn61000 [priv]", [])
+    other = _sshd_proc("sshd-session", "sshd-session: fmssn61001 [priv]", [])
+    process = MagicMock()
+    process.poll.return_value = 0
+    session = _session(RunSignals(), process)
+    session.account.name = "fmssn61000"
+    with (
+        patch.object(process_module, "kill_processes"),
+        patch.object(
+            process_module.psutil, "process_iter", return_value=[monitor, other]
+        ),
+        patch.object(process_module, "_kill_tree") as kill_tree,
+    ):
+        session.stop(1)
+
+    kill_tree.assert_called_once_with(monitor)

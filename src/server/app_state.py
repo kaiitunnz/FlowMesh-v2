@@ -15,6 +15,7 @@ from .services.metrics import MetricsRecorder
 from .services.port_forward import PortForwardService
 from .services.ssh_connections import SshConnectionRegistry
 from .services.watchdog import WorkerWatchdog
+from .ssh import SshRelayOrigin
 from .supervisor.supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
 from .telemetry.store import TelemetryStore
@@ -90,6 +91,10 @@ def get_ssh_connection_registry(conn: HTTPConnection) -> SshConnectionRegistry |
 
 def get_ssh_proxy_enabled(conn: HTTPConnection) -> bool:
     return conn.app.state.ssh_proxy_enabled
+
+
+def get_ssh_relay(conn: HTTPConnection) -> SshRelayOrigin | None:
+    return conn.app.state.ssh_relay
 
 
 def get_resident_control(conn: HTTPConnection) -> ResidentCapacityControl | None:

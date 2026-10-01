@@ -58,6 +58,7 @@ from ..base import (
     is_ssh_ready,
     path_size_bytes,
     read_local_proc_net_tcp,
+    render_authorized_keys,
     resolve_tailnet_address,
 )
 from ..config import SAFE_MOUNT_ROOT, normalize_mount_path
@@ -91,9 +92,14 @@ _TERMINATE_GRACE_SEC = 5.0
 _KILL_POLL_SEC = 0.05
 # The reader streams without pause, so this long without a byte means it is stuck.
 _ARCHIVE_IDLE_TIMEOUT_SEC = 60.0
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_ENV_VALUE_FORBIDDEN = ('"', "\\", "\n", "\r")
 _PORT_ATTEMPTS = 3
+# OpenSSH titles a connection's processes "sshd-session: <user> [priv]" and
+# "sshd-session: <user>@<tty>"; releases before 9.8 use "sshd:".
+_SSHD_CONNECTION_TITLES = ("sshd-session:", "sshd:")
+# A connection whose peer stops answering ends, so a relay leg its origin lost
+# never keeps the session from going idle.
+_CLIENT_ALIVE_INTERVAL_SEC = 60
+_CLIENT_ALIVE_COUNT_MAX = 3
 _READY_PROBE_SEC = 2.0
 _READY_POLL_SEC = 0.5
 _BIND_FAILURE_MARKERS = ("cannot bind", "address already in use", "bind to port")
@@ -197,12 +203,6 @@ class ProcessSessionBackend(SSHSessionBackend):
                 "reap what a session orphans (install tini in the worker image)"
             )
             return False
-        if not (config.ssh_relay_host or resolve_tailnet_address()):
-            logger.info(
-                "Process SSH backend unavailable: the worker has no tailnet address "
-                "and SSH_RELAY_HOST is unset, so its supervisor cannot reach a session"
-            )
-            return False
         if not _acquire_backend_lock():
             logger.info(
                 "Process SSH backend unavailable: another worker sharing this root "
@@ -231,19 +231,7 @@ class ProcessSessionBackend(SSHSessionBackend):
         if idle:
             self.reap_stale()
 
-    def relay_host(self) -> str:
-        if override := self._config.ssh_relay_host:
-            return override
-        if (address := resolve_tailnet_address()) is None:
-            raise ExecutionError(
-                "Cannot publish a relay target for this SSH session: the worker has "
-                "no tailnet address and SSH_RELAY_HOST is unset"
-            )
-        return address
-
-    def session_host(self) -> str:
-        if override := self._config.ssh_relay_host:
-            return override
+    def _default_session_host(self) -> str:
         return resolve_tailnet_address() or socket.getfqdn()
 
     def start_session(self, request: SessionRequest) -> "ProcessSession":
@@ -362,14 +350,20 @@ class ProcessSessionBackend(SSHSessionBackend):
             bin_dir = _install_finish_helper(session_dir, finish_sentinel)
             environment["PATH"] = f"{bin_dir.as_posix()}:{_DEFAULT_SESSION_PATH}"
             authorized_keys = session_dir / _AUTHORIZED_KEYS_NAME
-            rendered, exported = _render_authorized_keys(
+            rendered, exported = render_authorized_keys(
                 cfg.authorized_keys, environment
             )
             # It carries the session's env; sshd reads it as the session user.
             _write_private(authorized_keys, rendered)
             account.grant_read(authorized_keys)
             process, port, log_path = _start_sshd(
-                sshd_path, session_dir, host_key, authorized_keys, account, exported
+                sshd_path,
+                session_dir,
+                host_key,
+                authorized_keys,
+                account,
+                exported,
+                self.session_bind_host(cfg.access_mode),
             )
         except BaseException:
             if not _discard_session(process, account, session_dir):
@@ -421,18 +415,24 @@ def prepare_state_roots(config: WorkerConfig) -> list[Path]:
     each missing one root-owned ``0700``; raise if one cannot be denied safely.
 
     A missing root inside another that exists is left out: a session cannot reach
-    anything below a denied root. A filesystem content store is shared across
-    nodes, so the content plane creates its root.
+    anything below a denied root. A filesystem content store's root is the content
+    plane's to create, so a missing root below one that does not exist yet is left
+    out too.
     """
     if problem := _state_problem(config):
         raise ExecutionError(f"Refusing the SSH session: {problem}", retryable=True)
     roots = denied_roots(config)
     existing = [root for root in roots if os.path.lexists(root)]
     shared = _shared_roots(config)
+    missing_shared = [root for root in shared if not os.path.lexists(root)]
     ready: list[Path] = []
     for root in roots:
         if not os.path.lexists(root):
-            if _inside_any(root, existing) or root in shared:
+            if (
+                _inside_any(root, existing)
+                or root in shared
+                or _inside_any(root, missing_shared)
+            ):
                 continue
             try:
                 _create_state_root(root)
@@ -1016,16 +1016,23 @@ class ProcessSession(SSHSession):
 
     def stop(self, timeout_sec: float) -> None:
         # While the output is collected, the only process left is the reader: a
-        # stop lets it finish and a cancel kills it. Otherwise the session's own
-        # processes go first, while sshd's subreaper still lives to reap what they
-        # leave; those forked while sshd ends go after it.
+        # stop lets it finish and a cancel kills it. Otherwise no connection may
+        # authenticate from here on, the session's own processes go while sshd's
+        # subreaper still lives to reap what they leave, and those forked while
+        # sshd ends go after it.
         with self._stop_lock:
             if self._collecting:
                 if self._signals.cancelled and self._archiver is not None:
                     self._archiver.kill()
                 return
+        try:
+            self._bar_logins()
+        except OSError:
+            logger.warning(
+                "Could not bar logins to the stopped SSH session", exc_info=True
+            )
         self._kill_unless_collecting()
-        _end_sshd(self._process)
+        _end_sshd(self._process, self._session_dir, self.account.name)
         self._kill_unless_collecting()
 
     def _kill_unless_collecting(self) -> None:
@@ -1037,13 +1044,18 @@ class ProcessSession(SSHSession):
         """Bar the account from logging in, then end sshd and every connection it
         holds, so no process of the session starts from here on."""
         try:
-            (self._session_dir / _AUTHORIZED_KEYS_NAME).unlink(missing_ok=True)
+            self._bar_logins()
         except OSError as exc:
             raise ExecutionError(
                 f"Could not bar logins to the SSH session to collect its output: {exc}"
             ) from exc
+        _end_sshd(self._process, self._session_dir, self.account.name)
+
+    def _bar_logins(self) -> None:
+        """Remove the session's authorized keys and lock its account, so no
+        connection authenticates from here on."""
+        (self._session_dir / _AUTHORIZED_KEYS_NAME).unlink(missing_ok=True)
         lock_account(self.account.name)
-        _end_sshd(self._process)
 
     def cleanup(self) -> None:
         with self._stop_lock:
@@ -1097,11 +1109,8 @@ def reap_session(session_dir: Path) -> bool:
     The sshd is found by its config path, so one a worker started and died before
     it could record is found too.
     """
-    config_path = (session_dir / "sshd_config").as_posix()
-    for proc in psutil.process_iter():
-        if _is_our_sshd(proc, config_path):
-            _kill_tree(proc)
     manifest = SessionManifest.read(session_dir)
+    _kill_sshd_of(session_dir, None if manifest is None else manifest.account)
     if manifest is not None:
         try:
             uid = pwd.getpwnam(manifest.account).pw_uid
@@ -1127,20 +1136,114 @@ def _is_our_sshd(proc: psutil.Process, config_path: str) -> bool:
     return runs_sshd and config_path in args
 
 
-def _end_sshd(process: subprocess.Popen[bytes]) -> None:
-    """SIGKILL sshd, its subreaper and every connection process below them, so none
-    outlives the session to log in to it later."""
-    if process.poll() is not None:
-        return
+def _kill_sshd_of(session_dir: Path, account: str | None) -> None:
+    """SIGKILL every sshd process of the session in ``session_dir``, with what runs
+    below it: its listener, found by its config path, and each connection, found by
+    the session's port it holds or by a title naming ``account``.
+
+    A connection runs as root until it authenticates, so the account's uid kill
+    misses it, and once its listener or subreaper has exited it is outside their
+    tree too; left running, it could still start the account's shell. One accepted
+    before it authenticates has a title that names nobody.
+    """
+    config_path = session_dir / "sshd_config"
+    config = config_path.as_posix()
+    port = _configured_port(config_path)
+    procs = list(psutil.process_iter())
+    # Another sshd listening on the port took it after this session's listener
+    # exited, so what runs below that one holds the port for its own session.
+    foreign = {
+        proc.pid
+        for proc in procs
+        if port is not None
+        and _listens_on(proc, port)
+        and not _is_our_sshd(proc, config)
+    }
+    for proc in procs:
+        if (
+            _is_our_sshd(proc, config)
+            or (
+                port is not None
+                and _holds_port(proc, port)
+                and not _runs_under(proc, foreign)
+            )
+            or (account is not None and _serves_account(proc, account))
+        ):
+            _kill_tree(proc)
+
+
+def _configured_port(config_path: Path) -> int | None:
     try:
-        root = psutil.Process(process.pid)
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        key, _, value = line.partition(" ")
+        if key == "Port" and value.isdigit():
+            return int(value)
+    return None
+
+
+def _sshd_sockets_on(proc: psutil.Process, port: int) -> list[Any]:
+    """Return the sockets bound to ``port`` that ``proc`` holds if it is an sshd
+    process."""
+    if not _name(proc).startswith("sshd"):
+        return []
+    try:
+        connections = proc.net_connections("tcp")
     except psutil.Error:
-        return
-    _kill_tree(root)
+        return []
+    return [conn for conn in connections if conn.laddr and conn.laddr.port == port]
+
+
+def _holds_port(proc: psutil.Process, port: int) -> bool:
+    return bool(_sshd_sockets_on(proc, port))
+
+
+def _listens_on(proc: psutil.Process, port: int) -> bool:
+    return any(
+        conn.status == psutil.CONN_LISTEN for conn in _sshd_sockets_on(proc, port)
+    )
+
+
+def _runs_under(proc: psutil.Process, pids: set[int]) -> bool:
+    """Return whether ``proc`` or an ancestor is one of ``pids``; an ancestry that
+    cannot be read counts as one."""
+    if not pids:
+        return False
     try:
-        process.wait(timeout=_TERMINATE_GRACE_SEC)
-    except subprocess.TimeoutExpired:
-        logger.warning("sshd did not exit after SIGKILL")
+        return proc.pid in pids or any(p.pid in pids for p in proc.parents())
+    except psutil.Error:
+        return True
+
+
+def _serves_account(proc: psutil.Process, account: str) -> bool:
+    """Return whether ``proc`` is an sshd connection process for ``account``,
+    matching the account as a whole word of its title, never a prefix."""
+    try:
+        title = " ".join(proc.cmdline())
+    except psutil.Error:
+        return False
+    for prefix in _SSHD_CONNECTION_TITLES:
+        if title.startswith(prefix):
+            return account in re.split(r"[\s@]+", title[len(prefix) :].strip())
+    return False
+
+
+def _end_sshd(
+    process: subprocess.Popen[bytes], session_dir: Path, account: str | None
+) -> None:
+    """SIGKILL sshd's subreaper with everything below it, then every sshd process
+    of the session that has left that tree, so none outlives the session to log in
+    to it later."""
+    if process.poll() is None:
+        with contextlib.suppress(psutil.Error):
+            _kill_tree(psutil.Process(process.pid))
+        try:
+            process.wait(timeout=_TERMINATE_GRACE_SEC)
+        except subprocess.TimeoutExpired:
+            logger.warning("sshd did not exit after SIGKILL")
+    _kill_sshd_of(session_dir, account)
 
 
 def _kill_tree(root: psutil.Process) -> None:
@@ -1154,10 +1257,12 @@ def _kill_tree(root: psutil.Process) -> None:
     with contextlib.suppress(psutil.Error):
         root.suspend()
     deadline = time.monotonic() + _TERMINATE_GRACE_SEC
+    victims: list[psutil.Process] = []
     while time.monotonic() < deadline:
         try:
             victims = [p for p in root.children(recursive=True) if _is_live(p)]
         except psutil.Error:
+            victims = []
             break
         if not victims:
             break
@@ -1165,8 +1270,23 @@ def _kill_tree(root: psutil.Process) -> None:
             with contextlib.suppress(psutil.Error):
                 proc.kill()
         time.sleep(_KILL_POLL_SEC)
+    else:
+        if survivors := [p for p in victims if _is_live(p)]:
+            logger.warning(
+                "Processes below sshd %d outlived %.0fs of SIGKILL: %s",
+                root.pid,
+                _TERMINATE_GRACE_SEC,
+                ", ".join(f"{p.pid} ({_name(p)})" for p in survivors),
+            )
     with contextlib.suppress(psutil.Error):
         root.kill()
+
+
+def _name(proc: psutil.Process) -> str:
+    try:
+        return proc.name()
+    except psutil.Error:
+        return "?"
 
 
 def _is_live(proc: psutil.Process) -> bool:
@@ -1279,7 +1399,11 @@ def _discard_session(
     account are gone."""
     steps: list[Callable[[], Any]] = []
     if process is not None:
-        steps.append(lambda: _end_sshd(process))
+        steps.append(
+            lambda: _end_sshd(
+                process, session_dir, None if account is None else account.name
+            )
+        )
     if account is not None:
         steps.append(account.release)
     clean = True
@@ -1301,6 +1425,7 @@ def _start_sshd(
     authorized_keys: Path,
     account: SessionAccount,
     exported_env: list[str],
+    bind_host: str,
 ) -> tuple[subprocess.Popen[bytes], int, Path]:
     """Start sshd, retrying on another port when it loses the race to bind.
 
@@ -1320,6 +1445,7 @@ def _start_sshd(
                 authorized_keys=authorized_keys,
                 login_user=account.name,
                 exported_env=exported_env,
+                bind_host=bind_host,
             ),
             encoding="utf-8",
         )
@@ -1435,12 +1561,13 @@ def _render_sshd_config(
     authorized_keys: Path,
     login_user: str,
     exported_env: list[str],
+    bind_host: str,
 ) -> str:
     permit_env = ",".join(exported_env) if exported_env else "no"
     return "\n".join(
         (
             f"Port {port}",
-            "ListenAddress 0.0.0.0",
+            f"ListenAddress {bind_host}",
             f"HostKey {host_key.as_posix()}",
             f"PidFile {(session_dir / 'sshd.pid').as_posix()}",
             f"AuthorizedKeysFile {authorized_keys.as_posix()}",
@@ -1457,44 +1584,12 @@ def _render_sshd_config(
             "X11Forwarding no",
             "AllowAgentForwarding no",
             "GatewayPorts no",
+            f"ClientAliveInterval {_CLIENT_ALIVE_INTERVAL_SEC}",
+            f"ClientAliveCountMax {_CLIENT_ALIVE_COUNT_MAX}",
             "Subsystem sftp internal-sftp",
             "",
         )
     )
-
-
-def _render_authorized_keys(
-    authorized_keys: list[str], environment: dict[str, str]
-) -> tuple[str, list[str]]:
-    """Render authorized_keys, carrying session env as per-key options.
-
-    sshd does not pass its own environment into a login shell, so the values the
-    session is supposed to see travel as ``environment=`` options on each key.
-    Returns the rendered file and the names exported, which
-    ``PermitUserEnvironment`` must list.
-    """
-    exported = [
-        name
-        for name, value in sorted(environment.items())
-        if _is_safe_env_entry(name, value)
-    ]
-    options = ",".join(f'environment="{name}={environment[name]}"' for name in exported)
-    lines = [
-        f"{options} {key}" if options else key
-        for raw_key in authorized_keys
-        if (key := raw_key.strip())
-    ]
-    return ("\n".join(lines) + "\n" if lines else "", exported if lines else [])
-
-
-def _is_safe_env_entry(name: str, value: str) -> bool:
-    if not _ENV_NAME_RE.match(name):
-        logger.warning("Dropping SSH session env var with unsupported name %r", name)
-        return False
-    if any(ch in value for ch in _ENV_VALUE_FORBIDDEN):
-        logger.warning("Dropping SSH session env var %s: unsupported value", name)
-        return False
-    return True
 
 
 def _pick_free_port() -> int:

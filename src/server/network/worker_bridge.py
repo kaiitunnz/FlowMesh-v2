@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from shared.network.frame_stream import FrameSink
-from shared.network.relay_frame import RelayDirection, RelayFrame
+from shared.network.relay_frame import RESIDENT_FRAME_KIND, RelayDirection, RelayFrame
 
 from .reverse_relay import (
     BinaryRedis,
@@ -38,7 +38,7 @@ class RelayWorkerBridge:
         enqueue_local: LocalEnqueue,
         *,
         keyspace: RelayKeyspace,
-        frame_kind: str = "resident_frame",
+        frame_kind: str = RESIDENT_FRAME_KIND,
         logger: logging.Logger | None = None,
     ) -> None:
         self._streams = RelayStreamStore(redis, keyspace)
@@ -68,6 +68,10 @@ class RelayWorkerBridge:
                 "payload": frame.to_wire(),
             },
         )
+
+    def rebind(self, node_id: str) -> None:
+        """Publish worker frames on the up stream of the node's new id."""
+        self._node_id = node_id
 
     def bind_peer(self, session_id: str, sink: FrameSink) -> None:
         """Answer one session's worker frames over the connection its origin dialed.

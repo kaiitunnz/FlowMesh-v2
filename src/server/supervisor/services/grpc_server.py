@@ -99,8 +99,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
-        resident_bridge: RelayWorkerBridge | None = None,
-        content_bridge: RelayWorkerBridge | None = None,
+        relay_bridges: dict[str, RelayWorkerBridge] | None = None,
     ) -> None:
         self._registry = registry
         self._task_listener = task_listener
@@ -108,8 +107,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self._redis = redis
         self._node_id = node_id
         self._node_alias = node_alias
-        self._resident_bridge = resident_bridge
-        self._content_bridge = content_bridge
+        # Each relay namespace's bridge, by the event type its frames push up as.
+        self._relay_bridges = relay_bridges or {}
         self._logger = logger
         # Guards _node_id and the registry-vs-rehome window against concurrent
         # RegisterWorker (grpc loop thread) and rebind_node (heartbeat thread).
@@ -266,24 +265,21 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         unregistered: bool = False
         async for message in request_iterator:
             payload = _payload_from_struct(message.payload)
+            event_type = payload.get("type")
+            if (bridge := self._relay_bridges.get(str(event_type))) is not None:
+                # A relay frame publishes up to the root bridge opaquely, which
+                # carries it to the session's other end.
+                await bridge.publish_up(
+                    RelayFrame.from_wire(payload["payload"]["frame"])
+                )
+                continue
             # Trap register/unregister events
-            match payload.get("type"):
+            match event_type:
                 case "REGISTER":
                     registered = True
                     worker.set_status(WorkerStatus.RUNNING)
                 case "UNREGISTER":
                     unregistered = True
-                case "RESIDENT_FRAME" if self._resident_bridge is not None:
-                    # A resident data-plane frame publishes up to the root bridge
-                    # opaquely for the reverse-relay to carry to its peer worker.
-                    frame = RelayFrame.from_wire(payload["payload"]["frame"])
-                    await self._resident_bridge.publish_up(frame)
-                    continue
-                case "CONTENT_FRAME" if self._content_bridge is not None:
-                    # A content transfer frame rides the same way, on its own namespace.
-                    frame = RelayFrame.from_wire(payload["payload"]["frame"])
-                    await self._content_bridge.publish_up(frame)
-                    continue
             self._relay_service.add_event(payload)
         self._logger.info("Event stream closed for worker %s", worker_id)
         if registered and not unregistered:
@@ -344,8 +340,7 @@ class GrpcServer:
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
-        resident_bridge: RelayWorkerBridge | None = None,
-        content_bridge: RelayWorkerBridge | None = None,
+        relay_bridges: dict[str, RelayWorkerBridge] | None = None,
     ) -> None:
         self._logger = logger
         self._server: grpc.aio.Server | None = None
@@ -357,8 +352,7 @@ class GrpcServer:
             task_listener,
             relay_service,
             logger,
-            resident_bridge=resident_bridge,
-            content_bridge=content_bridge,
+            relay_bridges=relay_bridges,
         )
         self._listen_addr = f"{host}:{port}"
 

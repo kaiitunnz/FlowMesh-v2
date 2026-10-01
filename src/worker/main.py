@@ -36,6 +36,7 @@ from .hw import collect_hw
 from .lifecycle import Lifecycle
 from .power import PowerMonitor
 from .runner import Runner
+from .ssh_relay import SshRelayLane
 from .supervisor_client import SupervisorClient
 from .utils.logging import get_logger
 
@@ -421,6 +422,13 @@ def main() -> None:
     gpu_sampler.start()
 
     lifecycle.start_content_plane(_build_content_plane(cfg, supervisor_client, logger))
+    lifecycle.start_ssh_relay(
+        SshRelayLane(
+            registry=lifecycle.ssh_endpoints,
+            push_frame=supervisor_client.push_ssh_frame,
+            logger=logger,
+        )
+    )
 
     task_stream = supervisor_client.iter_tasks()
     runner = Runner(

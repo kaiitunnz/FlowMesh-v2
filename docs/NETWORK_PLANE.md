@@ -7,11 +7,10 @@ of three transports. It is control-resolved and data-direct: the resolver runs i
 control plane and the origin-side deputy executes only the resolved candidate ladder —
 workers never scan addresses or discover peers.
 
-The plane is a routing substrate only. It carries no resident traffic, exposes no resident
-engine listener, and never mints a `ServiceClaim`, releases a credit, or issues a
-`RouteAuthorization`. A route observation is network evidence; it can never promote,
-release, or overwrite a capacity credit. Enable it with `NETWORK_PLANE_ENABLED=true`
-(`docs/ENV.md` lists the knobs).
+The plane is a routing substrate: it carries what a caller frames over it and holds no
+admission or credit authority, so a route observation never promotes, releases, or
+overwrites a capacity credit. It is on by default; `NETWORK_PLANE_ENABLED=false` turns it
+off ([`ENV.md`](ENV.md) lists the knobs).
 
 ## The four facts
 
@@ -147,7 +146,7 @@ capacity credit. Recovery is a durable cursor lease rather than a consumer group
 has one logical receiver that resumes from its stored cursor, and a restarted receiver
 reclaims an owner-fenced lease. Unacknowledged frames are never trimmed — a stream is
 trimmed only at or below the acknowledged id. The relay uses its own traffic namespace and
-Redis endpoint, distinct from the event/log relay and the legacy proxy streams.
+Redis endpoint, distinct from the event/log relay.
 
 ## Echo seam
 
@@ -173,3 +172,8 @@ correlated by the `chg-*` grant that authorized the read rather than by an invoc
 bridge treats them as any other opaque frames — it never holds, assembles, or resolves the
 object — and the transfer mints no claim, credit, or route authorization. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+Relayed SSH connections reuse it on a keyspace of their own: the root's SSH ingresses are
+the origin, and the worker serving the session the target, which connects only to a
+loopback endpoint its SSH executor published. The SSH route's permission check decides who
+may open one. See [`EXECUTORS.md`](EXECUTORS.md#ssh-executor-access-modes).

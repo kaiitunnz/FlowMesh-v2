@@ -98,7 +98,7 @@ listed here is in `.env.example`.
 | `RESIDENT_IDLE_RETAIN_SEC` | `0` | Base idle retain window before teardown; 0 disables |
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
 | `RESIDENT_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Advertise the resident sidecar as directly routable |
-| `NETWORK_PLANE_ENABLED` | `false` | Enable the route-discovery and relay substrate |
+| `NETWORK_PLANE_ENABLED` | `true` | Enable the route-discovery and relay substrate |
 | `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node-relay substrate endpoint (`host:port`) |
 | `NETWORK_PLANE_SIDECAR_URL` | – | Node-local reachability echo listener (`host:port`) |
 | `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
@@ -225,8 +225,8 @@ advisory, and `ssh -L` forwarding is refused. What a `process` session is denied
 and where its data lives are in
 [`EXECUTORS.md`](EXECUTORS.md#ssh-executor-process-backend).
 
-A `process` worker needs a tailnet address, or an `ssh.relay_host` set on it,
-for its supervisor to reach its sessions; with neither it serves none.
+`SSH_DIRECT_HOST` sets the host a session is advertised at; see
+[`EXECUTORS.md`](EXECUTORS.md#ssh-executor-access-modes).
 
 ## SSH session resource caps
 

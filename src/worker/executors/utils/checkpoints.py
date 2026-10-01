@@ -1,12 +1,15 @@
+import errno
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import tarfile
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import urlparse
 
 import requests
@@ -434,6 +437,10 @@ def write_executor_result(
     return envelope
 
 
+# A link under O_NOFOLLOW, a socket, and a name removed mid-walk.
+_SKIPPED_OPEN_ERRNOS = frozenset({errno.ELOOP, errno.ENXIO, errno.ENOENT})
+
+
 def maybe_upload_artifacts(
     task: TaskReference,
     out_dir: Path,
@@ -455,12 +462,11 @@ def maybe_upload_artifacts(
     upload_url = f"{base_url}/{task.task_id}/files"
     uploaded: list[str] = []
 
-    for file_path in sorted(artifacts_dir.rglob("*")):
-        if not file_path.is_file():
-            continue
-        rel_name = file_path.relative_to(artifacts_dir).as_posix()
+    for rel_name, opened in _regular_files(artifacts_dir):
         try:
-            with file_path.open("rb") as fh:
+            if isinstance(opened, OSError):
+                raise opened
+            with opened as fh:
                 response = requests.request(
                     destination.method,
                     upload_url,
@@ -469,11 +475,12 @@ def maybe_upload_artifacts(
                     timeout=destination.timeout,
                 )
                 response.raise_for_status()
+                size = os.fstat(fh.fileno()).st_size
         except Exception as exc:
             if not skip_errors:
                 raise ExecutionError(
                     redact_urls(
-                        f"Artifact upload failed for {file_path}: {exc}", upload_url
+                        f"Artifact upload failed for {rel_name}: {exc}", upload_url
                     ),
                     retryable=True,
                 ) from exc
@@ -485,12 +492,37 @@ def maybe_upload_artifacts(
                 )
             continue
         if logger:
-            logger.info(
-                "Uploaded artifact %s (%d bytes)", rel_name, file_path.stat().st_size
-            )
+            logger.info("Uploaded artifact %s (%d bytes)", rel_name, size)
         uploaded.append(rel_name)
 
     return uploaded
+
+
+def _regular_files(root: Path) -> Iterator[tuple[str, BinaryIO | OSError]]:
+    """Yield each regular file under ``root`` by its relative path, opened for
+    reading, or with the error that kept it from opening.
+
+    Neither a link nor a directory swapped for one is followed: the walk holds each
+    directory open and opens every name relative to it without following a link. A
+    link, a socket, and a name removed during the walk are skipped.
+    """
+    for dirpath, dirs, files, dirfd in os.fwalk(root, follow_symlinks=False):
+        dirs.sort()
+        rel_dir = Path(dirpath).relative_to(root)
+        for name in sorted(files):
+            rel_name = (rel_dir / name).as_posix()
+            try:
+                fd = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd
+                )
+            except OSError as exc:
+                if exc.errno not in _SKIPPED_OPEN_ERRNOS:
+                    yield rel_name, exc
+                continue
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                continue
+            yield rel_name, os.fdopen(fd, "rb")
 
 
 def maybe_upload_traces(

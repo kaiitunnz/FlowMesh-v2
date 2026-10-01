@@ -183,8 +183,7 @@ def _events_servicer(wm: StubWorkerManager) -> SupervisorServicer:
     servicer = SupervisorServicer.__new__(SupervisorServicer)
     servicer._registry = wm._registry
     servicer._relay_service = MagicMock()
-    servicer._resident_bridge = None
-    servicer._content_bridge = None
+    servicer._relay_bridges = {}
     servicer._logger = logging.getLogger("test")
     return servicer
 

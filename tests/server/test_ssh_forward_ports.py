@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from server.services.port_forward import PortForwardService
+from server.ssh import SshRelayTarget
 
 
 def _free_port_range(count: int) -> tuple[int, int]:
@@ -42,9 +43,11 @@ def _make_service(
     worker.node_id = "nde-test"
     worker_registry = MagicMock()
     worker_registry.get_worker_async = AsyncMock(return_value=worker)
+    relay = MagicMock()
+    relay.open = AsyncMock(side_effect=RuntimeError("no relay in this test"))
+    relay.release = AsyncMock()
     return PortForwardService(
-        redis_client=MagicMock(),
-        node_registry=MagicMock(),
+        relay=relay,
         worker_registry=worker_registry,
         ssh_connections=None,
         bind_host="127.0.0.1",
@@ -72,12 +75,8 @@ async def _tcp_accepts(port: int) -> bool:
     return True
 
 
-def _ssh_info(session_id: str, target_port: int) -> dict:
-    return {
-        "session_id": session_id,
-        "username": "flowmesh",
-        "_relay_target": {"host": "127.0.0.1", "port": target_port},
-    }
+def _ssh_info(session_id: str) -> dict:
+    return {"session_id": session_id, "username": "flowmesh"}
 
 
 class TestSshForwardPersistentPorts:
@@ -145,7 +144,7 @@ class TestSshForwardPersistentPorts:
         await svc.start()
         try:
             payload = await svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a", 2201)
+                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a")
             )
             assert payload["host"] == "lum.id"
             assert payload["mode"] == "forward"
@@ -154,20 +153,20 @@ class TestSshForwardPersistentPorts:
 
             # Re-registering the same task keeps its assigned port.
             again = await svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a", 2201)
+                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a")
             )
             assert again["port"] == first_port
 
             # A different task gets a different port.
             other = await svc._register_task_async(
-                "tsk-b", "wfl-b", "wkr-b", _ssh_info("ssn-b", 2202)
+                "tsk-b", "wfl-b", "wkr-b", _ssh_info("ssn-b")
             )
             assert other["port"] != first_port
         finally:
             await svc.stop()
 
     @pytest.mark.anyio
-    async def test_connection_dispatches_endpoint_active_when_handler_starts(
+    async def test_connection_relays_to_the_endpoint_active_when_it_starts(
         self,
     ) -> None:
         start, end = _free_port_range(1)
@@ -177,43 +176,36 @@ class TestSshForwardPersistentPorts:
         cast(Any, svc._worker_registry).get_worker_async = AsyncMock(
             return_value=old_worker
         )
-        dispatch_started = asyncio.Event()
-        continue_uplink = asyncio.Event()
-        dispatched_commands = []
+        open_started = asyncio.Event()
+        continue_open = asyncio.Event()
+        opened: list[SshRelayTarget] = []
 
-        async def delayed_exec_node_cmd(
-            node_id: str, command: Any, timeout: float
-        ) -> MagicMock:
-            assert timeout == 5.0
-            dispatched_commands.append((node_id, command))
-            dispatch_started.set()
-            await continue_uplink.wait()
-            return MagicMock(success=False, message="test uplink failure")
+        async def delayed_open(target: SshRelayTarget) -> MagicMock:
+            opened.append(target)
+            open_started.set()
+            await continue_open.wait()
+            raise RuntimeError("test relay failure")
 
-        cast(Any, svc._node_registry).exec_node_cmd = AsyncMock(
-            side_effect=delayed_exec_node_cmd
-        )
+        cast(Any, svc._relay).open = AsyncMock(side_effect=delayed_open)
         await svc.start()
         try:
             payload = await svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-old", 2201)
+                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-old")
             )
             reader, writer = await asyncio.open_connection("127.0.0.1", payload["port"])
-            await dispatch_started.wait()
+            await open_started.wait()
 
             cast(Any, svc._worker_registry).get_worker_async = AsyncMock(
                 return_value=new_worker
             )
             await svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-new", 2202)
+                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-new")
             )
-            continue_uplink.set()
+            continue_open.set()
 
             assert await asyncio.wait_for(reader.read(1), timeout=2.0) == b""
-            node_id, command = dispatched_commands[0]
-            assert node_id == "nde-old"
-            assert command.payload["session_id"] == "ssn-old"
-            assert command.payload["target_port"] == 2201
+            assert opened[0].node_id == "nde-old"
+            assert opened[0].endpoint_id == "ssn-old"
             writer.close()
             await writer.wait_closed()
         finally:
@@ -226,7 +218,7 @@ class TestSshForwardPersistentPorts:
         await svc.start()
         try:
             payload = await svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a", 2201)
+                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a")
             )
             port = payload["port"]
             await svc._unregister_task_async("tsk-a")
@@ -234,7 +226,7 @@ class TestSshForwardPersistentPorts:
             assert await _tcp_accepts(port)
             # ... and the freed port is handed back out to the next task.
             reused = await svc._register_task_async(
-                "tsk-c", "wfl-c", "wkr-c", _ssh_info("ssn-c", 2203)
+                "tsk-c", "wfl-c", "wkr-c", _ssh_info("ssn-c")
             )
             assert reused["port"] == port
         finally:
@@ -247,11 +239,11 @@ class TestSshForwardPersistentPorts:
         await svc.start()
         try:
             await svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a", 2201)
+                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a")
             )
             with pytest.raises(RuntimeError, match="No available forward ports"):
                 await svc._register_task_async(
-                    "tsk-b", "wfl-b", "wkr-b", _ssh_info("ssn-b", 2202)
+                    "tsk-b", "wfl-b", "wkr-b", _ssh_info("ssn-b")
                 )
         finally:
             await svc.stop()
@@ -277,9 +269,7 @@ class TestSshForwardSessionListeners:
         monkeypatch.setattr(asyncio, "start_server", delayed_start_server)
         await svc.start()
         registration = asyncio.create_task(
-            svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a", 2201)
-            )
+            svc._register_task_async("tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a"))
         )
         await bound.wait()
         stopping = asyncio.create_task(svc.stop())
@@ -321,14 +311,14 @@ class TestSshForwardSessionListeners:
         try:
             older = asyncio.create_task(
                 svc._register_task_async(
-                    "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-old", 2201)
+                    "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-old")
                 )
             )
             await first_bind_started.wait()
 
             newer = asyncio.create_task(
                 svc._register_task_async(
-                    "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-new", 2202)
+                    "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-new")
                 )
             )
             await asyncio.sleep(0)
@@ -340,7 +330,7 @@ class TestSshForwardSessionListeners:
             payload = await newer
 
             assert payload["port"] == start
-            assert svc._sessions["tsk-a"].session_id == "ssn-new"
+            assert svc._sessions["tsk-a"].target.endpoint_id == "ssn-new"
         finally:
             await svc.stop()
 
@@ -353,7 +343,7 @@ class TestSshForwardSessionListeners:
             assert not await _tcp_accepts(start)
 
             payload = await svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a", 2201)
+                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a")
             )
             assert payload["port"] == start
             assert await _tcp_accepts(start)
@@ -376,7 +366,7 @@ class TestSshForwardSessionListeners:
         await svc.start()
         try:
             payload = await svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a", 2201)
+                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a")
             )
 
             assert payload["port"] == end
@@ -414,19 +404,19 @@ class TestSshForwardSessionListeners:
                     "tsk-a",
                     "wfl-a",
                     "wkr-a",
-                    _ssh_info("ssn-old", 2201),
+                    _ssh_info("ssn-old"),
                 )
             )
             await lookup_started.wait()
 
             newer = await svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-new", 2202)
+                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-new")
             )
             unblock_lookup.set()
 
             with pytest.raises(RuntimeError, match="registration was cancelled"):
                 await older
-            assert svc._sessions["tsk-a"].session_id == "ssn-new"
+            assert svc._sessions["tsk-a"].target.endpoint_id == "ssn-new"
             assert svc._sessions["tsk-a"].port == newer["port"]
         finally:
             await svc.stop()
@@ -459,7 +449,7 @@ class TestSshForwardSessionListeners:
                     "tsk-a",
                     "wfl-a",
                     "wkr-a",
-                    _ssh_info("ssn-a", 2201),
+                    _ssh_info("ssn-a"),
                 )
             )
             await lookup_started.wait()
@@ -493,9 +483,7 @@ class TestSshForwardSessionListeners:
         )
         await svc.start()
         registration = asyncio.create_task(
-            svc._register_task_async(
-                "tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a", 2201)
-            )
+            svc._register_task_async("tsk-a", "wfl-a", "wkr-a", _ssh_info("ssn-a"))
         )
         await lookup_started.wait()
         await svc.stop()

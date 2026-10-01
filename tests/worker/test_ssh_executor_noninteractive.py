@@ -756,3 +756,55 @@ class TestWaitForPort:
         with pytest.raises(ExecutionError, match="openssh-server") as exc_info:
             _session(container).wait_ready(0.1)
         assert "omitting the image field" in str(exc_info.value)
+
+
+class TestLoginEnvironment:
+    """A Docker login receives the task's env through its key options."""
+
+    def _env(self, tmp_path: Path, extra_env: dict[str, str]) -> dict[str, str]:
+        return DockerSessionBackend(
+            make_live_worker_config(tmp_path)
+        )._build_environment(
+            "flowmesh",
+            ["ssh-ed25519 AAAA one", "ssh-ed25519 BBBB two"],
+            extra_env,
+            [],
+            [],
+            bootstrap_entrypoint=True,
+        )
+
+    def test_the_task_env_rides_every_key_and_is_permitted_by_name(
+        self, tmp_path: Path
+    ) -> None:
+        env = self._env(tmp_path, {"E2E_TASK_VAR": "task-env-delivered"})
+        assert env["AUTHORIZED_KEYS"].splitlines() == [
+            'environment="E2E_TASK_VAR=task-env-delivered" ssh-ed25519 AAAA one',
+            'environment="E2E_TASK_VAR=task-env-delivered" ssh-ed25519 BBBB two',
+        ]
+        assert env["FLOWMESH_PERMIT_ENV"] == "E2E_TASK_VAR"
+
+    def test_a_name_or_value_that_could_rewrite_sshd_config_is_not_exported(
+        self, tmp_path: Path
+    ) -> None:
+        env = self._env(
+            tmp_path,
+            {
+                "BAD NAME": "x",
+                "EVIL\nPermitRootLogin": "yes",
+                "TRAILING\n": "x",
+                "QUOTED": 'a"b',
+                "OK": "fine",
+            },
+        )
+        assert env["FLOWMESH_PERMIT_ENV"] == "OK"
+        assert "TRAILING" not in env["AUTHORIZED_KEYS"]
+        assert "PermitRootLogin" not in env["AUTHORIZED_KEYS"]
+        assert 'a"b' not in env["AUTHORIZED_KEYS"]
+
+    def test_no_task_env_permits_nothing(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, {})
+        assert "FLOWMESH_PERMIT_ENV" not in env
+        assert env["AUTHORIZED_KEYS"].splitlines() == [
+            "ssh-ed25519 AAAA one",
+            "ssh-ed25519 BBBB two",
+        ]

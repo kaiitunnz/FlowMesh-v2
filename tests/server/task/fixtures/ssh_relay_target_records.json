@@ -1,0 +1,15 @@
+{
+ "sched": {
+  "wfl-64ac62d5-03e9-4b90-ac57-d0fdc40cd45b": "{\"in_epoch_order\":false,\"epoch_frontier\":0}"
+ },
+ "task_blobs": {
+  "tsk-90046dd3-4002-4bec-8f7d-92925601330e": "{\"record\":{\"task_id\":\"tsk-90046dd3-4002-4bec-8f7d-92925601330e\",\"workflow_id\":\"wfl-64ac62d5-03e9-4b90-ac57-d0fdc40cd45b\",\"owner_id\":\"owner\",\"org_id\":\"org\",\"supplier_id\":\"\",\"raw_yaml\":\"apiVersion: flowmesh/v1\\nkind: Workflow\\nmetadata:\\n  name: stored-ssh\\nspec:\\n  graph:\\n    nodes:\\n    - name: session\\n      spec:\\n        taskType: ssh\\n        accessMode: proxy\\n        authorizedKeys:\\n        - '[REDACTED]'\\n\",\"task\":{\"apiVersion\":\"flowmesh/v1\",\"kind\":\"Workflow\",\"metadata\":{\"name\":\"stored-ssh:session\",\"owner\":null,\"annotations\":null},\"spec\":{\"resources\":null,\"output\":null,\"dependsOn\":null,\"condition\":null,\"shard\":null,\"upstreamResults\":null,\"taskType\":\"ssh\",\"interactive\":true,\"image\":null,\"user\":null,\"authorizedKeys\":[\"[REDACTED]\"],\"command\":null,\"entrypoint\":null,\"ttlSeconds\":null,\"idleTimeoutSeconds\":null,\"accessMode\":\"proxy\",\"inputs\":null,\"sshOutput\":null,\"env\":null}},\"status\":\"DISPATCHED\",\"task_type\":\"ssh\",\"category\":\"other\",\"resident\":false,\"residual_cancel\":false,\"assigned_worker\":\"wkr-1\",\"topic\":\"tasks\",\"submitted_at\":\"2026-10-01T03:27:28.435426+00:00\",\"submitted_ts\":1790825248.4354312,\"last_queue_ts\":1790825248.4356024,\"dispatched_ts\":1790825248.4362888,\"started_ts\":1790812800.0,\"finished_ts\":null,\"usages\":[],\"error\":null,\"attempts\":0,\"max_attempts\":3,\"parent_task_id\":null,\"shard_index\":null,\"shard_total\":null,\"next_retry_at\":null,\"last_error\":null,\"local_name\":\"session\",\"graph_node_name\":\"session\",\"load\":0,\"position_in_epoch\":null,\"selected_worker\":null,\"merged_children\":null,\"merged_parent_id\":null,\"merge_slice\":null,\"merge_key\":null,\"latest_update\":{\"ssh\":{\"session_id\":\"ssn-stored\",\"mode\":\"proxy\",\"username\":\"flowmesh\",\"expires_at\":\"2026-10-01T01:00:00Z\",\"host\":\"worker-host\",\"port\":40022,\"_relay_target\":{\"host\":\"127.0.0.1\",\"port\":40022}}},\"pending_facade_group\":null,\"last_failed_worker\":null,\"failed_workers\":[],\"result_reference\":null,\"result_skip\":null,\"merged_dispatch_worker\":null,\"dispatch_id\":\"dsp-ae0f899981c2473dac7b6d7f2873e0ee\",\"credential_refs\":{\"/authorizedKeys\":\"msk-2d69c174ba6890ea5869207d627c4bb7\"}},\"depends_on\":[],\"epoch_index\":null}"
+ },
+ "task_id": "tsk-90046dd3-4002-4bec-8f7d-92925601330e",
+ "workflow_id": "wfl-64ac62d5-03e9-4b90-ac57-d0fdc40cd45b",
+ "workflow_task_ids": {
+  "wfl-64ac62d5-03e9-4b90-ac57-d0fdc40cd45b": [
+   "tsk-90046dd3-4002-4bec-8f7d-92925601330e"
+  ]
+ }
+}

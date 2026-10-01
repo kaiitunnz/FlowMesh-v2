@@ -1,27 +1,19 @@
 import asyncio
 import logging
-import secrets
+from collections import defaultdict
 from collections.abc import Callable, Coroutine
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from threading import Event, Lock
 from typing import Any
 
-from shared.schemas.command import CommandMessage, CommandType
-from shared.utils import new_ssh_connection_id, now_iso
-from shared.utils.encoding import (
-    decode_base64_text_to_bytes,
-    encode_bytes_to_base64_text,
-)
+from shared.network.byte_stream import splice
 
-from ..clients.redis import RedisClient, relay_down_key, relay_up_key
-from ..registries.node import NodeRegistry
 from ..registries.worker import WorkerRegistry
-from ..schemas.ssh import SSHConnectionInfo
+from ..ssh import SshRelayOrigin, SshRelayTarget
+from ..ssh.connections import tracked_ssh_connection
 from .ssh_connections import SshConnectionRegistry
 
-_STREAM_MAXLEN = 1000
-_READ_CHUNK = 16384
 _DEFAULT_TIMEOUT_SEC = 5.0
 
 
@@ -51,12 +43,8 @@ class _Registration:
 @dataclass(slots=True)
 class PortForwardSession:
     task_id: str
-    node_id: str
-    session_id: str
-    target_host: str
-    """The worker-internal host to which the connection is forwarded."""
-    target_port: int
-    """The worker-internal port to which the connection is forwarded."""
+    target: SshRelayTarget
+    """The worker and published endpoint each connection is relayed to."""
     port: int
     """The local port on which the port-forward service listens for this session."""
     server: asyncio.AbstractServer | None
@@ -67,8 +55,7 @@ class PortForwardSession:
 class PortForwardService:
     def __init__(
         self,
-        redis_client: RedisClient,
-        node_registry: NodeRegistry,
+        relay: SshRelayOrigin,
         worker_registry: WorkerRegistry,
         ssh_connections: SshConnectionRegistry | None,
         bind_host: str,
@@ -78,8 +65,7 @@ class PortForwardService:
         persistent_listeners: bool,
         logger: logging.Logger,
     ) -> None:
-        self._redis = redis_client
-        self._node_registry = node_registry
+        self._relay = relay
         self._worker_registry = worker_registry
         self._ssh_connections = ssh_connections
         self._logger = logger
@@ -96,6 +82,7 @@ class PortForwardService:
         self._port_to_task: dict[int, str] = {}
         self._used_ports: set[int] = set()
         self._registrations: dict[str, _Registration] = {}
+        self._handlers: defaultdict[str, set[asyncio.Task[None]]] = defaultdict(set)
         self._pending_dynamic: set[_Registration] = set()
         self._no_pending_dynamic = asyncio.Event()
         self._no_pending_dynamic.set()
@@ -161,9 +148,11 @@ class PortForwardService:
                 self._port_to_task.clear()
                 self._used_ports.clear()
                 self._registrations.clear()
+                handlers = [task for tasks in self._handlers.values() for task in tasks]
                 with self._loop_lock:
                     self._loop = None
 
+            await self._cancel_handlers(handlers)
             await self._close_servers(servers)
             await self._no_pending_dynamic.wait()
 
@@ -231,16 +220,9 @@ class PortForwardService:
     ) -> dict[str, Any]:
         if registration is None:
             registration = _Registration()
-        relay_target = endpoint.get("_relay_target")
-        if not isinstance(relay_target, dict):
-            raise RuntimeError("Missing relay target for forward-mode task")
         session_id = endpoint.get("session_id")
         if not session_id:
             raise RuntimeError("Missing session_id for forward-mode task")
-        target_host = relay_target.get("host")
-        target_port = relay_target.get("port")
-        if not (target_host and target_port):
-            raise RuntimeError("Incomplete relay target for forward-mode task")
         username = (
             str(raw_username)
             if (raw_username := endpoint.get("username")) is not None
@@ -264,16 +246,19 @@ class PortForwardService:
             worker_id=assigned_worker,
             username=username,
         )
+        target = SshRelayTarget(
+            task_id=task_id,
+            worker_id=assigned_worker,
+            node_id=worker.node_id,
+            endpoint_id=str(session_id),
+        )
         created = False
         async with self._lock:
             self._require_registration_locked(task_id, registration)
             session = self._sessions.get(task_id)
             if session is not None:
                 # Update existing session info
-                session.node_id = worker.node_id
-                session.session_id = str(session_id)
-                session.target_host = str(target_host)
-                session.target_port = int(target_port)
+                session.target = target
                 session.connection.workflow_id = workflow_id
                 session.connection.worker_id = assigned_worker
                 session.connection.username = username
@@ -281,10 +266,7 @@ class PortForwardService:
             elif self._persistent_listeners:
                 session = self._create_persistent_session_locked(
                     task_id,
-                    worker.node_id,
-                    str(session_id),
-                    str(target_host),
-                    int(target_port),
+                    target,
                     connection,
                     registration,
                 )
@@ -295,10 +277,7 @@ class PortForwardService:
         if session is None:
             session = await self._create_dynamic_session(
                 task_id,
-                worker.node_id,
-                str(session_id),
-                str(target_host),
-                int(target_port),
+                target,
                 connection,
                 registration,
             )
@@ -336,10 +315,7 @@ class PortForwardService:
     def _create_persistent_session_locked(
         self,
         task_id: str,
-        node_id: str,
-        session_id: str,
-        target_host: str,
-        target_port: int,
+        target: SshRelayTarget,
         connection: _ConnectionContext,
         registration: _Registration,
     ) -> PortForwardSession:
@@ -347,10 +323,7 @@ class PortForwardService:
             if port in self._servers and port not in self._port_to_task:
                 return PortForwardSession(
                     task_id=task_id,
-                    node_id=node_id,
-                    session_id=session_id,
-                    target_host=target_host,
-                    target_port=target_port,
+                    target=target,
                     port=port,
                     connection=connection,
                     registration=registration,
@@ -361,10 +334,7 @@ class PortForwardService:
     async def _create_dynamic_session(
         self,
         task_id: str,
-        node_id: str,
-        session_id: str,
-        target_host: str,
-        target_port: int,
+        target: SshRelayTarget,
         connection: _ConnectionContext,
         registration: _Registration,
     ) -> PortForwardSession:
@@ -411,10 +381,7 @@ class PortForwardService:
                     self._require_registration_locked(task_id, registration)
                     session = PortForwardSession(
                         task_id=task_id,
-                        node_id=node_id,
-                        session_id=session_id,
-                        target_host=target_host,
-                        target_port=target_port,
+                        target=target,
                         port=port,
                         connection=connection,
                         registration=registration,
@@ -433,8 +400,17 @@ class PortForwardService:
             if registration := self._registrations.pop(task_id, None):
                 registration.cancel()
             session = self._remove_session_locked(task_id)
+            handlers = list(self._handlers.pop(task_id, ()))
+        # A listener closes only once its connections have, so they end first.
+        await self._cancel_handlers(handlers)
         if session is not None and session.server is not None:
             await self._close_dynamic_server(session.server, session.port)
+
+    @staticmethod
+    async def _cancel_handlers(handlers: list["asyncio.Task[None]"]) -> None:
+        for handler in handlers:
+            handler.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
 
     async def _invalidate_registration(
         self, task_id: str, registration: _Registration
@@ -445,10 +421,13 @@ class PortForwardService:
             registration.cancel()
             self._registrations.pop(task_id, None)
             session = self._sessions.get(task_id)
+            handlers: list[asyncio.Task[None]] = []
             if session is not None and session.registration is registration:
                 session = self._remove_session_locked(task_id)
+                handlers = list(self._handlers.pop(task_id, ()))
             else:
                 session = None
+        await self._cancel_handlers(handlers)
         if session is not None and session.server is not None:
             await self._close_dynamic_server(session.server, session.port)
 
@@ -522,8 +501,6 @@ class PortForwardService:
                 pass
             return
 
-        relay_token = secrets.token_hex(32)
-        connection_id = new_ssh_connection_id()
         peer = writer.get_extra_info("peername")
         source_ip: str | None = None
         source_port: int | None = None
@@ -536,10 +513,10 @@ class PortForwardService:
                 except Exception:
                     source_port = None
         try:
-            await self._start_server_uplink(session, relay_token)
+            channel = await self._relay.open(session.target)
         except Exception as exc:
             self._logger.warning(
-                "Failed to start relay uplink for task %s: %s", task_id, exc
+                "Failed to open the SSH relay for task %s: %s", task_id, exc
             )
             writer.close()
             try:
@@ -548,121 +525,36 @@ class PortForwardService:
                 pass
             return
 
-        if self._ssh_connections is not None:
-            try:
-                await self._ssh_connections.register_connection(
-                    SSHConnectionInfo(
-                        connection_id=connection_id,
-                        access_mode="forward",
-                        task_id=task_id,
-                        workflow_id=session.connection.workflow_id,
-                        worker_id=session.connection.worker_id,
-                        node_id=session.node_id,
-                        session_id=session.session_id,
-                        username=(
-                            username
-                            if (username := session.connection.username) is not None
-                            else "flowmesh"
-                        ),
-                        source_ip=source_ip,
-                        source_port=source_port,
-                        connected_at=now_iso(),
-                    )
-                )
-            except Exception:
-                self._logger.debug(
-                    "Failed to register SSH connection %s",
-                    connection_id,
-                    exc_info=True,
-                )
+        handler = asyncio.current_task()
+        assert handler is not None
+        async with self._lock:
+            self._handlers[task_id].add(handler)
 
-        up = relay_up_key(relay_token)
-        down = relay_down_key(relay_token)
-
-        async def redis_to_client() -> None:
-            last_id = "0"
-            while True:
-                rows = await self._redis.asyncio.xread_telemetry(
-                    {up: last_id}, count=10, block_ms=5000
-                )
-                if not rows:
-                    continue
-                for _, entries in rows:
-                    for entry_id, fields in entries:
-                        last_id = entry_id
-                        if "eof" in fields:
-                            return
-                        raw = fields.get("d")
-                        if raw:
-                            writer.write(decode_base64_text_to_bytes(raw))
-                            await writer.drain()
-
-        async def client_to_redis() -> None:
-            try:
-                while True:
-                    data = await reader.read(_READ_CHUNK)
-                    if not data:
-                        break
-                    await self._redis.asyncio.xadd_telemetry(
-                        down,
-                        {"d": encode_bytes_to_base64_text(data)},
-                        maxlen=_STREAM_MAXLEN,
-                        approximate=True,
-                    )
-            finally:
-                try:
-                    await self._redis.asyncio.xadd_telemetry(
-                        down,
-                        {"eof": "1"},
-                        maxlen=_STREAM_MAXLEN,
-                        approximate=True,
-                    )
-                except Exception:
-                    pass
-
-        t1 = asyncio.create_task(redis_to_client())
-        t2 = asyncio.create_task(client_to_redis())
+        clean = False
         try:
-            _, pending = await asyncio.wait(
-                [t1, t2], return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+            async with tracked_ssh_connection(
+                self._ssh_connections,
+                "forward",
+                session.target,
+                session.connection.workflow_id,
+                (
+                    username
+                    if (username := session.connection.username) is not None
+                    else "flowmesh"
+                ),
+                (source_ip, source_port),
+                self._logger,
+            ):
+                clean = await splice(channel, reader, writer)
         finally:
-            if self._ssh_connections is not None:
-                try:
-                    await self._ssh_connections.unregister_connection(connection_id)
-                except Exception:
-                    self._logger.debug(
-                        "Failed to unregister SSH connection %s",
-                        connection_id,
-                        exc_info=True,
-                    )
+            await self._relay.release(channel, abort=not clean)
+            async with self._lock:
+                if handlers := self._handlers.get(task_id):
+                    handlers.discard(handler)
+                    if not handlers:
+                        del self._handlers[task_id]
             writer.close()
             try:
                 await writer.wait_closed()
             except Exception:
                 pass
-
-    async def _start_server_uplink(
-        self, session: PortForwardSession, relay_token: str
-    ) -> None:
-        """Ask the assigned node to start a relay uplink for this session."""
-        cmd = CommandMessage(
-            command=CommandType.START_RELAY,
-            payload={
-                "relay_token": relay_token,
-                "target_host": session.target_host,
-                "target_port": session.target_port,
-                "session_id": session.session_id,
-            },
-        )
-        resp = await self._node_registry.exec_node_cmd(
-            session.node_id, cmd, timeout=_DEFAULT_TIMEOUT_SEC
-        )
-        if not resp.success:
-            raise RuntimeError(resp.message or "Server refused START_RELAY")

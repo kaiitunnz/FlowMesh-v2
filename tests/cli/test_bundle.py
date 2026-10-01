@@ -1,6 +1,7 @@
 from importlib.metadata import version
 from pathlib import Path
 
+import pytest
 from flowmesh.models.nodes import NodeRole
 from flowmesh_cli_stack import bundle as bundle_module
 from flowmesh_cli_stack.bundle import (
@@ -337,6 +338,14 @@ def test_resident_capacity_with_network_plane_has_no_coupling_error() -> None:
         {"RESIDENT_CAPACITY_ENABLED": "true", "NETWORK_PLANE_ENABLED": "true"},
     )
     assert not any(_RESIDENT_COUPLING in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "dependent", ["RESIDENT_CAPACITY_ENABLED", "CONTENT_HYDRATION_ENABLED"]
+)
+def test_an_unset_network_plane_is_on(dependent: str) -> None:
+    errors, _ = validate_env_values(STACK_ENV_SCHEMA, {dependent: "true"})
+    assert not any("requires NETWORK_PLANE_ENABLED" in error for error in errors)
 
 
 _REAPER_WARNING = (

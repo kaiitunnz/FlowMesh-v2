@@ -18,7 +18,11 @@ from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from shared.telemetry.ids import workflow_to_trace_id_int
-from tests.worker.factories import make_worker_hardware, make_worker_task_message
+from tests.worker.factories import (
+    make_worker_hardware,
+    make_worker_task_message,
+    no_mediated_op,
+)
 from worker.executors.base_executor import Executor
 from worker.executors.mixins.governance import GovernanceMixin
 from worker.runner import Runner
@@ -119,6 +123,7 @@ def _run(
     lifecycle.client.create_task_log_emitter.return_value = None
     lifecycle.client.iter_interrupts.return_value = []
     lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
     msg = make_worker_task_message(
         {"taskType": "echo"},
         task_type=TaskType.ECHO,

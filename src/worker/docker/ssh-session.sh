@@ -7,6 +7,7 @@
 # "mount_path<TAB>target_path" pairs used to materialize staged read-only
 # input views into the container.
 # FLOWMESH_CREATE_DIRS is a newline-separated list of directories to create.
+# FLOWMESH_PERMIT_ENV is a comma-separated list of the env names a login receives.
 set -e
 
 # SSH host keys
@@ -86,7 +87,21 @@ AllowTcpForwarding no
 X11Forwarding no
 AllowAgentForwarding no
 GatewayPorts no
+ClientAliveInterval 60
+ClientAliveCountMax 3
 EOF
+
+# The task's env rides authorized_keys as environment= options; sshd honours only
+# the names listed here, which the worker validated as plain identifiers.
+if [ -n "${FLOWMESH_PERMIT_ENV:-}" ]; then
+    case "$FLOWMESH_PERMIT_ENV" in
+        *[!A-Za-z0-9_,]*)
+            echo "Refusing session env names: $FLOWMESH_PERMIT_ENV" >&2
+            exit 1
+            ;;
+    esac
+    echo "PermitUserEnvironment $FLOWMESH_PERMIT_ENV" >> /etc/ssh/sshd_config.d/flowmesh.conf
+fi
 
 # Start sshd
 exec /usr/sbin/sshd -D -e

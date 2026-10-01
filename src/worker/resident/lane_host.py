@@ -19,7 +19,7 @@ from typing import Any
 
 from shared.network.frame_stream import FrameSink, WireFrameSink
 from shared.network.mtls import MutualTlsMaterial, client_context
-from shared.network.relay_frame import RelayDirection, RelayFrame
+from shared.network.relay_frame import RESIDENT_FRAME_KIND, RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
 from shared.resident.carriage import (
     ClaimGatedServiceCarriage,
@@ -220,7 +220,7 @@ class ResidentLaneHost:
             self._loop.call_soon_threadsafe(self._sidecar_reap, frame)
         elif frame_kind == "resident_adapter_unload":
             asyncio.run_coroutine_threadsafe(self._adapter_unload(frame), self._loop)
-        elif frame_kind == "resident_frame":
+        elif frame_kind == RESIDENT_FRAME_KIND:
             asyncio.run_coroutine_threadsafe(self._on_frame(frame), self._loop)
         else:
             return False
