@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import pynvml
 
-from . import nvml
+from .utils import nvml
 
 logger = logging.getLogger(__name__)
 

@@ -32,7 +32,6 @@ from tests.worker.factories import (
     make_worker_task_message,
     no_mediated_op,
 )
-from worker import nvml
 from worker.executors.base_executor import ExecutionError, Executor
 from worker.gpu_availability import (
     MIB,
@@ -46,6 +45,7 @@ from worker.gpu_availability import (
 )
 from worker.lifecycle import Lifecycle
 from worker.runner import Runner
+from worker.utils import nvml
 
 THRESH = 1024
 GPU_A = "GPU-aaaa"
