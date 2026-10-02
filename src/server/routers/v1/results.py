@@ -61,7 +61,9 @@ def _resolve_artifact_path(filename: str) -> Path:
     if (
         sanitized.is_absolute()
         or filename in {"", ".", ".."}
-        or any(part in {"", ".", ".."} for part in sanitized.parts)
+        or any(
+            part in {"", ".", ".."} or is_atomic_temp(part) for part in sanitized.parts
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"

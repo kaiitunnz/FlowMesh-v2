@@ -192,6 +192,13 @@ def test_resolve_artifact_relative_path_rejects_invalid_paths() -> None:
         results_router._resolve_artifact_path("../result.json")
 
 
+@pytest.mark.parametrize("filename", [".fm-tmp-result.json", ".fm-tmp-dir/out.bin"])
+def test_an_artifact_named_as_an_in_flight_write_is_refused(filename: str) -> None:
+    with pytest.raises(HTTPException) as exc:
+        results_router._resolve_artifact_path(filename)
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
 @pytest.mark.anyio
 async def test_upload_result_file_denied_without_permission(
     deny_all_permissions: None, logger: logging.Logger

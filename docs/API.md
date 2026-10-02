@@ -63,7 +63,7 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 |--------|------|-------------|
 | GET | `/api/v1/results/{task_id}` | Get task result JSON, read from the shared content store. |
 | GET | `/api/v1/results/{task_id}/bundle` | Download tar.gz bundle (`?include=results,artifacts,logs,all`). |
-| POST | `/api/v1/results/{task_id}/files` | Upload artifact (multipart). |
+| POST | `/api/v1/results/{task_id}/files` | Upload artifact (multipart). A path segment starting with `.fm-tmp-` is reserved and refused. |
 | GET | `/api/v1/results/{task_id}/files/{filename}` | Download artifact. |
 | GET | `/api/v1/results/{task_id}/logs` | Download archived `logs.jsonl`. |
 
