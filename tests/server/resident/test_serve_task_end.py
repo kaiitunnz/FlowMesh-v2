@@ -393,3 +393,25 @@ def test_a_cold_start_whose_registrar_raises_leaves_no_serve_task(
         assert not node.control._has_materializing(FAMILY.family)
 
     asyncio.run(run())
+
+
+def test_a_released_claim_restarts_its_replica_retain_window() -> None:
+    async def run() -> None:
+        node = Node()
+        replica = await admitted_boundary(node)
+        (claim,) = node.control.stores.claims.all()
+        lifecycle = node.control._lifecycle
+        lifecycle._idle_retain_sec = 60.0
+        # The call outlasted the retain window before its credit released.
+        replica.last_active_at = "2000-01-01T00:00:00+00:00"
+        lifecycle.sweep_idle()
+        assert replica.state is ReplicaState.WARM
+
+        node.control.on_invocation_terminal(claim.invocation_id)
+        await asyncio.sleep(0)
+        lifecycle.sweep_idle()
+
+        assert not claim.holds_credit
+        assert replica.state is ReplicaState.WARM
+
+    asyncio.run(run())
