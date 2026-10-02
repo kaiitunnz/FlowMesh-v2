@@ -6674,6 +6674,18 @@ class TaskRuntime:
                 record.resident or record.task_type in SERVE_TASK_TYPES
             )
 
+    def resident_dispatches_on(self, worker_id: str) -> list[tuple[str, str]]:
+        """The resident serve tasks dispatched to ``worker_id``, each with its
+        dispatch."""
+        with self._lock:
+            return [
+                (task_id, dispatch_id)
+                for task_id, dispatch_id in self._dispatched_resident.items()
+                if dispatch_id is not None
+                and (record := self._tasks.get(task_id)) is not None
+                and record.assigned_worker == worker_id
+            ]
+
     def request_resident_yield(self, task_id: str, dispatch_id: str) -> bool:
         """Ask resident capacity to free the worker a resident serve task occupies
         under ``dispatch_id``.

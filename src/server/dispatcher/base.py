@@ -138,10 +138,7 @@ class Dispatcher:
         """
         for waiting in [t for t in self._owner_wait_since if t != task_id]:
             waiting_record = self._runtime.get_record(waiting)
-            if (
-                waiting_record is None
-                or waiting_record.status is not TaskStatus.PENDING
-            ):
+            if waiting_record is None or waiting_record.status != TaskStatus.PENDING:
                 self._end_owner_wait(waiting)
         now = time.monotonic()
         since = self._owner_wait_since.setdefault(task_id, now)
@@ -157,10 +154,10 @@ class Dispatcher:
         ):
             return
         self._yield_requested_at[task_id] = now
-        occupant = self._worker_registry.reservation(owner.worker_id)
-        asked = occupant is not None and self._runtime.request_resident_yield(
-            occupant.task_id, occupant.dispatch_id
-        )
+        occupants = self._holder_occupants(owner.worker_id)
+        asked = False
+        for occupant, dispatch_id in occupants:
+            asked = self._runtime.request_resident_yield(occupant, dispatch_id) or asked
         if logging_due:
             self._owner_wait_logged.add(task_id)
             self._logger.info(
@@ -169,9 +166,23 @@ class Dispatcher:
                 task_id,
                 now - since,
                 owner.worker_id,
-                occupant.task_id if occupant is not None else "no dispatched task",
+                ", ".join(occupant for occupant, _ in occupants)
+                or "no dispatched task",
                 "; asked resident capacity to free it" if asked else "",
             )
+
+    def _holder_occupants(self, worker_id: str) -> list[tuple[str, str]]:
+        """The tasks occupying a holder, each with its dispatch: the worker's
+        reservation, or the resident serve tasks dispatched to it when the registry
+        names none, as after a reservation write that failed."""
+        try:
+            reservation = self._worker_registry.reservation(worker_id)
+        except Exception as exc:
+            self._logger.debug("Failed to read %s's reservation: %s", worker_id, exc)
+            reservation = None
+        if reservation is not None:
+            return [(reservation.task_id, reservation.dispatch_id)]
+        return self._runtime.resident_dispatches_on(worker_id)
 
     def _end_owner_wait(self, task_id: str) -> None:
         self._owner_wait_since.pop(task_id, None)

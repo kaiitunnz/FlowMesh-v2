@@ -208,6 +208,21 @@ def test_a_waiting_episode_asks_resident_capacity_to_free_its_holder(
     }
 
 
+@pytest.mark.parametrize(
+    "unread", [None, ConnectionError("control Redis dropped")], ids=["none", "error"]
+)
+def test_a_holder_with_no_readable_reservation_asks_its_resident_serve_task(
+    unread: Exception | None,
+) -> None:
+    _runtime_, dispatcher, episode, serve, asked = _waiting_episode(resident=True)
+    _registry(dispatcher).reservation.side_effect = unread
+    _registry(dispatcher).reservation.return_value = None
+
+    assert dispatcher.dispatch_once(episode) is False
+
+    assert asked == [serve]
+
+
 def test_a_reservation_for_an_earlier_dispatch_asks_nothing() -> None:
     _runtime_, dispatcher, episode, serve, asked = _waiting_episode(resident=True)
     _registry(dispatcher).reservation.return_value = Reservation(
