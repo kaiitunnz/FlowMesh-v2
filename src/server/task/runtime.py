@@ -325,6 +325,18 @@ class _Revoke:
 
 
 @dataclass
+class _PendingOp:
+    """A worker-originated tool operation whose permit was relayed to its origin
+    worker, and when control re-drives it if no outcome has arrived."""
+
+    agent_task_id: str
+    call_correlation: str
+    worker_id: str
+    redrive_at: float
+    redrives: int = 0
+
+
+@dataclass
 class _Termination:
     """What control still owes workers off its lock: interrupts and revokes to send,
     operations to reap, and resident credits to release."""
@@ -576,6 +588,11 @@ def _is_default_url(url: str | None, default_url: str | None) -> bool:
 # Extra lifetime a worker-originated operation permit gets beyond the request timeout,
 # to cover dispatch and queue latency before the origin worker validates it.
 _OP_PERMIT_SLACK_SEC = 60.0
+# A pending operation whose outcome has not arrived by its permit's deadline is
+# re-driven, waiting this long times 2^n more after the n-th re-drive, and its boundary
+# fails once it has been re-driven _OP_REDRIVE_LIMIT times.
+_OP_REDRIVE_BACKOFF_SEC = 30.0
+_OP_REDRIVE_LIMIT = 5
 # A generous bound on a materialized external-model completion; a larger response
 # settles by reference under the reference-backed outcome contract.
 _MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
@@ -727,10 +744,10 @@ class TaskRuntime:
         # turn-completion into the pending boundary rather than settling it.
         self._pending_facade_groups: dict[str, FacadeTurnGroup] = {}
         # Worker-originated tool operations whose permit was relayed to the origin
-        # worker's egress sidecar, keyed by permit id -> (agent task, call, worker).
-        # Reaps custody on settle or cancel. In-memory and rebuilt on restart from the
-        # pending boundary, never durably persisted.
-        self._pending_ops: dict[str, tuple[str, str, str]] = {}
+        # worker's egress sidecar, keyed by permit id. Reaps custody on settle or
+        # cancel. In-memory and rebuilt on restart from the pending boundary, never
+        # durably persisted.
+        self._pending_ops: dict[str, _PendingOp] = {}
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -2296,9 +2313,9 @@ class TaskRuntime:
         """
         with self._cv:
             pending = {
-                (task_id, call)
-                for task_id, call, op_worker in self._pending_ops.values()
-                if op_worker == worker_id
+                (op.agent_task_id, op.call_correlation)
+                for op in self._pending_ops.values()
+                if op.worker_id == worker_id
             }
             self._queue_interrupts_locked(
                 self._cancelling_interrupts_locked(
@@ -2308,6 +2325,53 @@ class TaskRuntime:
         self._release_pending_terminations()
         for task_id, call in sorted(pending):
             self.redispatch_episode_invocation(task_id, call)
+
+    def redrive_overdue_ops(self, worker_id: str) -> None:
+        """Re-drive each operation a live worker originated whose outcome is overdue.
+
+        A first delivery can be lost or left ambiguous, as when the egress's outcome
+        could not be finalized while the root restarted, so an overdue operation is
+        re-minted; the worker returns an outcome it already produced rather than
+        egressing again. A boundary re-driven _OP_REDRIVE_LIMIT times fails.
+        """
+        now = time.time()
+        exhausted: list[_PendingOp] = []
+        redrive: list[_PendingOp] = []
+        with self._cv:
+            for permit_id, op in list(self._pending_ops.items()):
+                if op.worker_id != worker_id or op.redrive_at > now:
+                    continue
+                if op.redrives >= _OP_REDRIVE_LIMIT:
+                    del self._pending_ops[permit_id]
+                    exhausted.append(op)
+                else:
+                    op.redrives += 1
+                    redrive.append(op)
+        try:
+            for op in exhausted:
+                self._logger.warning(
+                    "No outcome arrived for tool operation %s of %s after %d "
+                    "re-drives; failing its boundary",
+                    op.call_correlation,
+                    op.agent_task_id,
+                    op.redrives,
+                )
+                self._settle_episode_invocation(
+                    op.agent_task_id,
+                    op.call_correlation,
+                    error="tool operation outcome never arrived",
+                )
+        finally:
+            self._release_pending_terminations()
+        for op in redrive:
+            if not self.redispatch_episode_invocation(
+                op.agent_task_id, op.call_correlation
+            ):
+                # The boundary is no longer pending, so nothing settles the operation.
+                with self._cv:
+                    for permit_id, pending in list(self._pending_ops.items()):
+                        if pending is op:
+                            del self._pending_ops[permit_id]
 
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
@@ -2520,15 +2584,21 @@ class TaskRuntime:
             )
             return
         # A re-drive re-mints under a fresh permit id; keep at most one pending op per
-        # occurrence.
-        occurrence = (env.task_id, env.call_correlation)
-        for stale_id, (task_id, call, _) in list(self._pending_ops.items()):
-            if (task_id, call) == occurrence:
+        # occurrence, and its re-drive count.
+        redrives = 0
+        for stale_id, op in list(self._pending_ops.items()):
+            if (op.agent_task_id, op.call_correlation) == (
+                env.task_id,
+                env.call_correlation,
+            ):
+                redrives = op.redrives
                 del self._pending_ops[stale_id]
-        self._pending_ops[permit.permit_id] = (
+        self._pending_ops[permit.permit_id] = _PendingOp(
             env.task_id,
             env.call_correlation,
             worker_id,
+            redrive_at=deadline + _OP_REDRIVE_BACKOFF_SEC * (2**redrives - 1),
+            redrives=redrives,
         )
         self._worker_registry.publish_mediated_op(
             worker,
@@ -2644,11 +2714,11 @@ class TaskRuntime:
             # A re-mint of the same operation is settled by this outcome too.
             occurrence = (outcome.agent_task_id, outcome.call_correlation)
             for permit_id, op in list(self._pending_ops.items()):
-                if op[:2] == occurrence:
+                if (op.agent_task_id, op.call_correlation) == occurrence:
                     pending = pending or op
                     del self._pending_ops[permit_id]
             worker_id = (
-                pending[2]
+                pending.worker_id
                 if pending
                 else self._assigned_worker_locked(outcome.agent_task_id)
             )
@@ -2748,12 +2818,10 @@ class TaskRuntime:
         and call for reaping."""
         agents = set(agent_task_ids)
         taken: list[tuple[str, str, str]] = []
-        for permit_id, (agent_task_id, call, worker_id) in list(
-            self._pending_ops.items()
-        ):
-            if agent_task_id in agents:
+        for permit_id, op in list(self._pending_ops.items()):
+            if op.agent_task_id in agents:
                 del self._pending_ops[permit_id]
-                taken.append((worker_id, agent_task_id, call))
+                taken.append((op.worker_id, op.agent_task_id, op.call_correlation))
         return taken
 
     def set_model_settler(
@@ -6591,8 +6659,8 @@ class TaskRuntime:
             # A pending tool operation on the departed worker lost its private request
             # custody with the worker; drop the stale mapping so its boundary re-mints
             # on a fresh worker rather than waiting on an outcome that can never arrive.
-            for permit_id, (_, _, op_worker) in list(self._pending_ops.items()):
-                if op_worker == worker_id:
+            for permit_id, op in list(self._pending_ops.items()):
+                if op.worker_id == worker_id:
                     del self._pending_ops[permit_id]
         return WorkerRecovery(recovered, resolved)
 

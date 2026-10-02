@@ -846,6 +846,7 @@ class EventMonitor:
                 self._took_status_report(worker_id, report, "Heartbeat", ttl_sec)
                 if report.outcome is ReportOutcome.APPLIED:
                     self._revoke_orphan_run(worker_id, event)
+                    self._runtime.redrive_overdue_ops(worker_id)
                 if report.outcome is not ReportOutcome.UNKNOWN:
                     self._record_gpu_availability(worker_id, event.metrics)
             case "STATUS" if event.origin == "worker":

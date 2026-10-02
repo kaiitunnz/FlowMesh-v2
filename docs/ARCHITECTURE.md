@@ -420,7 +420,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   reports a permit-fenced outcome that settles the boundary before the episode resumes.
   It retains the request non-destructively until the committed outcome is acknowledged.
   A fence rejection is a declared terminal boundary failure, never a retryable provider
-  response; a lost outcome holds the boundary pending for a same-`idm-*` re-drive. The
+  response; a lost outcome holds the boundary pending for a same-`idm-*` re-drive, which
+  control issues once the permit's deadline passes, a bounded number of times. The
   `FabricToolBroker` applies the tool's policy and correlation. See
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Reference-backed invocation outcomes.** A mediated boundary settles by reference: the

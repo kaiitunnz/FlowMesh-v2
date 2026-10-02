@@ -206,7 +206,10 @@ re-drive under the same `idm-*`. On resume the `AgentEpisodeExecutor` hydrates a
 digest-verifies the manifest before injecting the value into the harness; a hydration
 failure fails the step for a physical retry of the same reference, never a re-run. A
 server restart re-mints the permit and re-relays it to the surviving worker, whose
-in-memory request is intact; a genuine worker loss fails the boundary clean.
+in-memory request is intact; a genuine worker loss fails the boundary clean. An
+operation whose outcome has not arrived by its permit's deadline is re-driven under a
+fresh permit, each time after a longer wait, and its boundary fails after a bounded
+number of re-drives.
 
 The `FabricToolBroker` applies a fabric tool's policy and correlation on the control
 plane and terminalizes a server-captured boundary as an unavailable outcome.
