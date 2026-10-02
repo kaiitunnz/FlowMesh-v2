@@ -8,16 +8,23 @@ import threading
 from types import SimpleNamespace
 from typing import Any, cast
 
+import fakeredis
 import pytest
 
-from server.clients.redis import SyncRedisClient
-from server.registries.worker import Reservation, Worker
+from server.clients.redis import (
+    WORKERS_SET_KEY,
+    SyncRedisClient,
+    worker_hb_key,
+    worker_key,
+)
+from server.registries.worker import Worker, WorkerRegistry
 from server.supervisor.services.task_listener import TaskListener
 from server.task.runtime import TaskRuntime
-from shared.schemas.command import RevokeMessage, TaskMessage
+from shared.schemas.command import TaskMessage
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.redis_helpers import recording_redis_client
 from tests.server.task.test_v2_orchestration import LINEAR, FakeRegistry
 from tests.server.task.test_v2_orchestration import _register as _register_v2
 from tests.server.task.test_v2_orchestration import _runtime as _runtime_v2
@@ -27,40 +34,36 @@ _LOGGER = logging.getLogger("test.dispatch_revocation")
 _WORKER = "wkr-1"
 
 
-class _Registry:
-    """A worker registry that publishes onto one supervisor's task listener."""
+class _Registry(WorkerRegistry):
+    """The worker registry over fakeredis, with one registered worker, whose revokes
+    reach one supervisor's task listener when given."""
 
     def __init__(self, listener: TaskListener | None = None) -> None:
-        self.listener = listener
-        self.revokes: list[RevokeMessage] = []
-        self.reserved: list[Reservation] = []
-
-    def get_worker(self, worker_id: str) -> Any:
-        return SimpleNamespace(id=worker_id, node_id="nod-1")
-
-    def publish_revoke(self, node_id: str, payload: RevokeMessage) -> int:
-        self.revokes.append(payload)
-        if self.listener is not None:
-            self.listener._handle_message(json.loads(payload.model_dump_json()))
-        return 1
-
-    def release_worker(self, *args: Any) -> bool:
-        return True
-
-    def reservations(self) -> list[Reservation]:
-        return self.reserved
+        server = fakeredis.FakeServer()
+        client, self.sync = recording_redis_client(server)
+        super().__init__(client)
+        rds = fakeredis.FakeRedis(server=server, decode_responses=True)
+        rds.sadd(WORKERS_SET_KEY, _WORKER)
+        rds.hset(worker_key(_WORKER), mapping={"status": "IDLE", "node_id": "nod-1"})
+        rds.setex(worker_hb_key(_WORKER), 120, "ts")
+        if listener is not None:
+            self.sync.on_publish = listener._handle_message
 
 
 def _runtime(registry: _Registry) -> tuple[TaskRuntime, str]:
     runtime = _runtime_v2(FakeRegistry())
-    runtime._worker_registry = cast(Any, registry)
+    runtime._worker_registry = registry
     _, ids = asyncio.run(_register_v2(runtime, LINEAR))
     assert runtime.next_ready(threading.Event(), timeout=0.01) == ids["a"]
     return runtime, ids["a"]
 
 
 def _revocations(registry: _Registry) -> list[tuple[str, str, str]]:
-    return [(r.task_id, r.worker_id, r.dispatch_id) for r in registry.revokes]
+    return [
+        (m["task_id"], m["worker_id"], m["dispatch_id"])
+        for m in registry.sync.published
+        if m.get("kind") == "revoke"
+    ]
 
 
 def _frame(task_id: str, dispatch_id: str) -> dict[str, Any]:
@@ -136,7 +139,7 @@ def test_recovering_an_unrecorded_publish_revokes_it() -> None:
 def test_a_restart_revokes_a_reserved_dispatch_it_does_not_hold() -> None:
     registry = _Registry()
     runtime, task_id = _runtime(registry)
-    registry.reserved = [Reservation(_WORKER, task_id, "dsp-gone")]
+    assert registry.reserve_worker(_WORKER, task_id, "dsp-gone")
 
     runtime.release_ended_reservations()
 
@@ -147,8 +150,8 @@ def test_a_restart_leaves_a_dispatch_in_flight_alone() -> None:
     registry = _Registry()
     runtime, task_id = _runtime(registry)
     record_dispatch(runtime, task_id, _WORKER, "dsp-1")
-    registry.reserved = [Reservation(_WORKER, task_id, "dsp-1")]
+    assert registry.reserve_worker(_WORKER, task_id, "dsp-1")
 
     runtime.release_ended_reservations()
 
-    assert registry.revokes == []
+    assert _revocations(registry) == []
