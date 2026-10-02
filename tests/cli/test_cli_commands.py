@@ -70,6 +70,16 @@ class TestWorkflowSubmit:
 
 class TestWorkflowList:
     @patch("flowmesh_cli.commands.workflow.FlowMesh")
+    def test_a_paging_key_is_reported_not_raised(self, mock_hc: MagicMock) -> None:
+        client = _mock_client()
+        client.workflows.list.side_effect = ValueError("list() pages by itself")
+        mock_hc.return_value = client
+
+        result = runner.invoke(_app(), ["workflow", "list", "-q", "limit=5"])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+    @patch("flowmesh_cli.commands.workflow.FlowMesh")
     def test_status_filter(self, mock_hc: MagicMock) -> None:
         client = _mock_client()
         client.workflows.list.return_value = []

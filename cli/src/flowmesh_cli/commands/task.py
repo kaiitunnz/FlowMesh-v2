@@ -99,7 +99,7 @@ def list_tasks(
             failed=failed,
             query_params=query_params,
         )
-    except FlowMeshError as exc:
+    except (FlowMeshError, ValueError) as exc:
         logging.error(str(exc))
         raise typer.Exit(code=1)
     logging.log(json.dumps([t.model_dump(mode="json") for t in tasks], indent=2))
