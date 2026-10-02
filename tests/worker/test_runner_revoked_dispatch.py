@@ -247,3 +247,36 @@ def test_a_revoke_landing_before_its_run_leaves_the_next_dispatch_uncancelled(
         runner.start()
 
     assert executor.ran == [("dsp-0", False), ("dsp-2", False)]
+
+
+def test_a_revoke_landing_while_its_result_is_stored_leaves_the_next_dispatch(
+    tmp_path: Path,
+) -> None:
+    executor = _Signalled()
+    runner = _runner(tmp_path, executor, ["dsp-1", "dsp-2"])
+    pending = [("tsk-1", "dsp-1")]
+    landed = threading.Event()
+
+    def revokes() -> list[tuple[str, str]]:
+        if landed.is_set() and pending:
+            return [pending.pop()]
+        return []
+
+    _lifecycle(runner).client.iter_revokes.side_effect = revokes
+    write_results = runner._write_results
+
+    def revoked_while_storing(msg: Any, out_dir: Path, out: Any) -> Any:
+        if msg.dispatch_id == "dsp-1":
+            # The run has ended; the revoke lands while its result is stored.
+            landed.set()
+            polls = _lifecycle(runner).client.iter_revokes.call_count
+            _until(
+                lambda: not pending
+                and _lifecycle(runner).client.iter_revokes.call_count >= polls + 2
+            )
+        return write_results(msg, out_dir, out)
+
+    with patch.object(runner, "_write_results", side_effect=revoked_while_storing):
+        runner.start()
+
+    assert executor.ran == [("dsp-1", False), ("dsp-2", False)]

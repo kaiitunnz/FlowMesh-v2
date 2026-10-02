@@ -1257,7 +1257,13 @@ class Runner:
                         # it here, under the lock the stop's delivery reads it with.
                         if self._begin_execution(task_id):
                             executor_to_run.stop(task_id)
-                    out = self._run_executor(executor_to_run, msg, out_dir)
+                    try:
+                        out = self._run_executor(executor_to_run, msg, out_dir)
+                    finally:
+                        # A cancel past this point would wait in the warm executor and
+                        # end the task's next dispatch.
+                        with self._cancel_lock:
+                            self._executing = None
                     if isinstance(out, EpisodeStepResult):
                         unreported_step = out
                     references = self._write_results(msg, out_dir, out)
