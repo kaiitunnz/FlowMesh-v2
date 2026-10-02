@@ -1,17 +1,35 @@
 """The origin-side route deputy.
 
-Runs on the origin node and executes a resolved candidate ladder in order, echoing a
-payload over each transport until one round-trips. It executes only the candidates the
-control plane resolved — it never scans an address or invents a peer — and returns a
-classified observation per attempt so the control plane can update reachability.
+Runs on the origin node and probes a resolved candidate ladder in order until one
+answers. It dials only the candidates the control plane resolved — it never scans an
+address or invents a peer — and returns a classified observation per attempt so the
+control plane can update reachability.
+
+A probe dials a candidate's first hop as a peer origin does, over the same mutual TLS
+and relay-frame stream, and the listener there answers it. A connection that fails, a
+handshake the dialer rejects, a probe left unanswered, or an answer that echoes other
+bytes is a path failure. A connection the listener closes after the handshake without
+answering is not evidence about the path: a listener that reads no probes and one that
+refuses the dialer's identity both close that way and cannot be told apart.
 """
 
 import asyncio
-import socket
 import ssl
 from dataclasses import dataclass
 
-from . import wire
+from shared.network.frame_stream import (
+    MAX_PROBE_BYTES,
+    FrameStreamError,
+    ProbeFrame,
+    read_stream_frame,
+    write_probe,
+)
+from shared.network.peer_dial import (
+    PEER_DIAL_ERRORS,
+    classify_peer_error,
+    open_peer_connection,
+)
+
 from .state import (
     ResolvedRoute,
     RouteCandidate,
@@ -20,89 +38,84 @@ from .state import (
 )
 
 
+class ProbePayloadTooLarge(ValueError):
+    """A probe payload over ``MAX_PROBE_BYTES``, refused before anything is dialed."""
+
+
 @dataclass
-class EchoOutcome:
-    """The deputy's result: the transport that carried the echo (if any) and the
-    per-candidate classified observations."""
+class ProbeOutcome:
+    """The transport that answered the probe, if any, and the classified observation
+    of each candidate probed."""
 
     selected_transport: Transport | None
-    echoed: bytes | None
     observations: list[tuple[Transport, RouteObservationOutcome]]
 
 
-async def run_echo(
+def dialable_candidates(resolved: ResolvedRoute) -> list[RouteCandidate]:
+    """The candidates a probe dials, in order: each forward-dial transport with a hop.
+
+    ``control_relay`` carries no dialable first hop, so a probe skips it.
+    """
+    return [
+        candidate
+        for candidate in resolved.candidates
+        if candidate.transport is not Transport.CONTROL_RELAY and candidate.hops
+    ]
+
+
+async def run_probe(
     resolved: ResolvedRoute,
     payload: bytes,
     *,
     connect_budget_sec: float,
-) -> EchoOutcome:
-    """Attempt each forward-dial candidate in order; stop at the first that round-trips.
+    ssl_context: ssl.SSLContext | None = None,
+) -> ProbeOutcome:
+    """Probe each dialable candidate in order; stop at the first that answers.
 
-    ``control_relay`` carries no dialable first hop — its origin hop endpoint is empty —
-    so this forward-dial diagnostic skips it rather than dialing an empty address and
-    recording a spurious demotion for the guaranteed reverse-relay base.
+    Each candidate gets ``connect_budget_sec`` for its whole exchange.
+    ``ssl_context`` is the node's peer client context, or ``None`` where the deployment
+    runs its peer listeners without mutual TLS.
     """
+    if len(payload) > MAX_PROBE_BYTES:
+        raise ProbePayloadTooLarge(f"probe payload exceeds {MAX_PROBE_BYTES} bytes")
     observations: list[tuple[Transport, RouteObservationOutcome]] = []
-    for candidate in resolved.candidates:
-        if candidate.transport is Transport.CONTROL_RELAY:
-            continue
-        outcome, echoed = await _attempt(candidate, payload, connect_budget_sec)
+    for candidate in dialable_candidates(resolved):
+        outcome = await _probe(
+            candidate.hops[0].endpoint, payload, connect_budget_sec, ssl_context
+        )
         observations.append((candidate.transport, outcome))
         if outcome is RouteObservationOutcome.VERIFIED:
-            return EchoOutcome(candidate.transport, echoed, observations)
-    return EchoOutcome(None, None, observations)
+            return ProbeOutcome(candidate.transport, observations)
+    return ProbeOutcome(None, observations)
 
 
-async def _attempt(
-    candidate: RouteCandidate, payload: bytes, budget: float
-) -> tuple[RouteObservationOutcome, bytes | None]:
+async def _probe(
+    endpoint: str,
+    payload: bytes,
+    budget: float,
+    ssl_context: ssl.SSLContext | None,
+) -> RouteObservationOutcome:
+    writer: asyncio.StreamWriter | None = None
     try:
-        return await asyncio.wait_for(_drive(candidate, payload), timeout=budget)
+        async with asyncio.timeout(budget):
+            try:
+                reader, writer = await open_peer_connection(endpoint, ssl_context)
+            except PEER_DIAL_ERRORS as exc:
+                return classify_peer_error(exc)
+            try:
+                await write_probe(writer, payload)
+                answer = await read_stream_frame(reader)
+            except FrameStreamError:
+                return RouteObservationOutcome.ROUTE_FAILURE
+            except (asyncio.IncompleteReadError, OSError):
+                return RouteObservationOutcome.APPLICATION_ERROR
     except TimeoutError:
-        return RouteObservationOutcome.TIMEOUT, None
-    except ConnectionRefusedError:
-        return RouteObservationOutcome.CONNECT_FAILURE, None
-    except ssl.SSLError:
-        return RouteObservationOutcome.TLS_FAILURE, None
-    except socket.gaierror:
-        return RouteObservationOutcome.DNS_FAILURE, None
-    except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
-        return RouteObservationOutcome.ROUTE_FAILURE, None
-
-
-async def _drive(
-    candidate: RouteCandidate, payload: bytes
-) -> tuple[RouteObservationOutcome, bytes | None]:
-    connect_host, connect_port = wire.split_host_port(candidate.hops[0].endpoint)
-    reader, writer = await asyncio.open_connection(connect_host, connect_port)
-    try:
-        # Each intermediate hop is a target-addressed relay: it reads one leading
-        # frame naming its next hop, dials it, and byte-relays the rest. Writing a
-        # frame per hop after the first therefore chains the caller through the
-        # relay ladder to the terminal sidecar; a single-hop direct route writes
-        # none and speaks straight to the sidecar.
-        for hop in candidate.hops[1:]:
-            await wire.write_frame(writer, hop.endpoint.encode())
-        return await _echo_exchange(reader, writer, payload)
+        return RouteObservationOutcome.TIMEOUT
     finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except (OSError, asyncio.CancelledError):
-            pass
-
-
-async def _echo_exchange(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, payload: bytes
-) -> tuple[RouteObservationOutcome, bytes | None]:
-    await wire.write_frame(writer, payload)
-    status = await reader.readexactly(1)
-    if status == wire.STATUS_APP_ERROR:
-        return RouteObservationOutcome.APPLICATION_ERROR, None
-    if status == wire.STATUS_OK:
-        echoed = await reader.readexactly(len(payload))
-        return RouteObservationOutcome.VERIFIED, echoed
-    # Only OK / APP_ERROR exist over the echo; a nonstandard status is treated as a path
-    # failure here. When real transports land, a status carrying an auth/fence rejection
-    # must classify as non-demoting to preserve the never-demote-on-non-path invariant.
-    return RouteObservationOutcome.ROUTE_FAILURE, None
+        # A graceful TLS close waits on the peer's close_notify, which a stalled peer
+        # never sends; the probe is over either way.
+        if writer is not None:
+            writer.transport.abort()
+    if not isinstance(answer, ProbeFrame) or answer.payload != payload:
+        return RouteObservationOutcome.ROUTE_FAILURE
+    return RouteObservationOutcome.VERIFIED

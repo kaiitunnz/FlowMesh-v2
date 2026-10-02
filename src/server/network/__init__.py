@@ -1,5 +1,4 @@
 from .reachability import NetworkReachabilityView, ReachabilityBounds
-from .relay import RelaySession
 from .resolver import resolve_route
 from .state import (
     NetworkEndpointAdvertisement,
@@ -26,7 +25,6 @@ __all__ = [
     "NonresidentSidecarTarget",
     "PolicyClass",
     "ReachabilityBounds",
-    "RelaySession",
     "ReachabilityClass",
     "ReachabilityEntry",
     "ReachabilityState",

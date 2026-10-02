@@ -1088,6 +1088,10 @@ class Runner:
         self._start_idle_checker()
         self._start_interrupt_monitor()
         self._start_mediated_op_router()
+        if self._peer_listener_sock is not None:
+            # Serve the advertised peer listener from registration on: a dialer that
+            # reaches its port before any resident frame would otherwise go unanswered.
+            self._ensure_resident_host()
         try:
             for msg in self.task_stream:
                 if self._shutdown_requested.is_set():

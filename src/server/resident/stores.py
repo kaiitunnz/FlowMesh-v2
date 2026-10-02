@@ -85,6 +85,9 @@ class ReplicaDirectory:
     def by_family(self, family: str) -> list[ReplicaIncarnation]:
         return [r for r in self._replicas.values() if r.family == family]
 
+    def by_serve_task(self, serve_task_id: str) -> list[ReplicaIncarnation]:
+        return [r for r in self._replicas.values() if r.serve_task_id == serve_task_id]
+
     def live_by_family(self, family: str) -> list[ReplicaIncarnation]:
         return [
             r
@@ -171,6 +174,13 @@ class ClaimStore:
             c
             for c in self._claims.values()
             if c.replica_id == replica_id and c.holds_credit
+        ]
+
+    def pending_for_family(self, family: str) -> list[ServiceClaim]:
+        return [
+            c
+            for c in self._claims.values()
+            if c.family == family and c.state is ClaimState.PENDING
         ]
 
 

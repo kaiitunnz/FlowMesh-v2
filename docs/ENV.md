@@ -99,18 +99,16 @@ listed here is in `.env.example`.
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
 | `RESIDENT_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Advertise the resident sidecar as directly routable |
 | `NETWORK_PLANE_ENABLED` | `true` | Enable the route-discovery and relay substrate |
-| `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node-relay substrate endpoint (`host:port`) |
-| `NETWORK_PLANE_SIDECAR_URL` | – | Node-local reachability echo listener (`host:port`) |
+| `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node inbound address (`host:port`) |
 | `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
 | `NETWORK_PLANE_REACHABILITY_CLASS` | `routable` | Endpoint reachability class |
-| `NETWORK_PLANE_PROTOCOLS` | `echo` | Advertised transport protocols |
+| `NETWORK_PLANE_PROTOCOLS` | – | Extra transport protocols the node advertises |
 | `NETWORK_PLANE_POSITIVE_TTL_SEC` | `30` | Verified reachability TTL (seconds) |
 | `NETWORK_PLANE_NEGATIVE_TTL_SEC` | `15` | Demoted reachability TTL (seconds) |
 | `NETWORK_PLANE_BACKOFF_BASE_SEC` | `1` | Demotion retry backoff base (seconds) |
 | `NETWORK_PLANE_BACKOFF_MAX_SEC` | `30` | Demotion retry backoff cap (seconds) |
 | `NETWORK_PLANE_CONNECT_BUDGET_SEC` | `5` | Per-candidate optimistic connect budget (seconds) |
 | `NETWORK_PLANE_ROUTE_TTL_SEC` | `30` | Resolved-route snapshot TTL (seconds) |
-| `NETWORK_PLANE_RELAY_BUFFER_BYTES` | `65536` | Bounded relay-session in-flight buffer (bytes) |
 | `NETWORK_PLANE_PEER_ENABLED` | `false` | Enable trusted origin-to-target peer transports |
 | `NETWORK_PLANE_PEER_TRUST_DOMAIN` | – | Trust domain both ends must share |
 | `NETWORK_PLANE_PEER_CLASSES` | `same_node,same_cluster` | Target reachability classes a peer transport admits |

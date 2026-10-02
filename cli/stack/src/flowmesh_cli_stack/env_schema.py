@@ -824,12 +824,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "NETWORK_PLANE_ENDPOINT_URL",
                     "",
-                    description="Advertised node-relay substrate endpoint (host:port).",
-                ),
-                EnvVar(
-                    "NETWORK_PLANE_SIDECAR_URL",
-                    "",
-                    description="Node-local reachability echo listener (host:port).",
+                    description="Advertised node inbound address (host:port).",
                 ),
                 EnvVar(
                     "NETWORK_PLANE_TRUST_DOMAIN",
@@ -844,8 +839,8 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "NETWORK_PLANE_PROTOCOLS",
-                    "echo",
-                    description="Advertised transport protocols.",
+                    "",
+                    description="Extra transport protocols the node advertises.",
                     var_type=EnvVarType.CSV,
                 ),
                 EnvVar(
@@ -895,13 +890,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                     min_inclusive=False,
-                ),
-                EnvVar(
-                    "NETWORK_PLANE_RELAY_BUFFER_BYTES",
-                    "65536",
-                    description="Bounded relay-session in-flight buffer (bytes).",
-                    var_type=EnvVarType.INT,
-                    min_value=1024,
                 ),
                 EnvVar(
                     "NETWORK_PLANE_PEER_ENABLED",

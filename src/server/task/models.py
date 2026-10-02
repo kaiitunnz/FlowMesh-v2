@@ -5,7 +5,7 @@ from typing import Any, NamedTuple
 from pydantic import BaseModel, Field, computed_field
 
 from shared.content import ContentReference
-from shared.tasks import TaskEnvelopeTemplate
+from shared.tasks import TaskEnvelopeTemplate, TaskType
 from shared.tasks.worker_message import HardwareUsage
 
 from ..orchestration.tool_dispatch import FacadeTurnGroup
@@ -48,6 +48,9 @@ TERMINAL_TASK_STATUSES = frozenset(
 # A settling task has reached a terminal or is on its way to one (CANCELLING, awaiting
 # its worker's terminal); the status writers refuse to regress one to an active state.
 SETTLING_TASK_STATUSES = TERMINAL_TASK_STATUSES | {TaskStatus.CANCELLING}
+
+# Task types that run a model server for the life of the task.
+SERVE_TASK_TYPES = frozenset({TaskType.SERVE, TaskType.DEV_MODEL})
 
 
 class WorkflowSettlement(NamedTuple):
@@ -251,6 +254,11 @@ class TaskRecord(BaseModel):
     merge_key: str | None = Field(default=None, description="Merge grouping key.")
     latest_update: dict[str, Any] | None = Field(
         default=None, description="Latest mid-task update payload."
+    )
+    latest_update_dispatch_id: str | None = Field(
+        default=None,
+        description="Dispatch whose report set the latest update.",
+        exclude=True,
     )
     result_reference: ContentReference | None = Field(
         default=None,

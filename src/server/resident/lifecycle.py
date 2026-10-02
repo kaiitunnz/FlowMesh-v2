@@ -8,7 +8,7 @@ a typed denial) is a pure function of the directory, leases, and policy, and the
 start and stop cross the flat worker plane through injected substrate hooks.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Set
 from dataclasses import dataclass
 from typing import Literal
 
@@ -152,7 +152,7 @@ class LifecycleScaleManager:
         self._persist()
         try:
             serve_task_id = await self._materialize_fn(family, replica)
-        except Exception:
+        except BaseException:
             # A failed cold start must not wedge the family: invalidate the replica so a
             # later demand can materialize again, and let the caller settle the claim.
             self.on_preempt(replica.replica_id)
@@ -178,10 +178,8 @@ class LifecycleScaleManager:
         idle-torn down while its serve task is live. It replaces any prior incarnation
         for the same serve task so a re-adoption supersedes the old fence.
         """
-        for prior in self._stores.directory.by_family(family.family):
-            if prior.serve_task_id == serve_task_id and prior.state in (
-                _ACTIVE_REPLICA_STATES
-            ):
+        for prior in self._stores.directory.by_serve_task(serve_task_id):
+            if prior.state in _ACTIVE_REPLICA_STATES:
                 self.on_preempt(prior.replica_id)
         replica = ReplicaIncarnation(
             replica_id=new_replica_id(),
@@ -400,8 +398,72 @@ class LifecycleScaleManager:
         self._persist()
         self._reap_serve_task(serve_task_id)
 
+    def on_serve_task_end(self, serve_task_id: str, *, live: bool) -> None:
+        """Retire the demand replica a serve task stopped serving.
+
+        A serving replica on the task is invalidated, which reaps the task so nothing
+        re-runs it. A cold-starting replica is invalidated only once its task ended
+        (``live`` is false): a requeued cold start retries on another worker under the
+        task's own retry history. A draining replica is already retiring: its task is
+        reaped and the replica drains until its admitted work releases. Standing
+        replicas are exempt.
+        """
+        for replica in self._stores.directory.by_serve_task(serve_task_id):
+            if replica.standing:
+                continue
+            if replica.state is ReplicaState.DRAINING:
+                self._reap_serve_task(serve_task_id)
+            elif replica.state in SERVABLE_REPLICA_STATES or (
+                replica.state is ReplicaState.MATERIALIZING and not live
+            ):
+                self.on_preempt(replica.replica_id)
+
+    def yield_serve_task(self, serve_task_id: str) -> None:
+        """Retire the idle demand replica a serve task backs, freeing its worker.
+
+        A replica is idle once no claim holds credit on it and no claim of its family
+        is pending, since a pending claim may still land on it. An idle servable
+        replica is drained and stopped, as an idle teardown is; an idle cold start
+        never served, so it is invalidated. A standing replica is left as it is.
+        """
+        for replica in self._stores.directory.by_serve_task(serve_task_id):
+            if (
+                replica.standing
+                or replica.state not in _ACTIVE_REPLICA_STATES
+                or self._stores.credit_ledger.held(replica.replica_id) > 0
+                or self._stores.claims.pending_for_family(replica.family)
+            ):
+                continue
+            if replica.state is ReplicaState.MATERIALIZING:
+                self.on_preempt(replica.replica_id)
+            else:
+                self.drain(replica.replica_id)
+                self.stop(replica.replica_id)
+
+    def reconcile_serve_tasks(self, live_serve_tasks: Set[str]) -> None:
+        """Reconcile the directory against the live resident serve tasks.
+
+        A materializing replica whose serve task is gone can never become ready, so it
+        is invalidated to free its family's cold start. A live serve task no active
+        replica backs is reaped.
+        """
+        for replica in self._stores.directory.all():
+            if replica.state is ReplicaState.MATERIALIZING and (
+                replica.serve_task_id not in live_serve_tasks
+            ):
+                self.on_preempt(replica.replica_id)
+        backed = {
+            replica.serve_task_id
+            for replica in self._stores.directory.all()
+            if replica.state in _ACTIVE_REPLICA_STATES
+            and replica.serve_task_id is not None
+        }
+        for serve_task_id in sorted(live_serve_tasks - backed):
+            self._reap_serve_task(serve_task_id)
+
     def _reap_serve_task(self, serve_task_id: str | None) -> None:
-        """Cancel a replica's backing serve task; absent or terminal is a no-op."""
+        """Cancel a replica's backing serve task; one absent, settled, or already
+        cancelling is left as it is."""
         if self._stop_fn is not None and serve_task_id is not None:
             self._stop_fn(serve_task_id)
 

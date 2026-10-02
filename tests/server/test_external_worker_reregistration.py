@@ -33,6 +33,7 @@ from shared.schemas.command import TaskMessage
 from shared.schemas.worker import WorkerCapabilities, WorkerStatus
 from shared.tasks import TaskType
 from tests.server.redis_helpers import fake_redis_client
+from tests.support.waiting import until
 from tests.worker.factories import (
     make_worker_config,
     make_worker_hardware,
@@ -144,13 +145,6 @@ def _register(client: SupervisorClient) -> None:
 _REREGISTERED_WITHIN_SEC = 10.0
 
 
-async def _until(condition: Callable[[], bool], timeout: float = 30.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not condition():
-        assert time.monotonic() < deadline, "condition not met in time"
-        await asyncio.sleep(0.05)
-
-
 @pytest.mark.asyncio
 async def test_a_supervisor_restart_re_admits_the_worker_and_abandons_its_dispatch(
     monkeypatch: pytest.MonkeyPatch,
@@ -191,7 +185,7 @@ async def test_a_supervisor_restart_re_admits_the_worker_and_abandons_its_dispat
         second = _Supervisor(redis_client, port)
         await second.start()
         try:
-            await _until(lambda: bool(abandoned))
+            await until(lambda: bool(abandoned), timeout=30.0)
             assert abandoned == ["dsp-1"]
             new_id = client.worker_id
             assert new_id != old_id
@@ -202,7 +196,9 @@ async def test_a_supervisor_restart_re_admits_the_worker_and_abandons_its_dispat
             await asyncio.to_thread(client.set_status, WorkerStatus.BUSY, None, "dsp-1")
             await asyncio.to_thread(client.heartbeat)
             relayed = second.relay.events
-            await _until(lambda: any(e.get("type") == "HEARTBEAT" for e in relayed))
+            await until(
+                lambda: any(e.get("type") == "HEARTBEAT" for e in relayed), timeout=30.0
+            )
         finally:
             await second.stop()
     finally:
@@ -233,7 +229,7 @@ async def test_a_worker_the_root_reaped_registers_again(
 
         await asyncio.to_thread(supervisor.server.reconcile_workers)
 
-        await _until(lambda: client.worker_id != old_id)
+        await until(lambda: client.worker_id != old_id, timeout=30.0)
         assert redis.set_members(WORKERS_SET_KEY) == {client.worker_id}
     finally:
         await asyncio.to_thread(client.shutdown)
@@ -339,17 +335,17 @@ async def test_a_worker_holding_content_moves_to_its_new_registration(
         second = _Supervisor(redis_client, port)
         await second.start()
         try:
-            await _until(lambda: client.worker_id != old_id)
+            await until(lambda: client.worker_id != old_id, timeout=30.0)
             new_id = client.worker_id
-            await _until(
+            await until(
                 lambda: _relayed(second, "REGISTER", new_id), _REREGISTERED_WITHIN_SEC
             )
-            await _until(
+            await until(
                 lambda: _relayed(second, "CONTENT_HOLDING", new_id),
                 _REREGISTERED_WITHIN_SEC,
             )
             await asyncio.to_thread(client.heartbeat)
-            await _until(
+            await until(
                 lambda: _relayed(second, "HEARTBEAT", new_id), _REREGISTERED_WITHIN_SEC
             )
         finally:
@@ -400,13 +396,13 @@ async def test_a_worker_streaming_a_resident_session_moves_to_its_new_registrati
         second = _Supervisor(redis_client, port)
         await second.start()
         try:
-            await _until(lambda: client.worker_id != old_id)
+            await until(lambda: client.worker_id != old_id, timeout=30.0)
             new_id = client.worker_id
-            await _until(
+            await until(
                 lambda: _relayed(second, "REGISTER", new_id), _REREGISTERED_WITHIN_SEC
             )
             await asyncio.to_thread(client.heartbeat)
-            await _until(
+            await until(
                 lambda: _relayed(second, "HEARTBEAT", new_id), _REREGISTERED_WITHIN_SEC
             )
         finally:
@@ -432,13 +428,13 @@ async def test_a_worker_the_root_reaped_registers_its_new_id_with_the_root(
     old_id = client.worker_id
     await asyncio.to_thread(client.start)
     try:
-        await _until(lambda: _relayed(supervisor, "REGISTER", old_id))
+        await until(lambda: _relayed(supervisor, "REGISTER", old_id), timeout=30.0)
         redis.srem(WORKERS_SET_KEY, old_id)
         await asyncio.to_thread(supervisor.server.reconcile_workers)
-        await _until(lambda: client.worker_id != old_id)
+        await until(lambda: client.worker_id != old_id, timeout=30.0)
         new_id = client.worker_id
 
-        await _until(lambda: _relayed(supervisor, "REGISTER", new_id))
+        await until(lambda: _relayed(supervisor, "REGISTER", new_id), timeout=30.0)
     finally:
         await asyncio.to_thread(client.shutdown)
         await supervisor.stop()

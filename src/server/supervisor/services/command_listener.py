@@ -4,6 +4,7 @@ import contextlib
 import logging
 import queue
 import secrets
+import ssl
 from collections.abc import Callable, Iterable
 from concurrent import futures
 from threading import Thread
@@ -19,7 +20,7 @@ from shared.schemas.command import (
 )
 
 from ...clients.redis import NODE_RESPONSE_CHANNEL, SyncRedisClient, node_cmd_channel
-from ...network.deputy import run_echo
+from ...network.deputy import ProbePayloadTooLarge, run_probe
 from ...network.state import ResolvedRoute
 from ...utils.concurrent import Sentinel, TaskReceiver
 from ..adapters.docker import DockerWorkerConfig
@@ -155,8 +156,10 @@ class CommandListener:
         logger: logging.Logger,
         cmd_receiver: TaskReceiver[CommandMessage, CommandResponse] | None = None,
         max_inflight: int = _MAX_INFLIGHT_CMDS,
+        peer_ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self.logger = logger
+        self._peer_ssl_context = peer_ssl_context
         self._redis = redis
         self._node_id = node_id
         self._wm = worker_manager
@@ -485,28 +488,33 @@ class CommandListener:
     async def _handle_deliver_route_plan_cmd(
         self, cmd: CommandMessage
     ) -> CommandResponse:
-        """Run the origin-side deputy over a resolved route and echo a payload."""
+        """Run the origin-side deputy, probing the route's candidates in order."""
         payload = cmd.payload or {}
         try:
             resolved = ResolvedRoute.model_validate(payload["resolved_route"])
-            echo_payload = base64.b64decode(payload["payload_b64"])
+            probe_payload = base64.b64decode(payload["payload_b64"])
             budget = float(payload.get("connect_budget_sec", 5.0))
         except (KeyError, ValidationError, ValueError) as exc:
             return CommandResponse.error(
-                cmd, f"Invalid route plan: {exc}", CommandErrorCode.INTERNAL
+                cmd, f"Invalid route plan: {exc}", CommandErrorCode.INVALID_PAYLOAD
             )
-        outcome = await run_echo(resolved, echo_payload, connect_budget_sec=budget)
+        try:
+            outcome = await run_probe(
+                resolved,
+                probe_payload,
+                connect_budget_sec=budget,
+                ssl_context=self._peer_ssl_context,
+            )
+        except ProbePayloadTooLarge as exc:
+            return CommandResponse.error(
+                cmd, f"Invalid route plan: {exc}", CommandErrorCode.INVALID_PAYLOAD
+            )
         return CommandResponse.ok(
             cmd,
             data={
                 "selected_transport": (
                     outcome.selected_transport.value
                     if outcome.selected_transport is not None
-                    else None
-                ),
-                "echoed_b64": (
-                    base64.b64encode(outcome.echoed).decode()
-                    if outcome.echoed is not None
                     else None
                 ),
                 "observations": [

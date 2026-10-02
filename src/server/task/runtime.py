@@ -133,6 +133,7 @@ from .credentials import (
     take_spec_credentials,
 )
 from .models import (
+    SERVE_TASK_TYPES,
     SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
     DispatchEnd,
@@ -737,6 +738,12 @@ class TaskRuntime:
         # to the origin worker; the ack and outcome handlers consume the worker's fenced
         # transition reports. Set when resident-capacity control is enabled.
         self._resident_originate: Callable[[ToolInvocationEnvelope], bool] | None = None
+        self._resident_task_ended: Callable[[str], None] | None = None
+        self._resident_yield_requested: Callable[[str], None] | None = None
+        # The dispatch each resident task was last committed DISPATCHED under, so a
+        # commit moving it elsewhere, or under another dispatch, reports that the
+        # earlier dispatch ended.
+        self._dispatched_resident: dict[str, str | None] = {}
         self._resident_ack: Callable[[ResidentBootstrapAck], None] | None = None
         self._resident_outcome: Callable[[ResidentOpOutcome], None] | None = None
         self._resident_route_observation: (
@@ -1143,6 +1150,11 @@ class TaskRuntime:
             restored.append(workflow_id)
         with self._cv:
             self._restore_merges_locked()
+            self._dispatched_resident.update(
+                (task_id, record.dispatch_id)
+                for task_id, record in self._tasks.items()
+                if record.resident and record.status == TaskStatus.DISPATCHED
+            )
             self._held_dispatches.update(
                 (record.task_id, (record.assigned_worker, record.dispatch_id))
                 for record in self._tasks.values()
@@ -1507,6 +1519,45 @@ class TaskRuntime:
             epoch_frontier=self._workflow_epoch_frontier.get(workflow_id, 0),
         )
 
+    def _commit_transition_locked(
+        self,
+        workflow_id: str,
+        *,
+        records: Sequence[PersistedTask] = (),
+        dispatched: Sequence[str] = (),
+        pending: Sequence[str] = (),
+        done: Sequence[str] = (),
+        failed: Sequence[str] = (),
+        cancelled: Sequence[str] = (),
+        sched: WorkflowSched | None = None,
+    ) -> None:
+        """Apply one workflow state delta, then report each resident task it ended."""
+        self._workflow_registry.commit_transition(
+            workflow_id,
+            records=records,
+            dispatched=dispatched,
+            pending=pending,
+            done=done,
+            failed=failed,
+            cancelled=cancelled,
+            sched=sched,
+        )
+        for persisted in records:
+            if persisted.record.resident:
+                self._observe_resident_locked(persisted.record)
+
+    def _observe_resident_locked(self, record: TaskRecord) -> None:
+        task_id = record.task_id
+        ended = task_id in self._dispatched_resident
+        if record.status == TaskStatus.DISPATCHED:
+            ended = ended and self._dispatched_resident[task_id] != record.dispatch_id
+            self._dispatched_resident[task_id] = record.dispatch_id
+        else:
+            self._dispatched_resident.pop(task_id, None)
+            ended = ended or record.status in SETTLING_TASK_STATUSES
+        if ended and self._resident_task_ended is not None:
+            self._resident_task_ended(task_id)
+
     def _persist_locked(self, *task_ids: str) -> None:
         """Commit task records (no membership change) atomically, per workflow."""
         by_workflow: dict[str, list[str]] = defaultdict(list)
@@ -1514,7 +1565,7 @@ class TaskRuntime:
             if record := self._tasks.get(task_id):
                 by_workflow[record.workflow_id].append(task_id)
         for workflow_id, ids in by_workflow.items():
-            self._workflow_registry.commit_transition(
+            self._commit_transition_locked(
                 workflow_id, records=self._records_locked(*ids)
             )
 
@@ -1544,7 +1595,7 @@ class TaskRuntime:
                 if (record := self._tasks.get(task_id)) is not None:
                     moves[record.workflow_id][_membership(record)].append(task_id)
             for workflow_id, by_status in moves.items():
-                self._workflow_registry.commit_transition(
+                self._commit_transition_locked(
                     workflow_id,
                     records=self._records_locked(
                         *chain.from_iterable(by_status.values())
@@ -1715,7 +1766,7 @@ class TaskRuntime:
         if terminal_ids:
             self._commit_locked(*terminal_ids)
         else:
-            self._workflow_registry.commit_transition(
+            self._commit_transition_locked(
                 workflow_id, sched=self._sched_locked(workflow_id)
             )
 
@@ -2863,6 +2914,24 @@ class TaskRuntime:
         self._resident_ack = on_ack
         self._resident_outcome = on_outcome
         self._resident_route_observation = on_route_observation
+
+    def set_resident_task_end_hook(self, hook: Callable[[str], None]) -> None:
+        """Install the consumer told when a resident serve task stops serving.
+
+        The hook receives the task id once a dispatched resident serve task loses its
+        dispatch, including to another dispatch, and once one settles or starts
+        cancelling. It runs under the runtime's lock, so it must hand the work
+        off and never call back in.
+        """
+        self._resident_task_ended = hook
+
+    def set_resident_yield_hook(self, hook: Callable[[str], None]) -> None:
+        """Install the consumer asked to free a worker a resident serve task occupies.
+
+        The hook receives the serve task's id. It may run on the dispatcher's thread, so
+        it must hand the work off and never call back in.
+        """
+        self._resident_yield_requested = hook
 
     def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
         """Install the consumer that releases a resident admission credit on DS
@@ -5128,7 +5197,7 @@ class TaskRuntime:
 
     def _record_dispatch_locked(self, record: TaskRecord, publish: _Publish) -> None:
         self._take_dispatch_locked(record, publish)
-        self._workflow_registry.commit_transition(
+        self._commit_transition_locked(
             record.workflow_id,
             records=self._records_locked(record.task_id),
             dispatched=[record.task_id],
@@ -5190,7 +5259,7 @@ class TaskRuntime:
                     return EventEffect.SETTLED
                 record.status = TaskStatus.DISPATCHED
                 record.started_ts = started_ts
-                self._workflow_registry.commit_transition(
+                self._commit_transition_locked(
                     record.workflow_id,
                     records=self._records_locked(task_id),
                     dispatched=[task_id],
@@ -5205,7 +5274,7 @@ class TaskRuntime:
     def mark_updated(
         self,
         task_id: str,
-        worker_id: str | None,
+        worker_id: str,
         payload: dict[str, Any],
         dispatch_id: str | None = None,
     ) -> EventEffect:
@@ -5221,10 +5290,32 @@ class TaskRuntime:
                     # A replayed or late progress update must not touch a terminal task.
                     return EventEffect.SETTLED
                 record.latest_update = payload
+                record.latest_update_dispatch_id = record.dispatch_id
                 self._persist_locked(task_id)
                 return EventEffect.APPLIED
         finally:
             self._release_ended_workers()
+
+    def rewrite_update(
+        self, task_id: str, previous: dict[str, Any], payload: dict[str, Any]
+    ) -> bool:
+        """Replace a task's latest update with a root rewrite of ``previous``.
+
+        The rewrite keeps the dispatch that reported the update, and applies only while
+        ``previous`` is still the latest update, so a worker update that landed since is
+        never relabelled. Returns whether it applied.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if (
+                record is None
+                or record.status in TERMINAL_TASK_STATUSES
+                or record.latest_update is not previous
+            ):
+                return False
+            record.latest_update = payload
+            self._persist_locked(task_id)
+            return True
 
     def mark_succeeded(
         self,
@@ -6201,7 +6292,7 @@ class TaskRuntime:
         queue."""
 
         def commit() -> None:
-            self._workflow_registry.commit_transition(
+            self._commit_transition_locked(
                 workflow_id,
                 records=self._records_locked(*touched),
                 dispatched=[
@@ -6561,6 +6652,67 @@ class TaskRuntime:
     def get_record(self, task_id: str) -> TaskRecord | None:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def private_state_holders(self) -> list[OwnerFence]:
+        """The worker incarnations holding private state an unsettled activation
+        resumes on."""
+        with self._lock:
+            return [
+                holder
+                for engine in self._engines.values()
+                for holder in engine.private_state_holders()
+            ]
+
+    def long_lived_allocation(self, task_id: str) -> bool:
+        """Whether a task holds its worker for its own life: a model server, resident
+        or user-submitted."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            return record is not None and (
+                record.resident or record.task_type in SERVE_TASK_TYPES
+            )
+
+    def resident_dispatches_on(self, worker_id: str) -> list[tuple[str, str]]:
+        """The resident serve tasks dispatched to ``worker_id``, each with its
+        dispatch."""
+        with self._lock:
+            return [
+                (task_id, dispatch_id)
+                for task_id, dispatch_id in self._dispatched_resident.items()
+                if dispatch_id is not None
+                and (record := self._tasks.get(task_id)) is not None
+                and record.assigned_worker == worker_id
+            ]
+
+    def request_resident_yield(self, task_id: str, dispatch_id: str) -> bool:
+        """Ask resident capacity to free the worker a resident serve task occupies
+        under ``dispatch_id``.
+
+        Returns whether the task is one resident capacity started, still on that
+        dispatch, and was asked.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if (
+                record is None
+                or not record.resident
+                or record.status != TaskStatus.DISPATCHED
+                or record.dispatch_id != dispatch_id
+            ):
+                return False
+        if self._resident_yield_requested is None:
+            return False
+        self._resident_yield_requested(task_id)
+        return True
+
+    def live_resident_task_ids(self) -> set[str]:
+        """Ids of the resident serve tasks neither settled nor cancelling."""
+        with self._lock:
+            return {
+                task_id
+                for task_id, record in self._tasks.items()
+                if record.resident and record.status not in SETTLING_TASK_STATUSES
+            }
 
     def workflow_submitted_at(self, workflow_id: str) -> str | None:
         """The workflow's durable submission timestamp, or ``None`` if unknown."""

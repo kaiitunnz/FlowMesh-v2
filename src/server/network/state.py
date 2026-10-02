@@ -133,10 +133,10 @@ class TrustedPeerPolicy(BaseModel):
     every resident invocation over ``control_relay``. ``protocol`` is the transport
     capability both the origin and the target must advertise.
 
-    ``probe`` marks the rule a reachability diagnostic resolves under. A probe dials a
-    node's own diagnostic listener and carries no invocation payload, so it is offered
-    every reachable path regardless of the deployment's posture; it is never the rule a
-    route carrying resident traffic resolves under.
+    ``probe`` marks the rule a reachability diagnostic resolves under. A probe is
+    answered by the peer listener it dials and carries no invocation payload, so it is
+    offered every reachable peer path regardless of the pair's trust; it is never the
+    rule a route carrying resident traffic resolves under.
     """
 
     model_config = ConfigDict(frozen=True)

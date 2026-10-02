@@ -99,6 +99,9 @@ restart safe:
   vault of a workflow that settled or never finished registering. A task record
   stored with its credentials inline has them vaulted, and its source redacted, by
   the first start that loads it.
+- **Resident replicas.** A warm resident replica whose serve task holds its dispatch
+  is re-attached and reused; any other is invalidated and re-materialized on demand.
+  See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **SSH forward ports.** A running SSH task's `forward` session is served again
   on the port it was published on. A session whose port another process took
   while the root was down is unreachable until its task ends.

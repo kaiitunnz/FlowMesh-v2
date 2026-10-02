@@ -12,7 +12,11 @@ from queue import Empty as QueueEmpty
 from queue import Full as QueueFull
 from threading import Lock, Thread
 
-from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
+from shared.network.mtls import (
+    MutualTlsMaterial,
+    MutualTlsMaterialError,
+    client_context,
+)
 from shared.schemas.command import CommandMessage, CommandResponse
 from shared.schemas.network import (
     PEER_PROTOCOL,
@@ -258,8 +262,8 @@ def _peer_material(
     """
     if peer.disable_mtls:
         logger.warning(
-            "serving the node peer listener without mutual TLS: the deployment is "
-            "configured for a trusted network, so a dialer proves no identity"
+            "running peer connections without mutual TLS: the deployment is "
+            "configured for a trusted network, so no peer proves an identity"
         )
         return None
     try:
@@ -364,7 +368,6 @@ def _run_supervisor(
 
     from ..clients import RedisClient
     from ..clients.redis import resident_relay_client
-    from ..network.listeners import NetworkPlaneListeners
     from ..network.reverse_relay import BinaryRedis
     from ..registries.node import NodeRegistry
     from ..registries.worker import WorkerRegistry as WorkerRecords
@@ -492,12 +495,20 @@ def _run_supervisor(
     resident_bridge = (
         None if node_relays is None else node_relays.bridge(RESIDENT_NAMESPACE)
     )
+    peer_material = (
+        _peer_material(network_cfg.peer, logger)
+        if network_cfg.enabled and network_cfg.peer.enabled
+        else None
+    )
     command_listener = CommandListener(
         redis=redis_client.sync,
         node_id=node_id,
         worker_manager=worker_manager,
         logger=logger,
         cmd_receiver=cmd_receiver,
+        peer_ssl_context=(
+            client_context(peer_material) if peer_material is not None else None
+        ),
     )
     grpc_server = GrpcServer(
         grpc_cfg.host,
@@ -524,17 +535,8 @@ def _run_supervisor(
     ):
         peer_listener = NodePeerListener(
             endpoint=network_cfg.peer.node_listener_url,
-            material=_peer_material(network_cfg.peer, logger),
+            material=peer_material,
             bridge=resident_bridge,
-            logger=logger,
-        )
-
-    network_listeners: NetworkPlaneListeners | None = None
-    if network_cfg.enabled and network_cfg.sidecar_url and network_cfg.endpoint_url:
-        network_listeners = NetworkPlaneListeners(
-            sidecar_url=network_cfg.sidecar_url,
-            endpoint_url=network_cfg.endpoint_url,
-            buffer_bytes=network_cfg.relay_buffer_bytes,
             logger=logger,
         )
 
@@ -584,8 +586,6 @@ def _run_supervisor(
         await worker_manager.start()
         command_listener.start()
         await grpc_server.start()
-        if network_listeners is not None:
-            await network_listeners.start()
         if node_relays is not None:
             node_relays.start(loop)
         if peer_listener is not None:
@@ -608,8 +608,6 @@ def _run_supervisor(
             await peer_listener.stop()
         if node_relays is not None:
             await node_relays.stop()
-        if network_listeners is not None:
-            await network_listeners.stop()
         await grpc_server.stop()
         await command_listener.stop()
         await worker_manager.stop()

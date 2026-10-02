@@ -1,13 +1,15 @@
 """REST schemas for the feature-gated network-plane echo and diagnostics."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from shared.network.frame_stream import MAX_PROBE_BYTES
 
 
 class NetworkListenerBody(BaseModel):
     """The target listener an echo resolves a route to.
 
-    It stands in for a resident-facing sidecar; this seam never fronts a real engine.
-    ``routes`` are the sidecar addresses; ``directly_routable`` gates the direct path.
+    ``routes`` are the worker peer-listener addresses a direct probe dials;
+    ``directly_routable`` gates the direct path.
     """
 
     replica_id: str = Field(description="Target replica/listener id.")
@@ -18,7 +20,7 @@ class NetworkListenerBody(BaseModel):
         default=0, description="Listener generation fence."
     )
     routes: list[str] = Field(
-        default_factory=list, description="Sidecar route endpoints (host:port)."
+        default_factory=list, description="Worker peer-listener endpoints (host:port)."
     )
     directly_routable: bool = Field(
         default=False, description="Whether a direct worker path is advertised."
@@ -28,17 +30,25 @@ class NetworkListenerBody(BaseModel):
 class NetworkEchoRequest(BaseModel):
     origin_node_id: str = Field(description="Node whose deputy executes the route.")
     listener: NetworkListenerBody = Field(description="Target listener to reach.")
-    payload: str = Field(default="ping", description="Echo payload.")
-    app_error: bool = Field(
-        default=False, description="Ask the sidecar for an application error."
+    payload: str = Field(
+        default="ping", description=f"Probe payload, at most {MAX_PROBE_BYTES} bytes."
     )
+
+    @field_validator("payload")
+    @classmethod
+    def _bounded(cls, payload: str) -> str:
+        if len(payload.encode()) > MAX_PROBE_BYTES:
+            raise ValueError(f"payload exceeds {MAX_PROBE_BYTES} bytes")
+        return payload
 
 
 class NetworkEchoResponse(BaseModel):
     selected_transport: str | None = Field(
-        default=None, description="Transport that carried the echo, if any."
+        default=None, description="Transport that answered the probe, if any."
     )
-    echoed: str | None = Field(default=None, description="Echoed payload, if verified.")
+    echoed: str | None = Field(
+        default=None, description="Answered payload, if verified."
+    )
     route_epoch: int = Field(description="Resolved-route epoch.")
     candidates: list[str] = Field(description="Ordered candidate transports.")
     reachability: dict[str, str] = Field(

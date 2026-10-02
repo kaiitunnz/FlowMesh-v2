@@ -287,14 +287,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   resumes beside a workspace from another private-state generation. While a generation is
   sealed local to the holder that produced it, that holder is a hard scheduler
   feasibility constraint resolved at dispatch: the episode lane yields as any other does,
-  and an episode waits while its holder is busy. Owner loss, a worker-incarnation change,
-  or a component that does not match its seal fails closed as a typed
-  `PrivateStateUnavailable` rather than resuming against a fresh or partial home. One
-  activation reaches another's state only by holding a valid binding and attachment for
-  it, which the ledger's owner and write-epoch fences decide; the `0700` private root,
-  keyed by the opaque reference, separates a holder's lineages from other users on its
-  node,
-  and a harness works inside its own components under its sandbox. Only opaque
+  and an episode waits while its holder is busy. A model server — a resident or `serve`
+  task — prefers a worker holding no agent's private state when one is idle, and a
+  demand replica occupying a waiting episode's holder retires once no claim holds it and
+  no claim of its family is pending, so the episode resumes there. Owner loss, a
+  worker-incarnation change, or a component that does not match its seal fails closed as
+  a typed `PrivateStateUnavailable` rather than resuming against a fresh or partial home.
+  One activation reaches another's state only by holding a valid binding and attachment
+  for it, which the ledger's owner and write-epoch fences decide; the `0700` private
+  root, keyed by the opaque reference, separates a holder's lineages from other users on
+  its node, and a harness works inside its own components under its sandbox. Only opaque
   references cross into the ledger, control state, operation frames, logs, results, or
   artifacts. These fences are the activation's own — a private-state generation, its
   write epoch, and the ledger's owner fence — and are separate from the replica

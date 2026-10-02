@@ -5,16 +5,28 @@ must never raise out of the handler (which would kill the listener thread).
 """
 
 import asyncio
+import base64
 import logging
+import ssl
 import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 
+from server.network.deputy import ProbeOutcome
+from server.network.state import (
+    ResolvedRoute,
+    RouteCandidate,
+    RouteHop,
+    RouteObservationOutcome,
+    Transport,
+)
 from server.supervisor.adapters.docker import DockerWorkerConfig
 from server.supervisor.manager import ManagerNotStartedError, ProviderUnavailableError
+from server.supervisor.services import command_listener
 from server.supervisor.services.command_listener import CommandListener
+from shared.network.frame_stream import MAX_PROBE_BYTES
 from shared.schemas.command import (
     CommandErrorCode,
     CommandMessage,
@@ -526,3 +538,87 @@ class TestTargetWorkerAliases:
         ):
             payload = {"worker_alias": "w-1"}
             assert CommandListener._target_worker_aliases(_cmd(cmd_type, payload)) == []
+
+
+# ------------------------------------------------------------------ #
+# DELIVER_ROUTE_PLAN — the origin-side probe
+# ------------------------------------------------------------------ #
+
+
+def _route_plan(payload: bytes) -> dict:
+    route = ResolvedRoute(
+        origin_id="rog-1",
+        target_node_id="nde-2",
+        listener_generation=0,
+        route_epoch=1,
+        candidates=(
+            RouteCandidate(
+                transport=Transport.NODE_RELAY,
+                hops=(RouteHop(transport=Transport.NODE_RELAY, endpoint="h:1"),),
+            ),
+        ),
+    )
+    return {
+        "resolved_route": route.model_dump(mode="json"),
+        "payload_b64": base64.b64encode(payload).decode(),
+        "connect_budget_sec": 1.0,
+    }
+
+
+class TestHandleDeliverRoutePlanCmd:
+    def test_the_probe_dials_under_the_node_peer_tls_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        context = ssl.create_default_context()
+        probe = AsyncMock(
+            return_value=ProbeOutcome(
+                Transport.NODE_RELAY,
+                [(Transport.NODE_RELAY, RouteObservationOutcome.VERIFIED)],
+            )
+        )
+        monkeypatch.setattr(command_listener, "run_probe", probe)
+        cl = CommandListener(
+            redis=MagicMock(),
+            node_id="test-server",
+            worker_manager=MagicMock(),
+            logger=logging.getLogger("test-cl"),
+            peer_ssl_context=context,
+        )
+        cmd = _cmd(CommandType.DELIVER_ROUTE_PLAN, _route_plan(b"ping"))
+
+        resp = _run(cl._handle_deliver_route_plan_cmd(cmd))
+
+        assert resp.success
+        assert probe.await_args is not None
+        assert probe.await_args.kwargs["ssl_context"] is context
+        assert resp.data == {
+            "selected_transport": "node_relay",
+            "observations": [{"transport": "node_relay", "outcome": "verified"}],
+        }
+
+    def test_an_oversized_payload_is_refused_without_an_observation(self) -> None:
+        cmd = _cmd(
+            CommandType.DELIVER_ROUTE_PLAN, _route_plan(b"x" * (MAX_PROBE_BYTES + 1))
+        )
+
+        resp = _run(_listener()._handle_deliver_route_plan_cmd(cmd))
+
+        assert not resp.success
+        assert resp.error_code is CommandErrorCode.INVALID_PAYLOAD
+        assert resp.data is None
+
+    def test_an_error_inside_the_probe_is_not_a_payload_refusal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            command_listener, "run_probe", AsyncMock(side_effect=KeyError("late"))
+        )
+        cmd = _cmd(CommandType.DELIVER_ROUTE_PLAN, _route_plan(b"ping"))
+
+        cl = _listener()
+        cl._sem = asyncio.Semaphore(1)
+
+        resp = _run(cl._dispatch(cmd))
+
+        assert not resp.success
+        assert resp.error_code is CommandErrorCode.INTERNAL

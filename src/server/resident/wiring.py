@@ -22,7 +22,7 @@ from ..network.reverse_relay import RelaySessionStore
 from ..network.service import NetworkPlane
 from ..registries import WorkerRegistry
 from ..registries.resident import ResidentRegistry
-from ..task.models import TERMINAL_TASK_STATUSES
+from ..task.models import SETTLING_TASK_STATUSES, TaskStatus
 from ..task.runtime import TaskRuntime
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
@@ -47,7 +47,8 @@ def build_resident_capacity(
     control: ControlPlaneTracer | None = None,
     content_scope_authority: Callable[[str, str], None] | None = None,
 ) -> ResidentCapacityControl:
-    """Wire and return resident-capacity control for the enabled resident config."""
+    """Wire resident-capacity control for the enabled resident config, install its
+    runtime hooks, and return it."""
     cfg = orchestration.resident
     stores = ResidentStores()
     limits = ResidentPolicyLimits(
@@ -68,7 +69,7 @@ def build_resident_capacity(
 
     def stop(serve_task_id: str) -> None:
         record = runtime.get_record(serve_task_id)
-        if record is not None:
+        if record is not None and record.status not in SETTLING_TASK_STATUSES:
             runtime.cancel_workflow(
                 record.workflow_id, reason="resident replica teardown"
             )
@@ -86,12 +87,14 @@ def build_resident_capacity(
 
     def endpoint(serve_task_id: str) -> ReplicaEndpoint | None:
         record = runtime.get_record(serve_task_id)
-        # A terminal or absent serve task is known-dead: report no endpoint so the
-        # replica is invalidated rather than re-reported live.
+        # Only a dispatched serve task is serving, and only on the endpoint its current
+        # dispatch reported: an earlier dispatch's update outlives a requeue.
         if (
             record is None
-            or record.status in TERMINAL_TASK_STATUSES
+            or record.status != TaskStatus.DISPATCHED
             or not record.latest_update
+            or record.latest_update_dispatch_id is None
+            or record.latest_update_dispatch_id != record.dispatch_id
         ):
             return None
         serve = record.latest_update.get("serve")
@@ -110,8 +113,12 @@ def build_resident_capacity(
             interface=str(serve.get("interface") or "chat"),
         )
 
+    def serve_task_live(serve_task_id: str) -> bool:
+        record = runtime.get_record(serve_task_id)
+        return record is not None and record.status not in SETTLING_TASK_STATUSES
+
     sweep_interval = cfg.idle_sweep_interval_sec if cfg.idle_retain_sec > 0 else 0.0
-    return ResidentCapacityControl(
+    resident_control = ResidentCapacityControl(
         stores=stores,
         admission=AdmissionController(stores, persist),
         lifecycle=lifecycle,
@@ -124,6 +131,7 @@ def build_resident_capacity(
         settle_cb=runtime.settle_episode_invocation,
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
+        serve_task_live=serve_task_live,
         logger=logger,
         poll_interval_sec=cfg.poll_interval_sec,
         idle_sweep_interval_sec=sweep_interval,
@@ -131,6 +139,16 @@ def build_resident_capacity(
         max_transient_redrives=cfg.max_transient_redrives,
         control=control,
     )
+    runtime.set_resident_terminal_hook(resident_control.on_invocation_terminal)
+    runtime.set_resident_handlers(
+        originate=resident_control.originate,
+        on_ack=resident_control.on_bootstrap_ack,
+        on_outcome=resident_control.on_outcome,
+        on_route_observation=resident_control.on_route_observation,
+    )
+    runtime.set_resident_task_end_hook(resident_control.on_serve_task_end)
+    runtime.set_resident_yield_hook(resident_control.on_yield_requested)
+    return resident_control
 
 
 def wire_worker_delivery(

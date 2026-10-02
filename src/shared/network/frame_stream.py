@@ -7,11 +7,16 @@ bytes, so the payload crosses without a text encoding on the high-rate path.
 
 A reader that sees a malformed header, an oversized frame, or a truncated body raises,
 and the caller closes the connection: a stream whose framing is lost cannot resync.
+
+The same framing carries a reachability probe: the listener that reads one answers it
+itself, so a probe exercises a stream listener's TLS and framing without entering any
+relay session. A probe is not a relay frame kind, so no relay codec decodes one.
 """
 
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .relay_frame import RelayDirection, RelayFrame, RelayFrameKind
@@ -19,10 +24,20 @@ from .relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 _LENGTH_BYTES = 4
 MAX_META_BYTES = 64 * 1024
 MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
+MAX_PROBE_BYTES = 1024
+_PROBE_KIND = "probe"
+_PROBE_META = json.dumps({"kind": _PROBE_KIND}, separators=(",", ":")).encode()
 
 
 class FrameStreamError(Exception):
     """The stream's framing is unusable and its connection must be closed."""
+
+
+@dataclass(frozen=True)
+class ProbeFrame:
+    """A reachability probe, answered by the stream listener that reads it."""
+
+    payload: bytes
 
 
 class FrameWriter(Protocol):
@@ -74,34 +89,63 @@ def _meta(frame: RelayFrame) -> bytes:
     return json.dumps(meta, separators=(",", ":")).encode()
 
 
+async def _write_framed(writer: FrameWriter, meta: bytes, payload: bytes) -> None:
+    writer.write(
+        len(meta).to_bytes(_LENGTH_BYTES, "big")
+        + meta
+        + len(payload).to_bytes(_LENGTH_BYTES, "big")
+        + payload
+    )
+    await writer.drain()
+
+
 async def write_relay_frame(writer: FrameWriter, frame: RelayFrame) -> None:
     """Write one frame's header and payload, then flush."""
     meta = _meta(frame)
     if len(meta) > MAX_META_BYTES or len(frame.payload) > MAX_PAYLOAD_BYTES:
         raise FrameStreamError("relay frame exceeds the stream frame bounds")
-    writer.write(
-        len(meta).to_bytes(_LENGTH_BYTES, "big")
-        + meta
-        + len(frame.payload).to_bytes(_LENGTH_BYTES, "big")
-        + frame.payload
-    )
-    await writer.drain()
+    await _write_framed(writer, meta, frame.payload)
+
+
+async def write_probe(writer: FrameWriter, payload: bytes) -> None:
+    """Write one probe, then flush."""
+    if len(payload) > MAX_PROBE_BYTES:
+        raise FrameStreamError("probe payload exceeds its bound")
+    await _write_framed(writer, _PROBE_META, payload)
 
 
 async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
-    """Read one frame, raising once the framing or its bounds no longer hold."""
+    """Read one relay frame, raising on a probe or on broken framing."""
+    frame = await read_stream_frame(reader)
+    if isinstance(frame, ProbeFrame):
+        raise FrameStreamError("a probe is not a relay frame")
+    return frame
+
+
+async def read_stream_frame(
+    reader: asyncio.StreamReader,
+) -> RelayFrame | ProbeFrame:
+    """Read one frame or probe, raising on broken framing or an exceeded bound."""
     meta_len = int.from_bytes(await reader.readexactly(_LENGTH_BYTES), "big")
     if meta_len > MAX_META_BYTES:
         raise FrameStreamError(f"relay frame header too large: {meta_len}")
     raw_meta = await reader.readexactly(meta_len)
+    try:
+        meta = json.loads(raw_meta)
+        kind = meta["kind"]
+    except (KeyError, ValueError, TypeError) as exc:
+        raise FrameStreamError("undecodable relay frame header") from exc
     payload_len = int.from_bytes(await reader.readexactly(_LENGTH_BYTES), "big")
+    if kind == _PROBE_KIND:
+        if payload_len > MAX_PROBE_BYTES:
+            raise FrameStreamError(f"probe payload too large: {payload_len}")
+        return ProbeFrame(await reader.readexactly(payload_len))
     if payload_len > MAX_PAYLOAD_BYTES:
         raise FrameStreamError(f"relay frame payload too large: {payload_len}")
     payload = await reader.readexactly(payload_len) if payload_len else b""
     try:
-        meta = json.loads(raw_meta)
         return RelayFrame(
-            kind=RelayFrameKind(meta["kind"]),
+            kind=RelayFrameKind(kind),
             session_id=str(meta["session_id"]),
             correlation_id=str(meta["correlation_id"]),
             operation_id=str(meta["operation_id"]),
@@ -118,11 +162,15 @@ async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
 __all__ = [
     "MAX_META_BYTES",
     "MAX_PAYLOAD_BYTES",
+    "MAX_PROBE_BYTES",
     "FrameSink",
     "FrameStreamError",
     "FrameWriter",
+    "ProbeFrame",
     "WireFrameSink",
     "read_relay_frame",
+    "read_stream_frame",
     "split_host_port",
+    "write_probe",
     "write_relay_frame",
 ]

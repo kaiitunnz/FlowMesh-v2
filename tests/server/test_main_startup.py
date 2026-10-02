@@ -19,6 +19,9 @@ class _Runtime(_Recorder):
     def release_ended_reservations(self) -> None:
         self.calls.append("runtime.release")
 
+    def live_resident_task_ids(self) -> set[str]:
+        return set()
+
     def resident_invocation_completed(
         self, workflow_id: str, invocation_id: str
     ) -> None:
@@ -26,9 +29,13 @@ class _Runtime(_Recorder):
 
 
 class _Registry(_Recorder):
+    def __init__(self, calls: list[str], snapshot: Any = None) -> None:
+        super().__init__(calls)
+        self.snapshot = object() if snapshot is None else snapshot
+
     async def load_snapshot_async(self) -> Any:
         self.calls.append("load_snapshot")
-        return object()  # a non-None snapshot
+        return self.snapshot
 
 
 class _Control(_Recorder):
@@ -37,6 +44,9 @@ class _Control(_Recorder):
 
     def rehydrate(self, snapshot: Any) -> None:
         self.calls.append("control.rehydrate")
+
+    def reattach_replicas(self, live_serve_tasks: Any) -> None:
+        self.calls.append("control.reattach")
 
     def reconcile_workflow_terminals(self, completed: Any) -> None:
         self.calls.append("control.reconcile")
@@ -56,15 +66,17 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
     asyncio.run(
         rehydrate_root_state(runtime, control, registry)  # type: ignore[arg-type]
     )
-    # The BLOCKER guard: the claim store is bound and loaded before the runtime
+    # The claim store is bound and loaded before the runtime
     # re-drives suspended boundaries (a resident boundary would otherwise terminalize
-    # against an empty store), the claims the restored ledger settled release before
-    # the idle sweep starts, and it starts only after the store rebuilds.
+    # against an empty store), restored replicas re-attach once the runtime has restored
+    # their serve tasks, the claims the restored ledger settled release before the idle
+    # sweep starts, and it starts only after the store rebuilds.
     assert calls == [
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
         "runtime.rehydrate",
+        "control.reattach",
         "runtime.release",
         "control.reconcile",
         "start",
@@ -86,6 +98,7 @@ def test_root_startup_reconciles_serve_terminals_after_the_claim_store() -> None
         "control.rehydrate",
         "serve.reconcile",
         "runtime.rehydrate",
+        "control.reattach",
         "runtime.release",
         "control.reconcile",
         "start",

@@ -1,6 +1,6 @@
 """Guardrails: the route substrate carries no resident capacity concern.
 
-The echo seam proves the route ladder and relay mechanics only. Its modules must not
+The echo seam proves the route ladder and its transports only. Its modules must not
 import resident-capacity code or reference a claim/credit/route-authorization identifier
 (prose in docstrings is fine; actual code coupling is not).
 """
@@ -9,14 +9,13 @@ import ast
 from pathlib import Path
 
 import server.network.deputy as deputy
-import server.network.listeners as listeners
 import server.network.rendezvous as rendezvous
 import server.network.resolver as resolver
 import server.network.reverse_relay as reverse_relay
 import server.network.service as service
 import server.network.state as state
 
-_SUBSTRATE = (deputy, listeners, rendezvous, resolver, reverse_relay, service, state)
+_SUBSTRATE = (deputy, rendezvous, resolver, reverse_relay, service, state)
 
 _FORBIDDEN_IDENTIFIERS = {
     "ServiceClaim",

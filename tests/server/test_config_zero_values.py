@@ -88,14 +88,6 @@ def test_resident_floored_counts_settle_at_their_floor_for_zero(
     assert getattr(ResidentCapacityConfig.from_env(), attribute) == floor
 
 
-def test_relay_buffer_bytes_settles_at_its_floor_for_zero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("NETWORK_PLANE_RELAY_BUFFER_BYTES", "0")
-
-    assert NetworkPlaneConfig.from_env().relay_buffer_bytes == 1024
-
-
 @pytest.mark.parametrize(
     ("read_config", "env_name", "attribute", "default"),
     [

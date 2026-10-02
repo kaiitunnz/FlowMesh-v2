@@ -24,7 +24,6 @@ from shared.schemas.event import (
     parse_event,
 )
 from shared.schemas.worker import WorkerStatus
-from shared.tasks import TaskType
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils.recent import RecentMap
 
@@ -62,6 +61,7 @@ from ..ssh import SshRelayOrigin
 from ..task.finalizer import WorkflowFinalizer
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import (
+    SERVE_TASK_TYPES,
     DispatchEnd,
     EventEffect,
     LossOutcome,
@@ -78,10 +78,6 @@ from .watchdog import WorkerWatchdog
 
 if TYPE_CHECKING:
     from ..serve import GatedServe
-
-# Model-serving task types adopted as standing resident allocations: the GPU vLLM serve
-# task and its GPU-free dev_model stand-in, both reached only through the gated route.
-_SERVE_TASK_TYPES = frozenset({TaskType.SERVE, TaskType.DEV_MODEL})
 
 # How a report of a task its worker gave up ended the task's dispatch.
 _GIVEN_UP_ENDS = {
@@ -1263,8 +1259,8 @@ class EventMonitor:
         payload = getattr(record, "latest_update", None) if record is not None else None
         if not isinstance(payload, dict):
             return
-        self._runtime.mark_updated(
-            task_id, None, self._handle_serve_task_update(task_id, None, payload)
+        self._runtime.rewrite_update(
+            task_id, payload, self._handle_serve_task_update(task_id, None, payload)
         )
 
     def _serve_url(self, task_id: str) -> str | None:
@@ -1305,7 +1301,7 @@ class EventMonitor:
         record = self._runtime.get_record(task_id)
         if (
             record is None
-            or record.task_type not in _SERVE_TASK_TYPES
+            or record.task_type not in SERVE_TASK_TYPES
             or record.resident
         ):
             return
@@ -1332,7 +1328,7 @@ class EventMonitor:
         if self._gated_serve is None:
             return
         record = self._runtime.get_record(task_id)
-        if record is not None and record.task_type in _SERVE_TASK_TYPES:
+        if record is not None and record.task_type in SERVE_TASK_TYPES:
             self._gated_serve.drain(task_id)
 
     def _track_pending(self, fut: Future[Any]) -> None:

@@ -9,6 +9,9 @@ node's purpose-scoped listener — serve that shape and differ only in where a f
 which each supplies as a per-connection handler.
 
 The listener is transport only: it reads a frame's framing and hands the frame on whole.
+A probe opening a connection is the one frame it answers itself: it echoes the probe and
+closes, so a reachability check covers the handshake, admission and framing a session
+uses without reaching a handler.
 
 A dialer that opens a socket but never finishes the handshake holds one slot, so the
 handshake is deadlined; the connection cap bounds the sessions accepted past it. A
@@ -31,8 +34,11 @@ from typing import Protocol
 from .frame_stream import (
     FrameSink,
     FrameStreamError,
+    ProbeFrame,
     read_relay_frame,
+    read_stream_frame,
     split_host_port,
+    write_probe,
     write_relay_frame,
 )
 from .mtls import MutualTlsMaterial, peer_identities, server_context
@@ -175,8 +181,15 @@ class MutualTlsFrameListener:
             return
         self._open += 1
         self._connections.add(writer)
-        handler = self._handler(ConnectionFrameSink(writer))
+        handler: ConnectionHandler | None = None
         try:
+            first = await read_stream_frame(reader)
+            if isinstance(first, ProbeFrame):
+                await write_probe(writer, first.payload)
+                writer.close()
+                return
+            handler = self._handler(ConnectionFrameSink(writer))
+            await handler.on_frame(first)
             while True:
                 await handler.on_frame(await read_relay_frame(reader))
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
@@ -186,7 +199,8 @@ class MutualTlsFrameListener:
         finally:
             self._open -= 1
             self._connections.discard(writer)
-            handler.close()
+            if handler is not None:
+                handler.close()
             await close_writer(writer)
 
     def _peer_identities(self, writer: asyncio.StreamWriter) -> frozenset[str]:

@@ -19,13 +19,13 @@ from ...auth.security import (
     require_permission,
 )
 from ...hooks import ResourceAction, ResourceKind
-from ...network.service import PROBE_TRUST, NetworkPlane
+from ...network.deputy import dialable_candidates
+from ...network.service import NetworkPlane
 from ...network.state import (
     ReplicaListenerAdvertisement,
     RouteObservationOutcome,
     Transport,
 )
-from ...network.wire import APP_ERROR_SENTINEL
 from ...registries.node import NodeRegistry
 from ...schemas.network import (
     NetworkEchoRequest,
@@ -56,9 +56,9 @@ def _require_plane(plane: NetworkPlane | None) -> NetworkPlane:
 
 @router.post(
     "/echo",
-    summary="Resolve a route and echo over the selected transport",
-    description="Resolve an ordered route to the target listener and round-trip a "
-    "payload over the first working transport, updating reachability.",
+    summary="Resolve a route and probe it transport by transport",
+    description="Resolve an ordered route to the target listener and probe each "
+    "forward-dial transport in order until one answers, updating reachability.",
 )
 async def network_echo(
     body: NetworkEchoRequest,
@@ -79,22 +79,30 @@ async def network_echo(
         routes=tuple(body.listener.routes),
         directly_routable=body.listener.directly_routable,
     )
-    # A diagnostic probe resolves the full ladder so an operator can test a path the
-    # deployment has not (yet) declared trusted for resident traffic.
-    resolved = await network.resolve(body.origin_node_id, listener, trust=PROBE_TRUST)
+    # A probe resolves every reachable peer path, trusted for resident traffic or not;
+    # its observations feed the reachability view resident routing reads.
+    resolved = await network.resolve(
+        body.origin_node_id, listener, trust=network.probe_trust
+    )
     if resolved is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="origin node has no network endpoint advertisement",
         )
     origin, route = resolved
+    candidates = [candidate.transport.value for candidate in route.candidates]
+    if not dialable_candidates(route):
+        return NetworkEchoResponse(
+            route_epoch=route.route_epoch,
+            candidates=candidates,
+            reachability=network.reachability_states(origin, listener),
+        )
 
-    echo_payload = APP_ERROR_SENTINEL if body.app_error else body.payload.encode()
     cmd = CommandMessage(
         command=CommandType.DELIVER_ROUTE_PLAN,
         payload={
             "resolved_route": route.model_dump(mode="json"),
-            "payload_b64": base64.b64encode(echo_payload).decode(),
+            "payload_b64": base64.b64encode(body.payload.encode()).decode(),
             "connect_budget_sec": network.connect_budget_sec,
         },
     )
@@ -117,13 +125,12 @@ async def network_echo(
     ]
     network.record_observations(origin, listener, observations)
 
-    echoed_b64 = resp.data.get("echoed_b64")
-    echoed = base64.b64decode(echoed_b64).decode() if echoed_b64 else None
+    selected = resp.data.get("selected_transport")
     return NetworkEchoResponse(
-        selected_transport=resp.data.get("selected_transport"),
-        echoed=echoed,
+        selected_transport=selected,
+        echoed=body.payload if selected else None,
         route_epoch=route.route_epoch,
-        candidates=[candidate.transport.value for candidate in route.candidates],
+        candidates=candidates,
         reachability=network.reachability_states(origin, listener),
     )
 
