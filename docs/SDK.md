@@ -45,7 +45,8 @@ async with AsyncFlowMesh(base_url="...", api_key="...") as client:
 - **Validate without executing** — `client.workflows.validate(text_or_mapping)`.
 - **List with filters** — `client.workflows.list(status=...)` and
   `client.tasks.list(workflow_id=..., status=...)` return every match, oldest
-  first, following the server's cursors.
+  first, following the server's cursors. `query_params` takes further filters
+  only; a paging key in it raises `FlowMeshError`.
 - **Stream logs** — `client.workflows.stream_logs(wf_id)` and
   `client.tasks.stream_logs(task_id)` yield server-sent events; the
   iterator stops when the source closes.

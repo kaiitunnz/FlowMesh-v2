@@ -52,8 +52,8 @@ class WorkflowValidateResponse(BaseModel):
 class WorkflowPage(BaseModel):
     entries: list[Workflow] = Field(description="Workflows, oldest submission first.")
     next_cursor: str | None = Field(
-        default=None, description="Cursor for the next page of newer workflows."
+        default=None, description="Pass as `after` for the page of newer workflows."
     )
     prev_cursor: str | None = Field(
-        default=None, description="Cursor for the next page of older workflows."
+        default=None, description="Pass as `before` for the page of older workflows."
     )

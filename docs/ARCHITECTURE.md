@@ -113,7 +113,7 @@ src/
     task/                 parser, runtime, models, merge / epoch helpers
       v2/                   versioned representations, compiler
     tools/                Fabric-served external-tool control authority (broker)
-    utils/                concurrent, helpers, logging, misc, time
+    utils/                concurrent, cursors, helpers, logging, query, time
   shared/
     grpc/supervisor/v1/   Generated proto stubs (server + worker)
     schemas/              Cross-cutting schemas
@@ -609,9 +609,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   fresh permit, and an interrupt for each of its cancelling tasks.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
-  do not parse client-side. A task listing matches and copies out its page in
-  one pass under the runtime lock, and builds and serializes it in a worker
-  thread.
+  do not parse client-side. Task and workflow listings build their pages off
+  the event loop.
 - **Cluster telemetry.** A workflow emits one OpenTelemetry trace spanning the processes
   that act on it — the root server's control plane and each worker that runs a task,
   with a supervisor relaying frames it never decodes and so never records — with a
