@@ -474,9 +474,13 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
 
 _GRPC_MAX_MSG_BYTES = 1024 * 1024 * 1024  # 1 GB
 # Fixed for every deployment: the server pings each worker connection, so a half-open
-# stream ends, and its worker reattaches, within about the sum of these.
+# stream ends, and its worker reattaches, within about the keepalive time plus the ping
+# ack timeout.
 _GRPC_KEEPALIVE_TIME_MS = 20_000
 _GRPC_KEEPALIVE_TIMEOUT_MS = 10_000
+# A worker's ack leaves behind whatever it already wrote to the connection, so it covers
+# a few windowed relay sessions draining over a slow link to an off-host worker.
+_GRPC_PING_ACK_TIMEOUT_MS = 30_000
 
 
 class GrpcServer:
@@ -521,9 +525,9 @@ class GrpcServer:
                 ("grpc.keepalive_timeout_ms", _GRPC_KEEPALIVE_TIMEOUT_MS),
                 # A task stream with nothing to deliver is the one a half-open
                 # connection hides: its pings never stop for lack of data, and one
-                # left unanswered fails the connection within the keepalive timeout.
+                # left unanswered fails the connection within the ping ack timeout.
                 ("grpc.http2.max_pings_without_data", 0),
-                ("grpc.http2.ping_timeout_ms", _GRPC_KEEPALIVE_TIMEOUT_MS),
+                ("grpc.http2.ping_timeout_ms", _GRPC_PING_ACK_TIMEOUT_MS),
                 (
                     "grpc.keepalive_permit_without_calls",
                     int(env.SUPERVISOR_GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS),

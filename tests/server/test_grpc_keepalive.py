@@ -73,6 +73,7 @@ async def test_a_half_open_task_stream_ends_at_the_supervisor(
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
     monkeypatch.setattr(grpc_server_module, "_GRPC_KEEPALIVE_TIME_MS", 200)
     monkeypatch.setattr(grpc_server_module, "_GRPC_KEEPALIVE_TIMEOUT_MS", 300)
+    monkeypatch.setattr(grpc_server_module, "_GRPC_PING_ACK_TIMEOUT_MS", 300)
     port = _free_port()
     supervisor = _Supervisor(_redis(fakeredis.FakeServer()), port)
     await supervisor.start()
