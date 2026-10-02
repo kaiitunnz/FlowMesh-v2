@@ -26,6 +26,7 @@ from shared.schemas.event import (
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import TaskType
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
+from shared.utils.recent import RecentMap
 
 from ..auth import default_principal, deregister_resource, register_resource
 from ..clients.redis import (
@@ -175,7 +176,9 @@ class EventMonitor:
         # Per-entry handler-failure counts backing the consumer's retry budget.
         self._event_handler_attempts: dict[str, int] = {}
         # When each (worker, dispatch) was last revoked as an orphan run.
-        self._revoked_runs: dict[tuple[str, str], float] = {}
+        self._revoked_runs: RecentMap[tuple[str, str], float] = RecentMap(
+            _REVOKED_RUN_MEMORY
+        )
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._threads: list[threading.Thread] | None = None
@@ -1025,19 +1028,16 @@ class EventMonitor:
         dispatch_id, task_id = event.dispatch_id, event.payload.get("task_id")
         run = (worker_id, dispatch_id or "")
         now = time.monotonic()
+        last = self._revoked_runs.get(run)
         if (
             event.status is not WorkerStatus.BUSY
             or not dispatch_id
             or not isinstance(task_id, str)
-            or now - self._revoked_runs.get(run, -_REVOKE_RESEND_SEC)
-            < _REVOKE_RESEND_SEC
+            or (last is not None and now - last < _REVOKE_RESEND_SEC)
             or self._runtime.dispatch_in_flight(task_id, dispatch_id, worker_id)
         ):
             return
-        self._revoked_runs.pop(run, None)
         self._revoked_runs[run] = now
-        if len(self._revoked_runs) > _REVOKED_RUN_MEMORY:
-            del self._revoked_runs[next(iter(self._revoked_runs))]
         self._logger.warning(
             "Worker %s runs dispatch %s of task %s that control does not hold; "
             "revoking it",
