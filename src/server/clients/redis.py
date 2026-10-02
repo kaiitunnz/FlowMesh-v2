@@ -505,6 +505,19 @@ class SyncRedisClient:
         if members:
             self._telemetry.srem(key, *members)
 
+    # ---- Sorted-set helpers ----
+    def lex_range(
+        self, key: str, start: str, stop: str, count: int, reverse: bool = False
+    ) -> list[str]:
+        """Return up to ``count`` members of a sorted set whose members share one
+        score, from ``start`` toward ``stop`` (``ZRANGEBYLEX`` bounds), descending
+        when ``reverse``."""
+        if reverse:
+            members = self._control.zrevrangebylex(key, start, stop, start=0, num=count)
+        else:
+            members = self._control.zrangebylex(key, start, stop, start=0, num=count)
+        return list(_sync(members))
+
     # ---- Pipelines ----
     def control_pipeline(self, transaction: bool = True) -> Pipeline:
         return self._control.pipeline(transaction=transaction)

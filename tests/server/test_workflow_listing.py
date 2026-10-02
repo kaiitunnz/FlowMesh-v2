@@ -14,7 +14,11 @@ from lumid_hooks import PrincipalContext
 
 from server.app_state import get_logger, get_workflow_registry
 from server.auth.security import authenticate_connection
-from server.clients.redis import WORKFLOWS_SET_KEY, workflow_key
+from server.clients.redis import (
+    WORKFLOWS_BY_SUBMISSION_KEY,
+    WORKFLOWS_SET_KEY,
+    workflow_key,
+)
 from server.config import OrchestrationConfig
 from server.registries.workflow import WorkflowRecord, WorkflowRegistry
 from server.routers.v1 import workflows as workflows_router
@@ -199,12 +203,33 @@ def test_workflows_registered_before_the_index_list_once_indexed(
     assert fabric.ids("/api/v1/workflows") == []
 
     assert asyncio.run(fabric.registry.index_submissions_async()) == 12
-    assert asyncio.run(fabric.registry.index_submissions_async()) == 0
     ids += [fabric.submit(index) for index in range(3)]
+    counting = _Counting(fabric.registry, monkeypatch)
+    assert asyncio.run(fabric.registry.index_submissions_async()) == 0
+    # A covering index is recognized by its size, without reading a workflow.
+    assert (counting.round_trips, counting.commands) == (1, 2)
 
     assert fabric.ids("/api/v1/workflows") == ids
     assert _walk(fabric, "before", limit=4) == ids
     assert _walk(fabric, "after", limit=4) == ids
+
+
+def test_the_sync_and_async_clients_read_the_same_index_range() -> None:
+    client = fake_redis_client(fakeredis.FakeServer())
+    members = {f"{index:016d}:wfl-{index}": 0 for index in range(6)}
+    pipe = client.sync.control_pipeline()
+    pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, members)
+    pipe.execute()
+
+    for args in [("-", "+", 4, False), ("+", "(0000000000000003:wfl-3", 2, True)]:
+        expected = asyncio.run(
+            client.asyncio.lex_range(WORKFLOWS_BY_SUBMISSION_KEY, *args)
+        )
+        assert client.sync.lex_range(WORKFLOWS_BY_SUBMISSION_KEY, *args) == expected
+    assert client.sync.lex_range(WORKFLOWS_BY_SUBMISSION_KEY, "-", "+", 2) == [
+        "0000000000000000:wfl-0",
+        "0000000000000001:wfl-1",
+    ]
 
 
 def _walk(fabric: _Fabric, direction: str, limit: int, **filters: str) -> list[str]:
