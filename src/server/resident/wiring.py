@@ -88,13 +88,13 @@ def build_resident_capacity(
     def endpoint(serve_task_id: str) -> ReplicaEndpoint | None:
         record = runtime.get_record(serve_task_id)
         # Only a dispatched serve task is serving, and only on the endpoint its current
-        # dispatch reported: an earlier dispatch's update outlives a requeue. A record
-        # stored before updates named their dispatch carries none.
+        # dispatch reported: an earlier dispatch's update outlives a requeue.
         if (
             record is None
             or record.status != TaskStatus.DISPATCHED
             or not record.latest_update
-            or record.latest_update_dispatch_id not in (None, record.dispatch_id)
+            or record.latest_update_dispatch_id is None
+            or record.latest_update_dispatch_id != record.dispatch_id
         ):
             return None
         serve = record.latest_update.get("serve")

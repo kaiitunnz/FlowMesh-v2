@@ -295,3 +295,19 @@ def test_a_boundary_redriven_by_the_restart_never_admits_on_a_dead_replica() -> 
         assert replica.replica_id not in {r for r, _ in handoff_replicas(node)}
 
     asyncio.run(run())
+
+
+def test_a_restart_never_reattaches_an_endpoint_no_dispatch_reported() -> None:
+    node = Node()
+    warm = node.warm()
+    serve_task_id = warm.serve_task_id
+    assert serve_task_id is not None
+    record = node.runtime.get_record(serve_task_id)
+    assert record is not None
+    record.latest_update_dispatch_id = None
+    with node.runtime._lock:
+        node.runtime._persist_locked(serve_task_id)
+
+    node.restart()
+
+    assert node.replica(warm.replica_id).state is ReplicaState.PREEMPTED
