@@ -47,6 +47,13 @@ def test_a_sync_never_overwrites_a_later_one(
     assert {"a.txt", "b.txt"} <= paths
 
 
+def test_a_directory_lock_lives_only_while_a_sync_holds_it(tmp_path: Path) -> None:
+    for index in range(50):
+        sync_manifest(tmp_path / f"task-{index}", f"t{index}", [])
+
+    assert len(manifest._MANIFEST_LOCKS) == 0
+
+
 def test_a_scan_skips_in_flight_writes_and_files_removed_under_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
