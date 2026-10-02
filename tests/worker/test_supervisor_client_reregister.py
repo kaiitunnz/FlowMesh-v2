@@ -230,3 +230,48 @@ def test_task_stream_reregisters_and_reconnects_on_unauthenticated() -> None:
     assert client._register_generation == 1
     assert client._worker_id == "wrk-new"
     assert calls["n"] == 2  # stream re-entered after the fast-continue
+
+
+def test_the_task_stream_waits_for_the_latest_re_registration_s_callback() -> None:
+    client = _make_client()
+    first, second = threading.Event(), threading.Event()
+    client._rebound = first
+    passed = threading.Event()
+
+    def attach() -> None:
+        if client._await_rebound():
+            passed.set()
+
+    waiter = threading.Thread(target=attach, daemon=True)
+    waiter.start()
+    # A second re-registration arms the gate while the first one's callback runs,
+    # which then finishes.
+    client._rebound = second
+    first.set()
+
+    assert not passed.wait(1.5)
+    second.set()
+    assert passed.wait(3.0)
+    waiter.join(timeout=3.0)
+
+
+def test_the_task_stream_waits_from_the_claim_of_a_re_registration() -> None:
+    client = _make_client()
+    claimed = threading.Event()
+    release = threading.Event()
+
+    def register() -> None:
+        claimed.set()
+        release.wait(5.0)
+
+    registering = threading.Thread(target=client._reregister, args=(0,), daemon=True)
+    with mock.patch.object(client, "_retry_register_grpc", side_effect=register):
+        registering.start()
+        assert claimed.wait(3.0)
+
+        # The registration is in flight, so the stream does not attach yet.
+        assert not client._rebound.is_set()
+        release.set()
+        registering.join(timeout=3.0)
+    # It gave up, so nothing will rebind and the gate opens again.
+    assert client._rebound.is_set()

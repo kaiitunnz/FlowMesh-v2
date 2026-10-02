@@ -522,9 +522,14 @@ class SupervisorClient:
             if self._register_generation != seen_gen or self._reregistering:
                 return self._register_generation
             self._reregistering = True
+            # The task stream waits from the claim on: once the supervisor takes the
+            # registration, a stream it attaches belongs to the new id.
+            rebound = threading.Event()
+            self._rebound = rebound
         try:
             registration = self._retry_register_grpc()
             if registration is None:
+                rebound.set()
                 return self._register_generation
             new_id, incarnation = registration
             with self._register_lock:
@@ -535,8 +540,6 @@ class SupervisorClient:
                 self._incarnation = incarnation
                 self._register_generation += 1
                 gen = self._register_generation
-                rebound = threading.Event()
-                self._rebound = rebound
             # Interrupts, stops and revokes queued under the previous registration
             # target the dispatch it gave up.
             for stale in (self._interrupt_queue, self._stop_queue, self._revoke_queue):
@@ -561,10 +564,15 @@ class SupervisorClient:
     def _await_rebound(self) -> bool:
         """Wait until the latest re-registration's callback finished; False on
         shutdown."""
-        while not self._rebound.wait(1.0):
-            if self._shutdown.is_set():
+        while True:
+            rebound = self._rebound
+            if rebound.wait(1.0):
+                # An earlier re-registration's callback finishing does not open the
+                # gate a later one armed.
+                if rebound is self._rebound:
+                    return True
+            elif self._shutdown.is_set():
                 return False
-        return True
 
     def _retry_register_grpc(self) -> tuple[str, int] | None:
         """Retry the unary `RegisterWorker` with backoff until it succeeds.
