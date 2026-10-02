@@ -737,6 +737,10 @@ class TaskRuntime:
         # to the origin worker; the ack and outcome handlers consume the worker's fenced
         # transition reports. Set when resident-capacity control is enabled.
         self._resident_originate: Callable[[ToolInvocationEnvelope], bool] | None = None
+        self._resident_task_ended: Callable[[str], None] | None = None
+        # Resident tasks last committed DISPATCHED, so a commit moving one elsewhere
+        # reports that its dispatch ended.
+        self._dispatched_resident: set[str] = set()
         self._resident_ack: Callable[[ResidentBootstrapAck], None] | None = None
         self._resident_outcome: Callable[[ResidentOpOutcome], None] | None = None
         self._resident_route_observation: (
@@ -1143,6 +1147,11 @@ class TaskRuntime:
             restored.append(workflow_id)
         with self._cv:
             self._restore_merges_locked()
+            self._dispatched_resident.update(
+                task_id
+                for task_id, record in self._tasks.items()
+                if record.resident and record.status == TaskStatus.DISPATCHED
+            )
             self._held_dispatches.update(
                 (record.task_id, (record.assigned_worker, record.dispatch_id))
                 for record in self._tasks.values()
@@ -1507,6 +1516,47 @@ class TaskRuntime:
             epoch_frontier=self._workflow_epoch_frontier.get(workflow_id, 0),
         )
 
+    def _commit_transition_locked(
+        self,
+        workflow_id: str,
+        *,
+        records: Sequence[PersistedTask] = (),
+        dispatched: Sequence[str] = (),
+        pending: Sequence[str] = (),
+        done: Sequence[str] = (),
+        failed: Sequence[str] = (),
+        cancelled: Sequence[str] = (),
+        sched: WorkflowSched | None = None,
+    ) -> None:
+        """Apply one workflow state delta, then report each resident task it ended."""
+        self._workflow_registry.commit_transition(
+            workflow_id,
+            records=records,
+            dispatched=dispatched,
+            pending=pending,
+            done=done,
+            failed=failed,
+            cancelled=cancelled,
+            sched=sched,
+        )
+        for persisted in records:
+            if persisted.record.resident:
+                self._observe_resident_locked(persisted.record)
+
+    def _observe_resident_locked(self, record: TaskRecord) -> None:
+        task_id = record.task_id
+        if record.status == TaskStatus.DISPATCHED:
+            self._dispatched_resident.add(task_id)
+            return
+        if task_id not in self._dispatched_resident and not (
+            record.status in TERMINAL_TASK_STATUSES
+            or record.status == TaskStatus.CANCELLING
+        ):
+            return
+        self._dispatched_resident.discard(task_id)
+        if self._resident_task_ended is not None:
+            self._resident_task_ended(task_id)
+
     def _persist_locked(self, *task_ids: str) -> None:
         """Commit task records (no membership change) atomically, per workflow."""
         by_workflow: dict[str, list[str]] = defaultdict(list)
@@ -1514,7 +1564,7 @@ class TaskRuntime:
             if record := self._tasks.get(task_id):
                 by_workflow[record.workflow_id].append(task_id)
         for workflow_id, ids in by_workflow.items():
-            self._workflow_registry.commit_transition(
+            self._commit_transition_locked(
                 workflow_id, records=self._records_locked(*ids)
             )
 
@@ -1544,7 +1594,7 @@ class TaskRuntime:
                 if (record := self._tasks.get(task_id)) is not None:
                     moves[record.workflow_id][_membership(record)].append(task_id)
             for workflow_id, by_status in moves.items():
-                self._workflow_registry.commit_transition(
+                self._commit_transition_locked(
                     workflow_id,
                     records=self._records_locked(
                         *chain.from_iterable(by_status.values())
@@ -1715,7 +1765,7 @@ class TaskRuntime:
         if terminal_ids:
             self._commit_locked(*terminal_ids)
         else:
-            self._workflow_registry.commit_transition(
+            self._commit_transition_locked(
                 workflow_id, sched=self._sched_locked(workflow_id)
             )
 
@@ -2863,6 +2913,15 @@ class TaskRuntime:
         self._resident_ack = on_ack
         self._resident_outcome = on_outcome
         self._resident_route_observation = on_route_observation
+
+    def set_resident_task_end_hook(self, hook: Callable[[str], None]) -> None:
+        """Install the consumer told when a resident task stops serving.
+
+        The hook receives the task id once a commit moves a dispatched resident task
+        anywhere but a dispatch, or settles or cancels one. It runs under the runtime's
+        lock, so it must hand the work off rather than call back in.
+        """
+        self._resident_task_ended = hook
 
     def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
         """Install the consumer that releases a resident admission credit on DS
@@ -5128,7 +5187,7 @@ class TaskRuntime:
 
     def _record_dispatch_locked(self, record: TaskRecord, publish: _Publish) -> None:
         self._take_dispatch_locked(record, publish)
-        self._workflow_registry.commit_transition(
+        self._commit_transition_locked(
             record.workflow_id,
             records=self._records_locked(record.task_id),
             dispatched=[record.task_id],
@@ -5190,7 +5249,7 @@ class TaskRuntime:
                     return EventEffect.SETTLED
                 record.status = TaskStatus.DISPATCHED
                 record.started_ts = started_ts
-                self._workflow_registry.commit_transition(
+                self._commit_transition_locked(
                     record.workflow_id,
                     records=self._records_locked(task_id),
                     dispatched=[task_id],
@@ -6201,7 +6260,7 @@ class TaskRuntime:
         queue."""
 
         def commit() -> None:
-            self._workflow_registry.commit_transition(
+            self._commit_transition_locked(
                 workflow_id,
                 records=self._records_locked(*touched),
                 dispatched=[

@@ -132,10 +132,12 @@ class _Node:
         await rehydrate_root_state(self.runtime, self.control, cast(Any, self.resident))
 
     def materialize(self) -> ReplicaIncarnation:
+        return asyncio.run(self.materialize_async())
+
+    async def materialize_async(self) -> ReplicaIncarnation:
         """Cold-start one replica of the family; its serve task is registered."""
         self.control.stores.families.register(_FAMILY)
-        lifecycle = self.control._lifecycle
-        return asyncio.run(lifecycle.materialize(_FAMILY))
+        return await self.control._lifecycle.materialize(_FAMILY)
 
     def serve(self, serve_task_id: str, worker_id: str = "wkr-1") -> None:
         """Dispatch the serve task and have it report its engine endpoint."""
@@ -157,7 +159,10 @@ class _Node:
         )
 
     def warm(self) -> ReplicaIncarnation:
-        replica = self.materialize()
+        return asyncio.run(self.warm_async())
+
+    async def warm_async(self) -> ReplicaIncarnation:
+        replica = await self.materialize_async()
         assert replica.serve_task_id is not None
         self.serve(replica.serve_task_id)
         self.control._promote_ready_replicas(_FAMILY.family)

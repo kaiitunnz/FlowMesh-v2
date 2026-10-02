@@ -763,6 +763,18 @@ class ResidentCapacityControl:
             ):
                 self._admission.on_route_loss(claim)
 
+    def on_serve_task_end(self, serve_task_id: str) -> None:
+        """Retire the replica a resident serve task stopped serving, on the control
+        loop.
+
+        The runtime reports this under its own lock, so the work is handed to the loop
+        that owns the stores; nothing is loaded to retire before the loop is bound.
+        """
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._lifecycle.on_serve_task_end, serve_task_id
+            )
+
     def reattach_replicas(self) -> None:
         """Re-attach each restored replica to its serve task, then open admission.
 

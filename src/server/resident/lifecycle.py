@@ -400,6 +400,23 @@ class LifecycleScaleManager:
         self._persist()
         self._reap_serve_task(serve_task_id)
 
+    def on_serve_task_end(self, serve_task_id: str) -> None:
+        """Retire the demand replica a serve task stopped serving.
+
+        A replica still serving or cold-starting on the task is invalidated, which reaps
+        the task so nothing re-runs it. A draining replica is already retiring: its task
+        is reaped and the replica stays draining until its admitted work releases. A
+        replica the task no longer backs, a standing replica, and one a teardown already
+        ended are left as they are.
+        """
+        for replica in self._stores.directory.all():
+            if replica.serve_task_id != serve_task_id or replica.standing:
+                continue
+            if replica.state is ReplicaState.DRAINING:
+                self._reap_serve_task(serve_task_id)
+            elif replica.state in _ACTIVE_REPLICA_STATES:
+                self.on_preempt(replica.replica_id)
+
     def reconcile_serve_tasks(self, live_serve_tasks: frozenset[str]) -> None:
         """Reconcile the directory against the serve tasks still running for it.
 

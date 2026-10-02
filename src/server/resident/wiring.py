@@ -115,7 +115,7 @@ def build_resident_capacity(
         )
 
     sweep_interval = cfg.idle_sweep_interval_sec if cfg.idle_retain_sec > 0 else 0.0
-    return ResidentCapacityControl(
+    resident_control = ResidentCapacityControl(
         stores=stores,
         admission=AdmissionController(stores, persist),
         lifecycle=lifecycle,
@@ -136,6 +136,8 @@ def build_resident_capacity(
         max_transient_redrives=cfg.max_transient_redrives,
         control=control,
     )
+    runtime.set_resident_task_end_hook(resident_control.on_serve_task_end)
+    return resident_control
 
 
 def wire_worker_delivery(

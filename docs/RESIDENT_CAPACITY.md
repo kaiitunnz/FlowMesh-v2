@@ -191,6 +191,20 @@ plan node carries is retained for twice the base, and every other family keeps t
 standing `serve` allocation is pinned to its task and exempt. Warmth is a retention
 preference only — it reserves nothing and changes no claim, admission, route, or credit.
 
+A demand replica lives only while its serve task holds a dispatch. A serve task that
+leaves its dispatch for any reason other than a new one — its worker lost or drained, the
+task settled or cancelled — invalidates its serving or materializing replica and is
+reaped, so nothing re-runs it and the family materializes again on demand. A draining
+replica's task is reaped while the replica finishes draining. An admitted claim keeps its
+credit until its own fenced terminal either way.
+
+On a root restart, the stores load and in-flight claims go `UNCERTAIN` before the runtime
+re-drives suspended boundaries, and each restored replica re-attaches to its serve task
+once the runtime has restored the task's record: a dispatched serve task re-attaches its
+endpoint and the warm replica is reused, and any other invalidates it. Admission waits
+until the replicas have re-attached. A resident serve task that no active replica backs
+is reaped at startup.
+
 ## Selection strategy
 
 Replica selection is swappable and bound per approved family, not per workflow or request,
