@@ -25,7 +25,7 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 |--------|------|-------------|
 | POST | `/api/v1/workflows` | Submit a workflow. Body is YAML (`text/plain`) or JSON; set `Workflow-Format: n8n` for n8n graphs. |
 | POST | `/api/v1/workflows/validate` | Parse without executing; for `flowmesh/v2` returns the compiled template/plan inspection. |
-| GET | `/api/v1/workflows` | List workflows (`workflow_id`, `owner`, `status`, cursor pagination). |
+| GET | `/api/v1/workflows` | List workflows, a cursor page. Filters: `workflow_id`, `status`, `task_ids`. |
 | GET | `/api/v1/workflows/{id}` | Workflow details + per-task summary. |
 | GET | `/api/v1/workflows/{id}/logs` | Query logs (`limit`, `before`/`after` cursors). |
 | GET | `/api/v1/workflows/{id}/logs/stream` | SSE log stream. |
@@ -51,7 +51,7 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/tasks` | List tasks. Filters: `workflow_id`, `status`, `task_type`, `assigned_worker`. |
+| GET | `/api/v1/tasks` | List tasks, a cursor page. Filters: `task_id`, `workflow_id`, `status`, `category`, `task_type`, `assigned_worker`, `graph_node_name`, `completed`, `failed`. |
 | GET | `/api/v1/tasks/{id}` | Task details. |
 | GET | `/api/v1/tasks/{id}/logs` | Query task logs. |
 | GET | `/api/v1/tasks/{id}/logs/stream` | SSE task log stream. |
@@ -166,3 +166,12 @@ resident traffic and dials only with `NETWORK_PLANE_PEER_ENABLED=true`. See
 List endpoints (`/api/v1/workflows`, `/api/v1/tasks`, log queries,
 published outputs) accept `limit` and `before` / `after` cursors.
 Cursors are opaque; do not parse them client-side.
+
+Workflows and tasks are ordered by submission and return
+`{entries, next_cursor, prev_cursor}`. Without a cursor, a request returns
+the newest page; `before=<prev_cursor>` returns the next older page and
+`after=<next_cursor>` the next newer one, each in submission order. `limit`
+defaults to 100, at most 1000. A repeated filter matches any of its values,
+and a filter key the endpoint does not accept is a `400` with
+`detail.code` `invalid_request`; setting both cursors is one too, and a
+malformed cursor is `invalid_cursor`.
