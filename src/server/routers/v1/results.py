@@ -1,8 +1,10 @@
 import asyncio
-import contextlib
+import errno
 import gzip
 import io
 import logging
+import os
+import stat
 import tarfile
 import tempfile
 import time
@@ -360,18 +362,50 @@ def _create_result_bundle_archive(
 
 
 def _add_tree(archive: tarfile.TarFile, root: Path, arcname: str) -> None:
-    """Add ``root`` and everything under it, leaving out in-flight atomic writes and
-    any file removed while the archive is built."""
+    """Add ``root`` and everything under it without following a link.
+
+    The walk holds each directory open and reads every name relative to it, so a
+    link, or a directory swapped for one, is archived as the link. In-flight atomic
+    writes and names removed or replaced during the walk are left out.
+    """
     archive.add(root, arcname=arcname, recursive=False)
-    for path in sorted(root.rglob("*")):
-        if is_atomic_temp(path.name):
-            continue
-        with contextlib.suppress(FileNotFoundError):
-            archive.add(
-                path,
-                arcname=f"{arcname}/{path.relative_to(root).as_posix()}",
-                recursive=False,
-            )
+    for dirpath, dirs, files, dirfd in os.fwalk(root, follow_symlinks=False):
+        dirs[:] = sorted(name for name in dirs if not is_atomic_temp(name))
+        rel_dir = Path(dirpath).relative_to(root)
+        for name in sorted([*dirs, *files]):
+            if is_atomic_temp(name):
+                continue
+            try:
+                _add_entry(
+                    archive, dirfd, name, f"{arcname}/{(rel_dir / name).as_posix()}"
+                )
+            except OSError as exc:
+                if exc.errno not in {errno.ENOENT, errno.ELOOP}:
+                    raise
+
+
+def _add_entry(archive: tarfile.TarFile, dirfd: int, name: str, arcname: str) -> None:
+    st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    if stat.S_ISREG(st.st_mode):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd)
+        with open(fd, "rb") as fh:
+            info = archive.gettarinfo(arcname=arcname, fileobj=fh)
+            if info is not None and info.isreg():
+                archive.addfile(info, fh)
+        return
+    info = tarfile.TarInfo(arcname)
+    if stat.S_ISDIR(st.st_mode):
+        info.type = tarfile.DIRTYPE
+    elif stat.S_ISLNK(st.st_mode):
+        info.type = tarfile.SYMTYPE
+        info.linkname = os.readlink(name, dir_fd=dirfd)
+    elif stat.S_ISFIFO(st.st_mode):
+        info.type = tarfile.FIFOTYPE
+    else:
+        return
+    info.mode = stat.S_IMODE(st.st_mode)
+    info.uid, info.gid, info.mtime = st.st_uid, st.st_gid, int(st.st_mtime)
+    archive.addfile(info)
 
 
 def _bundle_section_path(base_dir: Path, section: str) -> Path | None:

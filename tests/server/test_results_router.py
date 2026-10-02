@@ -1,5 +1,7 @@
+import contextlib
 import io
 import logging
+import os
 import stat
 import tarfile
 import tempfile
@@ -373,25 +375,135 @@ def test_a_bundle_leaves_out_in_flight_writes_and_files_removed_under_it(
     (artifacts / "nested" / "kept.bin").write_bytes(b"x")
     in_flight = Path(tempfile.mkstemp(prefix=".fm-tmp-", dir=artifacts)[1])
     assert atomic.is_atomic_temp(in_flight.name)
-    rglob = Path.rglob
+    fwalk = os.fwalk
 
-    def _with_removed(self: Path, pattern: str) -> Iterator[Path]:
-        yield from rglob(self, pattern)
-        yield self / "gone.bin"
+    def _with_removed(top: Any, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        for dirpath, dirs, files, dirfd in fwalk(top, *args, **kwargs):
+            yield dirpath, dirs, [*files, "gone.bin"], dirfd
 
-    monkeypatch.setattr(Path, "rglob", _with_removed)
+    monkeypatch.setattr(results_router.os, "fwalk", _with_removed)
 
+    assert _bundle_members(tmp_path) == [
+        ("t-1/artifacts", tarfile.DIRTYPE, ""),
+        ("t-1/artifacts/nested", tarfile.DIRTYPE, ""),
+        ("t-1/artifacts/nested/kept.bin", tarfile.REGTYPE, ""),
+    ]
+
+
+def test_a_bundle_archives_a_symlinked_section_root_as_the_link(
+    tmp_path: Path,
+) -> None:
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "passwd").write_text("root:x:0:0")
+    task = tmp_path / "task"
+    task.mkdir()
+    (task / "logs").symlink_to(secret)
+
+    members = _bundle_members(task, ("logs",))
+
+    assert members == [("t-1/logs", tarfile.SYMTYPE, str(secret))]
+    assert members == _reference_members(task, ("logs",))
+
+
+def test_a_bundle_archives_a_symlinked_nested_directory_as_the_link(
+    tmp_path: Path,
+) -> None:
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "passwd").write_text("root:x:0:0")
+    artifacts = tmp_path / "task" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "out").symlink_to(secret)
+
+    members = _bundle_members(tmp_path / "task")
+
+    assert members == [
+        ("t-1/artifacts", tarfile.DIRTYPE, ""),
+        ("t-1/artifacts/out", tarfile.SYMTYPE, str(secret)),
+    ]
+    assert members == _reference_members(tmp_path / "task")
+
+
+def test_a_bundle_reads_a_directory_swapped_for_a_link_from_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "kept.bin").write_bytes(b"secret")
+    artifacts = tmp_path / "task" / "artifacts"
+    (artifacts / "nested").mkdir(parents=True)
+    (artifacts / "nested" / "kept.bin").write_bytes(b"x")
+    fwalk = os.fwalk
+
+    def _swapping(top: Any, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        for entry in fwalk(top, *args, **kwargs):
+            if entry[0].endswith("nested"):
+                (artifacts / "nested").rename(tmp_path / "moved")
+                (artifacts / "nested").symlink_to(secret)
+            yield entry
+
+    monkeypatch.setattr(results_router.os, "fwalk", _swapping)
+
+    with _open_bundle(tmp_path / "task") as archive:
+        member = archive.extractfile("t-1/artifacts/nested/kept.bin")
+        assert member is not None and member.read() == b"x"
+
+
+def test_a_bundle_keeps_links_fifos_empty_directories_and_modes(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "empty").mkdir(parents=True)
+    (artifacts / "loop").symlink_to("loop")
+    os.mkfifo(artifacts / "pipe")
+    script = artifacts / "run.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o750)
+    (artifacts / "empty").chmod(0o700)
+
+    members = _bundle_members(tmp_path)
+
+    assert sorted(members) == _reference_members(tmp_path)
+    with _open_bundle(tmp_path) as archive:
+        modes = {member.name: member.mode for member in archive.getmembers()}
+    assert modes["t-1/artifacts/run.sh"] == 0o750
+    assert modes["t-1/artifacts/empty"] == 0o700
+
+
+def _bundle_members(
+    base_dir: Path, sections: tuple[str, ...] = ("artifacts",)
+) -> list[tuple[str, bytes, str]]:
+    with _open_bundle(base_dir, sections) as archive:
+        return [
+            (member.name, member.type, member.linkname)
+            for member in archive.getmembers()
+        ]
+
+
+@contextlib.contextmanager
+def _open_bundle(
+    base_dir: Path, sections: tuple[str, ...] = ("artifacts",)
+) -> Iterator[tarfile.TarFile]:
     bundle = results_router._create_result_bundle_archive(
-        "t-1", tmp_path, None, ("artifacts",)
+        "t-1", base_dir, None, sections
     )
     try:
         with tarfile.open(bundle, mode="r:gz") as archive:
-            names = archive.getnames()
+            yield archive
     finally:
         bundle.unlink()
 
-    assert names == [
-        "t-1/artifacts",
-        "t-1/artifacts/nested",
-        "t-1/artifacts/nested/kept.bin",
-    ]
+
+def _reference_members(
+    base_dir: Path, sections: tuple[str, ...] = ("artifacts",)
+) -> list[tuple[str, bytes, str]]:
+    """The members ``tarfile`` itself archives for each section, in walk order."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for section in sections:
+            archive.add(base_dir / section, arcname=f"t-1/{section}")
+    buffer.seek(0)
+    with tarfile.open(fileobj=buffer, mode="r") as archive:
+        members = [(m.name, m.type, m.linkname) for m in archive.getmembers()]
+    return sorted(members)
