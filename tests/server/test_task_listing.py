@@ -16,6 +16,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 from flowmesh import FlowMesh
+from flowmesh.exceptions import FlowMeshError
 from lumid_hooks import PrincipalContext
 from pydantic import TypeAdapter
 
@@ -384,7 +385,7 @@ def test_the_sdk_lists_every_task_across_pages() -> None:
         client = FlowMesh(base_url=url, api_key="k")
         listed = client.tasks.list()
         filtered = client.tasks.list(workflow_id=workflow_id)
-        with pytest.raises(ValueError, match="limit"):
+        with pytest.raises(FlowMeshError, match="limit"):
             client.tasks.list(query_params=[("limit", "5")])
 
     assert len(listed) == len(listing.task_ids) > 1000

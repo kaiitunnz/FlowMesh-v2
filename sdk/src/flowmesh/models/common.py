@@ -112,3 +112,11 @@ class LogQueryResponse(BaseModel):
     entries: list[LogEntry]
     next_cursor: str | None = None
     prev_cursor: str | None = None
+
+
+class CursorPage(BaseModel):
+    """One page of a cursor-paged listing."""
+
+    entries: list[Any]
+    next_cursor: str | None = None
+    prev_cursor: str | None = None

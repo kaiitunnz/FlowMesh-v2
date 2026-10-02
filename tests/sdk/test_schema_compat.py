@@ -37,6 +37,7 @@ from flowmesh.models import (
     StorageInfo,
     TaskInfo,
     TaskInputElement,
+    TaskPage,
     TaskType,
     TaskUsage,
     TraceAggregate,
@@ -55,6 +56,7 @@ from flowmesh.models import (
     WorkflowOutputMember,
     WorkflowOutputPage,
     WorkflowOutputValue,
+    WorkflowPage,
     WorkflowStatus,
     WorkflowSubmitResponse,
     WorkflowSubmitTaskEntry,
@@ -94,10 +96,12 @@ from server.schemas.outputs import WorkflowOutputEntry as SrvWorkflowOutputEntry
 from server.schemas.outputs import WorkflowOutputMember as SrvWorkflowOutputMember
 from server.schemas.outputs import WorkflowOutputPage as SrvWorkflowOutputPage
 from server.schemas.outputs import WorkflowOutputValue as SrvWorkflowOutputValue
+from server.schemas.tasks import TaskPage as SrvTaskPage
 from server.schemas.traces import TraceAggregate as SrvTraceAggregate
 from server.schemas.traces import TraceAggregateBucket as SrvTraceAggregateBucket
 from server.schemas.traces import TraceSpanNode as SrvTraceSpanNode
 from server.schemas.traces import TraceTree as SrvTraceTree
+from server.schemas.workflow import WorkflowPage as SrvWorkflowPage
 from server.schemas.workflow import WorkflowSubmitResponse as SrvWorkflowSubmitResponse
 from server.schemas.workflow import (
     WorkflowSubmitTaskEntry as SrvWorkflowSubmitTaskEntry,
@@ -199,9 +203,11 @@ MODEL_PAIRS = [
     (SrvSourceLocation, SourceLocation),
     # Workflow registry
     (SrvWorkflow, Workflow),
+    (SrvWorkflowPage, WorkflowPage),
     # Task models (last_queue_ts is server-internal scheduling field)
     (SrvTaskUsage, TaskUsage),
     (SrvTaskInputElement, TaskInputElement),
+    (SrvTaskPage, TaskPage),
     # Published outputs
     (SrvWorkflowOutputMember, WorkflowOutputMember),
     (SrvWorkflowOutputEntry, WorkflowOutputEntry),

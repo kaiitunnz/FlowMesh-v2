@@ -114,7 +114,7 @@ def list_workflows(
             task_ids=task_id or None,
             query_params=query_params,
         )
-    except (FlowMeshError, ValueError) as exc:
+    except FlowMeshError as exc:
         logging.error(str(exc))
         raise typer.Exit(code=1)
     logging.log(json.dumps([w.model_dump(mode="json") for w in workflows], indent=2))

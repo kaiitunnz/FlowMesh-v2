@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .common import TaskStatus
+from .common import CursorPage, TaskStatus
 
 
 class HardwareUsage(BaseModel, extra="allow"):
@@ -70,3 +70,7 @@ class TaskInfo(BaseModel):
     completed: bool
     failed: bool
     input_element: TaskInputElement | None = None
+
+
+class TaskPage(CursorPage):
+    entries: list[TaskInfo]

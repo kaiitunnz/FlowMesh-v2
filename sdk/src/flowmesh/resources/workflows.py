@@ -20,6 +20,7 @@ from ..models.workflows import (
     Workflow,
     WorkflowOutputPage,
     WorkflowOutputValue,
+    WorkflowPage,
     WorkflowSubmitResponse,
     WorkflowValidateResponse,
 )
@@ -112,8 +113,8 @@ class Workflows(SyncResource):
         extend_params(params, "task_ids", task_ids)
         if query_params:
             params.extend(query_params)
-        data = list_all(self._client, "/workflows", params)
-        return [Workflow.model_validate(w) for w in data]
+        pages = list_all(self._client, "/workflows", params, WorkflowPage)
+        return [entry for page in pages for entry in page.entries]
 
     def cancel(self, workflow_id: str) -> Workflow:
         """Cancel a running workflow."""
@@ -262,8 +263,8 @@ class AsyncWorkflows(AsyncResource):
         extend_params(params, "task_ids", task_ids)
         if query_params:
             params.extend(query_params)
-        data = await list_all_async(self._client, "/workflows", params)
-        return [Workflow.model_validate(w) for w in data]
+        pages = await list_all_async(self._client, "/workflows", params, WorkflowPage)
+        return [entry for page in pages for entry in page.entries]
 
     async def cancel(self, workflow_id: str) -> Workflow:
         """Cancel a running workflow."""

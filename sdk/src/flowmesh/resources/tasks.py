@@ -13,7 +13,7 @@ from ..models.common import (
     LogQueryResponse,
     OkResponse,
 )
-from ..models.tasks import TaskInfo
+from ..models.tasks import TaskInfo, TaskPage
 from ..params import append_param, extend_params
 from ..ssh import task_ssh_info, wait_for_ssh_info, wait_for_ssh_info_async
 from ._base import AsyncResource, SyncResource
@@ -54,8 +54,8 @@ class Tasks(SyncResource):
         append_param(params, "failed", failed)
         if query_params:
             params.extend(query_params)
-        data = list_all(self._client, "/tasks", params)
-        return [TaskInfo.model_validate(t) for t in data]
+        pages = list_all(self._client, "/tasks", params, TaskPage)
+        return [entry for page in pages for entry in page.entries]
 
     def stop(self, task_id: str) -> OkResponse:
         """Request a running task to stop."""
@@ -162,8 +162,8 @@ class AsyncTasks(AsyncResource):
         append_param(params, "failed", failed)
         if query_params:
             params.extend(query_params)
-        data = await list_all_async(self._client, "/tasks", params)
-        return [TaskInfo.model_validate(t) for t in data]
+        pages = await list_all_async(self._client, "/tasks", params, TaskPage)
+        return [entry for page in pages for entry in page.entries]
 
     async def stop(self, task_id: str) -> OkResponse:
         """Request a running task to stop."""

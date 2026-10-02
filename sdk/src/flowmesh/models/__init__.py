@@ -2,6 +2,7 @@
 
 from .artifacts import ArtifactContext, ArtifactRef
 from .common import (
+    CursorPage,
     LogEntry,
     LogEvent,
     LogLevel,
@@ -69,7 +70,7 @@ from .result import (
     SFTResult,
     SSHResult,
 )
-from .tasks import HardwareUsage, TaskInfo, TaskInputElement, TaskUsage
+from .tasks import HardwareUsage, TaskInfo, TaskInputElement, TaskPage, TaskUsage
 from .traces import (
     ActiveWaitBreakdown,
     AssetSummary,
@@ -108,6 +109,7 @@ from .workflows import (
     WorkflowOutputMember,
     WorkflowOutputPage,
     WorkflowOutputValue,
+    WorkflowPage,
     WorkflowSubmitResponse,
     WorkflowSubmitTaskEntry,
     WorkflowValidateResponse,
@@ -177,6 +179,7 @@ __all__ = [
     "LogEntry",
     "LogEvent",
     "LogLevel",
+    "CursorPage",
     "LogQueryResponse",
     "LogStream",
     "MemoryInfo",
@@ -194,6 +197,7 @@ __all__ = [
     "SourceLocation",
     "StorageInfo",
     "TaskInfo",
+    "TaskPage",
     "TaskInputElement",
     "TaskStatus",
     "TaskTiming",
@@ -214,6 +218,7 @@ __all__ = [
     "WorkflowOutputEntry",
     "WorkflowOutputMember",
     "WorkflowOutputPage",
+    "WorkflowPage",
     "WorkflowOutputValue",
     "WorkflowStatus",
     "WorkflowSubmitResponse",
