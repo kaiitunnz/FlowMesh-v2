@@ -182,10 +182,10 @@ async def list_ssh_connections(
     ),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[SSHConnectionInfo]:
-    query = query_filter(request, SSH_CONNECTION_FILTER_FIELDS)
     await require_permission(
         principal, ResourceKind.SYSTEM, None, ResourceAction.ADMIN, logger
     )
+    query = query_filter(request, SSH_CONNECTION_FILTER_FIELDS)
     if ssh_connections is None:
         return []
     connections = await ssh_connections.list_connections()

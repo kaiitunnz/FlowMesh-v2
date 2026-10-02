@@ -188,10 +188,10 @@ async def list_node_workers(
     worker_registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[NodeWorkerInfo]:
-    query = query_filter(request, NODE_WORKER_FILTER_FIELDS)
     await require_permission(
         principal, ResourceKind.NODE, node_id, ResourceAction.READ, logger
     )
+    query = query_filter(request, NODE_WORKER_FILTER_FIELDS)
     workers = await _fetch_node_workers(node_id, node_registry, worker_registry, logger)
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.WORKER, ResourceAction.READ, logger

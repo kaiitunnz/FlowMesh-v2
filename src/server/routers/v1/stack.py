@@ -74,10 +74,10 @@ async def list_workers(
     node_id: str = Depends(get_node_id),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[WorkerInfo]:
-    query = query_filter(request, STACK_WORKER_FILTER_FIELDS)
     await require_permission(
         principal, ResourceKind.NODE, node_id, ResourceAction.READ, logger
     )
+    query = query_filter(request, STACK_WORKER_FILTER_FIELDS)
     cmd = CommandMessage(command=CommandType.GET_WORKERS)
     data = await _exec(supervisor, cmd)
     workers = [WorkerInfo(**w) for w in data.get("workers", [])]

@@ -1,20 +1,32 @@
 """Every list route filters on fields its response model serves, and nothing else."""
 
 import asyncio
+import logging
 import types
-from collections.abc import Collection
-from typing import Annotated, Any, Union, get_args, get_origin
+from collections.abc import Callable, Collection, Coroutine, Iterator
+from typing import Annotated, Any, Union, cast, get_args, get_origin
 
 import pytest
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.routing import APIRoute
+from lumid_hooks import PrincipalContext, ResourceRef
 from pydantic import BaseModel
 from starlette.datastructures import QueryParams
 
+from server.hooks import PERMISSION_CHECKERS
 from server.routers.v1 import nodes, resident, ssh, stack, tasks, workers, workflows
 from server.task.models import TaskRecord
 from server.utils.query import InvalidQuery, QueryFilter
 from tests.server.task.test_v2_orchestration import FakeRegistry, _live_runtime
+
+_LOGGER = logging.getLogger("test.list_filter_fields")
+_PRINCIPAL = PrincipalContext(
+    principal_id="p-1",
+    org_id="org",
+    external_id="ext",
+    principal_type="user",
+    scopes=[],
+)
 
 _ROUTES = [
     (tasks.router, "/tasks", tasks.TASK_FILTER_FIELDS),
@@ -138,3 +150,60 @@ def test_private_and_unmatchable_fields_are_not_filters(
 ) -> None:
     with pytest.raises(InvalidQuery):
         QueryFilter.parse(QueryParams({key: "guess"}), fields)
+
+
+class _DenyAll:
+    name = "deny-all"
+
+    async def require(
+        self,
+        principal: PrincipalContext,
+        resource: ResourceRef,
+        action: str,
+        logger: logging.Logger,
+    ) -> None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="denied")
+
+    async def accessible_ids(
+        self,
+        principal: PrincipalContext,
+        kind: str,
+        action: str,
+        logger: logging.Logger,
+    ) -> frozenset[str] | None:
+        return frozenset()
+
+
+@pytest.fixture
+def deny_all() -> Iterator[None]:
+    PERMISSION_CHECKERS.append(_DenyAll())
+    try:
+        yield
+    finally:
+        PERMISSION_CHECKERS.clear()
+
+
+_GATED_LISTINGS: list[Callable[[Request], Coroutine[Any, Any, Any]]] = [
+    lambda request: resident.list_resident_replicas(request, _PRINCIPAL, None, _LOGGER),
+    lambda request: ssh.list_ssh_connections(request, _PRINCIPAL, None, _LOGGER),
+    lambda request: stack.list_workers(
+        request, _PRINCIPAL, cast(Any, None), "node-1", _LOGGER
+    ),
+    lambda request: nodes.list_node_workers(
+        "node-1", request, _PRINCIPAL, cast(Any, None), cast(Any, None), _LOGGER
+    ),
+]
+
+
+@pytest.mark.parametrize("listing", _GATED_LISTINGS)
+def test_a_gated_listing_authorizes_before_it_reads_filters(
+    deny_all: None, listing: Callable[[Request], Coroutine[Any, Any, Any]]
+) -> None:
+    request = Request(
+        {"type": "http", "method": "GET", "query_string": b"undeclared=1"}
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(listing(request))
+
+    assert exc.value.status_code == status.HTTP_403_FORBIDDEN

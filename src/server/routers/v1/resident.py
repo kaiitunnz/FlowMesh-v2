@@ -68,8 +68,8 @@ async def list_resident_replicas(
     control: ResidentCapacityControl | None = Depends(get_resident_control),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[ResidentReplicaInfo]:
-    query = query_filter(request, RESIDENT_REPLICA_FILTER_FIELDS)
     await _require_admin(principal, logger)
+    query = query_filter(request, RESIDENT_REPLICA_FILTER_FIELDS)
     if control is None:
         return []
     replicas = [
