@@ -6,19 +6,13 @@ spawns, whose members are keyed by child index within their scope. Members order
 that stable identity, so a cursor names a fixed position.
 """
 
-import base64
-import binascii
-import json
 from dataclasses import dataclass
 from typing import Any
 
 from ..orchestration import OrchestrationEngine
 from ..orchestration.state import ResultPublication, ResultSlot
+from ..utils.cursors import InvalidCursor, decode_cursor, encode_cursor, page_slice
 from .v2.representations.results import CardinalityKind, ResultDeclaration
-
-
-class InvalidCursor(ValueError):
-    """A cursor that is not one this catalog issued."""
 
 
 @dataclass(frozen=True)
@@ -38,9 +32,7 @@ class OutputMember:
 
     @property
     def cursor(self) -> str:
-        identity = [self.name, self.scope_id, self.key, self.sequence]
-        raw = json.dumps(identity, separators=(",", ":")).encode()
-        return base64.urlsafe_b64encode(raw).decode("ascii")
+        return encode_cursor([self.name, self.scope_id, self.key, self.sequence])
 
     @property
     def order(self) -> tuple[Any, ...]:
@@ -100,13 +92,13 @@ def paginate_members(
 ) -> list[OutputMember]:
     """The ``limit`` members strictly after, or strictly before, a cursor."""
     ordered = sorted(members, key=lambda member: member.order)
-    if after is not None:
-        bound = _decode_cursor(after)
-        return [m for m in ordered if m.order > bound][:limit]
-    if before is not None:
-        bound = _decode_cursor(before)
-        return [m for m in ordered if m.order < bound][-limit:]
-    return ordered[:limit]
+    window = page_slice(
+        [member.order for member in ordered],
+        limit,
+        after=_decode_cursor(after) if after is not None else None,
+        before=_decode_cursor(before) if before is not None else None,
+    )
+    return ordered[window]
 
 
 def _member(
@@ -125,11 +117,10 @@ def _member(
 
 
 def _decode_cursor(cursor: str) -> tuple[Any, ...]:
-    try:
-        identity = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
-        name, scope_id, key, sequence = identity
-    except (binascii.Error, UnicodeError, ValueError, TypeError) as exc:
-        raise InvalidCursor(f"invalid cursor {cursor!r}") from exc
+    identity = decode_cursor(cursor)
+    if len(identity) != 4:
+        raise InvalidCursor(f"invalid cursor {cursor!r}")
+    name, scope_id, key, sequence = identity
     if not isinstance(name, str) or not all(
         value is None or isinstance(value, str) for value in (scope_id, key)
     ):
@@ -149,7 +140,6 @@ def _order(
 
 
 __all__ = [
-    "InvalidCursor",
     "OutputMember",
     "PublishedOutput",
     "PublishedOutputs",

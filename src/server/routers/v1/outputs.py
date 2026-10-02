@@ -18,10 +18,11 @@ from ...schemas.outputs import (
     WorkflowOutputPage,
     WorkflowOutputValue,
 )
-from ...task.outputs import InvalidCursor, OutputMember, paginate_members
+from ...task.outputs import OutputMember, paginate_members
 from ...task.results import ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
 from ...task.v2.representations.results import CardinalityKind
+from ...utils.cursors import InvalidCursor
 
 router = APIRouter(prefix="/workflows", tags=["Outputs"])
 
