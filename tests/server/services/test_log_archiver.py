@@ -1,13 +1,17 @@
+import asyncio
 import logging
 import stat
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from server.services import log_archiver
 from server.services.log_archiver import TaskLogArchiver
-from server.task.models import TaskStatus
+from server.task import runtime as runtime_module
+from server.task.models import TaskInfo, TaskStatus
+from tests.server.task.test_v2_orchestration import FakeRegistry, _live_runtime
 
 
 @pytest.fixture
@@ -74,3 +78,41 @@ def test_finalizing_shares_the_logs_directory_it_writes_into(
     assert logs_path.is_file()
     for directory in (logs_path.parent.parent, logs_path.parent):
         assert _mode(directory) == 0o777
+
+
+def test_a_tick_builds_no_task_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _live_runtime(FakeRegistry())
+    asyncio.run(
+        runtime.register(
+            "owner",
+            "org",
+            "apiVersion: flowmesh/v1\nkind: EchoTask\nmetadata: {name: w}\nspec:\n"
+            "  taskType: echo\n  stages:\n"
+            "    - {name: a, spec: {data: {type: list, items: [x]}}}\n"
+            "    - {name: b, spec: {data: {type: list, items: [y]}}}\n",
+            format="native",
+        )
+    )
+    built: list[str] = []
+
+    class _Counting(TaskInfo):
+        def __init__(self, **data: Any) -> None:
+            built.append(data["task_id"])
+            super().__init__(**data)
+
+    monkeypatch.setattr(runtime_module, "TaskInfo", _Counting)
+    archiver = TaskLogArchiver(
+        MagicMock(), runtime, tmp_path, logging.getLogger("test.log_archiver")
+    )
+    tracked: list[str] = []
+    monkeypatch.setattr(
+        archiver, "_ensure_task", lambda task_id, now: tracked.append(task_id)
+    )
+
+    with patch.object(log_archiver.time, "sleep"):
+        archiver._tick()
+
+    assert built == []
+    assert sorted(tracked) == sorted(runtime.tasks)

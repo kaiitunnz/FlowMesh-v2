@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi import Path as ApiPath
 from fastapi import Query, Request, status
 from fastapi.responses import Response, StreamingResponse
+from pydantic import TypeAdapter
 
 from shared.schemas.command import StopMessage
 from shared.tasks import TaskType
@@ -30,12 +31,13 @@ from ...registries.worker import WorkerRegistry
 from ...schemas.common import OkResponse
 from ...schemas.logs import LogEntry, LogEvent, LogQueryResponse
 from ...schemas.tasks import TaskPage
-from ...task.models import TaskOrder
+from ...task.models import TaskOrder, task_order
 from ...task.runtime import TaskInfo, TaskRuntime
 from ...utils.cursors import decode_position, encode_cursor
 from ...utils.query import QueryFilter
 from ._listing import (
     PAGE_LIMIT_DEFAULT,
+    PAGE_PARAMS,
     PageAfter,
     PageBefore,
     PageLimit,
@@ -68,13 +70,29 @@ TASK_FILTER_FIELDS = frozenset(
     {
         "task_id",
         "workflow_id",
+        "owner_id",
+        "org_id",
+        "supplier_id",
+        "local_name",
+        "graph_node_name",
+        "parent_task_id",
+        "merged_parent_id",
         "status",
         "category",
         "task_type",
-        "assigned_worker",
-        "graph_node_name",
+        "resident",
         "completed",
         "failed",
+        "assigned_worker",
+        "selected_worker",
+        "shard_index",
+        "shard_total",
+        "attempts",
+        "max_attempts",
+        "depends_on",
+        "pending_dependencies",
+        "dependents",
+        "merged_children",
     }
 )
 
@@ -97,7 +115,7 @@ async def list_tasks(
     runtime: TaskRuntime = Depends(get_runtime),
     logger: logging.Logger = Depends(get_logger),
 ) -> Response:
-    query = query_filter(request, TASK_FILTER_FIELDS)
+    query = query_filter(request, TASK_FILTER_FIELDS, PAGE_PARAMS)
     after_bound, before_bound = page_bounds(after, before, _decode_task_cursor)
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.TASK, ResourceAction.READ, logger
@@ -124,11 +142,14 @@ def _task_page_json(
         next_cursor=_task_cursor(tasks[-1]) if tasks else None,
         prev_cursor=_task_cursor(tasks[0]) if tasks else None,
     )
-    return page.model_dump_json(by_alias=True).encode()
+    return _TASK_PAGE.dump_json(page, by_alias=True)
+
+
+_TASK_PAGE = TypeAdapter(TaskPage)
 
 
 def _task_cursor(task: TaskInfo) -> str:
-    return encode_cursor([task.submitted_ts, task.task_id])
+    return encode_cursor(task_order(task))
 
 
 def _decode_task_cursor(cursor: str) -> TaskOrder:

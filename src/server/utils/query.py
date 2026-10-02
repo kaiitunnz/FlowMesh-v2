@@ -1,15 +1,14 @@
 """Query-string filters over a declared set of fields.
 
-An endpoint declares the fields it filters on; a query naming any other key is
-rejected, so a filter only ever matches what the endpoint already serves. A value is
-read by attribute, so filtering never serializes a model.
+An endpoint declares the fields it filters on and rejects a query naming any other
+key. Values are read by attribute.
 
 Matching:
 
 - Values match exactly, as strings.
 - Different keys combine with AND; a repeated key matches any of its values.
-- A dotted key walks nested models and dicts (``hardware.cpu.model``); a path absent
-  on an item leaves that key unchecked for it.
+- A dotted key walks nested models and dicts (``hardware.cpu.model``); a path that
+  meets ``None`` or an absent dict key on an item reads as ``None``.
 - A list field matches when it contains any value.
 - A ``tags`` field holding a comma-separated string matches any of its tags.
 - A null field matches ``""``, ``null`` or ``None``.
@@ -23,9 +22,7 @@ from typing import Any, Self
 from pydantic import BaseModel
 from starlette.datastructures import QueryParams
 
-_PAGE_PARAMS = frozenset({"limit", "before", "after"})
-
-_MISSING = object()
+_NULLS = frozenset({"", "null", "None"})
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off"})
 
@@ -35,33 +32,62 @@ class InvalidQuery(ValueError):
 
 
 @dataclass(frozen=True)
+class _Accepted:
+    """The values one key accepts, in every form a field's value is compared as."""
+
+    strings: frozenset[str]
+    bools: frozenset[bool]
+    null: bool
+
+    @classmethod
+    def of(cls, values: frozenset[str]) -> Self:
+        spellings = {value.strip().lower() for value in values}
+        bools = {True} if spellings & _TRUTHY else set()
+        if spellings & _FALSY:
+            bools.add(False)
+        return cls(values, frozenset(bools), bool(values & _NULLS))
+
+    def matches(self, value: Any, key: str) -> bool:
+        if value is None:
+            return self.null
+        if isinstance(value, bool):
+            return value in self.bools
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(str(member) in self.strings for member in value)
+        if key == "tags" and isinstance(value, str):
+            tags = (tag.strip() for tag in value.split(","))
+            return any(tag in self.strings for tag in tags if tag)
+        return str(value) in self.strings
+
+
+@dataclass(frozen=True)
 class QueryFilter:
     """The filter terms of one query: each declared key and the values it accepts."""
 
-    terms: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    terms: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    _accepted: Mapping[str, _Accepted] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        accepted = {key: _Accepted.of(values) for key, values in self.terms.items()}
+        object.__setattr__(self, "_accepted", accepted)
 
     @classmethod
     def parse(
         cls,
-        params: QueryParams | Mapping[str, str],
+        params: QueryParams,
         fields: Collection[str],
+        skip: Collection[str] = (),
     ) -> Self:
-        """Collect a query's filter terms, skipping the paging parameters; raise
-        InvalidQuery for a key not in ``fields``."""
-        items = (
-            params.multi_items()
-            if isinstance(params, QueryParams)
-            else list(params.items())
-        )
-        terms: dict[str, list[str]] = {}
-        for key, value in items:
-            key = str(key)
-            if key in _PAGE_PARAMS:
+        """Collect a query's filter terms, leaving out the keys in ``skip``; raise
+        InvalidQuery for any other key not in ``fields``."""
+        terms: dict[str, set[str]] = {}
+        for key, value in params.multi_items():
+            if key in skip:
                 continue
             if key not in fields:
                 raise InvalidQuery(f"unsupported filter {key!r}")
-            terms.setdefault(key, []).append(str(value))
-        return cls({key: tuple(values) for key, values in terms.items()})
+            terms.setdefault(key, set()).add(value)
+        return cls({key: frozenset(values) for key, values in terms.items()})
 
     def __bool__(self) -> bool:
         return bool(self.terms)
@@ -69,8 +95,7 @@ class QueryFilter:
     def values(self, key: str) -> frozenset[str] | None:
         """Return the values a key accepts, or None when the query does not name
         it."""
-        values = self.terms.get(key)
-        return frozenset(values) if values is not None else None
+        return self.terms.get(key)
 
     def without(self, *keys: str) -> Self:
         return type(self)(
@@ -78,11 +103,10 @@ class QueryFilter:
         )
 
     def matches(self, item: Any) -> bool:
-        for key, values in self.terms.items():
-            value = _read(item, key)
-            if value is not _MISSING and not _matches(value, key, values):
-                return False
-        return True
+        return all(
+            accepted.matches(_read(item, key), key)
+            for key, accepted in self._accepted.items()
+        )
 
     def filter[T](self, items: list[T]) -> list[T]:
         return [item for item in items if self.matches(item)] if self else items
@@ -92,32 +116,17 @@ def _read(item: Any, path: str) -> Any:
     current = item
     for part in path.split("."):
         if isinstance(current, Mapping):
-            current = current.get(part, _MISSING)
+            current = current.get(part)
         elif isinstance(current, BaseModel) and (
             part in type(current).model_fields
             or part in type(current).model_computed_fields
         ):
             current = getattr(current, part)
         else:
-            return _MISSING
-        if current is _MISSING:
-            return _MISSING
+            return None
+        if current is None:
+            return None
     return current
-
-
-def _matches(value: Any, key: str, accepted: tuple[str, ...]) -> bool:
-    if value is None:
-        return any(v in ("", "null", "None") for v in accepted)
-    if isinstance(value, bool):
-        spellings = {v.strip().lower() for v in accepted}
-        return bool(spellings & (_TRUTHY if value else _FALSY))
-    if isinstance(value, (list, tuple, set, frozenset)):
-        members = {str(v) for v in value}
-        return any(v in members for v in accepted)
-    if key == "tags" and isinstance(value, str):
-        tags = {t.strip() for t in value.split(",") if t.strip()}
-        return any(v in tags for v in accepted)
-    return any(str(value) == v for v in accepted)
 
 
 __all__ = ["InvalidQuery", "QueryFilter"]

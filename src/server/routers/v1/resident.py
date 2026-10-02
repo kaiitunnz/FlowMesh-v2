@@ -21,6 +21,17 @@ from ._listing import query_filter
 
 router = APIRouter(prefix="/resident", tags=["Resident"])
 
+RESIDENT_REPLICA_FILTER_FIELDS = frozenset(
+    {
+        "replica_id",
+        "family",
+        "state",
+        "healthy",
+        "serve_task_id",
+        "worker_id",
+    }
+)
+
 
 async def _require_admin(principal: PrincipalContext, logger: logging.Logger) -> None:
     await require_permission(
@@ -57,6 +68,7 @@ async def list_resident_replicas(
     control: ResidentCapacityControl | None = Depends(get_resident_control),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[ResidentReplicaInfo]:
+    query = query_filter(request, RESIDENT_REPLICA_FILTER_FIELDS)
     await _require_admin(principal, logger)
     if control is None:
         return []
@@ -64,7 +76,7 @@ async def list_resident_replicas(
         ResidentReplicaInfo.project(replica)
         for replica in control.list_replica_incarnations()
     ]
-    return query_filter(request, {"family"}).filter(replicas)
+    return query.filter(replicas)
 
 
 @router.get(

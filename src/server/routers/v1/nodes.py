@@ -21,7 +21,6 @@ from ...auth.security import (
 from ...hooks import ResourceAction, ResourceKind
 from ...registries import Node, NodeAliasInUseError, NodeRegistry, WorkerRegistry
 from ...schemas.node import (
-    NODE_WORKER_FILTER_FIELDS,
     NodeInfo,
     NodeRegisterResponse,
     NodeWorkerInfo,
@@ -34,7 +33,39 @@ from ._listing import query_filter
 router = APIRouter(prefix="/nodes", tags=["Nodes"])
 
 
-NODE_FILTER_FIELDS = frozenset({"id", "namespace", "cluster", "alias", "tags"})
+NODE_FILTER_FIELDS = frozenset(
+    {
+        "id",
+        "alias",
+        "namespace",
+        "cluster",
+        "version",
+        "tags",
+    }
+)
+NODE_WORKER_FILTER_FIELDS = frozenset(
+    {
+        "id",
+        "alias",
+        "namespace",
+        "cluster",
+        "node_id",
+        "node_alias",
+        "provider",
+        "version",
+        "status",
+        "hardware.cpu.model",
+        "hardware.cpu.arch",
+        "hardware.cpu.name",
+        "hardware.gpu.driver_version",
+        "hardware.gpu.cuda_version",
+        "hardware.gpu.gpu_arch",
+        "hardware.network.ip",
+        "hardware.network.public_ipaddr",
+        "hardware.network.geolocation",
+        "hardware.host.os_version",
+    }
+)
 
 
 @router.get(
@@ -80,6 +111,7 @@ async def list_all_workers(
     worker_registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[NodeWorkerInfo]:
+    query = query_filter(request, NODE_WORKER_FILTER_FIELDS)
     nodes = await node_registry.list_nodes_async()
     node_ids = [n.id for n in nodes]
 
@@ -102,7 +134,7 @@ async def list_all_workers(
     )
     if allowed is not None:
         all_workers = [w for w in all_workers if w.id in allowed]
-    return query_filter(request, NODE_WORKER_FILTER_FIELDS).filter(all_workers)
+    return query.filter(all_workers)
 
 
 @router.post(
@@ -156,6 +188,7 @@ async def list_node_workers(
     worker_registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[NodeWorkerInfo]:
+    query = query_filter(request, NODE_WORKER_FILTER_FIELDS)
     await require_permission(
         principal, ResourceKind.NODE, node_id, ResourceAction.READ, logger
     )
@@ -165,7 +198,7 @@ async def list_node_workers(
     )
     if allowed is not None:
         workers = [w for w in workers if w.id in allowed]
-    return query_filter(request, NODE_WORKER_FILTER_FIELDS).filter(workers)
+    return query.filter(workers)
 
 
 @router.post(

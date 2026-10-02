@@ -15,7 +15,6 @@ from ...auth.security import (
     require_permission,
 )
 from ...hooks import ResourceAction, ResourceKind
-from ...schemas.node import NODE_WORKER_FILTER_FIELDS
 from ...supervisor import WorkerSupervisor
 from ...supervisor.manager import WorkerInitConfig
 from ...supervisor.schemas import WorkerInfo
@@ -25,6 +24,28 @@ from ._listing import query_filter
 router = APIRouter(prefix="/stack/workers", tags=["Stack"])
 
 _WORKER_CREATE_TIMEOUT = 600.0
+
+STACK_WORKER_FILTER_FIELDS = frozenset(
+    {
+        "id",
+        "alias",
+        "namespace",
+        "cluster",
+        "node_alias",
+        "provider",
+        "status",
+        "hardware.cpu.model",
+        "hardware.cpu.arch",
+        "hardware.cpu.name",
+        "hardware.gpu.driver_version",
+        "hardware.gpu.cuda_version",
+        "hardware.gpu.gpu_arch",
+        "hardware.network.ip",
+        "hardware.network.public_ipaddr",
+        "hardware.network.geolocation",
+        "hardware.host.os_version",
+    }
+)
 
 
 async def _exec(
@@ -53,13 +74,14 @@ async def list_workers(
     node_id: str = Depends(get_node_id),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[WorkerInfo]:
+    query = query_filter(request, STACK_WORKER_FILTER_FIELDS)
     await require_permission(
         principal, ResourceKind.NODE, node_id, ResourceAction.READ, logger
     )
     cmd = CommandMessage(command=CommandType.GET_WORKERS)
     data = await _exec(supervisor, cmd)
     workers = [WorkerInfo(**w) for w in data.get("workers", [])]
-    return query_filter(request, NODE_WORKER_FILTER_FIELDS).filter(workers)
+    return query.filter(workers)
 
 
 @router.post("")

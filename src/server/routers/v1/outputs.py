@@ -22,12 +22,12 @@ from ...task.outputs import OutputMember, decode_member_cursor, paginate_members
 from ...task.results import ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
 from ...task.v2.representations.results import CardinalityKind
+from ._errors import api_error
 from ._listing import (
     PAGE_LIMIT_DEFAULT,
     PageAfter,
     PageBefore,
     PageLimit,
-    api_error,
     page_bounds,
 )
 

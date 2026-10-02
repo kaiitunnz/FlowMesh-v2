@@ -56,6 +56,7 @@ from ...task.v2 import CompileError, Diagnostic
 from ...utils.cursors import decode_position, encode_cursor
 from ._listing import (
     PAGE_LIMIT_DEFAULT,
+    PAGE_PARAMS,
     PageAfter,
     PageBefore,
     PageLimit,
@@ -545,7 +546,17 @@ async def cancel_workflow(
     return workflow
 
 
-WORKFLOW_FILTER_FIELDS = frozenset({"workflow_id", "status", "task_ids"})
+WORKFLOW_FILTER_FIELDS = frozenset(
+    {
+        "workflow_id",
+        "status",
+        "task_ids",
+        "dispatched_tasks",
+        "completed_tasks",
+        "failed_tasks",
+        "cancelled_tasks",
+    }
+)
 
 
 @router.get(
@@ -567,7 +578,7 @@ async def list_workflows(
     registry: WorkflowRegistry = Depends(get_workflow_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> Response:
-    query = query_filter(request, WORKFLOW_FILTER_FIELDS)
+    query = query_filter(request, WORKFLOW_FILTER_FIELDS, PAGE_PARAMS)
     after_bound, before_bound = page_bounds(after, before, _decode_workflow_cursor)
     workflow_ids = await registry.get_workflow_ids_async()
     allowed = await resolve_accessible_ids(

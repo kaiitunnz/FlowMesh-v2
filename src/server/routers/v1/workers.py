@@ -27,12 +27,18 @@ WORKER_FILTER_FIELDS = frozenset(
         "cluster",
         "node_id",
         "node_alias",
+        "version",
         "status",
-        "tags",
         "stale",
+        "tags",
         "cached_models",
+        "cached_datasets",
+        "capabilities.supported_task_types",
+        "capabilities.ssh_noninteractive",
         "hardware.cpu.model",
+        "hardware.gpu.driver_version",
         "hardware.gpu.cuda_version",
+        "hardware.network.ip",
     }
 )
 

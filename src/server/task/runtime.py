@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import Any, Self, cast
@@ -153,6 +153,7 @@ from .models import (
     WorkerRecovery,
     WorkflowSettlement,
     categorize_task_type,
+    task_order,
 )
 from .outputs import (
     OutputMember,
@@ -637,6 +638,20 @@ def _captured_calls(
 
 def _unscrubbed(text: str) -> str:
     return text
+
+
+def _listing_fields(
+    task_id: str,
+    record: TaskRecord,
+    query: QueryFilter,
+    computed: Mapping[str, Callable[[str], Any]],
+) -> dict[str, Any]:
+    """Read the fields ``query`` names from a record, computing those ``TaskInfo``
+    derives from runtime state."""
+    return {
+        key: computed[key](task_id) if key in computed else getattr(record, key)
+        for key in query.terms
+    }
 
 
 class TaskRuntime:
@@ -6769,15 +6784,16 @@ class TaskRuntime:
         statuses = query.values("status")
         rest = query.without("workflow_id", "status")
         with self._lock:
+            computed = self._listing_computed_locked()
             keys = sorted(
-                (record.submitted_ts, task_id)
+                task_order(record)
                 for task_id, record in self._tasks.items()
                 if (workflow_ids is None or record.workflow_id in workflow_ids)
                 and (statuses is None or record.status in statuses)
                 and (accessible is None or task_id in accessible)
                 and (
                     not rest
-                    or rest.matches(self._listing_fields_locked(task_id, record, rest))
+                    or rest.matches(_listing_fields(task_id, record, rest, computed))
                 )
             )
             window = page_slice(keys, limit, after=after, before=before, newest=True)
@@ -7056,15 +7072,26 @@ class TaskRuntime:
             total = len(self._tasks)
             return queueing, dispatched, pending, done, total
 
+    def _listing_computed_locked(self) -> dict[str, Callable[[str], Any]]:
+        empty: frozenset[str] = frozenset()
+        return {
+            "completed": self._completed.__contains__,
+            "failed": self._failed.__contains__,
+            "depends_on": lambda task_id: self._original_deps.get(task_id, empty),
+            "pending_dependencies": lambda task_id: self._pending_deps.get(
+                task_id, empty
+            ),
+            "dependents": lambda task_id: self._dependents.get(task_id, empty),
+        }
+
     def _build_task_info_locked(self, task_id: str, record: TaskRecord) -> TaskInfo:
         return TaskInfo(**self._task_info_fields_locked(task_id, record))
 
     def _task_info_fields_locked(
         self, task_id: str, record: TaskRecord
     ) -> dict[str, Any]:
-        """Copy out a task's ``TaskInfo`` fields to build from after the lock is
-        released; the record's containers are copied, since some are appended to in
-        place."""
+        """Return a task's ``TaskInfo`` fields to build from after the lock is
+        released, duplicating the containers a record appends to in place."""
         element = self._input_element_locked(task_id)
         return {
             **{
@@ -7083,14 +7110,4 @@ class TaskRuntime:
                 if element is not None
                 else None
             ),
-        }
-
-    def _listing_fields_locked(
-        self, task_id: str, record: TaskRecord, query: QueryFilter
-    ) -> dict[str, Any]:
-        flags = {"completed": self._completed, "failed": self._failed}
-        return {
-            key: task_id in flags[key] if key in flags else getattr(record, key)
-            for key in query.terms
-            if key in flags or key in TaskRecord.model_fields
         }

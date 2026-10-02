@@ -155,6 +155,7 @@ async def _relay_websocket(websocket: WebSocket, channel: ByteStreamChannel) -> 
 SSH_CONNECTION_FILTER_FIELDS = frozenset(
     {
         "connection_id",
+        "session_id",
         "access_mode",
         "task_id",
         "workflow_id",
@@ -181,10 +182,11 @@ async def list_ssh_connections(
     ),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[SSHConnectionInfo]:
+    query = query_filter(request, SSH_CONNECTION_FILTER_FIELDS)
     await require_permission(
         principal, ResourceKind.SYSTEM, None, ResourceAction.ADMIN, logger
     )
     if ssh_connections is None:
         return []
     connections = await ssh_connections.list_connections()
-    return query_filter(request, SSH_CONNECTION_FILTER_FIELDS).filter(connections)
+    return query.filter(connections)

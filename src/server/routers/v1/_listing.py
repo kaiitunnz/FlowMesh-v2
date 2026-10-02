@@ -3,10 +3,11 @@
 from collections.abc import Callable, Collection
 from typing import Annotated
 
-from fastapi import HTTPException, Query, Request, status
+from fastapi import Query, Request, status
 
 from ...utils.cursors import InvalidCursor
 from ...utils.query import InvalidQuery, QueryFilter
+from ._errors import api_error
 
 PAGE_LIMIT_DEFAULT = 100
 
@@ -19,17 +20,16 @@ PageAfter = Annotated[
 PageBefore = Annotated[
     str | None, Query(description="Return entries strictly before this cursor.")
 ]
+PAGE_PARAMS = frozenset({"limit", "after", "before"})
 
 
-def api_error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(status_code, detail={"code": code, "message": message})
-
-
-def query_filter(request: Request, fields: Collection[str]) -> QueryFilter:
-    """Parse the request's filter over ``fields``; reject any other key with a
-    400."""
+def query_filter(
+    request: Request, fields: Collection[str], params: Collection[str] = ()
+) -> QueryFilter:
+    """Parse the request's filter over ``fields``, past the route's own ``params``;
+    reject any other key with a 400."""
     try:
-        return QueryFilter.parse(request.query_params, fields)
+        return QueryFilter.parse(request.query_params, fields, params)
     except InvalidQuery as exc:
         raise api_error(
             status.HTTP_400_BAD_REQUEST, "invalid_request", str(exc)
@@ -56,3 +56,14 @@ def page_bounds[K](
         raise api_error(
             status.HTTP_400_BAD_REQUEST, "invalid_cursor", str(exc)
         ) from exc
+
+
+__all__ = [
+    "PAGE_LIMIT_DEFAULT",
+    "PAGE_PARAMS",
+    "PageAfter",
+    "PageBefore",
+    "PageLimit",
+    "page_bounds",
+    "query_filter",
+]

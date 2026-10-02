@@ -2,14 +2,14 @@
 loop free while they build."""
 
 import asyncio
+import base64
 import logging
 import socket
 import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import httpx
 import pytest
@@ -22,35 +22,33 @@ from pydantic import TypeAdapter
 from server.app_state import get_logger, get_runtime
 from server.auth.security import authenticate_connection
 from server.routers.v1 import tasks as tasks_router
-from server.schemas.tasks import TaskPage
-from server.services import log_archiver
-from server.services.log_archiver import TaskLogArchiver
 from server.task import runtime as runtime_module
 from server.task.models import TaskInfo
 from server.task.runtime import TaskRuntime
+from server.utils.cursors import encode_cursor
 from server.utils.query import QueryFilter
 from tests.server.task.test_v2_orchestration import FakeRegistry, _live_runtime
 
 _LOGGER = logging.getLogger("test.task_listing")
-_WORKFLOWS = 1000
+_WORKFLOWS = 60
 _STAGES = 5
 _FILLER = " ".join(f"word{i:04d}" for i in range(120))
 
 
-def _workflow(index: int, stages: int = _STAGES) -> str:
+def _workflow(index: int, stages: int = _STAGES, filler: str = _FILLER) -> str:
     body = "\n".join(f"""    - name: s-{stage}
       spec:
         data:
           type: list
           items:
-            - "{index}-{stage} {_FILLER}"
-            - "{_FILLER}\"""" for stage in range(stages))
+            - "{index}-{stage} {filler}"
+            - "{filler}\"""" for stage in range(stages))
     return f"""apiVersion: flowmesh/v1
 kind: EchoTask
 metadata:
   name: listing-{index}
   annotations:
-    description: "{_FILLER}"
+    description: "{filler}"
     schedule_hint:
       selected_worker:
         global: [wkr-a]
@@ -78,18 +76,24 @@ class _Listing:
         return {task for tasks in self.workflows.values() for task in tasks}
 
 
-@pytest.fixture(scope="module")
-def listing() -> _Listing:
+def _seeded(workflows: int, filler: str = _FILLER) -> _Listing:
     runtime = _live_runtime(FakeRegistry())
 
     async def seed() -> dict[str, list[str]]:
-        workflows: dict[str, list[str]] = {}
-        for index in range(_WORKFLOWS):
-            workflow_id, tasks = await _register(runtime, _workflow(index))
-            workflows[workflow_id] = tasks
-        return workflows
+        seeded: dict[str, list[str]] = {}
+        for index in range(workflows):
+            workflow_id, tasks = await _register(
+                runtime, _workflow(index, filler=filler)
+            )
+            seeded[workflow_id] = tasks
+        return seeded
 
     return _Listing(runtime, asyncio.run(seed()))
+
+
+@pytest.fixture(scope="module")
+def listing() -> _Listing:
+    return _seeded(_WORKFLOWS)
 
 
 def _principal() -> PrincipalContext:
@@ -211,13 +215,14 @@ def test_a_page_serializes_off_the_event_loop(
     listing: _Listing, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     threads: list[int] = []
-    dump = TaskPage.model_dump_json
+    page_adapter = tasks_router._TASK_PAGE
 
-    def _recording(self: TaskPage, **kwargs: Any) -> str:
-        threads.append(threading.get_ident())
-        return dump(self, **kwargs)
+    class _Recording:
+        def dump_json(self, *args: Any, **kwargs: Any) -> bytes:
+            threads.append(threading.get_ident())
+            return page_adapter.dump_json(*args, **kwargs)
 
-    monkeypatch.setattr(TaskPage, "model_dump_json", _recording)
+    monkeypatch.setattr(tasks_router, "_TASK_PAGE", _Recording())
 
     async def call() -> tuple[int, int]:
         transport = httpx.ASGITransport(app=_app(listing.runtime))
@@ -299,7 +304,14 @@ def test_an_unbounded_listing_returns_the_newest_page(listing: _Listing) -> None
         listing.runtime.tasks.values(), key=lambda r: (r.submitted_ts, r.task_id)
     )[-100:]
     assert [t["task_id"] for t in page["entries"]] == [r.task_id for r in newest]
+
+
+def test_a_limit_past_the_cap_is_rejected(listing: _Listing) -> None:
     assert _get(_app(listing.runtime), "/api/v1/tasks?limit=1001").status_code == 422
+
+
+def _raw_cursor(identity: str) -> str:
+    return base64.urlsafe_b64encode(identity.encode()).decode()
 
 
 @pytest.mark.parametrize(
@@ -308,6 +320,19 @@ def test_an_unbounded_listing_returns_the_newest_page(listing: _Listing) -> None
         ("before=x&after=y", "invalid_request"),
         ("before=not-a-cursor", "invalid_cursor"),
         ("after=WyJhIiwiYiJd", "invalid_cursor"),
+        (f"before={_raw_cursor('[' + '9' * 400 + ', \"t\"]')}", "invalid_cursor"),
+        (f"before={_raw_cursor('[1e400, \"t\"]')}", "invalid_cursor"),
+        (f"before={_raw_cursor('[NaN, \"t\"]')}", "invalid_cursor"),
+        (f"before={encode_cursor([1_700_000_000_000_000, 'wfl-1'])}", "invalid_cursor"),
+    ],
+    ids=[
+        "both",
+        "malformed",
+        "not-a-position",
+        "overflow",
+        "infinite",
+        "nan",
+        "workflow",
     ],
 )
 def test_a_bad_cursor_is_rejected(listing: _Listing, query: str, code: str) -> None:
@@ -352,7 +377,8 @@ def test_cursors_walk_every_task_once_while_tasks_are_added() -> None:
     )
 
 
-def test_the_sdk_lists_every_task_across_pages(listing: _Listing) -> None:
+def test_the_sdk_lists_every_task_across_pages() -> None:
+    listing = _seeded(210, filler="x")
     workflow_id, tasks = next(iter(listing.workflows.items()))
     with _serving(_app(listing.runtime)) as url:
         client = FlowMesh(base_url=url, api_key="k")
@@ -431,20 +457,3 @@ def test_a_page_is_unaffected_by_appends_after_its_lock_pass(
     [info] = runtime.task_page(QueryFilter(), 10)
 
     assert info.failed_workers == ["wkr-before"]
-
-
-def test_the_log_archiver_builds_no_task_info(
-    listing: _Listing, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    built = _count_task_infos(monkeypatch)
-    archiver = TaskLogArchiver(cast(Any, None), listing.runtime, tmp_path, _LOGGER)
-    tracked: list[str] = []
-    monkeypatch.setattr(
-        archiver, "_ensure_task", lambda task_id, now: tracked.append(task_id)
-    )
-    monkeypatch.setattr(log_archiver.time, "sleep", lambda _: None)
-
-    archiver._tick()
-
-    assert built == []
-    assert sorted(tracked) == sorted(listing.runtime.tasks)
