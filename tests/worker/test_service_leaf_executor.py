@@ -178,6 +178,15 @@ def test_first_step_captures_the_request_and_yields_a_resident_boundary(
     assert _body(store) == {"messages": [{"role": "user", "content": "hello there"}]}
 
 
+def test_a_captured_request_records_its_dispatch(tmp_path: Path) -> None:
+    ex, store = _executor()
+    msg = _msg({"prompt": "hello"}).model_copy(update={"dispatch_id": "dsp-7"})
+
+    ex.run(msg, tmp_path)
+
+    assert store.dispatch_of(msg.task_id) == "dsp-7"
+
+
 def test_explicit_messages_pass_through_as_a_chat_request(tmp_path: Path) -> None:
     ex, store = _executor()
     messages = [{"role": "user", "content": "summarize"}]

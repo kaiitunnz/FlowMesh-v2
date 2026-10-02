@@ -33,6 +33,7 @@ from ...schemas.network import (
     NetworkEndpointInfo,
     NetworkReachabilityEntryInfo,
 )
+from ._command import command_error
 
 router = APIRouter(prefix="/network", tags=["Network"])
 
@@ -108,10 +109,7 @@ async def network_echo(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)
         )
     if not resp.success or resp.data is None:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=resp.message or "route-plan delivery failed",
-        )
+        raise command_error(resp, "route-plan delivery failed")
 
     observations = [
         (Transport(item["transport"]), RouteObservationOutcome(item["outcome"]))

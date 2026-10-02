@@ -1,0 +1,159 @@
+"""The `external` worker provider: workers this supervisor does not launch,
+admitted by a shared secret (`EXTERNAL_WORKER_TOKEN` / `_FILE`) instead of a
+runtime-minted token.
+
+The secret is a bearer credential shared by every external worker: it
+authenticates "a worker enrolled by whoever holds the secret", not an
+individual machine, cannot be revoked per worker, and admits nobody unless set.
+"""
+
+import hmac
+from hashlib import sha256
+
+from shared.utils.worker_token import EXTERNAL_ALIAS_SEP, split_external_token
+
+from ... import env
+from ...hooks import PrincipalContext
+from ..schemas import WorkerInfo, WorkerStatus
+from .base import (
+    ProviderSpec,
+    WorkerAdapter,
+    WorkerConfig,
+    WorkerFactory,
+    WorkerTokenType,
+)
+
+_PROVIDER_NAME = "external"
+
+
+def mint_external_token(secret: str, alias: str) -> WorkerTokenType:
+    """Build the token an external worker with alias `alias` must present.
+
+    Deterministic: the same (secret, alias) yields the same token, so a worker
+    or supervisor restart re-derives the identity instead of losing it.
+    """
+    digest = hmac.new(secret.encode(), alias.encode(), sha256).hexdigest()
+    return WorkerTokenType(f"{alias}{EXTERNAL_ALIAS_SEP}{digest}")
+
+
+def verify_external_token(token: str, secret: str | None = None) -> str | None:
+    """Return the worker alias a token proves, or None if it proves nothing.
+
+    Never raises: every rejection path returns None so a caller can treat "not
+    an external token" and "a forged one" identically and fall through to the
+    normal registry lookup.
+    """
+    configured = env.EXTERNAL_WORKER_TOKEN if secret is None else secret
+    if not configured:
+        return None
+    parts = split_external_token(token)
+    if parts is None:
+        return None
+    alias, digest = parts
+    expected = hmac.new(configured.encode(), alias.encode(), sha256).hexdigest()
+    # Constant-time compare so a forged digest can't be recovered by timing.
+    if hmac.compare_digest(expected, digest):
+        return alias
+    return None
+
+
+class ExternalWorkerConfig(WorkerConfig):
+    """Config for a worker the supervisor does not launch.
+
+    Inherits `WorkerConfig` so `_base_environment()` still describes a valid
+    worker environment for operators generating a unit file or Pod spec, though
+    the supervisor applies none of it.
+    """
+
+
+class ExternalWorkerAdapter(WorkerAdapter):
+    def __init__(
+        self,
+        token: WorkerTokenType,
+        alias: str,
+        config: ExternalWorkerConfig,
+        owner: PrincipalContext,
+    ) -> None:
+        super().__init__(token, alias, config, owner)
+        # An external worker is already running when it presents its token.
+        self._status: WorkerStatus = WorkerStatus.RUNNING
+
+    @property
+    def status(self) -> WorkerStatus:
+        return self._status
+
+    def set_status(self, status: WorkerStatus) -> None:
+        self._status = status
+
+    def get_info(self) -> WorkerInfo:
+        return WorkerInfo(
+            id=self.worker_id,
+            alias=self.alias,
+            provider=_PROVIDER_NAME,
+            status=self._status,
+            # Externally managed workers' hardware is not known to the supervisor.
+            hardware=None,
+        )
+
+    async def start(self) -> bool:
+        """No-op: the worker's lifecycle belongs to its orchestrator.
+
+        Reports success because nothing failed; False would mark a healthy
+        worker broken.
+        """
+        return True
+
+    async def stop(self) -> bool:
+        """No-op, deliberately not a kill.
+
+        The supervisor cannot stop a process it did not start; conflating
+        forget with terminate would make `destroy_worker` silently drop a
+        running worker's tasks.
+        """
+        return True
+
+    def _start(self) -> bool:
+        return True
+
+    def _stop(self) -> bool:
+        return True
+
+    def holds_worker(self) -> bool:
+        return False
+
+
+class ExternalWorkerFactory(WorkerFactory):
+    def create_worker(
+        self, token: WorkerTokenType, config: ExternalWorkerConfig, alias: str = ""
+    ) -> ExternalWorkerAdapter:
+        resolved = alias or (verify_external_token(token) or "")
+        if not resolved:
+            raise ValueError(
+                "external worker token does not carry a verifiable alias; "
+                "it must be minted with mint_external_token()"
+            )
+        return ExternalWorkerAdapter(token, resolved, config, self.system_principal)
+
+    def destroy_worker(self, worker: WorkerAdapter) -> None:
+        # Nothing to release: no container, instance or reservation. The caller
+        # removes the registry entry.
+        return None
+
+
+def get_provider_spec(system_principal: PrincipalContext) -> ProviderSpec:
+    return ProviderSpec(
+        name=_PROVIDER_NAME,
+        config_cls=ExternalWorkerConfig,
+        adapter_cls=ExternalWorkerAdapter,
+        factory=ExternalWorkerFactory(system_principal),
+    )
+
+
+__all__ = [
+    "ExternalWorkerAdapter",
+    "ExternalWorkerConfig",
+    "ExternalWorkerFactory",
+    "get_provider_spec",
+    "mint_external_token",
+    "verify_external_token",
+]

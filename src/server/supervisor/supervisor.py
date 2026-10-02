@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import signal
+import time
 from collections.abc import Callable
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
@@ -39,6 +40,7 @@ from ..utils.concurrent import (
 
 _CMD_TIMEOUT = 120.0
 _NODE_ID_HANDSHAKE_TIMEOUT = 30.0
+_NODE_ID_HANDSHAKE_MARGIN_SEC = 30.0
 _NODE_ID_WATCH_POLL_SEC = 0.5
 _REBIND_APPLY_TIMEOUT_SEC = 2.0
 
@@ -117,21 +119,30 @@ class WorkerSupervisor:
             self._identity.alias,
         )
 
-        try:
-            node_id = await asyncio.to_thread(
-                self._node_id_queue.get, True, _NODE_ID_HANDSHAKE_TIMEOUT
-            )
-        except QueueEmpty as exc:
+        # Registration waits out an alias lease left by this node's previous
+        # run, which frees within one heartbeat TTL.
+        handshake_timeout = max(
+            _NODE_ID_HANDSHAKE_TIMEOUT,
+            self._worker_management.heartbeat_ttl_sec + _NODE_ID_HANDSHAKE_MARGIN_SEC,
+        )
+        node_id = await asyncio.to_thread(self._await_node_id, handshake_timeout)
+        if node_id is None:
             alive = self._process.is_alive()
             if alive:
                 self._process.terminate()
                 self._process.join(timeout=3.0)
             self._process = None
+            hint = (
+                f"; check that NODE_ALIAS {self._identity.alias!r} is not held by "
+                "another live node"
+                if alive
+                else ""
+            )
             raise RuntimeError(
                 f"Supervisor child did not register a node within "
-                f"{_NODE_ID_HANDSHAKE_TIMEOUT:.0f}s "
-                f"(child {'still alive' if alive else 'exited'})"
-            ) from exc
+                f"{handshake_timeout:.0f}s "
+                f"(child {'still alive' if alive else 'exited'}){hint}"
+            )
         self._node_id = node_id
         self._logger.info("Supervisor handshake complete: node_id=%s", node_id)
 
@@ -190,6 +201,19 @@ class WorkerSupervisor:
         if sender is None:
             raise RuntimeError("Supervisor command channel not initialized")
         return await sender.send(cmd.command_id, cmd, timeout=timeout)
+
+    def _await_node_id(self, timeout: float) -> str | None:
+        """Wait for the child's first node id; give up early if the child dies."""
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                return self._node_id_queue.get(
+                    timeout=min(remaining, _NODE_ID_WATCH_POLL_SEC)
+                )
+            except QueueEmpty:
+                if self._process is None or not self._process.is_alive():
+                    return None
+        return None
 
     # ------------------------------------------------------------------ #
     # Node ID watching
@@ -343,6 +367,7 @@ def _run_supervisor(
     from ..network.listeners import NetworkPlaneListeners
     from ..network.reverse_relay import BinaryRedis
     from ..registries.node import NodeRegistry
+    from ..registries.worker import WorkerRegistry as WorkerRecords
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
     from .registry import WorkerRegistry as WorkerAdapterRegistry
@@ -406,11 +431,10 @@ def _run_supervisor(
     )
 
     # --- NodeRegistry (for lifecycle self-registration) ---
-    node_registry = NodeRegistry(redis_client, logger)
+    hb_ttl_sec = wm_cfg.heartbeat_ttl_sec
+    node_registry = NodeRegistry(redis_client, logger, hb_ttl_sec)
 
     # --- Lifecycle: register node and get auto-assigned node_id ---
-    hb_ttl_sec = max(wm_cfg.heartbeat_interval * 4, 120)
-
     lifecycle = Lifecycle(
         redis=redis_client.sync,
         node_registry=node_registry,
@@ -436,10 +460,15 @@ def _run_supervisor(
     task_listener = TaskListener(
         redis=redis_client.sync, node_id=node_id, logger=logger
     )
-    worker_adapter_registry = WorkerAdapterRegistry(
-        on_worker_id_released=task_listener.remove_worker
-    )
     relay_service = RelayService(redis=redis_client.sync, logger=logger)
+
+    def on_worker_id_released(worker_id: str) -> None:
+        task_listener.remove_worker(worker_id)
+        grpc_server.worker_id_released(worker_id)
+
+    worker_adapter_registry = WorkerAdapterRegistry(
+        on_worker_id_released=on_worker_id_released
+    )
     worker_manager = WorkerManager(
         system_principal,
         wm_cfg.config_path,
@@ -475,10 +504,12 @@ def _run_supervisor(
         grpc_cfg.port,
         worker_adapter_registry,
         redis=redis_client.sync,
+        worker_records=WorkerRecords(redis_client),
         node_id=node_id,
         node_alias=identity.alias,
         task_listener=task_listener,
         relay_service=relay_service,
+        worker_manager=worker_manager,
         logger=logger,
         relay_bridges=(
             {} if node_relays is None else node_relays.bridges_by_event_type()
@@ -561,6 +592,7 @@ def _run_supervisor(
             await peer_listener.start()
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
+        lifecycle.set_heartbeat_callback(grpc_server.reconcile_workers)
         logger.info("Supervisor ready for node %s", node_id)
 
         # Wait for termination signal
@@ -568,6 +600,7 @@ def _run_supervisor(
 
         # Shutdown — reverse order
         logger.info("Supervisor shutting down ...")
+        grpc_server.begin_shutdown()
         # Publish unregister event early to allow the server to handle before being
         # timed out
         lifecycle.publish_unregister()

@@ -147,7 +147,10 @@ async def stop_task(
             detail="Assigned worker not found",
         )
     await worker_registry.publish_stop_async(
-        worker, StopMessage(task_id=task_id, worker_id=worker.id)
+        worker,
+        StopMessage(
+            task_id=task_id, worker_id=worker.id, dispatch_id=record.dispatch_id
+        ),
     )
     return OkResponse(ok=True)
 

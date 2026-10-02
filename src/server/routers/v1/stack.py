@@ -19,6 +19,7 @@ from ...supervisor import WorkerSupervisor
 from ...supervisor.manager import WorkerInitConfig
 from ...supervisor.schemas import WorkerInfo
 from ...utils.misc import filter_models_by_queries
+from ._command import command_error
 
 router = APIRouter(prefix="/stack/workers", tags=["Stack"])
 
@@ -39,10 +40,7 @@ async def _exec(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)
         )
     if not resp.success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=resp.message or "Command failed",
-        )
+        raise command_error(resp)
     return resp.data or {}
 
 
@@ -81,9 +79,24 @@ async def create_worker(
     return WorkerInfo(**data)
 
 
-@router.get("/{name}")
+@router.get("/providers")
+async def get_providers(
+    principal: PrincipalContext = Depends(authenticate_connection),
+    supervisor: WorkerSupervisor = Depends(get_supervisor),
+    node_id: str = Depends(get_node_id),
+    logger: logging.Logger = Depends(get_logger),
+) -> dict[str, list[str]]:
+    await require_permission(
+        principal, ResourceKind.NODE, node_id, ResourceAction.READ, logger
+    )
+    cmd = CommandMessage(command=CommandType.GET_PROVIDERS)
+    data = await _exec(supervisor, cmd)
+    return {"providers": data.get("providers") or []}
+
+
+@router.get("/{alias}")
 async def get_worker(
-    name: str,
+    alias: str,
     principal: PrincipalContext = Depends(authenticate_connection),
     supervisor: WorkerSupervisor = Depends(get_supervisor),
     node_id: str = Depends(get_node_id),
@@ -92,7 +105,9 @@ async def get_worker(
     await require_permission(
         principal, ResourceKind.NODE, node_id, ResourceAction.READ, logger
     )
-    cmd = CommandMessage(command=CommandType.GET_WORKERS, payload={"worker_name": name})
+    cmd = CommandMessage(
+        command=CommandType.GET_WORKERS, payload={"worker_alias": alias}
+    )
     data = await _exec(supervisor, cmd)
     if workers := [WorkerInfo(**w) for w in data.get("workers", [])]:
         return workers[0]
@@ -101,9 +116,9 @@ async def get_worker(
     )
 
 
-@router.post("/{name}/start")
+@router.post("/{alias}/start")
 async def start_worker(
-    name: str,
+    alias: str,
     principal: PrincipalContext = Depends(authenticate_connection),
     supervisor: WorkerSupervisor = Depends(get_supervisor),
     node_id: str = Depends(get_node_id),
@@ -113,39 +128,19 @@ async def start_worker(
         principal, ResourceKind.NODE, node_id, ResourceAction.WRITE, logger
     )
     cmd = CommandMessage(
-        command=CommandType.START_WORKER, payload={"worker_name": name}
+        command=CommandType.START_WORKER, payload={"worker_alias": alias}
     )
     data = await _exec(supervisor, cmd)
     if not data.get("success"):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start worker '{name}'",
+            detail=f"Failed to start worker '{alias}'",
         )
 
 
-@router.post("/{name}/stop")
+@router.post("/{alias}/stop")
 async def stop_worker(
-    name: str,
-    principal: PrincipalContext = Depends(authenticate_connection),
-    supervisor: WorkerSupervisor = Depends(get_supervisor),
-    node_id: str = Depends(get_node_id),
-    logger: logging.Logger = Depends(get_logger),
-) -> None:
-    await require_permission(
-        principal, ResourceKind.NODE, node_id, ResourceAction.WRITE, logger
-    )
-    cmd = CommandMessage(command=CommandType.STOP_WORKER, payload={"worker_name": name})
-    data = await _exec(supervisor, cmd)
-    if not data.get("success"):
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to stop worker '{name}'",
-        )
-
-
-@router.delete("/{name}")
-async def destroy_worker(
-    name: str,
+    alias: str,
     principal: PrincipalContext = Depends(authenticate_connection),
     supervisor: WorkerSupervisor = Depends(get_supervisor),
     node_id: str = Depends(get_node_id),
@@ -155,7 +150,29 @@ async def destroy_worker(
         principal, ResourceKind.NODE, node_id, ResourceAction.WRITE, logger
     )
     cmd = CommandMessage(
-        command=CommandType.DESTROY_WORKER, payload={"worker_name": name}
+        command=CommandType.STOP_WORKER, payload={"worker_alias": alias}
+    )
+    data = await _exec(supervisor, cmd)
+    if not data.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to stop worker '{alias}'",
+        )
+
+
+@router.delete("/{alias}")
+async def destroy_worker(
+    alias: str,
+    principal: PrincipalContext = Depends(authenticate_connection),
+    supervisor: WorkerSupervisor = Depends(get_supervisor),
+    node_id: str = Depends(get_node_id),
+    logger: logging.Logger = Depends(get_logger),
+) -> None:
+    await require_permission(
+        principal, ResourceKind.NODE, node_id, ResourceAction.WRITE, logger
+    )
+    cmd = CommandMessage(
+        command=CommandType.DESTROY_WORKER, payload={"worker_alias": alias}
     )
     await _exec(supervisor, cmd)
 
@@ -172,7 +189,7 @@ async def destroy_all_workers(
         principal, ResourceKind.NODE, node_id, ResourceAction.WRITE, logger
     )
     body = await request.body()
-    names: list[str] | None = None
+    aliases: list[str] | None = None
     if body.strip():
         try:
             raw = json.loads(body)
@@ -182,15 +199,15 @@ async def destroy_all_workers(
                 detail=f"Invalid JSON payload: {exc.msg}",
             )
         if raw is None:
-            names = None
+            aliases = None
         elif isinstance(raw, list):
-            names = [str(n) for n in raw]
+            aliases = [str(alias) for alias in raw]
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Expected request body to be an array of worker names.",
+                detail="Expected request body to be an array of worker aliases.",
             )
 
-    payload = None if names is None else {"worker_names": names}
+    payload = None if aliases is None else {"worker_aliases": aliases}
     cmd = CommandMessage(command=CommandType.DESTROY_WORKERS, payload=payload)
     await _exec(supervisor, cmd)

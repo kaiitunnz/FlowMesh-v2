@@ -15,28 +15,36 @@ from shared.grpc.supervisor.v1 import (
     supervisor_pb2_grpc,
 )
 from shared.network.relay_frame import RelayFrame
-from shared.utils import new_worker_id
+from shared.utils.recent import RecentSet
 
 from ... import env
 from ...clients.redis import (
-    WORKER_ID_SEQ_KEY,
     WORKERS_SET_KEY,
     SyncRedisClient,
     worker_key,
 )
 from ...network.worker_bridge import RelayWorkerBridge
+from ...registries.worker import WorkerRegistry as WorkerRecords
 from ..adapters.base import WorkerAdapter, WorkerTokenType
+from ..manager import WorkerManager
 from ..registry import WorkerRegistry
 from ..schemas import WorkerStatus
 from ..services.relay_service import RelayService
 from ..services.task_listener import TaskListener
 
-# Rewrite node_id for each worker key that still exists, atomically. KEYS are
-# worker keys; ARGV[1] is the new node id. Returns the count actually rewritten.
+# Longer than a worker waits before reconnecting a closed event stream.
+_REATTACH_GRACE_SEC = 10.0
+# Far more worker ids than a supervisor registers or releases while their events are
+# in flight.
+_WORKER_ID_MEMORY = 4096
+
+# Rewrite node_id for each worker key that still exists and this node wrote,
+# atomically. KEYS are worker keys; ARGV[1] is the new node id, ARGV[2] this node's
+# alias. Returns the count actually rewritten.
 _REHOME_LUA = """
 local rehomed = 0
 for _, key in ipairs(KEYS) do
-  if redis.call('EXISTS', key) == 1 then
+  if redis.call('HGET', key, 'node_alias') == ARGV[2] then
     redis.call('HSET', key, 'node_id', ARGV[1])
     rehomed = rehomed + 1
   end
@@ -94,25 +102,102 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self,
         registry: WorkerRegistry,
         redis: SyncRedisClient,
+        worker_records: WorkerRecords,
         node_id: str,
         node_alias: str,
         task_listener: TaskListener,
         relay_service: RelayService,
+        worker_manager: WorkerManager,
         logger: logging.Logger,
         relay_bridges: dict[str, RelayWorkerBridge] | None = None,
     ) -> None:
         self._registry = registry
+        self._worker_records = worker_records
         self._task_listener = task_listener
         self._relay_service = relay_service
         self._redis = redis
         self._node_id = node_id
         self._node_alias = node_alias
+        self._worker_manager = worker_manager
         # Each relay namespace's bridge, by the event type its frames push up as.
         self._relay_bridges = relay_bridges or {}
         self._logger = logger
         # Guards _node_id and the registry-vs-rehome window against concurrent
         # RegisterWorker (grpc loop thread) and rebind_node (heartbeat thread).
         self._lock = Lock()
+        # Worker ids already unregistered with the root; each is unregistered once.
+        self._unregistered: RecentSet[str] = RecentSet(_WORKER_ID_MEMORY)
+        # Worker ids released here, which a fresh registration never takes: the root
+        # may still be about to apply their unregister.
+        self._released: RecentSet[str] = RecentSet(_WORKER_ID_MEMORY)
+        # Worker ids whose registration reached the root.
+        self._registered: RecentSet[str] = RecentSet(_WORKER_ID_MEMORY)
+        # Guards the three id sets.
+        self._ids_lock = Lock()
+        self._pending_unregisters: set[asyncio.Task[None]] = set()
+        # Set once this supervisor starts stopping: a worker it admitted then would be
+        # admitted again by the next supervisor, leaving a ghost id behind.
+        self._stopping = False
+
+    def begin_shutdown(self) -> None:
+        """Refuse registrations, so a worker registers with the next supervisor."""
+        self._stopping = True
+
+    def reconcile_workers(self) -> None:
+        """Release every binding whose record the root does not hold for this node, so
+        the worker registers again."""
+        if self._stopping:
+            return
+        with self._lock:
+            missing, foreign = self._unowned_bindings_locked()
+            # The root's record of a foreign id is another node's live worker, which
+            # this node's UNREGISTER must not reach.
+            for worker_id in foreign:
+                self._note_unregistered(worker_id)
+            gone = missing + foreign
+            released = sum(self._registry.retire(worker_id) for worker_id in gone)
+        if released:
+            self._logger.warning(
+                "Released %d worker(s) the root does not record for this node: %s",
+                released,
+                ", ".join(gone),
+            )
+
+    def _unowned_bindings_locked(self) -> tuple[list[str], list[str]]:
+        """The bound ids the root holds no record of, and those whose record another
+        node wrote, as after a store wipe."""
+        bound = self._registry.bound_worker_ids()
+        recorded = self._redis.set_members(WORKERS_SET_KEY)
+        with self._redis.control_pipeline() as pipe:
+            for worker_id in bound:
+                pipe.hget(worker_key(worker_id), "node_alias")
+            aliases = pipe.execute()
+        missing = [worker_id for worker_id in bound if worker_id not in recorded]
+        foreign = [
+            worker_id
+            for worker_id, alias in zip(bound, aliases)
+            if worker_id in recorded and alias != self._node_alias
+        ]
+        return missing, foreign
+
+    def worker_id_released(self, worker_id: str) -> None:
+        """Tell the root a worker id ended, unless its own unregister already did."""
+        with self._ids_lock:
+            self._released.add(worker_id)
+            if worker_id in self._unregistered:
+                self._unregistered.discard(worker_id)
+                return
+            self._unregistered.add(worker_id)
+        self._relay_service.add_unregister(worker_id, self._node_alias)
+
+    def _note_unregistered(self, worker_id: str) -> bool:
+        """Record that the root heard ``worker_id`` unregister; return whether it is the
+        first to."""
+        with self._ids_lock:
+            if worker_id in self._unregistered:
+                return False
+            self._unregistered.add(worker_id)
+            return True
 
     def rebind_node(self, node_id: str) -> None:
         """Re-home this node's workers under a new node id.
@@ -120,8 +205,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         Future registrations stamp the new id, and every already-registered
         worker's ``node_id`` field is rewritten in Redis so the dispatcher
         routes tasks to them on the node's new dispatch channel. A worker whose
-        record no longer exists (e.g. Redis was wiped) is skipped rather than
-        resurrected as a partial record.
+        record no longer exists (e.g. Redis was wiped), or that another node wrote
+        under the same id, is skipped.
         """
         with self._lock:
             if node_id == self._node_id:
@@ -135,7 +220,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             ]
             rehomed, skipped = self._rehome_workers(worker_ids, node_id)
             self._logger.info(
-                "Re-homed %d worker(s) (%d skipped: no record) from node %s to %s",
+                "Re-homed %d worker(s) (%d not recorded here) from node %s to %s",
                 rehomed,
                 skipped,
                 old_node_id,
@@ -143,13 +228,15 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             )
 
     def _rehome_workers(self, worker_ids: list[str], node_id: str) -> tuple[int, int]:
-        """Rewrite node_id only for workers whose record still exists, atomically
-        so a worker deleted mid-rebind is skipped rather than resurrected as a
+        """Rewrite node_id only for workers whose record still exists and this node
+        wrote, atomically, so a worker deleted mid-rebind is never resurrected as a
         partial record. Returns (rehomed, skipped)."""
         if not worker_ids:
             return 0, 0
         keys = [worker_key(worker_id) for worker_id in worker_ids]
-        rehomed = int(self._redis.eval(_REHOME_LUA, len(keys), *keys, node_id))
+        rehomed = int(
+            self._redis.eval(_REHOME_LUA, len(keys), *keys, node_id, self._node_alias)
+        )
         return rehomed, len(worker_ids) - rehomed
 
     async def RegisterWorker(
@@ -157,28 +244,47 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         request: supervisor_pb2.RegisterRequest,
         context: grpc.aio.ServicerContext,
     ) -> supervisor_pb2.RegisterResponse:
-        worker = self._get_worker_from_context(context)
+        if self._stopping:
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE, "Supervisor is shutting down"
+            )
+        token = _token_from_context(context)
+        if not token:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid worker token")
+        worker = self._registry.try_get(token)
+        if worker is None:
+            # Unknown token: try admitting an external worker.
+            await self._worker_manager.admit_worker(token)
+            worker = self._registry.try_get(token)
         if worker is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid worker token")
         worker_meta = _payload_from_struct(request.meta)
-        incarnation = self._redis.incr(WORKER_ID_SEQ_KEY)
-        worker_id = new_worker_id(incarnation)
-        worker_meta["id"] = worker_id
-        worker_meta["incarnation"] = incarnation
-        worker_meta["node_alias"] = self._node_alias
-        # Stamp node_id, persist the record, and insert into the registry as one unit so
-        # a concurrent rebind_node either sees this worker in its snapshot or stamps it
-        # with the new id.
+        reported_alias = worker_meta.get("alias")
+        if reported_alias != worker.alias:
+            if reported_alias:
+                self._logger.warning(
+                    "Worker %s reported alias %r; check WORKER_ALIAS against the "
+                    "alias the supervisor assigned or the worker's token",
+                    worker.alias,
+                    reported_alias,
+                )
+            worker_meta["alias"] = worker.alias
+        # Stamp node_id, persist the record and set the worker id as one unit so a
+        # concurrent rebind_node either sees this worker in its snapshot or stamps
+        # it with the new id.
         with self._lock:
-            worker_meta["node_id"] = self._node_id
-            self._redis.sadd(WORKERS_SET_KEY, worker_id)
-            self._redis.hash_set(worker_key(worker_id), worker_meta)
-            self._registry.set_worker_id(worker.token, worker_id)
+            with self._ids_lock:
+                released = list(self._released)
+            worker_id = self._worker_records.register_worker(
+                self._node_id,
+                self._node_alias,
+                worker_meta,
+                [*self._registry.bound_worker_ids(), *released],
+            )
+            incarnation = int(worker_meta["incarnation"])
+            self._registry.set_worker_id(token, worker_id)
         self._task_listener.add_worker(worker_id)
-        try:
-            worker.set_worker_id(worker_id)
-        except RuntimeError as exc:
-            self._logger.warning(exc)
+        worker.set_worker_id(worker_id)
         self._logger.info("Registered worker %s", worker_id)
         return supervisor_pb2.RegisterResponse(
             worker_id=worker_id, incarnation=incarnation
@@ -195,6 +301,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         if stream is None:
             self._logger.warning("No dispatch queue for worker %s", worker_id)
             return
+        self._relay_service.add_attached(worker_id)
         try:
             while True:
                 try:
@@ -208,6 +315,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                         interrupt=supervisor_pb2.InterruptMessage(
                             task_id=str(event["task_id"]),
                             reason=str(event["reason"]),
+                            dispatch_id=str(event.get("dispatch_id") or ""),
                         )
                     )
                 elif event.get("kind") == "stop":
@@ -215,6 +323,14 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                         stop=supervisor_pb2.StopMessage(
                             task_id=str(event["task_id"]),
                             reason=str(event["reason"]),
+                            dispatch_id=str(event.get("dispatch_id") or ""),
+                        )
+                    )
+                elif event.get("kind") == "revoke":
+                    yield supervisor_pb2.DispatchMessage(
+                        revoke=supervisor_pb2.RevokeMessage(
+                            task_id=str(event["task_id"]),
+                            dispatch_id=str(event["dispatch_id"]),
                         )
                     )
                 elif event.get("kind") == "mediated_op":
@@ -251,19 +367,30 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
 
         worker.attach_event_stream()
         try:
-            return await self._relay_events(worker, worker_id, request_iterator)
+            return await self._relay_events(
+                worker, worker_id, request_iterator, context
+            )
         finally:
             worker.detach_event_stream()
+            # A stream of the worker's current registration still open, or a later
+            # registration, keeps what the adapter holds.
+            if not worker.has_event_stream and worker.clear_worker_id(worker_id):
+                worker.set_status(WorkerStatus.STOPPED)
 
     async def _relay_events(
         self,
         worker: WorkerAdapter,
         worker_id: str,
         request_iterator: AsyncIterator[supervisor_pb2.EventMessage],
+        context: grpc.aio.ServicerContext,
     ) -> Empty:
         registered: bool = False
         unregistered: bool = False
         async for message in request_iterator:
+            if self._registry.get_worker_id(worker.token) != worker_id:
+                await context.abort(
+                    grpc.StatusCode.UNAUTHENTICATED, "Worker registration ended"
+                )
             payload = _payload_from_struct(message.payload)
             event_type = payload.get("type")
             if (bridge := self._relay_bridges.get(str(event_type))) is not None:
@@ -273,25 +400,45 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                     RelayFrame.from_wire(payload["payload"]["frame"])
                 )
                 continue
+            # Control attributes an event to the worker this stream authenticated.
+            payload["worker_id"] = worker_id
             # Trap register/unregister events
             match event_type:
                 case "REGISTER":
+                    # Every event stream opens with one; the root hears it once.
                     registered = True
+                    worker.set_worker_id(worker_id)
                     worker.set_status(WorkerStatus.RUNNING)
+                    if worker_id in self._registered:
+                        continue
+                    self._registered.add(worker_id)
                 case "UNREGISTER":
                     unregistered = True
+                    if not self._note_unregistered(worker_id):
+                        continue
+                    payload.setdefault("payload", {})["node_alias"] = self._node_alias
             self._relay_service.add_event(payload)
         self._logger.info("Event stream closed for worker %s", worker_id)
         if registered and not unregistered:
-            # Manually send unregister event if not sent by worker
-            payload = dict(type="UNREGISTER", worker_id=worker_id, payload={})
-            self._relay_service.add_event(payload)
-        try:
-            worker.clear_worker_id()
-        except RuntimeError as exc:
-            self._logger.warning(exc)
-        worker.set_status(WorkerStatus.STOPPED)
+            task = asyncio.ensure_future(
+                self._unregister_unless_reattached(worker, worker_id)
+            )
+            self._pending_unregisters.add(task)
+            task.add_done_callback(self._pending_unregisters.discard)
         return Empty()
+
+    async def _unregister_unless_reattached(
+        self, worker: WorkerAdapter, worker_id: str
+    ) -> None:
+        """Unregister a worker whose event stream closed without it unregistering,
+        unless it re-attaches first, as a worker reconnecting after a blip does."""
+        await asyncio.sleep(_REATTACH_GRACE_SEC)
+        if worker.has_event_stream:
+            return
+        if self._registry.get_worker_id(worker.token) != worker_id:
+            return
+        if self._note_unregistered(worker_id):
+            self._relay_service.add_unregister(worker_id, self._node_alias)
 
     async def PushLogs(
         self,
@@ -304,8 +451,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
 
         async for msg in request_iterator:
             payload = _payload_from_struct(msg.payload)
-            if isinstance(payload, dict):
-                payload.setdefault("worker_id", worker_id)
+            # Control attributes a log to the worker this stream authenticated.
+            payload["worker_id"] = worker_id
             self._relay_service.add_log(payload)
         self._logger.debug("Log stream closed for worker %s", worker_id)
         return Empty()
@@ -326,6 +473,14 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
 
 
 _GRPC_MAX_MSG_BYTES = 1024 * 1024 * 1024  # 1 GB
+# Fixed for every deployment: the server pings each worker connection, so a half-open
+# stream ends, and its worker reattaches, within about the keepalive time plus the ping
+# ack timeout.
+_GRPC_KEEPALIVE_TIME_MS = 20_000
+_GRPC_KEEPALIVE_TIMEOUT_MS = 10_000
+# A worker's ping ack queues behind whatever it already wrote to the connection, so this
+# covers a few windowed relay sessions draining over a slow link to an off-host worker.
+_GRPC_PING_ACK_TIMEOUT_MS = 30_000
 
 
 class GrpcServer:
@@ -335,10 +490,12 @@ class GrpcServer:
         port: int,
         registry: WorkerRegistry,
         redis: SyncRedisClient,
+        worker_records: WorkerRecords,
         node_id: str,
         node_alias: str,
         task_listener: TaskListener,
         relay_service: RelayService,
+        worker_manager: WorkerManager,
         logger: logging.Logger,
         relay_bridges: dict[str, RelayWorkerBridge] | None = None,
     ) -> None:
@@ -347,10 +504,12 @@ class GrpcServer:
         self._servicer = SupervisorServicer(
             registry,
             redis,
+            worker_records,
             node_id,
             node_alias,
             task_listener,
             relay_service,
+            worker_manager,
             logger,
             relay_bridges=relay_bridges,
         )
@@ -364,6 +523,13 @@ class GrpcServer:
             options=[
                 ("grpc.max_receive_message_length", _GRPC_MAX_MSG_BYTES),
                 ("grpc.max_send_message_length", _GRPC_MAX_MSG_BYTES),
+                ("grpc.keepalive_time_ms", _GRPC_KEEPALIVE_TIME_MS),
+                ("grpc.keepalive_timeout_ms", _GRPC_KEEPALIVE_TIMEOUT_MS),
+                # A task stream with nothing to deliver is the one a half-open
+                # connection hides: its pings never stop for lack of data, and one
+                # left unanswered fails the connection within the ping ack timeout.
+                ("grpc.http2.max_pings_without_data", 0),
+                ("grpc.http2.ping_timeout_ms", _GRPC_PING_ACK_TIMEOUT_MS),
                 (
                     "grpc.keepalive_permit_without_calls",
                     int(env.SUPERVISOR_GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS),
@@ -406,3 +572,15 @@ class GrpcServer:
     def rebind_node(self, node_id: str) -> None:
         """Re-home registered workers under a new node id."""
         self._servicer.rebind_node(node_id)
+
+    def begin_shutdown(self) -> None:
+        """Refuse worker registrations while the supervisor stops."""
+        self._servicer.begin_shutdown()
+
+    def reconcile_workers(self) -> None:
+        """Release the workers the root does not record for this node."""
+        self._servicer.reconcile_workers()
+
+    def worker_id_released(self, worker_id: str) -> None:
+        """Tell the root a worker id's binding ended."""
+        self._servicer.worker_id_released(worker_id)

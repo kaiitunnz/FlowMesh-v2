@@ -90,7 +90,7 @@ def _egress_spans(path: Path) -> list[dict[str, Any]]:
 
 def _run_held_turn(spans_path: Path, traceparent: str | None) -> None:
     pending = PendingEgressRequestStore()
-    pending.put(_AGENT, _CALL, _REQUEST)
+    pending.put(_AGENT, _CALL, _REQUEST, None)
     sidecar = MediatedEgressSidecar(
         pending_requests=pending,
         audience=lambda: (_WORKER, _GEN),

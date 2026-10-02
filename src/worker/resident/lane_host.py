@@ -56,6 +56,10 @@ ObservationReport = Callable[[ResidentRouteObservation], None]
 OutcomeStoreFor = Callable[[str], FabricContentStore | None]
 
 
+# A lane busy sending waits on the event stream; a re-registration waits this long.
+_REBIND_WAIT_SEC = 30.0
+
+
 class ResidentLaneHost:
     """Hosts the origin and replica resident lanes on one worker loop."""
 
@@ -205,6 +209,20 @@ class ResidentLaneHost:
         self, coro_fn: Callable[[], Coroutine[Any, Any, Any]]
     ) -> "concurrent.futures.Future[Any]":
         return asyncio.run_coroutine_threadsafe(coro_fn(), self._loop)
+
+    def unbind_replicas(self) -> None:
+        """Refuse every claim to a replica served before the worker re-registered."""
+
+        async def unbind() -> None:
+            if self._replica is not None:
+                self._replica.unbind_all()
+
+        try:
+            self._call(unbind).result(_REBIND_WAIT_SEC)
+        except concurrent.futures.TimeoutError:
+            self._logger.warning(
+                "The resident lane did not unbind its replicas in time"
+            )
 
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one resident control frame onto the lane loop; return handled."""

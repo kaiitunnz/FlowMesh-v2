@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -27,7 +28,7 @@ class WorkerConfig(BaseModel):
     hb_interval: int = env.SERVER_HEARTBEAT_INTERVAL
     """Interval between heartbeats in seconds"""
     worker_alias: str | None = None
-    """Optional worker alias"""
+    """Requested worker alias"""
     tags: str = env.WORKER_TAGS
     """Comma-separated tags used by the scheduler"""
     hb_file: str | None = None
@@ -102,13 +103,15 @@ class WorkerAdapter(ABC):
     def __init__(
         self,
         token: WorkerTokenType,
-        name: str,
+        alias: str,
         config: WorkerConfig,
         owner: PrincipalContext,
     ) -> None:
         self._worker_id: str | None = None
+        # The servicer's loop and the registry's heartbeat thread both change the id.
+        self._worker_id_lock = threading.Lock()
         self.token = token
-        self.name = name
+        self.alias = alias
         self.config = config
         self.owner = owner
         # The last start or stop accepted; each waits for the one accepted before it.
@@ -130,14 +133,18 @@ class WorkerAdapter(ABC):
         pass
 
     def set_worker_id(self, worker_id: str) -> None:
-        if self._worker_id is not None:
-            raise RuntimeError(f"Worker ID is already set to {self._worker_id}")
-        self._worker_id = worker_id
+        """Hold the id the worker's current registration took, replacing any other."""
+        with self._worker_id_lock:
+            self._worker_id = worker_id
 
-    def clear_worker_id(self) -> None:
-        if self._worker_id is None:
-            raise RuntimeError("Worker ID is not set")
-        self._worker_id = None
+    def clear_worker_id(self, worker_id: str | None = None) -> bool:
+        """Drop the id held, only while it is ``worker_id`` when one is named; returns
+        whether it dropped one."""
+        with self._worker_id_lock:
+            if self._worker_id is None or worker_id not in (None, self._worker_id):
+                return False
+            self._worker_id = None
+            return True
 
     @property
     def has_event_stream(self) -> bool:
@@ -267,7 +274,7 @@ class WorkerAdapter(ABC):
         if not starting.cancelled() and (exc := starting.exception()) is not None:
             logger.warning(
                 "Worker %s failed to start after its start was cancelled: %r",
-                self.name,
+                self.alias,
                 exc,
             )
 
@@ -320,7 +327,7 @@ class WorkerAdapter(ABC):
             "WORKER_HB_FILE": hb_file,
             "WORKER_NAMESPACE": env.NODE_NAMESPACE,
             "WORKER_CLUSTER": env.NODE_CLUSTER,
-            "WORKER_ALIAS": config.worker_alias or "",
+            "WORKER_ALIAS": self.alias,
             "WORKER_TAGS": config.tags,
             "LOG_LEVEL": config.log_level,
             "WORKER_COST_PER_HOUR": to_env_str(config.worker_cost_per_hour),

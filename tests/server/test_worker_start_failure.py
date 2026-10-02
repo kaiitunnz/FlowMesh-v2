@@ -22,7 +22,7 @@ from tests.server.test_docker_removal_in_progress import _adapter
 
 def _worker(*, started: bool) -> MagicMock:
     worker = MagicMock(spec=WorkerAdapter)
-    worker.name = "gpu_0"
+    worker.alias = "gpu_0"
     worker.token = "gpu_0.token"
     worker.status = WorkerStatus.STOPPED
     worker.holds_worker.return_value = False
@@ -275,7 +275,7 @@ class TestCancelledCreate:
             release.set()
             await wm.create_worker(create)
             task = asyncio.ensure_future(
-                asyncio.wait_for(wm.stop_worker(adapter.name), timeout=0.1)
+                asyncio.wait_for(wm.stop_worker(adapter.alias), timeout=0.1)
             )
         await asyncio.sleep(0.2)
         assert adapter.status is WorkerStatus.STOPPING
@@ -283,18 +283,18 @@ class TestCancelledCreate:
             # The worker unregisters as it drains, before its container stops.
             adapter.set_status(WorkerStatus.STOPPED)
 
-        destroy = asyncio.ensure_future(wm.destroy_worker(adapter.name))
+        destroy = asyncio.ensure_future(wm.destroy_worker(adapter.alias))
         await asyncio.sleep(0.2)
 
         assert not destroy.done()
-        assert registry.try_get_by_name(adapter.name) is adapter
+        assert registry.try_get_by_alias(adapter.alias) is adapter
         stopped.set()
         assert await destroy is True
         with contextlib.suppress(BaseException):
             await task
         created.stop.assert_called_once()
         factory.destroy_worker.assert_called_once_with(adapter)
-        assert registry.try_get_by_name(adapter.name) is None
+        assert registry.try_get_by_alias(adapter.alias) is None
 
     @pytest.mark.asyncio
     async def test_a_create_keeps_its_name_until_its_unwind_ends(self) -> None:
@@ -306,9 +306,9 @@ class TestCancelledCreate:
         )
         await asyncio.sleep(0.2)
 
-        assert registry.try_get_by_name(adapter.name) is adapter
+        assert registry.try_get_by_alias(adapter.alias) is adapter
         release.set()
         with contextlib.suppress(BaseException):
             await task
         created.stop.assert_called_once()
-        assert registry.try_get_by_name(adapter.name) is None
+        assert registry.try_get_by_alias(adapter.alias) is None

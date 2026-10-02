@@ -4,46 +4,23 @@ over by the worker's next stream."""
 import asyncio
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator
-from threading import Lock
 from typing import Any, cast
 
+import fakeredis
 import pytest
 from google.protobuf.empty_pb2 import Empty
 
 from server.clients.redis import SyncRedisClient
-from server.supervisor.adapters.base import WorkerAdapter, WorkerTokenType
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from server.supervisor.services.task_listener import TaskListener
 from shared.grpc.supervisor.v1 import supervisor_pb2
+from tests.server.redis_helpers import fake_redis_client
+from tests.server.servicer_helpers import external_adapter, supervisor_servicer
 
 _LOGGER = logging.getLogger("test.stream_tasks")
 _TOKEN = "tok-1"
 _NAME = "worker-1"
-
-
-class _FakeRedis:
-    def __init__(self) -> None:
-        self._seq = 0
-
-    def incr(self, key: str) -> int:
-        self._seq += 1
-        return self._seq
-
-    def sadd(self, key: str, *members: str) -> None:
-        pass
-
-    def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
-        pass
-
-
-class _FakeAdapter:
-    def __init__(self) -> None:
-        self.token = cast(WorkerTokenType, _TOKEN)
-        self.name = _NAME
-
-    def set_worker_id(self, worker_id: str) -> None:
-        pass
 
 
 class _FakeContext:
@@ -56,15 +33,14 @@ class _FakeContext:
 
 def _servicer(listener: TaskListener) -> tuple[SupervisorServicer, WorkerRegistry]:
     registry = WorkerRegistry(on_worker_id_released=listener.remove_worker)
-    registry.add(cast(WorkerAdapter, _FakeAdapter()))
-    servicer = SupervisorServicer.__new__(SupervisorServicer)
-    servicer._registry = registry
-    servicer._task_listener = listener
-    servicer._redis = cast(SyncRedisClient, _FakeRedis())
-    servicer._node_id = "nde-1"
-    servicer._node_alias = "box"
-    servicer._logger = _LOGGER
-    servicer._lock = Lock()
+    registry.add(external_adapter(_TOKEN, _NAME))
+    servicer = supervisor_servicer(
+        registry,
+        fake_redis_client(fakeredis.FakeServer()),
+        "nde-1",
+        "box",
+        task_listener=listener,
+    )
     return servicer, registry
 
 
@@ -103,7 +79,7 @@ async def test_a_destroyed_worker_s_stream_finishes(listener: TaskListener) -> N
     reader = asyncio.ensure_future(_read_until_closed(_stream_tasks(servicer)))
     await asyncio.sleep(0)
 
-    registry.try_pop_by_name(_NAME)
+    registry.try_pop_by_alias(_NAME)
 
     assert await asyncio.wait_for(reader, timeout=2) == []
     assert worker_id not in listener._qs
@@ -128,8 +104,11 @@ async def test_a_second_stream_ends_the_first_and_takes_every_frame_kind(
         worker_id,
         {"kind": "mediated_op", "frame_kind": "permit", "payload": {"n": 1}},
     )
+    listener._deliver(
+        worker_id, {"kind": "revoke", "task_id": "tsk-1", "dispatch_id": "dsp-9"}
+    )
     messages = [await asyncio.wait_for(read, timeout=2)]
-    messages += [await asyncio.wait_for(anext(second), timeout=2) for _ in range(2)]
+    messages += [await asyncio.wait_for(anext(second), timeout=2) for _ in range(3)]
     await second.aclose()
 
     assert await asyncio.wait_for(first, timeout=2) == []
@@ -137,9 +116,11 @@ async def test_a_second_stream_ends_the_first_and_takes_every_frame_kind(
         "task",
         "stop",
         "mediated_op",
+        "revoke",
     ]
     assert messages[0].task.payload["task_id"] == "tsk-1"
     assert messages[2].mediated_op.kind == "permit"
+    assert messages[3].revoke.dispatch_id == "dsp-9"
 
 
 @pytest.mark.asyncio

@@ -56,7 +56,7 @@ from shared.sandbox import (
     LocalSandboxCapability,
     SandboxEgressMode,
 )
-from shared.schemas.command import InterruptMessage, MediatedOpMessage
+from shared.schemas.command import InterruptMessage, MediatedOpMessage, RevokeMessage
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import collection_elements, value_text
@@ -316,14 +316,39 @@ class _StagedRegistration:
     v2_engine: OrchestrationEngine | None
 
 
+@dataclass(frozen=True)
+class _Revoke:
+    message: RevokeMessage
+    # The node the dispatch went to, when known apart from the worker's record, which
+    # the worker's unregister deletes.
+    node_id: str | None = None
+
+
+@dataclass
+class _PendingOp:
+    """A worker-originated tool operation whose permit was relayed to its origin
+    worker, and when control re-drives it if no outcome has arrived."""
+
+    agent_task_id: str
+    call_correlation: str
+    worker_id: str
+    # The node the origin worker registered on; after a store wipe its id can name
+    # another node's worker, which holds none of the operation's request.
+    node_alias: str
+    redrive_at: float
+    redrives: int = 0
+
+
 @dataclass
 class _Termination:
-    """What a terminated workflow's work still holds, released after its terminal."""
+    """What control still owes workers off its lock: interrupts and revokes to send,
+    operations to reap, and resident credits to release."""
 
     interrupts: list[InterruptMessage]
     # Each pending mediated operation's worker, agent task, and call.
     reaps: list[tuple[str, str, str]]
     resident_invocation_ids: list[str] = field(default_factory=list)
+    revokes: list[_Revoke] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -566,6 +591,11 @@ def _is_default_url(url: str | None, default_url: str | None) -> bool:
 # Extra lifetime a worker-originated operation permit gets beyond the request timeout,
 # to cover dispatch and queue latency before the origin worker validates it.
 _OP_PERMIT_SLACK_SEC = 60.0
+# A pending operation whose outcome has not arrived is re-driven at its permit's
+# deadline plus this long times 2^n - 1 after the n-th re-drive, and its boundary fails
+# once it has been re-driven _OP_REDRIVE_LIMIT times.
+_OP_REDRIVE_BACKOFF_SEC = 30.0
+_OP_REDRIVE_LIMIT = 5
 # A generous bound on a materialized external-model completion; a larger response
 # settles by reference under the reference-backed outcome contract.
 _MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
@@ -717,10 +747,10 @@ class TaskRuntime:
         # turn-completion into the pending boundary rather than settling it.
         self._pending_facade_groups: dict[str, FacadeTurnGroup] = {}
         # Worker-originated tool operations whose permit was relayed to the origin
-        # worker's egress sidecar, keyed by permit id -> (agent task, call, worker).
-        # Reaps custody on settle or cancel. In-memory and rebuilt on restart from the
-        # pending boundary, never durably persisted.
-        self._pending_ops: dict[str, tuple[str, str, str]] = {}
+        # worker's egress sidecar, keyed by permit id. Reaps custody on settle or
+        # cancel. In-memory and rebuilt on restart from the pending boundary, never
+        # durably persisted.
+        self._pending_ops: dict[str, _PendingOp] = {}
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -1582,16 +1612,25 @@ class TaskRuntime:
 
     def release_ended_reservations(self) -> None:
         """Release every worker reserved for a dispatch not in flight, such as one
-        whose task settled just before a restart."""
-        self._release_workers(
-            [
-                (reservation.worker_id, reservation.dispatch_id)
-                for reservation in self._worker_registry.reservations()
-                if not self.dispatch_in_flight(
-                    reservation.task_id, reservation.dispatch_id, reservation.worker_id
-                )
-            ]
-        )
+        whose task settled just before a restart, and revoke the dispatch."""
+        ended = [
+            reservation
+            for reservation in self._worker_registry.reservations()
+            if not self.dispatch_in_flight(
+                reservation.task_id, reservation.dispatch_id, reservation.worker_id
+            )
+        ]
+        with self._lock:
+            for r in ended:
+                self._revoke_locked(r.task_id, r.worker_id, r.dispatch_id)
+        self._release_pending_terminations()
+        self._release_workers([(r.worker_id, r.dispatch_id) for r in ended])
+
+    def revoke_dispatch(self, task_id: str, worker_id: str, dispatch_id: str) -> None:
+        """Revoke one dispatch on its worker, which control does not hold."""
+        with self._lock:
+            self._revoke_locked(task_id, worker_id, dispatch_id)
+        self._release_pending_terminations()
 
     def _write_locked(
         self, write: Callable[[], None], hold: Callable[[_HeldWrites], None]
@@ -2267,6 +2306,76 @@ class TaskRuntime:
         finally:
             self._release_pending_terminations()
 
+    def redeliver_to_worker(self, worker_id: str) -> None:
+        """Re-relay what control holds for a worker whose task stream attached.
+
+        A frame relayed while the worker had no stream attached may be lost. Each
+        pending mediated operation the worker originated is re-minted, and the worker
+        drops one it already runs; each task being cancelled there is interrupted
+        again, keyed to its dispatch. A lost task dispatch resolves as lost.
+        """
+        with self._cv:
+            pending = {
+                (op.agent_task_id, op.call_correlation)
+                for op in self._pending_ops.values()
+                if op.worker_id == worker_id
+            }
+            self._queue_interrupts_locked(
+                self._cancelling_interrupts_locked(
+                    lambda record: record.assigned_worker == worker_id
+                )
+            )
+        self._release_pending_terminations()
+        for task_id, call in sorted(pending):
+            self.redispatch_episode_invocation(task_id, call)
+
+    def redrive_overdue_ops(self, worker_id: str) -> None:
+        """Re-drive each operation a live worker originated whose outcome is overdue.
+
+        A first delivery can be lost or left ambiguous, as when the egress's outcome
+        could not be finalized while the root restarted, so an overdue operation is
+        re-minted under the same idempotency key, and a worker that already produced
+        its outcome returns it. A boundary re-driven _OP_REDRIVE_LIMIT times fails.
+        """
+        now = time.time()
+        exhausted: list[_PendingOp] = []
+        redrive: list[tuple[str, _PendingOp]] = []
+        with self._cv:
+            for permit_id, op in list(self._pending_ops.items()):
+                if op.worker_id != worker_id or op.redrive_at > now:
+                    continue
+                if op.redrives >= _OP_REDRIVE_LIMIT:
+                    del self._pending_ops[permit_id]
+                    exhausted.append(op)
+                else:
+                    op.redrives += 1
+                    redrive.append((permit_id, op))
+        try:
+            for op in exhausted:
+                self._logger.warning(
+                    "No outcome arrived for tool operation %s of %s after %d "
+                    "re-drives; failing its boundary",
+                    op.call_correlation,
+                    op.agent_task_id,
+                    op.redrives,
+                )
+                self._settle_episode_invocation(
+                    op.agent_task_id,
+                    op.call_correlation,
+                    error="tool operation outcome never arrived",
+                )
+        finally:
+            self._release_pending_terminations()
+        for permit_id, op in redrive:
+            if not self.redispatch_episode_invocation(
+                op.agent_task_id, op.call_correlation
+            ):
+                # Its boundary has settled or ended, so no outcome will reap the
+                # operation.
+                with self._cv:
+                    if self._pending_ops.get(permit_id) is op:
+                        del self._pending_ops[permit_id]
+
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
 
@@ -2450,6 +2559,25 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error="origin worker unavailable"
             )
             return
+        occurrence = (env.task_id, env.call_correlation)
+        stale = [
+            (permit_id, op)
+            for permit_id, op in self._pending_ops.items()
+            if (op.agent_task_id, op.call_correlation) == occurrence
+        ]
+        for permit_id, _ in stale:
+            del self._pending_ops[permit_id]
+        if any(op.node_alias != worker.node_alias for _, op in stale):
+            self._logger.warning(
+                "worker-originated tool op for %s: %s now names a worker of another "
+                "node; failing the boundary clean",
+                env.task_id,
+                worker_id,
+            )
+            self._settle_episode_invocation(
+                env.task_id, env.call_correlation, error="origin worker unavailable"
+            )
+            return
         op_credential = self._resolve_op_credential(agent, env.interface)
         if isinstance(op_credential, _MissingCredential):
             self._settle_episode_invocation(
@@ -2477,16 +2605,16 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error="could not mint a permit"
             )
             return
-        # A re-drive re-mints under a fresh permit id; keep at most one pending op per
-        # occurrence.
-        occurrence = (env.task_id, env.call_correlation)
-        for stale_id, (task_id, call, _) in list(self._pending_ops.items()):
-            if (task_id, call) == occurrence:
-                del self._pending_ops[stale_id]
-        self._pending_ops[permit.permit_id] = (
+        # A re-drive re-mints under a fresh permit id, keeping one pending op per
+        # occurrence and its re-drive count.
+        redrives = max((op.redrives for _, op in stale), default=0)
+        self._pending_ops[permit.permit_id] = _PendingOp(
             env.task_id,
             env.call_correlation,
             worker_id,
+            worker.node_alias,
+            redrive_at=deadline + _OP_REDRIVE_BACKOFF_SEC * (2**redrives - 1),
+            redrives=redrives,
         )
         self._worker_registry.publish_mediated_op(
             worker,
@@ -2497,7 +2625,9 @@ class TaskRuntime:
             ),
         )
 
-    def authorize_model_turn(self, proposal: AgentModelTurnProposal) -> None:
+    def authorize_model_turn(
+        self, proposal: AgentModelTurnProposal, proposer_id: str
+    ) -> None:
         """Authorize a held agent's in-turn model egress and relay a one-use permit.
 
         The agent's own worker holds the model request privately and proposes only its
@@ -2507,16 +2637,21 @@ class TaskRuntime:
         binding, or an authority failure — relays a deny frame so the held turn fails
         fast rather than waiting out its deadline. No settle is expected: the held turn
         consumes the outcome in-worker and its durable progress rests on its
-        turn-completion boundaries.
+        turn-completion boundaries. Only the dispatch holding the agent's task, on the
+        worker whose stream relayed the proposal, is authorized; any other proposer is
+        denied.
         """
         with self._cv:
             agent = self._tasks.get(proposal.agent_task_id)
             engine = self._engines.get(agent.workflow_id) if agent else None
             if agent is None or engine is None:
                 return
-            worker_id = agent.assigned_worker
-            worker = self._worker_registry.get_worker(worker_id) if worker_id else None
-            if worker_id is None or worker is None:
+            if not self._dispatch_live_locked(agent, proposer_id, proposal.dispatch_id):
+                self._deny_model_turn(proposal, proposer_id, "model turn not held")
+                return
+            worker_id = proposer_id
+            worker = self._worker_registry.get_worker(worker_id)
+            if worker is None:
                 # A gone origin worker cannot receive a relay: the held turn fails on
                 # its own permit deadline.
                 return
@@ -2545,18 +2680,7 @@ class TaskRuntime:
                         deployment_credential=op_credential.deployment_credential,
                     )
             if permit is None:
-                self._worker_registry.publish_mediated_op(
-                    worker,
-                    MediatedOpMessage(
-                        worker_id=worker_id,
-                        frame_kind="deny",
-                        payload={
-                            "agent_task_id": proposal.agent_task_id,
-                            "call_correlation": proposal.call_correlation,
-                            "reason": reason,
-                        },
-                    ),
-                )
+                self._deny_model_turn(proposal, worker_id, reason)
                 return
             self._worker_registry.publish_mediated_op(
                 worker,
@@ -2566,6 +2690,25 @@ class TaskRuntime:
                     payload=self._stamped_permit_payload(permit, agent),
                 ),
             )
+
+    def _deny_model_turn(
+        self, proposal: AgentModelTurnProposal, worker_id: str, reason: str
+    ) -> None:
+        """Relay a deny frame that fails a held turn before its deadline."""
+        if (worker := self._worker_registry.get_worker(worker_id)) is None:
+            return
+        self._worker_registry.publish_mediated_op(
+            worker,
+            MediatedOpMessage(
+                worker_id=worker_id,
+                frame_kind="deny",
+                payload={
+                    "agent_task_id": proposal.agent_task_id,
+                    "call_correlation": proposal.call_correlation,
+                    "reason": reason,
+                },
+            ),
+        )
 
     def settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         """Settle an agent boundary from its origin worker's fenced outcome report.
@@ -2584,8 +2727,14 @@ class TaskRuntime:
     def _settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         with self._cv:
             pending = self._pending_ops.pop(outcome.permit_id, None)
+            # A re-mint of the same operation is settled by this outcome too.
+            occurrence = (outcome.agent_task_id, outcome.call_correlation)
+            for permit_id, op in list(self._pending_ops.items()):
+                if (op.agent_task_id, op.call_correlation) == occurrence:
+                    pending = pending or op
+                    del self._pending_ops[permit_id]
             worker_id = (
-                pending[2]
+                pending.worker_id
                 if pending
                 else self._assigned_worker_locked(outcome.agent_task_id)
             )
@@ -2685,12 +2834,10 @@ class TaskRuntime:
         and call for reaping."""
         agents = set(agent_task_ids)
         taken: list[tuple[str, str, str]] = []
-        for permit_id, (agent_task_id, call, worker_id) in list(
-            self._pending_ops.items()
-        ):
-            if agent_task_id in agents:
+        for permit_id, op in list(self._pending_ops.items()):
+            if op.agent_task_id in agents:
                 del self._pending_ops[permit_id]
-                taken.append((worker_id, agent_task_id, call))
+                taken.append((op.worker_id, op.agent_task_id, op.call_correlation))
         return taken
 
     def set_model_settler(
@@ -3299,19 +3446,19 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
         return record.org_id if record is not None else ""
 
-    def renewable_content_scope(self, task_id: str, worker_id: str) -> str | None:
+    def renewable_content_scope(
+        self, task_id: str, worker_id: str, dispatch_id: str | None
+    ) -> str | None:
         """The scope a task's store access renews in, or None when it may not renew.
 
-        Renewal serves a task still running on the worker asking for it; a task that
-        has settled or moved to another worker is given nothing, so a superseded
+        Renewal serves the dispatch holding a task, on the worker asking for it; a task
+        that has settled or moved to another dispatch is given nothing, so a superseded
         attempt's late write fails rather than landing under fresh access.
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            if (
-                record is None
-                or record.status in TERMINAL_TASK_STATUSES
-                or record.assigned_worker != worker_id
+            if record is None or not self._dispatch_live_locked(
+                record, worker_id, dispatch_id
             ):
                 return None
             return record.org_id
@@ -4801,6 +4948,16 @@ class TaskRuntime:
             for held_worker, held_dispatch in held
         )
 
+    def _dispatch_live_locked(
+        self, record: TaskRecord, worker_id: str, dispatch_id: str | None
+    ) -> bool:
+        """Whether the named dispatch, on ``worker_id``, holds a task still running."""
+        return (
+            dispatch_id is not None
+            and record.status not in TERMINAL_TASK_STATUSES
+            and self._holds_dispatch_locked(record, worker_id, dispatch_id)
+        )
+
     def _accepts_event_locked(
         self, record: TaskRecord, worker_id: str | None, dispatch_id: str | None
     ) -> bool:
@@ -5918,25 +6075,58 @@ class TaskRuntime:
         if not record.assigned_worker or record.merged_parent_id:
             return None
         return InterruptMessage(
-            task_id=record.task_id, worker_id=record.assigned_worker, reason=reason
+            task_id=record.task_id,
+            worker_id=record.assigned_worker,
+            reason=reason,
+            dispatch_id=record.dispatch_id,
         )
+
+    def _revoke_locked(
+        self,
+        task_id: str,
+        worker_id: str,
+        dispatch_id: str | None,
+        node_id: str | None = None,
+    ) -> None:
+        """Queue the revocation of a dispatch that resolved without its worker ending
+        it."""
+        if dispatch_id is None:
+            return
+        message = RevokeMessage(
+            task_id=task_id, worker_id=worker_id, dispatch_id=dispatch_id
+        )
+        self._pending_terminations.append(
+            _Termination([], [], revokes=[_Revoke(message, node_id)])
+        )
+
+    def _queue_interrupts_locked(self, interrupts: list[InterruptMessage]) -> None:
+        if interrupts:
+            self._pending_terminations.append(_Termination(interrupts, []))
+
+    def _cancelling_interrupts_locked(
+        self, include: Callable[[TaskRecord], bool]
+    ) -> list[InterruptMessage]:
+        """An interrupt for each task being cancelled that ``include`` selects."""
+        return [
+            interrupt
+            for record in self._tasks.values()
+            if record.status == TaskStatus.CANCELLING
+            and include(record)
+            and (interrupt := self._interrupt_for(record, record.error or "cancelled"))
+        ]
 
     def _interrupt_cancelling_locked(self, workflow_id: str) -> None:
         """Queue an interrupt for each task a restart found still being cancelled,
         whose worker may never have received one."""
-        interrupts = [
-            interrupt
-            for record in self._tasks.values()
-            if record.workflow_id == workflow_id
-            and record.status == TaskStatus.CANCELLING
-            and (interrupt := self._interrupt_for(record, record.error or "cancelled"))
-        ]
-        if interrupts:
-            self._pending_terminations.append(_Termination(interrupts, []))
+        self._queue_interrupts_locked(
+            self._cancelling_interrupts_locked(
+                lambda record: record.workflow_id == workflow_id
+            )
+        )
 
     def _release_terminated_work(self, termination: _Termination) -> None:
-        """Release what a terminated workflow's work held, best effort: each resident
-        credit, each interrupt, and each reap is attempted however the others fare."""
+        """Send what ``termination`` owes workers, best effort: each resident credit,
+        interrupt, revoke, and reap is attempted however the others fare."""
         # The fenced terminal releases each in-flight resident invocation's credit, so a
         # lost or draining replica is not held forever.
         for invocation_id in termination.resident_invocation_ids:
@@ -5963,6 +6153,29 @@ class TaskRuntime:
                     interrupt.task_id,
                     interrupt.worker_id,
                 )
+        for revoke in termination.revokes:
+            message = revoke.message
+            try:
+                node_id = revoke.node_id
+                if node_id is None and (
+                    worker := self._worker_registry.get_worker(message.worker_id)
+                ):
+                    node_id = worker.node_id
+                if node_id is None:
+                    self._logger.warning(
+                        "Cannot revoke dispatch %s of %s; worker %s missing",
+                        message.dispatch_id,
+                        message.task_id,
+                        message.worker_id,
+                    )
+                else:
+                    self._worker_registry.publish_revoke(node_id, message)
+            except Exception:
+                self._logger.exception(
+                    "Revoking dispatch %s on %s failed",
+                    message.dispatch_id,
+                    message.worker_id,
+                )
         # The worker drops a reaped operation and its custody.
         for worker_id, agent_task_id, call in termination.reaps:
             try:
@@ -5973,8 +6186,8 @@ class TaskRuntime:
                 )
 
     def _release_pending_terminations(self) -> None:
-        """Release, off the lock, what workflows control failed under it still hold,
-        and each worker reserved for a dispatch that ended."""
+        """Release, off the lock, what control queued under it, and each worker
+        reserved for a dispatch that ended."""
         with self._lock:
             pending, self._pending_terminations = self._pending_terminations, []
         for termination in pending:
@@ -6395,26 +6608,28 @@ class TaskRuntime:
         return self._tasks
 
     def recover_tasks_for_worker(
-        self, worker_id: str, *, spend_attempt: bool
+        self, worker_id: str, *, spend_attempt: bool, node_id: str | None = None
     ) -> WorkerRecovery:
         """Recover the tasks a departed worker held.
 
-        A dispatch to the worker published and not yet recorded is lost here: its
-        tasks go back to the head of the queue, a merged batch's to run alone, spending
-        no attempt, and the dispatch is never recorded. A v2 task resolves as its
-        worker's loss here, spending an attempt unless ``spend_attempt`` is False, as
-        for a worker that gave its tasks up; a v1 task is left for the caller to return
-        or settle. A task whose dispatch ended at a suspension holds nothing on the
-        worker and waits on its boundary, unless the worker originated that boundary
-        and holds its request.
+        Every dispatch recovered here is revoked on the worker, in case it is still
+        reachable. A dispatch to the worker published and not yet recorded is lost
+        here: its tasks go back to the head of the queue, a merged batch's to run
+        alone, spending no attempt, and the dispatch is never recorded. A v2 task
+        resolves as its worker's loss here, spending an attempt unless
+        ``spend_attempt`` is False, as for a worker that gave its tasks up; a v1 task
+        is left for the caller to return or settle. A task whose dispatch ended at a
+        suspension holds nothing on the worker and waits on its boundary, unless the
+        worker originated that boundary and holds its request. ``node_id`` names the
+        worker's node when its record is already gone.
         """
         try:
-            return self._recover_tasks_for_worker(worker_id, spend_attempt)
+            return self._recover_tasks_for_worker(worker_id, spend_attempt, node_id)
         finally:
             self._release_pending_terminations()
 
     def _recover_tasks_for_worker(
-        self, worker_id: str, spend_attempt: bool
+        self, worker_id: str, spend_attempt: bool, node_id: str | None
     ) -> WorkerRecovery:
         recovered: list[str] = []
         resolved: list[LossOutcome] = []
@@ -6423,6 +6638,9 @@ class TaskRuntime:
                 publish = self._publishing.get(task_id)
                 if publish and not publish.recorded and publish.worker_id == worker_id:
                     self._publishing[task_id] = None
+                    self._revoke_locked(
+                        task_id, worker_id, publish.dispatch_id, node_id
+                    )
                     children = self._merge_children_map.pop(task_id, [])
                     record.merged_children = None
                     self._commit_locked(
@@ -6443,6 +6661,8 @@ class TaskRuntime:
                 ):
                     continue
                 self._rehydrated_dispatched.pop(task_id, None)
+                if not record.merged_parent_id:
+                    self._revoke_locked(task_id, worker_id, record.dispatch_id, node_id)
                 if (
                     record.status == TaskStatus.DISPATCHED
                     and record.workflow_id in self._engines
@@ -6455,8 +6675,8 @@ class TaskRuntime:
             # A pending tool operation on the departed worker lost its private request
             # custody with the worker; drop the stale mapping so its boundary re-mints
             # on a fresh worker rather than waiting on an outcome that can never arrive.
-            for permit_id, (_, _, op_worker) in list(self._pending_ops.items()):
-                if op_worker == worker_id:
+            for permit_id, op in list(self._pending_ops.items()):
+                if op.worker_id == worker_id:
                     del self._pending_ops[permit_id]
         return WorkerRecovery(recovered, resolved)
 
@@ -6466,14 +6686,15 @@ class TaskRuntime:
         """Resolve a dispatch its live worker keeps reporting it does not hold as lost.
 
         Only a dispatch recorded at least ``bound_sec`` ago with no event of it applied
-        resolves: the bound a silent worker gets before it is declared dead. Nothing
-        revokes the dispatch, so it may still reach its worker and run; it resolves as
-        a lost dispatch does. A task being cancelled settles CANCELLED; any other
-        returns without spending an attempt, or fails as on its worker's loss when it
-        is a v2 task that cannot safely re-run. The worker is excluded from the task's
-        next placement, so a worker that cannot take the task never gets it back. A
-        task bound to that worker's private state goes back to it, and its return
-        spends an attempt. Returns None when the dispatch does not resolve.
+        resolves: the bound a silent worker gets before it is declared dead. The
+        dispatch is revoked, so a frame of it still queued for the worker never runs,
+        and it resolves as a lost dispatch does. A task being cancelled settles
+        CANCELLED; any other returns without spending an attempt, or fails as on its
+        worker's loss when it is a v2 task that cannot safely re-run. The worker is
+        excluded from the task's next placement, so a worker that cannot take the task
+        never gets it back. A task bound to that worker's private state goes back to
+        it, and its return spends an attempt. Returns None when the dispatch does not
+        resolve.
         """
         try:
             with self._cv:
@@ -6494,6 +6715,7 @@ class TaskRuntime:
                 )
                 if time.time() - since < bound_sec:
                     return None
+                self._revoke_locked(task_id, worker_id, dispatch_id)
                 if worker_id not in record.failed_workers:
                     record.failed_workers.append(worker_id)
                 record.last_error = (
@@ -6516,9 +6738,9 @@ class TaskRuntime:
         """Return a task bound to its worker's private state, spending an attempt.
 
         The task can run only on that worker, so the attempt budget bounds how often
-        the worker disowns it. A late delivery of the disowned dispatch may still run
-        there: its events are fenced, and a retry that finds the private state it
-        changed fails closed.
+        the worker disowns it. The disowned dispatch is revoked; should a delivery of
+        it still run, its events are fenced, and a retry that finds the private state
+        it changed fails closed.
         """
         end = self._return_dispatch_locked(record, increment_retry=True, front=True)
         if end is DispatchEnd.RETURNED:
@@ -6570,7 +6792,7 @@ class TaskRuntime:
                 TaskStatus.DISPATCHED,
                 TaskStatus.CANCELLING,
             ) or (publish is not None and not publish.recorded)
-            return in_flight and self._holds_dispatch_locked(
+            return in_flight and self._dispatch_live_locked(
                 record, worker_id, dispatch_id
             )
 

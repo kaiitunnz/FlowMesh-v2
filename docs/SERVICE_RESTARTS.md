@@ -51,6 +51,15 @@ requeue at the cost of an attempt when they can safely re-run and fail
 otherwise. A recreated node's supervisor re-creates its configured workers,
 which re-register themselves on startup. No cordon step is required.
 
+**Node alias.** A node holds a lease on its `NODE_ALIAS` while it is live and
+releases it when it shuts down cleanly, so a restarted node re-registers under
+the same alias at once. A node that exits without unregistering (a crash or a
+kill) leaves its lease behind; the replacement takes it over once the lease has
+gone unrefreshed for half the node heartbeat TTL (60s by default), and startup
+waits until then. Registering removes the old node's record, so the node list
+shows only the replacement. A node whose alias another live node keeps refreshing
+fails at startup.
+
 **Root node.** The root holds the dispatcher's scheduling state in memory, so a
 naive restart would lose every in-flight workflow. These mechanisms make a root
 restart safe:
@@ -90,6 +99,9 @@ restart safe:
   vault of a workflow that settled or never finished registering. A task record
   stored with its credentials inline has them vaulted, and its source redacted, by
   the first start that loads it.
+- **SSH forward ports.** A running SSH task's `forward` session is served again
+  on the port it was published on. A session whose port another process took
+  while the root was down is unreachable until its task ends.
 
 Rehydration runs inside the ASGI lifespan **before it yields**, so the server
 does not accept traffic (and its healthcheck does not pass) until scheduling

@@ -139,7 +139,9 @@ REDIS_CLIENT = RedisClient(
     tls_ca_file=config.redis.tls_ca_file,
 )
 
-NODE_REGISTRY = NodeRegistry(REDIS_CLIENT, logger)
+NODE_REGISTRY = NodeRegistry(
+    REDIS_CLIENT, logger, config.worker_management.heartbeat_ttl_sec
+)
 
 METRICS_RECORDER = MetricsRecorder(
     METRICS_DIR,
@@ -679,6 +681,8 @@ async def _lifespan(_: FastAPI):
                 GATED_SERVE.rebind_forward_exposures()
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
+                if RUNTIME is not None:
+                    await PORT_FORWARD_SERVICE.restore_sessions(RUNTIME.tasks.values())
             _start_root_threads()
             if FLEET_SAMPLER is not None:
                 FLEET_SAMPLER.start(asyncio.get_running_loop())

@@ -13,9 +13,10 @@ class CommandType(StrEnum):
         "CREATE_WORKER_ON_NODE"  # payload: DockerWorkerConfig + gpu_count hint
     )
     GET_WORKERS = "GET_WORKERS"
+    GET_PROVIDERS = "GET_PROVIDERS"
     STOP_WORKER = "STOP_WORKER"
-    DESTROY_WORKER = "DESTROY_WORKER"  # payload: {worker_name: str}
-    DESTROY_WORKERS = "DESTROY_WORKERS"  # payload: {worker_names: [str]} or null
+    DESTROY_WORKER = "DESTROY_WORKER"  # payload: {worker_alias: str}
+    DESTROY_WORKERS = "DESTROY_WORKERS"  # payload: {worker_aliases: [str]} or null
     DELIVER_ROUTE_PLAN = "DELIVER_ROUTE_PLAN"  # payload: resolved route + echo payload
 
 
@@ -25,11 +26,23 @@ class CommandMessage(BaseModel):
     payload: dict[str, Any] | None = None
 
 
+class CommandErrorCode(StrEnum):
+    """Structured error codes carried on a failed CommandResponse."""
+
+    INTERNAL = "internal"
+    INVALID_PAYLOAD = "invalid_payload"
+    NOT_READY = "not_ready"
+    UNKNOWN_COMMAND = "unknown_command"
+    CANCELLED = "cancelled"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+
+
 class CommandResponse(BaseModel):
     command_id: str
     success: bool
     message: str | None = None
     data: dict[str, Any] | None = None
+    error_code: CommandErrorCode | None = None
 
     @classmethod
     def ok(
@@ -38,8 +51,18 @@ class CommandResponse(BaseModel):
         return cls(command_id=cmd.command_id, success=True, data=data)
 
     @classmethod
-    def error(cls, cmd: CommandMessage, message: str) -> "CommandResponse":
-        return cls(command_id=cmd.command_id, success=False, message=message)
+    def error(
+        cls,
+        cmd: CommandMessage,
+        message: str,
+        error_code: CommandErrorCode,
+    ) -> "CommandResponse":
+        return cls(
+            command_id=cmd.command_id,
+            success=False,
+            message=message,
+            error_code=error_code,
+        )
 
 
 class InterruptMessage(BaseModel):
@@ -47,6 +70,18 @@ class InterruptMessage(BaseModel):
     task_id: str
     worker_id: str
     reason: str = "cancelled"
+    # The one dispatch of the task it ends; None for whichever dispatch runs it.
+    dispatch_id: str | None = None
+
+
+class RevokeMessage(BaseModel):
+    """Ends one dispatch control resolved without its worker ending it: a frame of it
+    still queued for the worker is withdrawn, and a run of it is cancelled."""
+
+    kind: Literal["revoke"] = "revoke"
+    task_id: str
+    worker_id: str
+    dispatch_id: str
 
 
 class StopMessage(BaseModel):
@@ -54,6 +89,8 @@ class StopMessage(BaseModel):
     task_id: str
     worker_id: str
     reason: str = "stopped"
+    # The one dispatch of the task it stops; None for whichever dispatch runs it.
+    dispatch_id: str | None = None
 
 
 class TaskMessage(BaseModel):
@@ -83,6 +120,7 @@ type DispatchMessage = (
 __all__ = [
     "CommandMessage",
     "CommandResponse",
+    "CommandErrorCode",
     "CommandType",
     "DispatchMessage",
     "TaskMessage",

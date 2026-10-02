@@ -103,7 +103,7 @@ class _Harness:
         )
 
     def stash(self) -> None:
-        self.pending.put(_AGENT, _CALL, _REQUEST)
+        self.pending.put(_AGENT, _CALL, _REQUEST, None)
 
     def report(self, timeout: float = 5.0) -> MediatedOperationOutcome:
         return self.reports.get(timeout=timeout)
@@ -191,6 +191,37 @@ def test_permit_replay_is_ignored() -> None:
     h.sidecar.submit_permit(permit)
     with pytest.raises(queue.Empty):
         h.report(timeout=0.3)
+    h.stop()
+
+
+def test_a_re_minted_permit_gets_the_outcome_already_produced() -> None:
+    out = ToolOutcome(status=ToolOutcomeStatus.QUOTA, value="q")
+    h = _Harness(out)
+    h.stash()
+    h.sidecar.submit_permit(_permit())
+    first = h.report()
+
+    again = _permit(invocation_id="inv-2")
+    h.sidecar.submit_permit(again)
+    second = h.report()
+
+    assert h.egress.calls == 1
+    assert (second.permit_id, second.invocation_id) == (again.permit_id, "inv-2")
+    assert second.outcome == first.outcome == out
+    h.stop()
+
+
+def test_a_forgotten_outcome_is_produced_again() -> None:
+    h = _Harness(ToolOutcome(status=ToolOutcomeStatus.QUOTA, value="q"))
+    h.stash()
+    h.sidecar.submit_permit(_permit())
+    h.report()
+
+    h.sidecar.forget_outcomes()
+    h.sidecar.submit_permit(_permit(invocation_id="inv-2"))
+    h.report()
+
+    assert h.egress.calls == 2
     h.stop()
 
 
@@ -284,7 +315,7 @@ def _model_permit(**overrides: Any) -> MediatedOperationPermit:
 
 def test_egress_now_returns_the_completion_inline() -> None:
     sidecar, pending, egress = _model_sidecar()
-    pending.put(_AGENT, _CALL, _MODEL_REQUEST)
+    pending.put(_AGENT, _CALL, _MODEL_REQUEST, None)
     result = sidecar.egress_now(_model_permit())
     assert isinstance(result, ModelCompletion) and result.content == "a reply"
     # The per-call permit credential reaches the egress; custody is left for the reap.
@@ -295,7 +326,7 @@ def test_egress_now_returns_the_completion_inline() -> None:
 
 def test_egress_now_fence_rejection_is_terminal_and_never_egresses() -> None:
     sidecar, pending, egress = _model_sidecar()
-    pending.put(_AGENT, _CALL, _MODEL_REQUEST)
+    pending.put(_AGENT, _CALL, _MODEL_REQUEST, None)
     result = sidecar.egress_now(_model_permit(request_digest="deadbeef"))
     assert isinstance(result, HeldEgressReject) and "fence" in result.reason
     assert egress.calls == 0
@@ -312,7 +343,7 @@ def test_egress_now_without_a_request_is_terminal() -> None:
 
 def test_egress_now_permit_replay_is_terminal() -> None:
     sidecar, pending, egress = _model_sidecar()
-    pending.put(_AGENT, _CALL, _MODEL_REQUEST)
+    pending.put(_AGENT, _CALL, _MODEL_REQUEST, None)
     permit = _model_permit()
     assert isinstance(sidecar.egress_now(permit), ModelCompletion)
     # An exact permit replay is refused, so one authorization drives one egress.

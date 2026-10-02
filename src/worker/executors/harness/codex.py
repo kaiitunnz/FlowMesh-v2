@@ -229,6 +229,7 @@ def build_codex_adapter(
         binding.url,
         binding.model,
         list(dispatch.facade_descriptors),
+        task.dispatch_id,
         sandbox,
     )
     # The live binding pulls in the openai-codex SDK and its bundled app-server binary;

@@ -88,7 +88,7 @@ def _capture_resident_boundary(
     result = ScriptedHarnessAdapter(_MODEL_SCRIPT, "v1").start(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
-    result = capture_resident_request(ResidentRequestStore(), task_id, result)
+    result = capture_resident_request(ResidentRequestStore(), task_id, result, None)
     payload: dict[str, Any] = {"agent_episode": result.model_dump(mode="json")}
     if seal_in is not None and (attachment := dispatch.private_state_attachment):
         manifest = _manifest(

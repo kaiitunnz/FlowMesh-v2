@@ -19,7 +19,7 @@ from ...auth.security import (
     resolve_accessible_ids,
 )
 from ...hooks import ResourceAction, ResourceKind
-from ...registries import Node, NodeRegistry, WorkerRegistry
+from ...registries import Node, NodeAliasInUseError, NodeRegistry, WorkerRegistry
 from ...schemas.node import (
     NodeInfo,
     NodeRegisterResponse,
@@ -28,6 +28,7 @@ from ...schemas.node import (
     WorkerRegisterResponse,
 )
 from ...utils.misc import filter_models_by_queries
+from ._command import command_error
 
 router = APIRouter(prefix="/nodes", tags=["Nodes"])
 
@@ -107,6 +108,9 @@ async def list_all_workers(
     description="Register a new node.",
     response_description="Node ID",
     status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_409_CONFLICT: {"description": "Node alias held by a live node"}
+    },
 )
 async def register_node(
     node_info: NodeInfo,
@@ -117,7 +121,13 @@ async def register_node(
     await require_permission(
         principal, ResourceKind.NODE, None, ResourceAction.WRITE, logger
     )
-    node_id = await node_registry.register_node_async(node_info)
+    try:
+        node_id = await node_registry.register_node_async(node_info, principal)
+    except NodeAliasInUseError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"message": str(exc), "lease_remaining_ms": exc.lease_remaining_ms},
+        ) from exc
     return NodeRegisterResponse(node_id=node_id)
 
 
@@ -187,14 +197,14 @@ async def register_worker(
 
 
 @router.post(
-    "/{node_id}/workers/{worker_name}/start",
+    "/{node_id}/workers/{alias}/start",
     summary="Start a worker",
     description="Start a worker managed by a node.",
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def start_node_worker(
     node_id: str,
-    worker_name: str,
+    alias: str,
     principal: PrincipalContext = Depends(authenticate_connection),
     node_registry: NodeRegistry = Depends(get_node_registry),
     logger: logging.Logger = Depends(get_logger),
@@ -203,7 +213,7 @@ async def start_node_worker(
         principal, ResourceKind.NODE, node_id, ResourceAction.WRITE, logger
     )
     cmd = CommandMessage(
-        command=CommandType.START_WORKER, payload={"worker_name": worker_name}
+        command=CommandType.START_WORKER, payload={"worker_alias": alias}
     )
     try:
         resp = await node_registry.exec_node_cmd(node_id, cmd)
@@ -214,12 +224,9 @@ async def start_node_worker(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)
         )
 
-    if not resp.success or resp.data is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=resp.message
-        )
-    success = resp.data["success"]
-    if not success:
+    if not resp.success:
+        raise command_error(resp, "Failed to start worker")
+    if resp.data is None or not resp.data.get("success"):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to start worker",
@@ -227,14 +234,14 @@ async def start_node_worker(
 
 
 @router.post(
-    "/{node_id}/workers/{worker_name}/stop",
+    "/{node_id}/workers/{alias}/stop",
     summary="Stop a worker",
     description="Stop a worker managed by a node.",
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def stop_node_worker(
     node_id: str,
-    worker_name: str,
+    alias: str,
     principal: PrincipalContext = Depends(authenticate_connection),
     node_registry: NodeRegistry = Depends(get_node_registry),
     logger: logging.Logger = Depends(get_logger),
@@ -243,7 +250,7 @@ async def stop_node_worker(
         principal, ResourceKind.NODE, node_id, ResourceAction.WRITE, logger
     )
     cmd = CommandMessage(
-        command=CommandType.STOP_WORKER, payload={"worker_name": worker_name}
+        command=CommandType.STOP_WORKER, payload={"worker_alias": alias}
     )
     try:
         resp = await node_registry.exec_node_cmd(node_id, cmd)
@@ -254,12 +261,9 @@ async def stop_node_worker(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)
         )
 
-    if not resp.success or resp.data is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=resp.message
-        )
-    success = resp.data["success"]
-    if not success:
+    if not resp.success:
+        raise command_error(resp, "Failed to stop worker")
+    if resp.data is None or not resp.data.get("success"):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to stop worker",
@@ -306,9 +310,7 @@ async def _fetch_node_workers(
         )
 
     if not resp.success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=resp.message
-        )
+        raise command_error(resp, "Failed to list node workers")
     if resp.data is None or "workers" not in resp.data:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

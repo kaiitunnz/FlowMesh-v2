@@ -254,7 +254,7 @@ class _CapturingAdapter(_FakeAdapter):
 
     def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
         token = self._facade.register_episode(
-            activation_id, "http://up/v1", "m", [_SEARCH]
+            activation_id, "http://up/v1", "m", [_SEARCH], "dsp-1"
         )
         self._facade.handle_turn(activation_id, token, {"input": "find it"})
         if self._raises:
@@ -311,7 +311,7 @@ class _LateCaptureAdapter(_FakeAdapter):
 
     def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
         token = self._facade.register_episode(
-            activation_id, "http://up/v1", "m", [_SEARCH]
+            activation_id, "http://up/v1", "m", [_SEARCH], "dsp-1"
         )
 
         def turn() -> None:
@@ -381,7 +381,7 @@ def test_a_raised_step_whose_give_up_fails_still_drops_what_it_captured(
     class _CancelFails(_FakeAdapter):
         def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
             token = facade.register_episode(
-                activation_id, "http://up/v1", "m", [_SEARCH]
+                activation_id, "http://up/v1", "m", [_SEARCH], "dsp-1"
             )
             facade.handle_turn(activation_id, token, {"input": "find it"})
             raise RuntimeError("the reader died after the turn captured")
@@ -460,6 +460,46 @@ def test_a_step_whose_seal_fails_holds_no_request_for_control(
     assert lifecycle.resident_requests.occurrences() == []
 
 
+@pytest.mark.parametrize("resident", [False, True])
+def test_a_captured_request_records_the_dispatch_it_was_captured_under(
+    tmp_path: Path, resident: bool
+) -> None:
+    boundary = HarnessResult(
+        kind=HarnessResultKind.BOUNDARY,
+        request=BoundaryRequest(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface="model" if resident else SEARCH_INTERFACE,
+            request_payload=(
+                '{"messages": []}' if resident else '{"query": "q", "max_results": 3}'
+            ),
+        ),
+    )
+    register_adapter(
+        "fake",
+        lambda backend, task, config, facade, state, sandbox: _YieldingAdapter(
+            boundary
+        ),
+    )
+    lifecycle = MagicMock()
+    lifecycle.pending_egress_requests = PendingEgressRequestStore()
+    lifecycle.resident_requests = ResidentRequestStore()
+    lifecycle.responses_facade = None
+    ex = AgentEpisodeExecutor(make_worker_config(), lifecycle=lifecycle)
+    msg = _dispatch_msg(
+        model_binding={"mode": "resident"} if resident else None,
+    ).model_copy(update={"dispatch_id": "dsp-7"})
+    with patch.object(
+        AgentEpisodeExecutor, "_open_private_state", lambda self, dispatch: (None, None)
+    ):
+        ex.run(msg, tmp_path)
+
+    store = (
+        lifecycle.resident_requests if resident else lifecycle.pending_egress_requests
+    )
+    assert store.dispatch_of(msg.task_id) == "dsp-7"
+
+
 class _CapturingExecutor(Executor):
     """A step that holds one request for control of the given kind."""
 
@@ -477,7 +517,7 @@ class _CapturingExecutor(Executor):
         )
         if self._kind == "facade_group":
             self._lifecycle.pending_egress_requests.put(
-                task.task_id, "c1", parse_search_request('{"query": "q"}')
+                task.task_id, "c1", parse_search_request('{"query": "q"}'), None
             )
             return EpisodeStepResult(
                 harness_result=HarnessResult(
@@ -502,10 +542,10 @@ class _CapturingExecutor(Executor):
                 ),
             )
         if self._kind == "resident":
-            self._lifecycle.resident_requests.put(task.task_id, "c0", "{}")
+            self._lifecycle.resident_requests.put(task.task_id, "c0", "{}", None)
         else:
             self._lifecycle.pending_egress_requests.put(
-                task.task_id, "c0", parse_search_request('{"query": "q"}')
+                task.task_id, "c0", parse_search_request('{"query": "q"}'), None
             )
         return EpisodeStepResult(
             harness_result=HarnessResult(

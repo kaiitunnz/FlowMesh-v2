@@ -57,6 +57,7 @@ from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.hardware import available_devices, gpus_fit_dispatch
 from shared.utils.manifest import prepare_output_dir, sync_manifest
+from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
 from shared.utils.time import now_iso
 
@@ -92,6 +93,23 @@ _STOP_BUDGET_SEC = 25.0
 # the rest is left to the teardown.
 _BOUNDARY_DRAIN_SEC = 15.0
 _BOUNDARY_DRAIN_POLL_SEC = 0.1
+# A revoke or stop may name a dispatch that never reaches this worker, so only the
+# most recent are remembered.
+_ENDED_DISPATCH_MEMORY = 1024
+
+
+def _note_end(
+    by_task: set[str],
+    by_dispatch: RecentSet[str],
+    task_id: str,
+    dispatch_id: str | None,
+) -> None:
+    """Record a cancel or stop for the dispatch it names, or for the task when it
+    names none."""
+    if dispatch_id is None:
+        by_task.add(task_id)
+    else:
+        by_dispatch.add(dispatch_id)
 
 
 def _declared_result(
@@ -171,6 +189,17 @@ class Runner:
         self._mediated_op_stop = threading.Event()
         self._current_task_id: str | None = None
         self._pending_cancels: set[str] = set()
+        # The dispatch the task loop holds.
+        self._current_dispatch_id: str | None = None
+        # The task and dispatch the active executor runs. A cancel reaches the executor
+        # only for the dispatch it runs; one landing earlier ends that dispatch before
+        # it starts.
+        self._executing: tuple[str, str | None] | None = None
+        # Dispatches revoked or given up by a re-registration, cancelled, or stopped,
+        # which never run.
+        self._revoked_dispatches: RecentSet[str] = RecentSet(_ENDED_DISPATCH_MEMORY)
+        self._cancelled_dispatches: RecentSet[str] = RecentSet(_ENDED_DISPATCH_MEMORY)
+        self._stopped_dispatches: RecentSet[str] = RecentSet(_ENDED_DISPATCH_MEMORY)
         self._pending_stops: set[str] = set()
         self._cancel_lock = threading.Lock()
         self._shutdown_requested = threading.Event()
@@ -583,17 +612,41 @@ class Runner:
             raise ExecutionError(str(exc), retryable=False) from exc
 
     def _raise_if_cancel_pending(self, task_id: str) -> None:
-        """Honor a cancel, or the worker's shutdown, that landed before the task's
-        executor runs it, such as while it read its inputs from the store."""
+        """Honor a cancel, a revoke of its dispatch, or the worker's shutdown that
+        landed before the task's executor runs it, such as while it read its inputs."""
         with self._cancel_lock:
-            cancelled = task_id in self._pending_cancels
-            self._pending_cancels.discard(task_id)
-        if cancelled:
-            raise TaskCancelledError(f"Task {task_id} was cancelled before execution")
-        if self._shutdown_requested.is_set():
-            raise TaskCancelledError(
-                f"Task {task_id} was given up by the worker shutting down"
+            ended = self._ended_before_execution_locked(task_id)
+        if ended is not None:
+            raise TaskCancelledError(ended)
+
+    def _begin_execution(self, task_id: str) -> bool:
+        """Hand the task to its executor unless it ended before execution; return
+        whether a stop for it is pending."""
+        with self._cancel_lock:
+            ended = self._ended_before_execution_locked(task_id)
+            if ended is None:
+                self._executing = (task_id, self._current_dispatch_id)
+            stop_pending = (
+                task_id in self._pending_stops
+                or self._current_dispatch_id in self._stopped_dispatches
             )
+        if ended is not None:
+            raise TaskCancelledError(ended)
+        return stop_pending
+
+    def _ended_before_execution_locked(self, task_id: str) -> str | None:
+        cancelled = (
+            task_id in self._pending_cancels
+            or self._current_dispatch_id in self._cancelled_dispatches
+        )
+        self._pending_cancels.discard(task_id)
+        if cancelled:
+            return f"Task {task_id} was cancelled before execution"
+        if self._current_dispatch_id in self._revoked_dispatches:
+            return f"Task {task_id} was revoked before execution"
+        if self._shutdown_requested.is_set():
+            return f"Task {task_id} was given up by the worker shutting down"
+        return None
 
     def _materialize_contract(self, msg: WorkerTaskMessage) -> None:
         """Settle the one request a task runs, before its embodiment reaches a model.
@@ -860,29 +913,103 @@ class Runner:
             self._idle_checker_thread = None
             self._idle_checker_stop_event = None
 
+    def abandon_running(self, dispatch_id: str | None) -> None:
+        """Give up the dispatch this worker runs, as its registration has ended.
+
+        Control resolves the dispatch through the previous registration's loss, so the
+        task's executor is cancelled to end what it started, and its reports go
+        nowhere. A serve task's replica stops admitting claims.
+        """
+        with self._cancel_lock:
+            if dispatch_id is not None:
+                self._revoked_dispatches.add(dispatch_id)
+            task_id = (
+                self._current_task_id
+                if self._current_dispatch_id == dispatch_id
+                else None
+            )
+            executing = task_id is not None and self._runs_locked(task_id, dispatch_id)
+        with self._boundary_lanes_lock:
+            resident_host = self._resident_host
+            sidecar = self._mediated_sidecar
+        if resident_host is not None:
+            resident_host.unbind_replicas()
+        if sidecar is not None:
+            sidecar.forget_outcomes()
+        if task_id is None:
+            return
+        self.logger.warning("Abandoning task %s: this worker re-registered", task_id)
+        if executing:
+            self._cancel_executor_run(task_id)
+
+    def _cancel_executor_run(self, task_id: str) -> None:
+        with self._active_executor_lock:
+            executor = self._active_executor
+        if executor is not None:
+            try:
+                executor.cancel(task_id)
+            except Exception as exc:
+                self.logger.warning("Executor cancel() raised: %s", exc)
+
+    def _runs_locked(self, task_id: str, dispatch_id: str | None) -> bool:
+        """Whether the active executor runs ``task_id``, as the dispatch named if one
+        is."""
+        executing = self._executing
+        return (
+            executing is not None
+            and executing[0] == task_id
+            and dispatch_id in (None, executing[1])
+        )
+
     def _interrupt_monitor_loop(self, stop_event: threading.Event) -> None:
         try:
             while not stop_event.wait(0.5):
                 try:
-                    for task_id, reason in self.lifecycle.client.iter_interrupts():
+                    for (
+                        task_id,
+                        reason,
+                        dispatch_id,
+                    ) in self.lifecycle.client.iter_interrupts():
                         with self._cancel_lock:
-                            self._pending_cancels.add(task_id)
-                        if self._current_task_id != task_id:
+                            _note_end(
+                                self._pending_cancels,
+                                self._cancelled_dispatches,
+                                task_id,
+                                dispatch_id,
+                            )
+                            running = self._runs_locked(task_id, dispatch_id)
+                        if not running:
                             continue
                         self.logger.info(
                             "Interrupt for running task %s (reason=%s)", task_id, reason
                         )
-                        with self._active_executor_lock:
-                            executor = self._active_executor
-                        if executor is not None:
-                            try:
-                                executor.cancel(task_id)
-                            except Exception as exc:
-                                self.logger.warning("Executor cancel() raised: %s", exc)
-                    for task_id, reason in self.lifecycle.client.iter_stops():
+                        self._cancel_executor_run(task_id)
+                    for task_id, dispatch_id in self.lifecycle.client.iter_revokes():
                         with self._cancel_lock:
-                            self._pending_stops.add(task_id)
-                        if self._current_task_id != task_id:
+                            self._revoked_dispatches.add(dispatch_id)
+                            running = self._runs_locked(task_id, dispatch_id)
+                        if not running:
+                            continue
+                        self.logger.info(
+                            "Revoked dispatch %s of running task %s",
+                            dispatch_id,
+                            task_id,
+                        )
+                        self._cancel_executor_run(task_id)
+                    for (
+                        task_id,
+                        reason,
+                        dispatch_id,
+                    ) in self.lifecycle.client.iter_stops():
+                        with self._cancel_lock:
+                            _note_end(
+                                self._pending_stops,
+                                self._stopped_dispatches,
+                                task_id,
+                                dispatch_id,
+                            )
+                            running = self._runs_locked(task_id, dispatch_id)
+                        if not running:
                             continue
                         self.logger.info(
                             "Graceful stop for running task %s (reason=%s)",
@@ -976,6 +1103,8 @@ class Runner:
                     continue
 
                 task_id = msg.task_id
+                with self._cancel_lock:
+                    self._current_dispatch_id = msg.dispatch_id
                 spec = msg.spec
                 task_type = spec.taskType
                 scrub = _task_scrubber(msg)
@@ -1124,18 +1253,21 @@ class Runner:
                         notified_task_started = True
 
                         self._materialize_contract(msg)
-                        self._raise_if_cancel_pending(task_id)
 
                         # Disable idle checker during execution
                         self._active_executor_last_used_at = None
                         executor_to_run = self._active_executor
                         # A stop that landed before the executor was bound is handed to
                         # it here, under the lock the stop's delivery reads it with.
-                        with self._cancel_lock:
-                            stop_pending = task_id in self._pending_stops
-                        if stop_pending:
+                        if self._begin_execution(task_id):
                             executor_to_run.stop(task_id)
-                    out = self._run_executor(executor_to_run, msg, out_dir)
+                    try:
+                        out = self._run_executor(executor_to_run, msg, out_dir)
+                    finally:
+                        # A cancel past this point would wait in the warm executor and
+                        # end the task's next dispatch.
+                        with self._cancel_lock:
+                            self._executing = None
                     if isinstance(out, EpisodeStepResult):
                         unreported_step = out
                     references = self._write_results(msg, out_dir, out)
@@ -1228,8 +1360,14 @@ class Runner:
                         discard_step_captures(self.lifecycle, task_id, unreported_step)
                     self._current_task_id = None
                     with self._cancel_lock:
+                        self._executing = None
+                        self._current_dispatch_id = None
                         self._pending_cancels.discard(task_id)
                         self._pending_stops.discard(task_id)
+                        if (dispatch_id := msg.dispatch_id) is not None:
+                            self._revoked_dispatches.discard(dispatch_id)
+                            self._cancelled_dispatches.discard(dispatch_id)
+                            self._stopped_dispatches.discard(dispatch_id)
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()
                     self.lifecycle.set_idle(task_id)

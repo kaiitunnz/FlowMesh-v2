@@ -77,13 +77,13 @@ def _draining_runner(
     lifecycle = Lifecycle(MagicMock(), 5, 15, tmp_path / "hb", 0.0)
     cast(MagicMock, lifecycle.client).worker_id = runner.lifecycle.worker_id
     if resident:
-        lifecycle.resident_requests.put(*_RESIDENT_HELD, '{"messages": []}')
+        lifecycle.resident_requests.put(*_RESIDENT_HELD, '{"messages": []}', None)
         reap = (
             "resident_reap",
             {"task_id": _RESIDENT_HELD[0], "call_correlation": _RESIDENT_HELD[1]},
         )
     else:
-        lifecycle.pending_egress_requests.put(*_HELD, cast(Any, object()))
+        lifecycle.pending_egress_requests.put(*_HELD, cast(Any, object()), None)
         reap = ("reap", {"agent_task_id": _HELD[0], "call_correlation": _HELD[1]})
     runner.lifecycle = lifecycle
     reap_at: list[float] = []
@@ -224,7 +224,7 @@ def test_a_held_model_turn_does_not_hold_the_boundary_drain(tmp_path: Path) -> N
     rendezvous.reopen(_HELD[0], "episode-1")
 
     def stash() -> None:
-        lifecycle.pending_egress_requests.put(*_HELD, cast(Any, object()))
+        lifecycle.pending_egress_requests.put(*_HELD, cast(Any, object()), None)
 
     with rendezvous.register(*_HELD, "episode-1", stash):
         runner._finish_held_boundaries(started + 5.0)

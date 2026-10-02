@@ -133,9 +133,12 @@ class _WorkerStub:
     def __init__(self) -> None:
         self.frames: list[tuple[str, str, dict[str, Any]]] = []
         self.egress = PendingEgressRequestStore()
+        self.node_alias = "box"
 
     def get_worker(self, worker_id: str) -> Any:
-        return SimpleNamespace(id=worker_id, node_id="nde-1", incarnation=7)
+        return SimpleNamespace(
+            id=worker_id, node_id="nde-1", node_alias=self.node_alias, incarnation=7
+        )
 
     def publish_interrupt(self, *args: Any) -> int:
         return 0
@@ -218,7 +221,7 @@ def _run_agent_step(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
     result = AgentEpisodeExecutor._capture_local_request(
-        _egress(runtime), task_id, result, dispatch.model_binding
+        _egress(runtime), task_id, result, dispatch.model_binding, None
     )
     payload: dict[str, Any] = {"agent_episode": result.model_dump(mode="json")}
     if seal_in is not None and (attachment := dispatch.private_state_attachment):
@@ -251,6 +254,22 @@ def _deny_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
     return [payload for _, kind, payload in frames if kind == "deny"]
 
 
+HELD_DISPATCH = "dsp-held"
+
+
+def _propose_held_turn(runtime: TaskRuntime, writer: str, digest: str) -> None:
+    """Propose the held agent's turn ``t0`` from its dispatch on its worker."""
+    runtime.authorize_model_turn(
+        AgentModelTurnProposal(
+            agent_task_id=writer,
+            call_correlation="t0",
+            request_digest=digest,
+            dispatch_id=HELD_DISPATCH,
+        ),
+        "wkr-1",
+    )
+
+
 def _hold_dispatch(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") -> Any:
     """Pin a worker and hold the agent mid-turn without running the episode.
 
@@ -263,6 +282,7 @@ def _hold_dispatch(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") ->
     engine.on_dispatched(task_id, worker)
     record = runtime._tasks[task_id]
     record.assigned_worker = worker
+    record.dispatch_id = HELD_DISPATCH
     record.status = TaskStatus.DISPATCHED
     return engine
 
@@ -282,7 +302,10 @@ def _serialize_outcome_frame(outcome: MediatedOperationOutcome) -> dict[str, Any
     client._stub = cast(Any, object())
     client._event_ready.set()
     client.push_mediated_outcome(outcome)
-    return cast(dict[str, Any], client._event_queue.get_nowait())
+    _generation, frame = cast(
+        tuple[int, dict[str, Any]], client._event_queue.get_nowait()
+    )
+    return frame
 
 
 def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() -> None:
@@ -426,11 +449,7 @@ def test_held_model_turn_mints_a_worker_permit_without_a_settle() -> None:
         writer = ids["writer"]
 
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="deadbeef"
-            )
-        )
+        _propose_held_turn(runtime, writer, "deadbeef")
 
         permits = _permit_frames(runtime)
         assert len(permits) == 1 and not _deny_frames(runtime)
@@ -455,11 +474,7 @@ def test_held_model_turn_permit_carries_the_workflow_key() -> None:
         writer = ids["writer"]
 
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="d"
-            )
-        )
+        _propose_held_turn(runtime, writer, "d")
 
         permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
         assert permit.credential == "sk-byok-abc"
@@ -481,11 +496,7 @@ def test_held_model_turn_denied_relays_a_deny_frame() -> None:
         writer = ids["writer"]
 
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="d"
-            )
-        )
+        _propose_held_turn(runtime, writer, "d")
 
         assert not _permit_frames(runtime)
         denies = _deny_frames(runtime)
@@ -777,11 +788,7 @@ def test_only_the_deployment_model_url_is_granted_the_deployment_key(
 
         _dispatch_agent(runtime, writer, script=_MODEL_SCRIPT)
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="d"
-            )
-        )
+        _propose_held_turn(runtime, writer, "d")
 
         permits = [
             MediatedOperationPermit.model_validate(p) for p in _permit_frames(runtime)
@@ -856,11 +863,7 @@ def test_a_gone_vaulted_key_denies_the_held_model_turn() -> None:
         vault.expire_all()
 
         _hold_dispatch(runtime, writer)
-        runtime.authorize_model_turn(
-            AgentModelTurnProposal(
-                agent_task_id=writer, call_correlation="t0", request_digest="d"
-            )
-        )
+        _propose_held_turn(runtime, writer, "d")
 
         assert not _permit_frames(runtime)
         (deny,) = _deny_frames(runtime)
@@ -1252,6 +1255,7 @@ def test_a_stale_step_reaps_the_request_its_worker_captured() -> None:
                 writer, capsule=None, outcomes=[]
             ),
             None,
+            None,
         )
 
         runtime.mark_succeeded(
@@ -1349,7 +1353,7 @@ def _stash_search_group(runtime: TaskRuntime, writer: str) -> FacadeTurnGroup:
     )
     for member in group.members:
         _egress(runtime).put(
-            writer, member.call_correlation, parse_search_request(_PAYLOAD)
+            writer, member.call_correlation, parse_search_request(_PAYLOAD), None
         )
     return group
 

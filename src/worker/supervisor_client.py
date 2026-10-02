@@ -1,5 +1,7 @@
 import base64
 import binascii
+import collections
+import concurrent.futures
 import json
 import logging
 import queue
@@ -77,6 +79,19 @@ class SupervisorClient:
         self._worker_id: str | None = None
         self._incarnation: int = 0
         self._worker_register_event: WorkerEvent | None = None
+        self._register_meta: dict[str, Any] | None = None
+        self._last_status: WorkerStatus = WorkerStatus.STARTING
+        self._register_lock = threading.Lock()
+        self._register_generation: int = 0
+        self._reregistering: bool = False
+        # Dispatches a re-registration gave up: their reports never reach control.
+        self._abandoned_dispatches: set[str] = set()
+        self._on_reregistered: Callable[[str | None], None] | None = None
+        # The re-registration callback waits on the event stream, so it runs on its own
+        # thread, in order; the task stream reattaches once the latest one finished.
+        self._rebinder = _rebinder()
+        self._rebound = threading.Event()
+        self._rebound.set()
         self._drain = threading.Event()
         self._shutdown = threading.Event()
         self._shutdown.set()  # Initially shutdown
@@ -89,10 +104,19 @@ class SupervisorClient:
         # The task being run and its dispatch id: tasks run one at a time, in the order
         # this client yields them, so the task's events name the dispatch running it.
         self._running_dispatch: tuple[str, str] | None = None
-        self._interrupt_queue: queue.Queue[tuple[str, str]] = queue.Queue()
-        self._stop_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        # (task id, reason, dispatch id or None for whichever dispatch runs the task)
+        self._interrupt_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
+        self._stop_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
+        self._revoke_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._mediated_op_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
-        self._event_queue: queue.Queue[dict[str, Any] | object] = queue.Queue()
+        self._event_queue: queue.Queue[tuple[int, dict[str, Any]] | object] = (
+            queue.Queue()
+        )
+        # Events a closed PushEvents call took but never sent, oldest first.
+        self._carried_events: collections.deque[tuple[int, dict[str, Any]] | object] = (
+            collections.deque()
+        )
+        self._carried_lock = threading.Lock()
         self._event_thread: threading.Thread | None = None
         self._task_thread: threading.Thread | None = None
         self._channel: grpc.Channel | None = None
@@ -152,7 +176,7 @@ class SupervisorClient:
         self._register_grpc(worker_meta)
         self.logger.info("Worker connected via supervisor at %s", self.grpc_target)
 
-        # Create a temporary register event for later use
+        # Build the REGISTER event and cache for potential re-registration.
         payload: dict[str, Any] = {
             "env": env,
             "hardware": hardware.model_dump(mode="python"),
@@ -169,6 +193,8 @@ class SupervisorClient:
             payload=payload,
             actor=self.owner_principal,
         )
+        self._register_meta = worker_meta
+        self._last_status = status
 
     def start(self) -> None:
         """Start background threads to handle events and tasks.
@@ -180,11 +206,13 @@ class SupervisorClient:
             return
         self._shutdown.clear()
         self._stop.clear()
+        self._rebinder = _rebinder()
         self._channel = self._create_grpc_channel()
         self._stub = supervisor_pb2_grpc.SupervisorStub(self._channel)
+        if self._worker_register_event is None:
+            raise RuntimeError("Worker not registered with supervisor")
         self._start_event_stream()
         self._start_task_stream()
-        self._send_register_event()
 
     def stop(self) -> None:
         """Stop task pulling without fully shutting down; the task stream keeps
@@ -216,6 +244,7 @@ class SupervisorClient:
         if self._task_thread:
             self._task_thread.join(timeout=5)
             self._task_thread = None
+        self._rebinder.shutdown(wait=False, cancel_futures=True)
         self._event_ready.clear()
         self._task_ready.clear()
         self._worker_id = None
@@ -232,8 +261,12 @@ class SupervisorClient:
         ttl_sec: int = 120,
         status: WorkerStatus | None = None,
         dispatch_id: str | None = None,
+        task_id: str | None = None,
     ) -> None:
         ts = ts or now_iso()
+        payload: dict[str, Any] = {"ttl_sec": ttl_sec}
+        if task_id is not None:
+            payload["task_id"] = task_id
         event = WorkerEvent(
             type="HEARTBEAT",
             worker_id=self.worker_id,
@@ -241,7 +274,7 @@ class SupervisorClient:
             status=status,
             dispatch_id=dispatch_id,
             metrics=metrics or {},
-            payload={"ttl_sec": ttl_sec},
+            payload=payload,
         )
         self._offer_event(event)
 
@@ -251,6 +284,7 @@ class SupervisorClient:
         extra: dict[str, Any] | None = None,
         dispatch_id: str | None = None,
     ) -> None:
+        self._last_status = status
         event = WorkerEvent(
             type="STATUS",
             worker_id=self.worker_id,
@@ -415,14 +449,27 @@ class SupervisorClient:
         running = self._running_dispatch
         return running[1] if running is not None and running[0] == task_id else None
 
-    def iter_interrupts(self) -> Iterable[tuple[str, str]]:
+    def on_reregistered(self, callback: Callable[[str | None], None]) -> None:
+        """Run ``callback`` after each re-registration with the dispatch it gave up,
+        before the task stream takes any work under the new registration."""
+        self._on_reregistered = callback
+
+    def iter_interrupts(self) -> Iterable[tuple[str, str, str | None]]:
         while True:
             try:
                 yield self._interrupt_queue.get_nowait()
             except queue.Empty:
                 break
 
-    def iter_stops(self) -> Iterable[tuple[str, str]]:
+    def iter_revokes(self) -> Iterable[tuple[str, str]]:
+        """Yield each ``(task_id, dispatch_id)`` control revoked."""
+        while True:
+            try:
+                yield self._revoke_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def iter_stops(self) -> Iterable[tuple[str, str, str | None]]:
         while True:
             try:
                 yield self._stop_queue.get_nowait()
@@ -440,13 +487,6 @@ class SupervisorClient:
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
-
-    def _send_register_event(self) -> None:
-        event = self._worker_register_event
-        if event is None:
-            raise RuntimeError("Worker not registered with supervisor")
-        self._send_event(event)
-        self._worker_register_event = None
 
     def _register_grpc(self, worker_meta: dict[str, Any]) -> None:
         self.logger.info(
@@ -469,6 +509,110 @@ class SupervisorClient:
             raise SystemExit("Supervisor registration response missing worker_id")
         self._worker_id = resp.worker_id
         self._incarnation = int(resp.incarnation)
+
+    def _reregister(self, seen_gen: int) -> int:
+        """Re-enrol the worker after the supervisor forgot its token.
+
+        Coordinated across the two stream threads: the generation counter and
+        the `_reregistering` claim ensure exactly one unary `RegisterWorker` runs
+        per outage. Returns the current generation; the caller fast-retries its
+        stream only when the value advanced past `seen_gen`.
+        """
+        with self._register_lock:
+            if self._register_generation != seen_gen or self._reregistering:
+                return self._register_generation
+            self._reregistering = True
+            # The task stream waits from the claim on: once the supervisor takes the
+            # registration, a stream it attaches belongs to the new id.
+            rebound = threading.Event()
+            self._rebound = rebound
+        try:
+            registration = self._retry_register_grpc()
+            if registration is None:
+                rebound.set()
+                return self._register_generation
+            new_id, incarnation = registration
+            with self._register_lock:
+                abandoned = running[1] if (running := self._running_dispatch) else None
+                if abandoned is not None:
+                    self._abandoned_dispatches.add(abandoned)
+                self._worker_id = new_id
+                self._incarnation = incarnation
+                self._register_generation += 1
+                gen = self._register_generation
+            # Interrupts, stops and revokes queued under the previous registration
+            # target the dispatch it gave up.
+            for stale in (self._interrupt_queue, self._stop_queue, self._revoke_queue):
+                _drain(stale)
+            self._rearm_register_event()
+            self.logger.info("Re-registered worker as %s", new_id)
+            self._rebinder.submit(self._rebind, abandoned, rebound)
+            return gen
+        finally:
+            with self._register_lock:
+                self._reregistering = False
+
+    def _rebind(self, abandoned: str | None, rebound: threading.Event) -> None:
+        try:
+            if (on_reregistered := self._on_reregistered) is not None:
+                on_reregistered(abandoned)
+        except Exception:
+            self.logger.exception("Moving to the new registration failed")
+        finally:
+            rebound.set()
+
+    def _await_rebound(self) -> bool:
+        """Wait until the latest re-registration's callback finished; False on
+        shutdown."""
+        while True:
+            rebound = self._rebound
+            if rebound.wait(1.0):
+                # Only the latest re-registration's callback opens the gate.
+                if rebound is self._rebound:
+                    return True
+            elif self._shutdown.is_set():
+                return False
+
+    def _retry_register_grpc(self) -> tuple[str, int] | None:
+        """Retry the unary `RegisterWorker` with backoff until it succeeds.
+
+        Unlike `_register_grpc`, never raises `SystemExit`: a token that can
+        never be re-admitted (a runtime-minted provider token whose supervisor
+        restarted) just keeps backing off until the worker stops.
+        """
+        if self._stub is None or self._register_meta is None:
+            return None
+        meta = self._register_meta.copy()
+        meta["status"] = self._last_status.value
+        meta["last_seen"] = now_iso()
+        request = supervisor_pb2.RegisterRequest(meta=self._struct_from_payload(meta))
+        metadata = self._grpc_metadata()
+        delay = 1.0
+        while not (self._shutdown.is_set() or self._stop.is_set()):
+            try:
+                resp = self._stub.RegisterWorker(request, metadata=metadata)
+            except grpc.RpcError as exc:
+                self.logger.warning(
+                    "Re-registration failed, retrying in %.0fs: %s", delay, exc
+                )
+            else:
+                if resp.worker_id:
+                    return resp.worker_id, int(resp.incarnation)
+                self.logger.warning("Re-registration response missing worker_id")
+            if self._shutdown.wait(delay):
+                return None
+            delay = min(delay * 2, 30.0)
+        return None
+
+    def _register_event(self, template: WorkerEvent) -> WorkerEvent:
+        """The REGISTER event for the current registration and status."""
+        return template.model_copy(
+            update={"worker_id": self._worker_id, "status": self._last_status}
+        )
+
+    def _rearm_register_event(self) -> None:
+        if (template := self._worker_register_event) is not None:
+            self._enqueue_event(self._register_event(template))
 
     def _start_event_stream(self) -> None:
         self._event_ready.clear()
@@ -498,14 +642,24 @@ class SupervisorClient:
             return
         metadata = self._grpc_metadata()
         while not self._shutdown.is_set() or self._drain.is_set():
+            seen_gen = self._register_generation
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=10)
                 self._event_ready.set()
                 if (on_ready := self._on_event_stream_ready) is not None:
                     on_ready()
-                self._stub.PushEvents(self._event_messages(), metadata=metadata)
+                stream_done = threading.Event()
+                try:
+                    self._stub.PushEvents(
+                        self._call_events(stream_done, seen_gen), metadata=metadata
+                    )
+                finally:
+                    stream_done.set()
                 if self._shutdown.is_set():
                     break
+                if self._register_generation != seen_gen:
+                    # The call ended for the worker's new registration.
+                    continue
                 self._event_ready.clear()
                 self.logger.warning("Event stream closed, retrying in 3 seconds")
                 time.sleep(3)
@@ -519,6 +673,9 @@ class SupervisorClient:
                 if self._shutdown.is_set():
                     break
                 self._event_ready.clear()
+                if exc.code() is grpc.StatusCode.UNAUTHENTICATED:
+                    if self._reregister(seen_gen) != seen_gen:
+                        continue
                 self.logger.error("Supervisor event stream error: %s", exc)
                 time.sleep(3)
 
@@ -528,17 +685,30 @@ class SupervisorClient:
             return
         metadata = self._grpc_metadata()
         while not self._shutdown.is_set():
+            if not self._await_rebound():
+                break
+            seen_gen = self._register_generation
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=10)
                 self._task_ready.set()
                 for message in self._stub.StreamTasks(Empty(), metadata=metadata):
                     if message.HasField("interrupt"):
+                        interrupt = message.interrupt
                         self._interrupt_queue.put(
-                            (message.interrupt.task_id, message.interrupt.reason)
+                            (
+                                interrupt.task_id,
+                                interrupt.reason,
+                                interrupt.dispatch_id or None,
+                            )
                         )
                     elif message.HasField("stop"):
+                        stop = message.stop
                         self._stop_queue.put(
-                            (message.stop.task_id, message.stop.reason)
+                            (stop.task_id, stop.reason, stop.dispatch_id or None)
+                        )
+                    elif message.HasField("revoke"):
+                        self._revoke_queue.put(
+                            (message.revoke.task_id, message.revoke.dispatch_id)
                         )
                     elif message.HasField("mediated_op"):
                         self._mediated_op_queue.put(
@@ -582,19 +752,76 @@ class SupervisorClient:
                 if self._shutdown.is_set():
                     break
                 self._task_ready.clear()
+                if exc.code() is grpc.StatusCode.UNAUTHENTICATED:
+                    if self._reregister(seen_gen) != seen_gen:
+                        continue
                 self.logger.error("Supervisor task stream error: %s", exc)
                 time.sleep(3)
 
-    def _event_messages(self) -> Iterable[supervisor_pb2.EventMessage]:
-        while not self._shutdown.is_set() or self._drain.is_set():
-            try:
-                item = self._event_queue.get(timeout=1.0)
-            except queue.Empty:
+    def _call_events(
+        self, stream_done: threading.Event, gen: int
+    ) -> Iterable[supervisor_pb2.EventMessage]:
+        """One PushEvents call's messages: the worker's registration under ``gen``
+        first, so the supervisor knows the stream's worker, then the events queued
+        under it."""
+        with self._register_lock:
+            template = self._worker_register_event
+            if gen != self._register_generation or template is None:
+                return
+            register = self._register_event(template)
+        yield supervisor_pb2.EventMessage(
+            payload=self._struct_from_payload(serialize_event(register))
+        )
+        yield from self._event_messages(stream_done, gen)
+
+    def _event_messages(
+        self, stream_done: threading.Event, call_gen: int | None = None
+    ) -> Iterable[supervisor_pb2.EventMessage]:
+        """Yield queued events to one PushEvents call until it ends.
+
+        gRPC keeps pulling a call's request iterator on its own thread after the call
+        ends and drops what it pulls, so an event taken once the call is done goes
+        back for the next call. A call opened under registration ``call_gen`` ends
+        at the first event of a later registration, which goes to the next call.
+        """
+        while (
+            not self._shutdown.is_set() or self._drain.is_set()
+        ) and not stream_done.is_set():
+            item = self._next_event()
+            if item is None:
                 continue
+            if stream_done.is_set():
+                with self._carried_lock:
+                    self._carried_events.appendleft(item)
+                return
             if item is self._EVENT_SENTINEL:
                 break
-            assert isinstance(item, dict)
-            yield supervisor_pb2.EventMessage(payload=self._struct_from_payload(item))
+            assert isinstance(item, tuple)
+            gen, payload = item
+            # Drop events serialized under a superseded worker_id so a ghost id
+            # never gets its heartbeat refreshed after re-registration.
+            if gen < self._register_generation:
+                continue
+            if call_gen is not None:
+                if gen > call_gen:
+                    with self._carried_lock:
+                        self._carried_events.appendleft(item)
+                    return
+                if payload.get("type") == "REGISTER":
+                    # The call opened with the registration already.
+                    continue
+            yield supervisor_pb2.EventMessage(
+                payload=self._struct_from_payload(payload)
+            )
+
+    def _next_event(self) -> tuple[int, dict[str, Any]] | object | None:
+        with self._carried_lock:
+            if self._carried_events:
+                return self._carried_events.popleft()
+        try:
+            return self._event_queue.get(timeout=1.0)
+        except queue.Empty:
+            return None
 
     # ---- Networking helpers ----------------------------------------- #
 
@@ -651,7 +878,7 @@ class SupervisorClient:
             raise RuntimeError("Supervisor gRPC client not started")
         if not self._event_ready.wait(timeout):
             raise RuntimeError("Supervisor event stream not ready")
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def on_event_stream_ready(self, callback: Callable[[], None]) -> None:
         """Run ``callback`` each time the event stream (re)connects, before the stream
@@ -670,7 +897,7 @@ class SupervisorClient:
         if not self._event_ready.is_set():
             self.logger.debug("Event stream not ready; dropping %s", event.type)
             return
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_mediated_outcome(self, outcome: MediatedOperationOutcome) -> None:
         """Report one fenced mediated-operation outcome over the event stream."""
@@ -683,7 +910,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"outcome": outcome.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_mediated_propose(self, proposal: AgentModelTurnProposal) -> None:
         """Propose a held in-turn model egress for a one-use permit, digest-only."""
@@ -691,12 +918,15 @@ class SupervisorClient:
             raise RuntimeError("Supervisor gRPC client not started")
         if not self._event_ready.wait():
             raise RuntimeError("Supervisor event stream not ready")
+        proposal = proposal.model_copy(
+            update={"dispatch_id": self.dispatch_id(proposal.agent_task_id)}
+        )
         event = WorkerEvent(
             type="MEDIATED_OP_PROPOSE",
             worker_id=self.worker_id,
             payload={"proposal": proposal.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_resident_frame(self, frame: dict[str, Any]) -> None:
         """Send one resident relay frame up for the supervisor to bridge onward."""
@@ -709,7 +939,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"frame": frame},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_content_frame(self, frame: dict[str, Any]) -> None:
         """Send one content transfer frame up for the supervisor to bridge onward."""
@@ -720,9 +950,19 @@ class SupervisorClient:
         self._push_event("SSH_FRAME", {"frame": frame})
 
     def push_content_holding(self, held: Sequence[tuple[str, str]]) -> None:
-        """Report the objects this worker holds, so control can resolve them."""
-        self._push_event(
-            "CONTENT_HOLDING", {"held": [[scope, digest] for scope, digest in held]}
+        """Report the objects this worker holds, so control can resolve them.
+
+        The report queues while the event stream is down, so a re-registration's
+        report reaches control once the stream is back.
+        """
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        self._enqueue_event(
+            WorkerEvent(
+                type="CONTENT_HOLDING",
+                worker_id=self.worker_id,
+                payload={"held": [[scope, digest] for scope, digest in held]},
+            )
         )
 
     def push_content_hydration_request(
@@ -734,16 +974,17 @@ class SupervisorClient:
         )
 
     def push_content_access_request(
-        self, task_id: str, ready_timeout_sec: float = 5.0
+        self, task_id: str, dispatch_id: str | None, ready_timeout_sec: float = 5.0
     ) -> None:
-        """Ask control to renew one task's access to the shared content store.
+        """Ask control to renew one task's access to the shared content store, for the
+        dispatch whose work writes under it.
 
         It runs on a result write, so a stream that is not ready fails the request
         rather than holding the write.
         """
         self._push_event(
             "CONTENT_ACCESS_REQUEST",
-            {"task_id": task_id},
+            {"task_id": task_id, "dispatch_id": dispatch_id},
             ready_timeout_sec=ready_timeout_sec,
         )
 
@@ -758,10 +999,8 @@ class SupervisorClient:
             raise RuntimeError("Supervisor gRPC client not started")
         if not self._event_ready.wait(ready_timeout_sec):
             raise RuntimeError("Supervisor event stream not ready")
-        self._event_queue.put(
-            serialize_event(
-                WorkerEvent(type=event_type, worker_id=self.worker_id, payload=payload)
-            )
+        self._enqueue_event(
+            WorkerEvent(type=event_type, worker_id=self.worker_id, payload=payload)
         )
 
     def push_resident_ack(self, ack: ResidentBootstrapAck) -> None:
@@ -775,7 +1014,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"ack": ack.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_resident_route_observation(
         self, observation: ResidentRouteObservation
@@ -790,7 +1029,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"observation": observation.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
 
     def push_resident_outcome(self, outcome: ResidentOpOutcome) -> None:
         """Report the fenced resident terminal outcome to control."""
@@ -803,4 +1042,29 @@ class SupervisorClient:
             worker_id=self.worker_id,
             payload={"outcome": outcome.model_dump(mode="json")},
         )
-        self._event_queue.put(serialize_event(event))
+        self._enqueue_event(event)
+
+    def _enqueue_event(self, event: Event) -> None:
+        with self._register_lock:
+            if isinstance(event, (TaskEvent, WorkerEvent)):
+                if event.dispatch_id in self._abandoned_dispatches:
+                    if isinstance(event, TaskEvent):
+                        return
+                    event.dispatch_id = None
+                if self._worker_id is not None:
+                    event.worker_id = self._worker_id
+            self._event_queue.put((self._register_generation, serialize_event(event)))
+
+
+def _rebinder() -> concurrent.futures.ThreadPoolExecutor:
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="SupervisorRebind"
+    )
+
+
+def _drain(stale: queue.Queue[Any]) -> None:
+    while True:
+        try:
+            stale.get_nowait()
+        except queue.Empty:
+            return

@@ -58,7 +58,7 @@ class _VastAI:
         self.client.show_instance.return_value = {}
         self.adapter = VastAIWorkerAdapter(
             token=WorkerTokenType("vast_0.token"),
-            name="vast_0",
+            alias="vast_0",
             config=VastAIWorkerConfig(instance_id=instance_id),
             vastai_client=self.client,
             instance_pool=ResourcePool(),
@@ -107,7 +107,7 @@ async def test_a_destroy_stops_a_worker_whose_event_stream_closed(kind: str) -> 
         )
     }
 
-    assert await wm.destroy_worker(world.adapter.name)
+    assert await wm.destroy_worker(world.adapter.alias)
 
     assert world.stops == 1
     factory.destroy_worker.assert_called_once_with(world.adapter)
@@ -155,7 +155,7 @@ async def test_an_operator_stops_a_worker_whose_event_stream_closed(kind: str) -
     await world.start()
     world.adapter.set_status(WorkerStatus.STOPPED)
 
-    assert await _manager(world, kind).stop_worker(world.adapter.name)
+    assert await _manager(world, kind).stop_worker(world.adapter.alias)
 
     assert world.stops == 1
 
@@ -172,10 +172,10 @@ async def test_a_crashed_worker_an_operator_stopped_starts_again(kind: str) -> N
     world.adapter.clear_worker_id()
     world.adapter.set_status(WorkerStatus.STOPPED)
 
-    assert await wm.stop_worker(world.adapter.name)
+    assert await wm.stop_worker(world.adapter.alias)
     assert world.adapter.status is WorkerStatus.STOPPED
 
-    assert await wm.start_worker(world.adapter.name)
+    assert await wm.start_worker(world.adapter.alias)
     assert world.adapter.holds_worker()
 
 
@@ -201,10 +201,10 @@ async def test_a_worker_that_died_before_its_event_stream_opened_starts_again(
     world.adapter.set_worker_id("wkr-1")
     world.adapter.set_status(WorkerStatus.STARTING)
 
-    assert await wm.stop_worker(world.adapter.name)
+    assert await wm.stop_worker(world.adapter.alias)
     assert world.adapter.status is WorkerStatus.STOPPED
 
-    assert await wm.start_worker(world.adapter.name)
+    assert await wm.start_worker(world.adapter.alias)
 
 
 @pytest.mark.asyncio
@@ -229,14 +229,14 @@ async def test_a_stopped_worker_whose_event_stream_is_open_stops_at_its_close(
     await asyncio.sleep(0)
     assert world.adapter.has_event_stream
 
-    assert await wm.stop_worker(world.adapter.name)
+    assert await wm.stop_worker(world.adapter.alias)
     assert world.adapter.status is WorkerStatus.STOPPING
 
     closed.set()
     await stream
     assert not world.adapter.has_event_stream
     assert world.adapter.status is WorkerStatus.STOPPED
-    assert await wm.start_worker(world.adapter.name)
+    assert await wm.start_worker(world.adapter.alias)
 
 
 @pytest.mark.asyncio
@@ -249,7 +249,7 @@ async def test_a_worker_whose_event_stream_closed_is_not_started_again(
     world.adapter.set_status(WorkerStatus.STOPPED)
 
     with pytest.raises(ValueError, match="starting, running or stopping"):
-        await _manager(world, kind).start_worker(world.adapter.name)
+        await _manager(world, kind).start_worker(world.adapter.alias)
 
     if kind == "vastai":
         assert world.client.create_instance.call_count == 1
@@ -315,7 +315,7 @@ async def test_two_starts_behind_a_finishing_stop_create_one_instance() -> None:
     world.adapter.set_status(WorkerStatus.STOPPED)  # the stream closes mid-stop
     wm = _manager(world, "vastai")
     starts = [
-        asyncio.ensure_future(wm.start_worker(world.adapter.name)) for _ in range(2)
+        asyncio.ensure_future(wm.start_worker(world.adapter.alias)) for _ in range(2)
     ]
     await asyncio.sleep(0.05)
 
@@ -344,7 +344,7 @@ async def test_a_cancelled_start_that_then_failed_leaves_the_worker_stopped(
     world.client.start_instance.side_effect = refuse
     world.client.create_instance.side_effect = refuse
     wm = _manager(world, "vastai")
-    start = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    start = asyncio.ensure_future(wm.start_worker(world.adapter.alias))
     await asyncio.to_thread(refusing.wait, 5)
     start.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -356,9 +356,9 @@ async def test_a_cancelled_start_that_then_failed_leaves_the_worker_stopped(
 
     assert world.adapter.status is WorkerStatus.STOPPED
     with pytest.raises(ValueError, match="not starting or running"):
-        await wm.stop_worker(world.adapter.name)
+        await wm.stop_worker(world.adapter.alias)
     assert world.stops == 0
-    assert await wm.start_worker(world.adapter.name) is False
+    assert await wm.start_worker(world.adapter.alias) is False
 
 
 @pytest.mark.asyncio
@@ -375,12 +375,12 @@ async def test_a_start_behind_a_stop_queued_on_a_start_runs_after_the_stop() -> 
 
     world.client.create_instance.side_effect = create_instance
     wm = _manager(world, "vastai")
-    first = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    first = asyncio.ensure_future(wm.start_worker(world.adapter.alias))
     await asyncio.to_thread(creating.wait, 5)
-    stop = asyncio.ensure_future(wm.stop_worker(world.adapter.name))
+    stop = asyncio.ensure_future(wm.stop_worker(world.adapter.alias))
     await asyncio.sleep(0.05)
     world.adapter.set_status(WorkerStatus.STOPPED)  # a late stream close
-    second = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    second = asyncio.ensure_future(wm.start_worker(world.adapter.alias))
     await asyncio.sleep(0.05)
 
     release.set()
@@ -403,10 +403,10 @@ async def test_a_destroy_logs_stopping_a_worker_whose_event_stream_closed(
     wm = _manager(world, "docker")
 
     with caplog.at_level(logging.INFO, logger=wm.logger.name):
-        assert await wm.destroy_worker(world.adapter.name)
+        assert await wm.destroy_worker(world.adapter.alias)
 
-    assert f"Stopping worker {world.adapter.name}..." in caplog.messages
-    assert f"Worker {world.adapter.name} stopped." in caplog.messages
+    assert f"Stopping worker {world.adapter.alias}..." in caplog.messages
+    assert f"Worker {world.adapter.alias} stopped." in caplog.messages
 
 
 def _gate_first_start(world: Any) -> tuple[threading.Event, threading.Event]:
@@ -440,12 +440,12 @@ async def _start_queued_behind_a_stop_on_a_start(
     world: Any, wm: StubWorkerManager
 ) -> tuple[threading.Event, asyncio.Future[bool], asyncio.Future[bool], Any]:
     starting, release = _gate_first_start(world)
-    first = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    first = asyncio.ensure_future(wm.start_worker(world.adapter.alias))
     await asyncio.to_thread(starting.wait, 5)
-    stop = asyncio.ensure_future(wm.stop_worker(world.adapter.name))
+    stop = asyncio.ensure_future(wm.stop_worker(world.adapter.alias))
     await asyncio.sleep(0.05)
     world.adapter.set_status(WorkerStatus.STOPPED)  # a late stream close
-    second = asyncio.ensure_future(wm.start_worker(world.adapter.name))
+    second = asyncio.ensure_future(wm.start_worker(world.adapter.alias))
     await asyncio.sleep(0.05)
     return release, first, stop, second
 
@@ -460,7 +460,7 @@ async def test_a_start_queued_behind_a_stop_creates_nothing_once_destroyed(
     release, first, stop, second = await _start_queued_behind_a_stop_on_a_start(
         world, wm
     )
-    destroy = asyncio.ensure_future(wm.destroy_worker(world.adapter.name))
+    destroy = asyncio.ensure_future(wm.destroy_worker(world.adapter.alias))
     await asyncio.sleep(0.05)
 
     release.set()
@@ -473,7 +473,7 @@ async def test_a_start_queued_behind_a_stop_creates_nothing_once_destroyed(
 
     assert _created(world) == 1
     assert not world.adapter.holds_worker()
-    assert wm._registry.try_get_by_name(world.adapter.name) is None
+    assert wm._registry.try_get_by_alias(world.adapter.alias) is None
 
 
 @pytest.mark.asyncio
@@ -643,17 +643,17 @@ async def test_a_destroy_whose_command_is_cancelled_still_removes_the_worker(
         return stop()
 
     world.adapter._stop = gated_stop
-    destroy = asyncio.ensure_future(wm.destroy_worker(world.adapter.name))
+    destroy = asyncio.ensure_future(wm.destroy_worker(world.adapter.alias))
     await asyncio.to_thread(stopping.wait, 5)
     destroy.cancel()
     with pytest.raises(asyncio.CancelledError):
         await destroy
     with pytest.raises(ValueError, match="is being destroyed"):
-        await wm.start_worker(world.adapter.name)
+        await wm.start_worker(world.adapter.alias)
 
     release.set()
     deadline = time.monotonic() + 5
-    while wm._registry.try_get_by_name(world.adapter.name) is not None:
+    while wm._registry.try_get_by_alias(world.adapter.alias) is not None:
         assert time.monotonic() < deadline, "the destroy never removed the worker"
         await asyncio.sleep(0.01)
     assert not world.adapter.holds_worker()
@@ -670,7 +670,7 @@ async def test_a_vastai_worker_with_no_event_stream_stops_without_waiting() -> N
     world.adapter.set_status(WorkerStatus.STARTING)
 
     started = time.monotonic()
-    assert await wm.stop_worker(world.adapter.name)
+    assert await wm.stop_worker(world.adapter.alias)
 
     assert time.monotonic() - started < 1.0
     assert world.adapter.status is WorkerStatus.STOPPED

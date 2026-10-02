@@ -14,6 +14,8 @@ def test_an_unregister_carries_whether_the_shutdown_was_requested(
     client = _client()
     client.unregister(graceful)
 
-    frame = cast(dict[str, Any], client._event_queue.get_nowait())
+    _generation, frame = cast(
+        tuple[int, dict[str, Any]], client._event_queue.get_nowait()
+    )
     assert frame["type"] == "UNREGISTER"
     assert frame["graceful"] is graceful

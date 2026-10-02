@@ -177,6 +177,7 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKER_TOKEN` | – | Auth token for supervisor gRPC |
+| `WORKER_ALIAS` | – | Worker alias; an external worker's token carries it |
 | `SUPERVISOR_GRPC_TARGET` | – | Supervisor gRPC endpoint |
 | `RESULTS_DIR` | `./results` | Task output directory |
 | `WORKER_CONTENT_DIR` | – | Root for this worker's content cache; defaults to a content subdirectory of `RESULTS_DIR` |
@@ -197,15 +198,27 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `DEV_MODEL_FORWARD_URL` | – | Upstream URL `dev_model` forwards to; canned if unset |
 | `DEV_MODEL_RESPONSE_DELAY_SEC` | `0` | Per-response delay the `dev_model` stand-in applies |
 
+An `external` worker runs outside its supervisor, so set on it the settings a
+supervisor passes the workers it launches: a `WORKER_TOKEN` of the form
+`<alias>.<hex HMAC-SHA256 of the alias keyed by EXTERNAL_WORKER_TOKEN>`,
+`SUPERVISOR_GRPC_TARGET` with `SUPERVISOR_GRPC_TLS_CA_B64`, and the deployment's
+network-plane peer (`NETWORK_PLANE_PEER_*`), content cache and store
+(`WORKER_CONTENT_DIR`, `CONTENT_*`), `WORKER_PRIVATE_STATE_DIR`, and telemetry
+(`SERVER_METRICS_*`) settings. An external worker on a host other than its node's
+carries resident traffic over `control_relay`.
+
 ## Supervisor
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NODE_NAMESPACE` / `NODE_CLUSTER` / `NODE_ALIAS` | defaults | Identity |
+| `NODE_NAMESPACE` / `NODE_CLUSTER` | defaults | Identity |
+| `NODE_ALIAS` | `node` | Node alias; unique among live nodes, so a live duplicate fails at startup |
 | `NODE_TAGS` | `` | Scheduler hints (CSV) |
 | `SUPERVISOR_GRPC_DISABLE_SERVER_TLS` | `false` | Local-only insecure gRPC |
 | `SUPERVISOR_GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS` | `true` | gRPC keepalive |
 | `SUPERVISOR_GRPC_EXTERNAL_PORT` | – | External port (when port-forwarded) |
+| `EXTERNAL_WORKER_TOKEN` | – | Shared secret admitting `external` workers (empty disables them) |
+| `EXTERNAL_WORKER_TOKEN_FILE` | – | File holding the secret; wins over `EXTERNAL_WORKER_TOKEN` |
 | `SERVER_GRPC_TLS_*` | – | TLS certificate files |
 
 ## SSH session backend

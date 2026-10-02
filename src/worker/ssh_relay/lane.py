@@ -11,7 +11,6 @@ import contextlib
 import logging
 import threading
 import time
-from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +29,7 @@ from shared.network.relay_frame import (
     RelayFrameKind,
 )
 from shared.network.session import RelaySessionRole
+from shared.utils.recent import RecentSet
 
 from .registry import LOOPBACK_HOST, SshEndpointRegistry
 
@@ -68,7 +68,7 @@ class SshRelayLane:
         self._connect_timeout_sec = connect_timeout_sec
         self._logger = logger or logging.getLogger("ssh-relay-lane")
         self._connections: dict[str, _Connection] = {}
-        self._ended: OrderedDict[str, None] = OrderedDict()
+        self._ended: RecentSet[str] = RecentSet(_ENDED_MEMORY)
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run, name="flowmesh-ssh-relay", daemon=True
@@ -106,7 +106,7 @@ class SshRelayLane:
             # left over from one that already ended. The bridge moves a cancel ahead
             # of data, so one can arrive before the opening frame it ends.
             if frame.kind is RelayFrameKind.CANCEL:
-                self._remember_ended(frame.session_id)
+                self._ended.add(frame.session_id)
             if (
                 frame.kind is not RelayFrameKind.DATA
                 or frame.seq != 1
@@ -165,16 +165,11 @@ class SshRelayLane:
             await channel.abort()
         finally:
             self._connections.pop(channel.session_id, None)
-            self._remember_ended(channel.session_id)
+            self._ended.add(channel.session_id)
             if writer is not None:
                 writer.close()
                 with contextlib.suppress(Exception):
                     await writer.wait_closed()
-
-    def _remember_ended(self, session_id: str) -> None:
-        self._ended[session_id] = None
-        if len(self._ended) > _ENDED_MEMORY:
-            self._ended.popitem(last=False)
 
     def _on_withdraw(self, endpoint_id: str) -> None:
         if self._thread.is_alive():

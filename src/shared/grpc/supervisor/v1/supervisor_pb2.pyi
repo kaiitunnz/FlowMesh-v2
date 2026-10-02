@@ -31,25 +31,46 @@ class RegisterResponse(_message.Message):
     ) -> None: ...
 
 class InterruptMessage(_message.Message):
-    __slots__ = ("task_id", "reason")
+    __slots__ = ("task_id", "reason", "dispatch_id")
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
+    DISPATCH_ID_FIELD_NUMBER: _ClassVar[int]
     task_id: str
     reason: str
+    dispatch_id: str
 
     def __init__(
-        self, task_id: _Optional[str] = ..., reason: _Optional[str] = ...
+        self,
+        task_id: _Optional[str] = ...,
+        reason: _Optional[str] = ...,
+        dispatch_id: _Optional[str] = ...,
     ) -> None: ...
 
 class StopMessage(_message.Message):
-    __slots__ = ("task_id", "reason")
+    __slots__ = ("task_id", "reason", "dispatch_id")
     TASK_ID_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
+    DISPATCH_ID_FIELD_NUMBER: _ClassVar[int]
     task_id: str
     reason: str
+    dispatch_id: str
 
     def __init__(
-        self, task_id: _Optional[str] = ..., reason: _Optional[str] = ...
+        self,
+        task_id: _Optional[str] = ...,
+        reason: _Optional[str] = ...,
+        dispatch_id: _Optional[str] = ...,
+    ) -> None: ...
+
+class RevokeMessage(_message.Message):
+    __slots__ = ("task_id", "dispatch_id")
+    TASK_ID_FIELD_NUMBER: _ClassVar[int]
+    DISPATCH_ID_FIELD_NUMBER: _ClassVar[int]
+    task_id: str
+    dispatch_id: str
+
+    def __init__(
+        self, task_id: _Optional[str] = ..., dispatch_id: _Optional[str] = ...
     ) -> None: ...
 
 class TaskMessage(_message.Message):
@@ -75,15 +96,17 @@ class MediatedOperationFrame(_message.Message):
     ) -> None: ...
 
 class DispatchMessage(_message.Message):
-    __slots__ = ("task", "interrupt", "stop", "mediated_op")
+    __slots__ = ("task", "interrupt", "stop", "mediated_op", "revoke")
     TASK_FIELD_NUMBER: _ClassVar[int]
     INTERRUPT_FIELD_NUMBER: _ClassVar[int]
     STOP_FIELD_NUMBER: _ClassVar[int]
     MEDIATED_OP_FIELD_NUMBER: _ClassVar[int]
+    REVOKE_FIELD_NUMBER: _ClassVar[int]
     task: TaskMessage
     interrupt: InterruptMessage
     stop: StopMessage
     mediated_op: MediatedOperationFrame
+    revoke: RevokeMessage
 
     def __init__(
         self,
@@ -91,6 +114,7 @@ class DispatchMessage(_message.Message):
         interrupt: _Optional[_Union[InterruptMessage, _Mapping]] = ...,
         stop: _Optional[_Union[StopMessage, _Mapping]] = ...,
         mediated_op: _Optional[_Union[MediatedOperationFrame, _Mapping]] = ...,
+        revoke: _Optional[_Union[RevokeMessage, _Mapping]] = ...,
     ) -> None: ...
 
 class EventMessage(_message.Message):

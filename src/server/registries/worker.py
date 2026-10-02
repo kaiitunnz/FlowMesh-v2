@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from shared.schemas.command import (
     InterruptMessage,
     MediatedOpMessage,
+    RevokeMessage,
     StopMessage,
     TaskMessage,
 )
@@ -22,6 +23,7 @@ from shared.tasks.worker_message import (
 )
 from shared.utils import new_worker_id, now_iso, parse_mem_to_bytes
 from shared.utils.hardware import gpu_meets_requirements, gpus_fit_dispatch
+from shared.utils.ids import PREFIX_WORKER
 
 from ..clients.redis import (
     WORKER_EVENT_CHANNEL,
@@ -34,6 +36,24 @@ from ..clients.redis import (
 )
 
 logger = logging.getLogger(__name__)
+
+# KEYS: [worker id counter, workers set]
+# ARGV: [worker id prefix, worker id to skip, ...]
+# Returns the next counter value whose worker id neither a recorded worker holds nor
+# ARGV skips, and records that id, so a counter the store lost never hands out an id
+# still in use.
+_ALLOCATE_WORKER_LUA = """
+local skip = {}
+for i = 2, #ARGV do skip[ARGV[i]] = true end
+while true do
+  local seq = redis.call('INCR', KEYS[1])
+  local id = ARGV[1] .. seq
+  if not skip[id] and redis.call('SADD', KEYS[2], id) == 1 then
+    return seq
+  end
+end
+"""
+
 
 # A write for a worker that is no longer a set member must not recreate a partial
 # record. A read-then-write cannot promise that, since the watchdog can reap
@@ -106,6 +126,18 @@ return 1
 # A heartbeat key with no TTL left (missing, or never given one) is a stale worker.
 _REAP_IF_STALE = """
 if redis.call('TTL', KEYS[3]) >= 0 then
+    return 0
+end
+redis.call('SREM', KEYS[1], ARGV[1])
+redis.call('DEL', KEYS[2], KEYS[3])
+return 1
+"""
+
+# A record another node wrote under the same id is that node's worker; only that node's
+# unregister deletes it.
+_UNREGISTER_IF_NODE = """
+local alias = redis.call('HGET', KEYS[2], 'node_alias')
+if alias and alias ~= ARGV[2] then
     return 0
 end
 redis.call('SREM', KEYS[1], ARGV[1])
@@ -229,22 +261,48 @@ class WorkerRegistry:
     # Worker lifecycle helpers
     # ------------------------------------------------------------------ #
 
+    def allocate_worker_seq(self, skip: Iterable[str] = ()) -> int:
+        """Record a fresh worker id and return its sequence number."""
+        return int(
+            self._rds.sync.eval(
+                _ALLOCATE_WORKER_LUA,
+                2,
+                WORKER_ID_SEQ_KEY,
+                WORKERS_SET_KEY,
+                f"{PREFIX_WORKER}-",
+                *skip,
+            )
+        )
+
+    async def allocate_worker_seq_async(self, skip: Iterable[str] = ()) -> int:
+        """Record a fresh worker id and return its sequence number."""
+        return int(
+            await self._rds.asyncio.eval(
+                _ALLOCATE_WORKER_LUA,
+                2,
+                WORKER_ID_SEQ_KEY,
+                WORKERS_SET_KEY,
+                f"{PREFIX_WORKER}-",
+                *skip,
+            )
+        )
+
     def register_worker(
         self,
         node_id: str,
         node_alias: str,
         worker_meta: dict[str, Any],
+        skip: Iterable[str] = (),
     ) -> str:
-        seq = self._rds.sync.incr(WORKER_ID_SEQ_KEY)
+        """Record a worker under a fresh id that no recorded worker holds and ``skip``
+        leaves out, stamping its id, incarnation and node into ``worker_meta``."""
+        seq = self.allocate_worker_seq(skip)
         worker_id = new_worker_id(seq)
         worker_meta["id"] = worker_id
         worker_meta["incarnation"] = seq
         worker_meta["node_id"] = node_id
         worker_meta["node_alias"] = node_alias
-        with self._rds.sync.control_pipeline() as pipe:
-            pipe.sadd(WORKERS_SET_KEY, worker_id)
-            pipe.hset(worker_key(worker_id), mapping=worker_meta)
-            pipe.execute()
+        self._rds.sync.hash_set(worker_key(worker_id), worker_meta)
         return worker_id
 
     async def register_worker_async(
@@ -253,16 +311,13 @@ class WorkerRegistry:
         node_alias: str,
         worker_meta: dict[str, Any],
     ) -> str:
-        seq = await self._rds.asyncio.incr(WORKER_ID_SEQ_KEY)
+        seq = await self.allocate_worker_seq_async()
         worker_id = new_worker_id(seq)
         worker_meta["id"] = worker_id
         worker_meta["incarnation"] = seq
         worker_meta["node_id"] = node_id
         worker_meta["node_alias"] = node_alias
-        async with self._rds.asyncio.control_pipeline() as pipe:
-            pipe.sadd(WORKERS_SET_KEY, worker_id)
-            pipe.hset(worker_key(worker_id), mapping=worker_meta)
-            await pipe.execute()
+        await self._rds.asyncio.hash_set(worker_key(worker_id), worker_meta)
         return worker_id
 
     def update_worker_hb(
@@ -411,6 +466,38 @@ class WorkerRegistry:
             pipe.delete(*(worker_key(worker_id) for worker_id in worker_ids))
             pipe.delete(*(worker_hb_key(worker_id) for worker_id in worker_ids))
             pipe.execute()
+
+    def unregister_node_worker(self, worker_id: str, node_alias: str) -> bool:
+        """Delete a worker's record unless another node wrote it; returns False when
+        another node holds the id."""
+        return bool(
+            self._rds.sync.eval(
+                _UNREGISTER_IF_NODE,
+                3,
+                WORKERS_SET_KEY,
+                worker_key(worker_id),
+                worker_hb_key(worker_id),
+                worker_id,
+                node_alias,
+            )
+        )
+
+    async def unregister_node_worker_async(
+        self, worker_id: str, node_alias: str
+    ) -> bool:
+        """Delete a worker's record unless another node wrote it; returns False when
+        another node holds the id."""
+        return bool(
+            await self._rds.asyncio.eval(
+                _UNREGISTER_IF_NODE,
+                3,
+                WORKERS_SET_KEY,
+                worker_key(worker_id),
+                worker_hb_key(worker_id),
+                worker_id,
+                node_alias,
+            )
+        )
 
     async def unregister_workers_async(self, *worker_ids: str) -> None:
         async with self._rds.asyncio.control_pipeline() as pipe:
@@ -657,6 +744,15 @@ class WorkerRegistry:
     ) -> int:
         message = payload.model_dump_json()
         channel = node_dispatch_channel(worker.node_id)
+        return await self._rds.asyncio.publish_control(channel, message)
+
+    def publish_revoke(self, node_id: str, payload: RevokeMessage) -> int:
+        message = payload.model_dump_json()
+        return self._rds.sync.publish_control(node_dispatch_channel(node_id), message)
+
+    async def publish_revoke_async(self, node_id: str, payload: RevokeMessage) -> int:
+        message = payload.model_dump_json()
+        channel = node_dispatch_channel(node_id)
         return await self._rds.asyncio.publish_control(channel, message)
 
     def publish_stop(self, worker: Worker, payload: StopMessage) -> int:

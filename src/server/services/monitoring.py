@@ -26,6 +26,7 @@ from shared.schemas.event import (
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import TaskType
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
+from shared.utils.recent import RecentMap
 
 from ..auth import default_principal, deregister_resource, register_resource
 from ..clients.redis import (
@@ -89,6 +90,12 @@ _GIVEN_UP_ENDS = {
 }
 
 TASK_EVENT_HANDLER_MAX_ATTEMPTS = 5
+
+# How many revoked runs the monitor remembers, so a worker's repeated BUSY reports of
+# one revoked dispatch publish one revoke each interval.
+_REVOKED_RUN_MEMORY = 4096
+# A run still reported after its revoke is revoked again, in case the revoke was lost.
+_REVOKE_RESEND_SEC = 120.0
 
 
 def _stream_id_tuple(entry_id: str) -> tuple[int, int]:
@@ -168,6 +175,10 @@ class EventMonitor:
 
         # Per-entry handler-failure counts backing the consumer's retry budget.
         self._event_handler_attempts: dict[str, int] = {}
+        # When each (worker, dispatch) was last revoked as an orphan run.
+        self._revoked_runs: RecentMap[tuple[str, str], float] = RecentMap(
+            _REVOKED_RUN_MEMORY
+        )
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._threads: list[threading.Thread] | None = None
@@ -820,9 +831,9 @@ class EventMonitor:
         log_worker_event(self._logger, event)
         self._metrics.record_worker_event(event)
         event_type = event.type
+        worker_id = (event.worker_id or "").strip()
         match event_type:
             case "REGISTER":
-                worker_id = (event.worker_id or "").strip()
                 if worker_id:
                     self._schedule_register(
                         ResourceKind.WORKER,
@@ -831,19 +842,20 @@ class EventMonitor:
                         {"tags": list(event.tags or [])},
                     )
             case "HEARTBEAT":
-                worker_id = (event.worker_id or "").strip()
                 ttl_sec = event.payload.get("ttl_sec", 120)
                 report = self._worker_registry.update_worker_hb(
                     worker_id, event.ts, ttl_sec, event.status, event.dispatch_id
                 )
                 self._took_status_report(worker_id, report, "Heartbeat", ttl_sec)
+                if report.outcome is ReportOutcome.APPLIED:
+                    self._revoke_orphan_run(worker_id, event)
+                    self._runtime.redrive_overdue_ops(worker_id)
                 if report.outcome is not ReportOutcome.UNKNOWN:
                     self._record_gpu_availability(worker_id, event.metrics)
             case "STATUS" if event.origin == "worker":
                 # A server-origin event announces a write the registry already applied
                 # inline; replaying it would land that value again on top of whatever
                 # has since replaced it.
-                worker_id = (event.worker_id or "").strip()
                 report = self._worker_registry.set_worker_status(
                     worker_id,
                     event.status or WorkerStatus.UNKNOWN,
@@ -852,13 +864,16 @@ class EventMonitor:
                     event.dispatch_id,
                 )
                 self._took_status_report(worker_id, report, "Status update")
+                if report.outcome is ReportOutcome.APPLIED:
+                    self._revoke_orphan_run(worker_id, event)
             case "MEDIATED_OP_OUTCOME":
                 self._runtime.settle_mediated_operation(
                     MediatedOperationOutcome.model_validate(event.payload["outcome"])
                 )
             case "MEDIATED_OP_PROPOSE":
                 self._runtime.authorize_model_turn(
-                    AgentModelTurnProposal.model_validate(event.payload["proposal"])
+                    AgentModelTurnProposal.model_validate(event.payload["proposal"]),
+                    worker_id,
                 )
             case "RESIDENT_BOOTSTRAP_ACK":
                 self._runtime.on_resident_bootstrap_ack(
@@ -870,17 +885,21 @@ class EventMonitor:
                 )
             case "CONTENT_HOLDING" if self._content_authority is not None:
                 self._content_authority.record_holding(
-                    (event.worker_id or "").strip(),
+                    worker_id,
                     [
                         (str(scope), str(digest))
                         for scope, digest in event.payload["held"]
                     ],
                 )
             case "CONTENT_ACCESS_REQUEST" if self._content_access is not None:
-                worker_id = (event.worker_id or "").strip()
                 task_id = str(event.payload["task_id"])
+                dispatch_id = event.payload.get("dispatch_id")
                 if (
-                    scope := self._runtime.renewable_content_scope(task_id, worker_id)
+                    scope := self._runtime.renewable_content_scope(
+                        task_id,
+                        worker_id,
+                        dispatch_id if isinstance(dispatch_id, str) else None,
+                    )
                 ) is None:
                     self._logger.warning(
                         "Refusing to renew content store access for %s on %s",
@@ -891,7 +910,7 @@ class EventMonitor:
                     self._content_access.issue(worker_id, task_id, scope)
             case "CONTENT_HYDRATION_REQUEST" if self._content_authority is not None:
                 self._content_authority.authorize(
-                    (event.worker_id or "").strip(),
+                    worker_id,
                     str(event.payload["task_id"]),
                     ContentReference.model_validate(event.payload["reference"]),
                 )
@@ -901,9 +920,24 @@ class EventMonitor:
                         event.payload["observation"]
                     )
                 )
+            case "ATTACHED":
+                self._runtime.redeliver_to_worker(worker_id)
             case "UNREGISTER":
-                worker_id = (event.worker_id or "").strip()
-                self._worker_registry.unregister_workers(worker_id)
+                # A revoke routes by the node the record names, which this deletes.
+                departing = self._worker_registry.get_worker(worker_id)
+                node_alias = event.payload.get("node_alias")
+                if not isinstance(node_alias, str):
+                    self._worker_registry.unregister_workers(worker_id)
+                elif not self._worker_registry.unregister_node_worker(
+                    worker_id, node_alias
+                ):
+                    self._logger.warning(
+                        "Ignoring node %s's unregister of %s, which another node "
+                        "holds",
+                        node_alias,
+                        worker_id,
+                    )
+                    return
                 if worker_id:
                     self._schedule_deregister(
                         ResourceKind.WORKER, worker_id, self._actor_from_event(event)
@@ -918,7 +952,11 @@ class EventMonitor:
                         )
                         self._watchdog.clear_dead_mark(worker_id)
                         return
-                    self._return_lost_tasks(worker_id, graceful=event.graceful)
+                    self._return_lost_tasks(
+                        worker_id,
+                        graceful=event.graceful,
+                        node_id=departing.node_id if departing else None,
+                    )
             case _:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
@@ -980,6 +1018,35 @@ class EventMonitor:
                         task_id,
                     )
 
+    def _revoke_orphan_run(self, worker_id: str, event: WorkerEvent) -> None:
+        """Revoke a dispatch a worker reports running that control does not hold, once
+        per worker and dispatch in each resend interval.
+
+        A dispatch control resolved without its worker ending it may still have
+        reached the worker and started; the revoke ends it there.
+        """
+        dispatch_id, task_id = event.dispatch_id, event.payload.get("task_id")
+        run = (worker_id, dispatch_id or "")
+        now = time.monotonic()
+        last = self._revoked_runs.get(run)
+        if (
+            event.status is not WorkerStatus.BUSY
+            or not dispatch_id
+            or not isinstance(task_id, str)
+            or (last is not None and now - last < _REVOKE_RESEND_SEC)
+            or self._runtime.dispatch_in_flight(task_id, dispatch_id, worker_id)
+        ):
+            return
+        self._revoked_runs[run] = now
+        self._logger.warning(
+            "Worker %s runs dispatch %s of task %s that control does not hold; "
+            "revoking it",
+            worker_id,
+            dispatch_id,
+            task_id,
+        )
+        self._runtime.revoke_dispatch(task_id, worker_id, dispatch_id)
+
     def _resolve_disowned_dispatch(
         self, worker_id: str, task_id: str, dispatch_id: str, ttl_sec: float
     ) -> None:
@@ -1014,7 +1081,9 @@ class EventMonitor:
                 [],
             )
 
-    def _return_lost_tasks(self, worker_id: str, graceful: bool) -> None:
+    def _return_lost_tasks(
+        self, worker_id: str, graceful: bool, node_id: str | None = None
+    ) -> None:
         """Return the tasks a departed worker held, settling any being cancelled.
 
         A worker that left on its own shutdown gave its tasks up, so they return
@@ -1023,7 +1092,7 @@ class EventMonitor:
         requeued: list[str] = []
         ts = now_iso()
         recovery = self._runtime.recover_tasks_for_worker(
-            worker_id, spend_attempt=not graceful
+            worker_id, spend_attempt=not graceful, node_id=node_id
         )
         self.record_worker_losses(worker_id, recovery.resolved, "worker_unregistered")
         for task_id in recovery.lost:
@@ -1132,6 +1201,8 @@ class EventMonitor:
 
     def _fail_ssh_task(self, task_id: str, worker_id: str | None, reason: str) -> None:
         """Fail a task whose session cannot be reached and stop its executor."""
+        record = self._runtime.get_record(task_id)
+        dispatch_id = record.dispatch_id if record is not None else None
         self._dispatcher.fail_task(task_id, reason, worker_id=worker_id)
         if (
             not worker_id
@@ -1141,7 +1212,12 @@ class EventMonitor:
         try:
             self._worker_registry.publish_interrupt(
                 worker,
-                InterruptMessage(task_id=task_id, worker_id=worker.id, reason=reason),
+                InterruptMessage(
+                    task_id=task_id,
+                    worker_id=worker.id,
+                    reason=reason,
+                    dispatch_id=dispatch_id,
+                ),
             )
         except Exception as exc:
             self._logger.warning(

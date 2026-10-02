@@ -1,12 +1,13 @@
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 import httpx
 from lumid_hooks import PrincipalContext
 
-from shared.schemas.event import NodeEvent, serialize_event
+from shared.schemas.event import serialize_event
 from shared.schemas.network import NetworkEndpointAdvertisement
 from shared.schemas.node import NodeInfo
 from shared.utils.http import auth_headers
@@ -14,7 +15,22 @@ from shared.utils.time import now_iso
 
 from ...clients.redis import NODE_EVENT_CHANNEL, SyncRedisClient
 from ...config import NodeRole
-from ...registries.node import NodeRegistry
+from ...registries.node import NodeAliasInUseError, NodeRegistry, node_event
+
+_REGISTER_RETRY_INITIAL_SEC = 2.0
+
+
+class AliasHeldError(RuntimeError):
+    """Registration was refused because a live node holds this node's alias, whose
+    lease had ``lease_remaining_ms`` left."""
+
+    def __init__(self, message: str, lease_remaining_ms: int) -> None:
+        super().__init__(message)
+        self.lease_remaining_ms = lease_remaining_ms
+
+
+class NodeAliasConflictError(RuntimeError):
+    """Another live node keeps this node's alias, so this node cannot start."""
 
 
 class Lifecycle:
@@ -48,6 +64,7 @@ class Lifecycle:
         self._system_principal = system_principal
         self._current_gpu_count_getter = current_gpu_count_getter
         self._on_reregister = on_reregister
+        self._on_heartbeat: Callable[[], None] | None = None
         self._endpoint_advertisement_provider = endpoint_advertisement_provider
 
         self._node_id: str | None = None
@@ -56,6 +73,7 @@ class Lifecycle:
         self._hb_thread: threading.Thread | None = None
         self._hb_lock = threading.Lock()
         self._unregister_published: bool = False
+        self._shutting_down: bool = False
 
     @property
     def node_id(self) -> str:
@@ -68,12 +86,19 @@ class Lifecycle:
         """Register a hook invoked with the new node id after a re-register."""
         self._on_reregister = callback
 
+    def set_heartbeat_callback(self, callback: Callable[[], None]) -> None:
+        """Register a hook run after each node heartbeat."""
+        self._on_heartbeat = callback
+
     # ------------------------------------------------------------------ #
     # Registration
     # ------------------------------------------------------------------ #
 
     def _register(self) -> str:
-        """Register with the root and return the assigned node_id."""
+        """Register with the root and return the assigned node_id.
+
+        Raises `AliasHeldError` when a live node holds this node's alias.
+        """
         self._refresh_advertisement()
         if self._role is NodeRole.ROOT:
             return self._register_direct()
@@ -88,9 +113,46 @@ class Lifecycle:
             update={"network_endpoint": advertisement}
         )
 
+    def _register_until_alias_free(self) -> str:
+        """Retry registration until this node's alias lease is free, e.g. while
+        a lease left by this node's crashed previous run goes stale.
+
+        A crashed holder's lease only runs down, while a live holder's heartbeats
+        refresh it, so a lease with more time left than at the previous refusal
+        belongs to another live node, and registration fails with
+        `NodeAliasConflictError`.
+        """
+        delay = _REGISTER_RETRY_INITIAL_SEC
+        previous_remaining_ms: int | None = None
+        while True:
+            try:
+                return self._register()
+            except AliasHeldError as exc:
+                remaining_ms = exc.lease_remaining_ms
+                if (
+                    previous_remaining_ms is not None
+                    and remaining_ms > previous_remaining_ms
+                ):
+                    message = (
+                        f"NODE_ALIAS {self._node_info.alias!r} is held by another "
+                        "live node, which keeps refreshing its lease; set a distinct "
+                        "NODE_ALIAS"
+                    )
+                    self.logger.error(message)
+                    raise NodeAliasConflictError(message) from exc
+                previous_remaining_ms = remaining_ms
+                self.logger.warning("%s; retrying in %.0fs", exc, delay)
+            time.sleep(delay)
+            delay = min(delay * 2, max(self.hb_sec, _REGISTER_RETRY_INITIAL_SEC))
+
     def _register_direct(self) -> str:
         """Root node: register directly via NodeRegistry (Redis)."""
-        node_id = self._node_registry.register_node(self._node_info)
+        try:
+            node_id = self._node_registry.register_node(
+                self._node_info, self._system_principal
+            )
+        except NodeAliasInUseError as exc:
+            raise AliasHeldError(str(exc), exc.lease_remaining_ms) from exc
         self.logger.info("Node registered (direct): %s", node_id)
         return node_id
 
@@ -102,6 +164,11 @@ class Lifecycle:
         )
         payload = self._node_info.model_dump()
         resp = httpx.post(url, json=payload, headers=auth_headers(), timeout=10.0)
+        if resp.status_code == httpx.codes.CONFLICT:
+            detail = resp.json()["detail"]
+            raise AliasHeldError(
+                str(detail["message"]), int(detail["lease_remaining_ms"])
+            )
         resp.raise_for_status()
         data = resp.json()
         node_id = data.get("node_id")
@@ -115,14 +182,7 @@ class Lifecycle:
     # ------------------------------------------------------------------ #
 
     def _publish_event(self, event_type: str, **extra: object) -> None:
-        event = NodeEvent(
-            type=event_type,
-            ts=now_iso(),
-            node_id=self.node_id,
-            tags=[],
-            payload={},
-            actor=self._system_principal.model_dump(),
-        )
+        event = node_event(event_type, self.node_id, self._system_principal)
         payload = serialize_event(event) | extra
         self._redis.publish_telemetry(NODE_EVENT_CHANNEL, json.dumps(payload))
 
@@ -143,12 +203,18 @@ class Lifecycle:
     def heartbeat_now(self) -> None:
         with self._hb_lock:
             ts = now_iso()
-            self._node_registry.update_node_hb(
+            alias_held = self._node_registry.update_node_hb(
                 self.node_id,
                 ts,
                 self.hb_ttl_sec,
                 current_gpu_count=self._current_gpu_count(),
             )
+            if alias_held:
+                self.logger.error(
+                    "Node alias %r was taken over by another live node; set a "
+                    "distinct NODE_ALIAS for this node",
+                    self._node_info.alias,
+                )
             gpu_count = self._current_gpu_count()
             hb_payload: dict[str, object] = {"ttl_sec": self.hb_ttl_sec}
             if gpu_count is not None:
@@ -160,7 +226,7 @@ class Lifecycle:
             self.logger.warning("Node lifecycle already started")
             return self.node_id
 
-        self._node_id = self._register()
+        self._node_id = self._register_until_alias_free()
         self._unregister_published = False
         self._publish_event("SV_REGISTER")
         self.heartbeat_now()
@@ -181,12 +247,19 @@ class Lifecycle:
         present in the root registry (e.g., when the control-plane Redis is cleared on
         root redeploy), the node must re-register to obtain a new node_id.
         """
-        if self._node_registry.node_exists(self.node_id):
+        # Once SV_UNREGISTER is out, the root removes this node's record; that is
+        # not a loss to recover from, and a re-register would leave a lease
+        # nothing releases.
+        if self._shutting_down or self._node_registry.node_exists(self.node_id):
             return
         self.logger.warning(
             "Node %s missing from root registry; re-registering", self._node_id
         )
-        self._node_id = self._register()
+        try:
+            self._node_id = self._register()
+        except AliasHeldError as exc:
+            self.logger.warning("%s; retrying on the next heartbeat", exc)
+            return
         self._unregister_published = False
         self._publish_event("SV_REGISTER")
         self.logger.info("Node re-registered as %s", self._node_id)
@@ -207,9 +280,17 @@ class Lifecycle:
                 self.logger.warning(
                     "Node heartbeat failed for %s: %s", self._node_id, exc
                 )
+            if (on_heartbeat := self._on_heartbeat) is not None:
+                try:
+                    on_heartbeat()
+                except Exception as exc:
+                    self.logger.warning(
+                        "Node heartbeat callback failed for %s: %s", self._node_id, exc
+                    )
             self._stop_event.wait(self.hb_sec)
 
     def publish_unregister(self) -> None:
+        self._shutting_down = True
         if self._unregister_published:
             return
         self._publish_event("SV_UNREGISTER")

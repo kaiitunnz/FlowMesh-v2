@@ -130,6 +130,9 @@ class MediatedEgressSidecar:
         # In-flight egress futures and cancelled boundaries, keyed by the boundary.
         self._inflight: dict[_BoundaryKey, Future[None]] = {}
         self._cancelled: set[_BoundaryKey] = set()
+        # Each boundary's outcome until it is reaped: a re-minted permit for it gets
+        # the same outcome again, never a second egress.
+        self._produced: dict[_BoundaryKey, MediatedOperationOutcome] = {}
 
     def submit_permit(self, permit: MediatedOperationPermit) -> None:
         """Drive one authorized operation; ignore an exact permit replay."""
@@ -142,6 +145,12 @@ class MediatedEgressSidecar:
                 return
             self._inflight[key] = self._pool.submit(self._drive, permit)
 
+    def forget_outcomes(self) -> None:
+        """Drop the outcomes kept for re-minted permits, which control re-mints only to
+        the registration that produced them."""
+        with self._lock:
+            self._produced.clear()
+
     def reap(self, agent_task_id: str, call_correlation: str) -> None:
         """Delete worker-private custody after a committed outcome or a cancellation.
 
@@ -150,6 +159,7 @@ class MediatedEgressSidecar:
         """
         key = (agent_task_id, call_correlation)
         with self._lock:
+            self._produced.pop(key, None)
             fut = self._inflight.get(key)
             if fut is not None:
                 if fut.cancel():
@@ -191,6 +201,21 @@ class MediatedEgressSidecar:
 
     def _drive(self, permit: MediatedOperationPermit) -> None:
         key = (permit.agent_task_id, permit.call_correlation)
+        with self._lock:
+            produced = self._produced.get(key)
+            if produced is not None:
+                self._inflight.pop(key, None)
+        if produced is not None:
+            self._sink(
+                produced.model_copy(
+                    update={
+                        "permit_id": permit.permit_id,
+                        "invocation_id": permit.invocation_id,
+                    }
+                )
+            )
+            return
+        report: MediatedOperationOutcome | None = None
         with self._egress_span(permit):
             try:
                 report = self._produce(permit)
@@ -209,6 +234,8 @@ class MediatedEgressSidecar:
                     self._inflight.pop(key, None)
                     cancelled = key in self._cancelled
                     self._cancelled.discard(key)
+                    if report is not None and not cancelled:
+                        self._produced[key] = report
         if report is not None and not cancelled:
             self._sink(report)
 

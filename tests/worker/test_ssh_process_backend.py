@@ -216,6 +216,7 @@ def test_the_worker_reports_whether_its_sessions_run_batch_tasks(
 
 def _worker_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("WORKER_TOKEN", "tok")
+    monkeypatch.setenv("WORKER_ALIAS", "worker-0")
     monkeypatch.setenv("SUPERVISOR_GRPC_TARGET", "127.0.0.1:50051")
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
     monkeypatch.setenv("WORKER_HB_FILE", str(tmp_path / "worker.hb"))
@@ -260,6 +261,7 @@ def test_an_unknown_session_backend_stops_the_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("WORKER_TOKEN", "tok")
+    monkeypatch.setenv("WORKER_ALIAS", "worker-0")
     monkeypatch.setenv("SUPERVISOR_GRPC_TARGET", "127.0.0.1:50051")
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
     monkeypatch.setenv("WORKER_HB_FILE", str(tmp_path / "worker.hb"))
@@ -766,7 +768,7 @@ def _request(tmp_path: Path, inputs: list[str], output: str | None) -> SessionRe
     return SessionRequest(
         task_id="tsk-ssh",
         session_id="ssn-1",
-        worker_name="worker-1",
+        owner="worker-1",
         cfg=cfg,
         out_dir=tmp_path,
         resolved_inputs=cast(Any, resolved),
@@ -1410,7 +1412,7 @@ def test_a_session_that_fails_to_start_and_cannot_be_discarded_stops_the_worker(
     request = SessionRequest(
         task_id="tsk-ssh",
         session_id="ssn-0123456789abcdef",
-        worker_name="worker-1",
+        owner="worker-1",
         cfg=MagicMock(interactive=True, output=None, requested_image=None),
         out_dir=tmp_path / "out",
         resolved_inputs=[],

@@ -338,14 +338,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and Chat Completions, injects the agent's pinned fabric facades, and runs the held
   egress — it proposes the request digest to control, awaits the one-use
   `MediatedOperationPermit` over the worker's attachment, and egresses synchronously
-  through the `MediatedEgressSidecar`, returning the model's whole message inline. The
-  per-workflow model credential rides the permit to the worker. A binding without one
-  uses the worker's deployment key only for the deployment's default model URL, and
-  calls any other URL without a credential; a pinned credential missing from the vault
-  fails the call. A fabric facade the model calls on the turn is captured into
-  a `FacadeTurnGroup` reported to control, which records the group so the episode's next
-  completion routes its members and the turn returns Codex a clean summary. The
-  credential is kept out of the ledger, the control stores, and the logs.
+  through the `MediatedEgressSidecar`, returning the model's whole message inline.
+  Control authorizes a turn only for the dispatch holding the agent's task, on the
+  worker whose stream proposed it. The per-workflow model credential rides the permit
+  to the worker. A binding without one uses the worker's deployment key only for the
+  deployment's default model URL, and calls any other URL without a credential; a
+  pinned credential missing from the vault fails the call. A fabric facade the model
+  calls on the turn is captured into a `FacadeTurnGroup` reported to control, which
+  records the group so the episode's next completion routes its members and the turn
+  returns Codex a clean summary. The credential is kept out of the ledger, the control
+  stores, and the logs.
 - **Resident-capacity control.** A `resident` model binding is served from reusable
   physical capacity rather than an external endpoint. Two control-plane actors — an
   Admission controller and a Lifecycle & scale manager — over durable control-state
@@ -419,7 +421,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   reports a permit-fenced outcome that settles the boundary before the episode resumes.
   It retains the request non-destructively until the committed outcome is acknowledged.
   A fence rejection is a declared terminal boundary failure, never a retryable provider
-  response; a lost outcome holds the boundary pending for a same-`idm-*` re-drive. The
+  response; a lost outcome holds the boundary pending for a same-`idm-*` re-drive, which
+  control issues once the permit's deadline passes, a bounded number of times. The
   `FabricToolBroker` applies the tool's policy and correlation. See
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Reference-backed invocation outcomes.** A mediated boundary settles by reference: the
@@ -470,8 +473,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   control store, manifest, frame, or log. A scope is the widest a task can reach, cut as a
   short-lived session over that scope's prefix, and the grant carries no list, delete, or
   binding operation — which references a task may use is still decided by the consumer
-  bindings control checks. A fresh dispatch or recovery gets fresh access; expiry or a
-  policy rotation fences what came before.
+  bindings control checks. A fresh dispatch or recovery gets fresh access, and renewal
+  serves only the dispatch holding the task; expiry or a policy rotation fences what
+  came before.
 - **Worker content cache and granted hydration.** What a worker holds is a cache over that
   store, so a copy may be dropped at any time: a deployment can bound the cache by how
   long a copy goes unused and by disk, least recently used first, and leaves both
@@ -556,8 +560,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   status it last reported. When a live worker keeps reporting that it does not hold
   a dispatch, the dispatch resolves as lost after the bound a silent worker gets, and
   the task's next placement avoids that worker; a task bound to that worker's private
-  state goes back to it, spending an attempt. A worker shutting down reports itself
-  busy until it leaves.
+  state goes back to it, spending an attempt. Control revokes on its worker any
+  dispatch it resolves without that worker ending it, as a disowned, lost, or
+  restart-ended dispatch, so a queued frame of it never runs; a worker reporting itself
+  busy on a dispatch control does not hold has that dispatch revoked, again for as long
+  as the report persists. A worker shutting down reports itself busy until it leaves.
 - **Per-device GPU availability.** A GPU worker reads each device's memory on every
   heartbeat and reports any device a process outside FlowMesh holds. The worker stays
   `IDLE` and keeps taking CPU work. A model dispatch waits while any device of its
@@ -571,14 +578,33 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   taken is refused and retried. Disable with `WORKER_FOREIGN_GPU_GATE=false`.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
   dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
-  recreates a deleted record.
+  recreates a deleted record. A worker whose record is gone, as after a partition
+  longer than that or a Redis wipe, is released by its supervisor on its next node
+  heartbeat and registers again as a new incarnation.
+- **Worker and node identity.** A worker's alias is assigned by its
+  supervisor: the supervisor passes it as `WORKER_ALIAS` to the workers it
+  launches, an external worker reads it from its token, and registration
+  records the alias the supervisor verified from the worker's token. Aliases
+  are unique per node. A node takes a Redis lease on its `NODE_ALIAS` at registration
+  (`nodes:alias:{alias}`), refreshes it with its heartbeat, and releases it on
+  unregister; while another live node holds the alias, registration fails with
+  `409`. A lease its holder has not refreshed for half its TTL can be taken
+  over, so a crash-restarted node reclaims its alias. Taking the lease removes
+  any other node record with the alias, so a node that crashed or was taken
+  over does not linger beside its replacement. `(node_alias, alias)` is
+  therefore a worker's durable, unique address.
 - **Dispatch queues.** A supervisor keeps one dispatch queue per registered worker id
   and frees it when the worker's token registers again under a new id or is removed,
   dropping the frames still queued and ending any task stream still reading it. A new
   `StreamTasks` on an id takes over the frames still queued, in order, and ends every
   older stream on that id, so a half-open stream receives nothing once the worker's new
   stream attaches. A worker whose task stream ends reconnects, and its new stream reads
-  the queue of the id its token then holds.
+  the queue of the id its token then holds. An id the supervisor frees is unregistered
+  with the root, as is a worker whose event stream closes before it unregisters,
+  unless it reconnects within a few seconds. A worker whose connection stops
+  answering is treated as one whose stream closed. When a worker's task stream attaches,
+  control re-sends each pending mediated operation the worker originated, under a
+  fresh permit, and an interrupt for each of its cancelling tasks.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side.

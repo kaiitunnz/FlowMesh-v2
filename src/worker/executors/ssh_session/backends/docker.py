@@ -152,12 +152,12 @@ class DockerSessionBackend(SSHSessionBackend):
         """Return every address: Docker publishes the port on the host either way."""
         return ANY_BIND_HOST
 
-    def teardown(self, worker_name: str) -> None:
+    def teardown(self, owner: str) -> None:
         stop_timeout_sec = self._config.ssh_stop_timeout_sec
         client = self._get_docker_client()
         try:
             containers = client.containers.list(
-                filters={"label": f"{LABEL_WORKER}={worker_name}"}
+                filters={"label": f"{LABEL_WORKER}={owner}"}
             )
         except Exception as exc:
             logger.warning(
@@ -188,13 +188,12 @@ class DockerSessionBackend(SSHSessionBackend):
         if signals.interrupted:
             raise SessionInterrupted
         container_name = (
-            f"{request.worker_name}_ssh-"
-            f"{request.task_id[:8]}-{request.session_id[:8]}"
+            f"{request.owner}_ssh-{request.task_id[:8]}-{request.session_id[:8]}"
         )
         mount_plan = self._build_mount_plan(client, request)
         try:
             labels = {
-                LABEL_WORKER: request.worker_name,
+                LABEL_WORKER: request.owner,
                 LABEL_TASK: request.task_id,
                 LABEL_SESSION: request.session_id,
                 LABEL_MANAGED: "true",
@@ -502,7 +501,7 @@ class DockerSessionBackend(SSHSessionBackend):
         session_id = request.session_id
         volume_name = f"flowmesh_ssh_inputs_{session_id}"
         labels = {
-            LABEL_WORKER: request.worker_name,
+            LABEL_WORKER: request.owner,
             LABEL_SESSION: session_id,
             LABEL_MANAGED: "true",
         }

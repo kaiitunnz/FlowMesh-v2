@@ -40,7 +40,11 @@ def _boundary(
 def test_search_boundary_is_stripped_and_stored() -> None:
     store = PendingEgressRequestStore()
     result = AgentEpisodeExecutor._capture_local_request(
-        store, _TASK, _boundary('{"query": "weather", "max_results": 3}'), None
+        store,
+        _TASK,
+        _boundary('{"query": "weather", "max_results": 3}'),
+        None,
+        "dsp-1",
     )
     req = result.request
     assert req is not None
@@ -54,7 +58,11 @@ def test_search_boundary_is_stripped_and_stored() -> None:
 def test_model_boundary_is_stripped_and_stored_for_openai_binding() -> None:
     store = PendingEgressRequestStore()
     result = AgentEpisodeExecutor._capture_local_request(
-        store, _TASK, _boundary("summarize this", interface=MODEL_INTERFACE), _OPENAI
+        store,
+        _TASK,
+        _boundary("summarize this", interface=MODEL_INTERFACE),
+        _OPENAI,
+        "dsp-1",
     )
     req = result.request
     assert req is not None
@@ -75,7 +83,9 @@ def test_model_boundary_passes_through_without_external_binding() -> None:
     store = PendingEgressRequestStore()
     canned = EpisodeModelBinding(mode=ModelBindingMode.CANNED)
     original = _boundary("do something", interface=MODEL_INTERFACE)
-    result = AgentEpisodeExecutor._capture_local_request(store, _TASK, original, canned)
+    result = AgentEpisodeExecutor._capture_local_request(
+        store, _TASK, original, canned, "dsp-1"
+    )
     assert result.request is not None
     assert result.request.request_payload == "do something"
     assert result.request.request_digest is None
@@ -85,7 +95,9 @@ def test_model_boundary_passes_through_without_external_binding() -> None:
 def test_boundary_without_payload_passes_through() -> None:
     store = PendingEgressRequestStore()
     original = _boundary(None)
-    result = AgentEpisodeExecutor._capture_local_request(store, _TASK, original, None)
+    result = AgentEpisodeExecutor._capture_local_request(
+        store, _TASK, original, None, "dsp-1"
+    )
     assert result.request is not None
     assert result.request.request_digest is None
     assert store.peek(_TASK, "m0") is None

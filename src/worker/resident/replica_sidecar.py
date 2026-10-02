@@ -135,6 +135,10 @@ class ResidentReplicaSidecar:
         """Drop a replica's binding; in-flight sessions run to their own terminal."""
         self._bindings.pop(replica_id, None)
 
+    def unbind_all(self) -> None:
+        """Drop every replica's binding, so no claim reaches an abandoned replica."""
+        self._bindings.clear()
+
     async def unload_adapter(self, replica_id: str, adapter_name: str) -> None:
         """Free an adapter's engine slot once its last credit-bearing claim released.
 

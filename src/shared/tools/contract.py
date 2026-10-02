@@ -152,6 +152,8 @@ class AgentModelTurnProposal(BaseModel):
     the egress and mints a one-use permit without the request ever crossing up.
     ``agent_task_id`` and ``call_correlation`` name the held occurrence; the
     ``request_digest`` is the fence the minted permit binds and the worker re-validates.
+    ``dispatch_id`` names the dispatch running the turn, which must hold the agent's
+    task for the turn to be authorized.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -159,6 +161,7 @@ class AgentModelTurnProposal(BaseModel):
     agent_task_id: str
     call_correlation: str
     request_digest: str
+    dispatch_id: str | None = None
 
 
 __all__ = [

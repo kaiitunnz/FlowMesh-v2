@@ -83,6 +83,13 @@ class WorkerContentPlane:
         if (held := self._lane.report_held()) > 0:
             self._logger.info("reported %d held content objects at startup", held)
 
+    def rebind(self, holder_id: str, generation: int) -> None:
+        """Move to the worker's new registration: drop the store access granted to the
+        previous one, and hold the cached copies under the new one."""
+        self._access.clear()
+        if self._lane is not None:
+            self._lane.rebind(holder_id, generation)
+
     def stop(self, timeout: float = 10.0) -> None:
         """Drain the cache lane, if this worker runs one."""
         if self._lane is not None:

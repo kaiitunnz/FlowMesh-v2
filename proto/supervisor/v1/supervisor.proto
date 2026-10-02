@@ -34,12 +34,22 @@ message RegisterResponse {
 message InterruptMessage {
   string task_id = 1;
   string reason = 2;
+  // The one dispatch of the task it ends; empty for whichever dispatch runs it.
+  string dispatch_id = 3;
 }
 
 // Graceful stop payload emitted by the supervisor.
 message StopMessage {
   string task_id = 1;
   string reason = 2;
+  // The one dispatch of the task it stops; empty for whichever dispatch runs it.
+  string dispatch_id = 3;
+}
+
+// Revocation of one dispatch control resolved without its worker ending it.
+message RevokeMessage {
+  string task_id = 1;
+  string dispatch_id = 2;
 }
 
 // Task payload emitted by the supervisor.
@@ -68,6 +78,8 @@ message DispatchMessage {
     StopMessage stop = 3;
     // Mediated-operation permit/reap for a worker's egress sidecar.
     MediatedOperationFrame mediated_op = 5;
+    // Revocation of one dispatch, withdrawn if still queued.
+    RevokeMessage revoke = 6;
   }
 }
 

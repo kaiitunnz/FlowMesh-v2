@@ -151,6 +151,12 @@ class ContentAccessRegistry:
         )
         return S3ObjectStore(client, self._cfg.bucket, prefix=self._cfg.prefix)
 
+    def clear(self) -> None:
+        """Drop every access, as the incarnation it was granted to has ended."""
+        with self._arrived:
+            self._granted.clear()
+            self._stores.clear()
+
     def _forget(self, key: _AccessKey) -> None:
         self._granted.pop(key, None)
         self._stores.pop(key, None)
