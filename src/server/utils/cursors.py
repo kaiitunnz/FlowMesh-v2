@@ -7,9 +7,13 @@ position while entries are added or removed around it.
 import base64
 import binascii
 import json
+import math
 from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
 from typing import Any
+
+_INT64_MIN = -(1 << 63)
+_INT64_MAX = (1 << 63) - 1
 
 
 class InvalidCursor(ValueError):
@@ -54,12 +58,14 @@ def page_slice(
 
 
 def decode_position[T: (int, float)](cursor: str, kind: type[T]) -> tuple[T, str]:
-    """Return the ``(timestamp, id)`` position a cursor encodes; raise InvalidCursor
-    for anything else."""
+    """Return the ``(timestamp, id)`` position a cursor encodes, its timestamp a
+    finite ``kind``; raise InvalidCursor for anything else."""
     match decode_cursor(cursor):
-        case [int() | float() as ts, str() as entry_id] if not isinstance(
-            ts, bool
-        ) and (kind is float or isinstance(ts, int)):
+        case [int() | float() as ts, str() as entry_id] if type(ts) is kind and (
+            math.isfinite(ts)
+            if isinstance(ts, float)
+            else _INT64_MIN <= ts <= _INT64_MAX
+        ):
             return kind(ts), entry_id
     raise InvalidCursor(f"invalid cursor {cursor!r}")
 

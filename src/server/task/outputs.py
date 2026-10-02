@@ -116,25 +116,27 @@ def _member(
 
 def decode_member_cursor(cursor: str) -> tuple[Any, ...]:
     """Return the member position a cursor encodes; raise InvalidCursor otherwise."""
-    identity = decode_cursor(cursor)
-    if len(identity) != 4:
-        raise InvalidCursor(f"invalid cursor {cursor!r}")
-    name, scope_id, key, sequence = identity
-    if not isinstance(name, str) or not all(
-        value is None or isinstance(value, str) for value in (scope_id, key)
-    ):
-        raise InvalidCursor(f"invalid cursor {cursor!r}")
-    if sequence is not None and not isinstance(sequence, int):
-        raise InvalidCursor(f"invalid cursor {cursor!r}")
-    return _order(name, scope_id, key, sequence)
+    match decode_cursor(cursor):
+        case [
+            str() as name,
+            str() | None as scope_id,
+            str() | None as key,
+            int() | None as sequence,
+        ] if not isinstance(sequence, bool):
+            return _order(name, scope_id, key, sequence)
+    raise InvalidCursor(f"invalid cursor {cursor!r}")
 
 
 def _order(
     name: str, scope_id: str | None, key: str | None, sequence: int | None
 ) -> tuple[Any, ...]:
-    # A child index orders numerically, so member 10 follows member 9.
-    numeric = key is not None and key.isascii() and key.isdigit()
-    key_order = (0, int(key), "") if numeric and key else (1, 0, key or "")
+    # A child index orders numerically, so member 10 follows member 9: by its digit
+    # count without leading zeros, then by its digits.
+    if key and key.isascii() and key.isdigit():
+        digits = key.lstrip("0")
+        key_order: tuple[int, int, str] = (0, len(digits), digits)
+    else:
+        key_order = (1, 0, key or "")
     return (name, scope_id or "", key_order, -1 if sequence is None else sequence)
 
 
