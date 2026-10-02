@@ -13,6 +13,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import Response, StreamingResponse
+from pydantic import TypeAdapter
 
 from shared.schemas.event import TaskEvent
 
@@ -37,6 +38,7 @@ from ...clients.redis import (
 )
 from ...hooks import SUBMISSION_GUARDS, ResourceAction, ResourceKind
 from ...registries.workflow import (
+    SUBMISSION_US_MAX,
     Workflow,
     WorkflowOrder,
     WorkflowRegistry,
@@ -53,7 +55,7 @@ from ...schemas.workflow import (
 from ...services.metrics import MetricsRecorder
 from ...task.runtime import TaskRuntime
 from ...task.v2 import CompileError, Diagnostic
-from ...utils.cursors import decode_position, encode_cursor
+from ...utils.cursors import InvalidCursor, decode_position, encode_cursor
 from ._listing import (
     PAGE_LIMIT_DEFAULT,
     PAGE_PARAMS,
@@ -580,24 +582,24 @@ async def list_workflows(
 ) -> Response:
     query = query_filter(request, WORKFLOW_FILTER_FIELDS, PAGE_PARAMS)
     after_bound, before_bound = page_bounds(after, before, _decode_workflow_cursor)
-    workflow_ids = await registry.get_workflow_ids_async()
-    allowed = await resolve_accessible_ids(
+    candidates = await resolve_accessible_ids(
         principal, ResourceKind.WORKFLOW, ResourceAction.READ, logger
     )
-    if allowed is not None:
-        workflow_ids &= allowed
     if (named := query.values("workflow_id")) is not None:
-        workflow_ids &= named
+        candidates = named if candidates is None else named & candidates
     workflows = await registry.workflow_page(
-        workflow_ids, query.without("workflow_id"), limit, after_bound, before_bound
+        query.without("workflow_id"), limit, after_bound, before_bound, candidates
     )
     page = WorkflowPage(
         entries=workflows,
         next_cursor=_workflow_cursor(workflows[-1]) if workflows else None,
         prev_cursor=_workflow_cursor(workflows[0]) if workflows else None,
     )
-    body = await asyncio.to_thread(page.model_dump_json, by_alias=True)
+    body = await asyncio.to_thread(_WORKFLOW_PAGE.dump_json, page, by_alias=True)
     return Response(body, media_type="application/json")
+
+
+_WORKFLOW_PAGE = TypeAdapter(WorkflowPage)
 
 
 def _workflow_cursor(workflow: Workflow) -> str:
@@ -605,7 +607,10 @@ def _workflow_cursor(workflow: Workflow) -> str:
 
 
 def _decode_workflow_cursor(cursor: str) -> WorkflowOrder:
-    return decode_position(cursor, int)
+    micros, workflow_id = decode_position(cursor, int)
+    if not 0 <= micros <= SUBMISSION_US_MAX:
+        raise InvalidCursor(f"invalid cursor {cursor!r}")
+    return micros, workflow_id
 
 
 def _get_workflow_from_request(

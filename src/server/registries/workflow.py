@@ -1,5 +1,6 @@
 import json
-from collections.abc import Collection, Sequence
+from collections.abc import AsyncGenerator, Collection, Iterator, Sequence
+from contextlib import aclosing
 from enum import StrEnum
 from itertools import batched
 from typing import Any
@@ -18,6 +19,7 @@ from shared.tasks import PERSISTED_LOAD_CONTEXT
 from shared.utils.time import iso_to_ns
 
 from ..clients.redis import (
+    WORKFLOWS_BY_SUBMISSION_KEY,
     WORKFLOWS_SET_KEY,
     RedisClient,
     task_state_key,
@@ -124,9 +126,17 @@ class WorkflowRecord(BaseModel):
         return v
 
 
-# A workflow's position in a listing: its submission time in epoch nanoseconds,
+# A workflow's position in a listing: its submission time in epoch microseconds,
 # then its id.
 type WorkflowOrder = tuple[int, str]
+
+# The submission index holds every workflow under one score as its zero-padded
+# submission microsecond and id, so its lexical order is the listing order and a
+# position is an exclusive lexical bound.
+_SUBMISSION_DIGITS = 16
+SUBMISSION_US_MAX = 10**_SUBMISSION_DIGITS - 1
+# The most index entries one filtered scan step reads.
+_SCAN_CHUNK_MAX = 1000
 
 
 class Workflow(BaseModel):
@@ -143,9 +153,32 @@ class Workflow(BaseModel):
 
 def workflow_order(submitted_at: str, workflow_id: str) -> WorkflowOrder:
     try:
-        return iso_to_ns(submitted_at), workflow_id
+        micros = iso_to_ns(submitted_at) // 1_000
     except ValueError:
-        return 0, workflow_id
+        micros = 0
+    return min(max(micros, 0), SUBMISSION_US_MAX), workflow_id
+
+
+def _index_member(order: WorkflowOrder) -> str:
+    micros, workflow_id = order
+    return f"{micros:0{_SUBMISSION_DIGITS}d}:{workflow_id}"
+
+
+def _record_member(record: "WorkflowRecord") -> str:
+    return _index_member(workflow_order(record.submitted_at, record.workflow_id))
+
+
+def _indexed_id(member: str) -> str:
+    return member[_SUBMISSION_DIGITS + 1 :]
+
+
+def _scan_sizes(limit: int, filtered: bool) -> Iterator[int]:
+    """Yield the entries each scan step reads: ``limit``, then doubling up to the
+    larger of ``limit`` and the chunk cap while a filter rejects entries."""
+    size, cap = limit, max(limit, _SCAN_CHUNK_MAX) if filtered else limit
+    while True:
+        yield size
+        size = min(size * 2, cap)
 
 
 def _create_workflow_record(
@@ -201,6 +234,7 @@ class WorkflowRegistry:
         )
         with self._rds.sync.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
+            pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, {_record_member(record): 0})
             pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
             if remaining_tasks:
                 pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
@@ -222,6 +256,7 @@ class WorkflowRegistry:
         )
         async with self._rds.asyncio.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
+            pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, {_record_member(record): 0})
             pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
             if remaining_tasks:
                 pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
@@ -232,9 +267,11 @@ class WorkflowRegistry:
             await pipe.execute()
 
     def unregister_workflows(self, *workflow_ids: str) -> None:
-        task_ids = self._collect_task_ids(workflow_ids)
+        task_ids, members = self._collect(workflow_ids)
         with self._rds.sync.control_pipeline() as pipe:
             pipe.srem(WORKFLOWS_SET_KEY, *workflow_ids)
+            if members:
+                pipe.zrem(WORKFLOWS_BY_SUBMISSION_KEY, *members)
             pipe.delete(*(workflow_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_dispatched_tasks_key(wid) for wid in workflow_ids))
@@ -250,9 +287,11 @@ class WorkflowRegistry:
             pipe.execute()
 
     async def unregister_workflows_async(self, *workflow_ids: str) -> None:
-        task_ids = self._collect_task_ids(workflow_ids)
+        task_ids, members = self._collect(workflow_ids)
         async with self._rds.asyncio.control_pipeline() as pipe:
             pipe.srem(WORKFLOWS_SET_KEY, *workflow_ids)
+            if members:
+                pipe.zrem(WORKFLOWS_BY_SUBMISSION_KEY, *members)
             pipe.delete(*(workflow_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_dispatched_tasks_key(wid) for wid in workflow_ids))
@@ -289,28 +328,6 @@ class WorkflowRegistry:
     async def workflow_exists_async(self, workflow_id: str) -> bool:
         return await self._rds.asyncio.exists(workflow_key(workflow_id))
 
-    def get_workflow(self, workflow_id: str) -> Workflow | None:
-        record = self.get_workflow_record(workflow_id)
-        if record is None:
-            return None
-        dispatched_tasks = self._rds.sync.set_members(
-            workflow_dispatched_tasks_key(workflow_id)
-        )
-        failed_tasks = self._rds.sync.set_members(
-            workflow_failed_tasks_key(workflow_id)
-        )
-        cancelled_tasks = self._rds.sync.set_members(
-            workflow_cancelled_tasks_key(workflow_id)
-        )
-        remaining_tasks = self._rds.sync.set_members(workflow_tasks_key(workflow_id))
-        return self._build_workflow(
-            record,
-            dispatched_tasks,
-            failed_tasks,
-            cancelled_tasks,
-            remaining_tasks,
-        )
-
     async def get_workflow_async(self, workflow_id: str) -> Workflow | None:
         workflows = await self.get_workflows_async([workflow_id])
         return workflows[0] if workflows else None
@@ -338,38 +355,109 @@ class WorkflowRegistry:
             if data
         ]
 
+    async def index_submissions_async(self) -> int:
+        """Add every registered workflow the submission index lacks; return how many
+        it added."""
+        ids = list(await self.get_workflow_ids_async())
+        stamps = await self._submission_stamps(ids)
+        members = [
+            _index_member(workflow_order(stamp, workflow_id))
+            for workflow_id, stamp in zip(ids, stamps, strict=True)
+            if stamp
+        ]
+        if not members:
+            return 0
+        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
+            for chunk in batched(members, _SCAN_CHUNK_MAX):
+                pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, dict.fromkeys(chunk, 0))
+            added = await pipe.execute()
+        return sum(added)
+
     async def workflow_page(
         self,
-        workflow_ids: Collection[str],
         query: QueryFilter,
         limit: int,
         after: WorkflowOrder | None = None,
         before: WorkflowOrder | None = None,
+        candidates: Collection[str] | None = None,
     ) -> list[Workflow]:
-        """Return the workflows among ``workflow_ids`` matching ``query``, ordered by
-        submission: the ``limit`` just after or before a position, or the newest
-        ``limit``."""
-        ids = list(workflow_ids)
-        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
-            for workflow_id in ids:
-                pipe.hget(workflow_key(workflow_id), "submitted_at")
-            stamps = await pipe.execute()
+        """Return the workflows matching ``query``, among ``candidates`` when given,
+        ordered by submission: the ``limit`` just after or before a position, or the
+        newest ``limit``.
+
+        Without candidates the page reads the submission index from the position;
+        with them it orders just the candidates.
+        """
+        sizes = _scan_sizes(limit, bool(query))
+        scan = (
+            self._indexed_ids(sizes, after, before)
+            if candidates is None
+            else self._candidate_ids(candidates, sizes, after, before)
+        )
+        page: list[Workflow] = []
+        async with aclosing(scan) as chunks:
+            async for ids in chunks:
+                page.extend(query.filter(await self.get_workflows_async(ids)))
+                if len(page) >= limit:
+                    break
+        page = page[:limit]
+        return page if after is not None else page[::-1]
+
+    async def _indexed_ids(
+        self,
+        sizes: Iterator[int],
+        after: WorkflowOrder | None,
+        before: WorkflowOrder | None,
+    ) -> AsyncGenerator[list[str]]:
+        """Yield the indexed workflow ids past a position in scan order: ascending
+        after ``after``, else descending before ``before`` or from the newest."""
+        forward = after is not None
+        bound = after if forward else before
+        start = f"({_index_member(bound)}" if bound is not None else None
+        for size in sizes:
+            members = await self._rds.asyncio.lex_range(
+                WORKFLOWS_BY_SUBMISSION_KEY,
+                start or ("-" if forward else "+"),
+                "+" if forward else "-",
+                size,
+                reverse=not forward,
+            )
+            if members:
+                yield [_indexed_id(member) for member in members]
+            if len(members) < size:
+                return
+            start = f"({members[-1]}"
+
+    async def _candidate_ids(
+        self,
+        candidates: Collection[str],
+        sizes: Iterator[int],
+        after: WorkflowOrder | None,
+        before: WorkflowOrder | None,
+    ) -> AsyncGenerator[list[str]]:
+        """Yield the candidates past a position in scan order, as ``_indexed_ids``
+        does."""
+        ids = list(candidates)
+        stamps = await self._submission_stamps(ids)
         keys = sorted(
             workflow_order(stamp, workflow_id)
             for workflow_id, stamp in zip(ids, stamps, strict=True)
             if stamp
         )
-        candidates = keys[page_slice(keys, len(keys), after=after, before=before)]
-        forward = after is not None
-        scan = candidates if forward else candidates[::-1]
-        page: list[Workflow] = []
-        for start in range(0, len(scan), limit):
-            chunk = [workflow_id for _, workflow_id in scan[start : start + limit]]
-            page.extend(query.filter(await self.get_workflows_async(chunk)))
-            if len(page) >= limit:
-                break
-        page = page[:limit]
-        return page if forward else page[::-1]
+        window = keys[page_slice(keys, len(keys), after=after, before=before)]
+        scan = window if after is not None else window[::-1]
+        start = 0
+        for size in sizes:
+            if start >= len(scan):
+                return
+            yield [workflow_id for _, workflow_id in scan[start : start + size]]
+            start += size
+
+    async def _submission_stamps(self, ids: Sequence[str]) -> list[str | None]:
+        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
+            for workflow_id in ids:
+                pipe.hget(workflow_key(workflow_id), "submitted_at")
+            return await pipe.execute()
 
     def commit_transition(
         self,
@@ -573,11 +661,14 @@ class WorkflowRegistry:
             cancelled_tasks=list(cancelled_tasks),
         )
 
-    def _collect_task_ids(self, workflow_ids: Sequence[str]) -> list[str]:
+    def _collect(self, workflow_ids: Sequence[str]) -> tuple[list[str], list[str]]:
+        """Return the workflows' task ids and their submission-index members."""
         task_ids: list[str] = []
+        members: list[str] = []
         for wid in workflow_ids:
             record = self.get_workflow_record(wid)
             if record:
                 task_ids.extend(record.task_ids)
+                members.append(_record_member(record))
             task_ids.extend(self._rds.sync.set_members(workflow_dynamic_tasks_key(wid)))
-        return task_ids
+        return task_ids, members

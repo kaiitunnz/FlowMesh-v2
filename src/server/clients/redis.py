@@ -52,6 +52,7 @@ TASK_EVENT_CURSOR_KEY = "tasks:events:cursor"
 TASK_EVENT_STREAM_MAXLEN = 100_000
 
 WORKFLOWS_SET_KEY = "workflows:ids"
+WORKFLOWS_BY_SUBMISSION_KEY = "workflows:by_submission"
 
 TASK_LOGS_STREAM_PREFIX = "logs:task:"
 WORKFLOW_LOGS_STREAM_PREFIX = "logs:workflow:"
@@ -723,6 +724,19 @@ class AsyncRedisClient:
     async def srem_telemetry(self, key: str, *members: str) -> None:
         if members:
             await _awaitable(self._telemetry.srem(key, *members))
+
+    # ---- Sorted-set helpers ----
+    async def lex_range(
+        self, key: str, start: str, stop: str, count: int, reverse: bool = False
+    ) -> list[str]:
+        """Return up to ``count`` members of a sorted set whose members share one
+        score, from ``start`` toward ``stop`` (``ZRANGEBYLEX`` bounds), descending
+        when ``reverse``."""
+        if reverse:
+            members = self._control.zrevrangebylex(key, start, stop, start=0, num=count)
+        else:
+            members = self._control.zrangebylex(key, start, stop, start=0, num=count)
+        return list(await _awaitable(members))
 
     # ---- Pipelines ----
     def control_pipeline(self, transaction: bool = True):
