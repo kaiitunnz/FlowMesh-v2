@@ -96,7 +96,7 @@ def _selected_pool(
     """The pool the dispatcher selects from, with a selector that would pick the
     holder whenever it is offered one."""
     runtime.private_state_holders = mock.Mock(  # type: ignore[method-assign]
-        return_value={_HOLDER}
+        return_value=[_HOLDER]
     )
     seen: list[list[str]] = []
 

@@ -6632,15 +6632,15 @@ class TaskRuntime:
         with self._lock:
             return self._tasks.get(task_id)
 
-    def private_state_holders(self) -> set[OwnerFence]:
+    def private_state_holders(self) -> list[OwnerFence]:
         """The worker incarnations holding private state an unsettled activation
         resumes on."""
         with self._lock:
-            return {
+            return [
                 holder
                 for engine in self._engines.values()
                 for holder in engine.private_state_holders()
-            }
+            ]
 
     def long_lived_allocation(self, task_id: str) -> bool:
         """Whether a task holds its worker for its own life: a model server, resident

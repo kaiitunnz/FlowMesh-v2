@@ -33,14 +33,14 @@ async def _sealed_agent(tmp_path: Path):
 def test_a_sealed_agent_holds_its_worker_until_it_settles(tmp_path: Path) -> None:
     async def run() -> None:
         runtime, workflow_id, writer = await _sealed_agent(tmp_path)
-        assert runtime.private_state_holders() == {_HOLDER}
+        assert runtime.private_state_holders() == [_HOLDER]
 
         adapter = _adapter()
         for _ in range(3):  # spawn, seal the region, complete
-            assert runtime.private_state_holders() == {_HOLDER}
+            assert runtime.private_state_holders() == [_HOLDER]
             _step(runtime, adapter, writer)
 
-        assert runtime.private_state_holders() == set()
+        assert runtime.private_state_holders() == []
 
     asyncio.run(run())
 
@@ -51,6 +51,6 @@ def test_a_cancelled_agent_releases_its_worker(tmp_path: Path) -> None:
 
         runtime.cancel_workflow(workflow_id)
 
-        assert runtime.private_state_holders() == set()
+        assert runtime.private_state_holders() == []
 
     asyncio.run(run())

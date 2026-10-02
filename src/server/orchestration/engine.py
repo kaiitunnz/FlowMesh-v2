@@ -4116,16 +4116,16 @@ class OrchestrationEngine:
             return None
         return self._private_state.owner(wi.activation_id)
 
-    def private_state_holders(self) -> set[OwnerFence]:
+    def private_state_holders(self) -> list[OwnerFence]:
         """The holders whose sealed private state an unsettled activation resumes on."""
-        holders: set[OwnerFence] = set()
+        holders: list[OwnerFence] = []
         for lineage in self._private_state.lineages():
             if (owner := lineage.binding.owner) is None:
                 continue
             wi_id = self._wi_by_activation.get(lineage.binding.reference.activation_id)
             wi = self._work_items.get(wi_id) if wi_id is not None else None
             if wi is not None and wi.status not in TERMINAL_WORK_ITEM_STATUSES:
-                holders.add(owner)
+                holders.append(owner)
         return holders
 
     def grant_private_state(
