@@ -68,7 +68,7 @@ def _facade(
 
 def test_plain_turn_returns_the_reply_and_captures_no_group() -> None:
     facade, egress, _ = _facade(ModelCompletion(content="just thinking"))
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-1")
     output = facade.handle_turn(_TASK, token, {"input": "hello"})
     assert [item["type"] for item in output] == ["message"]
     assert output[0]["content"][0]["text"] == "just thinking"
@@ -90,7 +90,7 @@ def test_facade_call_is_captured_and_the_turn_is_cleaned() -> None:
         ),
     )
     facade, _, pending = _facade(completion)
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-1")
     output = facade.handle_turn(_TASK, token, {"input": "find the weather"})
 
     # The group is captured for the completion to carry; the search request is kept in
@@ -114,9 +114,7 @@ def test_a_facade_capture_belongs_to_the_dispatch_running_its_step() -> None:
         ),
     )
     facade, _, pending = _facade(completion)
-    token = facade.register_episode(
-        _TASK, "http://up/v1", "m", [_SEARCH], dispatch_id="dsp-7"
-    )
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-7")
 
     facade.handle_turn(_TASK, token, {"input": "find the weather"})
 
@@ -133,7 +131,7 @@ def test_a_native_call_co_emitted_with_a_facade_call_is_preserved() -> None:
         ),
     )
     facade, _, _ = _facade(completion)
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-1")
     output = facade.handle_turn(_TASK, token, {"input": "hi"})
     # The facade call is captured; the co-emitted native call stays in the turn so the
     # harness runs it, and a dispatch summary follows.
@@ -147,21 +145,21 @@ def test_unknown_episode_or_bad_token_is_a_turn_error() -> None:
     facade, _, _ = _facade(ModelCompletion(content="x"))
     with pytest.raises(FacadeTurnError):
         facade.handle_turn("nope", "t", {"input": "hi"})
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-1")
     with pytest.raises(FacadeTurnError):
         facade.handle_turn(_TASK, token + "x", {"input": "hi"})
 
 
 def test_a_rejected_egress_fails_the_turn() -> None:
     facade, _, _ = _facade(HeldEgressReject(reason="permit fence rejected: digest"))
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-1")
     with pytest.raises(FacadeTurnError):
         facade.handle_turn(_TASK, token, {"input": "hi"})
 
 
 def test_http_server_serves_a_turn_over_loopback() -> None:
     facade, _, _ = _facade(ModelCompletion(content="hi there"))
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-1")
     facade.start()
     try:
         base = facade.base_url()
@@ -186,7 +184,7 @@ def test_a_native_tool_call_passes_through_uncaptured() -> None:
         tool_calls=(ModelToolCall(call_id="c1", name="native_fn", arguments="{}"),),
     )
     facade, _, _ = _facade(completion)
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-1")
     output = facade.handle_turn(_TASK, token, {"input": "hi"})
     assert (
         facade.take_captured_group(_TASK) is None
@@ -216,7 +214,7 @@ def _answered_after_the_release(
 
 def test_a_turn_of_an_episode_being_given_up_waits_for_its_release() -> None:
     facade, egress, _ = _facade(ModelCompletion(content="just thinking"))
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-1")
     facade.refuse_episode(_TASK)
 
     order = _answered_after_the_release(
@@ -256,7 +254,7 @@ def test_a_capture_while_the_episode_is_given_up_waits_and_stashes_nothing() -> 
         )
     )
     facade = ResponsesFacade(held_egress=cast(Any, egress), pending=pending)
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH], "dsp-1")
 
     def given_up_mid_call() -> None:
         assert returning.wait(5)

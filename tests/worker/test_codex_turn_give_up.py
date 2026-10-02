@@ -92,7 +92,9 @@ class _AppServer:
         return "turn-1"
 
     def next_event(self, thread_id: str, turn_id: str) -> CodexEvent:
-        token = self._facade.register_episode(_TASK, "http://model/v1", "m", [])
+        token = self._facade.register_episode(
+            _TASK, "http://model/v1", "m", [], "dsp-1"
+        )
         replied = threading.Event()
 
         def call_model() -> None:
@@ -256,7 +258,9 @@ class _SearchingAppServer:
         return "turn-1"
 
     def next_event(self, thread_id: str, turn_id: str) -> CodexEvent:
-        token = self._facade.register_episode(_TASK, "http://model/v1", "m", [_SEARCH])
+        token = self._facade.register_episode(
+            _TASK, "http://model/v1", "m", [_SEARCH], "dsp-1"
+        )
         turn = threading.Thread(
             target=self._facade.handle_turn,
             args=(_TASK, token, {"input": [{"role": "user", "content": "find"}]}),

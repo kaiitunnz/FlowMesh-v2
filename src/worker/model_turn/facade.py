@@ -70,9 +70,9 @@ class EpisodeContext:
     model: str
     descriptors: tuple[FacadeDescriptor, ...]
     token: str
-    sandbox: LocalSandboxExecutor | None = None
     # The dispatch running the episode's step, which its captures belong to.
-    dispatch_id: str | None = None
+    dispatch_id: str | None
+    sandbox: LocalSandboxExecutor | None = None
 
 
 class ResponsesFacade:
@@ -108,8 +108,8 @@ class ResponsesFacade:
         url: str,
         model: str,
         descriptors: list[FacadeDescriptor],
+        dispatch_id: str | None,
         sandbox: LocalSandboxExecutor | None = None,
-        dispatch_id: str | None = None,
     ) -> str:
         """Register one episode's binding and facades; return its per-episode token."""
         token = secrets.token_urlsafe(24)

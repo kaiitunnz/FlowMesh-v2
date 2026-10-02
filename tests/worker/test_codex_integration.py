@@ -268,7 +268,7 @@ class _FacadeServer:
     def __enter__(self) -> "_FacadeServer":
         self._facade.start()
         self.token = self._facade.register_episode(
-            _TASK_ID, self._upstream, "codex-model", [_spawn_facade()]
+            _TASK_ID, self._upstream, "codex-model", [_spawn_facade()], "dsp-1"
         )
         return self
 

@@ -123,7 +123,7 @@ def _facade(
     pending = PendingEgressRequestStore()
     facade = ResponsesFacade(held_egress=cast(Any, egress), pending=pending)
     token = facade.register_episode(
-        _TASK, "http://up/v1", "m", [_RUN_COMMAND, _SEARCH], sandbox
+        _TASK, "http://up/v1", "m", [_RUN_COMMAND, _SEARCH], "dsp-1", sandbox
     )
     return facade, egress, pending, token
 
@@ -362,7 +362,9 @@ def test_a_turn_cancelled_during_a_command_proposes_no_later_round() -> None:
             return super().execute(command)
 
     sandbox = _CancelledMidCommand()
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_RUN_COMMAND], sandbox)
+    token = facade.register_episode(
+        _TASK, "http://up/v1", "m", [_RUN_COMMAND], "dsp-1", sandbox
+    )
 
     with pytest.raises(FacadeTurnError, match="cancelled"):
         facade.handle_turn(_TASK, token, {"input": "go"})
@@ -418,7 +420,9 @@ def test_a_round_during_the_harness_close_waits_for_the_release_unproposed() -> 
             return super().execute(command)
 
     sandbox = _GivenUpMidCommand()
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_RUN_COMMAND], sandbox)
+    token = facade.register_episode(
+        _TASK, "http://up/v1", "m", [_RUN_COMMAND], "dsp-1", sandbox
+    )
 
     with pytest.raises(FacadeTurnError, match="cancelled"):
         facade.handle_turn(_TASK, token, {"input": "go"})
@@ -511,7 +515,9 @@ def test_a_turn_given_up_mid_batch_runs_no_more_of_its_commands(given_up: str) -
             return super().execute(command)
 
     sandbox = _GivenUpOnFirstCommand()
-    token = facade.register_episode(_TASK, "http://up/v1", "m", [_RUN_COMMAND], sandbox)
+    token = facade.register_episode(
+        _TASK, "http://up/v1", "m", [_RUN_COMMAND], "dsp-1", sandbox
+    )
 
     with pytest.raises(FacadeTurnError, match="cancelled"):
         facade.handle_turn(_TASK, token, {"input": "go"})
@@ -557,7 +563,7 @@ def test_a_given_up_turn_egresses_nothing_once_its_task_registers_again() -> Non
         return thread
 
     first = facade.register_episode(
-        _TASK, "http://up/v1", "m", [_RUN_COMMAND], _Sandbox()
+        _TASK, "http://up/v1", "m", [_RUN_COMMAND], "dsp-1", _Sandbox()
     )
     stale = turn("stale", first)
     control.await_proposals(1)
@@ -568,7 +574,7 @@ def test_a_given_up_turn_egresses_nothing_once_its_task_registers_again() -> Non
     facade.release_episode(_TASK)
     facade.unregister_episode(_TASK)
     second = facade.register_episode(
-        _TASK, "http://up/v1", "m", [_RUN_COMMAND], _Sandbox()
+        _TASK, "http://up/v1", "m", [_RUN_COMMAND], "dsp-1", _Sandbox()
     )
     retry = turn("retry", second)
     control.await_proposals(2)
@@ -635,7 +641,12 @@ def test_a_step_that_raises_gives_up_the_turn_still_running(tmp_path: Path) -> N
 
         def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
             token = facade.register_episode(
-                activation_id, "http://up/v1", "m", [_RUN_COMMAND], _SlowSandbox()
+                activation_id,
+                "http://up/v1",
+                "m",
+                [_RUN_COMMAND],
+                "dsp-1",
+                _SlowSandbox(),
             )
 
             def turn() -> None:

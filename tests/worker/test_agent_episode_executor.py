@@ -254,7 +254,7 @@ class _CapturingAdapter(_FakeAdapter):
 
     def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
         token = self._facade.register_episode(
-            activation_id, "http://up/v1", "m", [_SEARCH]
+            activation_id, "http://up/v1", "m", [_SEARCH], "dsp-1"
         )
         self._facade.handle_turn(activation_id, token, {"input": "find it"})
         if self._raises:
@@ -311,7 +311,7 @@ class _LateCaptureAdapter(_FakeAdapter):
 
     def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
         token = self._facade.register_episode(
-            activation_id, "http://up/v1", "m", [_SEARCH]
+            activation_id, "http://up/v1", "m", [_SEARCH], "dsp-1"
         )
 
         def turn() -> None:
@@ -381,7 +381,7 @@ def test_a_raised_step_whose_give_up_fails_still_drops_what_it_captured(
     class _CancelFails(_FakeAdapter):
         def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
             token = facade.register_episode(
-                activation_id, "http://up/v1", "m", [_SEARCH]
+                activation_id, "http://up/v1", "m", [_SEARCH], "dsp-1"
             )
             facade.handle_turn(activation_id, token, {"input": "find it"})
             raise RuntimeError("the reader died after the turn captured")

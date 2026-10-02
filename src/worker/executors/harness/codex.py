@@ -229,8 +229,8 @@ def build_codex_adapter(
         binding.url,
         binding.model,
         list(dispatch.facade_descriptors),
+        task.dispatch_id,
         sandbox,
-        dispatch_id=task.dispatch_id,
     )
     # The live binding pulls in the openai-codex SDK and its bundled app-server binary;
     # keep both off the import path of a worker that never selects the codex backend.
