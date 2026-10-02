@@ -601,7 +601,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   stream attaches. A worker whose task stream ends reconnects, and its new stream reads
   the queue of the id its token then holds. An id the supervisor frees is unregistered
   with the root, as is a worker whose event stream closes before it unregisters,
-  unless it reconnects within a few seconds. When a worker's task stream attaches,
+  unless it reconnects within a few seconds. A worker whose connection stops
+  answering is treated as one whose stream closed. When a worker's task stream attaches,
   control re-sends each pending mediated operation the worker originated, under a
   fresh permit, and an interrupt for each of its cancelling tasks.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
