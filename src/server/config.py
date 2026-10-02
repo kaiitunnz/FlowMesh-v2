@@ -637,7 +637,7 @@ class NetworkPlaneConfig:
     endpoint_url: str | None = None
     trust_domain: str = "flowmesh"
     reachability_class: str = "routable"
-    protocols: tuple[str, ...] = ("echo",)
+    protocols: tuple[str, ...] = ()
     positive_ttl_sec: float = 30.0
     negative_ttl_sec: float = 15.0
     backoff_base_sec: float = 1.0
@@ -653,7 +653,7 @@ class NetworkPlaneConfig:
         protocols = (
             tuple(p.strip() for p in raw_protocols.split(",") if p.strip())
             if raw_protocols
-            else ("echo",)
+            else ()
         )
         return cls(
             enabled=parse_bool_env(f"{prefix}ENABLED", True),

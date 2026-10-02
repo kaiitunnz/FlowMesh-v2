@@ -839,8 +839,8 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "NETWORK_PLANE_PROTOCOLS",
-                    "echo",
-                    description="Advertised transport protocols.",
+                    "",
+                    description="Extra transport protocols the node advertises.",
                     var_type=EnvVarType.CSV,
                 ),
                 EnvVar(

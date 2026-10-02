@@ -102,7 +102,7 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node inbound address (`host:port`) |
 | `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
 | `NETWORK_PLANE_REACHABILITY_CLASS` | `routable` | Endpoint reachability class |
-| `NETWORK_PLANE_PROTOCOLS` | `echo` | Advertised transport protocols |
+| `NETWORK_PLANE_PROTOCOLS` | – | Extra transport protocols the node advertises |
 | `NETWORK_PLANE_POSITIVE_TTL_SEC` | `30` | Verified reachability TTL (seconds) |
 | `NETWORK_PLANE_NEGATIVE_TTL_SEC` | `15` | Demoted reachability TTL (seconds) |
 | `NETWORK_PLANE_BACKOFF_BASE_SEC` | `1` | Demotion retry backoff base (seconds) |
