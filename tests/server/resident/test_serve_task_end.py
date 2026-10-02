@@ -474,3 +474,20 @@ def test_a_released_claim_restarts_its_replica_retain_window() -> None:
         assert replica.state is ReplicaState.WARM
 
     asyncio.run(run())
+
+
+def test_a_root_rewrite_keeps_an_earlier_dispatch_endpoint_fenced() -> None:
+    async def run() -> None:
+        node = Node()
+        serve_task_id = await node.submit_serve_async()
+        node.serve(serve_task_id, "wkr-1", "dsp-a")
+        node.runtime.mark_cancelled(serve_task_id, "wkr-1", {}, TS, "dsp-a")
+        node.dispatch(serve_task_id, "wkr-2", "dsp-b")
+        record = node.runtime.get_record(serve_task_id)
+        assert record is not None and record.latest_update is not None
+
+        node.runtime.mark_updated(serve_task_id, None, dict(record.latest_update))
+
+        assert node.control.probe_serve_endpoint(serve_task_id) is None
+
+    asyncio.run(run())

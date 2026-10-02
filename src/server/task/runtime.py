@@ -5290,7 +5290,9 @@ class TaskRuntime:
                     # A replayed or late progress update must not touch a terminal task.
                     return EventEffect.SETTLED
                 record.latest_update = payload
-                record.latest_update_dispatch_id = record.dispatch_id
+                # A root rewrite of the update keeps the dispatch that reported it.
+                if worker_id is not None:
+                    record.latest_update_dispatch_id = record.dispatch_id
                 self._persist_locked(task_id)
                 return EventEffect.APPLIED
         finally:
