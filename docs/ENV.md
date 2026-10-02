@@ -212,7 +212,7 @@ carries resident traffic over `control_relay`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NODE_NAMESPACE` / `NODE_CLUSTER` | defaults | Identity |
-| `NODE_ALIAS` | `node` | Node alias; unique among live nodes |
+| `NODE_ALIAS` | `node` | Node alias; unique among live nodes, so a live duplicate fails at startup |
 | `NODE_TAGS` | `` | Scheduler hints (CSV) |
 | `SUPERVISOR_GRPC_DISABLE_SERVER_TLS` | `false` | Local-only insecure gRPC |
 | `SUPERVISOR_GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS` | `true` | gRPC keepalive |

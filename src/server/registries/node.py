@@ -52,15 +52,16 @@ _RECONNECT_BACKOFF_SEC = 1.0
 # ARGV: [node_id, alias, lease ttl_ms, node key prefix, node hash field, value,
 #        field, value, ...]
 # Returns the ids of the records it removed once the lease is taken and the node
-# written, else nil with nothing written. Taking the lease removes any other record
-# with the alias, left by a node that crashed or was taken over.
+# written, else the held lease's remaining ms with nothing written. Taking the lease
+# removes any other record with the alias, left by a node that crashed or was taken
+# over.
 _REGISTER_LUA = """
 local holder = redis.call('HGET', KEYS[1], 'node_id')
 if holder and holder ~= ARGV[1] then
   local held_ttl = tonumber(redis.call('HGET', KEYS[1], 'ttl_ms')) or 0
   local remaining = redis.call('PTTL', KEYS[1])
   if remaining >= 0 and remaining * 2 >= held_ttl then
-    return false
+    return remaining
   end
 end
 redis.call('DEL', KEYS[1])
@@ -125,14 +126,19 @@ redis.call('DEL', KEYS[2], KEYS[3])
 
 
 class NodeAliasInUseError(Exception):
-    """A live node other than the registrant holds the requested node alias."""
+    """A live node other than the registrant holds the requested node alias.
 
-    def __init__(self, alias: str) -> None:
+    ``lease_remaining_ms`` is the held lease's remaining time: a holder that keeps
+    heartbeating raises it, while a crashed holder's only runs down.
+    """
+
+    def __init__(self, alias: str, lease_remaining_ms: int) -> None:
         super().__init__(
             f"node alias '{alias}' is held by another live node; "
             "set a distinct NODE_ALIAS"
         )
         self.alias = alias
+        self.lease_remaining_ms = lease_remaining_ms
 
 
 class Node(BaseModel):
@@ -306,11 +312,11 @@ class NodeRegistry:
         node_id = self._allocate_node_id()
         keys, args = _register_script_args(node_id, node_info, self._lease_ttl_ms)
         removed = cast(
-            list[str] | None,
+            list[str] | int,
             self._rds.sync.eval(_REGISTER_LUA, len(keys), *keys, *args),
         )
-        if removed is None:
-            raise NodeAliasInUseError(node_info.alias)
+        if isinstance(removed, int):
+            raise NodeAliasInUseError(node_info.alias, removed)
         for message in _unregister_messages(removed, actor):
             self._rds.sync.publish_telemetry(NODE_EVENT_CHANNEL, message)
         return node_id
@@ -321,11 +327,11 @@ class NodeRegistry:
         node_id = await self._allocate_node_id_async()
         keys, args = _register_script_args(node_id, node_info, self._lease_ttl_ms)
         removed = cast(
-            list[str] | None,
+            list[str] | int,
             await self._rds.asyncio.eval(_REGISTER_LUA, len(keys), *keys, *args),
         )
-        if removed is None:
-            raise NodeAliasInUseError(node_info.alias)
+        if isinstance(removed, int):
+            raise NodeAliasInUseError(node_info.alias, removed)
         for message in _unregister_messages(removed, actor):
             await self._rds.asyncio.publish_telemetry(NODE_EVENT_CHANNEL, message)
         return node_id

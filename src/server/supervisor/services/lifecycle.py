@@ -21,7 +21,16 @@ _REGISTER_RETRY_INITIAL_SEC = 2.0
 
 
 class AliasHeldError(RuntimeError):
-    """Registration was refused because a live node holds this node's alias."""
+    """Registration was refused because a live node holds this node's alias, whose
+    lease had ``lease_remaining_ms`` left."""
+
+    def __init__(self, message: str, lease_remaining_ms: int) -> None:
+        super().__init__(message)
+        self.lease_remaining_ms = lease_remaining_ms
+
+
+class NodeAliasConflictError(RuntimeError):
+    """Another live node keeps this node's alias, so this node cannot start."""
 
 
 class Lifecycle:
@@ -106,12 +115,32 @@ class Lifecycle:
 
     def _register_until_alias_free(self) -> str:
         """Retry registration until this node's alias lease is free, e.g. while
-        a lease left by this node's crashed previous run goes stale."""
+        a lease left by this node's crashed previous run goes stale.
+
+        A crashed holder's lease only runs down, while a live holder's heartbeats
+        refresh it, so a lease with more time left than at the previous refusal
+        belongs to another live node, and registration fails with
+        `NodeAliasConflictError`.
+        """
         delay = _REGISTER_RETRY_INITIAL_SEC
+        previous_remaining_ms: int | None = None
         while True:
             try:
                 return self._register()
             except AliasHeldError as exc:
+                remaining_ms = exc.lease_remaining_ms
+                if (
+                    previous_remaining_ms is not None
+                    and remaining_ms > previous_remaining_ms
+                ):
+                    message = (
+                        f"NODE_ALIAS {self._node_info.alias!r} is held by another "
+                        "live node, which keeps refreshing its lease; set a distinct "
+                        "NODE_ALIAS"
+                    )
+                    self.logger.error(message)
+                    raise NodeAliasConflictError(message) from exc
+                previous_remaining_ms = remaining_ms
                 self.logger.warning("%s; retrying in %.0fs", exc, delay)
             time.sleep(delay)
             delay = min(delay * 2, max(self.hb_sec, _REGISTER_RETRY_INITIAL_SEC))
@@ -123,7 +152,7 @@ class Lifecycle:
                 self._node_info, self._system_principal
             )
         except NodeAliasInUseError as exc:
-            raise AliasHeldError(str(exc)) from exc
+            raise AliasHeldError(str(exc), exc.lease_remaining_ms) from exc
         self.logger.info("Node registered (direct): %s", node_id)
         return node_id
 
@@ -136,7 +165,10 @@ class Lifecycle:
         payload = self._node_info.model_dump()
         resp = httpx.post(url, json=payload, headers=auth_headers(), timeout=10.0)
         if resp.status_code == httpx.codes.CONFLICT:
-            raise AliasHeldError(resp.json().get("detail", resp.text))
+            detail = resp.json()["detail"]
+            raise AliasHeldError(
+                str(detail["message"]), int(detail["lease_remaining_ms"])
+            )
         resp.raise_for_status()
         data = resp.json()
         node_id = data.get("node_id")

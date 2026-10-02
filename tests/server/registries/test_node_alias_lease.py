@@ -101,14 +101,16 @@ def test_duplicate_alias_is_refused_without_writing(
 
     assert "NODE_ALIAS" in str(exc.value)
     assert holder not in str(exc.value)
+    assert 0 < exc.value.lease_remaining_ms <= TTL_SEC * 1000
     assert rds.smembers(NODES_SET_KEY) == {holder}
 
 
 @pytest.mark.asyncio
 async def test_async_register_refuses_duplicate(registry: NodeRegistry) -> None:
     await registry.register_node_async(_info())
-    with pytest.raises(NodeAliasInUseError):
+    with pytest.raises(NodeAliasInUseError) as exc:
         await registry.register_node_async(_info())
+    assert 0 < exc.value.lease_remaining_ms <= TTL_SEC * 1000
 
 
 def test_distinct_aliases_coexist(

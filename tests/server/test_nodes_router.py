@@ -31,7 +31,7 @@ class _Registry:
 
     async def register_node_async(self, node_info: Any, actor: Any = None) -> str:
         if self.alias_held:
-            raise NodeAliasInUseError(node_info.alias)
+            raise NodeAliasInUseError(node_info.alias, 90_000)
         return "nde-1"
 
 
@@ -64,6 +64,10 @@ async def test_register_node(
 
     assert resp.status_code == status_code
     if alias_held:
-        assert resp.json()["detail"] == (
-            "node alias 'gpu-a' is held by another live node; set a distinct NODE_ALIAS"
-        )
+        assert resp.json()["detail"] == {
+            "message": (
+                "node alias 'gpu-a' is held by another live node; "
+                "set a distinct NODE_ALIAS"
+            ),
+            "lease_remaining_ms": 90_000,
+        }

@@ -125,17 +125,22 @@ def test_reregister_if_lost_swallows_callback_error() -> None:
 def test_register_http_raises_alias_held_on_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    detail = (
-        "node alias 'worker-1' is held by another live node; set a distinct NODE_ALIAS"
-    )
+    detail = {
+        "message": (
+            "node alias 'worker-1' is held by another live node; "
+            "set a distinct NODE_ALIAS"
+        ),
+        "lease_remaining_ms": 90_000,
+    }
 
     def fake_post(url: str, **kwargs: Any) -> _StubResponse:
         return _StubResponse({"detail": detail}, status_code=409)
 
     monkeypatch.setattr(lifecycle_module.httpx, "post", fake_post)
 
-    with pytest.raises(AliasHeldError, match="another live node"):
+    with pytest.raises(AliasHeldError, match="another live node") as exc:
         _build_lifecycle()._register_http()
+    assert exc.value.lease_remaining_ms == 90_000
 
 
 class _AliasHeldThenFree(StubLifecycle):
@@ -148,7 +153,10 @@ class _AliasHeldThenFree(StubLifecycle):
     def _register(self) -> str:
         self.attempts += 1
         if self.attempts <= self.refusals:
-            raise AliasHeldError("node alias 'a' is held by another live node")
+            raise AliasHeldError(
+                "node alias 'a' is held by another live node",
+                100_000 - self.attempts * 1_000,
+            )
         return "nde-2"
 
 
