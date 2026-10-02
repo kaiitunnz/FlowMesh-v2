@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from server.resident import ReplicaState
+from server.resident import ReplicaState, materializer
 from server.resident.state import ClaimState, ReplicaIncarnation
 from server.task.models import TERMINAL_TASK_STATUSES, TaskStatus
 from tests.server.resident.node_harness import FAMILY, TS, Node, admitted_boundary
@@ -369,5 +369,27 @@ def test_a_requeued_cold_start_that_never_redispatches_ends_at_its_deadline() ->
 
         assert not claim.holds_credit
         assert "resident_handoff" not in node.delivery.kinds()
+
+    asyncio.run(run())
+
+
+def test_a_cold_start_whose_registrar_raises_leaves_no_serve_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_registrar(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("resource registry unavailable")
+
+    monkeypatch.setattr(materializer, "register_resource", failing_registrar)
+
+    async def run() -> None:
+        node = Node()
+        _loop_bound(node)
+        with pytest.raises(RuntimeError):
+            await node.materialize_async()
+
+        (replica,) = node.control.stores.directory.all()
+        assert replica.state is ReplicaState.PREEMPTED
+        assert node.runtime.live_resident_task_ids() == set()
+        assert not node.control._has_materializing(FAMILY.family)
 
     asyncio.run(run())

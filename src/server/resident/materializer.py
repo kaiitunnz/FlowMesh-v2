@@ -78,19 +78,25 @@ async def materialize_resident_replica(
         format="native",
         resident=True,
     )
-    await register_resource(
-        owner,
-        ResourceKind.WORKFLOW,
-        workflow_id,
-        {"format": "native", "task_count": len(entries)},
-        logger,
-    )
-    for entry in entries:
+    try:
         await register_resource(
             owner,
-            ResourceKind.TASK,
-            entry.task_id,
-            {"workflow_id": workflow_id},
+            ResourceKind.WORKFLOW,
+            workflow_id,
+            {"format": "native", "task_count": len(entries)},
             logger,
         )
+        for entry in entries:
+            await register_resource(
+                owner,
+                ResourceKind.TASK,
+                entry.task_id,
+                {"workflow_id": workflow_id},
+                logger,
+            )
+    except BaseException:
+        # The caller learns no serve task id from a failed cold start, so nothing else
+        # would ever reap the one registered here.
+        runtime.cancel_workflow(workflow_id, reason="resident cold start failed")
+        raise
     return entries[0].task_id
