@@ -154,7 +154,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             # this node's UNREGISTER must not reach.
             for worker_id in foreign:
                 self._note_unregistered(worker_id)
-            gone = [*missing, *foreign]
+            gone = missing + foreign
             released = sum(self._registry.retire(worker_id) for worker_id in gone)
         if released:
             self._logger.warning(
