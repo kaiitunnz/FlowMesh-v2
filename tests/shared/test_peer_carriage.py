@@ -92,12 +92,15 @@ def test_a_relay_plan_carries_the_base_sink() -> None:
     assert carriage.select(_plan("control_relay", "")) is base
 
 
-def test_a_peer_transport_without_an_address_is_refused_not_relayed() -> None:
+@pytest.mark.parametrize("endpoint", ["", "host-without-port", "host:port"])
+def test_a_peer_transport_without_a_dialable_address_is_refused_not_relayed(
+    endpoint: str,
+) -> None:
     # Silently relaying a selection control made would carry the attempt over a
     # transport other than the one it chose.
     carriage = _carriage(_BaseSink(), [], [])
     with pytest.raises(CarriageUnavailable):
-        carriage.select(_plan("worker_direct", ""))
+        carriage.select(_plan("worker_direct", endpoint))
 
 
 def test_an_unreachable_target_falls_back_to_the_relay_under_one_credit() -> None:

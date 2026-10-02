@@ -34,6 +34,7 @@ from shared.network.frame_stream import (
     FrameSink,
     FrameStreamError,
     read_relay_frame,
+    split_host_port,
     write_relay_frame,
 )
 from shared.network.peer_dial import (
@@ -194,8 +195,10 @@ class PeerCarriage:
         """
         if plan.selected_transport == CONTROL_RELAY:
             return self._base
-        if not plan.selected_endpoint:
-            raise CarriageUnavailable(plan.selected_transport)
+        try:
+            split_host_port(plan.selected_endpoint or "")
+        except ValueError as exc:
+            raise CarriageUnavailable(plan.selected_transport) from exc
         sink = _PeerSink(
             carriage=self,
             session_id=plan.session_id,
