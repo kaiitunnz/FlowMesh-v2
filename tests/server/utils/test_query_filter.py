@@ -1,9 +1,10 @@
-"""Tests for filter_models_by_queries — the generic query filter."""
+"""A query filter matches declared fields by attribute and rejects any other key."""
 
 import pytest
 from pydantic import BaseModel
+from starlette.datastructures import QueryParams
 
-from server.utils.misc import filter_models_by_queries
+from server.utils.query import InvalidQuery, QueryFilter
 
 
 class _SampleModel(BaseModel):
@@ -21,6 +22,8 @@ def _make(id: str, status: str = "IDLE", **kw) -> _SampleModel:
 
 # ---------- Fixtures ----------
 
+_FIELDS = frozenset({"id", "status", "stale", "tags", "env.region", "score"})
+
 _MODELS = [
     _make("w-1", tags=["gpu", "a100"], env={"region": "us-east"}, score=1.0),
     _make("w-2", status="BUSY", tags=["cpu"], stale=True, score=2.0),
@@ -30,6 +33,10 @@ _MODELS = [
 
 
 # ---------- Tests ----------
+
+
+def _filter(models: list, query: dict | QueryParams) -> list:
+    return QueryFilter.parse(query, _FIELDS).filter(models)
 
 
 @pytest.mark.parametrize(
@@ -42,31 +49,51 @@ _MODELS = [
         ({"status": "UNKNOWN"}, set()),
         # Empty query returns all
         ({}, {"w-1", "w-2", "w-3", "w-4"}),
-        # Unknown key ignored
-        ({"nonexistent": "val"}, {"w-1", "w-2", "w-3", "w-4"}),
+        # Pagination parameters are not filters
+        ({"limit": "1", "after": "c"}, {"w-1", "w-2", "w-3", "w-4"}),
     ],
-    ids=["exact", "exact-busy", "no-match", "empty-query", "unknown-key"],
+    ids=["exact", "exact-busy", "no-match", "empty-query", "page-params"],
 )
 def test_basic_filtering(query: dict, expected_ids: set[str]) -> None:
-    result = filter_models_by_queries(_MODELS, query)
+    result = _filter(_MODELS, query)
     assert {m.id for m in result} == expected_ids
+
+
+@pytest.mark.parametrize("key", ["nonexistent", "env", "env.secret", "id.x"])
+def test_undeclared_key_is_rejected(key: str) -> None:
+    with pytest.raises(InvalidQuery):
+        QueryFilter.parse({key: "val"}, _FIELDS)
 
 
 def test_repeated_key_or_semantics() -> None:
     """?status=IDLE&status=BUSY should match either."""
-
-    class _MultiItems:
-        def multi_items(self):
-            return [("status", "IDLE"), ("status", "BUSY")]
-
-    result = filter_models_by_queries(_MODELS, _MultiItems())  # type: ignore[arg-type]
+    result = _filter(_MODELS, QueryParams("status=IDLE&status=BUSY"))
     assert {m.id for m in result} == {"w-1", "w-2", "w-3"}
+
+
+def test_nested_models_are_read_by_attribute() -> None:
+    class _Cpu(BaseModel):
+        model: str
+
+    class _Hardware(BaseModel):
+        cpu: _Cpu
+
+    class _Worker(BaseModel):
+        id: str
+        hardware: _Hardware
+
+    workers = [
+        _Worker(id="a", hardware=_Hardware(cpu=_Cpu(model="xeon"))),
+        _Worker(id="b", hardware=_Hardware(cpu=_Cpu(model="epyc"))),
+    ]
+    query = QueryFilter.parse({"hardware.cpu.model": "xeon"}, {"hardware.cpu.model"})
+    assert [w.id for w in query.filter(workers)] == ["a"]
 
 
 def test_nested_dot_notation() -> None:
     """Dot-notation matches nested dict fields; models where traversal
     fails (empty env) are NOT excluded — the unknown key is skipped."""
-    result = filter_models_by_queries(_MODELS, {"env.region": "us-east"})
+    result = _filter(_MODELS, {"env.region": "us-east"})
     # w-1 matches, w-3 has eu-west (excluded), w-2 and w-4 have no
     # env.region so the key is skipped (they pass through).
     assert "w-1" in {m.id for m in result}
@@ -74,7 +101,7 @@ def test_nested_dot_notation() -> None:
 
 
 def test_list_membership() -> None:
-    result = filter_models_by_queries(_MODELS, {"tags": "gpu"})
+    result = _filter(_MODELS, {"tags": "gpu"})
     assert {m.id for m in result} == {"w-1", "w-3"}
 
 
@@ -84,7 +111,7 @@ def test_list_membership() -> None:
     ids=lambda v: f"truthy-{v}",
 )
 def test_boolean_truthy(query_value: str) -> None:
-    result = filter_models_by_queries(_MODELS, {"stale": query_value})
+    result = _filter(_MODELS, {"stale": query_value})
     assert {m.id for m in result} == {"w-2"}
 
 
@@ -94,7 +121,7 @@ def test_boolean_truthy(query_value: str) -> None:
     ids=lambda v: f"falsy-{v}",
 )
 def test_boolean_falsy(query_value: str) -> None:
-    result = filter_models_by_queries(_MODELS, {"stale": query_value})
+    result = _filter(_MODELS, {"stale": query_value})
     assert {m.id for m in result} == {"w-1", "w-3", "w-4"}
 
 
@@ -104,7 +131,7 @@ def test_boolean_falsy(query_value: str) -> None:
     ids=lambda v: f"null-{v!r}",
 )
 def test_none_matching(query_value: str) -> None:
-    result = filter_models_by_queries(_MODELS, {"score": query_value})
+    result = _filter(_MODELS, {"score": query_value})
     assert {m.id for m in result} == {"w-4"}
 
 
@@ -116,5 +143,5 @@ def test_csv_tag_string() -> None:
         tags: str
 
     models = [_CsvModel(id="a", tags="gpu,a100"), _CsvModel(id="b", tags="cpu")]
-    result = filter_models_by_queries(models, {"tags": "gpu"})
+    result = QueryFilter.parse({"tags": "gpu"}, {"tags"}).filter(models)
     assert [m.id for m in result] == ["a"]

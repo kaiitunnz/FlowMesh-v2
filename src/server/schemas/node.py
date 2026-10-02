@@ -137,6 +137,23 @@ class WorkerHardware(BaseModel):
     )
 
 
+# The filters a list of a node's workers takes, wherever it is listed.
+NODE_WORKER_FILTER_FIELDS = frozenset(
+    {
+        "id",
+        "alias",
+        "namespace",
+        "cluster",
+        "node_id",
+        "node_alias",
+        "provider",
+        "status",
+        "hardware.cpu.model",
+        "hardware.gpu.cuda_version",
+    }
+)
+
+
 class NodeWorkerInfo(BaseModel):
     id: str | None = Field(..., description="Worker ID")
     alias: str = Field(..., description="Worker alias")
@@ -155,6 +172,7 @@ class NodeWorkerInfo(BaseModel):
 __all__ = [
     "NodeInfo",
     "NodeRegisterResponse",
+    "NODE_WORKER_FILTER_FIELDS",
     "NodeWorkerInfo",
     "NodeWorkerStatus",
     "WorkerRegisterResponse",

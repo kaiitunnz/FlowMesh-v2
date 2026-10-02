@@ -15,11 +15,12 @@ from ...auth.security import (
     require_permission,
 )
 from ...hooks import ResourceAction, ResourceKind
+from ...schemas.node import NODE_WORKER_FILTER_FIELDS
 from ...supervisor import WorkerSupervisor
 from ...supervisor.manager import WorkerInitConfig
 from ...supervisor.schemas import WorkerInfo
-from ...utils.misc import filter_models_by_queries
 from ._command import command_error
+from ._listing import query_filter
 
 router = APIRouter(prefix="/stack/workers", tags=["Stack"])
 
@@ -58,7 +59,7 @@ async def list_workers(
     cmd = CommandMessage(command=CommandType.GET_WORKERS)
     data = await _exec(supervisor, cmd)
     workers = [WorkerInfo(**w) for w in data.get("workers", [])]
-    return filter_models_by_queries(workers, request.query_params)
+    return query_filter(request, NODE_WORKER_FILTER_FIELDS).filter(workers)
 
 
 @router.post("")

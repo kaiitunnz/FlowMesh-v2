@@ -1,12 +1,13 @@
 import asyncio
 import json
 import logging
+from collections.abc import Collection
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi import Path as ApiPath
 from fastapi import Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from shared.schemas.command import StopMessage
 from shared.tasks import TaskType
@@ -28,8 +29,19 @@ from ...hooks import ResourceAction, ResourceKind
 from ...registries.worker import WorkerRegistry
 from ...schemas.common import OkResponse
 from ...schemas.logs import LogEntry, LogEvent, LogQueryResponse
+from ...schemas.tasks import TaskPage
+from ...task.models import TaskOrder
 from ...task.runtime import TaskInfo, TaskRuntime
-from ...utils.misc import filter_models_by_queries
+from ...utils.cursors import InvalidCursor, decode_cursor, encode_cursor
+from ...utils.query import QueryFilter
+from ._listing import (
+    PAGE_LIMIT_DEFAULT,
+    PageAfter,
+    PageBefore,
+    PageLimit,
+    page_bounds,
+    query_filter,
+)
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
@@ -52,27 +64,79 @@ def _sanitize_latest_update(info: TaskInfo) -> None:
     info.latest_update = latest_update
 
 
+TASK_FILTER_FIELDS = frozenset(
+    {
+        "task_id",
+        "workflow_id",
+        "status",
+        "category",
+        "task_type",
+        "assigned_worker",
+        "graph_node_name",
+        "completed",
+        "failed",
+    }
+)
+
+
 @router.get(
     "",
     summary="List tasks",
-    description="List all tasks.",
-    response_description="List of task details.",
+    description=(
+        "List tasks ordered by submission. Without a cursor, returns the newest page."
+    ),
+    response_description="A page of task details.",
+    response_model=TaskPage,
 )
 async def list_tasks(
     request: Request,
+    limit: PageLimit = PAGE_LIMIT_DEFAULT,
+    before: PageBefore = None,
+    after: PageAfter = None,
     principal: PrincipalContext = Depends(authenticate_connection),
     runtime: TaskRuntime = Depends(get_runtime),
     logger: logging.Logger = Depends(get_logger),
-) -> list[TaskInfo]:
-    tasks = runtime.list_tasks()
+) -> Response:
+    query = query_filter(request, TASK_FILTER_FIELDS)
+    after_bound, before_bound = page_bounds(after, before, _decode_task_cursor)
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.TASK, ResourceAction.READ, logger
     )
-    if allowed is not None:
-        tasks = [task for task in tasks if task.task_id in allowed]
+    body = await asyncio.to_thread(
+        _task_page_json, runtime, query, limit, after_bound, before_bound, allowed
+    )
+    return Response(body, media_type="application/json")
+
+
+def _task_page_json(
+    runtime: TaskRuntime,
+    query: QueryFilter,
+    limit: int,
+    after: TaskOrder | None,
+    before: TaskOrder | None,
+    accessible: Collection[str] | None,
+) -> bytes:
+    tasks = runtime.task_page(query, limit, after, before, accessible)
     for task in tasks:
         _sanitize_latest_update(task)
-    return filter_models_by_queries(tasks, request.query_params)
+    page = TaskPage(
+        entries=tasks,
+        next_cursor=_task_cursor(tasks[-1]) if tasks else None,
+        prev_cursor=_task_cursor(tasks[0]) if tasks else None,
+    )
+    return page.model_dump_json(by_alias=True).encode()
+
+
+def _task_cursor(task: TaskInfo) -> str:
+    return encode_cursor([task.submitted_ts, task.task_id])
+
+
+def _decode_task_cursor(cursor: str) -> TaskOrder:
+    identity = decode_cursor(cursor)
+    match identity:
+        case [int() | float() as ts, str() as task_id] if not isinstance(ts, bool):
+            return float(ts), task_id
+    raise InvalidCursor(f"invalid cursor {cursor!r}")
 
 
 @router.get(

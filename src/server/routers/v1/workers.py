@@ -14,9 +14,27 @@ from ...auth.security import (
 )
 from ...hooks import ResourceAction, ResourceKind
 from ...registries.worker import WorkerInfo, WorkerRegistry
-from ...utils.misc import filter_models_by_queries
+from ._listing import query_filter
 
 router = APIRouter(prefix="/workers", tags=["Workers"])
+
+
+WORKER_FILTER_FIELDS = frozenset(
+    {
+        "id",
+        "alias",
+        "namespace",
+        "cluster",
+        "node_id",
+        "node_alias",
+        "status",
+        "tags",
+        "stale",
+        "cached_models",
+        "hardware.cpu.model",
+        "hardware.gpu.cuda_version",
+    }
+)
 
 
 @router.get(
@@ -31,14 +49,14 @@ async def list_workers(
     registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[WorkerInfo]:
-    queries = request.query_params
+    query = query_filter(request, WORKER_FILTER_FIELDS)
     workers = await registry.list_workers_async()
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.WORKER, ResourceAction.READ, logger
     )
     if allowed is not None:
         workers = [w for w in workers if w.id in allowed]
-    return filter_models_by_queries(workers, queries)
+    return query.filter(workers)
 
 
 @router.get(

@@ -12,7 +12,7 @@ from fastapi import (
     Request,
     status,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from shared.schemas.event import TaskEvent
 
@@ -36,9 +36,15 @@ from ...clients.redis import (
     workflow_log_stream_key,
 )
 from ...hooks import SUBMISSION_GUARDS, ResourceAction, ResourceKind
-from ...registries.workflow import Workflow, WorkflowRegistry
+from ...registries.workflow import (
+    Workflow,
+    WorkflowOrder,
+    WorkflowRegistry,
+    workflow_order,
+)
 from ...schemas.logs import LogEntry, LogEvent, LogQueryResponse
 from ...schemas.workflow import (
+    WorkflowPage,
     WorkflowSubmitResponse,
     WorkflowSubmitTaskEntry,
     WorkflowValidateResponse,
@@ -47,7 +53,15 @@ from ...schemas.workflow import (
 from ...services.metrics import MetricsRecorder
 from ...task.runtime import TaskRuntime
 from ...task.v2 import CompileError, Diagnostic
-from ...utils.misc import filter_models_by_queries
+from ...utils.cursors import InvalidCursor, decode_cursor, encode_cursor
+from ._listing import (
+    PAGE_LIMIT_DEFAULT,
+    PageAfter,
+    PageBefore,
+    PageLimit,
+    page_bounds,
+    query_filter,
+)
 
 _WORKFLOW_REQUEST_BODY_FORMAT = {
     "requestBody": {
@@ -531,30 +545,60 @@ async def cancel_workflow(
     return workflow
 
 
+WORKFLOW_FILTER_FIELDS = frozenset({"workflow_id", "status", "task_ids"})
+
+
 @router.get(
     "",
     summary="List workflows",
-    description="List submitted workflows.",
-    response_description="List of workflows",
+    description=(
+        "List submitted workflows ordered by submission. Without a cursor, returns "
+        "the newest page."
+    ),
+    response_description="A page of workflows",
+    response_model=WorkflowPage,
 )
 async def list_workflows(
     request: Request,
+    limit: PageLimit = PAGE_LIMIT_DEFAULT,
+    before: PageBefore = None,
+    after: PageAfter = None,
     principal: PrincipalContext = Depends(authenticate_connection),
     registry: WorkflowRegistry = Depends(get_workflow_registry),
     logger: logging.Logger = Depends(get_logger),
-) -> list[Workflow]:
+) -> Response:
+    query = query_filter(request, WORKFLOW_FILTER_FIELDS)
+    after_bound, before_bound = page_bounds(after, before, _decode_workflow_cursor)
     workflow_ids = await registry.get_workflow_ids_async()
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.WORKFLOW, ResourceAction.READ, logger
     )
     if allowed is not None:
-        workflow_ids = workflow_ids & allowed
-    workflows: list[Workflow] = []
-    for workflow_id in workflow_ids:
-        workflow = await registry.get_workflow_async(workflow_id)
-        if workflow:
-            workflows.append(workflow)
-    return filter_models_by_queries(workflows, request.query_params)
+        workflow_ids &= allowed
+    if (named := query.values("workflow_id")) is not None:
+        workflow_ids &= named
+    workflows = await registry.workflow_page(
+        workflow_ids, query.without("workflow_id"), limit, after_bound, before_bound
+    )
+    page = WorkflowPage(
+        entries=workflows,
+        next_cursor=_workflow_cursor(workflows[-1]) if workflows else None,
+        prev_cursor=_workflow_cursor(workflows[0]) if workflows else None,
+    )
+    body = await asyncio.to_thread(page.model_dump_json, by_alias=True)
+    return Response(body, media_type="application/json")
+
+
+def _workflow_cursor(workflow: Workflow) -> str:
+    return encode_cursor(workflow_order(workflow.submitted_at, workflow.workflow_id))
+
+
+def _decode_workflow_cursor(cursor: str) -> WorkflowOrder:
+    identity = decode_cursor(cursor)
+    match identity:
+        case [int() as ns, str() as workflow_id] if not isinstance(ns, bool):
+            return ns, workflow_id
+    raise InvalidCursor(f"invalid cursor {cursor!r}")
 
 
 def _get_workflow_from_request(

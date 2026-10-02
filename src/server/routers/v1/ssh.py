@@ -29,7 +29,7 @@ from ...services.ssh_connections import SshConnectionRegistry
 from ...ssh import SshRelayOrigin, resolve_relay_target
 from ...ssh.connections import tracked_ssh_connection
 from ...task.runtime import TaskRuntime
-from ...utils.misc import filter_models_by_queries
+from ._listing import query_filter
 
 router = APIRouter(prefix="/ssh", tags=["SSH"])
 
@@ -152,6 +152,21 @@ async def _relay_websocket(websocket: WebSocket, channel: ByteStreamChannel) -> 
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+SSH_CONNECTION_FILTER_FIELDS = frozenset(
+    {
+        "connection_id",
+        "access_mode",
+        "task_id",
+        "workflow_id",
+        "worker_id",
+        "node_id",
+        "username",
+        "source_ip",
+        "source_port",
+    }
+)
+
+
 @router.get(
     "/connections",
     summary="List SSH connections",
@@ -172,4 +187,4 @@ async def list_ssh_connections(
     if ssh_connections is None:
         return []
     connections = await ssh_connections.list_connections()
-    return filter_models_by_queries(connections, request.query_params)
+    return query_filter(request, SSH_CONNECTION_FILTER_FIELDS).filter(connections)

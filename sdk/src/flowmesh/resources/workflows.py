@@ -25,6 +25,7 @@ from ..models.workflows import (
 )
 from ..params import append_param, extend_params
 from ._base import AsyncResource, SyncResource
+from ._pages import list_all, list_all_async
 
 WorkflowFormat = Literal["native", "n8n"]
 
@@ -104,14 +105,14 @@ class Workflows(SyncResource):
         task_ids: str | list[str] | None = None,
         query_params: list[tuple[str, str]] | None = None,
     ) -> list[Workflow]:
-        """List workflows with optional filters."""
+        """List every workflow matching the filters, oldest first."""
         params: list[tuple[str, str]] = []
         append_param(params, "workflow_id", workflow_id)
         extend_params(params, "status", status)
         extend_params(params, "task_ids", task_ids)
         if query_params:
             params.extend(query_params)
-        data = self._client._request("GET", "/workflows", params=params or None)
+        data = list_all(self._client, "/workflows", params)
         return [Workflow.model_validate(w) for w in data]
 
     def cancel(self, workflow_id: str) -> Workflow:
@@ -254,14 +255,14 @@ class AsyncWorkflows(AsyncResource):
         task_ids: str | list[str] | None = None,
         query_params: list[tuple[str, str]] | None = None,
     ) -> list[Workflow]:
-        """List workflows with optional filters."""
+        """List every workflow matching the filters, oldest first."""
         params: list[tuple[str, str]] = []
         append_param(params, "workflow_id", workflow_id)
         extend_params(params, "status", status)
         extend_params(params, "task_ids", task_ids)
         if query_params:
             params.extend(query_params)
-        data = await self._client._request("GET", "/workflows", params=params or None)
+        data = await list_all_async(self._client, "/workflows", params)
         return [Workflow.model_validate(w) for w in data]
 
     async def cancel(self, workflow_id: str) -> Workflow:

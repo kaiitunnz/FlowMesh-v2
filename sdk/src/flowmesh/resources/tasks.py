@@ -17,6 +17,7 @@ from ..models.tasks import TaskInfo
 from ..params import append_param, extend_params
 from ..ssh import task_ssh_info, wait_for_ssh_info, wait_for_ssh_info_async
 from ._base import AsyncResource, SyncResource
+from ._pages import list_all, list_all_async
 
 
 class Tasks(SyncResource):
@@ -40,7 +41,7 @@ class Tasks(SyncResource):
         failed: bool | None = None,
         query_params: list[tuple[str, str]] | None = None,
     ) -> list[TaskInfo]:
-        """List tasks with optional filters."""
+        """List every task matching the filters, oldest first."""
         params: list[tuple[str, str]] = []
         append_param(params, "task_id", task_id)
         append_param(params, "workflow_id", workflow_id)
@@ -53,7 +54,7 @@ class Tasks(SyncResource):
         append_param(params, "failed", failed)
         if query_params:
             params.extend(query_params)
-        data = self._client._request("GET", "/tasks", params=params or None)
+        data = list_all(self._client, "/tasks", params)
         return [TaskInfo.model_validate(t) for t in data]
 
     def stop(self, task_id: str) -> OkResponse:
@@ -148,7 +149,7 @@ class AsyncTasks(AsyncResource):
         failed: bool | None = None,
         query_params: list[tuple[str, str]] | None = None,
     ) -> list[TaskInfo]:
-        """List tasks with optional filters."""
+        """List every task matching the filters, oldest first."""
         params: list[tuple[str, str]] = []
         append_param(params, "task_id", task_id)
         append_param(params, "workflow_id", workflow_id)
@@ -161,7 +162,7 @@ class AsyncTasks(AsyncResource):
         append_param(params, "failed", failed)
         if query_params:
             params.extend(query_params)
-        data = await self._client._request("GET", "/tasks", params=params or None)
+        data = await list_all_async(self._client, "/tasks", params)
         return [TaskInfo.model_validate(t) for t in data]
 
     async def stop(self, task_id: str) -> OkResponse:

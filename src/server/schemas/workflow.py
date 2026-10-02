@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from server.registries.workflow import Workflow
 from server.task.v2 import InspectionReport
 
 
@@ -45,4 +46,14 @@ class WorkflowValidateResponse(BaseModel):
     inspection: InspectionReport | None = Field(
         default=None,
         description="Compiled v2 template/plan inspection (v2 submissions only).",
+    )
+
+
+class WorkflowPage(BaseModel):
+    entries: list[Workflow] = Field(description="Workflows, oldest submission first.")
+    next_cursor: str | None = Field(
+        default=None, description="Cursor for the next page of newer workflows."
+    )
+    prev_cursor: str | None = Field(
+        default=None, description="Cursor for the next page of older workflows."
     )

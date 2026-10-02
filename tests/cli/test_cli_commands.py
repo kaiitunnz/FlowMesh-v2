@@ -89,12 +89,12 @@ class TestWorkflowList:
 
         result = runner.invoke(
             _app(),
-            ["workflow", "list", "--query", "owner_id=u-1", "--query", "status=DONE"],
+            ["workflow", "list", "--query", "task_ids=tsk-1", "--query", "status=DONE"],
         )
         assert result.exit_code == 0
         call_kwargs = client.workflows.list.call_args.kwargs
         assert call_kwargs["query_params"] == [
-            ("owner_id", "u-1"),
+            ("task_ids", "tsk-1"),
             ("status", "DONE"),
         ]
 

@@ -17,7 +17,7 @@ from ...schemas.resident import (
     ResidentReplicaCredit,
     ResidentReplicaInfo,
 )
-from ...utils.misc import filter_models_by_queries
+from ._listing import query_filter
 
 router = APIRouter(prefix="/resident", tags=["Resident"])
 
@@ -64,7 +64,7 @@ async def list_resident_replicas(
         ResidentReplicaInfo.project(replica)
         for replica in control.list_replica_incarnations()
     ]
-    return filter_models_by_queries(replicas, request.query_params)
+    return query_filter(request, {"family"}).filter(replicas)
 
 
 @router.get(
