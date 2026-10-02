@@ -12,7 +12,7 @@ from google.protobuf.empty_pb2 import Empty
 from server.supervisor.adapters.external import mint_external_token
 from server.supervisor.services import grpc_server as grpc_server_module
 from shared.grpc.supervisor.v1 import supervisor_pb2, supervisor_pb2_grpc
-from tests.server.redis_helpers import fake_sync_client
+from tests.server.redis_helpers import fake_redis_client
 from tests.server.test_external_worker_reregistration import (
     _ALIAS,
     _SECRET,
@@ -75,7 +75,7 @@ async def test_a_half_open_task_stream_ends_at_the_supervisor(
     monkeypatch.setattr(grpc_server_module, "_GRPC_KEEPALIVE_TIMEOUT_MS", 300)
     monkeypatch.setattr(grpc_server_module, "_GRPC_PING_ACK_TIMEOUT_MS", 300)
     port = _free_port()
-    supervisor = _Supervisor(fake_sync_client(fakeredis.FakeServer()), port)
+    supervisor = _Supervisor(fake_redis_client(fakeredis.FakeServer()), port)
     await supervisor.start()
     proxy = _FreezableProxy(port)
     channel = grpc.aio.insecure_channel(f"127.0.0.1:{await proxy.start()}")

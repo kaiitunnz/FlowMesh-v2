@@ -16,10 +16,12 @@ import pytest
 
 from server.clients.redis import (
     WORKERS_SET_KEY,
+    RedisClient,
     SyncRedisClient,
     node_dispatch_channel,
 )
 from server.hooks import PrincipalContext
+from server.registries.worker import WorkerRegistry as WorkerRecords
 from server.supervisor.adapters.external import mint_external_token
 from server.supervisor.manager import WorkerManager
 from server.supervisor.registry import WorkerRegistry
@@ -30,7 +32,7 @@ from shared.content import BACKEND_FILESYSTEM, ObjectStoreConfig
 from shared.schemas.command import TaskMessage
 from shared.schemas.worker import WorkerCapabilities, WorkerStatus
 from shared.tasks import TaskType
-from tests.server.redis_helpers import fake_sync_client
+from tests.server.redis_helpers import fake_redis_client
 from tests.worker.factories import (
     make_worker_config,
     make_worker_hardware,
@@ -74,7 +76,8 @@ def _free_port() -> int:
 class _Supervisor:
     """One supervisor process's gRPC side, as a restart would build it afresh."""
 
-    def __init__(self, redis: SyncRedisClient, port: int) -> None:
+    def __init__(self, redis_client: RedisClient, port: int) -> None:
+        redis = redis_client.sync
         self.listener = TaskListener(redis, _NODE, _LOGGER)
         registry = WorkerRegistry(on_worker_id_released=self.listener.remove_worker)
         manager = WorkerManager(
@@ -91,6 +94,7 @@ class _Supervisor:
             port,
             registry,
             redis,
+            WorkerRecords(redis_client),
             _NODE,
             "box",
             self.listener,
@@ -152,9 +156,10 @@ async def test_a_supervisor_restart_re_admits_the_worker_and_abandons_its_dispat
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = fake_sync_client(fakeredis.FakeServer())
+    redis_client = fake_redis_client(fakeredis.FakeServer())
+    redis = redis_client.sync
     port = _free_port()
-    first = _Supervisor(redis, port)
+    first = _Supervisor(redis_client, port)
     await first.start()
 
     client = _client(port)
@@ -183,7 +188,7 @@ async def test_a_supervisor_restart_re_admits_the_worker_and_abandons_its_dispat
         assert received.dispatch_id == "dsp-1"
 
         await first.stop()
-        second = _Supervisor(redis, port)
+        second = _Supervisor(redis_client, port)
         await second.start()
         try:
             await _until(lambda: bool(abandoned))
@@ -214,9 +219,10 @@ async def test_a_worker_the_root_reaped_registers_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = fake_sync_client(fakeredis.FakeServer())
+    redis_client = fake_redis_client(fakeredis.FakeServer())
+    redis = redis_client.sync
     port = _free_port()
-    supervisor = _Supervisor(redis, port)
+    supervisor = _Supervisor(redis_client, port)
     await supervisor.start()
     client = _client(port)
     await asyncio.to_thread(_register, client)
@@ -298,9 +304,9 @@ async def test_a_worker_holding_content_moves_to_its_new_registration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = fake_sync_client(fakeredis.FakeServer())
+    redis_client = fake_redis_client(fakeredis.FakeServer())
     port = _free_port()
-    first = _Supervisor(redis, port)
+    first = _Supervisor(redis_client, port)
     await first.start()
 
     client = _client(port)
@@ -330,7 +336,7 @@ async def test_a_worker_holding_content_moves_to_its_new_registration(
     lane.start()
     try:
         await first.stop()
-        second = _Supervisor(redis, port)
+        second = _Supervisor(redis_client, port)
         await second.start()
         try:
             await _until(lambda: client.worker_id != old_id)
@@ -359,9 +365,9 @@ async def test_a_worker_streaming_a_resident_session_moves_to_its_new_registrati
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = fake_sync_client(fakeredis.FakeServer())
+    redis_client = fake_redis_client(fakeredis.FakeServer())
     port = _free_port()
-    first = _Supervisor(redis, port)
+    first = _Supervisor(redis_client, port)
     await first.start()
 
     client = _client(port)
@@ -391,7 +397,7 @@ async def test_a_worker_streaming_a_resident_session_moves_to_its_new_registrati
     await asyncio.to_thread(client.start)
     try:
         await first.stop()
-        second = _Supervisor(redis, port)
+        second = _Supervisor(redis_client, port)
         await second.start()
         try:
             await _until(lambda: client.worker_id != old_id)
@@ -416,9 +422,10 @@ async def test_a_worker_the_root_reaped_registers_its_new_id_with_the_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = fake_sync_client(fakeredis.FakeServer())
+    redis_client = fake_redis_client(fakeredis.FakeServer())
+    redis = redis_client.sync
     port = _free_port()
-    supervisor = _Supervisor(redis, port)
+    supervisor = _Supervisor(redis_client, port)
     await supervisor.start()
     client = _client(port)
     await asyncio.to_thread(_register, client)

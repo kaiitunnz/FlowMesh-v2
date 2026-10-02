@@ -7,6 +7,7 @@ runtime-minted `uuid4()` token cannot.
 
 import logging
 from threading import Lock
+from types import SimpleNamespace
 from typing import Any, cast
 
 import grpc
@@ -14,10 +15,12 @@ import pytest
 
 from server.clients.redis import (
     WORKERS_SET_KEY,
+    RedisClient,
     SyncRedisClient,
     worker_key,
 )
 from server.hooks import PrincipalContext
+from server.registries.worker import WorkerRegistry as WorkerRecords
 from server.supervisor.adapters.external import (
     ExternalWorkerAdapter,
     ExternalWorkerConfig,
@@ -279,6 +282,9 @@ def _build_servicer(
     servicer = SupervisorServicer.__new__(SupervisorServicer)
     servicer._registry = registry
     servicer._redis = cast(SyncRedisClient, redis)
+    servicer._worker_records = WorkerRecords(
+        cast(RedisClient, SimpleNamespace(sync=redis))
+    )
     servicer._node_id = node_id
     servicer._node_alias = node_alias
     servicer._logger = logging.getLogger("test.external.enroll")

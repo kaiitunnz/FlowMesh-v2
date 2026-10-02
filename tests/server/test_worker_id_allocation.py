@@ -10,7 +10,7 @@ from server.registries.worker import WorkerRegistry as RootWorkerRegistry
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from shared.grpc.supervisor.v1 import supervisor_pb2
-from tests.server.redis_helpers import fake_redis_client, fake_sync_client
+from tests.server.redis_helpers import fake_redis_client
 from tests.server.servicer_helpers import external_adapter, supervisor_servicer
 
 
@@ -31,7 +31,7 @@ def _servicer(
     node_id: str = "nod-1",
     node_alias: str = "box",
 ) -> tuple[SupervisorServicer, WorkerRegistry]:
-    client = fake_sync_client(server)
+    client = fake_redis_client(server)
     servicer: SupervisorServicer | None = None
 
     def on_released(worker_id: str) -> None:

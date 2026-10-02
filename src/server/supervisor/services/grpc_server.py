@@ -15,7 +15,6 @@ from shared.grpc.supervisor.v1 import (
     supervisor_pb2_grpc,
 )
 from shared.network.relay_frame import RelayFrame
-from shared.utils import new_worker_id
 from shared.utils.recent import RecentSet
 
 from ... import env
@@ -25,7 +24,7 @@ from ...clients.redis import (
     worker_key,
 )
 from ...network.worker_bridge import RelayWorkerBridge
-from ...registries.worker import allocate_worker_seq
+from ...registries.worker import WorkerRegistry as WorkerRecords
 from ..adapters.base import WorkerAdapter, WorkerTokenType
 from ..manager import WorkerManager
 from ..registry import WorkerRegistry
@@ -103,6 +102,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self,
         registry: WorkerRegistry,
         redis: SyncRedisClient,
+        worker_records: WorkerRecords,
         node_id: str,
         node_alias: str,
         task_listener: TaskListener,
@@ -112,6 +112,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         relay_bridges: dict[str, RelayWorkerBridge] | None = None,
     ) -> None:
         self._registry = registry
+        self._worker_records = worker_records
         self._task_listener = task_listener
         self._relay_service = relay_service
         self._redis = redis
@@ -274,15 +275,13 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         with self._lock:
             with self._ids_lock:
                 released = list(self._released)
-            incarnation = allocate_worker_seq(
-                self._redis, [*self._registry.bound_worker_ids(), *released]
+            worker_id = self._worker_records.register_worker(
+                self._node_id,
+                self._node_alias,
+                worker_meta,
+                [*self._registry.bound_worker_ids(), *released],
             )
-            worker_id = new_worker_id(incarnation)
-            worker_meta["id"] = worker_id
-            worker_meta["incarnation"] = incarnation
-            worker_meta["node_alias"] = self._node_alias
-            worker_meta["node_id"] = self._node_id
-            self._redis.hash_set(worker_key(worker_id), worker_meta)
+            incarnation = int(worker_meta["incarnation"])
             self._registry.set_worker_id(token, worker_id)
         self._task_listener.add_worker(worker_id)
         worker.set_worker_id(worker_id)
@@ -491,6 +490,7 @@ class GrpcServer:
         port: int,
         registry: WorkerRegistry,
         redis: SyncRedisClient,
+        worker_records: WorkerRecords,
         node_id: str,
         node_alias: str,
         task_listener: TaskListener,
@@ -504,6 +504,7 @@ class GrpcServer:
         self._servicer = SupervisorServicer(
             registry,
             redis,
+            worker_records,
             node_id,
             node_alias,
             task_listener,

@@ -367,6 +367,7 @@ def _run_supervisor(
     from ..network.listeners import NetworkPlaneListeners
     from ..network.reverse_relay import BinaryRedis
     from ..registries.node import NodeRegistry
+    from ..registries.worker import WorkerRegistry as WorkerRecords
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
     from .registry import WorkerRegistry as WorkerAdapterRegistry
@@ -503,6 +504,7 @@ def _run_supervisor(
         grpc_cfg.port,
         worker_adapter_registry,
         redis=redis_client.sync,
+        worker_records=WorkerRecords(redis_client),
         node_id=node_id,
         node_alias=identity.alias,
         task_listener=task_listener,

@@ -8,8 +8,9 @@ from unittest.mock import MagicMock
 import fakeredis
 import grpc
 
-from server.clients.redis import SyncRedisClient
+from server.clients.redis import RedisClient, SyncRedisClient
 from server.hooks import PrincipalContext
+from server.registries.worker import WorkerRegistry as WorkerRecords
 from server.supervisor.adapters.base import WorkerTokenType
 from server.supervisor.adapters.external import (
     ExternalWorkerAdapter,
@@ -19,7 +20,7 @@ from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from server.supervisor.services.relay_service import RelayService
 from shared.grpc.supervisor.v1 import supervisor_pb2
-from tests.server.redis_helpers import fake_sync_client
+from tests.server.redis_helpers import fake_redis_client
 
 _LOGGER = logging.getLogger("test.servicer")
 TOKEN = "tok-1"
@@ -41,7 +42,7 @@ def external_adapter(
 
 def supervisor_servicer(
     registry: WorkerRegistry,
-    client: SyncRedisClient,
+    client: RedisClient,
     node_id: str = "nod-1",
     node_alias: str = NODE_ALIAS,
     task_listener: Any = None,
@@ -50,7 +51,8 @@ def supervisor_servicer(
     """A servicer over ``registry`` and ``client``, its other collaborators mocked."""
     return SupervisorServicer(
         registry,
-        client,
+        client.sync,
+        WorkerRecords(client),
         node_id,
         node_alias,
         task_listener or MagicMock(),
@@ -105,7 +107,7 @@ class ServicerHarness:
         self.registry.add(self.adapter)
         self.servicer = supervisor_servicer(
             self.registry,
-            fake_sync_client(server),
+            fake_redis_client(server),
             node_alias=node_alias,
             relay=self.relay,
         )

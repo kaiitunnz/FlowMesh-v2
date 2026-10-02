@@ -15,7 +15,7 @@ from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from server.supervisor.services.task_listener import TaskListener
 from shared.grpc.supervisor.v1 import supervisor_pb2
-from tests.server.redis_helpers import fake_sync_client
+from tests.server.redis_helpers import fake_redis_client
 from tests.server.servicer_helpers import external_adapter, supervisor_servicer
 
 _LOGGER = logging.getLogger("test.stream_tasks")
@@ -36,7 +36,7 @@ def _servicer(listener: TaskListener) -> tuple[SupervisorServicer, WorkerRegistr
     registry.add(external_adapter(_TOKEN, _NAME))
     servicer = supervisor_servicer(
         registry,
-        fake_sync_client(fakeredis.FakeServer()),
+        fake_redis_client(fakeredis.FakeServer()),
         "nde-1",
         "box",
         task_listener=listener,

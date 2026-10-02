@@ -29,9 +29,7 @@ from ..clients.redis import (
     WORKER_EVENT_CHANNEL,
     WORKER_ID_SEQ_KEY,
     WORKERS_SET_KEY,
-    AsyncRedisClient,
     RedisClient,
-    SyncRedisClient,
     node_dispatch_channel,
     worker_hb_key,
     worker_key,
@@ -55,36 +53,6 @@ while true do
   end
 end
 """
-
-
-def allocate_worker_seq(redis: SyncRedisClient, skip: Iterable[str] = ()) -> int:
-    """Record a fresh worker id and return its sequence number."""
-    return int(
-        redis.eval(
-            _ALLOCATE_WORKER_LUA,
-            2,
-            WORKER_ID_SEQ_KEY,
-            WORKERS_SET_KEY,
-            f"{PREFIX_WORKER}-",
-            *skip,
-        )
-    )
-
-
-async def allocate_worker_seq_async(
-    redis: AsyncRedisClient, skip: Iterable[str] = ()
-) -> int:
-    """Record a fresh worker id and return its sequence number."""
-    return int(
-        await redis.eval(
-            _ALLOCATE_WORKER_LUA,
-            2,
-            WORKER_ID_SEQ_KEY,
-            WORKERS_SET_KEY,
-            f"{PREFIX_WORKER}-",
-            *skip,
-        )
-    )
 
 
 # A write for a worker that is no longer a set member must not recreate a partial
@@ -293,13 +261,42 @@ class WorkerRegistry:
     # Worker lifecycle helpers
     # ------------------------------------------------------------------ #
 
+    def allocate_worker_seq(self, skip: Iterable[str] = ()) -> int:
+        """Record a fresh worker id and return its sequence number."""
+        return int(
+            self._rds.sync.eval(
+                _ALLOCATE_WORKER_LUA,
+                2,
+                WORKER_ID_SEQ_KEY,
+                WORKERS_SET_KEY,
+                f"{PREFIX_WORKER}-",
+                *skip,
+            )
+        )
+
+    async def allocate_worker_seq_async(self, skip: Iterable[str] = ()) -> int:
+        """Record a fresh worker id and return its sequence number."""
+        return int(
+            await self._rds.asyncio.eval(
+                _ALLOCATE_WORKER_LUA,
+                2,
+                WORKER_ID_SEQ_KEY,
+                WORKERS_SET_KEY,
+                f"{PREFIX_WORKER}-",
+                *skip,
+            )
+        )
+
     def register_worker(
         self,
         node_id: str,
         node_alias: str,
         worker_meta: dict[str, Any],
+        skip: Iterable[str] = (),
     ) -> str:
-        seq = allocate_worker_seq(self._rds.sync)
+        """Record a worker under a fresh id that no recorded worker holds and ``skip``
+        leaves out, stamping its id, incarnation and node into ``worker_meta``."""
+        seq = self.allocate_worker_seq(skip)
         worker_id = new_worker_id(seq)
         worker_meta["id"] = worker_id
         worker_meta["incarnation"] = seq
@@ -314,7 +311,7 @@ class WorkerRegistry:
         node_alias: str,
         worker_meta: dict[str, Any],
     ) -> str:
-        seq = await allocate_worker_seq_async(self._rds.asyncio)
+        seq = await self.allocate_worker_seq_async()
         worker_id = new_worker_id(seq)
         worker_meta["id"] = worker_id
         worker_meta["incarnation"] = seq
