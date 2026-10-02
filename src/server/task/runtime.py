@@ -738,9 +738,10 @@ class TaskRuntime:
         # transition reports. Set when resident-capacity control is enabled.
         self._resident_originate: Callable[[ToolInvocationEnvelope], bool] | None = None
         self._resident_task_ended: Callable[[str], None] | None = None
-        # Resident tasks last committed DISPATCHED, so a commit moving one elsewhere
-        # reports that its dispatch ended.
-        self._dispatched_resident: set[str] = set()
+        # The dispatch each resident task was last committed DISPATCHED under, so a
+        # commit moving it elsewhere, or under another dispatch, reports that the
+        # earlier dispatch ended.
+        self._dispatched_resident: dict[str, str | None] = {}
         self._resident_ack: Callable[[ResidentBootstrapAck], None] | None = None
         self._resident_outcome: Callable[[ResidentOpOutcome], None] | None = None
         self._resident_route_observation: (
@@ -1148,7 +1149,7 @@ class TaskRuntime:
         with self._cv:
             self._restore_merges_locked()
             self._dispatched_resident.update(
-                task_id
+                (task_id, record.dispatch_id)
                 for task_id, record in self._tasks.items()
                 if record.resident and record.status == TaskStatus.DISPATCHED
             )
@@ -1545,16 +1546,14 @@ class TaskRuntime:
 
     def _observe_resident_locked(self, record: TaskRecord) -> None:
         task_id = record.task_id
+        ended = task_id in self._dispatched_resident
         if record.status == TaskStatus.DISPATCHED:
-            self._dispatched_resident.add(task_id)
-            return
-        if task_id not in self._dispatched_resident and not (
-            record.status in TERMINAL_TASK_STATUSES
-            or record.status == TaskStatus.CANCELLING
-        ):
-            return
-        self._dispatched_resident.discard(task_id)
-        if self._resident_task_ended is not None:
+            ended = ended and self._dispatched_resident[task_id] != record.dispatch_id
+            self._dispatched_resident[task_id] = record.dispatch_id
+        else:
+            self._dispatched_resident.pop(task_id, None)
+            ended = ended or record.status in SETTLING_TASK_STATUSES
+        if ended and self._resident_task_ended is not None:
             self._resident_task_ended(task_id)
 
     def _persist_locked(self, *task_ids: str) -> None:
@@ -6627,9 +6626,7 @@ class TaskRuntime:
             return {
                 task_id
                 for task_id, record in self._tasks.items()
-                if record.resident
-                and record.status not in TERMINAL_TASK_STATUSES
-                and record.status != TaskStatus.CANCELLING
+                if record.resident and record.status not in SETTLING_TASK_STATUSES
             }
 
     def workflow_submitted_at(self, workflow_id: str) -> str | None:

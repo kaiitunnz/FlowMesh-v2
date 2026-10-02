@@ -5,6 +5,7 @@ and watchdog do, against the resident control ``build_resident_capacity`` wires 
 """
 
 import asyncio
+import contextlib
 import threading
 from typing import Any
 
@@ -192,5 +193,44 @@ def test_retiring_a_replica_leaves_its_admitted_credit_held() -> None:
         assert claim.state is not ClaimState.TERMINAL
         assert claim.holds_credit
         assert node.control.stores.credit_ledger.held(replica.replica_id) == 1
+
+    asyncio.run(run())
+
+
+def test_a_redispatch_behind_a_held_write_still_retires_the_replica() -> None:
+    async def run() -> None:
+        node = _Node()
+        _loop_bound(node)
+        replica = await _serving(node)
+        serve_task_id = replica.serve_task_id
+        assert serve_task_id is not None
+        commit = node.tasks.commit_transition
+        failures = [RuntimeError("control store unavailable")]
+
+        def flaky(*args: Any, **kwargs: Any) -> Any:
+            if failures:
+                raise failures.pop()
+            return commit(*args, **kwargs)
+
+        node.tasks.commit_transition = flaky  # type: ignore[method-assign]
+
+        def give_up() -> None:
+            # The give-up's commit fails and is held for the report's redelivery, so
+            # the requeue is in memory only.
+            with contextlib.suppress(RuntimeError):
+                node.runtime.mark_cancelled(serve_task_id, "wkr-1", {}, _TS)
+
+        await _off_loop(give_up)
+        assert node.status(serve_task_id) == TaskStatus.PENDING
+        await asyncio.sleep(0.05)
+        assert replica.state is ReplicaState.WARM
+
+        def redispatch() -> None:
+            stop = threading.Event()
+            assert node.runtime.next_ready(stop, timeout=0.01) == serve_task_id
+            record_dispatch(node.runtime, serve_task_id, "wkr-2", "dsp-next")
+
+        await _off_loop(redispatch)
+        await _until(lambda: replica.state is ReplicaState.PREEMPTED)
 
     asyncio.run(run())

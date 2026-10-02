@@ -22,7 +22,7 @@ from ..network.reverse_relay import RelaySessionStore
 from ..network.service import NetworkPlane
 from ..registries import WorkerRegistry
 from ..registries.resident import ResidentRegistry
-from ..task.models import TERMINAL_TASK_STATUSES, TaskStatus
+from ..task.models import SETTLING_TASK_STATUSES, TaskStatus
 from ..task.runtime import TaskRuntime
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
@@ -68,11 +68,7 @@ def build_resident_capacity(
 
     def stop(serve_task_id: str) -> None:
         record = runtime.get_record(serve_task_id)
-        if (
-            record is not None
-            and record.status not in TERMINAL_TASK_STATUSES
-            and record.status != TaskStatus.CANCELLING
-        ):
+        if record is not None and record.status not in SETTLING_TASK_STATUSES:
             runtime.cancel_workflow(
                 record.workflow_id, reason="resident replica teardown"
             )
