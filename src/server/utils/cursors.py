@@ -22,7 +22,7 @@ def encode_cursor(identity: Sequence[Any]) -> str:
 
 
 def decode_cursor(cursor: str) -> list[Any]:
-    """The identity a cursor encodes; raises InvalidCursor for anything else."""
+    """Return the identity a cursor encodes; raise InvalidCursor for anything else."""
     try:
         identity = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
     except (binascii.Error, UnicodeError, ValueError) as exc:
@@ -39,8 +39,9 @@ def page_slice(
     before: Any = None,
     newest: bool = False,
 ) -> slice:
-    """The ``limit`` positions of ascending ``keys`` strictly after, or strictly
-    before, a bound; with neither, the first ``limit``, or the last when ``newest``."""
+    """Select the ``limit`` positions of ascending ``keys`` strictly after, or
+    strictly before, a bound; with neither, the first ``limit``, or the last when
+    ``newest``."""
     if after is not None:
         start = bisect_right(keys, after)
         return slice(start, start + limit)
@@ -52,4 +53,21 @@ def page_slice(
     return slice(0, limit)
 
 
-__all__ = ["InvalidCursor", "decode_cursor", "encode_cursor", "page_slice"]
+def decode_position[T: (int, float)](cursor: str, kind: type[T]) -> tuple[T, str]:
+    """Return the ``(timestamp, id)`` position a cursor encodes; raise InvalidCursor
+    for anything else."""
+    match decode_cursor(cursor):
+        case [int() | float() as ts, str() as entry_id] if not isinstance(
+            ts, bool
+        ) and (kind is float or isinstance(ts, int)):
+            return kind(ts), entry_id
+    raise InvalidCursor(f"invalid cursor {cursor!r}")
+
+
+__all__ = [
+    "InvalidCursor",
+    "decode_cursor",
+    "decode_position",
+    "encode_cursor",
+    "page_slice",
+]

@@ -6759,8 +6759,8 @@ class TaskRuntime:
         before: TaskOrder | None = None,
         accessible: Collection[str] | None = None,
     ) -> list[TaskInfo]:
-        """The tasks matching ``query``, ordered by submission: the ``limit`` just
-        after or before a position, or the newest ``limit``.
+        """Return the tasks matching ``query``, ordered by submission: the ``limit``
+        just after or before a position, or the newest ``limit``.
 
         One pass under the lock matches record attributes and copies out the page's
         fields, so the page is one consistent snapshot; building runs outside it.
@@ -7062,8 +7062,9 @@ class TaskRuntime:
     def _task_info_fields_locked(
         self, task_id: str, record: TaskRecord
     ) -> dict[str, Any]:
-        """A task's ``TaskInfo`` fields, safe to build from after the lock is released:
-        the record's containers are copied, since some are appended to in place."""
+        """Copy out a task's ``TaskInfo`` fields to build from after the lock is
+        released; the record's containers are copied, since some are appended to in
+        place."""
         element = self._input_element_locked(task_id)
         return {
             **{

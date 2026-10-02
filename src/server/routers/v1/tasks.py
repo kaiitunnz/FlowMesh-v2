@@ -32,7 +32,7 @@ from ...schemas.logs import LogEntry, LogEvent, LogQueryResponse
 from ...schemas.tasks import TaskPage
 from ...task.models import TaskOrder
 from ...task.runtime import TaskInfo, TaskRuntime
-from ...utils.cursors import InvalidCursor, decode_cursor, encode_cursor
+from ...utils.cursors import decode_position, encode_cursor
 from ...utils.query import QueryFilter
 from ._listing import (
     PAGE_LIMIT_DEFAULT,
@@ -132,11 +132,7 @@ def _task_cursor(task: TaskInfo) -> str:
 
 
 def _decode_task_cursor(cursor: str) -> TaskOrder:
-    identity = decode_cursor(cursor)
-    match identity:
-        case [int() | float() as ts, str() as task_id] if not isinstance(ts, bool):
-            return float(ts), task_id
-    raise InvalidCursor(f"invalid cursor {cursor!r}")
+    return decode_position(cursor, float)
 
 
 @router.get(

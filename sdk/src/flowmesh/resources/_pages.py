@@ -25,8 +25,8 @@ def _page_params(
 def list_all(
     client: "BaseClient", path: str, params: list[tuple[str, str]]
 ) -> list[dict[str, Any]]:
-    """Every entry the endpoint lists, oldest first, walking back from the newest
-    page until an empty one."""
+    """Return every entry the endpoint lists, oldest first, walking back from the
+    newest page until an empty one."""
     params = _filter_params(params)
     pages: list[list[dict[str, Any]]] = []
     before: str | None = None
@@ -43,8 +43,8 @@ def list_all(
 async def list_all_async(
     client: "BaseAsyncClient", path: str, params: list[tuple[str, str]]
 ) -> list[dict[str, Any]]:
-    """Every entry the endpoint lists, oldest first, walking back from the newest
-    page until an empty one."""
+    """Return every entry the endpoint lists, oldest first, walking back from the
+    newest page until an empty one."""
     params = _filter_params(params)
     pages: list[list[dict[str, Any]]] = []
     before: str | None = None

@@ -53,7 +53,7 @@ from ...schemas.workflow import (
 from ...services.metrics import MetricsRecorder
 from ...task.runtime import TaskRuntime
 from ...task.v2 import CompileError, Diagnostic
-from ...utils.cursors import InvalidCursor, decode_cursor, encode_cursor
+from ...utils.cursors import decode_position, encode_cursor
 from ._listing import (
     PAGE_LIMIT_DEFAULT,
     PageAfter,
@@ -594,11 +594,7 @@ def _workflow_cursor(workflow: Workflow) -> str:
 
 
 def _decode_workflow_cursor(cursor: str) -> WorkflowOrder:
-    identity = decode_cursor(cursor)
-    match identity:
-        case [int() as ns, str() as workflow_id] if not isinstance(ns, bool):
-            return ns, workflow_id
-    raise InvalidCursor(f"invalid cursor {cursor!r}")
+    return decode_position(cursor, int)
 
 
 def _get_workflow_from_request(

@@ -26,7 +26,8 @@ def api_error(status_code: int, code: str, message: str) -> HTTPException:
 
 
 def query_filter(request: Request, fields: Collection[str]) -> QueryFilter:
-    """The request's filter over ``fields``; any other key is a 400."""
+    """Parse the request's filter over ``fields``; reject any other key with a
+    400."""
     try:
         return QueryFilter.parse(request.query_params, fields)
     except InvalidQuery as exc:
@@ -38,8 +39,8 @@ def query_filter(request: Request, fields: Collection[str]) -> QueryFilter:
 def page_bounds[K](
     after: str | None, before: str | None, decode: Callable[[str], K]
 ) -> tuple[K | None, K | None]:
-    """The decoded ``after``/``before`` cursors; both set, or one malformed, is a
-    400."""
+    """Decode the ``after``/``before`` cursors; reject both set, or one malformed,
+    with a 400."""
     if after and before:
         raise api_error(
             status.HTTP_400_BAD_REQUEST,

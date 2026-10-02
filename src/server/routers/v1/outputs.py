@@ -18,12 +18,18 @@ from ...schemas.outputs import (
     WorkflowOutputPage,
     WorkflowOutputValue,
 )
-from ...task.outputs import OutputMember, paginate_members
+from ...task.outputs import OutputMember, decode_member_cursor, paginate_members
 from ...task.results import ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
 from ...task.v2.representations.results import CardinalityKind
-from ...utils.cursors import InvalidCursor
-from ._listing import api_error
+from ._listing import (
+    PAGE_LIMIT_DEFAULT,
+    PageAfter,
+    PageBefore,
+    PageLimit,
+    api_error,
+    page_bounds,
+)
 
 router = APIRouter(prefix="/workflows", tags=["Outputs"])
 
@@ -80,36 +86,22 @@ def _present[M: WorkflowOutputMember](
 )
 async def list_outputs(
     workflow_id: str,
-    limit: int = Query(100, ge=1, le=1000, description="Maximum members to return."),
-    before: str | None = Query(
-        None, description="Return members strictly before this cursor."
-    ),
-    after: str | None = Query(
-        None, description="Return members strictly after this cursor."
-    ),
+    limit: PageLimit = PAGE_LIMIT_DEFAULT,
+    before: PageBefore = None,
+    after: PageAfter = None,
     output: str | None = Query(None, description="Only this output's members."),
     scope: str | None = Query(None, description="Only members in this scope."),
     principal: PrincipalContext = Depends(authenticate_connection),
     runtime: TaskRuntime = Depends(get_runtime),
     logger: logging.Logger = Depends(get_logger),
 ) -> WorkflowOutputPage:
-    if before and after:
-        raise api_error(
-            status.HTTP_400_BAD_REQUEST,
-            "invalid_request",
-            "only one of before/after may be set",
-        )
+    after_bound, before_bound = page_bounds(after, before, decode_member_cursor)
     await _authorize(workflow_id, principal, logger)
     outputs = runtime.published_outputs(workflow_id, output)
     if outputs is None:
         raise _no_outputs(workflow_id)
     members = [m for m in outputs.members if scope is None or m.scope_id == scope]
-    try:
-        selected = paginate_members(members, limit, after=after, before=before)
-    except InvalidCursor as exc:
-        raise api_error(
-            status.HTTP_400_BAD_REQUEST, "invalid_cursor", str(exc)
-        ) from exc
+    selected = paginate_members(members, limit, after=after_bound, before=before_bound)
     entries = [
         _present(WorkflowOutputEntry, member, cursor=member.cursor)
         for member in selected

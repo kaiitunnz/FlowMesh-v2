@@ -87,16 +87,14 @@ def published_member(
 def paginate_members(
     members: list[OutputMember],
     limit: int,
-    after: str | None = None,
-    before: str | None = None,
+    after: tuple[Any, ...] | None = None,
+    before: tuple[Any, ...] | None = None,
 ) -> list[OutputMember]:
-    """The ``limit`` members strictly after, or strictly before, a cursor."""
+    """Select the ``limit`` members strictly after, or strictly before, a decoded
+    cursor position."""
     ordered = sorted(members, key=lambda member: member.order)
     window = page_slice(
-        [member.order for member in ordered],
-        limit,
-        after=_decode_cursor(after) if after is not None else None,
-        before=_decode_cursor(before) if before is not None else None,
+        [member.order for member in ordered], limit, after=after, before=before
     )
     return ordered[window]
 
@@ -116,7 +114,8 @@ def _member(
     )
 
 
-def _decode_cursor(cursor: str) -> tuple[Any, ...]:
+def decode_member_cursor(cursor: str) -> tuple[Any, ...]:
+    """Return the member position a cursor encodes; raise InvalidCursor otherwise."""
     identity = decode_cursor(cursor)
     if len(identity) != 4:
         raise InvalidCursor(f"invalid cursor {cursor!r}")
@@ -143,6 +142,7 @@ __all__ = [
     "OutputMember",
     "PublishedOutput",
     "PublishedOutputs",
+    "decode_member_cursor",
     "paginate_members",
     "published_member",
     "published_members",

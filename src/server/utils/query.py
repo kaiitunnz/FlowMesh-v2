@@ -23,7 +23,7 @@ from typing import Any, Self
 from pydantic import BaseModel
 from starlette.datastructures import QueryParams
 
-PAGE_PARAMS = frozenset({"limit", "before", "after"})
+_PAGE_PARAMS = frozenset({"limit", "before", "after"})
 
 _MISSING = object()
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -45,9 +45,9 @@ class QueryFilter:
         cls,
         params: QueryParams | Mapping[str, str],
         fields: Collection[str],
-        reserved: Collection[str] = PAGE_PARAMS,
     ) -> Self:
-        """Collect a query's terms; raises InvalidQuery for a key not in ``fields``."""
+        """Collect a query's filter terms, skipping the paging parameters; raise
+        InvalidQuery for a key not in ``fields``."""
         items = (
             params.multi_items()
             if isinstance(params, QueryParams)
@@ -56,7 +56,7 @@ class QueryFilter:
         terms: dict[str, list[str]] = {}
         for key, value in items:
             key = str(key)
-            if key in reserved:
+            if key in _PAGE_PARAMS:
                 continue
             if key not in fields:
                 raise InvalidQuery(f"unsupported filter {key!r}")
@@ -67,7 +67,8 @@ class QueryFilter:
         return bool(self.terms)
 
     def values(self, key: str) -> frozenset[str] | None:
-        """The values a key accepts, or None when the query does not name it."""
+        """Return the values a key accepts, or None when the query does not name
+        it."""
         values = self.terms.get(key)
         return frozenset(values) if values is not None else None
 
@@ -119,4 +120,4 @@ def _matches(value: Any, key: str, accepted: tuple[str, ...]) -> bool:
     return any(str(value) == v for v in accepted)
 
 
-__all__ = ["PAGE_PARAMS", "InvalidQuery", "QueryFilter"]
+__all__ = ["InvalidQuery", "QueryFilter"]
