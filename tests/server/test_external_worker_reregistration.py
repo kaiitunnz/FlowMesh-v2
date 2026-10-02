@@ -139,6 +139,11 @@ def _register(client: SupervisorClient) -> None:
     )
 
 
+# Well under a lane's 30 s rebind bound, so a re-registration whose event thread waits
+# on a rebind fails rather than stalls.
+_REREGISTERED_WITHIN_SEC = 10.0
+
+
 async def _until(condition: Callable[[], bool], timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     while not condition():
@@ -334,10 +339,17 @@ async def test_a_worker_holding_content_moves_to_its_new_registration(
         try:
             await _until(lambda: client.worker_id != old_id)
             new_id = client.worker_id
-            await _until(lambda: _relayed(second, "REGISTER", new_id))
-            await _until(lambda: _relayed(second, "CONTENT_HOLDING", new_id))
+            await _until(
+                lambda: _relayed(second, "REGISTER", new_id), _REREGISTERED_WITHIN_SEC
+            )
+            await _until(
+                lambda: _relayed(second, "CONTENT_HOLDING", new_id),
+                _REREGISTERED_WITHIN_SEC,
+            )
             await asyncio.to_thread(client.heartbeat)
-            await _until(lambda: _relayed(second, "HEARTBEAT", new_id))
+            await _until(
+                lambda: _relayed(second, "HEARTBEAT", new_id), _REREGISTERED_WITHIN_SEC
+            )
         finally:
             await second.stop()
     finally:
@@ -388,9 +400,13 @@ async def test_a_worker_streaming_a_resident_session_moves_to_its_new_registrati
         try:
             await _until(lambda: client.worker_id != old_id)
             new_id = client.worker_id
-            await _until(lambda: _relayed(second, "REGISTER", new_id))
+            await _until(
+                lambda: _relayed(second, "REGISTER", new_id), _REREGISTERED_WITHIN_SEC
+            )
             await asyncio.to_thread(client.heartbeat)
-            await _until(lambda: _relayed(second, "HEARTBEAT", new_id))
+            await _until(
+                lambda: _relayed(second, "HEARTBEAT", new_id), _REREGISTERED_WITHIN_SEC
+            )
         finally:
             await second.stop()
     finally:
