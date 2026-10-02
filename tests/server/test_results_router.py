@@ -1,6 +1,7 @@
 import io
 import logging
 import stat
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException, UploadFile, status
+from fastapi import BackgroundTasks, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from fastapi.routing import APIRoute
 from lumid_hooks import PrincipalContext, ResourceRef
@@ -23,6 +24,7 @@ from shared.content import (
 )
 from shared.schemas.result import RESULT_MEDIA_TYPE, ResultEnvelope
 from shared.tasks.result_binding import ResultBinding
+from shared.utils import atomic
 
 
 class _UnreachableStore(SharedFilesystemObjectStore):
@@ -202,16 +204,16 @@ async def test_upload_result_file_shares_the_task_directories_before_writing(
     tmp_path: Path, logger: logging.Logger
 ) -> None:
     task_dir = tmp_path / "task-1"
-    open_path = Path.open
+    write = results_router.atomic_write_stream
     modes_at_write: dict[str, int] = {}
 
-    def _open(path: Path, *args: Any, **kwargs: Any) -> Any:
+    def _write(target: Path, source: Any) -> None:
         for directory in (task_dir, task_dir / "artifacts", task_dir / "logs"):
             if directory.is_dir():
                 modes_at_write[directory.name] = stat.S_IMODE(directory.stat().st_mode)
-        return open_path(path, *args, **kwargs)
+        write(target, source)
 
-    with patch.object(Path, "open", autospec=True, side_effect=_open):
+    with patch.object(results_router, "atomic_write_stream", _write):
         await results_router.upload_result_file(
             task_id="task-1",
             file=UploadFile(file=io.BytesIO(b"x"), filename="out.txt"),
@@ -295,3 +297,67 @@ async def test_download_results_json_reads_the_stored_envelope(
 
     assert response.body == stored
     assert response.media_type == RESULT_MEDIA_TYPE
+
+
+@pytest.mark.anyio
+async def test_upload_result_file_copies_in_chunks_off_the_event_loop(
+    tmp_path: Path, logger: logging.Logger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copies: list[tuple[int, int]] = []
+    copy = atomic.shutil.copyfileobj
+
+    def _recording(source: Any, target: Any, length: int = 0) -> None:
+        copies.append((threading.get_ident(), length))
+        copy(source, target, length)
+
+    async def _whole_read(*args: Any) -> bytes:
+        raise AssertionError("the upload was read whole")
+
+    monkeypatch.setattr(atomic.shutil, "copyfileobj", _recording)
+    upload = UploadFile(file=io.BytesIO(b"x" * 10), filename="out.bin")
+    monkeypatch.setattr(upload, "read", _whole_read)
+
+    await results_router.upload_result_file(
+        task_id="task-1",
+        file=upload,
+        runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+        principal=_principal(),
+        results_dir=tmp_path,
+        logger=logger,
+    )
+
+    assert copies == [(copies[0][0], 1 << 20)]
+    assert copies[0][0] != threading.get_ident()
+    assert (tmp_path / "task-1" / "artifacts" / "out.bin").read_bytes() == b"x" * 10
+
+
+@pytest.mark.anyio
+async def test_download_result_bundle_builds_off_the_event_loop(
+    tmp_path: Path, logger: logging.Logger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    threads: list[int] = []
+    build = results_router._create_result_bundle_archive
+
+    def _recording(*args: Any, **kwargs: Any) -> Path:
+        threads.append(threading.get_ident())
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(results_router, "_create_result_bundle_archive", _recording)
+    stub = SimpleNamespace(
+        get_record=lambda _task_id: None,
+        read_result_bytes=lambda _task_id: b"{}",
+    )
+
+    response = await results_router.download_result_bundle(
+        task_id="t-1",
+        background_tasks=BackgroundTasks(),
+        include=[],
+        principal=_principal(),
+        runtime=cast(Any, stub),
+        results_dir=tmp_path,
+        logger=logger,
+    )
+
+    assert isinstance(response, FileResponse)
+    assert threads and threads[0] != threading.get_ident()
+    Path(response.path).unlink()
