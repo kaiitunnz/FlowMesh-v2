@@ -18,6 +18,7 @@ from shared.tools.contract import (
     ToolOutcomeStatus,
 )
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.servicer_helpers import ServicerHarness, WorkerContext
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import LINEAR, FakeRegistry
 from tests.server.task.test_v2_orchestration import _register as _register_v2
@@ -29,7 +30,6 @@ from tests.server.task.test_worker_originated_boundary import (
     _register,
     _runtime,
 )
-from tests.server.test_worker_binding_reconcile import _Context, _Harness
 
 
 def test_an_attached_worker_gets_its_pending_operation_re_minted() -> None:
@@ -113,11 +113,11 @@ def test_an_attached_worker_is_interrupted_again_for_its_cancelling_task() -> No
 
 @pytest.mark.asyncio
 async def test_a_task_stream_attaching_tells_the_root() -> None:
-    harness = _Harness()
+    harness = ServicerHarness()
     worker_id = await harness.register()
     listener = cast(MagicMock, harness.servicer._task_listener)
     listener.attach_stream.return_value = MagicMock(next=_closed_stream)
-    async for _ in harness.servicer.StreamTasks(Empty(), cast(Any, _Context())):
+    async for _ in harness.servicer.StreamTasks(Empty(), cast(Any, WorkerContext())):
         pass
 
     runtime = MagicMock()

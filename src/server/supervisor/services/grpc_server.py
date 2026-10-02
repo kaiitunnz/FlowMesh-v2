@@ -132,10 +132,20 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self._registered: RecentSet[str] = RecentSet(_RELEASED_ID_MEMORY)
         self._unregistered_lock = Lock()
         self._pending_unregisters: set[asyncio.Task[None]] = set()
+        # Set once this supervisor starts stopping: a worker it admitted then would be
+        # admitted again by the next supervisor, leaving a ghost id behind.
+        self._stopping = False
+
+    def begin_shutdown(self) -> None:
+        """Refuse registrations from now on, so a worker registers with the next
+        supervisor instead."""
+        self._stopping = True
 
     def reconcile_workers(self) -> None:
         """Release every binding whose record the root does not hold for this node, so
         the worker registers again."""
+        if self._stopping:
+            return
         with self._lock:
             gone = self._unowned_bindings_locked()
             released = sum(self._registry.retire(worker_id) for worker_id in gone)
@@ -225,6 +235,10 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         request: supervisor_pb2.RegisterRequest,
         context: grpc.aio.ServicerContext,
     ) -> supervisor_pb2.RegisterResponse:
+        if self._stopping:
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE, "Supervisor is shutting down"
+            )
         token = _token_from_context(context)
         if not token:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid worker token")
@@ -545,6 +559,10 @@ class GrpcServer:
     def rebind_node(self, node_id: str) -> None:
         """Re-home registered workers under a new node id."""
         self._servicer.rebind_node(node_id)
+
+    def begin_shutdown(self) -> None:
+        """Refuse worker registrations while the supervisor stops."""
+        self._servicer.begin_shutdown()
 
     def reconcile_workers(self) -> None:
         """Release the workers the root does not record for this node."""

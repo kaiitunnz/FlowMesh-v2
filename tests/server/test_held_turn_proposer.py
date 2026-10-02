@@ -10,6 +10,7 @@ from server.task.runtime import TaskRuntime
 from shared.grpc.supervisor.v1 import supervisor_pb2
 from shared.schemas.event import parse_event
 from shared.tools.contract import AgentModelTurnProposal
+from tests.server.servicer_helpers import ServicerHarness, WorkerContext
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_worker_originated_boundary import (
     _MODEL_WF,
@@ -20,7 +21,6 @@ from tests.server.task.test_worker_originated_boundary import (
     _register,
     _runtime,
 )
-from tests.server.test_worker_binding_reconcile import _Context, _Harness
 
 
 async def _proposal_stream(
@@ -48,10 +48,11 @@ async def _relay_proposal(
 ) -> str:
     """Relay one proposal through a supervisor whose stream authenticates as its own
     worker, and hand what it relays to the root; returns the authenticated id."""
-    harness = _Harness()
+    harness = ServicerHarness()
     stream_worker = await harness.register()
     await harness.servicer.PushEvents(
-        _proposal_stream(writer, claimed_worker, dispatch_id), cast(Any, _Context())
+        _proposal_stream(writer, claimed_worker, dispatch_id),
+        cast(Any, WorkerContext()),
     )
     monitor = _monitor(runtime)
     for relayed in harness.relay.events:

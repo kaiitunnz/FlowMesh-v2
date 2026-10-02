@@ -598,6 +598,7 @@ def _run_supervisor(
 
         # Shutdown — reverse order
         logger.info("Supervisor shutting down ...")
+        grpc_server.begin_shutdown()
         # Publish unregister event early to allow the server to handle before being
         # timed out
         lifecycle.publish_unregister()
