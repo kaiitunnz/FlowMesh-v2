@@ -17,6 +17,7 @@ from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import CapturingDispatcher, WorkflowRegistryStub
 from tests.server.result_store import make_result_reader
+from tests.support.waiting import pop_ready
 
 _HOLDER = OwnerFence(worker_id="wkr-holder", incarnation=1)
 
@@ -157,7 +158,7 @@ def _waiting_episode(
     """An owner-affine episode whose holder runs a serve task; no worker is idle."""
     runtime = _runtime()
     serve = _register(runtime, _SERVE, resident=resident)
-    assert runtime.next_ready(mock.Mock(is_set=lambda: False), timeout=0.01) == serve
+    assert pop_ready(runtime) == serve
     record_dispatch(runtime, serve, _HOLDER.worker_id)
     episode = _register(runtime, _ECHO_WORKFLOW)
     runtime.private_state_owner = mock.Mock(  # type: ignore[method-assign]

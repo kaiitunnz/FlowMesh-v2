@@ -4,7 +4,6 @@ order over a real task runtime and the wired resident control."""
 import asyncio
 import json
 import logging
-import threading
 from collections.abc import Awaitable, Callable
 from typing import Any, Self, cast
 
@@ -28,7 +27,7 @@ from tests.server.task.test_resident_origin_loss import (
 )
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register
 from tests.server.task.test_worker_originated_boundary import _WorkerStub
-from tests.support.waiting import until
+from tests.support.waiting import pop_ready, until
 
 TS = "2026-06-01T00:00:00Z"
 SYSTEM = PrincipalContext(
@@ -167,7 +166,7 @@ class Node:
         self, task_id: str, worker_id: str = "wkr-1", dispatch_id: str | None = None
     ) -> None:
         """Hand the next ready task, which must be ``task_id``, to a worker."""
-        assert self.runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+        assert pop_ready(self.runtime) == task_id
         record_dispatch(
             self.runtime, task_id, worker_id, dispatch_id or new_dispatch_id()
         )

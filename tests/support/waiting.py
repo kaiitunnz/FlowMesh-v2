@@ -1,7 +1,10 @@
 """Await a condition another task or thread brings about."""
 
 import asyncio
+import threading
 from collections.abc import Callable
+
+from server.task.runtime import TaskRuntime
 
 
 async def until(
@@ -13,3 +16,14 @@ async def until(
     while not condition():
         assert loop.time() < deadline, "condition not reached in time"
         await asyncio.sleep(interval)
+
+
+def pop_ready(runtime: TaskRuntime, timeout: float = 1.0) -> str | None:
+    """The next ready task, or None once ``timeout`` passes with none ready."""
+    stop = threading.Event()
+    timer = threading.Timer(timeout, stop.set)
+    timer.start()
+    try:
+        return runtime.next_ready(stop, timeout=0.01)
+    finally:
+        timer.cancel()
