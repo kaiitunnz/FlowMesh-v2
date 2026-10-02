@@ -610,8 +610,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side. A task listing matches and copies out its page in
-  one pass under the runtime lock and builds and serializes it in a worker
-  thread, so a listing never holds the event loop.
+  one pass under the runtime lock, and builds and serializes it in a worker
+  thread.
 - **Cluster telemetry.** A workflow emits one OpenTelemetry trace spanning the processes
   that act on it — the root server's control plane and each worker that runs a task,
   with a supervisor relaying frames it never decodes and so never records — with a

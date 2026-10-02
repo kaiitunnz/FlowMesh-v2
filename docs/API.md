@@ -88,11 +88,12 @@ The outcome-finalization index: the binding from a fabric idempotency key to the
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/workers` | List workers. Filters: `alias`, `namespace`, `cluster`, `status`, `tags`. |
+| GET | `/api/v1/workers` | List workers. Filters: `id`, `alias`, `namespace`, `cluster`, `node_id`, `node_alias`, `status`, `tags`, `stale`, `cached_models`, `hardware.cpu.model`, `hardware.gpu.cuda_version`. |
 | GET | `/api/v1/workers/{id}` | Worker details + hardware. |
-| GET | `/api/v1/nodes` | List nodes (supervisors). |
+| GET | `/api/v1/nodes` | List nodes (supervisors). Filters: `id`, `namespace`, `cluster`, `alias`, `tags`. |
 | POST | `/api/v1/nodes/register` | Register a node; `409 Conflict` while another live node holds the same alias, with the held lease's `lease_remaining_ms`. |
-| GET | `/api/v1/nodes/{id}/workers` | List workers under a node. |
+| GET | `/api/v1/nodes/{id}/workers` | List workers under a node. Filters: `id`, `alias`, `namespace`, `cluster`, `node_id`, `node_alias`, `provider`, `status`, `hardware.cpu.model`, `hardware.gpu.cuda_version`. |
+| GET | `/api/v1/nodes/workers` | List workers across every node, with the same filters. |
 | POST | `/api/v1/nodes/{id}/workers/register` | Register worker under node. |
 | POST | `/api/v1/nodes/{id}/workers/{alias}/{start,stop}` | Start/stop a worker. |
 
@@ -110,7 +111,7 @@ calls.
 | Method | Path | Description |
 |--------|------|-------------|
 | WS | `/api/v1/ssh/tasks/{task_id}/proxy` | WebSocket SSH proxy for proxy- and forward-mode SSH tasks. |
-| GET | `/api/v1/ssh/connections` | List active SSH proxy/forward connections the server is relaying. |
+| GET | `/api/v1/ssh/connections` | List active SSH proxy/forward connections the server is relaying. Filters: `connection_id`, `access_mode`, `task_id`, `workflow_id`, `worker_id`, `node_id`, `username`, `source_ip`, `source_port`. |
 
 Server policy toggles: `ENABLE_SERVER_SSH_PROXY`,
 `ENABLE_SERVER_PORT_FORWARD`, `ENABLE_SERVER_SSH_CONNECTION_REGISTRY`.
