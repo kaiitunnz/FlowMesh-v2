@@ -180,6 +180,8 @@ defaults to 100, at most 1000. A request setting both cursors is a `400` with
 ## List filters
 
 A list route with a `Filters:` entry matches each filter exactly, as a string.
+A boolean field matches `true`, `1`, `yes` or `on` and `false`, `0`, `no` or
+`off`, in any case, and a comma-separated `tags` string matches any of its tags.
 A repeated filter matches any of its values, and different filters all apply. A
 list field matches when it holds a value, a dotted filter reads a nested field,
 and a field that is unset, or whose parent is unset, matches `null`. Any other
