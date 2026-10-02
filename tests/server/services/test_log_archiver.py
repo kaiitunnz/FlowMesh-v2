@@ -1,7 +1,6 @@
 import logging
 import stat
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -43,9 +42,7 @@ def test_probing_an_archived_task_leaves_its_directory_alone(
     task_dir = logs_path.parent.parent
     for directory in (task_dir, logs_path.parent):
         directory.chmod(0o755)
-    runtime.list_tasks.return_value = [
-        SimpleNamespace(task_id="tsk-1", status=TaskStatus.DONE)
-    ]
+    runtime.task_statuses.return_value = {"tsk-1": TaskStatus.DONE}
 
     with patch.object(log_archiver.time, "sleep"):
         archiver._tick()

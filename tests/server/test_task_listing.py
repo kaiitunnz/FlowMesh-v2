@@ -8,7 +8,8 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -22,6 +23,8 @@ from server.app_state import get_logger, get_runtime
 from server.auth.security import authenticate_connection
 from server.routers.v1 import tasks as tasks_router
 from server.schemas.tasks import TaskPage
+from server.services import log_archiver
+from server.services.log_archiver import TaskLogArchiver
 from server.task import runtime as runtime_module
 from server.task.models import TaskInfo
 from server.task.runtime import TaskRuntime
@@ -407,3 +410,20 @@ def test_a_listing_never_redacts(
     for record in list(listing.runtime.tasks.values())[:50]:
         record.model_dump_json()
     assert calls == ["native"]
+
+
+def test_the_log_archiver_builds_no_task_info(
+    listing: _Listing, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    built = _count_task_infos(monkeypatch)
+    archiver = TaskLogArchiver(cast(Any, None), listing.runtime, tmp_path, _LOGGER)
+    tracked: list[str] = []
+    monkeypatch.setattr(
+        archiver, "_ensure_task", lambda task_id, now: tracked.append(task_id)
+    )
+    monkeypatch.setattr(log_archiver.time, "sleep", lambda _: None)
+
+    archiver._tick()
+
+    assert built == []
+    assert sorted(tracked) == sorted(listing.runtime.tasks)

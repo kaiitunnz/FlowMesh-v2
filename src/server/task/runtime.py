@@ -6747,12 +6747,9 @@ class TaskRuntime:
                 return None
             return self._build_task_info_locked(task_id, record)
 
-    def list_tasks(self) -> list[TaskInfo]:
+    def task_statuses(self) -> dict[str, str]:
         with self._lock:
-            return [
-                self._build_task_info_locked(task_id, record)
-                for task_id, record in self._tasks.items()
-            ]
+            return {task_id: record.status for task_id, record in self._tasks.items()}
 
     def task_page(
         self,
