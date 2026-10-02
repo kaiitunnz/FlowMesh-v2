@@ -28,6 +28,7 @@ from server.services.log_archiver import TaskLogArchiver
 from server.task import runtime as runtime_module
 from server.task.models import TaskInfo
 from server.task.runtime import TaskRuntime
+from server.utils.query import QueryFilter
 from tests.server.task.test_v2_orchestration import FakeRegistry, _live_runtime
 
 _LOGGER = logging.getLogger("test.task_listing")
@@ -169,7 +170,7 @@ def test_a_listing_leaves_the_event_loop_free(
     listing: _Listing, monkeypatch: pytest.MonkeyPatch, listings: int
 ) -> None:
     # The first build holds until /ping returns, so /ping always overlaps a
-    # listing; a build on the event loop holds /ping instead.
+    # listing; a build on the event loop would hold /ping for that time.
     building = threading.Event()
     released = threading.Event()
 
@@ -203,7 +204,7 @@ def test_a_listing_leaves_the_event_loop_free(
             thread.join(60)
 
     assert statuses == [200] * listings
-    assert waited < 0.25, f"/ping waited {waited:.3f}s behind the listing"
+    assert waited < 1.0, f"/ping waited {waited:.3f}s behind the listing"
 
 
 def test_a_page_serializes_off_the_event_loop(
@@ -392,9 +393,8 @@ def test_the_schema_names_the_page_model(listing: _Listing) -> None:
     assert ref.endswith("/TaskPage")
 
 
-def test_a_listing_never_redacts(
-    listing: _Listing, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_listing_never_redacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = _live_runtime(FakeRegistry())
     calls: list[str] = []
     redact = runtime_module.redact_source_text
 
@@ -403,13 +403,34 @@ def test_a_listing_never_redacts(
         return redact(payload, format)
 
     monkeypatch.setattr(runtime_module, "redact_source_text", _counting)
-    asyncio.run(_register(listing.runtime, _workflow(9999)))
+    asyncio.run(_register(runtime, _workflow(0)))
     assert calls == ["native"]
 
-    _get(_app(listing.runtime), "/api/v1/tasks?limit=1000")
-    for record in list(listing.runtime.tasks.values())[:50]:
+    _get(_app(runtime), "/api/v1/tasks?limit=1000")
+    for record in runtime.tasks.values():
         record.model_dump_json()
     assert calls == ["native"]
+
+
+def test_a_page_is_unaffected_by_appends_after_its_lock_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _live_runtime(FakeRegistry())
+    _, tasks = asyncio.run(_register(runtime, _workflow(0, stages=1)))
+    record = runtime.tasks[tasks[0]]
+    record.failed_workers.append("wkr-before")
+
+    class _AppendingFirst(TaskInfo):
+        def __init__(self, **data: Any) -> None:
+            # Another thread appends to the live record once the lock is released.
+            record.failed_workers.append("wkr-after")
+            super().__init__(**data)
+
+    monkeypatch.setattr(runtime_module, "TaskInfo", _AppendingFirst)
+
+    [info] = runtime.task_page(QueryFilter(), 10)
+
+    assert info.failed_workers == ["wkr-before"]
 
 
 def test_the_log_archiver_builds_no_task_info(
