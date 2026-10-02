@@ -183,7 +183,7 @@ class FakeRegistry:
 
 class _WorkerRegistryStub:
     def get_worker(self, worker_id: str) -> Any:
-        return SimpleNamespace(id=worker_id, node_id="nde-1", node_alias="node-1")
+        return SimpleNamespace(id=worker_id, node_id="nde-1")
 
     def publish_interrupt(self, *args: Any) -> int:
         return 0
@@ -207,7 +207,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
 
 
 def _worker(worker_id: str = "wkr-1") -> Any:
-    return SimpleNamespace(id=worker_id, node_id="nde-1", node_alias="node-1")
+    return SimpleNamespace(id=worker_id, node_id="nde-1")
 
 
 async def _register(runtime: TaskRuntime, payload: str) -> tuple[str, dict[str, str]]:

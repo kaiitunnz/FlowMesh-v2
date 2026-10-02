@@ -159,7 +159,7 @@ class FakeWorkflowRegistry:
 
 class _WorkerRegistryStub:
     def get_worker(self, worker_id: str) -> Any:
-        return SimpleNamespace(id=worker_id, node_id="nde-1", node_alias="node-1")
+        return SimpleNamespace(id=worker_id, node_id="nde-1")
 
     def publish_interrupt(self, *args: Any) -> int:
         return 0
@@ -264,7 +264,7 @@ async def test_rehydrate_restores_completed_and_ready_state() -> None:
     _, ids = await _register(runtime, GRAPH)
     a, b = ids["a"], ids["b"]
 
-    worker = SimpleNamespace(id="wkr-1", node_id="nde-1", node_alias="node-1")
+    worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
     record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
 
@@ -292,7 +292,7 @@ async def test_rehydrate_keeps_in_flight_task_dispatched() -> None:
     _, ids = await _register(runtime, GRAPH)
     a = ids["a"]
 
-    worker = SimpleNamespace(id="wkr-9", node_id="nde-1", node_alias="node-1")
+    worker = SimpleNamespace(id="wkr-9", node_id="nde-1")
     record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
@@ -331,7 +331,7 @@ async def test_mark_succeeded_is_idempotent_under_replay() -> None:
     _, ids = await _register(runtime, GRAPH)
     a, b = ids["a"], ids["b"]
 
-    worker = SimpleNamespace(id="wkr-1", node_id="nde-1", node_alias="node-1")
+    worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
     record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     # A replayed completion must not re-apply.
@@ -352,7 +352,7 @@ async def test_rehydrated_in_flight_task_is_protected_then_released() -> None:
     _, ids = await _register(runtime, GRAPH)
     a = ids["a"]
 
-    worker = SimpleNamespace(id="wkr-7", node_id="nde-1", node_alias="node-1")
+    worker = SimpleNamespace(id="wkr-7", node_id="nde-1")
     record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
@@ -372,7 +372,7 @@ async def test_rehydrated_protection_clears_on_completion() -> None:
     _, ids = await _register(runtime, GRAPH)
     a = ids["a"]
 
-    worker = SimpleNamespace(id="wkr-7", node_id="nde-1", node_alias="node-1")
+    worker = SimpleNamespace(id="wkr-7", node_id="nde-1")
     record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
@@ -390,7 +390,7 @@ async def test_recover_clears_rehydrated_protection() -> None:
     _, ids = await _register(runtime, GRAPH)
     a = ids["a"]
 
-    worker = SimpleNamespace(id="wkr-7", node_id="nde-1", node_alias="node-1")
+    worker = SimpleNamespace(id="wkr-7", node_id="nde-1")
     record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
@@ -406,7 +406,7 @@ async def test_terminal_task_does_not_regress_on_replayed_dispatch_or_start() ->
     _, ids = await _register(runtime, GRAPH)
     a = ids["a"]
 
-    worker = SimpleNamespace(id="wkr-1", node_id="nde-1", node_alias="node-1")
+    worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
     record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
 

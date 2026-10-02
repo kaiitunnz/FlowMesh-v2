@@ -932,14 +932,10 @@ class EventMonitor:
                     worker_id, node_alias
                 ):
                     self._logger.warning(
-                        "Node %s unregistered %s, which another node now holds; "
-                        "recovering only what %s's worker held",
+                        "Ignoring node %s's unregister of %s, which another node "
+                        "holds",
                         node_alias,
                         worker_id,
-                        node_alias,
-                    )
-                    self._return_lost_tasks(
-                        worker_id, graceful=event.graceful, node_alias=node_alias
                     )
                     return
                 if worker_id:
@@ -1086,25 +1082,17 @@ class EventMonitor:
             )
 
     def _return_lost_tasks(
-        self,
-        worker_id: str,
-        graceful: bool,
-        node_id: str | None = None,
-        node_alias: str | None = None,
+        self, worker_id: str, graceful: bool, node_id: str | None = None
     ) -> None:
         """Return the tasks a departed worker held, settling any being cancelled.
 
         A worker that left on its own shutdown gave its tasks up, so they return
-        without spending an attempt; any other departure spends one. ``node_alias``
-        returns only what that node's worker held.
+        without spending an attempt; any other departure spends one.
         """
         requeued: list[str] = []
         ts = now_iso()
         recovery = self._runtime.recover_tasks_for_worker(
-            worker_id,
-            spend_attempt=not graceful,
-            node_id=node_id,
-            node_alias=node_alias,
+            worker_id, spend_attempt=not graceful, node_id=node_id
         )
         self.record_worker_losses(worker_id, recovery.resolved, "worker_unregistered")
         for task_id in recovery.lost:
