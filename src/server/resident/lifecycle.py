@@ -152,7 +152,7 @@ class LifecycleScaleManager:
         self._persist()
         try:
             serve_task_id = await self._materialize_fn(family, replica)
-        except Exception:
+        except BaseException:
             # A failed cold start must not wedge the family: invalidate the replica so a
             # later demand can materialize again, and let the caller settle the claim.
             self.on_preempt(replica.replica_id)

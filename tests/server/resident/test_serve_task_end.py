@@ -373,18 +373,21 @@ def test_a_requeued_cold_start_that_never_redispatches_ends_at_its_deadline() ->
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "error", [RuntimeError("resource registry unavailable"), asyncio.CancelledError()]
+)
 def test_a_cold_start_whose_registrar_raises_leaves_no_serve_task(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
 ) -> None:
     async def failing_registrar(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("resource registry unavailable")
+        raise error
 
     monkeypatch.setattr(materializer, "register_resource", failing_registrar)
 
     async def run() -> None:
         node = Node()
         _loop_bound(node)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(type(error)):
             await node.materialize_async()
 
         (replica,) = node.control.stores.directory.all()
