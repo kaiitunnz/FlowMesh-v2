@@ -930,8 +930,11 @@ class Runner:
             executing = task_id is not None and self._runs_locked(task_id, dispatch_id)
         with self._boundary_lanes_lock:
             resident_host = self._resident_host
+            sidecar = self._mediated_sidecar
         if resident_host is not None:
             resident_host.unbind_replicas()
+        if sidecar is not None:
+            sidecar.forget_outcomes()
         if task_id is None:
             return
         self.logger.warning("Abandoning task %s: this worker re-registered", task_id)

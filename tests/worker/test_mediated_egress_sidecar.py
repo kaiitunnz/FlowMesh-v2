@@ -211,6 +211,20 @@ def test_a_re_minted_permit_gets_the_outcome_already_produced() -> None:
     h.stop()
 
 
+def test_a_forgotten_outcome_is_produced_again() -> None:
+    h = _Harness(ToolOutcome(status=ToolOutcomeStatus.QUOTA, value="q"))
+    h.stash()
+    h.sidecar.submit_permit(_permit())
+    h.report()
+
+    h.sidecar.forget_outcomes()
+    h.sidecar.submit_permit(_permit(invocation_id="inv-2"))
+    h.report()
+
+    assert h.egress.calls == 2
+    h.stop()
+
+
 def test_redrive_after_materialize_recovers_the_prior_outcome() -> None:
     store = InMemoryContentStore()
     h = _Harness(

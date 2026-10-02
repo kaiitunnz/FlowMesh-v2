@@ -96,6 +96,27 @@ def test_abandoning_a_dispatch_unbinds_the_replicas_served_before(
     resident_host.unbind_replicas.assert_called_once_with()
 
 
+def test_abandoning_a_dispatch_forgets_the_outcomes_kept_for_re_mints(
+    tmp_path: Path,
+) -> None:
+    executor = EchoExecutor(make_worker_config())
+    runner = Runner(
+        lifecycle=cast(Any, MagicMock()),
+        task_stream=[],
+        results_dir=tmp_path / "out",
+        hardware=make_worker_hardware(),
+        executors={"echo": executor, "default": executor},
+        default_executor=executor,
+        logger=MagicMock(),
+    )
+    sidecar = MagicMock()
+    runner._mediated_sidecar = sidecar
+
+    runner.abandon_running(None)
+
+    sidecar.forget_outcomes.assert_called_once_with()
+
+
 def test_unbinding_every_replica_closes_each_claim_gate() -> None:
     sidecar = ResidentReplicaSidecar(sink=MagicMock(), engine_open=MagicMock())
     for replica_id in ("rpl-1", "rpl-2"):

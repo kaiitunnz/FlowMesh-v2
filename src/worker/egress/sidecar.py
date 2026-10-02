@@ -145,6 +145,12 @@ class MediatedEgressSidecar:
                 return
             self._inflight[key] = self._pool.submit(self._drive, permit)
 
+    def forget_outcomes(self) -> None:
+        """Drop the outcomes kept for re-minted permits, as the registration that
+        produced them has ended and control re-mints none of them to the next."""
+        with self._lock:
+            self._produced.clear()
+
     def reap(self, agent_task_id: str, call_correlation: str) -> None:
         """Delete worker-private custody after a committed outcome or a cancellation.
 
