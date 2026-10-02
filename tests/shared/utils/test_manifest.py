@@ -17,6 +17,7 @@ from shared.utils.manifest import (
     scratch_dir,
     sync_manifest,
 )
+from shared.utils.nofollow import LinkRefused
 
 
 def _race(fn, *, threads: int = 8) -> list[BaseException]:
@@ -85,7 +86,7 @@ class TestPrepareOutputDir:
     def test_rejects_non_directory_at_path(self, tmp_path: Path) -> None:
         out = tmp_path / "task-out"
         out.write_text("not a directory")
-        with pytest.raises(FileExistsError):
+        with pytest.raises(LinkRefused):
             prepare_output_dir(out)
 
 

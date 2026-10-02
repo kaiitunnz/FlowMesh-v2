@@ -40,7 +40,7 @@ def _mode(path: Path) -> int:
 def test_probing_an_archived_task_leaves_its_directory_alone(
     archiver: TaskLogArchiver, runtime: MagicMock
 ) -> None:
-    logs_path = archiver._logs_path("tsk-1")
+    logs_path = archiver._base_dir("tsk-1") / "logs" / "logs.jsonl"
     logs_path.parent.mkdir(parents=True, exist_ok=True)
     logs_path.touch()
     task_dir = logs_path.parent.parent
@@ -63,7 +63,7 @@ def test_a_flush_shares_the_logs_directory_it_writes_into(
 
     archiver._flush_task("tsk-1", [("1-0", {"payload": '{"message": "hi"}'})])
 
-    logs_path = archiver._logs_path("tsk-1")
+    logs_path = archiver._base_dir("tsk-1") / "logs" / "logs.jsonl"
     assert logs_path.read_text() == '{"message": "hi"}\n'
     for directory in (logs_path.parent.parent, logs_path.parent):
         assert _mode(directory) == 0o777
@@ -74,7 +74,7 @@ def test_finalizing_shares_the_logs_directory_it_writes_into(
 ) -> None:
     archiver._finalize_manifest("tsk-1")
 
-    logs_path = archiver._logs_path("tsk-1")
+    logs_path = archiver._base_dir("tsk-1") / "logs" / "logs.jsonl"
     assert logs_path.is_file()
     for directory in (logs_path.parent.parent, logs_path.parent):
         assert _mode(directory) == 0o777

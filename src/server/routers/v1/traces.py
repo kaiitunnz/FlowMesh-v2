@@ -1,12 +1,13 @@
 """Trace endpoints — per-task upload, workflow-level read + analyzer, span queries."""
 
 import functools
+import io
 import logging
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -16,7 +17,9 @@ from pydantic import TypeAdapter
 from shared.schemas.result import result_file_path
 from shared.telemetry.ids import workflow_to_trace_id_int
 from shared.utils.atomic import atomic_write_stream
-from shared.utils.json import encode_jsonl_bytes, read_jsonl
+from shared.utils.json import encode_jsonl_bytes, parse_jsonl_lines
+from shared.utils.manifest import LOGS_DIR
+from shared.utils.nofollow import LinkRefused, open_below, open_dir
 
 from ...app_state import (
     get_logger,
@@ -57,16 +60,19 @@ _TYPE_TO_FILENAME: dict[str, str] = {
 }
 
 
-def _logs_dir_for_task(results_dir: Path, task_id: str) -> Path:
-    """Per-task ``logs/`` directory holding the trace JSONL artifacts."""
-    return result_file_path(results_dir, task_id).parent / "logs"
+def _task_dir(results_dir: Path, task_id: str) -> Path:
+    return result_file_path(results_dir, task_id).parent
 
 
 def _iter_workflow_jsonl(
     results_dir: Path, task_ids: Iterable[str], filename: str
 ) -> Iterator[dict[str, Any]]:
     for task_id in task_ids:
-        yield from read_jsonl(_logs_dir_for_task(results_dir, task_id) / filename)
+        opened = open_below(_task_dir(results_dir, task_id), Path(LOGS_DIR) / filename)
+        if opened is None:
+            continue
+        with io.TextIOWrapper(opened, encoding="utf-8") as fh:
+            yield from parse_jsonl_lines(fh)
 
 
 async def _resolve_workflow(workflow_id: str, registry: WorkflowRegistry) -> Workflow:
@@ -167,15 +173,24 @@ async def upload_task_trace(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"unknown type '{trace_type}'; expected spans, assets, or lineage",
         )
-    target_path = _logs_dir_for_task(results_dir, task_id) / filename
+    task_dir = _task_dir(results_dir, task_id)
     try:
-        await run_in_threadpool(atomic_write_stream, target_path, file.file)
+        await run_in_threadpool(_store_trace, task_dir, filename, file.file)
+    except LinkRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path"
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to store trace: {exc}",
         ) from exc
-    return PathResponse(ok=True, path=target_path.as_posix())
+    return PathResponse(ok=True, path=(task_dir / LOGS_DIR / filename).as_posix())
+
+
+def _store_trace(task_dir: Path, filename: str, source: BinaryIO) -> None:
+    with open_dir(task_dir, LOGS_DIR, create=True) as logs_fd:
+        atomic_write_stream(Path(filename), source, dir_fd=logs_fd)
 
 
 def _require_telemetry_store(store: TelemetryStore | None) -> TelemetryStore:

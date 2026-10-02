@@ -65,31 +65,20 @@ def test_a_scan_skips_in_flight_writes_and_files_removed_under_it(
     in_flight.write_bytes(b"partial")
     assert atomic.is_atomic_temp(in_flight.name)
     (tmp_path / in_flight.name).write_bytes(b"partial")
-    is_file = Path.is_file
+    fwalk = os.fwalk
 
-    # A file the scan sees, then finds gone: renamed or removed between the two.
-    def _removed_after_listing(self: Path) -> bool:
-        return self.name == "gone.bin" or is_file(self)
+    # A file the scan lists, then finds gone: renamed or removed between the two.
+    def _with_removed(top: Any, *args: Any, **kwargs: Any) -> Any:
+        for dirpath, dirs, files, dirfd in fwalk(top, *args, **kwargs):
+            yield dirpath, dirs, [*files, "gone.bin"], dirfd
 
-    monkeypatch.setattr(Path, "is_file", _removed_after_listing)
-    monkeypatch.setattr(Path, "rglob", _with_extra(artifacts / "gone.bin"))
+    monkeypatch.setattr(os, "fwalk", _with_removed)
 
     entries = {e["path"]: e for e in sync_manifest(tmp_path, "t", [])["entries"]}
 
     assert in_flight.name not in entries
     assert entries["artifacts"]["file_count"] == 1
     assert entries["artifacts"]["size"] == 3
-
-
-def _with_extra(extra: Path) -> Any:
-    rglob = Path.rglob
-
-    def _rglob(self: Path, pattern: str) -> Any:
-        yield from rglob(self, pattern)
-        if self == extra.parent:
-            yield extra
-
-    return _rglob
 
 
 def test_a_long_filename_writes_atomically(tmp_path: Path) -> None:
@@ -103,8 +92,10 @@ def test_a_long_filename_writes_atomically(tmp_path: Path) -> None:
 def test_an_existing_entry_that_is_not_a_file_is_present(tmp_path: Path) -> None:
     os.mkfifo(tmp_path / "pipe")
 
-    entry = manifest._describe_path(tmp_path, Path("pipe"), required=False)
-    gone = manifest._describe_path(tmp_path, Path("gone.bin"), required=False)
+    entries = {
+        e["path"]: e for e in sync_manifest(tmp_path, "t", ["gone.bin"])["entries"]
+    }
 
-    assert (entry["status"], entry["size"], entry["file_count"]) == ("present", 0, 0)
-    assert gone["status"] == "missing"
+    pipe = entries["pipe"]
+    assert (pipe["status"], pipe["size"], pipe["file_count"]) == ("present", 0, 0)
+    assert entries["gone.bin"]["status"] == "missing"

@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 
 from shared.schemas.result import result_file_path
 from shared.utils.manifest import LOGS_DIR, prepare_output_dir, sync_manifest
+from shared.utils.nofollow import LinkRefused, open_append, open_dir
 
 from ..clients.redis import (
     TASK_LOGS_STREAM_PREFIX,
@@ -17,6 +19,8 @@ from ..clients.redis import (
 )
 from ..task.models import TaskStatus
 from ..task.runtime import TaskRuntime
+
+_LOGS_NAME = "logs.jsonl"
 
 
 @dataclass(slots=True)
@@ -67,10 +71,7 @@ class TaskLogArchiver:
                 TaskStatus.FAILED,
                 TaskStatus.CANCELLED,
             }:
-                if (
-                    self._load_checkpoint(task_id) is None
-                    and self._logs_path(task_id).exists()
-                ):
+                if self._load_checkpoint(task_id) is None and self._archived(task_id):
                     continue
                 terminal.add(task_id)
             self._ensure_task(task_id, now)
@@ -128,9 +129,20 @@ class TaskLogArchiver:
         )
         self._buffers.setdefault(task_id, [])
 
-    def _logs_path(self, task_id: str) -> Path:
-        base_dir = result_file_path(self._results_dir, task_id).parent
-        return base_dir / LOGS_DIR / "logs.jsonl"
+    def _base_dir(self, task_id: str) -> Path:
+        return result_file_path(self._results_dir, task_id).parent
+
+    def _archived(self, task_id: str) -> bool:
+        """Whether the task's log file exists, or a link stands where it or a
+        directory holding it belongs, so it is never written."""
+        try:
+            with open_dir(self._base_dir(task_id), LOGS_DIR) as logs_fd:
+                os.stat(_LOGS_NAME, dir_fd=logs_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except LinkRefused:
+            return True
+        return True
 
     def _load_checkpoint(self, task_id: str) -> str | None:
         last_id = self._redis.get(task_log_archive_last_id_key(task_id))
@@ -144,24 +156,32 @@ class TaskLogArchiver:
     ) -> None:
         if not items:
             return
-        logs_path = self._logs_path(task_id)
-        prepare_output_dir(logs_path.parent.parent)
         last_id = self._states[task_id].last_id
-        with logs_path.open("a", encoding="utf-8") as fh:
-            for _, fields in items:
-                payload = fields.get("payload")
-                if not isinstance(payload, str) or not payload:
-                    continue
-                try:
-                    json.loads(payload)
-                    fh.write(payload + "\n")
-                except json.JSONDecodeError:
-                    wrapper = {
-                        "message": payload,
-                        "level": "INFO",
-                        "stream": "system",
-                    }
-                    fh.write(json.dumps(wrapper, ensure_ascii=False) + "\n")
+        lines: list[str] = []
+        for _, fields in items:
+            payload = fields.get("payload")
+            if not isinstance(payload, str) or not payload:
+                continue
+            try:
+                json.loads(payload)
+                lines.append(payload)
+            except json.JSONDecodeError:
+                wrapper = {"message": payload, "level": "INFO", "stream": "system"}
+                lines.append(json.dumps(wrapper, ensure_ascii=False))
+        base_dir = self._base_dir(task_id)
+        try:
+            prepare_output_dir(base_dir)
+            with (
+                open_dir(base_dir, LOGS_DIR) as logs_fd,
+                open_append(logs_fd, _LOGS_NAME) as fh,
+            ):
+                fh.write("".join(f"{line}\n" for line in lines).encode("utf-8"))
+        except LinkRefused as exc:
+            self._logger.warning(
+                "Not archiving logs for %s: a link stands in its results: %s",
+                task_id,
+                exc,
+            )
         self._save_checkpoint(task_id, last_id)
 
     def _drain_task(self, task_id: str) -> None:
@@ -185,10 +205,14 @@ class TaskLogArchiver:
         if record:
             expected_artifacts = record.task.spec.get_artifacts()
         expected_artifacts.append("logs/logs.jsonl")
-        base_dir = result_file_path(self._results_dir, task_id).parent
-        prepare_output_dir(base_dir)
-        self._logs_path(task_id).touch(exist_ok=True)
+        base_dir = self._base_dir(task_id)
         try:
+            prepare_output_dir(base_dir)
+            with (
+                open_dir(base_dir, LOGS_DIR) as logs_fd,
+                open_append(logs_fd, _LOGS_NAME),
+            ):
+                pass
             sync_manifest(base_dir, task_id, expected_artifacts)
         except Exception as exc:
             self._logger.debug("Failed to sync manifest for %s: %s", task_id, exc)

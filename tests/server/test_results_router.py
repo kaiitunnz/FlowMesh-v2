@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from lumid_hooks import PrincipalContext, ResourceRef
 
@@ -148,8 +148,8 @@ async def test_download_result_file_resolves_flat_name_under_artifacts(
         results_dir=tmp_path,
     )
 
-    assert isinstance(response, FileResponse)
-    assert Path(response.path) == artifact_path
+    assert await _body(response) == b'{"ok":true}'
+    assert response.media_type == "application/json"
 
 
 @pytest.mark.anyio
@@ -168,8 +168,16 @@ async def test_download_result_file_falls_back_to_task_root_for_flat_filename(
         results_dir=tmp_path,
     )
 
-    assert isinstance(response, FileResponse)
-    assert Path(response.path) == root_file
+    assert await _body(response) == b'{"ok":true}'
+
+
+async def _body(response: Response) -> bytes:
+    assert isinstance(response, StreamingResponse)
+    chunks: list[bytes] = []
+    async for chunk in response.body_iterator:
+        assert isinstance(chunk, bytes)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def test_resolve_artifact_relative_path_scopes_nested_paths_to_artifacts() -> None:
@@ -218,11 +226,11 @@ async def test_upload_result_file_shares_the_task_directories_before_writing(
     write = results_router.atomic_write_stream
     modes_at_write: dict[str, int] = {}
 
-    def _write(target: Path, source: Any) -> None:
+    def _write(target: Path, source: Any, dir_fd: int) -> None:
         for directory in (task_dir, task_dir / "artifacts", task_dir / "logs"):
             if directory.is_dir():
                 modes_at_write[directory.name] = stat.S_IMODE(directory.stat().st_mode)
-        write(target, source)
+        write(target, source, dir_fd=dir_fd)
 
     with patch.object(results_router, "atomic_write_stream", _write):
         await results_router.upload_result_file(

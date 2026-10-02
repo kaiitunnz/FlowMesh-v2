@@ -1,15 +1,12 @@
-import errno
 import logging
 import os
 import shutil
-import stat
 import subprocess
 import tarfile
 import zipfile
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -20,6 +17,7 @@ from shared.tasks.specs import TaskSpecStrictBase
 from shared.telemetry.propagation import inject_ambient_traceparent
 from shared.utils.atomic import atomic_write_text
 from shared.utils.http import add_auth_headers
+from shared.utils.nofollow import regular_files
 from shared.utils.parsing import parse_bool_env
 from shared.utils.redact import redact_url
 
@@ -438,9 +436,6 @@ def write_executor_result(
 
 
 # A link under O_NOFOLLOW, a socket, and a name removed mid-walk.
-_SKIPPED_OPEN_ERRNOS = frozenset({errno.ELOOP, errno.ENXIO, errno.ENOENT})
-
-
 def maybe_upload_artifacts(
     task: TaskReference,
     out_dir: Path,
@@ -462,7 +457,7 @@ def maybe_upload_artifacts(
     upload_url = f"{base_url}/{task.task_id}/files"
     uploaded: list[str] = []
 
-    for rel_name, opened in _regular_files(artifacts_dir):
+    for rel_name, opened in regular_files(artifacts_dir):
         try:
             if isinstance(opened, OSError):
                 raise opened
@@ -496,33 +491,6 @@ def maybe_upload_artifacts(
         uploaded.append(rel_name)
 
     return uploaded
-
-
-def _regular_files(root: Path) -> Iterator[tuple[str, BinaryIO | OSError]]:
-    """Yield each regular file under ``root`` by its relative path, opened for
-    reading, or with the error that kept it from opening.
-
-    Neither a link nor a directory swapped for one is followed: the walk holds each
-    directory open and opens every name relative to it without following a link. A
-    link, a socket, and a name removed during the walk are skipped.
-    """
-    for dirpath, dirs, files, dirfd in os.fwalk(root, follow_symlinks=False):
-        dirs.sort()
-        rel_dir = Path(dirpath).relative_to(root)
-        for name in sorted(files):
-            rel_name = (rel_dir / name).as_posix()
-            try:
-                fd = os.open(
-                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd
-                )
-            except OSError as exc:
-                if exc.errno not in _SKIPPED_OPEN_ERRNOS:
-                    yield rel_name, exc
-                continue
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                os.close(fd)
-                continue
-            yield rel_name, os.fdopen(fd, "rb")
 
 
 def maybe_upload_traces(

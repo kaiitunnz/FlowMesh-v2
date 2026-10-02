@@ -2,13 +2,16 @@
 
 import hashlib
 import json
+import os
+import stat
 import threading
 import weakref
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from .atomic import atomic_write_text, is_atomic_temp
+from .nofollow import LinkRefused, open_dir, open_dir_at, open_regular, regular_files
 from .time import now_iso
 
 MANIFEST_NAME = "manifest.json"
@@ -27,26 +30,19 @@ _MANIFEST_LOCKS: weakref.WeakValueDictionary[Path, threading.Lock] = (
 _MANIFEST_LOCKS_GUARD = threading.Lock()
 
 
-def _ensure_shared_dir(path: Path) -> None:
-    """Create ``path`` if absent and make it writable by peer UIDs."""
-    path.mkdir(parents=True, exist_ok=True)
-    try:
-        path.chmod(_SHARED_DIR_MODE)
-    except OSError:
-        pass
-
-
 def prepare_output_dir(base_dir: Path) -> None:
-    """Ensure the base directory and standard sub-directories exist."""
-    for d in (base_dir, base_dir / LOGS_DIR, base_dir / ARTIFACTS_DIR):
-        _ensure_shared_dir(d)
+    """Ensure the base directory and standard sub-directories exist, writable by peer
+    UIDs; raises ``LinkRefused`` when any of them is a link."""
+    for parts in ((), (LOGS_DIR,), (ARTIFACTS_DIR,)):
+        with open_dir(base_dir, *parts, create=True, mode=_SHARED_DIR_MODE):
+            pass
 
 
 def scratch_dir(base_dir: Path) -> Path:
     """Return `out_dir/scratch/`, creating it if needed."""
-    path = base_dir / SCRATCH_DIR
-    _ensure_shared_dir(path)
-    return path
+    with open_dir(base_dir, SCRATCH_DIR, create=True, mode=_SHARED_DIR_MODE):
+        pass
+    return base_dir / SCRATCH_DIR
 
 
 def sync_manifest(
@@ -75,31 +71,34 @@ def _sync_manifest(
     expected_set.update({RESULTS_NAME, LOGS_DIR, ARTIFACTS_DIR})
 
     entries: list[dict[str, Any]] = []
-    added: set[str] = set()
+    with open_dir(base_dir) as base_fd:
+        for name in sorted(expected_set):
+            entries.append(_describe_path(base_fd, Path(name), required=True))
+        added = {entry["path"] for entry in entries}
 
-    for name in sorted(expected_set):
-        rel_path = Path(name)
-        entry = _describe_path(base_dir, rel_path, required=True)
-        entries.append(entry)
-        added.add(rel_path.as_posix())
+        # Capture additional files/directories that exist but were not declared.
+        with os.scandir(base_fd) as listing:
+            extra = sorted(
+                item.name
+                for item in listing
+                if item.name not in added
+                and item.name != MANIFEST_NAME
+                and not is_atomic_temp(item.name)
+                and not item.is_symlink()
+            )
+        for name in extra:
+            entries.append(_describe_path(base_fd, Path(name), required=False))
 
-    # Capture additional files/directories that exist but were not declared.
-    for item in base_dir.iterdir():
-        key = item.relative_to(base_dir).as_posix()
-        if key in added or item.name == MANIFEST_NAME or is_atomic_temp(item.name):
-            continue
-        entry = _describe_path(base_dir, item.relative_to(base_dir), required=False)
-        entries.append(entry)
-
-    manifest = {
-        "task_id": task_id,
-        "generated_at": now_iso(),
-        "entries": entries,
-    }
-    atomic_write_text(
-        base_dir / MANIFEST_NAME,
-        json.dumps(manifest, ensure_ascii=False, indent=2),
-    )
+        manifest = {
+            "task_id": task_id,
+            "generated_at": now_iso(),
+            "entries": entries,
+        }
+        atomic_write_text(
+            Path(MANIFEST_NAME),
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            dir_fd=base_fd,
+        )
     return manifest
 
 
@@ -123,8 +122,7 @@ def _infer_type(rel_path: Path) -> str:
     return "directory"
 
 
-def _describe_path(base_dir: Path, rel_path: Path, *, required: bool) -> dict[str, Any]:
-    target = base_dir / rel_path
+def _describe_path(base_fd: int, rel_path: Path, *, required: bool) -> dict[str, Any]:
     entry_type = _infer_type(rel_path)
     entry: dict[str, Any] = {
         "name": rel_path.as_posix(),
@@ -132,23 +130,42 @@ def _describe_path(base_dir: Path, rel_path: Path, *, required: bool) -> dict[st
         "type": entry_type,
         "required": required,
     }
-
-    stats: dict[str, Any]
-    try:
-        if target.is_file():
-            stats = {"size": target.stat().st_size, "sha256": _sha256_file(target)}
-        elif target.exists():
-            size, count = _directory_stats(target)
-            stats = {"size": size, "file_count": count}
-        else:
-            raise FileNotFoundError(target)
-    except FileNotFoundError:
+    stats = _stats(base_fd, rel_path)
+    if stats is None:
         entry["status"] = "missing"
         return entry
     entry["status"] = "present"
     entry["updated_at"] = now_iso()
     entry.update(stats)
     return entry
+
+
+def _stats(base_fd: int, rel_path: Path) -> dict[str, Any] | None:
+    """The size and digest or file count of ``rel_path``, or None when it is missing
+    or reached only through a link."""
+    if rel_path.is_absolute() or any(
+        part in {"", ".", ".."} for part in rel_path.parts
+    ):
+        return None
+    try:
+        with open_dir_at(base_fd, *rel_path.parent.parts) as dir_fd:
+            st = os.stat(rel_path.name, dir_fd=dir_fd, follow_symlinks=False)
+            if stat.S_ISLNK(st.st_mode):
+                return None
+            if stat.S_ISREG(st.st_mode):
+                if (opened := open_regular(dir_fd, rel_path.name)) is None:
+                    return None
+                with opened as fh:
+                    return {
+                        "size": os.fstat(fh.fileno()).st_size,
+                        "sha256": _sha256(fh),
+                    }
+            if not stat.S_ISDIR(st.st_mode):
+                return {"size": 0, "file_count": 0}
+            size, count = _directory_stats(rel_path.name, dir_fd)
+            return {"size": size, "file_count": count}
+    except (FileNotFoundError, LinkRefused):
+        return None
 
 
 def _normalize_artifact_name(name: str) -> str:
@@ -160,24 +177,20 @@ def _normalize_artifact_name(name: str) -> str:
     return value or name
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256(fh: BinaryIO) -> str:
     hasher = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(8192), b""):
-            hasher.update(chunk)
+    for chunk in iter(lambda: fh.read(8192), b""):
+        hasher.update(chunk)
     return hasher.hexdigest()
 
 
-def _directory_stats(path: Path) -> tuple[int, int]:
+def _directory_stats(name: str, dir_fd: int) -> tuple[int, int]:
     total_size = 0
     file_count = 0
-    for item in path.rglob("*"):
-        if is_atomic_temp(item.name):
+    for rel_name, opened in regular_files(name, dir_fd):
+        if isinstance(opened, OSError) or is_atomic_temp(Path(rel_name).name):
             continue
-        try:
-            if item.is_file():
-                total_size += item.stat().st_size
-                file_count += 1
-        except FileNotFoundError:
-            continue
+        with opened as fh:
+            total_size += os.fstat(fh.fileno()).st_size
+        file_count += 1
     return total_size, file_count
