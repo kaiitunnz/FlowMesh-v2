@@ -201,9 +201,10 @@ cancelled. A draining replica's task is reaped while the replica finishes draini
 admitted claim keeps its credit until its own fenced terminal.
 
 A serve task prefers a worker holding no agent's private state when one is idle. When an
-agent waits to resume on the worker a demand replica occupies, the replica retires
-through the idle-teardown path once it holds no credit, freeing the worker; the next
-demand materializes the family again. A standing replica never yields its worker.
+agent waits to resume on the worker a demand replica occupies, the replica is retired
+once no claim holds or awaits it, freeing the worker: a serving replica through the
+idle-teardown path, a cold start by invalidation. The next demand materializes the family
+again. A standing replica never yields its worker.
 
 On a root restart, in-flight claims go `UNCERTAIN`, and each restored replica whose serve
 task holds the dispatch that reported its endpoint re-attaches and is reused; any other

@@ -289,7 +289,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   feasibility constraint resolved at dispatch: the episode lane yields as any other does,
   and an episode waits while its holder is busy. A model server — a resident or `serve`
   task — prefers a worker holding no agent's private state when one is idle, and a
-  demand replica occupying a waiting episode's holder retires once it holds no credit, so
+  demand replica occupying a waiting episode's holder retires once no claim holds or awaits it, so
   the episode resumes there. Owner loss, a worker-incarnation change,
   or a component that does not match its seal fails closed as a typed
   `PrivateStateUnavailable` rather than resuming against a fresh or partial home. One

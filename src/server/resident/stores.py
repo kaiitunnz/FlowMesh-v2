@@ -176,6 +176,13 @@ class ClaimStore:
             if c.replica_id == replica_id and c.holds_credit
         ]
 
+    def pending_for_family(self, family: str) -> list[ServiceClaim]:
+        return [
+            c
+            for c in self._claims.values()
+            if c.family == family and c.state is ClaimState.PENDING
+        ]
+
 
 class ReportStore:
     """Latest capacity report per replica, fenced by incarnation and report epoch.

@@ -12,7 +12,15 @@ from typing import Any
 import pytest
 
 from server.resident import ReplicaState, materializer
-from server.resident.state import ClaimState, ReplicaIncarnation
+from server.resident.state import (
+    AdmissionProfile,
+    ClaimState,
+    ClaimTerminalReason,
+    InvocationSubject,
+    InvocationSubjectKind,
+    ReplicaIncarnation,
+    ServiceClaim,
+)
 from server.task.models import TERMINAL_TASK_STATUSES, TaskStatus
 from tests.server.resident.node_harness import FAMILY, TS, Node, admitted_boundary
 from tests.server.task.test_resident_origin_loss import (
@@ -21,6 +29,8 @@ from tests.server.task.test_resident_origin_loss import (
 )
 from tests.server.task.test_v2_orchestration import _register
 from tests.support.waiting import until
+
+_PROFILE = AdmissionProfile(engine_batch_key=FAMILY.engine_batch_key)
 
 
 def _loop_bound(node: Node) -> None:
@@ -443,23 +453,79 @@ def test_a_yield_request_waits_for_the_replica_credit_to_release() -> None:
     asyncio.run(run())
 
 
-def test_a_yield_request_leaves_standing_and_cold_starting_replicas() -> None:
+def test_a_yield_request_leaves_a_standing_replica() -> None:
     async def run() -> None:
         node = Node()
         _loop_bound(node)
         serve_task_id = await node.submit_serve_async()
         node.serve(serve_task_id)
         standing = node.adopt_standing(serve_task_id)
-        cold = await node.materialize_async()
-        assert cold.serve_task_id is not None
 
         node.control.on_yield_requested(serve_task_id)
-        node.control.on_yield_requested(cold.serve_task_id)
         await asyncio.sleep(0)
 
         assert standing.state is ReplicaState.WARM
-        assert cold.state is ReplicaState.MATERIALIZING
         assert node.status(serve_task_id) == TaskStatus.DISPATCHED
+
+    asyncio.run(run())
+
+
+def _queue_claim(node: Node) -> ServiceClaim:
+    """A claim of the family raised and not yet polled onto a replica."""
+    return node.control._admission.raise_claim(
+        invocation_id="inv-queued",
+        subject=InvocationSubject(
+            kind=InvocationSubjectKind.WORKFLOW, id="wfl-queued", tenant="org"
+        ),
+        family=FAMILY.family,
+        profile=_PROFILE,
+    )
+
+
+@pytest.mark.parametrize("awaited", [False, True])
+def test_a_yield_request_retires_a_cold_start_only_once_no_claim_awaits_it(
+    awaited: bool,
+) -> None:
+    async def run() -> None:
+        node = Node()
+        _loop_bound(node)
+        cold = await node.materialize_async()
+        assert cold.serve_task_id is not None
+        node.dispatch(cold.serve_task_id, "wkr-holder")
+        if awaited:
+            _queue_claim(node)
+
+        await _ask_yield(node, cold.serve_task_id)
+
+        if awaited:
+            assert cold.state is ReplicaState.MATERIALIZING
+            assert node.status(cold.serve_task_id) == TaskStatus.DISPATCHED
+        else:
+            assert cold.state is ReplicaState.PREEMPTED
+            assert node.status(cold.serve_task_id) == TaskStatus.CANCELLING
+
+    asyncio.run(run())
+
+
+def test_a_yield_request_leaves_a_replica_a_queued_claim_will_join() -> None:
+    async def run() -> None:
+        node = Node()
+        _loop_bound(node)
+        replica = await _serving(node)
+        assert replica.serve_task_id is not None
+        claim = _queue_claim(node)
+
+        await _ask_yield(node, replica.serve_task_id)
+        assert replica.state is ReplicaState.WARM
+
+        admission = node.control._admission
+        assert admission.admit(claim, _PROFILE, idempotency_key=None) is not None
+        admission.settle_invocation_terminal(
+            claim.invocation_id, ClaimTerminalReason.COMPLETED
+        )
+        await _ask_yield(node, replica.serve_task_id)
+
+        assert replica.state is ReplicaState.STOPPED
 
     asyncio.run(run())
 
