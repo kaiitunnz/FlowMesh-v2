@@ -2,7 +2,7 @@ import argparse
 import logging
 import signal
 import socket
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
@@ -268,7 +268,10 @@ def _bind_peer_listener(cfg: WorkerConfig) -> socket.socket | None:
 
 
 def _build_content_plane(
-    cfg: WorkerConfig, client: SupervisorClient, logger: logging.Logger
+    cfg: WorkerConfig,
+    client: SupervisorClient,
+    dispatch_for: Callable[[str], str | None],
+    logger: logging.Logger,
 ) -> WorkerContentPlane | None:
     """The worker's content plane: the shared store, and a cache over it if one runs.
 
@@ -278,7 +281,11 @@ def _build_content_plane(
     can serve a peer from it, and one that does not goes to the store every time.
     """
     access = ContentAccessRegistry(
-        cfg.object_store, logger, request_access=client.push_content_access_request
+        cfg.object_store,
+        logger,
+        request_access=lambda task_id: client.push_content_access_request(
+            task_id, dispatch_for(task_id)
+        ),
     )
     lane: ContentLaneHost | None = None
     if cfg.content_hydration_enabled:
@@ -429,7 +436,9 @@ def main() -> None:
     )
     gpu_sampler.start()
 
-    lifecycle.start_content_plane(_build_content_plane(cfg, supervisor_client, logger))
+    lifecycle.start_content_plane(
+        _build_content_plane(cfg, supervisor_client, lifecycle.dispatch_for, logger)
+    )
     lifecycle.start_ssh_relay(
         SshRelayLane(
             registry=lifecycle.ssh_endpoints,

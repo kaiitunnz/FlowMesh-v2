@@ -7,7 +7,10 @@ from .request_store import ResidentRequestStore
 
 
 def capture_resident_request(
-    store: ResidentRequestStore, task_id: str, result: HarnessResult
+    store: ResidentRequestStore,
+    task_id: str,
+    result: HarnessResult,
+    dispatch_id: str | None = None,
 ) -> HarnessResult:
     """Keep a resident request worker-private and emit only its digest.
 
@@ -27,5 +30,5 @@ def capture_resident_request(
         }
     )
     stripped_result = result.model_copy(update={"request": stripped})
-    store.put(task_id, req.call_correlation, req.request_payload)
+    store.put(task_id, req.call_correlation, req.request_payload, dispatch_id)
     return stripped_result

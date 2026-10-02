@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -11,6 +12,8 @@ from google.protobuf.struct_pb2 import Struct
 from shared.grpc.supervisor.v1 import supervisor_pb2
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.tools.contract import AgentModelTurnProposal
+from shared.tools.search.schema import ToolRequest
+from worker.lifecycle import Lifecycle
 from worker.supervisor_client import SupervisorClient
 
 
@@ -176,24 +179,52 @@ def test_a_model_turn_proposal_names_the_dispatch_running_its_agent() -> None:
     assert _pushed_payload(client)["proposal"]["dispatch_id"] == "dsp-1"
 
 
-def test_a_content_access_request_names_the_dispatch_running_its_task() -> None:
+def test_a_content_access_request_names_its_dispatch() -> None:
+    client = _client()
+
+    client.push_content_access_request("tsk-a", "dsp-1")
+
+    assert _pushed_payload(client) == {"task_id": "tsk-a", "dispatch_id": "dsp-1"}
+
+
+def _lifecycle(client: SupervisorClient, tmp_path: Path) -> Lifecycle:
+    return Lifecycle(client, 30, 120, tmp_path / "hb", cost_per_hour=0.0)
+
+
+def test_a_task_s_work_runs_for_the_dispatch_running_it(tmp_path: Path) -> None:
     client = _client()
     client._task_queue.put(_message("tsk-a", "dsp-1"))
     next(iter(client.iter_tasks()))
 
-    client.push_content_access_request("tsk-a")
-
-    assert _pushed_payload(client) == {"task_id": "tsk-a", "dispatch_id": "dsp-1"}
+    assert _lifecycle(client, tmp_path).dispatch_for("tsk-a") == "dsp-1"
 
 
-def test_off_lane_work_renews_access_under_its_task_s_dispatch() -> None:
+@pytest.mark.parametrize("store", ["egress", "resident"])
+def test_off_lane_work_runs_for_the_dispatch_its_boundary_was_captured_under(
+    tmp_path: Path, store: str
+) -> None:
     client = _client()
-    client._task_queue.put(_message("tsk-a", "dsp-1"))
-    client._task_queue.put(_message("tsk-b", "dsp-2"))
+    lifecycle = _lifecycle(client, tmp_path)
+    if store == "egress":
+        lifecycle.pending_egress_requests.put(
+            "tsk-a",
+            "c0",
+            ToolRequest(interface="search/v1", query="q", max_results=1),
+            "dsp-1",
+        )
+    else:
+        lifecycle.resident_requests.put("tsk-a", "c0", "{}", "dsp-1")
+    # The worker moves on to many other tasks while the boundary settles off-lane.
+    for n in range(2048):
+        client._task_queue.put(_message(f"tsk-{n}", f"dsp-{n + 2}"))
     tasks = iter(client.iter_tasks())
-    next(tasks)
-    next(tasks)
+    for _ in range(2048):
+        next(tasks)
 
-    client.push_content_access_request("tsk-a")
+    assert lifecycle.dispatch_for("tsk-a") == "dsp-1"
 
-    assert _pushed_payload(client) == {"task_id": "tsk-a", "dispatch_id": "dsp-1"}
+    if store == "egress":
+        lifecycle.pending_egress_requests.delete("tsk-a", "c0")
+    else:
+        lifecycle.resident_requests.delete("tsk-a", "c0")
+    assert lifecycle.dispatch_for("tsk-a") is None

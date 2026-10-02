@@ -96,6 +96,15 @@ class Lifecycle:
     def worker_id(self) -> str:
         return self.client.worker_id
 
+    def dispatch_for(self, task_id: str) -> str | None:
+        """The dispatch a task's work runs for: the one running it, or the one a
+        boundary it holds off-lane was captured under."""
+        return (
+            self.client.dispatch_id(task_id)
+            or self.pending_egress_requests.dispatch_of(task_id)
+            or self.resident_requests.dispatch_of(task_id)
+        )
+
     def set_abandon_handler(self, abandon: Callable[[str | None], None]) -> None:
         """Register how the dispatch running when the worker re-registers is given
         up."""

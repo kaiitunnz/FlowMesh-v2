@@ -174,10 +174,11 @@ class AgentEpisodeExecutor(Executor):
                 task.task_id,
                 result,
                 dispatch.model_binding,
+                task.dispatch_id,
             )
         elif self._is_resident_boundary(result, dispatch.model_binding):
             result = capture_resident_request(
-                self._resident_requests(), task.task_id, result
+                self._resident_requests(), task.task_id, result, task.dispatch_id
             )
         if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
             _LOG.info(
@@ -254,6 +255,7 @@ class AgentEpisodeExecutor(Executor):
         task_id: str,
         result: HarnessResult,
         model_binding: EpisodeModelBinding | None,
+        dispatch_id: str | None = None,
     ) -> HarnessResult:
         """Keep a worker-originated egress request local and emit only its digest.
 
@@ -286,7 +288,7 @@ class AgentEpisodeExecutor(Executor):
             update={"request_payload": None, "request_digest": digest}
         )
         stripped_result = result.model_copy(update={"request": stripped})
-        store.put(task_id, req.call_correlation, captured)
+        store.put(task_id, req.call_correlation, captured, dispatch_id)
         return stripped_result
 
     @staticmethod

@@ -111,6 +111,7 @@ class ServiceLeafExecutor(Executor):
             self._resident_requests(),
             task.task_id,
             HarnessResult(kind=HarnessResultKind.BOUNDARY, request=request),
+            task.dispatch_id,
         )
         _LOG.info(
             "[fabric] service leaf %s yielded a resident model boundary", task.task_id

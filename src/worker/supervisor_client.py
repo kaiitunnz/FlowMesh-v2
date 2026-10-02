@@ -44,9 +44,6 @@ from shared.utils.time import now_iso
 
 from .utils.logging import TaskLogEmitter
 
-# Far more tasks than a worker holds off-lane work for at once.
-_TASK_DISPATCH_MEMORY = 1024
-
 
 class SupervisorClient:
     """Bidirectional transport that lets the worker talk to its supervisor."""
@@ -107,12 +104,6 @@ class SupervisorClient:
         # The task being run and its dispatch id: tasks run one at a time, in the order
         # this client yields them, so the task's events name the dispatch running it.
         self._running_dispatch: tuple[str, str] | None = None
-        # The dispatch each task was last taken under. A task's off-lane work, such as
-        # a boundary settling after its step returned, renews store access under it.
-        self._task_dispatches: collections.OrderedDict[str, str] = (
-            collections.OrderedDict()
-        )
-        self._task_dispatches_lock = threading.Lock()
         # (task id, reason, dispatch id or None for whichever dispatch runs the task)
         self._interrupt_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
         self._stop_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
@@ -451,25 +442,12 @@ class SupervisorClient:
             self._running_dispatch = (
                 (item.task_id, item.dispatch_id) if item.dispatch_id else None
             )
-            if item.dispatch_id:
-                self._remember_task_dispatch(item.task_id, item.dispatch_id)
             yield item
 
     def dispatch_id(self, task_id: str) -> str | None:
         """The dispatch running ``task_id``, if this worker is running it."""
         running = self._running_dispatch
         return running[1] if running is not None and running[0] == task_id else None
-
-    def _remember_task_dispatch(self, task_id: str, dispatch_id: str) -> None:
-        with self._task_dispatches_lock:
-            self._task_dispatches[task_id] = dispatch_id
-            self._task_dispatches.move_to_end(task_id)
-            if len(self._task_dispatches) > _TASK_DISPATCH_MEMORY:
-                self._task_dispatches.popitem(last=False)
-
-    def _task_dispatch(self, task_id: str) -> str | None:
-        with self._task_dispatches_lock:
-            return self._task_dispatches.get(task_id)
 
     def on_reregistered(self, callback: Callable[[str | None], None]) -> None:
         """Run ``callback`` after each re-registration with the dispatch it gave up,
@@ -990,16 +968,17 @@ class SupervisorClient:
         )
 
     def push_content_access_request(
-        self, task_id: str, ready_timeout_sec: float = 5.0
+        self, task_id: str, dispatch_id: str | None, ready_timeout_sec: float = 5.0
     ) -> None:
-        """Ask control to renew one task's access to the shared content store.
+        """Ask control to renew one task's access to the shared content store, for the
+        dispatch whose work writes under it.
 
         It runs on a result write, so a stream that is not ready fails the request
         rather than holding the write.
         """
         self._push_event(
             "CONTENT_ACCESS_REQUEST",
-            {"task_id": task_id, "dispatch_id": self._task_dispatch(task_id)},
+            {"task_id": task_id, "dispatch_id": dispatch_id},
             ready_timeout_sec=ready_timeout_sec,
         )
 

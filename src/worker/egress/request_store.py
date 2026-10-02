@@ -25,13 +25,36 @@ class PendingEgressRequestStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._store: dict[tuple[str, str], CapturedRequest] = {}
+        # The dispatch each request was captured under, which its off-lane work runs
+        # for after the dispatch's own run ends.
+        self._dispatches: dict[tuple[str, str], str] = {}
 
     def put(
-        self, agent_task_id: str, call_correlation: str, request: CapturedRequest
+        self,
+        agent_task_id: str,
+        call_correlation: str,
+        request: CapturedRequest,
+        dispatch_id: str | None = None,
     ) -> None:
         """Store a captured request, overwriting a stale recapture."""
+        key = (agent_task_id, call_correlation)
         with self._lock:
-            self._store[(agent_task_id, call_correlation)] = request
+            self._store[key] = request
+            self._dispatches.pop(key, None)
+            if dispatch_id is not None:
+                self._dispatches[key] = dispatch_id
+
+    def dispatch_of(self, agent_task_id: str) -> str | None:
+        """The dispatch a request this task holds was captured under, if any."""
+        with self._lock:
+            return next(
+                (
+                    d
+                    for (task, _), d in self._dispatches.items()
+                    if task == agent_task_id
+                ),
+                None,
+            )
 
     def peek(self, agent_task_id: str, call_correlation: str) -> CapturedRequest | None:
         """Return the request for an occurrence without removing it."""
@@ -42,6 +65,7 @@ class PendingEgressRequestStore:
         """Drop the request for an occurrence once its outcome has committed."""
         with self._lock:
             self._store.pop((agent_task_id, call_correlation), None)
+            self._dispatches.pop((agent_task_id, call_correlation), None)
 
     def discard(
         self, agent_task_id: str, call_correlation: str, request: CapturedRequest
@@ -52,6 +76,7 @@ class PendingEgressRequestStore:
         with self._lock:
             if self._store.get(key) is request:
                 del self._store[key]
+                self._dispatches.pop(key, None)
 
     def occurrences(self) -> list[tuple[str, str]]:
         """The occurrences whose requests the store holds."""
@@ -62,3 +87,4 @@ class PendingEgressRequestStore:
         """Drop every request, as the incarnation that captured them has ended."""
         with self._lock:
             self._store.clear()
+            self._dispatches.clear()
