@@ -5274,7 +5274,7 @@ class TaskRuntime:
     def mark_updated(
         self,
         task_id: str,
-        worker_id: str | None,
+        worker_id: str,
         payload: dict[str, Any],
         dispatch_id: str | None = None,
     ) -> EventEffect:
@@ -5290,9 +5290,7 @@ class TaskRuntime:
                     # A replayed or late progress update must not touch a terminal task.
                     return EventEffect.SETTLED
                 record.latest_update = payload
-                # A root rewrite of the update keeps the dispatch that reported it.
-                if worker_id is not None:
-                    record.latest_update_dispatch_id = record.dispatch_id
+                record.latest_update_dispatch_id = record.dispatch_id
                 self._persist_locked(task_id)
                 return EventEffect.APPLIED
         finally:
