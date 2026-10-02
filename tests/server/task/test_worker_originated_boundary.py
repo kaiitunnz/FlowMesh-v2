@@ -1331,7 +1331,9 @@ def test_a_stale_step_leaves_what_a_new_dispatch_to_its_worker_captured() -> Non
         runtime._tasks[writer].dispatch_id = "dsp-1"
         runtime.return_dispatch(writer, "wkr-1", increment_retry=False, front=True)
         # The next dispatch goes to the same worker, which captures the same call anew.
-        worker = cast(Worker, SimpleNamespace(id="wkr-1", node_id="nde-1"))
+        worker = cast(
+            Worker, SimpleNamespace(id="wkr-1", node_id="nde-1", node_alias="node-1")
+        )
         assert runtime.begin_publish(writer, worker, "dsp-2")
 
         runtime.mark_succeeded(writer, "wkr-1", stale, _TS, dispatch_id="dsp-1")

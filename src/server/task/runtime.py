@@ -495,6 +495,7 @@ class _Publish:
     worker_id: str
     dispatch_id: str | None
     supplier_id: str
+    node_alias: str
     input_preparation: bool
     recorded: bool = False
     reported: bool = False
@@ -709,6 +710,10 @@ class TaskRuntime:
         # The worker and dispatch holding each dispatched task, until a commit moves the
         # task off it and releases the worker's reservation for it.
         self._held_dispatches: dict[str, tuple[str, str]] = {}
+        # The node alias of each dispatch's worker, from its record until it ends. A
+        # worker id another node took after a registry wipe names both workers, and the
+        # alias tells their dispatches apart.
+        self._dispatch_nodes: dict[str, str] = {}
         # Reservations of dispatches that ended, released after the lock; one whose
         # release failed stays here for the next release.
         self._ended_dispatches: list[tuple[str, str]] = []
@@ -1582,6 +1587,7 @@ class TaskRuntime:
             ):
                 continue
             del self._held_dispatches[task_id]
+            self._dispatch_nodes.pop(held[1], None)
             self._ended_dispatches.append(held)
 
     def _release_ended_workers(self) -> None:
@@ -5067,7 +5073,11 @@ class TaskRuntime:
         Returns whether the task is pending and may be published.
         """
         publish = _Publish(
-            worker.id, dispatch_id, _supplier_id(worker), input_preparation
+            worker.id,
+            dispatch_id,
+            _supplier_id(worker),
+            worker.node_alias,
+            input_preparation,
         )
         with self._cv:
             record = self._tasks.get(task_id)
@@ -5151,8 +5161,10 @@ class TaskRuntime:
             held = (publish.worker_id, publish.dispatch_id)
             earlier = self._held_dispatches.get(task_id)
             if earlier is not None and earlier != held:
+                self._dispatch_nodes.pop(earlier[1], None)
                 self._ended_dispatches.append(earlier)
             self._held_dispatches[task_id] = held
+            self._dispatch_nodes[publish.dispatch_id] = publish.node_alias
         record.merged_dispatch_worker = (
             publish.worker_id if self._merge_children_map.get(task_id) else None
         )
@@ -6608,7 +6620,12 @@ class TaskRuntime:
         return self._tasks
 
     def recover_tasks_for_worker(
-        self, worker_id: str, *, spend_attempt: bool, node_id: str | None = None
+        self,
+        worker_id: str,
+        *,
+        spend_attempt: bool,
+        node_id: str | None = None,
+        node_alias: str | None = None,
     ) -> WorkerRecovery:
         """Recover the tasks a departed worker held.
 
@@ -6621,22 +6638,34 @@ class TaskRuntime:
         is left for the caller to return or settle. A task whose dispatch ended at a
         suspension holds nothing on the worker and waits on its boundary, unless the
         worker originated that boundary and holds its request. ``node_id`` names the
-        worker's node when its record is already gone.
+        worker's node when its record is already gone. ``node_alias`` recovers only
+        what the worker of that node held, when another node's worker took its id.
         """
         try:
-            return self._recover_tasks_for_worker(worker_id, spend_attempt, node_id)
+            return self._recover_tasks_for_worker(
+                worker_id, spend_attempt, node_id, node_alias
+            )
         finally:
             self._release_pending_terminations()
 
     def _recover_tasks_for_worker(
-        self, worker_id: str, spend_attempt: bool, node_id: str | None
+        self,
+        worker_id: str,
+        spend_attempt: bool,
+        node_id: str | None,
+        node_alias: str | None,
     ) -> WorkerRecovery:
         recovered: list[str] = []
         resolved: list[LossOutcome] = []
         with self._cv:
             for task_id, record in list(self._tasks.items()):
                 publish = self._publishing.get(task_id)
-                if publish and not publish.recorded and publish.worker_id == worker_id:
+                if (
+                    publish
+                    and not publish.recorded
+                    and publish.worker_id == worker_id
+                    and node_alias in (None, publish.node_alias)
+                ):
                     self._publishing[task_id] = None
                     self._revoke_locked(
                         task_id, worker_id, publish.dispatch_id, node_id
@@ -6652,6 +6681,11 @@ class TaskRuntime:
                 if record.assigned_worker != worker_id:
                     continue
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
+                    continue
+                if node_alias is not None and (
+                    record.dispatch_id is None
+                    or self._dispatch_nodes.get(record.dispatch_id) != node_alias
+                ):
                     continue
                 # A boundary whose raw request only this worker holds is lost with it.
                 if self._dispatch_ended_at_suspension_locked(record) and not (
@@ -6676,7 +6710,7 @@ class TaskRuntime:
             # custody with the worker; drop the stale mapping so its boundary re-mints
             # on a fresh worker rather than waiting on an outcome that can never arrive.
             for permit_id, op in list(self._pending_ops.items()):
-                if op.worker_id == worker_id:
+                if op.worker_id == worker_id and node_alias in (None, op.node_alias):
                     del self._pending_ops[permit_id]
         return WorkerRecovery(recovered, resolved)
 

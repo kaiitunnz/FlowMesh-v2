@@ -16,7 +16,9 @@ def record_dispatch(
     input_preparation: bool = False,
 ) -> bool:
     if isinstance(worker, str):
-        worker = cast(Worker, SimpleNamespace(id=worker, node_id="nde-1"))
+        worker = cast(
+            Worker, SimpleNamespace(id=worker, node_id="nde-1", node_alias="node-1")
+        )
     runtime.begin_publish(
         task_id, worker, dispatch_id, input_preparation=input_preparation
     )

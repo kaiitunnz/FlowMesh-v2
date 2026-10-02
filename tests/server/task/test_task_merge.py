@@ -128,7 +128,7 @@ def _runtime(
 
 
 def _worker(worker_id: str = "wkr-1") -> Any:
-    return SimpleNamespace(id=worker_id, node_id="nde-1")
+    return SimpleNamespace(id=worker_id, node_id="nde-1", node_alias="node-1")
 
 
 _WORKER = _worker()

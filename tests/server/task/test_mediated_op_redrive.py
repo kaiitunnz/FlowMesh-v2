@@ -149,3 +149,21 @@ def test_no_operation_is_re_minted_to_another_node_s_worker_under_its_id() -> No
         assert not engine.boundary_settleable(writer, first["call_correlation"])
 
     asyncio.run(run())
+
+
+def test_recovering_another_nodes_worker_keeps_this_workers_operations() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        _dispatch_agent(runtime, ids["writer"])
+        pending = dict(runtime._pending_ops)
+
+        runtime.recover_tasks_for_worker(
+            "wkr-1", spend_attempt=True, node_alias="elsewhere"
+        )
+        assert runtime._pending_ops == pending
+
+        runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True, node_alias="box")
+        assert runtime._pending_ops == {}
+
+    asyncio.run(run())

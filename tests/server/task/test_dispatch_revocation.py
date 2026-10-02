@@ -128,7 +128,9 @@ def test_recovering_a_departed_workers_dispatch_revokes_it() -> None:
 def test_recovering_an_unrecorded_publish_revokes_it() -> None:
     registry = _Registry()
     runtime, task_id = _runtime(registry)
-    worker = cast(Worker, SimpleNamespace(id=_WORKER, node_id="nod-1"))
+    worker = cast(
+        Worker, SimpleNamespace(id=_WORKER, node_id="nod-1", node_alias="node-1")
+    )
     runtime.begin_publish(task_id, worker, "dsp-1")
 
     runtime.recover_tasks_for_worker(_WORKER, spend_attempt=True)
@@ -155,3 +157,29 @@ def test_a_restart_leaves_a_dispatch_in_flight_alone() -> None:
     runtime.release_ended_reservations()
 
     assert _revocations(registry) == []
+
+
+def test_recovering_one_nodes_worker_leaves_the_worker_that_took_its_id() -> None:
+    registry = _Registry()
+    runtime, old = _runtime(registry)
+    record_dispatch(runtime, old, _node_worker("box-a"), "dsp-1")
+    # A store wipe let a worker of another node register under the same id.
+    _, ids = asyncio.run(_register_v2(runtime, LINEAR))
+    new = ids["a"]
+    assert runtime.next_ready(threading.Event(), timeout=0.01) == new
+    record_dispatch(runtime, new, _node_worker("box-b"), "dsp-2")
+
+    recovery = runtime.recover_tasks_for_worker(
+        _WORKER, spend_attempt=True, node_alias="box-a"
+    )
+
+    assert [loss.task_id for loss in recovery.resolved] == [old]
+    assert _revocations(registry) == [(old, _WORKER, "dsp-1")]
+    record = runtime.get_record(new)
+    assert record is not None and record.dispatch_id == "dsp-2"
+
+
+def _node_worker(node_alias: str) -> Worker:
+    return cast(
+        Worker, SimpleNamespace(id=_WORKER, node_id="nod-1", node_alias=node_alias)
+    )

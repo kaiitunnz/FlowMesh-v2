@@ -1,5 +1,6 @@
 """A node's unregister of a worker id reaches the root's record only when that node
-wrote it, so an id another node holds keeps its live worker."""
+wrote it, so an id another node holds keeps its live worker, and recovers only what
+the unregistering node's worker held."""
 
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -44,7 +45,9 @@ def test_an_unregister_of_an_id_another_node_holds_leaves_its_worker() -> None:
 
     assert rds.hget(worker_key(_WORKER), "node_alias") == "box-b"
     assert rds.sismember(WORKERS_SET_KEY, _WORKER)
-    runtime.recover_tasks_for_worker.assert_not_called()
+    runtime.recover_tasks_for_worker.assert_called_once_with(
+        _WORKER, spend_attempt=True, node_id=None, node_alias="box-a"
+    )
 
 
 def test_a_nodes_unregister_of_its_own_worker_ends_it() -> None:
