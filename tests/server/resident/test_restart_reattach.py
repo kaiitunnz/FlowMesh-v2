@@ -9,7 +9,13 @@ from collections.abc import Set
 from typing import Any
 
 from server.resident import ReplicaState
-from server.resident.state import AdmissionProfile
+from server.resident.state import (
+    AdmissionProfile,
+    ClaimState,
+    ClaimTerminalReason,
+    InvocationSubject,
+    InvocationSubjectKind,
+)
 from server.task.models import TaskStatus
 from tests.server.resident.node_harness import (
     ENGINE_KEY,
@@ -19,6 +25,11 @@ from tests.server.resident.node_harness import (
     admitted_boundary,
     handoff_replicas,
 )
+from tests.server.task.test_resident_origin_loss import (
+    _RESIDENT_WF,
+    _capture_resident_boundary,
+)
+from tests.server.task.test_v2_orchestration import _register
 from tests.support.waiting import until
 
 
@@ -311,3 +322,61 @@ def test_a_restart_never_reattaches_an_endpoint_no_dispatch_reported() -> None:
     node.restart()
 
     assert node.replica(warm.replica_id).state is ReplicaState.PREEMPTED
+
+
+def test_a_claim_pending_at_a_restart_expires_and_frees_its_family_to_yield() -> None:
+    async def run() -> None:
+        node = Node()
+        warm = await node.warm_async()
+        assert warm.serve_task_id is not None
+        # A claim whose workflow was cancelled while it waited, before it settled.
+        pending = node.control._admission.raise_claim(
+            invocation_id="inv-pending",
+            subject=InvocationSubject(
+                kind=InvocationSubjectKind.WORKFLOW, id="wfl-gone", tenant="org"
+            ),
+            family=FAMILY.family,
+            profile=AdmissionProfile(engine_batch_key=FAMILY.engine_batch_key),
+        )
+        node.persist()
+
+        await node.restart_async()
+
+        restored = node.control.stores.claims.get(pending.claim_id)
+        assert restored is not None
+        assert restored.terminal_reason is ClaimTerminalReason.EXPIRED
+        node.control._lifecycle.yield_serve_task(warm.serve_task_id)
+        assert node.replica(warm.replica_id).state is ReplicaState.STOPPED
+
+    asyncio.run(run())
+
+
+def test_a_boundary_pending_at_a_restart_admits_on_a_successor_claim() -> None:
+    async def run() -> None:
+        node = Node()
+        node.control.bind_loop(asyncio.get_running_loop())
+        _, ids = await _register(node.runtime, _RESIDENT_WF)
+        _capture_resident_boundary(node.runtime, ids["writer"])
+        directory = node.control.stores.directory
+        await until(lambda: any(r.serve_task_id for r in directory.all()))
+        (cold,) = directory.all()
+        assert cold.serve_task_id is not None
+        (first,) = node.control.stores.claims.all()
+        assert first.state is ClaimState.PENDING
+
+        await node.restart_async()
+        claims = node.control.stores.claims
+        await until(lambda: len(claims.all()) == 2)
+        node.serve(cold.serve_task_id, "wkr-2")
+        await until(lambda: "resident_handoff" in node.delivery.kinds())
+
+        restored = claims.get(first.claim_id)
+        assert restored is not None
+        assert restored.terminal_reason is ClaimTerminalReason.EXPIRED
+        (successor,) = [c for c in claims.all() if c.claim_id != first.claim_id]
+        assert successor.invocation_id == first.invocation_id
+        assert successor.admission_epoch > first.admission_epoch
+        assert successor.holds_credit
+        assert handoff_replicas(node) == [(cold.replica_id, cold.incarnation)]
+
+    asyncio.run(run())

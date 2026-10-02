@@ -748,8 +748,10 @@ class ResidentCapacityControl:
 
         A credit-bearing claim whose data path did not survive the restart moves to
         ``UNCERTAIN`` rather than being re-admitted fresh, so its credit is not released
-        until the linked invocation reaches a fenced terminal outcome. Admission waits
-        until ``reattach_replicas`` has re-attached the restored replicas.
+        until the linked invocation reaches a fenced terminal outcome. A pending claim
+        holds no credit and its acquisition ended with the process, so it expires; a
+        re-driven boundary raises a successor. Admission waits until
+        ``reattach_replicas`` has re-attached the restored replicas.
         """
         self._replicas_attached.clear()
         if snapshot is None:
@@ -762,6 +764,8 @@ class ResidentCapacityControl:
                 ClaimState.STREAMING,
             ):
                 self._admission.on_route_loss(claim)
+            elif claim.state is ClaimState.PENDING:
+                self._admission.on_expired(claim)
 
     def on_serve_task_end(self, serve_task_id: str) -> None:
         """Retire, on the control loop, the replica a serve task stopped serving.
