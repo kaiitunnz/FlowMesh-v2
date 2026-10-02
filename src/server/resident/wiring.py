@@ -47,7 +47,8 @@ def build_resident_capacity(
     control: ControlPlaneTracer | None = None,
     content_scope_authority: Callable[[str, str], None] | None = None,
 ) -> ResidentCapacityControl:
-    """Wire and return resident-capacity control for the enabled resident config."""
+    """Wire resident-capacity control for the enabled resident config, install its
+    runtime hooks, and return it."""
     cfg = orchestration.resident
     stores = ResidentStores()
     limits = ResidentPolicyLimits(
@@ -86,12 +87,14 @@ def build_resident_capacity(
 
     def endpoint(serve_task_id: str) -> ReplicaEndpoint | None:
         record = runtime.get_record(serve_task_id)
-        # Only a dispatched serve task is serving: a requeued one keeps the endpoint
-        # its previous dispatch reported, and a terminal or absent one is known-dead.
+        # Only a dispatched serve task is serving, and only on the endpoint its current
+        # dispatch reported: an earlier dispatch's update outlives a requeue. A record
+        # stored before updates named their dispatch carries none.
         if (
             record is None
             or record.status != TaskStatus.DISPATCHED
             or not record.latest_update
+            or record.latest_update_dispatch_id not in (None, record.dispatch_id)
         ):
             return None
         serve = record.latest_update.get("serve")
@@ -110,6 +113,10 @@ def build_resident_capacity(
             interface=str(serve.get("interface") or "chat"),
         )
 
+    def serve_task_live(serve_task_id: str) -> bool:
+        record = runtime.get_record(serve_task_id)
+        return record is not None and record.status not in SETTLING_TASK_STATUSES
+
     sweep_interval = cfg.idle_sweep_interval_sec if cfg.idle_retain_sec > 0 else 0.0
     resident_control = ResidentCapacityControl(
         stores=stores,
@@ -124,13 +131,20 @@ def build_resident_capacity(
         settle_cb=runtime.settle_episode_invocation,
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
-        live_serve_tasks=runtime.live_resident_task_ids,
+        serve_task_live=serve_task_live,
         logger=logger,
         poll_interval_sec=cfg.poll_interval_sec,
         idle_sweep_interval_sec=sweep_interval,
         redrive_backoff_sec=cfg.redrive_backoff_sec,
         max_transient_redrives=cfg.max_transient_redrives,
         control=control,
+    )
+    runtime.set_resident_terminal_hook(resident_control.on_invocation_terminal)
+    runtime.set_resident_handlers(
+        originate=resident_control.originate,
+        on_ack=resident_control.on_bootstrap_ack,
+        on_outcome=resident_control.on_outcome,
+        on_route_observation=resident_control.on_route_observation,
     )
     runtime.set_resident_task_end_hook(resident_control.on_serve_task_end)
     return resident_control

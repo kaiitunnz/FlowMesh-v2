@@ -31,25 +31,24 @@ async def rehydrate_root_state(
     and resident admission waits until they have. A worker reserved for a dispatch the
     restored runtime does not hold is released.
     """
-    if resident_control is not None and resident_registry is not None:
-        resident_control.bind_loop(asyncio.get_running_loop())
-        snapshot = await resident_registry.load_snapshot_async()
-        if snapshot is not None:
-            resident_control.rehydrate(snapshot)
+    resident = resident_control if resident_registry is not None else None
+    if resident is not None and resident_registry is not None:
+        resident.bind_loop(asyncio.get_running_loop())
+        resident.rehydrate(await resident_registry.load_snapshot_async())
         if gated_serve is not None:
             gated_serve.reconcile_terminals()
     if runtime is not None:
         await runtime.rehydrate()
-    if resident_control is not None and resident_registry is not None:
-        resident_control.reattach_replicas()
+    if resident is not None:
+        resident.reattach_replicas(
+            runtime.live_resident_task_ids() if runtime is not None else frozenset()
+        )
     if runtime is not None:
         await asyncio.to_thread(runtime.release_ended_reservations)
-    if resident_control is not None and resident_registry is not None:
+    if resident is not None:
         if runtime is not None:
-            resident_control.reconcile_workflow_terminals(
-                runtime.resident_invocation_completed
-            )
-        resident_control.start()
+            resident.reconcile_workflow_terminals(runtime.resident_invocation_completed)
+        resident.start()
 
 
 _NODE_REFRESH_SEC = 1.0

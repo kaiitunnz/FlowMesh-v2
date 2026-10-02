@@ -18,7 +18,7 @@ the same invocation identity rather than falling through to a wrong terminal.
 
 import asyncio
 import logging
-from collections.abc import Callable, Collection, Coroutine
+from collections.abc import Callable, Coroutine, Set
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -99,6 +99,8 @@ SettleCallback = Callable[..., bool]
 RedispatchCallback = Callable[[str, str], bool]
 # Reads a serve substrate's reported endpoint once ready, else None.
 EndpointProbe = Callable[[str], ReplicaEndpoint | None]
+# Whether a serve task is live: neither settled nor being cancelled.
+ServeTaskLiveness = Callable[[str], bool]
 # Persists the authoritative CS snapshot.
 PersistCallback = Callable[[], None]
 
@@ -356,7 +358,7 @@ class ResidentCapacityControl:
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
-        live_serve_tasks: Callable[[], Collection[str]] = frozenset,
+        serve_task_live: ServeTaskLiveness = lambda _task_id: True,
         delivery: ResidentWorkerDelivery | None = None,
         persist: PersistCallback | None = None,
         logger: logging.Logger | None = None,
@@ -378,7 +380,7 @@ class ResidentCapacityControl:
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
-        self._live_serve_tasks = live_serve_tasks
+        self._serve_task_live = serve_task_live
         self._delivery = delivery
         self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("resident-capacity")
@@ -711,12 +713,8 @@ class ResidentCapacityControl:
         Accepted claims reconcile on their own fenced terminals; the replica is not
         idle-torn-down but drained because its serve task is ending.
         """
-        for replica in self._stores.directory.all():
-            if (
-                replica.standing
-                and replica.serve_task_id == serve_task_id
-                and replica.state in SERVABLE_REPLICA_STATES
-            ):
+        for replica in self._stores.directory.by_serve_task(serve_task_id):
+            if replica.standing and replica.state in SERVABLE_REPLICA_STATES:
                 self._lifecycle.drain(replica.replica_id)
                 # Stop it once its admitted work has drained so the stopped serve task's
                 # replica does not linger DRAINING in the directory; an in-flight claim
@@ -744,9 +742,9 @@ class ResidentCapacityControl:
         }
         return claims, held
 
-    def rehydrate(self, snapshot: ResidentSnapshot) -> None:
+    def rehydrate(self, snapshot: ResidentSnapshot | None) -> None:
         """Rebuild the authoritative CS facts and reconcile in-flight claims after a
-        restart.
+        restart, with or without a stored snapshot.
 
         A credit-bearing claim whose data path did not survive the restart moves to
         ``UNCERTAIN`` rather than being re-admitted fresh, so its credit is not released
@@ -754,6 +752,8 @@ class ResidentCapacityControl:
         until ``reattach_replicas`` has re-attached the restored replicas.
         """
         self._replicas_attached.clear()
+        if snapshot is None:
+            return
         self._stores.load_snapshot(snapshot)
         for claim in self._stores.claims.all():
             if claim.state in (
@@ -764,25 +764,29 @@ class ResidentCapacityControl:
                 self._admission.on_route_loss(claim)
 
     def on_serve_task_end(self, serve_task_id: str) -> None:
-        """Retire the replica a resident serve task stopped serving, on the control
-        loop.
+        """Retire, on the control loop, the replica a serve task stopped serving.
 
-        The runtime reports this under its own lock, so the work is handed to the loop
-        that owns the stores; nothing is loaded to retire before the loop is bound.
+        Safe to call under the runtime's lock: the retire is handed to the loop that
+        owns the stores. A report before the loop is bound is dropped, as no replica is
+        loaded yet.
         """
         if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                self._lifecycle.on_serve_task_end, serve_task_id
-            )
+            self._loop.call_soon_threadsafe(self._retire_serve_task, serve_task_id)
 
-    def reattach_replicas(self) -> None:
+    def _retire_serve_task(self, serve_task_id: str) -> None:
+        self._lifecycle.on_serve_task_end(
+            serve_task_id, live=self._serve_task_live(serve_task_id)
+        )
+
+    def reattach_replicas(self, live_serve_tasks: Set[str]) -> None:
         """Re-attach each restored replica to its serve task, then open admission.
 
-        Runs once the runtime has restored its task records. Reports are not snapshotted
-        and endpoint credentials are not persisted, so each servable replica is
-        re-probed: a live serve task re-attaches its endpoint and re-reports capacity,
-        and one no longer serving invalidates the incarnation to re-materialize. A serve
-        task resident capacity started that no active replica backs is reaped.
+        Call after the runtime restores its task records, passing the live resident
+        serve tasks. Reports are not snapshotted and endpoint credentials are not
+        persisted, so each servable replica is re-probed: a serve task holding the
+        dispatch that reported its endpoint re-attaches it and re-reports capacity, and
+        any other invalidates the incarnation to re-materialize. A resident serve task
+        that no active replica backs is reaped.
         """
         try:
             for replica in self._stores.directory.all():
@@ -796,7 +800,7 @@ class ResidentCapacityControl:
                     continue
                 replica.endpoint = fresh
                 self._lifecycle.refresh_report(replica.replica_id)
-            self._lifecycle.reconcile_serve_tasks(frozenset(self._live_serve_tasks()))
+            self._lifecycle.reconcile_serve_tasks(live_serve_tasks)
         finally:
             self._replicas_attached.set()
 
@@ -1714,13 +1718,18 @@ class ResidentCapacityControl:
         )
 
     def _promote_ready_replicas(self, family: str) -> None:
+        """Promote each cold start whose serve task reported its endpoint, and
+        invalidate one whose serve task ended, so a dead cold start never holds the
+        family's materialization."""
         for replica in self._stores.directory.by_family(family):
             if (
-                replica.state is ReplicaState.MATERIALIZING
-                and replica.serve_task_id is not None
-                and (endpoint := self._probe_endpoint(replica.serve_task_id))
-                is not None
+                replica.state is not ReplicaState.MATERIALIZING
+                or replica.serve_task_id is None
             ):
+                continue
+            if not self._serve_task_live(replica.serve_task_id):
+                self._lifecycle.on_preempt(replica.replica_id)
+            elif (endpoint := self._probe_endpoint(replica.serve_task_id)) is not None:
                 self._lifecycle.on_replica_ready(replica.replica_id, endpoint)
 
     def _fail(

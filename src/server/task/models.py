@@ -252,6 +252,11 @@ class TaskRecord(BaseModel):
     latest_update: dict[str, Any] | None = Field(
         default=None, description="Latest mid-task update payload."
     )
+    latest_update_dispatch_id: str | None = Field(
+        default=None,
+        description="Dispatch whose report set the latest update.",
+        exclude=True,
+    )
     result_reference: ContentReference | None = Field(
         default=None,
         description="The stored result envelope this task's success is bound to; "

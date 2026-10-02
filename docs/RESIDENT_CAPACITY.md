@@ -191,19 +191,19 @@ plan node carries is retained for twice the base, and every other family keeps t
 standing `serve` allocation is pinned to its task and exempt. Warmth is a retention
 preference only — it reserves nothing and changes no claim, admission, route, or credit.
 
-A demand replica lives only while its serve task holds a dispatch. A serve task that
-leaves its dispatch for any reason other than a new one — its worker lost or drained, the
-task settled or cancelled — invalidates its serving or materializing replica and is
-reaped, so nothing re-runs it and the family materializes again on demand. A draining
-replica's task is reaped while the replica finishes draining. An admitted claim keeps its
-credit until its own fenced terminal either way.
+A replica serves only on the endpoint its serve task's current dispatch reported. A warm
+demand replica lives only while its serve task holds that dispatch: when the serve task
+leaves it — its worker lost or drained, the task settled or cancelled — the replica is
+invalidated and the task is reaped; the next demand materializes the family again. A
+cold start whose dispatch ends retries the same serve task on an untried worker, under
+the task's own retry history, and is invalidated only once the task settles or is
+cancelled. A draining replica's task is reaped while the replica finishes draining. An
+admitted claim keeps its credit until its own fenced terminal.
 
-On a root restart, the stores load and in-flight claims go `UNCERTAIN` before the runtime
-re-drives suspended boundaries, and each restored replica re-attaches to its serve task
-once the runtime has restored the task's record: a dispatched serve task re-attaches its
-endpoint and the warm replica is reused, and any other invalidates it. Admission waits
-until the replicas have re-attached. A resident serve task that no active replica backs
-is reaped at startup.
+On a root restart, in-flight claims go `UNCERTAIN`, and each restored replica whose serve
+task holds the dispatch that reported its endpoint re-attaches and is reused; any other
+is invalidated. Admission waits until the replicas have re-attached, and a resident serve
+task that no active replica backs is reaped at startup.
 
 ## Selection strategy
 

@@ -275,13 +275,6 @@ if IS_ROOT_NODE:
             control=CONTROL_TRACER,
             content_scope_authority=FINALIZATION_INDEX.assign_scope,
         )
-        RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
-        RUNTIME.set_resident_handlers(
-            originate=RESIDENT_CONTROL.originate,
-            on_ack=RESIDENT_CONTROL.on_bootstrap_ack,
-            on_outcome=RESIDENT_CONTROL.on_outcome,
-            on_route_observation=RESIDENT_CONTROL.on_route_observation,
-        )
 
     _relay_redis: BinaryRedis | None = None
     CONTENT_BRIDGE: RootRendezvousBridge | None = None

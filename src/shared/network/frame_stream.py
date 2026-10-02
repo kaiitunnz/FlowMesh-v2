@@ -115,7 +115,7 @@ async def write_probe(writer: FrameWriter, payload: bytes) -> None:
 
 
 async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
-    """Read one relay frame, raising on a probe or once the framing no longer holds."""
+    """Read one relay frame, raising on a probe or on broken framing."""
     frame = await read_stream_frame(reader)
     if isinstance(frame, ProbeFrame):
         raise FrameStreamError("a probe is not a relay frame")
@@ -125,7 +125,7 @@ async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
 async def read_stream_frame(
     reader: asyncio.StreamReader,
 ) -> RelayFrame | ProbeFrame:
-    """Read one frame or probe, raising once its framing or bounds no longer hold."""
+    """Read one frame or probe, raising on broken framing or an exceeded bound."""
     meta_len = int.from_bytes(await reader.readexactly(_LENGTH_BYTES), "big")
     if meta_len > MAX_META_BYTES:
         raise FrameStreamError(f"relay frame header too large: {meta_len}")

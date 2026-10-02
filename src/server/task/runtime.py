@@ -2914,11 +2914,12 @@ class TaskRuntime:
         self._resident_route_observation = on_route_observation
 
     def set_resident_task_end_hook(self, hook: Callable[[str], None]) -> None:
-        """Install the consumer told when a resident task stops serving.
+        """Install the consumer told when a resident serve task stops serving.
 
-        The hook receives the task id once a commit moves a dispatched resident task
-        anywhere but a dispatch, or settles or cancels one. It runs under the runtime's
-        lock, so it must hand the work off rather than call back in.
+        The hook receives the task id once a dispatched resident serve task loses its
+        dispatch, including to another dispatch, and once one settles or starts
+        cancelling. It runs under the runtime's lock, so it must hand the work
+        off and never call back in.
         """
         self._resident_task_ended = hook
 
@@ -5279,6 +5280,7 @@ class TaskRuntime:
                     # A replayed or late progress update must not touch a terminal task.
                     return EventEffect.SETTLED
                 record.latest_update = payload
+                record.latest_update_dispatch_id = record.dispatch_id
                 self._persist_locked(task_id)
                 return EventEffect.APPLIED
         finally:
@@ -6621,7 +6623,7 @@ class TaskRuntime:
             return self._tasks.get(task_id)
 
     def live_resident_task_ids(self) -> set[str]:
-        """The tasks backing resident capacity that run and are not being cancelled."""
+        """Ids of the resident serve tasks neither settled nor cancelling."""
         with self._lock:
             return {
                 task_id

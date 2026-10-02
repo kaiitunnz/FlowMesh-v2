@@ -9,24 +9,25 @@ import contextlib
 import threading
 from typing import Any
 
+import pytest
+
 from server.resident import ReplicaState
 from server.resident.state import ClaimState, ReplicaIncarnation
 from server.task.models import TERMINAL_TASK_STATUSES, TaskStatus
-from tests.server.dispatch_helpers import record_dispatch
-from tests.server.resident.test_restart_reattach import (
-    _FAMILY,
-    _TS,
-    _admitted_boundary,
-    _Node,
-    _until,
+from tests.server.resident.node_harness import FAMILY, TS, Node, admitted_boundary
+from tests.server.task.test_resident_origin_loss import (
+    _RESIDENT_WF,
+    _capture_resident_boundary,
 )
+from tests.server.task.test_v2_orchestration import _register
+from tests.support.waiting import until
 
 
-def _loop_bound(node: _Node) -> None:
+def _loop_bound(node: Node) -> None:
     node.control.bind_loop(asyncio.get_running_loop())
 
 
-async def _serving(node: _Node) -> ReplicaIncarnation:
+async def _serving(node: Node) -> ReplicaIncarnation:
     replica = await node.warm_async()
     assert replica.serve_task_id is not None
     return replica
@@ -36,7 +37,7 @@ async def _off_loop(fn: Any, *args: Any) -> None:
     await asyncio.to_thread(fn, *args)
 
 
-def _lose_worker(node: _Node, worker_id: str) -> None:
+def _lose_worker(node: Node, worker_id: str) -> None:
     """Recover a departed worker's tasks and fail each it held, as the watchdog does."""
     recovery = node.runtime.recover_tasks_for_worker(worker_id, spend_attempt=True)
     for task_id in recovery.lost:
@@ -44,14 +45,14 @@ def _lose_worker(node: _Node, worker_id: str) -> None:
             task_id,
             worker_id,
             {"reason": "worker_heartbeat_expired", "synthetic": True},
-            _TS,
+            TS,
             error="worker_heartbeat_expired",
         )
 
 
 def test_a_lost_worker_retires_its_replica_on_the_control_loop() -> None:
     async def run() -> None:
-        node = _Node()
+        node = Node()
         _loop_bound(node)
         replica = await _serving(node)
         assert replica.serve_task_id is not None
@@ -66,7 +67,7 @@ def test_a_lost_worker_retires_its_replica_on_the_control_loop() -> None:
         node.control._lifecycle.on_preempt = recording  # type: ignore[method-assign]
 
         await _off_loop(_lose_worker, node, "wkr-1")
-        await _until(lambda: replica.state is ReplicaState.PREEMPTED)
+        await until(lambda: replica.state is ReplicaState.PREEMPTED)
 
         assert preempted_on == [loop_thread]
         assert node.status(replica.serve_task_id) in TERMINAL_TASK_STATUSES
@@ -77,15 +78,15 @@ def test_a_lost_worker_retires_its_replica_on_the_control_loop() -> None:
 
 def test_a_drained_worker_retires_its_replica_and_nothing_reruns_it() -> None:
     async def run() -> None:
-        node = _Node()
+        node = Node()
         _loop_bound(node)
         replica = await _serving(node)
         assert replica.serve_task_id is not None
 
         await _off_loop(
-            node.runtime.mark_cancelled, replica.serve_task_id, "wkr-1", {}, _TS
+            node.runtime.mark_cancelled, replica.serve_task_id, "wkr-1", {}, TS
         )
-        await _until(lambda: replica.state is ReplicaState.PREEMPTED)
+        await until(lambda: replica.state is ReplicaState.PREEMPTED)
 
         assert node.status(replica.serve_task_id) == TaskStatus.CANCELLED
         assert node.runtime.ready_queue_length() == 0
@@ -95,7 +96,7 @@ def test_a_drained_worker_retires_its_replica_and_nothing_reruns_it() -> None:
 
 def test_a_serve_task_end_reported_twice_invalidates_its_replica_once() -> None:
     async def run() -> None:
-        node = _Node()
+        node = Node()
         _loop_bound(node)
         replica = await _serving(node)
         assert replica.serve_task_id is not None
@@ -104,11 +105,11 @@ def test_a_serve_task_end_reported_twice_invalidates_its_replica_once() -> None:
         # The requeue reports the end; the reap that follows settles the task, which
         # reports it again.
         await _off_loop(
-            node.runtime.mark_cancelled, replica.serve_task_id, "wkr-1", {}, _TS
+            node.runtime.mark_cancelled, replica.serve_task_id, "wkr-1", {}, TS
         )
-        await _until(lambda: node.status(str(replica.serve_task_id)) == "CANCELLED")
+        await until(lambda: node.status(str(replica.serve_task_id)) == "CANCELLED")
         node.control.on_serve_task_end(replica.serve_task_id)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
 
         assert replica.state is ReplicaState.PREEMPTED
         assert replica.incarnation == incarnation + 1
@@ -118,7 +119,7 @@ def test_a_serve_task_end_reported_twice_invalidates_its_replica_once() -> None:
 
 def test_an_idle_retire_ends_stopped_rather_than_preempted() -> None:
     async def run() -> None:
-        node = _Node()
+        node = Node()
         _loop_bound(node)
         replica = await _serving(node)
         assert replica.serve_task_id is not None
@@ -129,7 +130,7 @@ def test_an_idle_retire_ends_stopped_rather_than_preempted() -> None:
         lifecycle.sweep_idle()
         assert replica.state is ReplicaState.DRAINING
         lifecycle.sweep_idle()
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
 
         assert replica.state is ReplicaState.STOPPED
         assert node.status(replica.serve_task_id) == TaskStatus.CANCELLING
@@ -139,16 +140,16 @@ def test_an_idle_retire_ends_stopped_rather_than_preempted() -> None:
 
 def test_a_draining_replica_whose_serve_task_is_given_up_keeps_retiring() -> None:
     async def run() -> None:
-        node = _Node()
+        node = Node()
         _loop_bound(node)
         replica = await _serving(node)
         assert replica.serve_task_id is not None
         node.control._lifecycle.drain(replica.replica_id)
 
         await _off_loop(
-            node.runtime.mark_cancelled, replica.serve_task_id, "wkr-1", {}, _TS
+            node.runtime.mark_cancelled, replica.serve_task_id, "wkr-1", {}, TS
         )
-        await _until(lambda: node.status(str(replica.serve_task_id)) == "CANCELLED")
+        await until(lambda: node.status(str(replica.serve_task_id)) == "CANCELLED")
 
         assert replica.state is ReplicaState.DRAINING
         assert node.runtime.ready_queue_length() == 0
@@ -158,22 +159,21 @@ def test_a_draining_replica_whose_serve_task_is_given_up_keeps_retiring() -> Non
 
 def test_a_cold_start_whose_serve_task_fails_before_reporting_is_invalidated() -> None:
     async def run() -> None:
-        node = _Node()
+        node = Node()
         _loop_bound(node)
         cold = await node.materialize_async()
         serve_task_id = cold.serve_task_id
         assert serve_task_id is not None
-        assert node.runtime.next_ready(threading.Event(), timeout=0.01) == serve_task_id
-        record_dispatch(node.runtime, serve_task_id, "wkr-1")
+        node.dispatch(serve_task_id, "wkr-1")
 
         await _off_loop(
             lambda: node.runtime.mark_failed(
-                serve_task_id, "wkr-1", {}, _TS, error="engine exited"
+                serve_task_id, "wkr-1", {}, TS, error="engine exited"
             )
         )
-        await _until(lambda: cold.state is ReplicaState.PREEMPTED)
+        await until(lambda: cold.state is ReplicaState.PREEMPTED)
 
-        plan = node.control._lifecycle.plan_capacity(_FAMILY.family, "m")
+        plan = node.control._lifecycle.plan_capacity(FAMILY.family, "m")
         assert plan.action == "materialize"
 
     asyncio.run(run())
@@ -181,14 +181,14 @@ def test_a_cold_start_whose_serve_task_fails_before_reporting_is_invalidated() -
 
 def test_retiring_a_replica_leaves_its_admitted_credit_held() -> None:
     async def run() -> None:
-        node = _Node()
-        replica = await _admitted_boundary(node)
+        node = Node()
+        replica = await admitted_boundary(node)
         assert replica.serve_task_id is not None
         (claim,) = node.control.stores.claims.all()
         assert claim.holds_credit
 
         await _off_loop(_lose_worker, node, "wkr-2")
-        await _until(lambda: replica.state is ReplicaState.PREEMPTED)
+        await until(lambda: replica.state is ReplicaState.PREEMPTED)
 
         assert claim.state is not ClaimState.TERMINAL
         assert claim.holds_credit
@@ -199,7 +199,7 @@ def test_retiring_a_replica_leaves_its_admitted_credit_held() -> None:
 
 def test_a_redispatch_behind_a_held_write_still_retires_the_replica() -> None:
     async def run() -> None:
-        node = _Node()
+        node = Node()
         _loop_bound(node)
         replica = await _serving(node)
         serve_task_id = replica.serve_task_id
@@ -218,19 +218,156 @@ def test_a_redispatch_behind_a_held_write_still_retires_the_replica() -> None:
             # The give-up's commit fails and is held for the report's redelivery, so
             # the requeue is in memory only.
             with contextlib.suppress(RuntimeError):
-                node.runtime.mark_cancelled(serve_task_id, "wkr-1", {}, _TS)
+                node.runtime.mark_cancelled(serve_task_id, "wkr-1", {}, TS)
 
         await _off_loop(give_up)
         assert node.status(serve_task_id) == TaskStatus.PENDING
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         assert replica.state is ReplicaState.WARM
 
         def redispatch() -> None:
-            stop = threading.Event()
-            assert node.runtime.next_ready(stop, timeout=0.01) == serve_task_id
-            record_dispatch(node.runtime, serve_task_id, "wkr-2", "dsp-next")
+            node.dispatch(serve_task_id, "wkr-2", "dsp-next")
 
         await _off_loop(redispatch)
-        await _until(lambda: replica.state is ReplicaState.PREEMPTED)
+        await until(lambda: replica.state is ReplicaState.PREEMPTED)
+
+    asyncio.run(run())
+
+
+def _retryable_failure(node: Node, task_id: str, worker_id: str, dispatch_id: str):
+    return node.runtime.fail_dispatch(
+        task_id,
+        worker_id,
+        {},
+        TS,
+        dispatch_id,
+        error="not enough GPU memory to load the model",
+        retryable=True,
+    )
+
+
+def test_a_retryable_cold_start_failure_retries_the_same_task_elsewhere() -> None:
+    async def run() -> None:
+        node = Node()
+        _loop_bound(node)
+        cold = await node.materialize_async()
+        serve_task_id = cold.serve_task_id
+        assert serve_task_id is not None
+        node.dispatch(serve_task_id, "wkr-1", "dsp-a")
+
+        await _off_loop(_retryable_failure, node, serve_task_id, "wkr-1", "dsp-a")
+        await asyncio.sleep(0)
+
+        assert cold.state is ReplicaState.MATERIALIZING
+        assert node.status(serve_task_id) == TaskStatus.PENDING
+        record = node.runtime.get_record(serve_task_id)
+        assert record is not None and record.failed_workers == ["wkr-1"]
+
+        node.serve(serve_task_id, "wkr-2", "dsp-b", port=8002)
+        node.control._promote_ready_replicas(FAMILY.family)
+
+        assert cold.state is ReplicaState.WARM
+        assert cold.endpoint is not None
+        assert cold.endpoint.base_url == "http://10.0.0.5:8002/v1"
+
+    asyncio.run(run())
+
+
+def test_an_earlier_dispatch_endpoint_never_promotes_a_cold_start() -> None:
+    async def run() -> None:
+        node = Node()
+        _loop_bound(node)
+        cold = await node.materialize_async()
+        serve_task_id = cold.serve_task_id
+        assert serve_task_id is not None
+        # The first dispatch reports its endpoint, then fails before promotion.
+        node.serve(serve_task_id, "wkr-1", "dsp-a")
+        await _off_loop(_retryable_failure, node, serve_task_id, "wkr-1", "dsp-a")
+        node.dispatch(serve_task_id, "wkr-2", "dsp-b")
+
+        node.control._promote_ready_replicas(FAMILY.family)
+
+        assert cold.state is ReplicaState.MATERIALIZING
+        assert node.control.probe_serve_endpoint(serve_task_id) is None
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_cold_start_is_invalidated() -> None:
+    async def run() -> None:
+        node = Node()
+        _loop_bound(node)
+        cold = await node.materialize_async()
+        serve_task_id = cold.serve_task_id
+        assert serve_task_id is not None
+        node.dispatch(serve_task_id, "wkr-1")
+        record = node.runtime.get_record(serve_task_id)
+        assert record is not None
+
+        await _off_loop(node.runtime.cancel_workflow, record.workflow_id)
+        await until(lambda: cold.state is ReplicaState.PREEMPTED)
+
+    asyncio.run(run())
+
+
+def test_a_cold_start_whose_end_went_unreported_frees_the_family() -> None:
+    async def run() -> None:
+        node = Node()
+        cold = await node.materialize_async()
+        serve_task_id = cold.serve_task_id
+        assert serve_task_id is not None
+        node.dispatch(serve_task_id, "wkr-1")
+        # The task ends before the control loop is bound, so no report reaches it.
+        node.runtime.mark_failed(serve_task_id, "wkr-1", {}, TS, error="engine exited")
+        assert cold.state is ReplicaState.MATERIALIZING
+
+        node.control._promote_ready_replicas(FAMILY.family)
+
+        assert cold.state is ReplicaState.PREEMPTED
+        assert not node.control._has_materializing(FAMILY.family)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("draining", [False, True])
+def test_a_standing_replica_ignores_its_serve_task_end(draining: bool) -> None:
+    async def run() -> None:
+        node = Node()
+        _loop_bound(node)
+        serve_task_id = await node.submit_serve_async()
+        node.serve(serve_task_id)
+        standing = node.adopt_standing(serve_task_id)
+        if draining:
+            node.control._lifecycle.drain(standing.replica_id)
+        state = standing.state
+
+        node.control.on_serve_task_end(serve_task_id)
+        await asyncio.sleep(0)
+
+        assert standing.state is state
+        assert node.status(serve_task_id) == TaskStatus.DISPATCHED
+
+    asyncio.run(run())
+
+
+def test_a_requeued_cold_start_that_never_redispatches_ends_at_its_deadline() -> None:
+    async def run() -> None:
+        node = Node(cold_start_deadline_sec=0.3)
+        node.control.bind_loop(asyncio.get_running_loop())
+        _, ids = await _register(node.runtime, _RESIDENT_WF)
+        _capture_resident_boundary(node.runtime, ids["writer"])
+        directory = node.control.stores.directory
+        await until(lambda: any(r.serve_task_id for r in directory.all()))
+        (cold,) = directory.all()
+        serve_task_id = cold.serve_task_id
+        assert serve_task_id is not None
+        node.dispatch(serve_task_id, "wkr-1", "dsp-a")
+        await _off_loop(_retryable_failure, node, serve_task_id, "wkr-1", "dsp-a")
+
+        (claim,) = node.control.stores.claims.all()
+        await until(lambda: claim.state is ClaimState.TERMINAL, timeout=5.0)
+
+        assert not claim.holds_credit
+        assert "resident_handoff" not in node.delivery.kinds()
 
     asyncio.run(run())

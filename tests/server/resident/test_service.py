@@ -607,21 +607,21 @@ def test_rehydrate_reconciles_in_flight_claim():
     assert fresh_stores.credit_ledger.held(claim.replica_id) == 1
 
 
-def test_rehydrate_reports_a_warm_replica_so_it_is_admittable_again():
+def test_reattach_reports_a_warm_replica_so_it_is_admittable_again():
     svc, stores, _settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))
     snapshot = stores.to_snapshot()
 
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc.rehydrate(snapshot)
-    fresh_svc.reattach_replicas()
+    fresh_svc.reattach_replicas(frozenset())
     fam = fresh_stores.directory.all()[0].family
     assert fresh_stores.pools.feasible_candidates(
         fam, AdmissionProfile(engine_batch_key=fam)
     )
 
 
-def test_rehydrate_preempts_a_warm_replica_whose_serve_task_is_gone():
+def test_reattach_preempts_a_warm_replica_whose_serve_task_is_gone():
     svc, stores, _settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))
     snapshot = stores.to_snapshot()
@@ -629,7 +629,7 @@ def test_rehydrate_preempts_a_warm_replica_whose_serve_task_is_gone():
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc._probe_endpoint = lambda serve_task_id: None  # serve task is gone
     fresh_svc.rehydrate(snapshot)
-    fresh_svc.reattach_replicas()
+    fresh_svc.reattach_replicas(frozenset())
     states = {r.state for r in fresh_stores.directory.all()}
     assert ReplicaState.WARM not in states
     assert ReplicaState.PREEMPTED in states
