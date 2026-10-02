@@ -20,7 +20,7 @@ from shared.schemas.command import (
 )
 
 from ...clients.redis import NODE_RESPONSE_CHANNEL, SyncRedisClient, node_cmd_channel
-from ...network.deputy import run_probe
+from ...network.deputy import ProbePayloadTooLarge, run_probe
 from ...network.state import ResolvedRoute
 from ...utils.concurrent import Sentinel, TaskReceiver
 from ..adapters.docker import DockerWorkerConfig
@@ -494,13 +494,18 @@ class CommandListener:
             resolved = ResolvedRoute.model_validate(payload["resolved_route"])
             probe_payload = base64.b64decode(payload["payload_b64"])
             budget = float(payload.get("connect_budget_sec", 5.0))
+        except (KeyError, ValidationError, ValueError) as exc:
+            return CommandResponse.error(
+                cmd, f"Invalid route plan: {exc}", CommandErrorCode.INVALID_PAYLOAD
+            )
+        try:
             outcome = await run_probe(
                 resolved,
                 probe_payload,
                 connect_budget_sec=budget,
                 ssl_context=self._peer_ssl_context,
             )
-        except (KeyError, ValidationError, ValueError) as exc:
+        except ProbePayloadTooLarge as exc:
             return CommandResponse.error(
                 cmd, f"Invalid route plan: {exc}", CommandErrorCode.INVALID_PAYLOAD
             )

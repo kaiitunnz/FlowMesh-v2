@@ -606,3 +606,19 @@ class TestHandleDeliverRoutePlanCmd:
         assert not resp.success
         assert resp.error_code is CommandErrorCode.INVALID_PAYLOAD
         assert resp.data is None
+
+    def test_an_error_inside_the_probe_is_not_a_payload_refusal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            command_listener, "run_probe", AsyncMock(side_effect=KeyError("late"))
+        )
+        cmd = _cmd(CommandType.DELIVER_ROUTE_PLAN, _route_plan(b"ping"))
+
+        cl = _listener()
+        cl._sem = asyncio.Semaphore(1)
+
+        resp = _run(cl._dispatch(cmd))
+
+        assert not resp.success
+        assert resp.error_code is CommandErrorCode.INTERNAL

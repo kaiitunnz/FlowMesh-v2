@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from server.network.deputy import run_probe
+from server.network.deputy import ProbePayloadTooLarge, run_probe
 from server.network.state import (
     ResolvedRoute,
     RouteCandidate,
@@ -389,7 +389,7 @@ def test_an_oversized_payload_is_refused_without_dialing() -> None:
 
         server, port = await _serve_once(count)
         async with server:
-            with pytest.raises(ValueError):
+            with pytest.raises(ProbePayloadTooLarge):
                 await run_probe(
                     _route((Transport.NODE_RELAY, f"127.0.0.1:{port}")),
                     b"x" * (MAX_PROBE_BYTES + 1),

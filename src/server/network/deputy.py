@@ -38,6 +38,10 @@ from .state import (
 )
 
 
+class ProbePayloadTooLarge(ValueError):
+    """A probe payload over ``MAX_PROBE_BYTES``, refused before anything is dialed."""
+
+
 @dataclass
 class ProbeOutcome:
     """The transport that answered the probe, if any, and the classified observation
@@ -70,11 +74,10 @@ async def run_probe(
 
     Each candidate gets ``connect_budget_sec`` for its whole exchange.
     ``ssl_context`` is the node's peer client context, or ``None`` where the deployment
-    runs its peer listeners without mutual TLS. A payload over ``MAX_PROBE_BYTES``
-    raises ``ValueError`` before anything is dialed.
+    runs its peer listeners without mutual TLS.
     """
     if len(payload) > MAX_PROBE_BYTES:
-        raise ValueError(f"probe payload exceeds {MAX_PROBE_BYTES} bytes")
+        raise ProbePayloadTooLarge(f"probe payload exceeds {MAX_PROBE_BYTES} bytes")
     observations: list[tuple[Transport, RouteObservationOutcome]] = []
     for candidate in dialable_candidates(resolved):
         outcome = await _probe(
