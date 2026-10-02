@@ -418,6 +418,23 @@ class LifecycleScaleManager:
             ):
                 self.on_preempt(replica.replica_id)
 
+    def yield_serve_task(self, serve_task_id: str) -> None:
+        """Retire the idle demand replica a serve task backs, freeing its worker.
+
+        A servable replica holding no admission credit is drained and stopped, as an
+        idle teardown is. One holding credit is left serving until its work releases,
+        and a standing or cold-starting replica is left as it is.
+        """
+        for replica in self._stores.directory.by_serve_task(serve_task_id):
+            if (
+                replica.standing
+                or replica.state not in SERVABLE_REPLICA_STATES
+                or self._stores.credit_ledger.held(replica.replica_id) > 0
+            ):
+                continue
+            self.drain(replica.replica_id)
+            self.stop(replica.replica_id)
+
     def reconcile_serve_tasks(self, live_serve_tasks: Set[str]) -> None:
         """Reconcile the directory against the live resident serve tasks.
 

@@ -54,6 +54,10 @@ from .worker_selector import DEFAULT_WORKER_SELECTION, select_worker
 _SENTINEL: Any = object()
 
 _NO_WORKER_BACKOFF_SEC = 0.5
+# How often a waiting owner-affine episode re-asks resident capacity for its holder,
+# and how long it waits before the wait is logged.
+_YIELD_REQUEST_INTERVAL_SEC = 2.0
+_OWNER_WAIT_LOG_SEC = 30.0
 _ERROR_BACKOFF_SEC = 1.0
 
 
@@ -107,6 +111,12 @@ class Dispatcher:
         self._resident_admission_slots = max(0, resident_admission_slots)
         self._embodiment_selector = embodiment_selector or PrimaryEmbodimentSelector()
         self._control = control if control is not None else NULL_CONTROL_TRACER
+        # Per owner-affine task waiting on its busy holder: when the wait began, when
+        # resident capacity was last asked to free the holder, and whether it was
+        # logged.
+        self._owner_wait_since: dict[str, float] = {}
+        self._yield_requested_at: dict[str, float] = {}
+        self._owner_wait_logged: set[str] = set()
         self._weight_reference_hints: tuple[str, ...] = (
             "checkpoint",
             "weight",
@@ -117,6 +127,48 @@ class Dispatcher:
             "load",
             "artifact",
         )
+
+    def _wait_for_owner(self, task_id: str, owner: OwnerFence) -> None:
+        """Account an owner-affine episode's wait on its busy holder.
+
+        A resident serve task occupying the holder is asked to yield it, at most once
+        per interval, since the episode can resume nowhere else. A wait past its bound
+        is logged once, naming what holds the worker.
+        """
+        now = time.monotonic()
+        since = self._owner_wait_since.setdefault(task_id, now)
+        last = self._yield_requested_at.get(task_id)
+        logging_due = (
+            now - since >= _OWNER_WAIT_LOG_SEC
+            and task_id not in self._owner_wait_logged
+        )
+        if (
+            not logging_due
+            and last is not None
+            and (now - last < _YIELD_REQUEST_INTERVAL_SEC)
+        ):
+            return
+        self._yield_requested_at[task_id] = now
+        occupant = self._runtime.dispatched_task_on(owner.worker_id)
+        asked = occupant is not None and self._runtime.request_resident_yield(
+            occupant.task_id
+        )
+        if logging_due:
+            self._owner_wait_logged.add(task_id)
+            self._logger.info(
+                "Task %s has waited %.0fs for its private-state holder %s, occupied "
+                "by %s%s",
+                task_id,
+                now - since,
+                owner.worker_id,
+                occupant.task_id if occupant is not None else "no dispatched task",
+                "; asked resident capacity to free it" if asked else "",
+            )
+
+    def _end_owner_wait(self, task_id: str) -> None:
+        self._owner_wait_since.pop(task_id, None)
+        self._yield_requested_at.pop(task_id, None)
+        self._owner_wait_logged.discard(task_id)
 
     def eligible_worker_ids(self, record: TaskRecord, relay: bool = False) -> set[str]:
         """Worker ids whose hardware satisfies the task, honoring selected_worker."""
@@ -441,10 +493,12 @@ class Dispatcher:
             ]
             if not pool:
                 record.no_eligible_since = None
+                self._wait_for_owner(task_id, owner)
                 self.requeue_task(
                     task_id, reason="private_state_owner_busy", count_retry=False
                 )
                 return False
+            self._end_owner_wait(task_id)
 
         failed_ids = set(record.failed_workers)
         if owner is not None:
@@ -499,6 +553,18 @@ class Dispatcher:
                 return self._grace_then_fail_exhausted(task_id, record, failed_ids)
 
         record.no_eligible_since = None
+
+        # 4b. A long-lived allocation keeps off a worker holding an unsettled
+        # activation's private state while another is idle: that activation can resume
+        # only there.
+        if self._runtime.long_lived_allocation(task_id):
+            holders = self._runtime.private_state_holders()
+            free = [
+                c
+                for c in pool
+                if OwnerFence(worker_id=c.id, incarnation=c.incarnation) not in holders
+            ]
+            pool = free or pool
 
         # 5. Worker selection (best-fit scoring by default)
         selection_info: dict[str, Any] = {}

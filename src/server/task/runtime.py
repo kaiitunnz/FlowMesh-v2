@@ -133,6 +133,7 @@ from .credentials import (
     take_spec_credentials,
 )
 from .models import (
+    SERVE_TASK_TYPES,
     SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
     DispatchEnd,
@@ -738,6 +739,7 @@ class TaskRuntime:
         # transition reports. Set when resident-capacity control is enabled.
         self._resident_originate: Callable[[ToolInvocationEnvelope], bool] | None = None
         self._resident_task_ended: Callable[[str], None] | None = None
+        self._resident_yield_requested: Callable[[str], None] | None = None
         # The dispatch each resident task was last committed DISPATCHED under, so a
         # commit moving it elsewhere, or under another dispatch, reports that the
         # earlier dispatch ended.
@@ -2922,6 +2924,14 @@ class TaskRuntime:
         off and never call back in.
         """
         self._resident_task_ended = hook
+
+    def set_resident_yield_hook(self, hook: Callable[[str], None]) -> None:
+        """Install the consumer asked to free a worker a resident serve task occupies.
+
+        The hook receives the serve task's id. It may run on the dispatcher's thread, so
+        it must hand the work off and never call back in.
+        """
+        self._resident_yield_requested = hook
 
     def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
         """Install the consumer that releases a resident admission credit on DS
@@ -6621,6 +6631,52 @@ class TaskRuntime:
     def get_record(self, task_id: str) -> TaskRecord | None:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def private_state_holders(self) -> set[OwnerFence]:
+        """The worker incarnations holding private state an unsettled activation
+        resumes on."""
+        with self._lock:
+            return {
+                holder
+                for engine in self._engines.values()
+                for holder in engine.private_state_holders()
+            }
+
+    def long_lived_allocation(self, task_id: str) -> bool:
+        """Whether a task holds its worker for its own life: a model server, resident
+        or user-submitted."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            return record is not None and (
+                record.resident or record.task_type in SERVE_TASK_TYPES
+            )
+
+    def dispatched_task_on(self, worker_id: str) -> TaskRecord | None:
+        """A task dispatched to ``worker_id``, if the worker holds one."""
+        with self._lock:
+            return next(
+                (
+                    record
+                    for record in self._tasks.values()
+                    if record.status == TaskStatus.DISPATCHED
+                    and record.assigned_worker == worker_id
+                ),
+                None,
+            )
+
+    def request_resident_yield(self, task_id: str) -> bool:
+        """Ask resident capacity to free the worker a resident serve task occupies.
+
+        Returns whether the task is one resident capacity started and was asked.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None or not record.resident:
+                return False
+        if self._resident_yield_requested is None:
+            return False
+        self._resident_yield_requested(task_id)
+        return True
 
     def live_resident_task_ids(self) -> set[str]:
         """Ids of the resident serve tasks neither settled nor cancelling."""

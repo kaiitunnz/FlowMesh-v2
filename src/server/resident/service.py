@@ -773,6 +773,17 @@ class ResidentCapacityControl:
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._retire_serve_task, serve_task_id)
 
+    def on_yield_requested(self, serve_task_id: str) -> None:
+        """Retire, on the control loop, the idle demand replica a serve task backs, so
+        an episode waiting for that worker can resume there.
+
+        Safe to call from any thread; a request before the loop is bound is dropped.
+        """
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._lifecycle.yield_serve_task, serve_task_id
+            )
+
     def _retire_serve_task(self, serve_task_id: str) -> None:
         self._lifecycle.on_serve_task_end(
             serve_task_id, live=self._serve_task_live(serve_task_id)

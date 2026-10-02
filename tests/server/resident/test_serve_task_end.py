@@ -395,6 +395,65 @@ def test_a_cold_start_whose_registrar_raises_leaves_no_serve_task(
     asyncio.run(run())
 
 
+def test_a_yield_request_retires_an_idle_demand_replica() -> None:
+    async def run() -> None:
+        node = Node()
+        _loop_bound(node)
+        replica = await _serving(node)
+        assert replica.serve_task_id is not None
+
+        await _off_loop(node.runtime.request_resident_yield, replica.serve_task_id)
+        await asyncio.sleep(0)
+
+        assert replica.state is ReplicaState.STOPPED
+        assert node.status(replica.serve_task_id) == TaskStatus.CANCELLING
+
+    asyncio.run(run())
+
+
+def test_a_yield_request_waits_for_the_replica_credit_to_release() -> None:
+    async def run() -> None:
+        node = Node()
+        replica = await admitted_boundary(node)
+        assert replica.serve_task_id is not None
+        (claim,) = node.control.stores.claims.all()
+
+        await _off_loop(node.runtime.request_resident_yield, replica.serve_task_id)
+        await asyncio.sleep(0)
+        assert replica.state is ReplicaState.WARM
+        assert claim.holds_credit
+
+        node.control.on_invocation_terminal(claim.invocation_id)
+        await asyncio.sleep(0)
+        await _off_loop(node.runtime.request_resident_yield, replica.serve_task_id)
+        await asyncio.sleep(0)
+
+        assert replica.state is ReplicaState.STOPPED
+
+    asyncio.run(run())
+
+
+def test_a_yield_request_leaves_standing_and_cold_starting_replicas() -> None:
+    async def run() -> None:
+        node = Node()
+        _loop_bound(node)
+        serve_task_id = await node.submit_serve_async()
+        node.serve(serve_task_id)
+        standing = node.adopt_standing(serve_task_id)
+        cold = await node.materialize_async()
+        assert cold.serve_task_id is not None
+
+        node.control.on_yield_requested(serve_task_id)
+        node.control.on_yield_requested(cold.serve_task_id)
+        await asyncio.sleep(0)
+
+        assert standing.state is ReplicaState.WARM
+        assert cold.state is ReplicaState.MATERIALIZING
+        assert node.status(serve_task_id) == TaskStatus.DISPATCHED
+
+    asyncio.run(run())
+
+
 def test_a_released_claim_restarts_its_replica_retain_window() -> None:
     async def run() -> None:
         node = Node()

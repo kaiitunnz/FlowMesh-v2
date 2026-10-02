@@ -147,6 +147,7 @@ def build_resident_capacity(
         on_route_observation=resident_control.on_route_observation,
     )
     runtime.set_resident_task_end_hook(resident_control.on_serve_task_end)
+    runtime.set_resident_yield_hook(resident_control.on_yield_requested)
     return resident_control
 
 
