@@ -5,25 +5,18 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import fakeredis
 import pytest
 from google.protobuf.empty_pb2 import Empty
 
 from server.clients.redis import SyncRedisClient
-from server.hooks import PrincipalContext
-from server.supervisor.adapters.base import WorkerTokenType
-from server.supervisor.adapters.external import (
-    ExternalWorkerAdapter,
-    ExternalWorkerConfig,
-)
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
-from server.supervisor.services.relay_service import RelayService
 from server.supervisor.services.task_listener import TaskListener
 from shared.grpc.supervisor.v1 import supervisor_pb2
 from tests.server.redis_helpers import fake_sync_client
+from tests.server.servicer_helpers import external_adapter, supervisor_servicer
 
 _LOGGER = logging.getLogger("test.stream_tasks")
 _TOKEN = "tok-1"
@@ -40,23 +33,13 @@ class _FakeContext:
 
 def _servicer(listener: TaskListener) -> tuple[SupervisorServicer, WorkerRegistry]:
     registry = WorkerRegistry(on_worker_id_released=listener.remove_worker)
-    registry.add(
-        ExternalWorkerAdapter(
-            cast(WorkerTokenType, _TOKEN),
-            _NAME,
-            ExternalWorkerConfig(),
-            MagicMock(spec=PrincipalContext),
-        )
-    )
-    servicer = SupervisorServicer(
+    registry.add(external_adapter(_TOKEN, _NAME))
+    servicer = supervisor_servicer(
         registry,
         fake_sync_client(fakeredis.FakeServer()),
         "nde-1",
         "box",
-        listener,
-        cast(RelayService, MagicMock()),
-        MagicMock(),
-        _LOGGER,
+        task_listener=listener,
     )
     return servicer, registry
 

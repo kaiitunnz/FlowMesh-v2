@@ -203,9 +203,9 @@ class MediatedEgressSidecar:
         key = (permit.agent_task_id, permit.call_correlation)
         with self._lock:
             produced = self._produced.get(key)
-        if produced is not None:
-            with self._lock:
+            if produced is not None:
                 self._inflight.pop(key, None)
+        if produced is not None:
             self._sink(
                 produced.model_copy(
                     update={

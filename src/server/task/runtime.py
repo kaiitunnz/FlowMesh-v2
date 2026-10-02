@@ -6109,8 +6109,8 @@ class TaskRuntime:
         )
 
     def _release_terminated_work(self, termination: _Termination) -> None:
-        """Release what a terminated workflow's work held, best effort: each resident
-        credit, each interrupt, and each reap is attempted however the others fare."""
+        """Send what ``termination`` owes workers, best effort: each resident credit,
+        interrupt, revoke, and reap is attempted however the others fare."""
         # The fenced terminal releases each in-flight resident invocation's credit, so a
         # lost or draining replica is not held forever.
         for invocation_id in termination.resident_invocation_ids:
@@ -6170,8 +6170,8 @@ class TaskRuntime:
                 )
 
     def _release_pending_terminations(self) -> None:
-        """Release, off the lock, what workflows control failed under it still hold,
-        and each worker reserved for a dispatch that ended."""
+        """Release, off the lock, what control queued under it, and each worker
+        reserved for a dispatch that ended."""
         with self._lock:
             pending, self._pending_terminations = self._pending_terminations, []
         for termination in pending:

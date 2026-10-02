@@ -283,7 +283,7 @@ def _build_servicer(
     servicer._node_alias = node_alias
     servicer._logger = logging.getLogger("test.external.enroll")
     servicer._lock = Lock()
-    servicer._unregistered_lock = Lock()
+    servicer._ids_lock = Lock()
     servicer._released = RecentSet(16)
     servicer._stopping = False
     servicer._task_listener = cast(TaskListener, _FakeTaskListener())

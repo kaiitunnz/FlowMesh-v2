@@ -2,23 +2,17 @@
 
 import logging
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import fakeredis
 import pytest
 
 from server.clients.redis import WORKER_ID_SEQ_KEY, WORKERS_SET_KEY, worker_key
-from server.hooks import PrincipalContext
 from server.registries.worker import WorkerRegistry as RootWorkerRegistry
-from server.supervisor.adapters.base import WorkerTokenType
-from server.supervisor.adapters.external import (
-    ExternalWorkerAdapter,
-    ExternalWorkerConfig,
-)
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from shared.grpc.supervisor.v1 import supervisor_pb2
 from tests.server.redis_helpers import fake_redis_client, fake_sync_client
+from tests.server.servicer_helpers import external_adapter, supervisor_servicer
 
 _LOGGER = logging.getLogger("test.worker_id_allocation")
 
@@ -50,24 +44,8 @@ def _servicer(
 
     registry = WorkerRegistry(on_worker_id_released=on_released)
     for token in ("tok-a", "tok-b"):
-        registry.add(
-            ExternalWorkerAdapter(
-                cast(WorkerTokenType, token),
-                token,
-                ExternalWorkerConfig(),
-                MagicMock(spec=PrincipalContext),
-            )
-        )
-    servicer = SupervisorServicer(
-        registry,
-        client,
-        node_id,
-        node_alias,
-        MagicMock(),
-        MagicMock(),
-        MagicMock(),
-        _LOGGER,
-    )
+        registry.add(external_adapter(token, token))
+    servicer = supervisor_servicer(registry, client, node_id, node_alias)
     return servicer, registry
 
 

@@ -27,6 +27,37 @@ ALIAS = "worker-1"
 NODE_ALIAS = "box"
 
 
+def external_adapter(token: str, alias: str) -> ExternalWorkerAdapter:
+    """An external worker's adapter, admitted under ``token``."""
+    return ExternalWorkerAdapter(
+        cast(WorkerTokenType, token),
+        alias,
+        ExternalWorkerConfig(),
+        MagicMock(spec=PrincipalContext),
+    )
+
+
+def supervisor_servicer(
+    registry: WorkerRegistry,
+    client: SyncRedisClient,
+    node_id: str = "nod-1",
+    node_alias: str = NODE_ALIAS,
+    task_listener: Any = None,
+    relay: RelayService | None = None,
+) -> SupervisorServicer:
+    """A servicer over ``registry`` and ``client``, its other collaborators mocked."""
+    return SupervisorServicer(
+        registry,
+        client,
+        node_id,
+        node_alias,
+        task_listener or MagicMock(),
+        relay or cast(RelayService, MagicMock()),
+        MagicMock(),
+        _LOGGER,
+    )
+
+
 class RecordingRelay(RelayService):
     def __init__(self) -> None:
         super().__init__(cast(SyncRedisClient, None), _LOGGER)
@@ -68,23 +99,13 @@ class ServicerHarness:
         self.relay = RecordingRelay()
         self.released: list[str] = []
         self.registry = WorkerRegistry(on_worker_id_released=self._released)
-        self.adapter = ExternalWorkerAdapter(
-            cast(WorkerTokenType, TOKEN),
-            ALIAS,
-            ExternalWorkerConfig(),
-            MagicMock(spec=PrincipalContext),
-        )
+        self.adapter = external_adapter(TOKEN, ALIAS)
         self.registry.add(self.adapter)
-        listener = MagicMock()
-        self.servicer = SupervisorServicer(
+        self.servicer = supervisor_servicer(
             self.registry,
             fake_sync_client(server),
-            "nod-1",
-            node_alias,
-            listener,
-            self.relay,
-            MagicMock(),
-            _LOGGER,
+            node_alias=node_alias,
+            relay=self.relay,
         )
 
     def _released(self, worker_id: str) -> None:

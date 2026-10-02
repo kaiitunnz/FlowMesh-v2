@@ -71,10 +71,6 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _redis(server: fakeredis.FakeServer) -> SyncRedisClient:
-    return fake_sync_client(server)
-
-
 class _Supervisor:
     """One supervisor process's gRPC side, as a restart would build it afresh."""
 
@@ -156,7 +152,7 @@ async def test_a_supervisor_restart_re_admits_the_worker_and_abandons_its_dispat
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = _redis(fakeredis.FakeServer())
+    redis = fake_sync_client(fakeredis.FakeServer())
     port = _free_port()
     first = _Supervisor(redis, port)
     await first.start()
@@ -218,7 +214,7 @@ async def test_a_worker_the_root_reaped_registers_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = _redis(fakeredis.FakeServer())
+    redis = fake_sync_client(fakeredis.FakeServer())
     port = _free_port()
     supervisor = _Supervisor(redis, port)
     await supervisor.start()
@@ -302,7 +298,7 @@ async def test_a_worker_holding_content_moves_to_its_new_registration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = _redis(fakeredis.FakeServer())
+    redis = fake_sync_client(fakeredis.FakeServer())
     port = _free_port()
     first = _Supervisor(redis, port)
     await first.start()
@@ -363,7 +359,7 @@ async def test_a_worker_streaming_a_resident_session_moves_to_its_new_registrati
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = _redis(fakeredis.FakeServer())
+    redis = fake_sync_client(fakeredis.FakeServer())
     port = _free_port()
     first = _Supervisor(redis, port)
     await first.start()
@@ -420,7 +416,7 @@ async def test_a_worker_the_root_reaped_registers_its_new_id_with_the_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", _SECRET)
-    redis = _redis(fakeredis.FakeServer())
+    redis = fake_sync_client(fakeredis.FakeServer())
     port = _free_port()
     supervisor = _Supervisor(redis, port)
     await supervisor.start()

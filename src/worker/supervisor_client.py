@@ -605,14 +605,15 @@ class SupervisorClient:
             delay = min(delay * 2, 30.0)
         return None
 
-    def _rearm_register_event(self) -> None:
-        template = self._worker_register_event
-        if template is None:
-            return
-        event = template.model_copy(
-            update={"worker_id": self.worker_id, "status": self._last_status}
+    def _register_event(self, template: WorkerEvent) -> WorkerEvent:
+        """The REGISTER event for the current registration and status."""
+        return template.model_copy(
+            update={"worker_id": self._worker_id, "status": self._last_status}
         )
-        self._enqueue_event(event)
+
+    def _rearm_register_event(self) -> None:
+        if (template := self._worker_register_event) is not None:
+            self._enqueue_event(self._register_event(template))
 
     def _start_event_stream(self) -> None:
         self._event_ready.clear()
@@ -768,9 +769,7 @@ class SupervisorClient:
             template = self._worker_register_event
             if gen != self._register_generation or template is None:
                 return
-            register = template.model_copy(
-                update={"worker_id": self._worker_id, "status": self._last_status}
-            )
+            register = self._register_event(template)
         yield supervisor_pb2.EventMessage(
             payload=self._struct_from_payload(serialize_event(register))
         )

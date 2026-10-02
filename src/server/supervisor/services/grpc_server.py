@@ -35,8 +35,9 @@ from ..services.task_listener import TaskListener
 
 # Longer than a worker waits before reconnecting a closed event stream.
 _REATTACH_GRACE_SEC = 10.0
-# Far more ids than a supervisor releases while their unregisters are in flight.
-_RELEASED_ID_MEMORY = 4096
+# Far more worker ids than a supervisor registers or releases while their events are
+# in flight.
+_WORKER_ID_MEMORY = 4096
 
 # Rewrite node_id for each worker key that still exists and this node wrote,
 # atomically. KEYS are worker keys; ARGV[1] is the new node id, ARGV[2] this node's
@@ -124,13 +125,14 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # RegisterWorker (grpc loop thread) and rebind_node (heartbeat thread).
         self._lock = Lock()
         # Worker ids already unregistered with the root; each is unregistered once.
-        self._unregistered: RecentSet[str] = RecentSet(_RELEASED_ID_MEMORY)
+        self._unregistered: RecentSet[str] = RecentSet(_WORKER_ID_MEMORY)
         # Worker ids released here, which a fresh registration never takes: the root
         # may still be about to apply their unregister.
-        self._released: RecentSet[str] = RecentSet(_RELEASED_ID_MEMORY)
+        self._released: RecentSet[str] = RecentSet(_WORKER_ID_MEMORY)
         # Worker ids whose registration reached the root.
-        self._registered: RecentSet[str] = RecentSet(_RELEASED_ID_MEMORY)
-        self._unregistered_lock = Lock()
+        self._registered: RecentSet[str] = RecentSet(_WORKER_ID_MEMORY)
+        # Guards the three id sets.
+        self._ids_lock = Lock()
         self._pending_unregisters: set[asyncio.Task[None]] = set()
         # Set once this supervisor starts stopping: a worker it admitted then would be
         # admitted again by the next supervisor, leaving a ghost id behind.
@@ -180,7 +182,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
 
     def worker_id_released(self, worker_id: str) -> None:
         """Tell the root a worker id ended, unless its own unregister already did."""
-        with self._unregistered_lock:
+        with self._ids_lock:
             self._released.add(worker_id)
             if worker_id in self._unregistered:
                 self._unregistered.discard(worker_id)
@@ -191,7 +193,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
     def _note_unregistered(self, worker_id: str) -> bool:
         """Record that the root heard ``worker_id`` unregister; return whether it is the
         first to."""
-        with self._unregistered_lock:
+        with self._ids_lock:
             if worker_id in self._unregistered:
                 return False
             self._unregistered.add(worker_id)
@@ -271,7 +273,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # concurrent rebind_node either sees this worker in its snapshot or stamps
         # it with the new id.
         with self._lock:
-            with self._unregistered_lock:
+            with self._ids_lock:
                 released = list(self._released)
             incarnation = allocate_worker_seq(
                 self._redis, [*self._registry.bound_worker_ids(), *released]

@@ -257,8 +257,8 @@ class Lifecycle:
         with self._status_lock:
             self._last_task_end = time.time()
             if self._draining.is_set():
-                # A draining worker sends no report, but its heartbeat stops naming
-                # the task it no longer runs.
+                # A draining worker sends no report; clearing the task keeps its
+                # heartbeat from naming it.
                 self._task_id = None
                 return
         self._report(

@@ -189,13 +189,14 @@ class Runner:
         self._mediated_op_stop = threading.Event()
         self._current_task_id: str | None = None
         self._pending_cancels: set[str] = set()
-        # The dispatch the task loop holds; the dispatches control ended or a
-        # re-registration gave up, which never run; and those control stopped.
+        # The dispatch the task loop holds.
         self._current_dispatch_id: str | None = None
         # The task and dispatch the active executor runs. A cancel reaches the executor
-        # only once it runs that dispatch: one landing earlier ends the dispatch before
-        # it starts, so the executor never keeps a cancel for a run it never began.
+        # only for the dispatch it runs; one landing earlier ends that dispatch before
+        # it starts.
         self._executing: tuple[str, str | None] | None = None
+        # Dispatches revoked or given up by a re-registration, cancelled, or stopped,
+        # which never run.
         self._revoked_dispatches: RecentSet[str] = RecentSet(_ENDED_DISPATCH_MEMORY)
         self._cancelled_dispatches: RecentSet[str] = RecentSet(_ENDED_DISPATCH_MEMORY)
         self._stopped_dispatches: RecentSet[str] = RecentSet(_ENDED_DISPATCH_MEMORY)

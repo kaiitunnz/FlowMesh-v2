@@ -343,10 +343,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   worker whose stream proposed it. The per-workflow model credential rides the permit
   to the worker. A binding without one uses the worker's deployment key only for the
   deployment's default model URL, and calls any other URL without a credential; a
-  pinned credential missing from the vault fails the call. A fabric facade the model calls on the turn is captured into
-  a `FacadeTurnGroup` reported to control, which records the group so the episode's next
-  completion routes its members and the turn returns Codex a clean summary. The
-  credential is kept out of the ledger, the control stores, and the logs.
+  pinned credential missing from the vault fails the call. A fabric facade the model
+  calls on the turn is captured into a `FacadeTurnGroup` reported to control, which
+  records the group so the episode's next completion routes its members and the turn
+  returns Codex a clean summary. The credential is kept out of the ledger, the control
+  stores, and the logs.
 - **Resident-capacity control.** A `resident` model binding is served from reusable
   physical capacity rather than an external endpoint. Two control-plane actors — an
   Admission controller and a Lifecycle & scale manager — over durable control-state
@@ -561,9 +562,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the task's next placement avoids that worker; a task bound to that worker's private
   state goes back to it, spending an attempt. Control revokes on its worker any
   dispatch it resolves without that worker ending it, as a disowned, lost, or
-  restart-ended dispatch, so a queued frame of it never runs; it also revokes, again
-  while the report persists, a dispatch a worker reports itself busy on that control
-  does not hold. A worker shutting down reports itself busy until it leaves.
+  restart-ended dispatch, so a queued frame of it never runs; a worker reporting itself
+  busy on a dispatch control does not hold has that dispatch revoked, again for as long
+  as the report persists. A worker shutting down reports itself busy until it leaves.
 - **Per-device GPU availability.** A GPU worker reads each device's memory on every
   heartbeat and reports any device a process outside FlowMesh holds. The worker stays
   `IDLE` and keeps taking CPU work. A model dispatch waits while any device of its
