@@ -647,8 +647,8 @@ async def _lifespan(_: FastAPI):
                 # must not hold up the process that would report it.
                 await asyncio.to_thread(ensure_bucket, config.object_store, logger)
             if WORKFLOW_REGISTRY is not None:
-                # Workflows registered before the submission index existed join it
-                # before any listing reads it.
+                # A workflow missing from the submission index joins it before any
+                # listing reads it.
                 indexed = await WORKFLOW_REGISTRY.index_submissions_async()
                 if indexed:
                     logger.info("Indexed %d workflow(s) by submission", indexed)

@@ -137,6 +137,8 @@ _SUBMISSION_DIGITS = 16
 SUBMISSION_US_MAX = 10**_SUBMISSION_DIGITS - 1
 # The most index entries one filtered scan step reads.
 _SCAN_CHUNK_MAX = 1000
+# The most index entries one backfill command adds.
+_BACKFILL_BATCH = 1000
 
 
 class Workflow(BaseModel):
@@ -358,6 +360,14 @@ class WorkflowRegistry:
     async def index_submissions_async(self) -> int:
         """Add every registered workflow the submission index lacks; return how many
         it added."""
+        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
+            pipe.scard(WORKFLOWS_SET_KEY)
+            pipe.zcard(WORKFLOWS_BY_SUBMISSION_KEY)
+            registered, indexed = await pipe.execute()
+        # Registration and removal update the set and the index in one transaction,
+        # so an index as large as the set covers it.
+        if indexed >= registered:
+            return 0
         ids = list(await self.get_workflow_ids_async())
         stamps = await self._submission_stamps(ids)
         members = [
@@ -368,7 +378,7 @@ class WorkflowRegistry:
         if not members:
             return 0
         async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
-            for chunk in batched(members, _SCAN_CHUNK_MAX):
+            for chunk in batched(members, _BACKFILL_BATCH):
                 pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, dict.fromkeys(chunk, 0))
             added = await pipe.execute()
         return sum(added)
