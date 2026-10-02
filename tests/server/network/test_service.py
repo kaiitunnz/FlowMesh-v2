@@ -3,7 +3,7 @@
 import asyncio
 import logging
 
-from server.config import NetworkPlaneConfig
+from server.config import NetworkPlaneConfig, TrustedPeerConfig
 from server.network.service import PROBE_TRUST, NetworkPlane
 from server.network.state import (
     NetworkEndpointAdvertisement,
@@ -77,9 +77,9 @@ def _listener(node_id="nde-2", generation=0) -> ReplicaListenerAdvertisement:
     )
 
 
-def _plane(registry: _FakeNodeRegistry) -> NetworkPlane:
+def _plane(registry: _FakeNodeRegistry, *, peer: bool = False) -> NetworkPlane:
     return NetworkPlane(
-        NetworkPlaneConfig(enabled=True),
+        NetworkPlaneConfig(enabled=True, peer=TrustedPeerConfig(enabled=peer)),
         registry,  # type: ignore[arg-type]
         logging.getLogger("test-network"),
     )
@@ -105,13 +105,27 @@ def test_a_probe_resolves_the_full_ladder() -> None:
     registry = _FakeNodeRegistry()
     registry.set(_node("nde-1", generation=1))
     registry.set(_node("nde-2", generation=1))
-    plane = _plane(registry)
-    result = asyncio.run(plane.resolve("nde-1", _listener(), trust=PROBE_TRUST))
+    plane = _plane(registry, peer=True)
+    assert plane.probe_trust == PROBE_TRUST
+    result = asyncio.run(plane.resolve("nde-1", _listener(), trust=plane.probe_trust))
     assert result is not None
     _origin, route = result
     transports = [c.transport.value for c in route.candidates]
     assert transports[0] == "worker_direct"
     assert "node_relay" in transports and "control_relay" in transports
+
+
+def test_a_probe_has_no_forward_dial_rung_without_peer_listeners() -> None:
+    # Without the peer plane no listener answers a forward dial, so a probe offers only
+    # the relay base, which it does not dial.
+    registry = _FakeNodeRegistry()
+    registry.set(_node("nde-1", generation=1))
+    registry.set(_node("nde-2", generation=1))
+    plane = _plane(registry)
+    result = asyncio.run(plane.resolve("nde-1", _listener(), trust=plane.probe_trust))
+    assert result is not None
+    _origin, route = result
+    assert [c.transport.value for c in route.candidates] == ["control_relay"]
 
 
 def test_resolve_none_without_origin_endpoint() -> None:

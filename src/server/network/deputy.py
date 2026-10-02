@@ -75,32 +75,36 @@ async def _probe(
     budget: float,
     ssl_context: ssl.SSLContext | None,
 ) -> tuple[RouteObservationOutcome, bytes | None]:
-    host, port = split_host_port(endpoint)
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(
-                host,
-                port,
-                ssl=ssl_context,
-                server_hostname=host if ssl_context is not None else None,
-            ),
-            timeout=budget,
+        return await asyncio.wait_for(
+            _exchange(endpoint, payload, ssl_context), timeout=budget
         )
     except TimeoutError:
         return RouteObservationOutcome.TIMEOUT, None
+
+
+async def _exchange(
+    endpoint: str, payload: bytes, ssl_context: ssl.SSLContext | None
+) -> tuple[RouteObservationOutcome, bytes | None]:
+    try:
+        host, port = split_host_port(endpoint)
+        reader, writer = await asyncio.open_connection(
+            host,
+            port,
+            ssl=ssl_context,
+            server_hostname=host if ssl_context is not None else None,
+        )
     except ssl.SSLError:
         return RouteObservationOutcome.TLS_FAILURE, None
     except socket.gaierror:
         return RouteObservationOutcome.DNS_FAILURE, None
     except ConnectionRefusedError:
         return RouteObservationOutcome.CONNECT_FAILURE, None
-    except OSError:
+    except (OSError, ValueError):
         return RouteObservationOutcome.ROUTE_FAILURE, None
     try:
         await write_probe(writer, payload)
-        answer = await asyncio.wait_for(read_stream_frame(reader), timeout=budget)
-    except TimeoutError:
-        return RouteObservationOutcome.TIMEOUT, None
+        answer = await read_stream_frame(reader)
     except FrameStreamError:
         return RouteObservationOutcome.ROUTE_FAILURE, None
     except (asyncio.IncompleteReadError, OSError):

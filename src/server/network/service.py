@@ -53,14 +53,14 @@ def stamp_endpoint(
 
 
 PROBE_TRUST = TrustedPeerPolicy(enabled=True, probe=True)
-
-_REACHABILITY_CLASSES = frozenset(ReachabilityClass)
 """The trust rule a reachability probe resolves under.
 
 A probe carries no invocation payload — the listener it dials answers it without any
 session — so it is not gated on the deployment's peer posture. It is never used to
 resolve a route that carries resident traffic.
 """
+
+_REACHABILITY_CLASSES = frozenset(ReachabilityClass)
 
 
 def _peer_policy(config: NetworkPlaneConfig) -> TrustedPeerPolicy:
@@ -106,6 +106,12 @@ class NetworkPlane:
     @property
     def connect_budget_sec(self) -> float:
         return self._config.connect_budget_sec
+
+    @property
+    def probe_trust(self) -> TrustedPeerPolicy:
+        """The rule a reachability probe resolves under: every reachable peer path
+        where the deployment serves peer listeners, and none where it does not."""
+        return PROBE_TRUST if self._config.peer.enabled else TrustedPeerPolicy()
 
     async def endpoint_for(self, node_id: str) -> NetworkEndpointAdvertisement | None:
         """The node's current advertisement, stamped with its assigned node id."""

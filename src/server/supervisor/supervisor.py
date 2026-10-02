@@ -496,7 +496,9 @@ def _run_supervisor(
         None if node_relays is None else node_relays.bridge(RESIDENT_NAMESPACE)
     )
     peer_material = (
-        _peer_material(network_cfg.peer, logger) if network_cfg.peer.enabled else None
+        _peer_material(network_cfg.peer, logger)
+        if network_cfg.enabled and network_cfg.peer.enabled
+        else None
     )
     command_listener = CommandListener(
         redis=redis_client.sync,
