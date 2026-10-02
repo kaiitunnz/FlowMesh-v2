@@ -202,8 +202,8 @@ admitted claim keeps its credit until its own fenced terminal.
 
 A serve task prefers a worker holding no agent's private state when one is idle. When an
 agent waits to resume on the worker a demand replica occupies, the replica is retired
-once no claim holds or awaits it, freeing the worker: a serving replica through the
-idle-teardown path, a cold start by invalidation. The next demand materializes the family
+once no claim holds it and no claim of its family is pending, freeing the worker: a
+serving replica through the idle-teardown path, a cold start by invalidation. The next demand materializes the family
 again. A standing replica never yields its worker.
 
 On a root restart, in-flight claims go `UNCERTAIN`, and each restored replica whose serve
