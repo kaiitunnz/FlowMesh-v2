@@ -1,6 +1,5 @@
 """A worker id is never handed out while a worker still holds it."""
 
-import logging
 from typing import Any, cast
 
 import fakeredis
@@ -13,8 +12,6 @@ from server.supervisor.services.grpc_server import SupervisorServicer
 from shared.grpc.supervisor.v1 import supervisor_pb2
 from tests.server.redis_helpers import fake_redis_client, fake_sync_client
 from tests.server.servicer_helpers import external_adapter, supervisor_servicer
-
-_LOGGER = logging.getLogger("test.worker_id_allocation")
 
 
 class _Context:

@@ -13,7 +13,11 @@ _LOGGER = logging.getLogger("test.redis")
 
 
 def fake_sync_client(server: fakeredis.FakeServer) -> SyncRedisClient:
-    client = SyncRedisClient.__new__(SyncRedisClient)
+    return _sync_client(SyncRedisClient, server)
+
+
+def _sync_client[C: SyncRedisClient](cls: type[C], server: fakeredis.FakeServer) -> C:
+    client = object.__new__(cls)
     client._control = fakeredis.FakeRedis(server=server, decode_responses=True)
     client._telemetry = client._control
     client.logger = _LOGGER
@@ -52,10 +56,7 @@ def recording_redis_client(
 ) -> tuple[RedisClient, RecordingSyncClient]:
     """A Redis client over fakeredis whose control publishes are recorded."""
     client = fake_redis_client(server)
-    sync = RecordingSyncClient.__new__(RecordingSyncClient)
-    sync._control = fakeredis.FakeRedis(server=server, decode_responses=True)
-    sync._telemetry = sync._control
-    sync.logger = _LOGGER
+    sync = _sync_client(RecordingSyncClient, server)
     sync.published = []
     sync.on_publish = None
     client.sync = sync

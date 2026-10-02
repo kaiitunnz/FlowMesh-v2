@@ -567,8 +567,7 @@ class SupervisorClient:
         while True:
             rebound = self._rebound
             if rebound.wait(1.0):
-                # An earlier re-registration's callback finishing does not open the
-                # gate a later one armed.
+                # Only the latest re-registration's callback opens the gate.
                 if rebound is self._rebound:
                     return True
             elif self._shutdown.is_set():

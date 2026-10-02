@@ -27,9 +27,11 @@ ALIAS = "worker-1"
 NODE_ALIAS = "box"
 
 
-def external_adapter(token: str, alias: str) -> ExternalWorkerAdapter:
+def external_adapter(
+    token: str, alias: str, cls: type[ExternalWorkerAdapter] = ExternalWorkerAdapter
+) -> ExternalWorkerAdapter:
     """An external worker's adapter, admitted under ``token``."""
-    return ExternalWorkerAdapter(
+    return cls(
         cast(WorkerTokenType, token),
         alias,
         ExternalWorkerConfig(),

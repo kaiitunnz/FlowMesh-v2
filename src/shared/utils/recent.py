@@ -36,8 +36,8 @@ class RecentSet[T: Hashable]:
 
 
 class RecentMap[K: Hashable, V]:
-    """The values of the last ``capacity`` distinct keys set; the key set least
-    recently is forgotten first.
+    """The values of the last ``capacity`` distinct keys set; the least recently set
+    key is forgotten first.
 
     It is not synchronized: a caller sharing one across threads holds its own lock.
     """
@@ -56,9 +56,6 @@ class RecentMap[K: Hashable, V]:
 
     def get(self, key: K) -> V | None:
         return self._items.get(key)
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._items
 
     def __len__(self) -> int:
         return len(self._items)

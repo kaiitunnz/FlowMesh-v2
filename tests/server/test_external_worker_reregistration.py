@@ -136,7 +136,7 @@ def _register(client: SupervisorClient) -> None:
 
 
 # Well under a lane's 30 s rebind bound, so a re-registration whose event thread waits
-# on a rebind fails rather than stalls.
+# on a rebind fails the test.
 _REREGISTERED_WITHIN_SEC = 10.0
 
 

@@ -591,9 +591,9 @@ def _is_default_url(url: str | None, default_url: str | None) -> bool:
 # Extra lifetime a worker-originated operation permit gets beyond the request timeout,
 # to cover dispatch and queue latency before the origin worker validates it.
 _OP_PERMIT_SLACK_SEC = 60.0
-# A pending operation whose outcome has not arrived by its permit's deadline is
-# re-driven, waiting this long times 2^n more after the n-th re-drive, and its boundary
-# fails once it has been re-driven _OP_REDRIVE_LIMIT times.
+# A pending operation whose outcome has not arrived is re-driven at its permit's
+# deadline plus this long times 2^n - 1 after the n-th re-drive, and its boundary fails
+# once it has been re-driven _OP_REDRIVE_LIMIT times.
 _OP_REDRIVE_BACKOFF_SEC = 30.0
 _OP_REDRIVE_LIMIT = 5
 # A generous bound on a materialized external-model completion; a larger response
@@ -2334,12 +2334,12 @@ class TaskRuntime:
 
         A first delivery can be lost or left ambiguous, as when the egress's outcome
         could not be finalized while the root restarted, so an overdue operation is
-        re-minted; the worker returns an outcome it already produced rather than
-        egressing again. A boundary re-driven _OP_REDRIVE_LIMIT times fails.
+        re-minted under the same idempotency key, and a worker that already produced
+        its outcome returns it. A boundary re-driven _OP_REDRIVE_LIMIT times fails.
         """
         now = time.time()
         exhausted: list[_PendingOp] = []
-        redrive: list[_PendingOp] = []
+        redrive: list[tuple[str, _PendingOp]] = []
         with self._cv:
             for permit_id, op in list(self._pending_ops.items()):
                 if op.worker_id != worker_id or op.redrive_at > now:
@@ -2349,7 +2349,7 @@ class TaskRuntime:
                     exhausted.append(op)
                 else:
                     op.redrives += 1
-                    redrive.append(op)
+                    redrive.append((permit_id, op))
         try:
             for op in exhausted:
                 self._logger.warning(
@@ -2366,15 +2366,15 @@ class TaskRuntime:
                 )
         finally:
             self._release_pending_terminations()
-        for op in redrive:
+        for permit_id, op in redrive:
             if not self.redispatch_episode_invocation(
                 op.agent_task_id, op.call_correlation
             ):
-                # The boundary is no longer pending, so nothing settles the operation.
+                # Its boundary has settled or ended, so no outcome will reap the
+                # operation.
                 with self._cv:
-                    for permit_id, pending in list(self._pending_ops.items()):
-                        if pending is op:
-                            del self._pending_ops[permit_id]
+                    if self._pending_ops.get(permit_id) is op:
+                        del self._pending_ops[permit_id]
 
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).

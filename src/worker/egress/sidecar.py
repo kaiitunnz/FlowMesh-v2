@@ -146,8 +146,8 @@ class MediatedEgressSidecar:
             self._inflight[key] = self._pool.submit(self._drive, permit)
 
     def forget_outcomes(self) -> None:
-        """Drop the outcomes kept for re-minted permits, as the registration that
-        produced them has ended and control re-mints none of them to the next."""
+        """Drop the outcomes kept for re-minted permits, which control re-mints only to
+        the registration that produced them."""
         with self._lock:
             self._produced.clear()
 

@@ -139,8 +139,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self._stopping = False
 
     def begin_shutdown(self) -> None:
-        """Refuse registrations from now on, so a worker registers with the next
-        supervisor instead."""
+        """Refuse registrations, so a worker registers with the next supervisor."""
         self._stopping = True
 
     def reconcile_workers(self) -> None:
@@ -480,8 +479,8 @@ _GRPC_MAX_MSG_BYTES = 1024 * 1024 * 1024  # 1 GB
 # ack timeout.
 _GRPC_KEEPALIVE_TIME_MS = 20_000
 _GRPC_KEEPALIVE_TIMEOUT_MS = 10_000
-# A worker's ack leaves behind whatever it already wrote to the connection, so it covers
-# a few windowed relay sessions draining over a slow link to an off-host worker.
+# A worker's ping ack queues behind whatever it already wrote to the connection, so this
+# covers a few windowed relay sessions draining over a slow link to an off-host worker.
 _GRPC_PING_ACK_TIMEOUT_MS = 30_000
 
 

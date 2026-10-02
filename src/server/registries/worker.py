@@ -165,7 +165,8 @@ redis.call('DEL', KEYS[2], KEYS[3])
 return 1
 """
 
-# A record another node wrote under the same id is that node's worker, and stays.
+# A record another node wrote under the same id is that node's worker; only that node's
+# unregister deletes it.
 _UNREGISTER_IF_NODE = """
 local alias = redis.call('HGET', KEYS[2], 'node_alias')
 if alias and alias ~= ARGV[2] then
@@ -470,8 +471,8 @@ class WorkerRegistry:
             pipe.execute()
 
     def unregister_node_worker(self, worker_id: str, node_alias: str) -> bool:
-        """Delete a worker's record unless another node wrote it; returns whether the
-        id was not another node's."""
+        """Delete a worker's record unless another node wrote it; returns False when
+        another node holds the id."""
         return bool(
             self._rds.sync.eval(
                 _UNREGISTER_IF_NODE,

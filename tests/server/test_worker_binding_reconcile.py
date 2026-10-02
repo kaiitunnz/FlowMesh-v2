@@ -3,17 +3,14 @@
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import grpc
 import pytest
 
 from server.clients.redis import WORKERS_SET_KEY, worker_key
-from server.hooks import PrincipalContext
 from server.supervisor.adapters.base import WorkerTokenType
 from server.supervisor.adapters.external import (
     ExternalWorkerAdapter,
-    ExternalWorkerConfig,
 )
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.schemas import WorkerStatus
@@ -26,6 +23,7 @@ from tests.server.servicer_helpers import (
     Aborted,
     ServicerHarness,
     WorkerContext,
+    external_adapter,
 )
 
 
@@ -298,12 +296,7 @@ class _ClosingAdapter(ExternalWorkerAdapter):
 def test_retiring_a_binding_whose_stream_closes_meanwhile_still_releases_it() -> None:
     released: list[str] = []
     registry = WorkerRegistry(on_worker_id_released=released.append)
-    adapter = _ClosingAdapter(
-        cast(WorkerTokenType, TOKEN),
-        ALIAS,
-        ExternalWorkerConfig(),
-        MagicMock(spec=PrincipalContext),
-    )
+    adapter = external_adapter(TOKEN, ALIAS, _ClosingAdapter)
     registry.add(adapter)
     registry.set_worker_id(adapter.token, "wkr-1")
     adapter.set_worker_id("wkr-1")
