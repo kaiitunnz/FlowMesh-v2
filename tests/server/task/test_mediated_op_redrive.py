@@ -3,7 +3,7 @@ not be finalized while the root restarted, is re-driven from its origin worker's
 heartbeat once its permit's deadline passes, a bounded number of times."""
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 from server.orchestration.state import WorkItemStatus
@@ -126,5 +126,26 @@ def test_each_re_drive_waits_longer() -> None:
             1,
             again["deadline_epoch"] + runtime_module._OP_REDRIVE_BACKOFF_SEC,
         )
+
+    asyncio.run(run())
+
+
+def test_no_operation_is_re_minted_to_another_node_s_worker_under_its_id() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        engine = _dispatch_agent(runtime, writer)
+        [first] = _permit_frames(runtime)
+        # A store wipe let a worker of another node register under the same id.
+        cast(Any, runtime._worker_registry).node_alias = "elsewhere"
+
+        _overdue(runtime)
+        _heartbeat(runtime)
+        runtime.redeliver_to_worker("wkr-1")
+
+        assert _permit_frames(runtime) == [first]
+        assert runtime._pending_ops == {}
+        assert not engine.boundary_settleable(writer, first["call_correlation"])
 
     asyncio.run(run())

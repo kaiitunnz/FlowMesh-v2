@@ -332,6 +332,9 @@ class _PendingOp:
     agent_task_id: str
     call_correlation: str
     worker_id: str
+    # The node the origin worker registered on; after a store wipe its id can name
+    # another node's worker, which holds none of the operation's request.
+    node_alias: str
     redrive_at: float
     redrives: int = 0
 
@@ -2556,6 +2559,25 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error="origin worker unavailable"
             )
             return
+        occurrence = (env.task_id, env.call_correlation)
+        stale = [
+            (permit_id, op)
+            for permit_id, op in self._pending_ops.items()
+            if (op.agent_task_id, op.call_correlation) == occurrence
+        ]
+        for permit_id, _ in stale:
+            del self._pending_ops[permit_id]
+        if any(op.node_alias != worker.node_alias for _, op in stale):
+            self._logger.warning(
+                "worker-originated tool op for %s: %s now names a worker of another "
+                "node; failing the boundary clean",
+                env.task_id,
+                worker_id,
+            )
+            self._settle_episode_invocation(
+                env.task_id, env.call_correlation, error="origin worker unavailable"
+            )
+            return
         op_credential = self._resolve_op_credential(agent, env.interface)
         if isinstance(op_credential, _MissingCredential):
             self._settle_episode_invocation(
@@ -2583,20 +2605,14 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error="could not mint a permit"
             )
             return
-        # A re-drive re-mints under a fresh permit id; keep at most one pending op per
-        # occurrence, and its re-drive count.
-        redrives = 0
-        for stale_id, op in list(self._pending_ops.items()):
-            if (op.agent_task_id, op.call_correlation) == (
-                env.task_id,
-                env.call_correlation,
-            ):
-                redrives = op.redrives
-                del self._pending_ops[stale_id]
+        # A re-drive re-mints under a fresh permit id, keeping one pending op per
+        # occurrence and its re-drive count.
+        redrives = max((op.redrives for _, op in stale), default=0)
         self._pending_ops[permit.permit_id] = _PendingOp(
             env.task_id,
             env.call_correlation,
             worker_id,
+            worker.node_alias,
             redrive_at=deadline + _OP_REDRIVE_BACKOFF_SEC * (2**redrives - 1),
             redrives=redrives,
         )

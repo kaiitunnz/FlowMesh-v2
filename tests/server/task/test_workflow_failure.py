@@ -114,7 +114,7 @@ def test_the_agents_pending_operations_are_reaped() -> None:
         runtime._worker_registry = cast(Any, _Workers())
         workflow_id, writer, _engine, env = await _held_boundary(runtime)
         runtime._pending_ops["mop-held"] = _PendingOp(
-            writer, env.call_correlation, "wkr-1", redrive_at=0.0
+            writer, env.call_correlation, "wkr-1", "box", redrive_at=0.0
         )
 
         _fail(runtime, workflow_id)
