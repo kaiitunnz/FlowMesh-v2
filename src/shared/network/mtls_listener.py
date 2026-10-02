@@ -186,6 +186,7 @@ class MutualTlsFrameListener:
             first = await read_stream_frame(reader)
             if isinstance(first, ProbeFrame):
                 await write_probe(writer, first.payload)
+                writer.close()
                 return
             handler = self._handler(ConnectionFrameSink(writer))
             await handler.on_frame(first)

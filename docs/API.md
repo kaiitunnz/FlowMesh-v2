@@ -144,7 +144,8 @@ logs via its `serve_task_id` through `GET /api/v1/tasks/{id}/logs`.
 
 SYSTEM/ADMIN-gated route-discovery diagnostics and a reachability probe. With
 `NETWORK_PLANE_ENABLED=false` these paths return 404. The echo carries no
-resident traffic. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+resident traffic and dials only with `NETWORK_PLANE_PEER_ENABLED=true`. See
+[`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 
 | Method | Path | Description |
 |--------|------|-------------|

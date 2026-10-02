@@ -10,7 +10,6 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from shared.network.frame_stream import MAX_PROBE_BYTES
 from shared.schemas.command import CommandMessage, CommandType
 
 from ...app_state import get_logger, get_network_plane, get_node_registry
@@ -20,6 +19,7 @@ from ...auth.security import (
     require_permission,
 )
 from ...hooks import ResourceAction, ResourceKind
+from ...network.deputy import dialable_candidates
 from ...network.service import NetworkPlane
 from ...network.state import (
     ReplicaListenerAdvertisement,
@@ -79,9 +79,8 @@ async def network_echo(
         routes=tuple(body.listener.routes),
         directly_routable=body.listener.directly_routable,
     )
-    # A probe resolves the full ladder so an operator can test a path the deployment
-    # has not declared trusted for resident traffic; its observations feed the same
-    # reachability view resident routing reads.
+    # A probe resolves every reachable peer path, trusted for resident traffic or not;
+    # its observations feed the reachability view resident routing reads.
     resolved = await network.resolve(
         body.origin_node_id, listener, trust=network.probe_trust
     )
@@ -91,18 +90,19 @@ async def network_echo(
             detail="origin node has no network endpoint advertisement",
         )
     origin, route = resolved
-
-    echo_payload = body.payload.encode()
-    if len(echo_payload) > MAX_PROBE_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"echo payload exceeds {MAX_PROBE_BYTES} bytes",
+    candidates = [candidate.transport.value for candidate in route.candidates]
+    if not dialable_candidates(route):
+        return NetworkEchoResponse(
+            route_epoch=route.route_epoch,
+            candidates=candidates,
+            reachability=network.reachability_states(origin, listener),
         )
+
     cmd = CommandMessage(
         command=CommandType.DELIVER_ROUTE_PLAN,
         payload={
             "resolved_route": route.model_dump(mode="json"),
-            "payload_b64": base64.b64encode(echo_payload).decode(),
+            "payload_b64": base64.b64encode(body.payload.encode()).decode(),
             "connect_budget_sec": network.connect_budget_sec,
         },
     )
@@ -125,13 +125,12 @@ async def network_echo(
     ]
     network.record_observations(origin, listener, observations)
 
-    echoed_b64 = resp.data.get("echoed_b64")
-    echoed = base64.b64decode(echoed_b64).decode() if echoed_b64 else None
+    selected = resp.data.get("selected_transport")
     return NetworkEchoResponse(
-        selected_transport=resp.data.get("selected_transport"),
-        echoed=echoed,
+        selected_transport=selected,
+        echoed=body.payload if selected else None,
         route_epoch=route.route_epoch,
-        candidates=[candidate.transport.value for candidate in route.candidates],
+        candidates=candidates,
         reachability=network.reachability_states(origin, listener),
     )
 

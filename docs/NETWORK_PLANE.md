@@ -71,17 +71,13 @@ and a demoted one drops out until its backoff cools.
   class can reach, under a bounded optimistic connect budget. Shared-node placement alone
   does not make it legal.
 - **`node_relay`** — caller to the target node's peer listener, which hands each session
-  to the node's local sidecar uplink. A forward-dial peer transport; the initial
-  same-node path as well as the normal cross-node path.
+  to the node's local sidecar uplink. A forward-dial peer transport for same-node and
+  cross-node pairs.
 - **`control_relay`** — the universal reverse-rendezvous base. Its descriptor names the
   origin and target reverse attachments by node (the delivery routes by node id) and the
   target's node-local sidecar delivery, not a chain of dialable addresses. It is feasible
   whenever both ends hold a live outbound attachment, so it resolves for an outbound-only
   node where the forward-dial peer transports do not.
-
-A `worker_direct` or `node_relay` candidate is forward-dialed: the origin opens one
-connection to its first hop — a worker's claim-gated peer listener, or the target node's
-peer listener — and carries relay frames over it.
 
 ## Trusted peer transports
 
@@ -155,14 +151,14 @@ observations back into the reachability view resident routing reads, so a failed
 demotes that path for resident traffic too. See the `Network` section of
 [`API.md`](API.md).
 
-The deputy dials each forward-dial candidate in order as a peer origin does, under the
-node's peer TLS identity, and sends a probe on the relay-frame stream. The listener
-answers the probe itself, before any session, sidecar, or engine, so a `node_relay` probe
-verifies the origin-to-node hop resident traffic dials. A failed connect or handshake, an
-unanswered probe, or an answer carrying other bytes demotes the transport. A listener that
-closes the connection after the handshake without answering, as one predating probes or
-refusing the deputy's identity does, demotes nothing. The echo needs the peer plane: with
-`NETWORK_PLANE_PEER_ENABLED` off, no candidate is forward-dialable.
+The deputy dials each forward-dial candidate in order under the node's peer TLS identity
+and sends a probe that the peer listener answers itself, before any session, sidecar, or
+engine, so a `node_relay` probe verifies the origin-to-node hop resident traffic dials. A
+failed connect or handshake, an unanswered probe, or a mismatched answer demotes the
+transport. A listener that closes after the handshake without answering demotes nothing:
+a listener that reads no probes and one that refuses the dialer's identity close the same
+way, and cannot be told apart. The echo dials peer listeners, so it probes only with
+`NETWORK_PLANE_PEER_ENABLED=true`.
 
 ## Reuse without resident contracts
 

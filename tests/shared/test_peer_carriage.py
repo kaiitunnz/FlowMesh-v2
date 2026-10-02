@@ -52,13 +52,6 @@ def _plan(transport: str, endpoint: str) -> ResidentCarriagePlan:
     )
 
 
-def _mtls(ca, identity: str, *sans: str) -> MutualTlsMaterial:
-    issued = ca.issue(identity, *sans)
-    return MutualTlsMaterial.from_b64(
-        ca_b64=ca.ca_b64, cert_b64=issued.cert_b64, key_b64=issued.key_b64
-    )
-
-
 def _dial_over_mtls(target: MutualTlsMaterial, origin: MutualTlsMaterial):
     """Dial a live mutual-TLS target on loopback: (received, relayed, observed)."""
     base = _BaseSink()
@@ -221,7 +214,7 @@ def test_a_target_whose_certificate_covers_the_dialed_host_is_carried() -> None:
     # registration. Requiring anything else refuses every legitimate target.
     ca = new_ca()
     received, relayed, observed = _dial_over_mtls(
-        _mtls(ca, "node-target", "127.0.0.1"), _mtls(ca, "node-origin", "127.0.0.1")
+        ca.material("node-target", "127.0.0.1"), ca.material("node-origin", "127.0.0.1")
     )
 
     assert [f.payload for f in received] == [b"request"]
@@ -234,7 +227,7 @@ def test_a_ca_signed_target_that_is_not_the_dialed_host_falls_back() -> None:
     # selected target from any other holder of a certificate.
     ca = new_ca()
     received, relayed, observed = _dial_over_mtls(
-        _mtls(ca, "node-elsewhere"), _mtls(ca, "node-origin", "127.0.0.1")
+        ca.material("node-elsewhere"), ca.material("node-origin", "127.0.0.1")
     )
 
     assert received == []

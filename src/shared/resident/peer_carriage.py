@@ -27,7 +27,6 @@ frame and settles the boundary without touching the path.
 import asyncio
 import contextlib
 import logging
-import socket
 import ssl
 from collections.abc import Awaitable, Callable
 
@@ -35,8 +34,12 @@ from shared.network.frame_stream import (
     FrameSink,
     FrameStreamError,
     read_relay_frame,
-    split_host_port,
     write_relay_frame,
+)
+from shared.network.peer_dial import (
+    PEER_DIAL_ERRORS,
+    classify_peer_error,
+    open_peer_connection,
 )
 from shared.network.relay_frame import RelayFrame
 from shared.schemas.network import RouteObservationOutcome, Transport
@@ -51,18 +54,6 @@ ObservationSink = Callable[[str, Transport, RouteObservationOutcome], None]
 
 class PeerCarriageLost(OSError):
     """A dialed carriage failed after delivery, leaving the outcome ambiguous."""
-
-
-def _classify(exc: BaseException) -> RouteObservationOutcome:
-    if isinstance(exc, ssl.SSLError):
-        return RouteObservationOutcome.TLS_FAILURE
-    if isinstance(exc, socket.gaierror):
-        return RouteObservationOutcome.DNS_FAILURE
-    if isinstance(exc, ConnectionRefusedError):
-        return RouteObservationOutcome.CONNECT_FAILURE
-    if isinstance(exc, TimeoutError):
-        return RouteObservationOutcome.TIMEOUT
-    return RouteObservationOutcome.ROUTE_FAILURE
 
 
 class _PeerSink(FrameSink):
@@ -102,19 +93,16 @@ class _PeerSink(FrameSink):
 
     async def _dial(self) -> bool:
         """Open the socket, or fall back to the relay and record the path evidence."""
-        host, port = split_host_port(self._endpoint)
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(
-                    host,
-                    port,
-                    ssl=self._carriage.ssl_context,
-                    server_hostname=host if self._carriage.ssl_context else None,
-                ),
-                timeout=self._carriage.connect_budget_sec,
+            reader, writer = await open_peer_connection(
+                self._endpoint,
+                self._carriage.ssl_context,
+                self._carriage.connect_budget_sec,
             )
-        except (OSError, ssl.SSLError, TimeoutError) as exc:
-            self._carriage.observe(self._session_id, self._transport, _classify(exc))
+        except PEER_DIAL_ERRORS as exc:
+            self._carriage.observe(
+                self._session_id, self._transport, classify_peer_error(exc)
+            )
             self._carriage.log.info(
                 "%s unavailable for %s, carrying the relay base: %s",
                 self._transport.value,
@@ -153,7 +141,9 @@ class _PeerSink(FrameSink):
         """
         if self._closing:
             return
-        self._carriage.observe(self._session_id, self._transport, _classify(exc))
+        self._carriage.observe(
+            self._session_id, self._transport, classify_peer_error(exc)
+        )
 
     def close(self) -> None:
         self._closing = True

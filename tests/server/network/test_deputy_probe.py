@@ -2,11 +2,12 @@
 
 import asyncio
 import socket
+import time
 from typing import Any, cast
 
 import pytest
 
-from server.network.deputy import run_echo
+from server.network.deputy import run_probe
 from server.network.state import (
     ResolvedRoute,
     RouteCandidate,
@@ -24,7 +25,7 @@ from shared.network.frame_stream import (
     write_probe,
     write_relay_frame,
 )
-from shared.network.mtls import MutualTlsMaterial, client_context
+from shared.network.mtls import MutualTlsMaterial, client_context, server_context
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from tests.support.certs import new_ca
 from worker.resident.peer_listener import ResidentPeerListener
@@ -45,13 +46,6 @@ class _Bridge:
 
     async def on_frame(self, frame: RelayFrame) -> None:
         self.frames.append(frame)
-
-
-def _mtls(ca: Any, identity: str, *sans: str) -> MutualTlsMaterial:
-    issued = ca.issue(identity, *sans)
-    return MutualTlsMaterial.from_b64(
-        ca_b64=ca.ca_b64, cert_b64=issued.cert_b64, key_b64=issued.key_b64
-    )
 
 
 def _free_port() -> int:
@@ -80,7 +74,7 @@ async def _node_listener(
     material: MutualTlsMaterial | None, bridge: _Bridge
 ) -> NodePeerListener:
     listener = NodePeerListener(
-        endpoint=f"127.0.0.1:{_free_port()}",
+        endpoint="127.0.0.1:0",
         material=material,
         bridge=cast(Any, bridge),
     )
@@ -95,13 +89,15 @@ def test_node_relay_is_verified_by_the_node_peer_listener(mtls: bool) -> None:
 
     async def run() -> Any:
         listener = await _node_listener(
-            _mtls(ca, "node-target", "127.0.0.1") if mtls else None, bridge
+            ca.material("node-target", "127.0.0.1") if mtls else None, bridge
         )
         try:
             context = (
-                client_context(_mtls(ca, "node-origin", "127.0.0.1")) if mtls else None
+                client_context(ca.material("node-origin", "127.0.0.1"))
+                if mtls
+                else None
             )
-            return await run_echo(
+            return await run_probe(
                 _route((Transport.NODE_RELAY, f"127.0.0.1:{listener.port}")),
                 b"ping",
                 connect_budget_sec=2.0,
@@ -113,7 +109,6 @@ def test_node_relay_is_verified_by_the_node_peer_listener(mtls: bool) -> None:
     outcome = asyncio.run(run())
 
     assert outcome.selected_transport is Transport.NODE_RELAY
-    assert outcome.echoed == b"ping"
     assert outcome.observations == [
         (Transport.NODE_RELAY, RouteObservationOutcome.VERIFIED)
     ]
@@ -132,16 +127,16 @@ def test_worker_direct_is_verified_by_the_worker_peer_listener() -> None:
         sock.bind(("127.0.0.1", 0))
         listener = ResidentPeerListener(
             sock=sock,
-            material=_mtls(ca, "wkr-target", "127.0.0.1"),
+            material=ca.material("wkr-target", "127.0.0.1"),
             deliver=cast(Any, deliver),
         )
         await listener.start()
         try:
-            return await run_echo(
+            return await run_probe(
                 _route((Transport.WORKER_DIRECT, f"127.0.0.1:{listener.port}")),
                 b"direct",
                 connect_budget_sec=2.0,
-                ssl_context=client_context(_mtls(ca, "node-origin", "127.0.0.1")),
+                ssl_context=client_context(ca.material("node-origin", "127.0.0.1")),
             )
         finally:
             await listener.stop()
@@ -149,7 +144,6 @@ def test_worker_direct_is_verified_by_the_worker_peer_listener() -> None:
     outcome = asyncio.run(run())
 
     assert outcome.selected_transport is Transport.WORKER_DIRECT
-    assert outcome.echoed == b"direct"
     assert delivered == []
 
 
@@ -157,7 +151,7 @@ def test_a_dead_direct_route_falls_over_to_node_relay() -> None:
     async def run() -> Any:
         listener = await _node_listener(None, _Bridge())
         try:
-            return await run_echo(
+            return await run_probe(
                 _route(
                     (Transport.WORKER_DIRECT, f"127.0.0.1:{_free_port()}"),
                     (Transport.NODE_RELAY, f"127.0.0.1:{listener.port}"),
@@ -181,13 +175,13 @@ def test_a_target_certificate_not_covering_the_dialed_host_is_a_tls_failure() ->
     ca = new_ca()
 
     async def run() -> Any:
-        listener = await _node_listener(_mtls(ca, "node-elsewhere"), _Bridge())
+        listener = await _node_listener(ca.material("node-elsewhere"), _Bridge())
         try:
-            return await run_echo(
+            return await run_probe(
                 _route((Transport.NODE_RELAY, f"127.0.0.1:{listener.port}")),
                 b"ping",
                 connect_budget_sec=2.0,
-                ssl_context=client_context(_mtls(ca, "node-origin", "127.0.0.1")),
+                ssl_context=client_context(ca.material("node-origin", "127.0.0.1")),
             )
         finally:
             await listener.stop()
@@ -204,20 +198,20 @@ def test_a_listener_refusing_the_deputy_identity_is_not_a_path_failure() -> None
 
     async def run() -> Any:
         listener = await _node_listener(
-            _mtls(ca, "node-target", "127.0.0.1"), _Bridge()
+            ca.material("node-target", "127.0.0.1"), _Bridge()
         )
         try:
             # The deputy trusts the target's CA but presents an identity it never
             # issued, so the target refuses it after the dialer's side completed.
-            origin = _mtls(other, "node-origin", "127.0.0.1")
+            origin = other.material("node-origin", "127.0.0.1")
             context = client_context(
                 MutualTlsMaterial(
-                    ca_pem=_mtls(ca, "x").ca_pem,
+                    ca_pem=ca.material("x").ca_pem,
                     cert_pem=origin.cert_pem,
                     key_pem=origin.key_pem,
                 )
             )
-            return await run_echo(
+            return await run_probe(
                 _route((Transport.NODE_RELAY, f"127.0.0.1:{listener.port}")),
                 b"ping",
                 connect_budget_sec=2.0,
@@ -238,7 +232,7 @@ async def _serve_once(handler: Any) -> tuple[asyncio.Server, int]:
     return server, server.sockets[0].getsockname()[1]
 
 
-def test_a_listener_that_predates_probes_is_not_a_path_failure() -> None:
+def test_a_listener_reading_only_relay_frames_is_not_a_path_failure() -> None:
     async def run() -> Any:
         async def old_listener(reader, writer) -> None:
             # A listener that reads only relay frames closes on a header it cannot
@@ -249,7 +243,7 @@ def test_a_listener_that_predates_probes_is_not_a_path_failure() -> None:
 
         server, port = await _serve_once(old_listener)
         async with server:
-            return await run_echo(
+            return await run_probe(
                 _route((Transport.NODE_RELAY, f"127.0.0.1:{port}")),
                 b"ping",
                 connect_budget_sec=2.0,
@@ -273,7 +267,7 @@ def test_an_answer_carrying_other_bytes_is_a_path_failure() -> None:
 
         server, port = await _serve_once(corrupting)
         async with server:
-            return await run_echo(
+            return await run_probe(
                 _route((Transport.NODE_RELAY, f"127.0.0.1:{port}")),
                 b"ping",
                 connect_budget_sec=2.0,
@@ -294,7 +288,7 @@ def test_an_unanswered_probe_is_a_timeout() -> None:
 
         server, port = await _serve_once(silent)
         async with server:
-            return await run_echo(
+            return await run_probe(
                 _route((Transport.NODE_RELAY, f"127.0.0.1:{port}")),
                 b"ping",
                 connect_budget_sec=0.3,
@@ -360,18 +354,18 @@ def test_a_probe_after_a_session_frame_closes_the_connection() -> None:
     assert [frame.seq for frame in bridge.frames] == [1]
 
 
-def test_an_oversized_probe_is_refused() -> None:
+def test_an_oversized_probe_is_refused_before_its_body_is_read() -> None:
     async def run() -> bytes:
         listener = await _node_listener(None, _Bridge())
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
             meta = b'{"kind":"probe"}'
-            body = b"x" * (MAX_PROBE_BYTES + 1)
+            # Only the header: a listener that waited for the declared body would never
+            # close the connection.
             writer.write(
                 len(meta).to_bytes(4, "big")
                 + meta
-                + len(body).to_bytes(4, "big")
-                + body
+                + (MAX_PROBE_BYTES + 1).to_bytes(4, "big")
             )
             await writer.drain()
             rest = await asyncio.wait_for(reader.read(), timeout=2.0)
@@ -383,6 +377,111 @@ def test_an_oversized_probe_is_refused() -> None:
     assert asyncio.run(run()) == b""
     with pytest.raises(FrameStreamError):
         asyncio.run(write_probe(cast(Any, None), b"x" * (MAX_PROBE_BYTES + 1)))
+
+
+def test_an_oversized_payload_is_refused_without_dialing() -> None:
+    accepted: list[int] = []
+
+    async def run() -> None:
+        async def count(reader, writer) -> None:
+            accepted.append(1)
+            writer.close()
+
+        server, port = await _serve_once(count)
+        async with server:
+            with pytest.raises(ValueError):
+                await run_probe(
+                    _route((Transport.NODE_RELAY, f"127.0.0.1:{port}")),
+                    b"x" * (MAX_PROBE_BYTES + 1),
+                    connect_budget_sec=2.0,
+                )
+
+    asyncio.run(run())
+
+    assert accepted == []
+
+
+def test_a_stalled_tls_peer_ends_within_the_budget() -> None:
+    ca = new_ca()
+    budget = 0.5
+
+    async def run() -> tuple[Any, float]:
+        async def stalled(reader, writer) -> None:
+            # Completes the handshake, then reads nothing more: neither the probe nor a
+            # close_notify is ever answered.
+            writer.transport.pause_reading()
+            await asyncio.sleep(60)
+
+        server = await asyncio.start_server(
+            stalled,
+            "127.0.0.1",
+            0,
+            ssl=server_context(ca.material("node-target", "127.0.0.1")),
+        )
+        port = server.sockets[0].getsockname()[1]
+        try:
+            started = time.monotonic()
+            outcome = await asyncio.wait_for(
+                run_probe(
+                    _route((Transport.NODE_RELAY, f"127.0.0.1:{port}")),
+                    b"ping",
+                    connect_budget_sec=budget,
+                    ssl_context=client_context(ca.material("node-origin", "127.0.0.1")),
+                ),
+                timeout=5.0,
+            )
+            return outcome, time.monotonic() - started
+        finally:
+            server.close()
+
+    outcome, elapsed = asyncio.run(run())
+
+    assert outcome.observations == [
+        (Transport.NODE_RELAY, RouteObservationOutcome.TIMEOUT)
+    ]
+    assert elapsed < budget + 1.0
+
+
+def test_only_candidates_with_a_dialable_hop_are_probed() -> None:
+    async def run() -> Any:
+        listener = await _node_listener(None, _Bridge())
+        try:
+            route = ResolvedRoute(
+                origin_id="rog-1",
+                target_node_id="nde-1",
+                listener_generation=0,
+                route_epoch=1,
+                candidates=(
+                    RouteCandidate(
+                        transport=Transport.CONTROL_RELAY,
+                        hops=(
+                            RouteHop(
+                                transport=Transport.CONTROL_RELAY,
+                                endpoint=f"127.0.0.1:{_free_port()}",
+                            ),
+                        ),
+                    ),
+                    RouteCandidate(transport=Transport.WORKER_DIRECT, hops=()),
+                    RouteCandidate(
+                        transport=Transport.NODE_RELAY,
+                        hops=(
+                            RouteHop(
+                                transport=Transport.NODE_RELAY,
+                                endpoint=f"127.0.0.1:{listener.port}",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return await run_probe(route, b"ping", connect_budget_sec=2.0)
+        finally:
+            await listener.stop()
+
+    outcome = asyncio.run(run())
+
+    assert outcome.observations == [
+        (Transport.NODE_RELAY, RouteObservationOutcome.VERIFIED)
+    ]
 
 
 def test_a_probe_is_refused_by_every_relay_codec() -> None:

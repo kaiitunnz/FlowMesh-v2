@@ -10,7 +10,7 @@ and the caller closes the connection: a stream whose framing is lost cannot resy
 
 The same framing carries a reachability probe: the listener that reads one answers it
 itself, so a probe exercises a stream listener's TLS and framing without entering any
-relay session. A probe is no relay frame kind, so no relay codec decodes one.
+relay session. A probe is not a relay frame kind, so no relay codec decodes one.
 """
 
 import asyncio
@@ -26,6 +26,7 @@ MAX_META_BYTES = 64 * 1024
 MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAX_PROBE_BYTES = 1024
 _PROBE_KIND = "probe"
+_PROBE_META = json.dumps({"kind": _PROBE_KIND}, separators=(",", ":")).encode()
 
 
 class FrameStreamError(Exception):
@@ -88,25 +89,7 @@ def _meta(frame: RelayFrame) -> bytes:
     return json.dumps(meta, separators=(",", ":")).encode()
 
 
-async def write_relay_frame(writer: FrameWriter, frame: RelayFrame) -> None:
-    """Write one frame's header and payload, then flush."""
-    meta = _meta(frame)
-    if len(meta) > MAX_META_BYTES or len(frame.payload) > MAX_PAYLOAD_BYTES:
-        raise FrameStreamError("relay frame exceeds the stream frame bounds")
-    writer.write(
-        len(meta).to_bytes(_LENGTH_BYTES, "big")
-        + meta
-        + len(frame.payload).to_bytes(_LENGTH_BYTES, "big")
-        + frame.payload
-    )
-    await writer.drain()
-
-
-async def write_probe(writer: FrameWriter, payload: bytes) -> None:
-    """Write one probe, then flush."""
-    if len(payload) > MAX_PROBE_BYTES:
-        raise FrameStreamError("probe payload exceeds its bound")
-    meta = json.dumps({"kind": _PROBE_KIND}, separators=(",", ":")).encode()
+async def _write_framed(writer: FrameWriter, meta: bytes, payload: bytes) -> None:
     writer.write(
         len(meta).to_bytes(_LENGTH_BYTES, "big")
         + meta
@@ -114,6 +97,21 @@ async def write_probe(writer: FrameWriter, payload: bytes) -> None:
         + payload
     )
     await writer.drain()
+
+
+async def write_relay_frame(writer: FrameWriter, frame: RelayFrame) -> None:
+    """Write one frame's header and payload, then flush."""
+    meta = _meta(frame)
+    if len(meta) > MAX_META_BYTES or len(frame.payload) > MAX_PAYLOAD_BYTES:
+        raise FrameStreamError("relay frame exceeds the stream frame bounds")
+    await _write_framed(writer, meta, frame.payload)
+
+
+async def write_probe(writer: FrameWriter, payload: bytes) -> None:
+    """Write one probe, then flush."""
+    if len(payload) > MAX_PROBE_BYTES:
+        raise FrameStreamError("probe payload exceeds its bound")
+    await _write_framed(writer, _PROBE_META, payload)
 
 
 async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
@@ -132,18 +130,22 @@ async def read_stream_frame(
     if meta_len > MAX_META_BYTES:
         raise FrameStreamError(f"relay frame header too large: {meta_len}")
     raw_meta = await reader.readexactly(meta_len)
+    try:
+        meta = json.loads(raw_meta)
+        kind = meta["kind"]
+    except (KeyError, ValueError, TypeError) as exc:
+        raise FrameStreamError("undecodable relay frame header") from exc
     payload_len = int.from_bytes(await reader.readexactly(_LENGTH_BYTES), "big")
+    if kind == _PROBE_KIND:
+        if payload_len > MAX_PROBE_BYTES:
+            raise FrameStreamError(f"probe payload too large: {payload_len}")
+        return ProbeFrame(await reader.readexactly(payload_len))
     if payload_len > MAX_PAYLOAD_BYTES:
         raise FrameStreamError(f"relay frame payload too large: {payload_len}")
     payload = await reader.readexactly(payload_len) if payload_len else b""
     try:
-        meta = json.loads(raw_meta)
-        if meta["kind"] == _PROBE_KIND:
-            if payload_len > MAX_PROBE_BYTES:
-                raise FrameStreamError(f"probe payload too large: {payload_len}")
-            return ProbeFrame(payload)
         return RelayFrame(
-            kind=RelayFrameKind(meta["kind"]),
+            kind=RelayFrameKind(kind),
             session_id=str(meta["session_id"]),
             correlation_id=str(meta["correlation_id"]),
             operation_id=str(meta["operation_id"]),

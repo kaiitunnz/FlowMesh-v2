@@ -262,8 +262,8 @@ def _peer_material(
     """
     if peer.disable_mtls:
         logger.warning(
-            "serving the node peer listener without mutual TLS: the deployment is "
-            "configured for a trusted network, so a dialer proves no identity"
+            "running peer connections without mutual TLS: the deployment is "
+            "configured for a trusted network, so no peer proves an identity"
         )
         return None
     try:
@@ -506,7 +506,7 @@ def _run_supervisor(
         worker_manager=worker_manager,
         logger=logger,
         cmd_receiver=cmd_receiver,
-        echo_ssl_context=(
+        peer_ssl_context=(
             client_context(peer_material) if peer_material is not None else None
         ),
     )

@@ -10,6 +10,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.x509.oid import NameOID
 
+from shared.network.mtls import MutualTlsMaterial
+
 _DAY = datetime.timedelta(days=1)
 
 
@@ -49,6 +51,13 @@ class TestCa:
             .sign(self.signer, None)
         )
         return Issued(_b64(_pem(cert)), _b64(_key_pem(key)))
+
+    def material(self, identity: str, *sans: str) -> MutualTlsMaterial:
+        """Issue an identity and return it as mutual-TLS material under this CA."""
+        issued = self.issue(identity, *sans)
+        return MutualTlsMaterial.from_b64(
+            ca_b64=self.ca_b64, cert_b64=issued.cert_b64, key_b64=issued.key_b64
+        )
 
 
 def new_ca(name: str = "flowmesh-test-ca") -> TestCa:

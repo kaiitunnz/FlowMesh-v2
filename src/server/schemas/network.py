@@ -1,6 +1,8 @@
 """REST schemas for the feature-gated network-plane echo and diagnostics."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from shared.network.frame_stream import MAX_PROBE_BYTES
 
 
 class NetworkListenerBody(BaseModel):
@@ -28,7 +30,16 @@ class NetworkListenerBody(BaseModel):
 class NetworkEchoRequest(BaseModel):
     origin_node_id: str = Field(description="Node whose deputy executes the route.")
     listener: NetworkListenerBody = Field(description="Target listener to reach.")
-    payload: str = Field(default="ping", description="Probe payload.")
+    payload: str = Field(
+        default="ping", description=f"Probe payload, at most {MAX_PROBE_BYTES} bytes."
+    )
+
+    @field_validator("payload")
+    @classmethod
+    def _bounded(cls, payload: str) -> str:
+        if len(payload.encode()) > MAX_PROBE_BYTES:
+            raise ValueError(f"payload exceeds {MAX_PROBE_BYTES} bytes")
+        return payload
 
 
 class NetworkEchoResponse(BaseModel):
