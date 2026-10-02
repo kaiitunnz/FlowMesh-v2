@@ -106,6 +106,11 @@ def restore_json(deduped_json: dict[str, dict[str, Any]]) -> Any:
     return _restore_deduped_node(deduped_json["data"], deduped_json["content"])
 
 
+def is_deduped_json(payload: dict[str, Any]) -> bool:
+    """Whether ``payload`` is in the deduplicated form ``dedup_json`` produces."""
+    return set(payload) == {"content", "data"}
+
+
 def lookup_deduped_json(deduped_json: dict[str, dict[str, Any]], key: str) -> str:
     """Given a deduped JSON structure, look up the original string for a given key."""
     return _restore_deduped_node(deduped_json["data"][key], deduped_json["content"])
