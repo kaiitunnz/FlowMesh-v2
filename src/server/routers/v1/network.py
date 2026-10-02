@@ -10,6 +10,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from shared.network.frame_stream import MAX_PROBE_BYTES
 from shared.schemas.command import CommandMessage, CommandType
 
 from ...app_state import get_logger, get_network_plane, get_node_registry
@@ -25,7 +26,6 @@ from ...network.state import (
     RouteObservationOutcome,
     Transport,
 )
-from ...network.wire import APP_ERROR_SENTINEL
 from ...registries.node import NodeRegistry
 from ...schemas.network import (
     NetworkEchoRequest,
@@ -56,9 +56,9 @@ def _require_plane(plane: NetworkPlane | None) -> NetworkPlane:
 
 @router.post(
     "/echo",
-    summary="Resolve a route and echo over the selected transport",
-    description="Resolve an ordered route to the target listener and round-trip a "
-    "payload over the first working transport, updating reachability.",
+    summary="Resolve a route and probe it transport by transport",
+    description="Resolve an ordered route to the target listener and probe each "
+    "forward-dial transport in order until one answers, updating reachability.",
 )
 async def network_echo(
     body: NetworkEchoRequest,
@@ -79,8 +79,9 @@ async def network_echo(
         routes=tuple(body.listener.routes),
         directly_routable=body.listener.directly_routable,
     )
-    # A diagnostic probe resolves the full ladder so an operator can test a path the
-    # deployment has not (yet) declared trusted for resident traffic.
+    # A probe resolves the full ladder so an operator can test a path the deployment
+    # has not declared trusted for resident traffic; its observations feed the same
+    # reachability view resident routing reads.
     resolved = await network.resolve(body.origin_node_id, listener, trust=PROBE_TRUST)
     if resolved is None:
         raise HTTPException(
@@ -89,7 +90,12 @@ async def network_echo(
         )
     origin, route = resolved
 
-    echo_payload = APP_ERROR_SENTINEL if body.app_error else body.payload.encode()
+    echo_payload = body.payload.encode()
+    if len(echo_payload) > MAX_PROBE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"echo payload exceeds {MAX_PROBE_BYTES} bytes",
+        )
     cmd = CommandMessage(
         command=CommandType.DELIVER_ROUTE_PLAN,
         payload={

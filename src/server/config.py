@@ -628,15 +628,13 @@ class TrustedPeerConfig:
 class NetworkPlaneConfig:
     """Network-plane route substrate knobs.
 
-    ``endpoint_url`` is the operator-configured node-relay endpoint advertised on
-    registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to.
-    TTL/backoff bounds drive the reachability state machine. ``relay_buffer_bytes`` is
-    the echo relay session's bounded in-flight buffer.
+    ``endpoint_url`` is the node's operator-configured inbound address, advertised on
+    registration; a direct route to one of its workers dials that host. TTL/backoff
+    bounds drive the reachability state machine.
     """
 
     enabled: bool = True
     endpoint_url: str | None = None
-    sidecar_url: str | None = None
     trust_domain: str = "flowmesh"
     reachability_class: str = "routable"
     protocols: tuple[str, ...] = ("echo",)
@@ -646,7 +644,6 @@ class NetworkPlaneConfig:
     backoff_max_sec: float = 30.0
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
-    relay_buffer_bytes: int = 65536
     peer: TrustedPeerConfig = field(default_factory=TrustedPeerConfig)
 
     @classmethod
@@ -661,7 +658,6 @@ class NetworkPlaneConfig:
         return cls(
             enabled=parse_bool_env(f"{prefix}ENABLED", True),
             endpoint_url=_env_or_none(f"{prefix}ENDPOINT_URL"),
-            sidecar_url=_env_or_none(f"{prefix}SIDECAR_URL"),
             trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh",
             reachability_class=_env_or_none(f"{prefix}REACHABILITY_CLASS")
             or "routable",
@@ -672,9 +668,6 @@ class NetworkPlaneConfig:
             backoff_max_sec=parse_float_env(f"{prefix}BACKOFF_MAX_SEC", 30.0),
             connect_budget_sec=parse_float_env(f"{prefix}CONNECT_BUDGET_SEC") or 5.0,
             route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC", 30.0),
-            relay_buffer_bytes=max(
-                1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES", 65536)
-            ),
             peer=TrustedPeerConfig.from_env(
                 default_trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh"
             ),

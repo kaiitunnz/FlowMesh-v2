@@ -70,20 +70,18 @@ and a demoted one drops out until its backoff cools.
   for an explicitly directly routable listener whose endpoint class the origin's network
   class can reach, under a bounded optimistic connect budget. Shared-node placement alone
   does not make it legal.
-- **`node_relay`** — caller to the target node's announced endpoint, which uplinks over an
-  authenticated node-local relay session to the target listener the route names. A
-  forward-dial peer transport; the initial same-node path as well as the normal
-  cross-node path.
+- **`node_relay`** — caller to the target node's peer listener, which hands each session
+  to the node's local sidecar uplink. A forward-dial peer transport; the initial
+  same-node path as well as the normal cross-node path.
 - **`control_relay`** — the universal reverse-rendezvous base. Its descriptor names the
   origin and target reverse attachments by node (the delivery routes by node id) and the
   target's node-local sidecar delivery, not a chain of dialable addresses. It is feasible
   whenever both ends hold a live outbound attachment, so it resolves for an outbound-only
   node where the forward-dial peer transports do not.
 
-A `worker_direct` or `node_relay` hop is target-addressed and forward-dialed: the deputy
-reads one leading frame naming its next hop, dials it, and byte-relays the rest, chaining a
-multi-hop ladder through the relays; a `RelaySession` bridges the two stream pairs with a
-bounded in-flight buffer so a slow consumer backpressures a fast producer.
+A `worker_direct` or `node_relay` candidate is forward-dialed: the origin opens one
+connection to its first hop — a worker's claim-gated peer listener, or the target node's
+peer listener — and carries relay frames over it.
 
 ## Trusted peer transports
 
@@ -150,12 +148,21 @@ Redis endpoint, distinct from the event/log relay.
 
 ## Echo seam
 
-A feature-gated, SYSTEM/ADMIN echo proves the substrate end to end without any resident
+A feature-gated, SYSTEM/ADMIN echo probes the forward-dial transports without any resident
 traffic. The control plane resolves a route to a target listener, delivers the plan to the
 origin node's deputy over the trusted node-command seam, and folds the deputy's classified
-observations back into the reachability view. The deputy round-trips a small payload over
-the selected transport against a bounded echo sidecar — never a resident engine. See the
-`Network` section of [`API.md`](API.md).
+observations back into the reachability view resident routing reads, so a failed probe
+demotes that path for resident traffic too. See the `Network` section of
+[`API.md`](API.md).
+
+The deputy dials each forward-dial candidate in order as a peer origin does, under the
+node's peer TLS identity, and sends a probe on the relay-frame stream. The listener
+answers the probe itself, before any session, sidecar, or engine, so a `node_relay` probe
+verifies the origin-to-node hop resident traffic dials. A failed connect or handshake, an
+unanswered probe, or an answer carrying other bytes demotes the transport. A listener that
+closes the connection after the handshake without answering, as one predating probes or
+refusing the deputy's identity does, demotes nothing. The echo needs the peer plane: with
+`NETWORK_PLANE_PEER_ENABLED` off, no candidate is forward-dialable.
 
 ## Reuse without resident contracts
 

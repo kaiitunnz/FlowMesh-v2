@@ -57,9 +57,9 @@ PROBE_TRUST = TrustedPeerPolicy(enabled=True, probe=True)
 _REACHABILITY_CLASSES = frozenset(ReachabilityClass)
 """The trust rule a reachability probe resolves under.
 
-A probe carries no invocation payload — it dials a node's own diagnostic listener to
-learn whether the path works at all — so it is not gated on the deployment's peer
-posture. It is never used to resolve a route that carries resident traffic.
+A probe carries no invocation payload — the listener it dials answers it without any
+session — so it is not gated on the deployment's peer posture. It is never used to
+resolve a route that carries resident traffic.
 """
 
 

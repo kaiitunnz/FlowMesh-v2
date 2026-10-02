@@ -142,13 +142,13 @@ logs via its `serve_task_id` through `GET /api/v1/tasks/{id}/logs`.
 
 ## Network
 
-SYSTEM/ADMIN-gated route-discovery diagnostics and a test echo. With
+SYSTEM/ADMIN-gated route-discovery diagnostics and a reachability probe. With
 `NETWORK_PLANE_ENABLED=false` these paths return 404. The echo carries no
 resident traffic. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/v1/network/echo` | Resolve a route to a target listener and echo a payload over the selected transport, updating reachability. |
+| POST | `/api/v1/network/echo` | Resolve a route to a target listener and probe each forward-dial transport in order until one answers, updating reachability. |
 | GET | `/api/v1/network/endpoints` | List advertised node network-plane endpoints. |
 | GET | `/api/v1/network/reachability` | List derived directional reachability entries. |
 

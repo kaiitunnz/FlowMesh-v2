@@ -43,7 +43,7 @@ and artifacts.
   inference substrate. Read before touching `src/server/resident/`.
 - **[`docs/NETWORK_PLANE.md`](docs/NETWORK_PLANE.md)** — network plane: trusted
   endpoint advertisements, the derived reachability view and its state machine,
-  the pure route resolver, the three transports, and the bounded relay session.
+  the pure route resolver, the three transports, and the reachability probe.
   Read before touching `src/server/network/`.
 - **[`docs/ENV.md`](docs/ENV.md)** — curated server / worker /
   supervisor env var tables (the knobs you actually tune). Full schema

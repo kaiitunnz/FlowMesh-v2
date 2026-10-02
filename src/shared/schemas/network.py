@@ -38,7 +38,8 @@ class NetworkEndpointAdvertisement(BaseModel):
 
     ``peer_url`` is the node's purpose-scoped listener for a directly dialed peer
     session, which hands it to the node's current local sidecar uplink; it is separate
-    from the diagnostic ``url`` and is empty on a node that hosts no such listener.
+    from ``url``, the node's advertised inbound address, and is empty on a node that
+    hosts no such listener.
 
     ``relay_attachment_id`` is the non-secret identity of this node's (or ingress
     edge's) outbound relay attachment to the root rendezvous. It proves the node can

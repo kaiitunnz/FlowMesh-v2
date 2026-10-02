@@ -4,6 +4,7 @@ import contextlib
 import logging
 import queue
 import secrets
+import ssl
 from collections.abc import Callable, Iterable
 from concurrent import futures
 from threading import Thread
@@ -155,8 +156,10 @@ class CommandListener:
         logger: logging.Logger,
         cmd_receiver: TaskReceiver[CommandMessage, CommandResponse] | None = None,
         max_inflight: int = _MAX_INFLIGHT_CMDS,
+        echo_ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self.logger = logger
+        self._echo_ssl_context = echo_ssl_context
         self._redis = redis
         self._node_id = node_id
         self._wm = worker_manager
@@ -485,7 +488,7 @@ class CommandListener:
     async def _handle_deliver_route_plan_cmd(
         self, cmd: CommandMessage
     ) -> CommandResponse:
-        """Run the origin-side deputy over a resolved route and echo a payload."""
+        """Run the origin-side deputy over a resolved route and probe each rung."""
         payload = cmd.payload or {}
         try:
             resolved = ResolvedRoute.model_validate(payload["resolved_route"])
@@ -495,7 +498,12 @@ class CommandListener:
             return CommandResponse.error(
                 cmd, f"Invalid route plan: {exc}", CommandErrorCode.INTERNAL
             )
-        outcome = await run_echo(resolved, echo_payload, connect_budget_sec=budget)
+        outcome = await run_echo(
+            resolved,
+            echo_payload,
+            connect_budget_sec=budget,
+            ssl_context=self._echo_ssl_context,
+        )
         return CommandResponse.ok(
             cmd,
             data={
