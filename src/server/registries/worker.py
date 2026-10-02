@@ -482,6 +482,23 @@ class WorkerRegistry:
             )
         )
 
+    async def unregister_node_worker_async(
+        self, worker_id: str, node_alias: str
+    ) -> bool:
+        """Delete a worker's record unless another node wrote it; returns False when
+        another node holds the id."""
+        return bool(
+            await self._rds.asyncio.eval(
+                _UNREGISTER_IF_NODE,
+                3,
+                WORKERS_SET_KEY,
+                worker_key(worker_id),
+                worker_hb_key(worker_id),
+                worker_id,
+                node_alias,
+            )
+        )
+
     async def unregister_workers_async(self, *worker_ids: str) -> None:
         async with self._rds.asyncio.control_pipeline() as pipe:
             pipe.srem(WORKERS_SET_KEY, *worker_ids)
