@@ -165,6 +165,17 @@ redis.call('DEL', KEYS[2], KEYS[3])
 return 1
 """
 
+# A record another node wrote under the same id is that node's worker, and stays.
+_UNREGISTER_IF_NODE = """
+local alias = redis.call('HGET', KEYS[2], 'node_alias')
+if alias and alias ~= ARGV[2] then
+    return 0
+end
+redis.call('SREM', KEYS[1], ARGV[1])
+redis.call('DEL', KEYS[2], KEYS[3])
+return 1
+"""
+
 
 class ReportOutcome(StrEnum):
     """How the registry took a worker's report of its status."""
@@ -457,6 +468,21 @@ class WorkerRegistry:
             pipe.delete(*(worker_key(worker_id) for worker_id in worker_ids))
             pipe.delete(*(worker_hb_key(worker_id) for worker_id in worker_ids))
             pipe.execute()
+
+    def unregister_node_worker(self, worker_id: str, node_alias: str) -> bool:
+        """Delete a worker's record unless another node wrote it; returns whether the
+        id was not another node's."""
+        return bool(
+            self._rds.sync.eval(
+                _UNREGISTER_IF_NODE,
+                3,
+                WORKERS_SET_KEY,
+                worker_key(worker_id),
+                worker_hb_key(worker_id),
+                worker_id,
+                node_alias,
+            )
+        )
 
     async def unregister_workers_async(self, *worker_ids: str) -> None:
         async with self._rds.asyncio.control_pipeline() as pipe:

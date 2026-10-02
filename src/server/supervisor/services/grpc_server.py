@@ -147,7 +147,12 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         if self._stopping:
             return
         with self._lock:
-            gone = self._unowned_bindings_locked()
+            missing, foreign = self._unowned_bindings_locked()
+            # The root's record of a foreign id is another node's live worker, which
+            # this node's UNREGISTER must not reach.
+            for worker_id in foreign:
+                self._note_unregistered(worker_id)
+            gone = [*missing, *foreign]
             released = sum(self._registry.retire(worker_id) for worker_id in gone)
         if released:
             self._logger.warning(
@@ -156,20 +161,22 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                 ", ".join(gone),
             )
 
-    def _unowned_bindings_locked(self) -> list[str]:
-        # A record another node wrote under the same id, as after a store wipe, is not
-        # this binding's.
+    def _unowned_bindings_locked(self) -> tuple[list[str], list[str]]:
+        """The bound ids the root holds no record of, and those whose record another
+        node wrote, as after a store wipe."""
         bound = self._registry.bound_worker_ids()
         recorded = self._redis.set_members(WORKERS_SET_KEY)
         with self._redis.control_pipeline() as pipe:
             for worker_id in bound:
                 pipe.hget(worker_key(worker_id), "node_alias")
             aliases = pipe.execute()
-        return [
+        missing = [worker_id for worker_id in bound if worker_id not in recorded]
+        foreign = [
             worker_id
             for worker_id, alias in zip(bound, aliases)
-            if worker_id not in recorded or alias != self._node_alias
+            if worker_id in recorded and alias != self._node_alias
         ]
+        return missing, foreign
 
     def worker_id_released(self, worker_id: str) -> None:
         """Tell the root a worker id ended, unless its own unregister already did."""
@@ -179,7 +186,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                 self._unregistered.discard(worker_id)
                 return
             self._unregistered.add(worker_id)
-        self._relay_service.add_unregister(worker_id)
+        self._relay_service.add_unregister(worker_id, self._node_alias)
 
     def _note_unregistered(self, worker_id: str) -> bool:
         """Record that the root heard ``worker_id`` unregister; return whether it is the
@@ -410,6 +417,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                     unregistered = True
                     if not self._note_unregistered(worker_id):
                         continue
+                    payload.setdefault("payload", {})["node_alias"] = self._node_alias
             self._relay_service.add_event(payload)
         self._logger.info("Event stream closed for worker %s", worker_id)
         if registered and not unregistered:
@@ -431,7 +439,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         if self._registry.get_worker_id(worker.token) != worker_id:
             return
         if self._note_unregistered(worker_id):
-            self._relay_service.add_unregister(worker_id)
+            self._relay_service.add_unregister(worker_id, self._node_alias)
 
     async def PushLogs(
         self,

@@ -922,7 +922,19 @@ class EventMonitor:
             case "UNREGISTER":
                 # A revoke routes by the node the record names, which this deletes.
                 departing = self._worker_registry.get_worker(worker_id)
-                self._worker_registry.unregister_workers(worker_id)
+                node_alias = event.payload.get("node_alias")
+                if not isinstance(node_alias, str):
+                    self._worker_registry.unregister_workers(worker_id)
+                elif not self._worker_registry.unregister_node_worker(
+                    worker_id, node_alias
+                ):
+                    self._logger.warning(
+                        "Ignoring node %s's unregister of %s, which another node "
+                        "holds",
+                        node_alias,
+                        worker_id,
+                    )
+                    return
                 if worker_id:
                     self._schedule_deregister(
                         ResourceKind.WORKER, worker_id, self._actor_from_event(event)

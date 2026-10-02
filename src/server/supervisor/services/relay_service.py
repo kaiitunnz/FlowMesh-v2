@@ -57,8 +57,15 @@ class RelayService:
     def add_event(self, event_data: Any) -> None:
         self._q.put(event_data)
 
-    def add_unregister(self, worker_id: str) -> None:
-        self.add_event({"type": "UNREGISTER", "worker_id": worker_id, "payload": {}})
+    # The root applies an UNREGISTER only to a record its node wrote.
+    def add_unregister(self, worker_id: str, node_alias: str) -> None:
+        self.add_event(
+            {
+                "type": "UNREGISTER",
+                "worker_id": worker_id,
+                "payload": {"node_alias": node_alias},
+            }
+        )
 
     # The root re-relays what a detached stream may have lost.
     def add_attached(self, worker_id: str) -> None:

@@ -57,7 +57,11 @@ class WorkerContext:
 
 
 class ServicerHarness:
-    def __init__(self, server: fakeredis.FakeServer | None = None) -> None:
+    def __init__(
+        self,
+        server: fakeredis.FakeServer | None = None,
+        node_alias: str = NODE_ALIAS,
+    ) -> None:
         server = server or fakeredis.FakeServer()
         self.server = server
         self.rds = fakeredis.FakeRedis(server=server, decode_responses=True)
@@ -76,7 +80,7 @@ class ServicerHarness:
             self.registry,
             fake_sync_client(server),
             "nod-1",
-            NODE_ALIAS,
+            node_alias,
             listener,
             self.relay,
             MagicMock(),

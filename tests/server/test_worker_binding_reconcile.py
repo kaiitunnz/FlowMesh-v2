@@ -73,6 +73,50 @@ async def test_a_binding_whose_record_another_node_wrote_is_released() -> None:
 
 
 @pytest.mark.asyncio
+async def test_releasing_an_id_another_node_holds_unregisters_nothing() -> None:
+    node_a = ServicerHarness(node_alias="box-a")
+    held = await node_a.register()
+    node_a.rds.flushall()
+    node_b = ServicerHarness(node_a.server, node_alias="box-b")
+    assert await node_b.register() == held
+
+    node_a.servicer.reconcile_workers()
+
+    assert node_a.released == [held]
+    assert node_a.relay.unregisters() == []
+
+
+@pytest.mark.asyncio
+async def test_a_remote_node_spares_the_worker_a_redeployed_root_gave_its_id() -> None:
+    remote = ServicerHarness(node_alias="box-a")
+    stale = await remote.register()
+    remote.rds.flushall()
+    root = ServicerHarness(remote.server, node_alias="root")
+    assert await root.register() == stale
+
+    remote.servicer.rebind_node("nod-a2")
+    remote.servicer.reconcile_workers()
+
+    assert remote.relay.unregisters() == []
+    assert remote.rds.hget(worker_key(stale), "node_alias") == "root"
+
+
+@pytest.mark.asyncio
+async def test_a_released_id_with_no_root_record_unregisters_with_its_node() -> None:
+    harness = ServicerHarness()
+    worker_id = await harness.register()
+    harness.rds.srem(WORKERS_SET_KEY, worker_id)
+
+    harness.servicer.reconcile_workers()
+
+    [event] = [e for e in harness.relay.events if e["type"] == "UNREGISTER"]
+    assert (event["worker_id"], event["payload"]) == (
+        worker_id,
+        {"node_alias": NODE_ALIAS},
+    )
+
+
+@pytest.mark.asyncio
 async def test_rehoming_leaves_a_record_another_node_wrote() -> None:
     harness = ServicerHarness()
     worker_id = await harness.register()
