@@ -52,8 +52,8 @@ class _Counting:
         counter = self
 
         class _Pipeline:
-            def __init__(self) -> None:
-                self._pipe = pipeline()
+            def __init__(self, transaction: bool = True) -> None:
+                self._pipe = pipeline(transaction)
 
             async def __aenter__(self) -> Any:
                 pipe = await self._pipe.__aenter__()

@@ -1,6 +1,7 @@
 import json
 from collections.abc import Collection, Sequence
 from enum import StrEnum
+from itertools import batched
 from typing import Any
 
 from pydantic import (
@@ -315,8 +316,8 @@ class WorkflowRegistry:
         return workflows[0] if workflows else None
 
     async def get_workflows_async(self, workflow_ids: Sequence[str]) -> list[Workflow]:
-        """The workflows named, in order, read in one round trip; a missing one is
-        left out."""
+        """Read the named workflows, in order, in one round trip; leave out a missing
+        one."""
         async with self._rds.asyncio.control_pipeline() as pipe:
             for workflow_id in workflow_ids:
                 pipe.hgetall(workflow_key(workflow_id))
@@ -325,20 +326,17 @@ class WorkflowRegistry:
                 pipe.smembers(workflow_cancelled_tasks_key(workflow_id))
                 pipe.smembers(workflow_tasks_key(workflow_id))
             replies = await pipe.execute()
-        workflows: list[Workflow] = []
-        for at in range(0, len(replies), 5):
-            data, dispatched, failed, cancelled, remaining = replies[at : at + 5]
-            if data:
-                workflows.append(
-                    self._build_workflow(
-                        WorkflowRecord.model_validate(data),
-                        set(dispatched),
-                        set(failed),
-                        set(cancelled),
-                        set(remaining),
-                    )
-                )
-        return workflows
+        return [
+            self._build_workflow(
+                WorkflowRecord.model_validate(data),
+                dispatched,
+                failed,
+                cancelled,
+                remaining,
+            )
+            for data, dispatched, failed, cancelled, remaining in batched(replies, 5)
+            if data
+        ]
 
     async def workflow_page(
         self,
@@ -348,16 +346,11 @@ class WorkflowRegistry:
         after: WorkflowOrder | None = None,
         before: WorkflowOrder | None = None,
     ) -> list[Workflow]:
-        """The workflows among ``workflow_ids`` matching ``query``, ordered by
+        """Return the workflows among ``workflow_ids`` matching ``query``, ordered by
         submission: the ``limit`` just after or before a position, or the newest
-        ``limit``.
-
-        Ordering reads every candidate's submission time in one round trip; the page
-        then takes one more, or one per ``limit`` candidates scanned while a filter
-        rejects them.
-        """
+        ``limit``."""
         ids = list(workflow_ids)
-        async with self._rds.asyncio.control_pipeline() as pipe:
+        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
             for workflow_id in ids:
                 pipe.hget(workflow_key(workflow_id), "submitted_at")
             stamps = await pipe.execute()

@@ -505,8 +505,8 @@ class SyncRedisClient:
             self._telemetry.srem(key, *members)
 
     # ---- Pipelines ----
-    def control_pipeline(self) -> Pipeline:
-        return self._control.pipeline()
+    def control_pipeline(self, transaction: bool = True) -> Pipeline:
+        return self._control.pipeline(transaction=transaction)
 
     # ---- Pub/Sub ----
     def publish_control(self, channel: str, message: str) -> int:
@@ -725,8 +725,8 @@ class AsyncRedisClient:
             await _awaitable(self._telemetry.srem(key, *members))
 
     # ---- Pipelines ----
-    def control_pipeline(self):
-        return self._control.pipeline()
+    def control_pipeline(self, transaction: bool = True):
+        return self._control.pipeline(transaction=transaction)
 
     # ---- Pub/Sub ----
     async def publish_control(self, channel: str, message: str) -> int:
