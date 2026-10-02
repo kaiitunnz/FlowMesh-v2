@@ -285,6 +285,7 @@ def _build_servicer(
     servicer._lock = Lock()
     servicer._unregistered_lock = Lock()
     servicer._released = RecentSet(16)
+    servicer._stopping = False
     servicer._task_listener = cast(TaskListener, _FakeTaskListener())
     servicer._worker_manager = manager
     return servicer, redis
