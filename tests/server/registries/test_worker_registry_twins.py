@@ -1,16 +1,19 @@
 """The server WorkerRegistry's sync and async twins behave alike over fakeredis."""
 
 import asyncio
+import json
 
 import fakeredis
 import pytest
 
 from server.clients.redis import (
     WORKERS_SET_KEY,
+    node_dispatch_channel,
     worker_hb_key,
     worker_key,
 )
 from server.registries.worker import WorkerRegistry
+from shared.schemas.command import RevokeMessage
 from tests.server.redis_helpers import fake_redis_client
 
 _WORKER = "wkr-1"
@@ -59,3 +62,23 @@ def test_a_node_leaves_a_worker_record_another_node_wrote(
 
     assert rds.hget(worker_key(_WORKER), "node_alias") == "box-b"
     assert rds.sismember(WORKERS_SET_KEY, _WORKER)
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+def test_a_revoke_is_published_on_its_nodes_dispatch_channel(
+    server: fakeredis.FakeServer, use_async: bool
+) -> None:
+    pubsub = fakeredis.FakeRedis(server=server, decode_responses=True).pubsub()
+    pubsub.subscribe(node_dispatch_channel("nod-1"))
+    pubsub.get_message(timeout=1)
+    registry = WorkerRegistry(fake_redis_client(server))
+    revoke = RevokeMessage(task_id="tsk-1", worker_id=_WORKER, dispatch_id="dsp-1")
+
+    if use_async:
+        asyncio.run(registry.publish_revoke_async("nod-1", revoke))
+    else:
+        registry.publish_revoke("nod-1", revoke)
+
+    message = pubsub.get_message(timeout=1)
+    assert message is not None
+    assert RevokeMessage.model_validate(json.loads(message["data"])) == revoke

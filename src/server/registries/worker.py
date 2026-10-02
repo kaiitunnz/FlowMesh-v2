@@ -750,6 +750,11 @@ class WorkerRegistry:
         message = payload.model_dump_json()
         return self._rds.sync.publish_control(node_dispatch_channel(node_id), message)
 
+    async def publish_revoke_async(self, node_id: str, payload: RevokeMessage) -> int:
+        message = payload.model_dump_json()
+        channel = node_dispatch_channel(node_id)
+        return await self._rds.asyncio.publish_control(channel, message)
+
     def publish_stop(self, worker: Worker, payload: StopMessage) -> int:
         message = payload.model_dump_json()
         channel = node_dispatch_channel(worker.node_id)
