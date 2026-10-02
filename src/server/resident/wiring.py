@@ -22,7 +22,7 @@ from ..network.reverse_relay import RelaySessionStore
 from ..network.service import NetworkPlane
 from ..registries import WorkerRegistry
 from ..registries.resident import ResidentRegistry
-from ..task.models import TERMINAL_TASK_STATUSES
+from ..task.models import TERMINAL_TASK_STATUSES, TaskStatus
 from ..task.runtime import TaskRuntime
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
@@ -68,7 +68,11 @@ def build_resident_capacity(
 
     def stop(serve_task_id: str) -> None:
         record = runtime.get_record(serve_task_id)
-        if record is not None:
+        if (
+            record is not None
+            and record.status not in TERMINAL_TASK_STATUSES
+            and record.status != TaskStatus.CANCELLING
+        ):
             runtime.cancel_workflow(
                 record.workflow_id, reason="resident replica teardown"
             )
@@ -86,11 +90,11 @@ def build_resident_capacity(
 
     def endpoint(serve_task_id: str) -> ReplicaEndpoint | None:
         record = runtime.get_record(serve_task_id)
-        # A terminal or absent serve task is known-dead: report no endpoint so the
-        # replica is invalidated rather than re-reported live.
+        # Only a dispatched serve task is serving: a requeued one keeps the endpoint
+        # its previous dispatch reported, and a terminal or absent one is known-dead.
         if (
             record is None
-            or record.status in TERMINAL_TASK_STATUSES
+            or record.status != TaskStatus.DISPATCHED
             or not record.latest_update
         ):
             return None
@@ -124,6 +128,7 @@ def build_resident_capacity(
         settle_cb=runtime.settle_episode_invocation,
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
+        live_serve_tasks=runtime.live_resident_task_ids,
         logger=logger,
         poll_interval_sec=cfg.poll_interval_sec,
         idle_sweep_interval_sec=sweep_interval,

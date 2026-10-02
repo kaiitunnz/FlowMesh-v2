@@ -400,6 +400,27 @@ class LifecycleScaleManager:
         self._persist()
         self._reap_serve_task(serve_task_id)
 
+    def reconcile_serve_tasks(self, live_serve_tasks: frozenset[str]) -> None:
+        """Reconcile the directory against the serve tasks still running for it.
+
+        A materializing replica whose serve task is gone will never become ready, so it
+        is invalidated rather than holding its family's cold start. A live serve task
+        no active replica references backs nothing and is reaped.
+        """
+        for replica in self._stores.directory.all():
+            if replica.state is ReplicaState.MATERIALIZING and (
+                replica.serve_task_id not in live_serve_tasks
+            ):
+                self.on_preempt(replica.replica_id)
+        backed = {
+            replica.serve_task_id
+            for replica in self._stores.directory.all()
+            if replica.state in _ACTIVE_REPLICA_STATES
+            and replica.serve_task_id is not None
+        }
+        for serve_task_id in sorted(live_serve_tasks - backed):
+            self._reap_serve_task(serve_task_id)
+
     def _reap_serve_task(self, serve_task_id: str | None) -> None:
         """Cancel a replica's backing serve task; absent or terminal is a no-op."""
         if self._stop_fn is not None and serve_task_id is not None:

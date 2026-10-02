@@ -38,6 +38,9 @@ class _Control(_Recorder):
     def rehydrate(self, snapshot: Any) -> None:
         self.calls.append("control.rehydrate")
 
+    def reattach_replicas(self) -> None:
+        self.calls.append("control.reattach")
+
     def reconcile_workflow_terminals(self, completed: Any) -> None:
         self.calls.append("control.reconcile")
 
@@ -58,13 +61,15 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
     )
     # The BLOCKER guard: the claim store is bound and loaded before the runtime
     # re-drives suspended boundaries (a resident boundary would otherwise terminalize
-    # against an empty store), the claims the restored ledger settled release before
-    # the idle sweep starts, and it starts only after the store rebuilds.
+    # against an empty store), restored replicas re-attach once the runtime has restored
+    # their serve tasks, the claims the restored ledger settled release before the idle
+    # sweep starts, and it starts only after the store rebuilds.
     assert calls == [
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
         "runtime.rehydrate",
+        "control.reattach",
         "runtime.release",
         "control.reconcile",
         "start",
@@ -86,6 +91,7 @@ def test_root_startup_reconciles_serve_terminals_after_the_claim_store() -> None
         "control.rehydrate",
         "serve.reconcile",
         "runtime.rehydrate",
+        "control.reattach",
         "runtime.release",
         "control.reconcile",
         "start",

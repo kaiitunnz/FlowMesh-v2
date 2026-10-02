@@ -18,7 +18,7 @@ the same invocation identity rather than falling through to a wrong terminal.
 
 import asyncio
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Collection, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -356,6 +356,7 @@ class ResidentCapacityControl:
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
+        live_serve_tasks: Callable[[], Collection[str]] = frozenset,
         delivery: ResidentWorkerDelivery | None = None,
         persist: PersistCallback | None = None,
         logger: logging.Logger | None = None,
@@ -377,6 +378,7 @@ class ResidentCapacityControl:
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
+        self._live_serve_tasks = live_serve_tasks
         self._delivery = delivery
         self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("resident-capacity")
@@ -392,6 +394,10 @@ class ResidentCapacityControl:
         self._originations: dict[str, tuple[str, str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
+        # Open except between a restart's snapshot load and its replica re-attach, so
+        # nothing admits against a restored replica whose endpoint is not yet probed.
+        self._replicas_attached = asyncio.Event()
+        self._replicas_attached.set()
         self._sweep_task: asyncio.Task[None] | None = None
 
     @property
@@ -744,24 +750,11 @@ class ResidentCapacityControl:
 
         A credit-bearing claim whose data path did not survive the restart moves to
         ``UNCERTAIN`` rather than being re-admitted fresh, so its credit is not released
-        until the linked invocation reaches a fenced terminal outcome.
+        until the linked invocation reaches a fenced terminal outcome. Admission waits
+        until ``reattach_replicas`` has re-attached the restored replicas.
         """
+        self._replicas_attached.clear()
         self._stores.load_snapshot(snapshot)
-        # Reports are not snapshotted and endpoint credentials are not persisted:
-        # re-probe each servable replica to re-attach its endpoint and re-report
-        # capacity so a warm replica is admittable again. A serve task that no longer
-        # reports an endpoint is gone, so invalidate the incarnation to re-materialize.
-        for replica in self._stores.directory.all():
-            if (
-                replica.state not in SERVABLE_REPLICA_STATES
-                or replica.serve_task_id is None
-            ):
-                continue
-            if (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
-                self._lifecycle.on_preempt(replica.replica_id)
-                continue
-            replica.endpoint = fresh
-            self._lifecycle.refresh_report(replica.replica_id)
         for claim in self._stores.claims.all():
             if claim.state in (
                 ClaimState.RESERVED,
@@ -769,6 +762,31 @@ class ResidentCapacityControl:
                 ClaimState.STREAMING,
             ):
                 self._admission.on_route_loss(claim)
+
+    def reattach_replicas(self) -> None:
+        """Re-attach each restored replica to its serve task, then open admission.
+
+        Runs once the runtime has restored its task records. Reports are not snapshotted
+        and endpoint credentials are not persisted, so each servable replica is
+        re-probed: a live serve task re-attaches its endpoint and re-reports capacity,
+        and one no longer serving invalidates the incarnation to re-materialize. A serve
+        task resident capacity started that no active replica backs is reaped.
+        """
+        try:
+            for replica in self._stores.directory.all():
+                if (
+                    replica.state not in SERVABLE_REPLICA_STATES
+                    or replica.serve_task_id is None
+                ):
+                    continue
+                if (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
+                    self._lifecycle.on_preempt(replica.replica_id)
+                    continue
+                replica.endpoint = fresh
+                self._lifecycle.refresh_report(replica.replica_id)
+            self._lifecycle.reconcile_serve_tasks(frozenset(self._live_serve_tasks()))
+        finally:
+            self._replicas_attached.set()
 
     async def _originate(self, env: ToolInvocationEnvelope) -> None:
         """Originate one resident boundary, settling an error at its call on any escape.
@@ -880,6 +898,7 @@ class ResidentCapacityControl:
                 orig, "resident-capacity control requires the network plane"
             )
             return
+        await self._replicas_attached.wait()
         model_ref = dependency.service_ref
         family = orig.family or dependency.service_family
         existing = self._admission.active_claim(orig.invocation_id)

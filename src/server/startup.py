@@ -26,8 +26,10 @@ async def rehydrate_root_state(
     replay after the claim store loads so a claim left UNCERTAIN by a crash between its
     terminal fact and its release settles, before the runtime rehydrate re-drives.
     Workflow terminals replay once the runtime has restored each ledger, releasing a
-    claim whose credit a crash kept past its ledger terminal. A worker reserved for a
-    dispatch the restored runtime does not hold is released.
+    claim whose credit a crash kept past its ledger terminal. Restored replicas
+    re-attach to their serve tasks once the runtime has restored those tasks' records,
+    and resident admission waits until they have. A worker reserved for a dispatch the
+    restored runtime does not hold is released.
     """
     if resident_control is not None and resident_registry is not None:
         resident_control.bind_loop(asyncio.get_running_loop())
@@ -38,6 +40,9 @@ async def rehydrate_root_state(
             gated_serve.reconcile_terminals()
     if runtime is not None:
         await runtime.rehydrate()
+    if resident_control is not None and resident_registry is not None:
+        resident_control.reattach_replicas()
+    if runtime is not None:
         await asyncio.to_thread(runtime.release_ended_reservations)
     if resident_control is not None and resident_registry is not None:
         if runtime is not None:

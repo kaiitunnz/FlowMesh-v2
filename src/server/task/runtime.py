@@ -6562,6 +6562,17 @@ class TaskRuntime:
         with self._lock:
             return self._tasks.get(task_id)
 
+    def live_resident_task_ids(self) -> set[str]:
+        """The tasks backing resident capacity that run and are not being cancelled."""
+        with self._lock:
+            return {
+                task_id
+                for task_id, record in self._tasks.items()
+                if record.resident
+                and record.status not in TERMINAL_TASK_STATUSES
+                and record.status != TaskStatus.CANCELLING
+            }
+
     def workflow_submitted_at(self, workflow_id: str) -> str | None:
         """The workflow's durable submission timestamp, or ``None`` if unknown."""
         record = self._workflow_registry.get_workflow_record(workflow_id)

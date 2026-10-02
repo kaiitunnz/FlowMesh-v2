@@ -614,6 +614,7 @@ def test_rehydrate_reports_a_warm_replica_so_it_is_admittable_again():
 
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc.rehydrate(snapshot)
+    fresh_svc.reattach_replicas()
     fam = fresh_stores.directory.all()[0].family
     assert fresh_stores.pools.feasible_candidates(
         fam, AdmissionProfile(engine_batch_key=fam)
@@ -628,6 +629,7 @@ def test_rehydrate_preempts_a_warm_replica_whose_serve_task_is_gone():
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc._probe_endpoint = lambda serve_task_id: None  # serve task is gone
     fresh_svc.rehydrate(snapshot)
+    fresh_svc.reattach_replicas()
     states = {r.state for r in fresh_stores.directory.all()}
     assert ReplicaState.WARM not in states
     assert ReplicaState.PREEMPTED in states
