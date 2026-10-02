@@ -3,12 +3,18 @@
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import grpc
 import pytest
 
 from server.clients.redis import WORKERS_SET_KEY, worker_key
+from server.hooks import PrincipalContext
 from server.supervisor.adapters.base import WorkerTokenType
+from server.supervisor.adapters.external import (
+    ExternalWorkerAdapter,
+    ExternalWorkerConfig,
+)
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.schemas import WorkerStatus
 from server.supervisor.services import grpc_server as grpc_server_module
@@ -16,6 +22,7 @@ from shared.grpc.supervisor.v1 import supervisor_pb2
 from tests.server.servicer_helpers import (
     ALIAS,
     NODE_ALIAS,
+    TOKEN,
     Aborted,
     ServicerHarness,
     WorkerContext,
@@ -276,3 +283,30 @@ async def test_a_log_is_attributed_to_the_worker_its_stream_authenticated() -> N
     await harness.servicer.PushLogs(logs(), cast(Any, WorkerContext()))
 
     assert [log["worker_id"] for log in harness.relay.logs] == [worker_id]
+
+
+class _ClosingAdapter(ExternalWorkerAdapter):
+    """An adapter whose event stream closes, clearing its id, as its id is read."""
+
+    @property
+    def worker_id(self) -> str | None:
+        held = self._worker_id
+        self._worker_id = None
+        return held
+
+
+def test_retiring_a_binding_whose_stream_closes_meanwhile_still_releases_it() -> None:
+    released: list[str] = []
+    registry = WorkerRegistry(on_worker_id_released=released.append)
+    adapter = _ClosingAdapter(
+        cast(WorkerTokenType, TOKEN),
+        ALIAS,
+        ExternalWorkerConfig(),
+        MagicMock(spec=PrincipalContext),
+    )
+    registry.add(adapter)
+    registry.set_worker_id(adapter.token, "wkr-1")
+    adapter.set_worker_id("wkr-1")
+
+    assert registry.retire("wkr-1")
+    assert released == ["wkr-1"]

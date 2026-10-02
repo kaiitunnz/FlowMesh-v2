@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -107,6 +108,8 @@ class WorkerAdapter(ABC):
         owner: PrincipalContext,
     ) -> None:
         self._worker_id: str | None = None
+        # The servicer's loop and the registry's heartbeat thread both change the id.
+        self._worker_id_lock = threading.Lock()
         self.token = token
         self.alias = alias
         self.config = config
@@ -130,18 +133,18 @@ class WorkerAdapter(ABC):
         pass
 
     def set_worker_id(self, worker_id: str) -> None:
-        if self._worker_id is not None:
-            raise RuntimeError(f"Worker ID is already set to {self._worker_id}")
-        self._worker_id = worker_id
-
-    def bind_worker_id(self, worker_id: str) -> None:
         """Hold the id the worker's current registration took, replacing any other."""
-        self._worker_id = worker_id
+        with self._worker_id_lock:
+            self._worker_id = worker_id
 
-    def clear_worker_id(self) -> None:
-        if self._worker_id is None:
-            raise RuntimeError("Worker ID is not set")
-        self._worker_id = None
+    def clear_worker_id(self, worker_id: str | None = None) -> bool:
+        """Drop the id held, only while it is ``worker_id`` when one is named; returns
+        whether it dropped one."""
+        with self._worker_id_lock:
+            if self._worker_id is None or worker_id not in (None, self._worker_id):
+                return False
+            self._worker_id = None
+            return True
 
     @property
     def has_event_stream(self) -> bool:

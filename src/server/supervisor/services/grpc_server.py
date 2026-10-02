@@ -284,7 +284,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             self._redis.hash_set(worker_key(worker_id), worker_meta)
             self._registry.set_worker_id(token, worker_id)
         self._task_listener.add_worker(worker_id)
-        worker.bind_worker_id(worker_id)
+        worker.set_worker_id(worker_id)
         self._logger.info("Registered worker %s", worker_id)
         return supervisor_pb2.RegisterResponse(
             worker_id=worker_id, incarnation=incarnation
@@ -374,8 +374,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             worker.detach_event_stream()
             # A stream of the worker's current registration still open, or a later
             # registration, keeps what the adapter holds.
-            if not worker.has_event_stream and worker.worker_id == worker_id:
-                worker.clear_worker_id()
+            if not worker.has_event_stream and worker.clear_worker_id(worker_id):
                 worker.set_status(WorkerStatus.STOPPED)
 
     async def _relay_events(
@@ -408,7 +407,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                 case "REGISTER":
                     # Every event stream opens with one; the root hears it once.
                     registered = True
-                    worker.bind_worker_id(worker_id)
+                    worker.set_worker_id(worker_id)
                     worker.set_status(WorkerStatus.RUNNING)
                     if worker_id in self._registered:
                         continue
