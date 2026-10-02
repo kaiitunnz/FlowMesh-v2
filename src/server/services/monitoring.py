@@ -1261,8 +1261,8 @@ class EventMonitor:
         payload = getattr(record, "latest_update", None) if record is not None else None
         if not isinstance(payload, dict):
             return
-        self._runtime.mark_updated(
-            task_id, None, self._handle_serve_task_update(task_id, None, payload)
+        self._runtime.rewrite_update(
+            task_id, payload, self._handle_serve_task_update(task_id, None, payload)
         )
 
     def _serve_url(self, task_id: str) -> str | None:

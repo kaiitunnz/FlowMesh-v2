@@ -5298,6 +5298,27 @@ class TaskRuntime:
         finally:
             self._release_ended_workers()
 
+    def rewrite_update(
+        self, task_id: str, previous: dict[str, Any], payload: dict[str, Any]
+    ) -> bool:
+        """Replace a task's latest update with a root rewrite of ``previous``.
+
+        The rewrite keeps the dispatch that reported the update, and applies only while
+        ``previous`` is still the latest update, so a worker update that landed since is
+        never relabelled. Returns whether it applied.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if (
+                record is None
+                or record.status in TERMINAL_TASK_STATUSES
+                or record.latest_update is not previous
+            ):
+                return False
+            record.latest_update = payload
+            self._persist_locked(task_id)
+            return True
+
     def mark_succeeded(
         self,
         task_id: str,

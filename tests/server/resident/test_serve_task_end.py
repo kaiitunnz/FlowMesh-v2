@@ -562,8 +562,29 @@ def test_a_root_rewrite_keeps_an_earlier_dispatch_endpoint_fenced() -> None:
         record = node.runtime.get_record(serve_task_id)
         assert record is not None and record.latest_update is not None
 
-        node.runtime.mark_updated(serve_task_id, None, dict(record.latest_update))
+        assert node.runtime.rewrite_update(
+            serve_task_id, record.latest_update, dict(record.latest_update)
+        )
 
         assert node.control.probe_serve_endpoint(serve_task_id) is None
+
+    asyncio.run(run())
+
+
+def test_a_root_rewrite_never_relabels_a_newer_worker_update() -> None:
+    async def run() -> None:
+        node = Node()
+        serve_task_id = await node.submit_serve_async()
+        node.serve(serve_task_id, "wkr-1", "dsp-a")
+        record = node.runtime.get_record(serve_task_id)
+        assert record is not None and record.latest_update is not None
+        read = record.latest_update
+        newer = {"serve": {**read["serve"], "_port": 2}}
+        node.runtime.mark_updated(serve_task_id, "wkr-1", newer, "dsp-a")
+
+        assert not node.runtime.rewrite_update(serve_task_id, read, dict(read))
+
+        assert record.latest_update is newer
+        assert record.latest_update_dispatch_id == "dsp-a"
 
     asyncio.run(run())
