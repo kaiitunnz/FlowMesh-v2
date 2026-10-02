@@ -31,7 +31,14 @@ class _StubEgress:
         self._result = result
         self.seen: list[tuple[str, str, Any]] = []
 
-    def run(self, task_id: str, correlation: str, request: Any, episode: str) -> Any:
+    def run(
+        self,
+        task_id: str,
+        correlation: str,
+        request: Any,
+        episode: str,
+        dispatch_id: str | None,
+    ) -> Any:
         self.seen.append((task_id, correlation, request))
         return self._result
 
@@ -95,6 +102,26 @@ def test_facade_call_is_captured_and_the_turn_is_cleaned() -> None:
     texts = [item["content"][0]["text"] for item in output if item["type"] == "message"]
     assert texts[0] == "searching"
     assert "web search" in texts[-1]
+
+
+def test_a_facade_capture_belongs_to_the_dispatch_running_its_step() -> None:
+    completion = ModelCompletion(
+        content="searching",
+        tool_calls=(
+            ModelToolCall(
+                call_id="c1", name="web_search", arguments='{"query": "weather"}'
+            ),
+        ),
+    )
+    facade, _, pending = _facade(completion)
+    token = facade.register_episode(
+        _TASK, "http://up/v1", "m", [_SEARCH], dispatch_id="dsp-7"
+    )
+
+    facade.handle_turn(_TASK, token, {"input": "find the weather"})
+
+    # The search settles off-lane after the step returns, renewing under this dispatch.
+    assert pending.dispatch_of(_TASK) == "dsp-7"
 
 
 def test_a_native_call_co_emitted_with_a_facade_call_is_preserved() -> None:
@@ -206,11 +233,16 @@ def test_a_capture_while_the_episode_is_given_up_waits_and_stashes_nothing() -> 
 
     class _InFlight(_StubEgress):
         def run(
-            self, task_id: str, correlation: str, request: Any, episode: str
+            self,
+            task_id: str,
+            correlation: str,
+            request: Any,
+            episode: str,
+            dispatch_id: str | None,
         ) -> Any:
             returning.set()
             assert proceed.wait(5)
-            return super().run(task_id, correlation, request, episode)
+            return super().run(task_id, correlation, request, episode, dispatch_id)
 
     pending = PendingEgressRequestStore()
     egress = _InFlight(

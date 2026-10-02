@@ -79,15 +79,16 @@ class HeldModelEgress:
         call_correlation: str,
         request: ModelRequest,
         episode: str,
+        dispatch_id: str | None,
     ) -> ModelCompletion | HeldEgressReject:
-        """Authorize and egress one held model turn of the ``episode`` registration,
-        returning its whole reply."""
+        """Authorize and egress one held model turn of the ``episode`` registration
+        running under ``dispatch_id``, returning its whole reply."""
         digest = model_request_digest(request.interface, request.url, request.body)
         with self._rendezvous.register(
             task_id,
             call_correlation,
             episode,
-            lambda: self._pending.put(task_id, call_correlation, request),
+            lambda: self._pending.put(task_id, call_correlation, request, dispatch_id),
         ) as waiter:
             if waiter.stale:
                 return HeldEgressReject(reason=_STALE)

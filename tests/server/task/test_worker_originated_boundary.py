@@ -133,9 +133,12 @@ class _WorkerStub:
     def __init__(self) -> None:
         self.frames: list[tuple[str, str, dict[str, Any]]] = []
         self.egress = PendingEgressRequestStore()
+        self.node_alias = "box"
 
     def get_worker(self, worker_id: str) -> Any:
-        return SimpleNamespace(id=worker_id, node_id="nde-1", incarnation=7)
+        return SimpleNamespace(
+            id=worker_id, node_id="nde-1", node_alias=self.node_alias, incarnation=7
+        )
 
     def publish_interrupt(self, *args: Any) -> int:
         return 0
@@ -218,7 +221,7 @@ def _run_agent_step(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
     result = AgentEpisodeExecutor._capture_local_request(
-        _egress(runtime), task_id, result, dispatch.model_binding
+        _egress(runtime), task_id, result, dispatch.model_binding, None
     )
     payload: dict[str, Any] = {"agent_episode": result.model_dump(mode="json")}
     if seal_in is not None and (attachment := dispatch.private_state_attachment):
@@ -1252,6 +1255,7 @@ def test_a_stale_step_reaps_the_request_its_worker_captured() -> None:
                 writer, capsule=None, outcomes=[]
             ),
             None,
+            None,
         )
 
         runtime.mark_succeeded(
@@ -1349,7 +1353,7 @@ def _stash_search_group(runtime: TaskRuntime, writer: str) -> FacadeTurnGroup:
     )
     for member in group.members:
         _egress(runtime).put(
-            writer, member.call_correlation, parse_search_request(_PAYLOAD)
+            writer, member.call_correlation, parse_search_request(_PAYLOAD), None
         )
     return group
 

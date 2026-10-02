@@ -70,7 +70,14 @@ class _ScriptedEgress:
         self._completions = completions
         self.seen: list[tuple[str, str, Any]] = []
 
-    def run(self, task_id: str, correlation: str, request: Any, episode: str) -> Any:
+    def run(
+        self,
+        task_id: str,
+        correlation: str,
+        request: Any,
+        episode: str,
+        dispatch_id: str | None,
+    ) -> Any:
         self.seen.append((task_id, correlation, request))
         index = min(len(self.seen) - 1, len(self._completions) - 1)
         return self._completions[index]

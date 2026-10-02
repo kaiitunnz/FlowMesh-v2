@@ -57,8 +57,9 @@ def test_a_re_registered_worker_drops_what_its_previous_registration_held(
         "tsk-1",
         "c0",
         ToolRequest(interface=SEARCH_INTERFACE, query="q", max_results=1),
+        None,
     )
-    lifecycle.resident_requests.put("tsk-1", "c1", "request")
+    lifecycle.resident_requests.put("tsk-1", "c1", "request", None)
     access = ContentAccessRegistry(
         ObjectStoreConfig(backend=BACKEND_FILESYSTEM, filesystem_root=tmp_path),
         arrival_wait_sec=0.05,

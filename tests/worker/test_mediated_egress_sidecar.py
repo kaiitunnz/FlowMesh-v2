@@ -103,7 +103,7 @@ class _Harness:
         )
 
     def stash(self) -> None:
-        self.pending.put(_AGENT, _CALL, _REQUEST)
+        self.pending.put(_AGENT, _CALL, _REQUEST, None)
 
     def report(self, timeout: float = 5.0) -> MediatedOperationOutcome:
         return self.reports.get(timeout=timeout)
@@ -315,7 +315,7 @@ def _model_permit(**overrides: Any) -> MediatedOperationPermit:
 
 def test_egress_now_returns_the_completion_inline() -> None:
     sidecar, pending, egress = _model_sidecar()
-    pending.put(_AGENT, _CALL, _MODEL_REQUEST)
+    pending.put(_AGENT, _CALL, _MODEL_REQUEST, None)
     result = sidecar.egress_now(_model_permit())
     assert isinstance(result, ModelCompletion) and result.content == "a reply"
     # The per-call permit credential reaches the egress; custody is left for the reap.
@@ -326,7 +326,7 @@ def test_egress_now_returns_the_completion_inline() -> None:
 
 def test_egress_now_fence_rejection_is_terminal_and_never_egresses() -> None:
     sidecar, pending, egress = _model_sidecar()
-    pending.put(_AGENT, _CALL, _MODEL_REQUEST)
+    pending.put(_AGENT, _CALL, _MODEL_REQUEST, None)
     result = sidecar.egress_now(_model_permit(request_digest="deadbeef"))
     assert isinstance(result, HeldEgressReject) and "fence" in result.reason
     assert egress.calls == 0
@@ -343,7 +343,7 @@ def test_egress_now_without_a_request_is_terminal() -> None:
 
 def test_egress_now_permit_replay_is_terminal() -> None:
     sidecar, pending, egress = _model_sidecar()
-    pending.put(_AGENT, _CALL, _MODEL_REQUEST)
+    pending.put(_AGENT, _CALL, _MODEL_REQUEST, None)
     permit = _model_permit()
     assert isinstance(sidecar.egress_now(permit), ModelCompletion)
     # An exact permit replay is refused, so one authorization drives one egress.

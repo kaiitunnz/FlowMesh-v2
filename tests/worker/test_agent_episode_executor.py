@@ -517,7 +517,7 @@ class _CapturingExecutor(Executor):
         )
         if self._kind == "facade_group":
             self._lifecycle.pending_egress_requests.put(
-                task.task_id, "c1", parse_search_request('{"query": "q"}')
+                task.task_id, "c1", parse_search_request('{"query": "q"}'), None
             )
             return EpisodeStepResult(
                 harness_result=HarnessResult(
@@ -542,10 +542,10 @@ class _CapturingExecutor(Executor):
                 ),
             )
         if self._kind == "resident":
-            self._lifecycle.resident_requests.put(task.task_id, "c0", "{}")
+            self._lifecycle.resident_requests.put(task.task_id, "c0", "{}", None)
         else:
             self._lifecycle.pending_egress_requests.put(
-                task.task_id, "c0", parse_search_request('{"query": "q"}')
+                task.task_id, "c0", parse_search_request('{"query": "q"}'), None
             )
         return EpisodeStepResult(
             harness_result=HarnessResult(

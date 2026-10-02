@@ -10,7 +10,7 @@ def capture_resident_request(
     store: ResidentRequestStore,
     task_id: str,
     result: HarnessResult,
-    dispatch_id: str | None = None,
+    dispatch_id: str | None,
 ) -> HarnessResult:
     """Keep a resident request worker-private and emit only its digest.
 

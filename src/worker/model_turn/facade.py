@@ -71,6 +71,8 @@ class EpisodeContext:
     descriptors: tuple[FacadeDescriptor, ...]
     token: str
     sandbox: LocalSandboxExecutor | None = None
+    # The dispatch running the episode's step, which its captures belong to.
+    dispatch_id: str | None = None
 
 
 class ResponsesFacade:
@@ -107,6 +109,7 @@ class ResponsesFacade:
         model: str,
         descriptors: list[FacadeDescriptor],
         sandbox: LocalSandboxExecutor | None = None,
+        dispatch_id: str | None = None,
     ) -> str:
         """Register one episode's binding and facades; return its per-episode token."""
         token = secrets.token_urlsafe(24)
@@ -118,6 +121,7 @@ class ResponsesFacade:
                 model=model,
                 descriptors=tuple(descriptors),
                 token=token,
+                dispatch_id=dispatch_id,
                 sandbox=sandbox,
             )
         self._held_egress.reopen(task_id, token)
@@ -329,7 +333,9 @@ class ResponsesFacade:
         correlation = (
             f"model:{base}" if not round_index else f"model:{base}:{round_index}"
         )
-        result = self._held_egress.run(task_id, correlation, request, ctx.token)
+        result = self._held_egress.run(
+            task_id, correlation, request, ctx.token, ctx.dispatch_id
+        )
         if isinstance(result, HeldEgressReject):
             raise FacadeTurnError(f"held model egress rejected: {result.reason}")
         return result
@@ -354,7 +360,7 @@ class ResponsesFacade:
             refused = self._refused.get(task_id)
             if not ended and refused is None:
                 for correlation, request in capture.stashes:
-                    self._pending.put(task_id, correlation, request)
+                    self._pending.put(task_id, correlation, request, ctx.dispatch_id)
                 self._captured[task_id] = capture.group
         if refused is not None:
             self._await_release(task_id, refused)

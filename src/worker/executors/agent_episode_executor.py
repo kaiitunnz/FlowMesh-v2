@@ -255,7 +255,7 @@ class AgentEpisodeExecutor(Executor):
         task_id: str,
         result: HarnessResult,
         model_binding: EpisodeModelBinding | None,
-        dispatch_id: str | None = None,
+        dispatch_id: str | None,
     ) -> HarnessResult:
         """Keep a worker-originated egress request local and emit only its digest.
 
