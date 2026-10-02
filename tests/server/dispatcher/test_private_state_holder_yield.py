@@ -10,7 +10,8 @@ from unittest import mock
 import pytest
 
 from server.config import OrchestrationConfig
-from server.registries.worker import Worker
+from server.registries.worker import Reservation, Worker
+from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.private_state import OwnerFence
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -91,6 +92,10 @@ def _dispatcher(runtime: TaskRuntime, idle_ids: list[str]) -> CapturingDispatche
     )
 
 
+def _registry(dispatcher: CapturingDispatcher) -> mock.Mock:
+    return cast(mock.Mock, dispatcher._worker_registry)
+
+
 def _selected_pool(
     runtime: TaskRuntime, task_id: str, idle_ids: list[str]
 ) -> list[str]:
@@ -153,43 +158,69 @@ class _Clock:
 
 
 def _waiting_episode(
-    resident: bool,
-) -> tuple[TaskRuntime, CapturingDispatcher, str, list[str]]:
-    """An owner-affine episode whose holder runs a serve task; no worker is idle."""
+    resident: bool, stale_dispatch: bool = False
+) -> tuple[TaskRuntime, CapturingDispatcher, str, str, list[str]]:
+    """An owner-affine episode whose holder runs a serve task; no worker is idle.
+
+    With ``stale_dispatch``, an earlier task still reads as dispatched to the holder,
+    as a lost dispatch does until its worker's loss is settled.
+    """
     runtime = _runtime()
+    if stale_dispatch:
+        stale = _register(runtime, _ECHO_WORKFLOW)
+        assert pop_ready(runtime) == stale
+        record_dispatch(runtime, stale, _HOLDER.worker_id, "dsp-stale")
     serve = _register(runtime, _SERVE, resident=resident)
     assert pop_ready(runtime) == serve
-    record_dispatch(runtime, serve, _HOLDER.worker_id)
+    record_dispatch(runtime, serve, _HOLDER.worker_id, "dsp-serve")
     episode = _register(runtime, _ECHO_WORKFLOW)
     runtime.private_state_owner = mock.Mock(  # type: ignore[method-assign]
         side_effect=lambda task_id: _HOLDER if task_id == episode else None
     )
     asked: list[str] = []
     runtime.set_resident_yield_hook(asked.append)
-    return runtime, _dispatcher(runtime, []), episode, asked
+    dispatcher = _dispatcher(runtime, [])
+    _registry(dispatcher).reservation.return_value = Reservation(
+        _HOLDER.worker_id, serve, "dsp-serve"
+    )
+    return runtime, dispatcher, episode, serve, asked
 
 
-def test_a_waiting_episode_asks_resident_capacity_to_free_its_holder() -> None:
-    runtime, dispatcher, episode, asked = _waiting_episode(resident=True)
+@pytest.mark.parametrize("stale_dispatch", [False, True])
+def test_a_waiting_episode_asks_resident_capacity_to_free_its_holder(
+    stale_dispatch: bool,
+) -> None:
+    _runtime_, dispatcher, episode, serve, asked = _waiting_episode(
+        resident=True, stale_dispatch=stale_dispatch
+    )
     clock = _Clock()
-    serve = runtime.dispatched_task_on(_HOLDER.worker_id)
-    assert serve is not None
 
     with mock.patch("server.dispatcher.base.time", clock):
         for _ in range(50):
             assert dispatcher.dispatch_once(episode) is False
-        assert asked == [serve.task_id]
+        assert asked == [serve]
         clock.now += 2.5
         dispatcher.dispatch_once(episode)
 
-    assert asked == [serve.task_id, serve.task_id]
+    assert asked == [serve, serve]
     assert {kw["reason"] for _, kw in dispatcher.requeued} == {
         "private_state_owner_busy"
     }
 
 
+def test_a_reservation_for_an_earlier_dispatch_asks_nothing() -> None:
+    _runtime_, dispatcher, episode, serve, asked = _waiting_episode(resident=True)
+    _registry(dispatcher).reservation.return_value = Reservation(
+        _HOLDER.worker_id, serve, "dsp-earlier"
+    )
+
+    dispatcher.dispatch_once(episode)
+
+    assert asked == []
+
+
 def test_a_standing_serve_task_is_never_asked_to_yield() -> None:
-    runtime, dispatcher, episode, asked = _waiting_episode(resident=False)
+    _runtime_, dispatcher, episode, _serve, asked = _waiting_episode(resident=False)
     clock = _Clock()
 
     with mock.patch("server.dispatcher.base.time", clock):
@@ -203,7 +234,7 @@ def test_a_standing_serve_task_is_never_asked_to_yield() -> None:
 def test_a_long_wait_on_a_holder_is_logged_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    runtime, dispatcher, episode, _asked = _waiting_episode(resident=False)
+    _runtime_, dispatcher, episode, serve, _asked = _waiting_episode(resident=False)
     clock = _Clock()
 
     with (
@@ -216,6 +247,35 @@ def test_a_long_wait_on_a_holder_is_logged_once(
             dispatcher.dispatch_once(episode)
 
     waits = [r for r in caplog.records if "for its private-state holder" in r.message]
-    serve = runtime.dispatched_task_on(_HOLDER.worker_id)
-    assert serve is not None
-    assert len(waits) == 1 and serve.task_id in waits[0].message
+    assert len(waits) == 1 and serve in waits[0].message
+
+
+def test_a_wait_is_forgotten_once_its_task_leaves_the_queue() -> None:
+    runtime, dispatcher, episode, _serve, _asked = _waiting_episode(resident=True)
+    other = _register(runtime, _ECHO_WORKFLOW)
+    runtime.private_state_owner = mock.Mock(  # type: ignore[method-assign]
+        side_effect=lambda task_id: _HOLDER if task_id in (episode, other) else None
+    )
+    dispatcher.dispatch_once(episode)
+    assert episode in dispatcher._owner_wait_since
+    record = runtime.get_record(episode)
+    assert record is not None
+    runtime.cancel_workflow(record.workflow_id)
+    assert record.status is not TaskStatus.PENDING
+
+    dispatcher.dispatch_once(other)
+
+    assert set(dispatcher._owner_wait_since) == {other}
+    assert set(dispatcher._yield_requested_at) == {other}
+
+
+def test_a_wait_is_forgotten_when_its_holder_is_lost() -> None:
+    _runtime_, dispatcher, episode, _serve, _asked = _waiting_episode(resident=True)
+    dispatcher.dispatch_once(episode)
+    assert episode in dispatcher._owner_wait_since
+    _registry(dispatcher).get_worker.return_value = None
+
+    dispatcher.dispatch_once(episode)
+
+    assert episode not in dispatcher._owner_wait_since
+    assert episode not in dispatcher._yield_requested_at

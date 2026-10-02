@@ -133,8 +133,16 @@ class Dispatcher:
 
         A resident serve task occupying the holder is asked to yield it, at most once
         per interval, since the episode can resume nowhere else. A wait past its bound
-        is logged once, naming what holds the worker.
+        is logged once, naming what holds the worker. A wait whose task left the queue
+        is forgotten.
         """
+        for waiting in [t for t in self._owner_wait_since if t != task_id]:
+            waiting_record = self._runtime.get_record(waiting)
+            if (
+                waiting_record is None
+                or waiting_record.status is not TaskStatus.PENDING
+            ):
+                self._end_owner_wait(waiting)
         now = time.monotonic()
         since = self._owner_wait_since.setdefault(task_id, now)
         last = self._yield_requested_at.get(task_id)
@@ -149,9 +157,9 @@ class Dispatcher:
         ):
             return
         self._yield_requested_at[task_id] = now
-        occupant = self._runtime.dispatched_task_on(owner.worker_id)
+        occupant = self._worker_registry.reservation(owner.worker_id)
         asked = occupant is not None and self._runtime.request_resident_yield(
-            occupant.task_id
+            occupant.task_id, occupant.dispatch_id
         )
         if logging_due:
             self._owner_wait_logged.add(task_id)
@@ -483,6 +491,7 @@ class Dispatcher:
         # in-flight effect settles terminally in the ledger before placement is asked.
         if (owner := self._runtime.private_state_owner(task_id)) is not None:
             if (loss := self._private_state_owner_loss(owner)) is not None:
+                self._end_owner_wait(task_id)
                 return self._fail_private_state_unavailable(
                     task_id, record, owner, loss
                 )

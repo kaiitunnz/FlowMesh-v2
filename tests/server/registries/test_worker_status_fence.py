@@ -54,6 +54,9 @@ class _Sync:
     def hash_getall(self, key: str) -> dict[str, str]:
         return cast(dict[str, str], self._client.hgetall(key))
 
+    def hash_mget(self, key: str, fields: list[str]) -> list[Any]:
+        return cast(list[Any], self._client.hmget(key, fields))
+
     def publish_control(self, *_args: Any) -> int:
         return 1
 
@@ -231,3 +234,16 @@ def test_reservations_lists_each_reserved_worker(
     registry.reserve_worker(_WORKER, "tsk-1", "dsp-1")
 
     assert registry.reservations() == [Reservation(_WORKER, "tsk-1", "dsp-1")]
+
+
+@_live
+def test_reservation_names_a_worker_s_current_dispatch(
+    client: redis.Redis, registry: WorkerRegistry
+) -> None:
+    assert registry.reservation(_WORKER) is None
+    registry.reserve_worker(_WORKER, "tsk-1", "dsp-1")
+    assert registry.reservation(_WORKER) == Reservation(_WORKER, "tsk-1", "dsp-1")
+
+    registry.release_worker(_WORKER, "dsp-1")
+
+    assert registry.reservation(_WORKER) is None

@@ -6653,27 +6653,21 @@ class TaskRuntime:
                 record.resident or record.task_type in SERVE_TASK_TYPES
             )
 
-    def dispatched_task_on(self, worker_id: str) -> TaskRecord | None:
-        """A task dispatched to ``worker_id``, if the worker holds one."""
-        with self._lock:
-            return next(
-                (
-                    record
-                    for record in self._tasks.values()
-                    if record.status == TaskStatus.DISPATCHED
-                    and record.assigned_worker == worker_id
-                ),
-                None,
-            )
+    def request_resident_yield(self, task_id: str, dispatch_id: str) -> bool:
+        """Ask resident capacity to free the worker a resident serve task occupies
+        under ``dispatch_id``.
 
-    def request_resident_yield(self, task_id: str) -> bool:
-        """Ask resident capacity to free the worker a resident serve task occupies.
-
-        Returns whether the task is one resident capacity started and was asked.
+        Returns whether the task is one resident capacity started, still on that
+        dispatch, and was asked.
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            if record is None or not record.resident:
+            if (
+                record is None
+                or not record.resident
+                or record.status != TaskStatus.DISPATCHED
+                or record.dispatch_id != dispatch_id
+            ):
                 return False
         if self._resident_yield_requested is None:
             return False

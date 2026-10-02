@@ -37,6 +37,16 @@ async def _off_loop(fn: Any, *args: Any) -> None:
     await asyncio.to_thread(fn, *args)
 
 
+async def _ask_yield(node: Node, serve_task_id: str) -> None:
+    """Ask resident capacity to free the worker the serve task's dispatch occupies."""
+    record = node.runtime.get_record(serve_task_id)
+    assert record is not None and record.dispatch_id is not None
+    await _off_loop(
+        node.runtime.request_resident_yield, serve_task_id, record.dispatch_id
+    )
+    await asyncio.sleep(0)
+
+
 def _lose_worker(node: Node, worker_id: str) -> None:
     """Recover a departed worker's tasks and fail each it held, as the watchdog does."""
     recovery = node.runtime.recover_tasks_for_worker(worker_id, spend_attempt=True)
@@ -405,8 +415,7 @@ def test_a_yield_request_retires_an_idle_demand_replica() -> None:
         replica = await _serving(node)
         assert replica.serve_task_id is not None
 
-        await _off_loop(node.runtime.request_resident_yield, replica.serve_task_id)
-        await asyncio.sleep(0)
+        await _ask_yield(node, replica.serve_task_id)
 
         assert replica.state is ReplicaState.STOPPED
         assert node.status(replica.serve_task_id) == TaskStatus.CANCELLING
@@ -421,15 +430,13 @@ def test_a_yield_request_waits_for_the_replica_credit_to_release() -> None:
         assert replica.serve_task_id is not None
         (claim,) = node.control.stores.claims.all()
 
-        await _off_loop(node.runtime.request_resident_yield, replica.serve_task_id)
-        await asyncio.sleep(0)
+        await _ask_yield(node, replica.serve_task_id)
         assert replica.state is ReplicaState.WARM
         assert claim.holds_credit
 
         node.control.on_invocation_terminal(claim.invocation_id)
         await asyncio.sleep(0)
-        await _off_loop(node.runtime.request_resident_yield, replica.serve_task_id)
-        await asyncio.sleep(0)
+        await _ask_yield(node, replica.serve_task_id)
 
         assert replica.state is ReplicaState.STOPPED
 

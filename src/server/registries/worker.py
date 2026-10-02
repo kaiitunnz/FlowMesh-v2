@@ -432,6 +432,15 @@ class WorkerRegistry:
                 "Failed to announce worker %s as %s: %s", worker_id, status, exc
             )
 
+    def reservation(self, worker_id: str) -> Reservation | None:
+        """The dispatch a worker is reserved for, if any."""
+        task_id, dispatch_id = self._rds.sync.hash_mget(
+            worker_key(worker_id), ["reserved_task", "reserved_dispatch"]
+        )
+        if not task_id or not dispatch_id:
+            return None
+        return Reservation(worker_id, _text(task_id), _text(dispatch_id))
+
     def reservations(self) -> list[Reservation]:
         """Every registered worker's reservation."""
         worker_ids = sorted(self.get_worker_ids())
