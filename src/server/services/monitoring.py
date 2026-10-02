@@ -79,8 +79,6 @@ from .watchdog import WorkerWatchdog
 if TYPE_CHECKING:
     from ..serve import GatedServe
 
-# Model-serving task types adopted as standing resident allocations: the GPU vLLM serve
-# task and its GPU-free dev_model stand-in, both reached only through the gated route.
 # How a report of a task its worker gave up ended the task's dispatch.
 _GIVEN_UP_ENDS = {
     EventEffect.RETURNED: DispatchEnd.RETURNED,
