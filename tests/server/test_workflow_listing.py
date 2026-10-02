@@ -42,7 +42,9 @@ spec:
 class _Counting:
     """Counts the round trips a registry makes: each pipeline and each direct call."""
 
-    def __init__(self, registry: WorkflowRegistry) -> None:
+    def __init__(
+        self, registry: WorkflowRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         self.round_trips = 0
         client = registry._rds.asyncio
         pipeline = client.control_pipeline
@@ -57,11 +59,11 @@ class _Counting:
                 pipe = await self._pipe.__aenter__()
                 execute = pipe.execute
 
-                async def counted() -> Any:
+                async def counted(raise_on_error: bool = True) -> Any:
                     counter.round_trips += 1
-                    return await execute()
+                    return await execute(raise_on_error)
 
-                pipe.execute = counted
+                monkeypatch.setattr(pipe, "execute", counted)
                 return pipe
 
             async def __aexit__(self, *exc: Any) -> Any:
@@ -71,8 +73,8 @@ class _Counting:
             counter.round_trips += 1
             return await set_members(key)
 
-        cast(Any, client).control_pipeline = _Pipeline
-        cast(Any, client).set_members = counted_members
+        monkeypatch.setattr(client, "control_pipeline", _Pipeline)
+        monkeypatch.setattr(client, "set_members", counted_members)
 
 
 class _Fabric:
@@ -129,9 +131,9 @@ def fabric() -> _Fabric:
 
 @pytest.mark.parametrize("limit", [5, 25])
 def test_a_page_takes_three_round_trips_whatever_its_size(
-    fabric: _Fabric, limit: int
+    fabric: _Fabric, limit: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    counting = _Counting(fabric.registry)
+    counting = _Counting(fabric.registry, monkeypatch)
 
     response = fabric.get(f"/api/v1/workflows?limit={limit}")
 
@@ -139,8 +141,10 @@ def test_a_page_takes_three_round_trips_whatever_its_size(
     assert counting.round_trips == 3
 
 
-def test_one_workflow_is_read_in_one_round_trip(fabric: _Fabric) -> None:
-    counting = _Counting(fabric.registry)
+def test_one_workflow_is_read_in_one_round_trip(
+    fabric: _Fabric, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counting = _Counting(fabric.registry, monkeypatch)
 
     workflow = asyncio.run(fabric.registry.get_workflow_async(fabric.workflow_ids[0]))
 
@@ -174,10 +178,12 @@ def test_an_unbounded_listing_returns_the_newest_page() -> None:
     assert [w["workflow_id"] for w in entries] == fabric.workflow_ids[-100:]
 
 
-def test_a_filter_scans_past_pages_it_rejects(fabric: _Fabric) -> None:
+def test_a_filter_scans_past_pages_it_rejects(
+    fabric: _Fabric, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fabric.runtime.cancel_workflow(fabric.workflow_ids[0])
     fabric.runtime.cancel_workflow(fabric.workflow_ids[1])
-    counting = _Counting(fabric.registry)
+    counting = _Counting(fabric.registry, monkeypatch)
 
     entries = fabric.get("/api/v1/workflows?limit=2&status=CANCELLED").json()["entries"]
 
