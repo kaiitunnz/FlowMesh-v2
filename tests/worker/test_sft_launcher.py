@@ -5,7 +5,7 @@ import os
 import sys
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from unittest.mock import patch
 
 import pytest
@@ -120,3 +120,20 @@ def test_a_launched_rank_keeps_the_devices_its_launch_chose(
     SFTExecutor._configure_devices({"visible_devices": [1, 0]})
 
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-c,GPU-b"
+
+
+def test_an_in_process_run_narrows_its_devices_before_cuda_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def cuda_started() -> NoReturn:
+        raise AssertionError("CUDA read its devices before the run narrowed them")
+
+    monkeypatch.setattr(sft_executor.torch.cuda, "is_available", cuda_started)
+    monkeypatch.setattr(sft_executor.torch.cuda, "device_count", cuda_started)
+    monkeypatch.setattr(sft_executor, "_STARTED_ON", "GPU-b,GPU-c")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-b,GPU-c")
+    monkeypatch.delenv(sft_executor._SFT_LAUNCHER_FLAG, raising=False)
+
+    SFTExecutor._configure_devices({"allow_multi_gpu": False, "primary_gpu": 1})
+
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-c"

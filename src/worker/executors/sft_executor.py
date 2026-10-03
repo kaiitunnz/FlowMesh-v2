@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+import pynvml
 import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -743,10 +744,11 @@ class SFTExecutor(TrainingMixin, Executor):
 
     @staticmethod
     def _configure_devices(training_cfg: dict[str, Any]) -> None:
-        """Control CUDA_VISIBLE_DEVICES only; no model.to() here.
+        """Narrow CUDA_VISIBLE_DEVICES to the run's training devices.
 
-        Each run starts from the devices the process was started on, and a launched
-        rank keeps the devices its launch already chose.
+        Runs before anything initialises CUDA, which reads the variable once. Each run
+        starts from the devices the process was started on, and a launched rank keeps
+        the devices its launch already chose.
         """
         if os.environ.get(_SFT_LAUNCHER_FLAG) == "1":
             return
@@ -754,40 +756,27 @@ class SFTExecutor(TrainingMixin, Executor):
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         else:
             os.environ["CUDA_VISIBLE_DEVICES"] = _STARTED_ON
-        if not torch.cuda.is_available():
-            return
-        requested = training_cfg.get("visible_devices")
-        allow_multi_cfg = training_cfg.get("allow_multi_gpu")
-        try:
-            n_devices = torch.cuda.device_count()
-        except Exception:
-            n_devices = 0
-        if allow_multi_cfg is None:
-            allow_multi = n_devices > 1
-        else:
-            allow_multi = bool(allow_multi_cfg)
-
-        if requested:
+        if requested := training_cfg.get("visible_devices"):
             devices = _within_visible(
                 list(requested) if isinstance(requested, (list, tuple)) else [requested]
             )
             os.environ["CUDA_VISIBLE_DEVICES"] = devices
             logger.info("Using user-specified CUDA_VISIBLE_DEVICES=%s", devices)
             return
-        if allow_multi:
-            logger.info("Multi-GPU allowed; using all visible GPUs.")
+        n_devices = _started_device_count()
+        allow_multi_cfg = training_cfg.get("allow_multi_gpu")
+        if n_devices <= 1 or allow_multi_cfg is None or bool(allow_multi_cfg):
+            if n_devices > 1:
+                logger.info("Multi-GPU allowed; using all visible GPUs.")
             return
-        # Default to a single GPU when multiple devices are visible but not
-        # explicitly allowed
-        if n_devices > 1:
-            preferred = _within_visible([training_cfg.get("primary_gpu", 0)])
-            os.environ["CUDA_VISIBLE_DEVICES"] = preferred
-            logger.info(
-                "Multiple GPUs detected (%d); restrict to device %s (set "
-                "training.allow_multi_gpu=false to override).",
-                n_devices,
-                preferred,
-            )
+        preferred = _within_visible([training_cfg.get("primary_gpu", 0)])
+        os.environ["CUDA_VISIBLE_DEVICES"] = preferred
+        logger.info(
+            "Multiple GPUs detected (%d); restrict to device %s (set "
+            "training.allow_multi_gpu=false to override).",
+            n_devices,
+            preferred,
+        )
 
     @staticmethod
     def _resolve_deepspeed_config(training_cfg: dict[str, Any], log) -> Any | None:
@@ -858,6 +847,20 @@ class SFTExecutor(TrainingMixin, Executor):
             "fp16": {"enabled": fp16_enabled and not bf16_enabled},
             "steps_per_print": 2000,
         }
+
+
+def _started_device_count() -> int:
+    """Count the GPUs the process was started on, without initialising CUDA."""
+    if _STARTED_ON is not None:
+        return len([entry for entry in _STARTED_ON.split(",") if entry.strip()])
+    try:
+        pynvml.nvmlInit()
+        try:
+            return pynvml.nvmlDeviceGetCount()
+        finally:
+            pynvml.nvmlShutdown()
+    except pynvml.NVMLError:
+        return 0
 
 
 def _within_visible(ordinals: list[Any]) -> str:
