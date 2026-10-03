@@ -749,6 +749,8 @@ class TestRefusalInTheTaskLoop:
         lifecycle.set_idle.assert_called_once_with("tsk-1")
         # Refused on what the worker can see now, before it pays to read any input.
         hydrator.hydrate.assert_not_called()
+        # Its start is reported as one that never ran, so it starts no serve TTL.
+        assert lifecycle.notify_task_started.call_args.kwargs["executing"] is False
 
     def test_a_resident_service_episode_on_a_held_card_runs(
         self, tmp_path: Path

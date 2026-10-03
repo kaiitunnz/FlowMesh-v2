@@ -365,13 +365,17 @@ class Lifecycle:
         task_type: str | None,
         dispatched_at: str | None,
         started_at: str,
+        executing: bool = True,
     ) -> None:
+        """Report a task's start; ``executing`` is False for the start a task reports
+        only to end before it ran."""
         try:
             self.client.task_started(
                 task_id,
                 task_type=task_type,
                 dispatched_at=dispatched_at,
                 started_at=started_at,
+                executing=executing,
             )
         except Exception:
             pass

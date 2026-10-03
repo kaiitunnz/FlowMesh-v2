@@ -125,3 +125,21 @@ def test_a_non_serve_task_carries_no_served_time() -> None:
     _start_then_requeue(runtime, task_id, first, served_sec=100.0)
 
     assert _dispatch(runtime, task_id).serve_elapsed_sec is None
+
+
+def test_a_dispatch_refused_before_it_ran_starts_no_ttl() -> None:
+    runtime = _runtime()
+    task_id = _register(runtime, "dev_model")
+    first = _dispatch(runtime, task_id)
+    runtime.mark_started(
+        task_id,
+        "wkr-1",
+        {"executing": False},
+        "2026-06-01T00:00:00Z",
+        dispatch_id=first.dispatch_id,
+    )
+    record = runtime.get_record(task_id)
+    assert record is not None and record.first_started_ts is None
+    runtime.return_dispatch(task_id, "wkr-1", increment_retry=False, front=True)
+
+    assert _dispatch(runtime, task_id).serve_elapsed_sec is None

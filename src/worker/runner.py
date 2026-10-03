@@ -1367,6 +1367,7 @@ class Runner:
                             task_type=task_type,
                             dispatched_at=dispatched_at,
                             started_at=start_iso,
+                            executing=False,
                         )
                         notified_task_started = True
                     metadata = self._build_task_metadata(
@@ -1386,6 +1387,7 @@ class Runner:
                             task_type=task_type,
                             dispatched_at=dispatched_at,
                             started_at=start_iso,
+                            executing=False,
                         )
                         notified_task_started = True
                     metadata = self._build_task_metadata(
