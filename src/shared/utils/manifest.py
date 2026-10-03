@@ -7,6 +7,7 @@ import stat
 import threading
 import weakref
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -28,6 +29,10 @@ ARTIFACTS_DIR = "artifacts"
 SCRATCH_DIR = "scratch"
 
 _SHARED_DIR_MODE = 0o0777
+# The most bytes one manifest sync reads to digest its files; a file that does not
+# fit what is left is listed with its size and no digest.
+_HASH_BUDGET_BYTES = 256 << 20
+_HASH_CHUNK_BYTES = 1 << 20
 # A manifest is a rescan of its directory; serializing a directory's rescans makes
 # the last manifest written list every file present before its scan. A directory's
 # lock lives only while a sync holds it.
@@ -78,9 +83,10 @@ def _sync_manifest(
     expected_set.update({RESULTS_NAME, LOGS_DIR, ARTIFACTS_DIR})
 
     entries: list[dict[str, Any]] = []
+    budget = _HashBudget(_HASH_BUDGET_BYTES)
     with open_dir(base_dir) as base_fd:
         for name in sorted(expected_set):
-            entries.append(_describe_path(base_fd, Path(name), required=True))
+            entries.append(_describe_path(base_fd, Path(name), budget, required=True))
         added = {entry["path"] for entry in entries}
 
         # Capture additional files/directories that exist but were not declared.
@@ -94,7 +100,7 @@ def _sync_manifest(
                 and not item.is_symlink()
             )
         for name in extra:
-            entries.append(_describe_path(base_fd, Path(name), required=False))
+            entries.append(_describe_path(base_fd, Path(name), budget, required=False))
 
         manifest = {
             "task_id": task_id,
@@ -129,7 +135,16 @@ def _infer_type(rel_path: Path) -> str:
     return "directory"
 
 
-def _describe_path(base_fd: int, rel_path: Path, *, required: bool) -> dict[str, Any]:
+@dataclass
+class _HashBudget:
+    """The bytes a manifest sync may still read to digest its files."""
+
+    remaining: int
+
+
+def _describe_path(
+    base_fd: int, rel_path: Path, budget: _HashBudget, *, required: bool
+) -> dict[str, Any]:
     entry_type = _infer_type(rel_path)
     entry: dict[str, Any] = {
         "name": rel_path.as_posix(),
@@ -137,7 +152,7 @@ def _describe_path(base_fd: int, rel_path: Path, *, required: bool) -> dict[str,
         "type": entry_type,
         "required": required,
     }
-    stats = _stats(base_fd, rel_path)
+    stats = _stats(base_fd, rel_path, budget)
     if stats is None:
         entry["status"] = "missing"
         return entry
@@ -147,9 +162,10 @@ def _describe_path(base_fd: int, rel_path: Path, *, required: bool) -> dict[str,
     return entry
 
 
-def _stats(base_fd: int, rel_path: Path) -> dict[str, Any] | None:
+def _stats(base_fd: int, rel_path: Path, budget: _HashBudget) -> dict[str, Any] | None:
     """The size and digest or file count of ``rel_path``, or None when it is missing
-    or reached only through a link."""
+    or reached only through a link. A file is digested only when its size fits what
+    is left of ``budget``."""
     if rel_path.is_absolute() or not all(map(is_plain_segment, rel_path.parts)):
         return None
     try:
@@ -161,10 +177,11 @@ def _stats(base_fd: int, rel_path: Path) -> dict[str, Any] | None:
                 if (opened := open_regular(dir_fd, rel_path.name)) is None:
                     return None
                 with opened as fh:
-                    return {
-                        "size": os.fstat(fh.fileno()).st_size,
-                        "sha256": _sha256(fh),
-                    }
+                    size = os.fstat(fh.fileno()).st_size
+                    if size > budget.remaining:
+                        return {"size": size}
+                    budget.remaining -= size
+                    return {"size": size, "sha256": _sha256(fh, size)}
             if not stat.S_ISDIR(st.st_mode):
                 return {"size": 0, "file_count": 0}
             with open_dir_at(dir_fd, rel_path.name) as top_fd:
@@ -183,10 +200,12 @@ def _normalize_artifact_name(name: str) -> str:
     return value or name
 
 
-def _sha256(fh: BinaryIO) -> str:
+def _sha256(fh: BinaryIO, size: int) -> str:
+    """The digest of the first ``size`` bytes of ``fh``."""
     hasher = hashlib.sha256()
-    for chunk in iter(lambda: fh.read(8192), b""):
+    while size > 0 and (chunk := fh.read(min(_HASH_CHUNK_BYTES, size))):
         hasher.update(chunk)
+        size -= len(chunk)
     return hasher.hexdigest()
 
 
