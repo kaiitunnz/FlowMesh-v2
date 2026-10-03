@@ -74,7 +74,7 @@ class WorkerConfig(BaseModel):
     foreign_gpu_grace_sec: float = env.WORKER_FOREIGN_GPU_GRACE_SEC
     """Seconds to wait after a task ends before trusting a reading"""
     serve_default_ttl_sec: float = env.SERVE_DEFAULT_TTL_SEC
-    """Serve task TTL when its spec sets none"""
+    """Serve task TTL, from its first start, when its spec sets none"""
     serve_max_ttl_sec: float = env.SERVE_MAX_TTL_SEC
     """Upper bound on a serve task's TTL"""
     enable_dev_model: bool = env.WORKER_ENABLE_DEV_MODEL
