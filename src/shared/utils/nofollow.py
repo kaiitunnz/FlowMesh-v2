@@ -8,6 +8,7 @@ through, and a special file is never opened as a file.
 """
 
 import errno
+import logging
 import os
 import stat
 from collections.abc import Iterator
@@ -28,6 +29,9 @@ _APPEND_FLAGS = (
     | os.O_NOCTTY
     | os.O_CLOEXEC
 )
+# The deepest directory below a walk's top that the walk opens.
+_MAX_WALK_DEPTH = 128
+_LOGGER = logging.getLogger(__name__)
 _REFUSED_DIR_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 _REFUSED_FILE_ERRNOS = frozenset({errno.ELOOP, errno.ENXIO, errno.EISDIR})
 _SKIPPED_READ_ERRNOS = frozenset({errno.ELOOP, errno.ENXIO, errno.ENOENT})
@@ -109,23 +113,22 @@ def _open_child(fd: int, name: str, create: bool, mode: int | None) -> int:
     return child
 
 
-def walk(
-    top_fd: int,
-) -> Iterator[tuple[PurePosixPath, list[str], list[str], int]]:
+def walk(top_fd: int) -> Iterator[tuple[str, list[str], list[str], int]]:
     """Walk the tree under the directory ``top_fd`` top-down, never opening a link.
 
     Yields ``(relative directory, subdirectories, other entries, descriptor)`` per
-    directory; a caller may prune the subdirectories in place. A subdirectory is
-    opened without following a link, and one removed or replaced by anything but a
-    directory during the walk is skipped. Links and special files are other entries.
-    The walk holds one descriptor per directory on the current path, at any depth.
+    directory, the top as ``""``; a caller may prune the subdirectories in place. A
+    subdirectory is opened without following a link, and one removed or replaced by
+    anything but a directory during the walk is skipped. Links and special files are
+    other entries. Directories deeper than ``_MAX_WALK_DEPTH`` below the top are
+    listed by their parent but not walked, with one warning per walk, which bounds
+    the descriptors and memory a walk holds.
     """
     dirs, others = _list_dir(top_fd)
-    yield PurePosixPath(), dirs, others, top_fd
+    yield "", dirs, others, top_fd
     # Each frame: a directory's descriptor, its path, and its subdirectories left.
-    stack: list[tuple[int, PurePosixPath, Iterator[str]]] = [
-        (top_fd, PurePosixPath(), iter(dirs))
-    ]
+    stack: list[tuple[int, str, Iterator[str]]] = [(top_fd, "", iter(dirs))]
+    warned = False
     try:
         while stack:
             fd, rel_dir, pending = stack[-1]
@@ -134,19 +137,34 @@ def walk(
                 if fd != top_fd:
                     os.close(fd)
                 continue
+            rel_child = join_relative(rel_dir, name)
+            if len(stack) > _MAX_WALK_DEPTH:
+                if not warned:
+                    _LOGGER.warning(
+                        "Not walking %s: deeper than %d directories",
+                        rel_child,
+                        _MAX_WALK_DEPTH,
+                    )
+                    warned = True
+                continue
             try:
                 child = _open_child(fd, name, create=False, mode=None)
             except (FileNotFoundError, PathRefused):
                 continue
             child_dirs: list[str] = []
-            stack.append((child, rel_dir / name, iter(child_dirs)))
+            stack.append((child, rel_child, iter(child_dirs)))
             listed_dirs, child_others = _list_dir(child)
             child_dirs.extend(listed_dirs)
-            yield rel_dir / name, child_dirs, child_others, child
+            yield rel_child, child_dirs, child_others, child
     finally:
         for fd, _, _ in stack:
             if fd != top_fd:
                 os.close(fd)
+
+
+def join_relative(rel_dir: str, name: str) -> str:
+    """The relative path of ``name`` in the walked directory ``rel_dir``."""
+    return f"{rel_dir}/{name}" if rel_dir else name
 
 
 def _list_dir(fd: int) -> tuple[list[str], list[str]]:
@@ -247,7 +265,7 @@ def regular_files(top: Path) -> Iterator[tuple[str, BinaryIO | OSError]]:
                 for name in others:
                     if is_atomic_temp(name):
                         continue
-                    rel_name = (rel_dir / name).as_posix()
+                    rel_name = join_relative(rel_dir, name)
                     try:
                         opened = open_regular(dir_fd, name)
                     except OSError as exc:

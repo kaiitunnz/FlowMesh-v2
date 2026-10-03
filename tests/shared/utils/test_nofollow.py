@@ -2,7 +2,7 @@
 
 import os
 import stat
-import sys
+import tracemalloc
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -123,9 +123,9 @@ def test_a_walk_never_opens_a_linked_directory(
     monkeypatch.setattr(nofollow, "_open_child", _recording)
 
     with open_dir(tmp_path / "top") as top_fd:
-        seen = [(rel.as_posix(), dirs, others) for rel, dirs, others, _ in walk(top_fd)]
+        seen = [(rel, dirs, others) for rel, dirs, others, _ in walk(top_fd)]
 
-    assert seen == [(".", ["sub"], ["linked"]), ("sub", [], [])]
+    assert seen == [("", ["sub"], ["linked"]), ("sub", [], [])]
     assert opened == ["top", "sub"]
 
 
@@ -159,22 +159,31 @@ def test_a_segment_that_leaves_its_directory_is_refused(
     assert open_below(tmp_path, PurePosixPath("x", segment or "y", "z")) is None
 
 
-def test_a_walk_reaches_a_tree_deeper_than_the_recursion_limit(tmp_path: Path) -> None:
-    depth = sys.getrecursionlimit() + 500
-    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
-    os.mkdir("top", dir_fd=fd)
+def _chain(top: Path, depth: int, files: dict[int, bytes]) -> None:
+    """A chain of ``depth`` directories below ``top``, with ``files[level]`` in the
+    directory ``level`` deep."""
+    fd = os.open(top.parent, os.O_RDONLY | os.O_DIRECTORY)
+    os.mkdir(top.name, dir_fd=fd)
     for level in range(depth + 1):
         child = os.open(
-            "top" if level == 0 else "d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd
+            top.name if level == 0 else "d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd
         )
         os.close(fd)
         fd = child
+        if level in files:
+            leaf = os.open("leaf.bin", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=fd)
+            os.write(leaf, files[level])
+            os.close(leaf)
         if level < depth:
             os.mkdir("d", dir_fd=fd)
-    leaf = os.open("leaf.bin", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=fd)
-    os.write(leaf, b"deep")
-    os.close(leaf)
     os.close(fd)
+
+
+def test_a_walk_stops_below_its_depth_bound_with_one_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    depth = nofollow._MAX_WALK_DEPTH
+    _chain(tmp_path / "top", depth + 5, {depth: b"at", depth + 1: b"past"})
 
     found = []
     for name, opened in regular_files(tmp_path / "top"):
@@ -182,4 +191,19 @@ def test_a_walk_reaches_a_tree_deeper_than_the_recursion_limit(tmp_path: Path) -
         with opened:
             found.append((name.count("/"), opened.read()))
 
-    assert found == [(depth, b"deep")]
+    assert found == [(depth, b"at")]
+    assert caplog.text.count("deeper than") == 1
+
+
+def test_a_walk_of_a_very_deep_tree_holds_bounded_memory(tmp_path: Path) -> None:
+    _chain(tmp_path / "top", 5000, {})
+    tracemalloc.start()
+    try:
+        with open_dir(tmp_path / "top") as top_fd:
+            levels = sum(1 for _ in walk(top_fd))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert levels == nofollow._MAX_WALK_DEPTH + 1
+    assert peak < 4 << 20

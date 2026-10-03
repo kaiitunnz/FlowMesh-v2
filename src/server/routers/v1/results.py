@@ -36,6 +36,7 @@ from shared.utils.manifest import (
 from shared.utils.nofollow import (
     PathRefused,
     is_plain_segment,
+    join_relative,
     open_below,
     open_dir,
     open_dir_at,
@@ -337,6 +338,9 @@ class _OpenFileResponse(FileResponse):
 
 
 def _names_several_ranges(value: bytes) -> bool:
+    """Whether a ``Range`` header names more than one range. Every non-empty part
+    counts, including one ``FileResponse`` would ignore, so such a request is answered
+    whole rather than as a single range."""
     _, _, ranges = value.decode("latin-1").partition("=")
     return sum(1 for part in ranges.split(",") if part.strip() not in {"", "-"}) > 1
 
@@ -429,7 +433,7 @@ def _add_section(
                                 archive,
                                 dirfd,
                                 entry,
-                                f"{arcname}/{(rel_dir / entry).as_posix()}",
+                                f"{arcname}/{join_relative(rel_dir, entry)}",
                             )
     except (FileNotFoundError, PathRefused):
         return

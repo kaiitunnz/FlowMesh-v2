@@ -66,14 +66,14 @@ def test_a_scan_skips_in_flight_writes_and_files_removed_under_it(
     in_flight.write_bytes(b"partial")
     assert atomic.is_atomic_temp(in_flight.name)
     (tmp_path / in_flight.name).write_bytes(b"partial")
-    fwalk = os.fwalk
+    walk = manifest.walk
 
     # A file the scan lists, then finds gone: renamed or removed between the two.
-    def _with_removed(top: Any, *args: Any, **kwargs: Any) -> Any:
-        for dirpath, dirs, files, dirfd in fwalk(top, *args, **kwargs):
-            yield dirpath, dirs, [*files, "gone.bin"], dirfd
+    def _with_removed(top_fd: int) -> Any:
+        for rel_dir, dirs, others, dirfd in walk(top_fd):
+            yield rel_dir, dirs, [*others, "gone.bin"], dirfd
 
-    monkeypatch.setattr(os, "fwalk", _with_removed)
+    monkeypatch.setattr(manifest, "walk", _with_removed)
 
     entries = {e["path"]: e for e in sync_manifest(tmp_path, "t", [])["entries"]}
 

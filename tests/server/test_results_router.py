@@ -389,13 +389,13 @@ def test_a_bundle_leaves_out_in_flight_writes_and_files_removed_under_it(
     (artifacts / "nested" / "kept.bin").write_bytes(b"x")
     in_flight = Path(tempfile.mkstemp(prefix=".fm-tmp-", dir=artifacts)[1])
     assert atomic.is_atomic_temp(in_flight.name)
-    fwalk = os.fwalk
+    walk = results_router.walk
 
-    def _with_removed(top: Any, *args: Any, **kwargs: Any) -> Iterator[Any]:
-        for dirpath, dirs, files, dirfd in fwalk(top, *args, **kwargs):
-            yield dirpath, dirs, [*files, "gone.bin"], dirfd
+    def _with_removed(top_fd: int) -> Iterator[Any]:
+        for rel_dir, dirs, others, dirfd in walk(top_fd):
+            yield rel_dir, dirs, [*others, "gone.bin"], dirfd
 
-    monkeypatch.setattr(results_router.os, "fwalk", _with_removed)
+    monkeypatch.setattr(results_router, "walk", _with_removed)
 
     assert _bundle_members(tmp_path) == [
         ("t-1/artifacts", tarfile.DIRTYPE, ""),
@@ -448,20 +448,21 @@ def test_a_bundle_reads_a_directory_swapped_for_a_link_from_the_directory(
     artifacts = tmp_path / "task" / "artifacts"
     (artifacts / "nested").mkdir(parents=True)
     (artifacts / "nested" / "kept.bin").write_bytes(b"x")
-    fwalk = os.fwalk
+    walk = results_router.walk
 
-    def _swapping(top: Any, *args: Any, **kwargs: Any) -> Iterator[Any]:
-        for entry in fwalk(top, *args, **kwargs):
-            if entry[0].endswith("nested"):
+    def _swapping(top_fd: int) -> Iterator[Any]:
+        for entry in walk(top_fd):
+            if entry[0] == "nested":
                 (artifacts / "nested").rename(tmp_path / "moved")
                 (artifacts / "nested").symlink_to(secret)
             yield entry
 
-    monkeypatch.setattr(results_router.os, "fwalk", _swapping)
+    monkeypatch.setattr(results_router, "walk", _swapping)
 
     with _open_bundle(tmp_path / "task") as archive:
         member = archive.extractfile("t-1/artifacts/nested/kept.bin")
         assert member is not None and member.read() == b"x"
+    assert (artifacts / "nested").is_symlink()
 
 
 def test_a_bundle_keeps_links_empty_directories_and_modes_and_leaves_out_special_files(
