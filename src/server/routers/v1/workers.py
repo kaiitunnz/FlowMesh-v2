@@ -43,6 +43,7 @@ WORKER_FILTER_FIELDS = frozenset(
         "cached_models",
         "cached_datasets",
         "capabilities.supported_task_types",
+        "capabilities.gpu_binding_task_types",
         "capabilities.ssh_noninteractive",
         "hardware.cpu.model",
         "hardware.gpu.driver_version",
