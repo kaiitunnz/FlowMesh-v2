@@ -5,6 +5,7 @@ CONFIGURATION verifies after the supervisor has forgotten everything, whereas a
 runtime-minted `uuid4()` token cannot.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
@@ -797,6 +798,27 @@ class TestExternalGpuHolds:
 
         await self._register(servicer, "GPU-1")
         manager._forget_worker(worker.alias)
+
+        assert rm.available_gpu_count() == 2
+
+    @pytest.mark.asyncio
+    async def test_a_registration_racing_a_bulk_destroy_holds_nothing(self) -> None:
+        rm = _host_pool(2)
+        servicer = self._servicer(rm)
+        await self._register(servicer, "GPU-0")
+
+        worker = servicer._registry.try_get(cast(Any, self.TOKEN))
+        assert isinstance(worker, ExternalWorkerAdapter)
+        destroying = asyncio.ensure_future(
+            servicer._worker_manager.destroy_workers({"fm-worker-0"})
+        )
+        # Re-register once the destroy released the holds, before it forgets the
+        # worker.
+        while worker.held_gpus:
+            await asyncio.sleep(0)
+        assert not destroying.done()
+        await self._register(servicer, "GPU-1")
+        await destroying
 
         assert rm.available_gpu_count() == 2
 
