@@ -624,7 +624,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
   settled. The span's end is the last durable finish among its tasks, so a workflow that
   closes again after a restart closes the same way it did the first time.
-- **Redis channels.** The runtime uses two Redis instances:
+- **Redis channels.** The runtime uses two Redis endpoints (separate instances in the
+  stack):
   - control (`REDIS_CONTROL_URL`) — durable state and the control plane's
     pub/sub: `node:{node_id}:dispatch` (task assignments, interrupts and other
     frames for a node's workers), `node:{node_id}:cmds` and `nodes:responses`
