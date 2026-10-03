@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import threading
+import tracemalloc
 from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
@@ -429,3 +430,32 @@ async def test_an_aborted_trace_stream_closes_its_file_without_a_collection(
         assert len(os.listdir("/dev/fd")) == open_fds
     finally:
         gc.enable()
+
+
+@pytest.mark.anyio
+async def test_a_newline_free_trace_file_streams_in_bounded_memory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    logs = tmp_path / "tsk-a" / "logs"
+    logs.mkdir(parents=True)
+    with (logs / "spans.jsonl").open("wb") as fh:
+        fh.write(b'{"n": 1}\n')
+        fh.seek(256 << 20, os.SEEK_CUR)
+        fh.write(b'\n{"n": 2}\n')
+    tracemalloc.start()
+    try:
+        response = await traces_router.get_workflow_trace(
+            workflow_id="wfl-1",
+            trace_type="spans",
+            registry=_registry(["tsk-a"]),
+            results_dir=tmp_path,
+            logger=logging.getLogger("test.traces"),
+        )
+        lines = await _collect_streamed_lines(response)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert [json.loads(line) for line in lines] == [{"n": 1}, {"n": 2}]
+    assert peak < 32 << 20
+    assert "longer than" in caplog.text

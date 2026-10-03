@@ -243,7 +243,7 @@ def test_trace_reads_follow_no_link(
     else:
         (task_dir / linked).symlink_to(outside.file)
 
-    rows = list(traces_router._WorkflowRows(results, ["tsk-1"], "spans.jsonl"))
+    rows = list(traces_router._WorkflowRows(results, ["tsk-1"], "spans.jsonl", _LOGGER))
 
     assert rows == []
 

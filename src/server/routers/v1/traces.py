@@ -1,7 +1,6 @@
 """Trace endpoints — per-task upload, workflow-level read + analyzer, span queries."""
 
 import functools
-import io
 import logging
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -65,15 +64,27 @@ def _task_dir(results_dir: Path, task_id: str) -> Path:
     return result_file_path(results_dir, task_id).parent
 
 
-class _WorkflowRows:
-    """The rows of one trace file across a workflow's tasks, read one file at a
-    time; ``close`` closes the file being read, so an aborted stream holds none."""
+# The longest trace line read; a longer one is skipped rather than held in memory.
+_MAX_TRACE_LINE_BYTES = 4 << 20
 
-    def __init__(self, results_dir: Path, task_ids: Iterable[str], filename: str):
+
+class _WorkflowRows:
+    """The rows of one trace file across a workflow's tasks, read one file and one
+    bounded line at a time; ``close`` closes the file being read, so an aborted
+    stream holds none."""
+
+    def __init__(
+        self,
+        results_dir: Path,
+        task_ids: Iterable[str],
+        filename: str,
+        logger: logging.Logger,
+    ):
         self._results_dir = results_dir
         self._task_ids = task_ids
         self._filename = filename
-        self._current: io.TextIOWrapper | None = None
+        self._logger = logger
+        self._current: BinaryIO | None = None
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         for task_id in self._task_ids:
@@ -83,10 +94,24 @@ class _WorkflowRows:
             )
             if opened is None:
                 continue
-            with io.TextIOWrapper(opened, encoding="utf-8") as fh:
+            with opened as fh:
                 self._current = fh
-                yield from parse_jsonl_lines(fh)
+                yield from parse_jsonl_lines(self._lines(fh, task_id))
             self._current = None
+
+    def _lines(self, fh: BinaryIO, task_id: str) -> Iterator[str]:
+        while line := fh.readline(_MAX_TRACE_LINE_BYTES + 1):
+            if len(line) > _MAX_TRACE_LINE_BYTES and not line.endswith(b"\n"):
+                self._logger.warning(
+                    "Skipping a %s line of task %s longer than %d bytes",
+                    self._filename,
+                    task_id,
+                    _MAX_TRACE_LINE_BYTES,
+                )
+                while line and not line.endswith(b"\n"):
+                    line = fh.readline(_MAX_TRACE_LINE_BYTES)
+                continue
+            yield line.decode("utf-8", errors="replace")
 
     def close(self) -> None:
         if self._current is not None:
@@ -140,7 +165,7 @@ async def analyze_workflow_trace(
     )
     task_ids = await _resolve_task_ids(workflow_id, registry)
     body = await run_in_threadpool(
-        _analyze_workflow, results_dir, task_ids, workflow_id
+        _analyze_workflow, results_dir, task_ids, workflow_id, logger
     )
     return Response(body, media_type="application/json")
 
@@ -149,11 +174,11 @@ _PROFILE_SUMMARY = TypeAdapter(ProfileSummary)
 
 
 def _analyze_workflow(
-    results_dir: Path, task_ids: list[str], workflow_id: str
+    results_dir: Path, task_ids: list[str], workflow_id: str, logger: logging.Logger
 ) -> bytes:
-    spans = list(_WorkflowRows(results_dir, task_ids, "spans.jsonl"))
-    assets = list(_WorkflowRows(results_dir, task_ids, "assets.jsonl"))
-    lineage = list(_WorkflowRows(results_dir, task_ids, "lineage.jsonl"))
+    spans = list(_WorkflowRows(results_dir, task_ids, "spans.jsonl", logger))
+    assets = list(_WorkflowRows(results_dir, task_ids, "assets.jsonl", logger))
+    lineage = list(_WorkflowRows(results_dir, task_ids, "lineage.jsonl", logger))
     summary = analyze(spans, assets, lineage, workflow_id=workflow_id)
     return _PROFILE_SUMMARY.dump_json(summary, by_alias=True)
 
@@ -180,7 +205,7 @@ async def get_workflow_trace(
             detail=f"unknown type '{trace_type}'; expected spans, assets, or lineage",
         )
     task_ids = await _resolve_task_ids(workflow_id, registry)
-    rows = _WorkflowRows(results_dir, task_ids, filename)
+    rows = _WorkflowRows(results_dir, task_ids, filename, logger)
     return _ClosingStreamingResponse(
         encode_jsonl_bytes(rows), rows.close, media_type="application/x-ndjson"
     )
