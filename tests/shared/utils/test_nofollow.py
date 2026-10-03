@@ -2,6 +2,7 @@
 
 import os
 import stat
+import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -156,3 +157,29 @@ def test_a_segment_that_leaves_its_directory_is_refused(
     with pytest.raises(PathRefused), open_dir(tmp_path, segment):
         pass
     assert open_below(tmp_path, PurePosixPath("x", segment or "y", "z")) is None
+
+
+def test_a_walk_reaches_a_tree_deeper_than_the_recursion_limit(tmp_path: Path) -> None:
+    depth = sys.getrecursionlimit() + 500
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    os.mkdir("top", dir_fd=fd)
+    for level in range(depth + 1):
+        child = os.open(
+            "top" if level == 0 else "d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd
+        )
+        os.close(fd)
+        fd = child
+        if level < depth:
+            os.mkdir("d", dir_fd=fd)
+    leaf = os.open("leaf.bin", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=fd)
+    os.write(leaf, b"deep")
+    os.close(leaf)
+    os.close(fd)
+
+    found = []
+    for name, opened in regular_files(tmp_path / "top"):
+        assert not isinstance(opened, OSError)
+        with opened:
+            found.append((name.count("/"), opened.read()))
+
+    assert found == [(depth, b"deep")]

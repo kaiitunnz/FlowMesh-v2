@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from .atomic import is_atomic_temp
+
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
 _APPEND_FLAGS = (
@@ -116,13 +118,38 @@ def walk(
     directory; a caller may prune the subdirectories in place. A subdirectory is
     opened without following a link, and one removed or replaced by anything but a
     directory during the walk is skipped. Links and special files are other entries.
+    The walk holds one descriptor per directory on the current path, at any depth.
     """
-    yield from _walk(top_fd, PurePosixPath())
+    dirs, others = _list_dir(top_fd)
+    yield PurePosixPath(), dirs, others, top_fd
+    # Each frame: a directory's descriptor, its path, and its subdirectories left.
+    stack: list[tuple[int, PurePosixPath, Iterator[str]]] = [
+        (top_fd, PurePosixPath(), iter(dirs))
+    ]
+    try:
+        while stack:
+            fd, rel_dir, pending = stack[-1]
+            if (name := next(pending, None)) is None:
+                stack.pop()
+                if fd != top_fd:
+                    os.close(fd)
+                continue
+            try:
+                child = _open_child(fd, name, create=False, mode=None)
+            except (FileNotFoundError, PathRefused):
+                continue
+            child_dirs: list[str] = []
+            stack.append((child, rel_dir / name, iter(child_dirs)))
+            listed_dirs, child_others = _list_dir(child)
+            child_dirs.extend(listed_dirs)
+            yield rel_dir / name, child_dirs, child_others, child
+    finally:
+        for fd, _, _ in stack:
+            if fd != top_fd:
+                os.close(fd)
 
 
-def _walk(
-    fd: int, rel_dir: PurePosixPath
-) -> Iterator[tuple[PurePosixPath, list[str], list[str], int]]:
+def _list_dir(fd: int) -> tuple[list[str], list[str]]:
     dirs: list[str] = []
     others: list[str] = []
     with os.scandir(fd) as entries:
@@ -134,16 +161,7 @@ def _walk(
             (dirs if is_dir else others).append(entry.name)
     dirs.sort()
     others.sort()
-    yield rel_dir, dirs, others, fd
-    for name in dirs:
-        try:
-            child = _open_child(fd, name, create=False, mode=None)
-        except (FileNotFoundError, PathRefused):
-            continue
-        try:
-            yield from _walk(child, rel_dir / name)
-        finally:
-            os.close(child)
+    return dirs, others
 
 
 def open_regular(dir_fd: int, name: str) -> BinaryIO | None:
@@ -219,13 +237,16 @@ def regular_files(top: Path) -> Iterator[tuple[str, BinaryIO | OSError]]:
     for reading, or with the error that kept it from opening.
 
     ``top``'s parent is trusted, as in ``open_dir``. Nothing is yielded when ``top``
-    is missing or a link; links, special files, and names removed during the walk
-    are skipped.
+    is missing or a link; links, special files, in-flight atomic writes, and names
+    removed during the walk are skipped.
     """
     try:
         with open_dir(top) as top_fd:
-            for rel_dir, _, others, dir_fd in walk(top_fd):
+            for rel_dir, dirs, others, dir_fd in walk(top_fd):
+                dirs[:] = [name for name in dirs if not is_atomic_temp(name)]
                 for name in others:
+                    if is_atomic_temp(name):
+                        continue
                     rel_name = (rel_dir / name).as_posix()
                     try:
                         opened = open_regular(dir_fd, name)

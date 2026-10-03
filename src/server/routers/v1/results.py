@@ -9,7 +9,7 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import BinaryIO
 
 from fastapi import (
     APIRouter,
@@ -301,26 +301,21 @@ def _file_response(opened: BinaryIO, name: str) -> "_OpenFileResponse":
 
 class _OpenFileResponse(FileResponse):
     """A file response served from an already-opened file rather than a path, with
-    ``FileResponse``'s ranges and validators.
+    ``FileResponse``'s single ranges and validators.
 
-    ``FileResponse`` opens ``path`` for each body it sends; here ``path`` hands out
-    a fresh duplicate of the opened descriptor, which that open takes over and
-    closes. The opened file is closed once the response ends, sent or aborted.
+    The body is read through ``/dev/fd``, which reopens the opened file itself, and
+    the opened file is closed once the response ends, sent or aborted. A request
+    naming several ranges is answered whole: ``FileResponse`` never finishes sending
+    several ranges of a file truncated under it.
     """
 
     def __init__(self, opened: BinaryIO, media_type: str) -> None:
         self._opened = opened
         super().__init__(
-            "", media_type=media_type, stat_result=os.fstat(opened.fileno())
+            f"/dev/fd/{opened.fileno()}",
+            media_type=media_type,
+            stat_result=os.fstat(opened.fileno()),
         )
-
-    @property  # type: ignore[override]
-    def path(self) -> int:
-        return os.dup(self._opened.fileno())
-
-    @path.setter
-    def path(self, value: Any) -> None:
-        pass
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         extensions = {
@@ -328,10 +323,22 @@ class _OpenFileResponse(FileResponse):
             for key, value in scope.get("extensions", {}).items()
             if key != "http.response.pathsend"
         }
+        headers = [
+            (name, value)
+            for name, value in scope.get("headers", [])
+            if name.lower() != b"range" or not _names_several_ranges(value)
+        ]
         try:
-            await super().__call__({**scope, "extensions": extensions}, receive, send)
+            await super().__call__(
+                {**scope, "extensions": extensions, "headers": headers}, receive, send
+            )
         finally:
             self._opened.close()
+
+
+def _names_several_ranges(value: bytes) -> bool:
+    _, _, ranges = value.decode("latin-1").partition("=")
+    return sum(1 for part in ranges.split(",") if part.strip() not in {"", "-"}) > 1
 
 
 def _has_dir(base_dir: Path) -> bool:
@@ -430,7 +437,8 @@ def _add_section(
 
 def _add_entry(archive: tarfile.TarFile, dirfd: int, name: str, arcname: str) -> bool:
     """Archive ``name`` in ``dirfd`` without following it; return whether it is a
-    directory to walk. A name removed or replaced while it is read is left out."""
+    directory to walk. A special file, and a name removed or replaced while it is
+    read, is left out."""
     try:
         st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
         if stat.S_ISREG(st.st_mode):
@@ -448,8 +456,6 @@ def _add_entry(archive: tarfile.TarFile, dirfd: int, name: str, arcname: str) ->
         elif stat.S_ISLNK(st.st_mode):
             info.type = tarfile.SYMTYPE
             info.linkname = os.readlink(name, dir_fd=dirfd)
-        elif stat.S_ISFIFO(st.st_mode):
-            info.type = tarfile.FIFOTYPE
         else:
             return False
     except FileNotFoundError:

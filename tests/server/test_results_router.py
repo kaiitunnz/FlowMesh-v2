@@ -3,6 +3,7 @@ import gc
 import io
 import logging
 import os
+import socket
 import stat
 import tarfile
 import tempfile
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
+import anyio
 import pytest
 from fastapi import BackgroundTasks, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, Response
@@ -462,23 +464,32 @@ def test_a_bundle_reads_a_directory_swapped_for_a_link_from_the_directory(
         assert member is not None and member.read() == b"x"
 
 
-def test_a_bundle_keeps_links_fifos_empty_directories_and_modes(
+def test_a_bundle_keeps_links_empty_directories_and_modes_and_leaves_out_special_files(
     tmp_path: Path,
 ) -> None:
     artifacts = tmp_path / "artifacts"
     (artifacts / "empty").mkdir(parents=True)
     (artifacts / "loop").symlink_to("loop")
     os.mkfifo(artifacts / "pipe")
+    held = socket.socket(socket.AF_UNIX)
+    held.bind(str(artifacts / "sock"))
     script = artifacts / "run.sh"
     script.write_text("#!/bin/sh\n")
     script.chmod(0o750)
     (artifacts / "empty").chmod(0o700)
 
-    members = _bundle_members(tmp_path)
+    try:
+        members = _bundle_members(tmp_path)
+        with _open_bundle(tmp_path) as archive:
+            modes = {member.name: member.mode for member in archive.getmembers()}
+            archive.extractall(tmp_path / "extracted", filter="data")
+    finally:
+        held.close()
 
-    assert sorted(members) == _reference_members(tmp_path)
-    with _open_bundle(tmp_path) as archive:
-        modes = {member.name: member.mode for member in archive.getmembers()}
+    special = {"t-1/artifacts/pipe", "t-1/artifacts/sock"}
+    assert sorted(members) == [
+        member for member in _reference_members(tmp_path) if member[0] not in special
+    ]
     assert modes["t-1/artifacts/run.sh"] == 0o750
     assert modes["t-1/artifacts/empty"] == 0o700
 
@@ -641,3 +652,46 @@ async def test_an_upload_through_a_link_loop_is_refused(
         )
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ranges", ["bytes=0-9,20-29", "bytes=0-1, 5-", "bytes=-5,0-0"])
+async def test_a_download_naming_several_ranges_is_answered_whole(
+    tmp_path: Path, ranges: str
+) -> None:
+    artifacts = tmp_path / "task-1" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "out.bin").write_bytes(bytes(range(256)))
+
+    response = await results_router.download_result_file(
+        task_id="task-1",
+        filename="out.bin",
+        runtime=cast(Any, _RuntimeStub()),
+        results_dir=tmp_path,
+    )
+
+    assert await serve(response, {"Range": ranges}) == await serve(
+        FileResponse(artifacts / "out.bin")
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ranges", [None, "bytes=0-", "bytes=0-9,100-199"])
+async def test_a_download_of_a_file_truncated_under_it_ends(
+    tmp_path: Path, ranges: str | None
+) -> None:
+    artifacts = tmp_path / "task-1" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "out.bin").write_bytes(b"x" * (1 << 20))
+    response = await results_router.download_result_file(
+        task_id="task-1",
+        filename="out.bin",
+        runtime=cast(Any, _RuntimeStub()),
+        results_dir=tmp_path,
+    )
+    os.truncate(artifacts / "out.bin", 0)
+
+    with anyio.fail_after(5):
+        served = await serve(response, {"Range": ranges} if ranges else None)
+
+    assert served.body == b""
