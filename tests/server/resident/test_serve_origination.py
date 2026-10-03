@@ -9,6 +9,7 @@ FAILED path, so the credit never strands and no ``DS`` state is fabricated.
 """
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 from server.network.state import (
@@ -182,6 +183,7 @@ class _Deps:
 
 def _build(
     base_candidate: bool = True,
+    stop_fn: Callable[[str], None] | None = None,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Deps]:
     stores = ResidentStores()
     limits = ResidentPolicyLimits()
@@ -200,7 +202,11 @@ def _build(
 
     admission = AdmissionController(stores)
     lifecycle = LifecycleScaleManager(
-        stores, limits=limits, admission_slots=2, materialize_fn=materialize_fn
+        stores,
+        limits=limits,
+        admission_slots=2,
+        materialize_fn=materialize_fn,
+        stop_fn=stop_fn,
     )
     deps = _Deps(base_candidate=base_candidate)
     svc = ResidentCapacityControl(
@@ -523,7 +529,8 @@ def test_reconcile_serve_terminal_settles_a_rehydrated_uncertain_claim() -> None
 
 
 def test_drain_stops_a_drained_standing_replica_with_no_credit() -> None:
-    svc, stores, _settled, _deps = _build()
+    reaped: list[str] = []
+    svc, stores, _settled, _deps = _build(stop_fn=reaped.append)
     _adopt(svc)
     svc.drain_serve_replica(_SERVE_TASK)
     replica = stores.directory.by_family(_FAMILY)[0]
@@ -531,10 +538,14 @@ def test_drain_stops_a_drained_standing_replica_with_no_credit() -> None:
     # rather than lingering DRAINING forever (the idle sweep skips standing replicas).
     assert replica.state is ReplicaState.STOPPED
     assert stores.directory.live_by_family(_FAMILY) == []
+    # The serve task owns its standing replica: a drain on its requeue leaves the task
+    # to re-run, so stopping the replica never cancels it.
+    assert reaped == []
 
 
 def test_drain_keeps_an_in_flight_standing_replica_draining_until_it_settles() -> None:
-    svc, stores, _settled, _deps = _build()
+    reaped: list[str] = []
+    svc, stores, _settled, _deps = _build(stop_fn=reaped.append)
     _adopt(svc)
     delivery = _ServeDelivery()
     asyncio.run(svc._originate_serve(_origination(delivery)))
@@ -554,3 +565,4 @@ def test_drain_keeps_an_in_flight_standing_replica_draining_until_it_settles() -
     settled_replica = stores.directory.get(replica.replica_id)
     assert settled_replica is not None and settled_replica.state is ReplicaState.STOPPED
     assert stores.directory.live_by_family(_FAMILY) == []
+    assert reaped == []

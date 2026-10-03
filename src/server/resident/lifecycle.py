@@ -300,7 +300,12 @@ class LifecycleScaleManager:
         self._persist()
 
     def stop(self, replica_id: str) -> None:
-        """Complete an idle teardown once a drained replica holds no admitted work."""
+        """Complete an idle teardown once a drained replica holds no admitted work.
+
+        A demand replica's serve task is reaped with it. A standing replica's serve task
+        owns the replica and is left to its own lifecycle, so a task drained on its way
+        back to the queue re-runs.
+        """
         replica = self._stores.directory.get(replica_id)
         if replica is None:
             return
@@ -311,7 +316,8 @@ class LifecycleScaleManager:
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.STOPPED)
         self._persist()
-        self._reap_serve_task(replica.serve_task_id)
+        if not replica.standing:
+            self._reap_serve_task(replica.serve_task_id)
 
     def stop_if_drained(self, replica_id: str | None) -> None:
         """Stop a drained replica once its last admitted work has released.
