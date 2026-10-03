@@ -424,9 +424,9 @@ process outside FlowMesh holds: when it loads one for a GPU task, it picks the f
 devices that match the task's `gpu` block (`count` of them, or every free match without
 a positive one) and starts the executor seeing only those, listed by index under
 `CUDA_DEVICE_ORDER=PCI_BUS_ID`. A warm executor keeps its devices while they stay free and
-fit the next task, and restarts on others otherwise. SFT's `visible_devices` and
-`primary_gpu` are positions within the task's devices; a position past them fails the
-task. Multi-GPU training runs its ranks on those devices. A task that sets
+fit the next task, and restarts on others otherwise, as for a task without a positive
+count once another device frees up. SFT's `visible_devices` and `primary_gpu` are
+positions within the task's devices; a position past them fails the task. Multi-GPU training runs its ranks on those devices. A task that sets
 `CUDA_VISIBLE_DEVICES` in `model.vllm.env_vars` picks its own devices, so its executor sees
 every device and the task waits while any is held. A worker on a MIG slice, or one whose
 `CUDA_VISIBLE_DEVICES` lists some of a host's mixed GPU models by position without
