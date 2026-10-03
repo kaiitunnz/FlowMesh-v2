@@ -82,6 +82,8 @@ class PersistedTask(BaseModel):
         ] = self.record.latest_update_dispatch_id
         # And where its vaulted credentials go back into its spec at dispatch.
         data["record"]["credential_refs"] = self.record.credential_refs
+        # And when its first run started, which a serve task's TTL counts from.
+        data["record"]["first_started_ts"] = self.record.first_started_ts
         return data
 
 

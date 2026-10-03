@@ -192,8 +192,8 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `WORKER_FOREIGN_GPU_GRACE_SEC` | `90` | Seconds after a task before a GPU reading counts |
 | `HF_CACHE_DIR` | – | Shared HuggingFace cache mount |
 | `HEARTBEAT_INTERVAL_SEC` | `30` | Heartbeat cadence |
-| `SERVE_DEFAULT_TTL_SEC` | `3600` | Default vLLM serve session TTL when `spec.ttlSeconds` is unset |
-| `SERVE_MAX_TTL_SEC` | `86400` | Upper bound on vLLM serve session TTL, regardless of `spec.ttlSeconds` |
+| `SERVE_DEFAULT_TTL_SEC` | `3600` | Default serve task TTL, from its first start, when `spec.ttlSeconds` is unset |
+| `SERVE_MAX_TTL_SEC` | `86400` | Upper bound on a serve task TTL, regardless of `spec.ttlSeconds` |
 | `WORKER_ENABLE_DEV_MODEL` | `false` | Advertise the GPU-free `dev_model` executor |
 | `DEV_MODEL_FORWARD_URL` | – | Upstream URL `dev_model` forwards to; canned if unset |
 | `DEV_MODEL_RESPONSE_DELAY_SEC` | `0` | Per-response delay the `dev_model` stand-in applies |

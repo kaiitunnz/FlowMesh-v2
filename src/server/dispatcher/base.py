@@ -38,7 +38,7 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.credentials import credential_merge_key
 from ..task.metadata import extract_model_dataset_names
-from ..task.models import DispatchEnd, TaskRecord, TaskStatus
+from ..task.models import SERVE_TASK_TYPES, DispatchEnd, TaskRecord, TaskStatus
 from ..task.results import ResultUnavailable
 from ..task.runtime import TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
@@ -821,6 +821,7 @@ class Dispatcher:
             input_preparation=preparing,
             recorded_input=self._runtime.recorded_input_reference(task_id),
             traceparent=self._runtime.dispatch_traceparent(task_id),
+            serve_elapsed_sec=_serve_elapsed_sec(record),
         )
 
         # 8. Give the task what it reads and writes its content under, then publish it
@@ -1606,3 +1607,11 @@ class Dispatcher:
                 payload={"error": str(exc)},
             )
             return True
+
+
+def _serve_elapsed_sec(record: TaskRecord) -> float | None:
+    """How long a serve task has run since its first start, which its TTL counts
+    across re-runs; None for any other task or one that never started."""
+    if record.task_type not in SERVE_TASK_TYPES or record.first_started_ts is None:
+        return None
+    return max(0.0, time.time() - record.first_started_ts)

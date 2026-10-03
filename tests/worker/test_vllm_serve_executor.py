@@ -495,7 +495,7 @@ class TestWaitForServe:
         mock_proc.poll.return_value = None
         with ex._signals.running("tsk-test"), pytest.raises(TaskCancelledError):
             ex.cancel("tsk-test")
-            ex._wait_for_serve(mock_proc, ttl_sec=60.0)
+            ex._wait_for_serve(mock_proc, deadline=time.time() + 60.0)
 
     def test_exits_on_stop(self) -> None:
         ex = self._make_executor()
@@ -503,7 +503,7 @@ class TestWaitForServe:
         mock_proc.poll.return_value = None
         with ex._signals.running("tsk-test"):
             ex.stop("tsk-test")
-            ex._wait_for_serve(mock_proc, ttl_sec=60.0)
+            ex._wait_for_serve(mock_proc, deadline=time.time() + 60.0)
 
     def test_raises_on_unexpected_proc_exit(self) -> None:
         ex = self._make_executor()
@@ -511,7 +511,7 @@ class TestWaitForServe:
         mock_proc.poll.return_value = 1
         mock_proc.returncode = 1
         with pytest.raises(ExecutionError):
-            ex._wait_for_serve(mock_proc, ttl_sec=60.0)
+            ex._wait_for_serve(mock_proc, deadline=time.time() + 60.0)
 
     def test_exits_when_ttl_expires(self) -> None:
         ex = self._make_executor()
@@ -522,7 +522,7 @@ class TestWaitForServe:
         mod._POLL_INTERVAL_SEC = 0.01
         try:
             start = time.time()
-            ex._wait_for_serve(mock_proc, ttl_sec=0.02)
+            ex._wait_for_serve(mock_proc, deadline=time.time() + 0.02)
             elapsed = time.time() - start
         finally:
             mod._POLL_INTERVAL_SEC = original
@@ -820,3 +820,42 @@ class TestPollHealthEofFastFail:
                     )
         finally:
             mod._HEALTH_POLL_INTERVAL_SEC = orig
+
+
+class TestServeTtlAcrossReruns:
+    def _run(
+        self, tmp_path: Path, ttl: float, elapsed: float | None
+    ) -> tuple[MagicMock, list[float]]:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+            ttlSeconds=ttl,
+        )
+        task = make_worker_task_message(
+            spec=spec, task_type=TaskType.SERVE, serve_elapsed_sec=elapsed
+        )
+        ex = VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+        deadlines: list[float] = []
+        proc = MagicMock()
+        proc.stdout = io.StringIO("")
+        with (
+            patch("subprocess.Popen", return_value=proc) as popen,
+            patch.object(ex, "_poll_health"),
+            patch.object(
+                ex, "_wait_for_serve", side_effect=lambda _p, d: deadlines.append(d)
+            ),
+            patch.object(ex, "emit_update"),
+            patch.object(ex, "_terminate_process_group"),
+        ):
+            ex.run(task, tmp_path)
+        return popen, deadlines
+
+    def test_a_re_run_serves_what_remains_of_the_ttl(self, tmp_path: Path) -> None:
+        before = time.time()
+        _popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=100.0)
+        assert before + 80.0 - 1.0 <= deadlines[0] <= time.time() + 80.0
+
+    def test_an_elapsed_ttl_starts_no_engine(self, tmp_path: Path) -> None:
+        popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=180.0)
+        popen.assert_not_called()
+        assert deadlines == []

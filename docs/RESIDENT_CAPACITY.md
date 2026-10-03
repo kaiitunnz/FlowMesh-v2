@@ -149,7 +149,8 @@ and a replica pinned for the task's lifetime. The model is validated under
 `RESIDENT_ALLOWED_MODELS`; a disallowed model is not adopted. A caller names only the task
 ID — the model, worker, endpoint, credential, and routing are fixed by the binding — and
 each request is admitted as its own claim. On task stop, cancellation, TTL, or failure the
-binding drains before it stops.
+binding drains before it stops. A serve task's `ttlSeconds` counts from its first start,
+across re-runs.
 
 A serve task pins one gated exposure mode. `proxy`, the default, terminates at the
 root-local ingress and is reached at `/api/v1/serve/tasks/{task_id}/{upstream_path}` on

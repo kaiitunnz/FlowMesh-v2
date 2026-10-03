@@ -22,17 +22,15 @@ import requests
 from shared.schemas.result import ServeResult
 from shared.tasks.specs.serve import ServeSpecStrict
 from shared.tasks.task_type import TaskType
-from shared.utils.parsing import parse_float_env
 from worker.config import WorkerConfig
 
 from ..utils.process import signal_process_group
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 from .utils.net import resolve_bind_port
+from .utils.serve_ttl import serve_deadline
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TTL_SEC = 3600.0
-_MAX_TTL_SEC = 86400.0
 _HEALTH_POLL_INTERVAL_SEC = 2.0
 # 600s default: cold-start includes model download, engine init, and CUDA graph capture
 _DEFAULT_READINESS_TIMEOUT_SEC = 600.0
@@ -100,11 +98,7 @@ class VLLMServeExecutor(Executor):
         if model_id is None:
             raise ExecutionError("Serve spec is missing model.source.identifier")
 
-        ttl_sec = min(
-            spec.ttlSeconds
-            or parse_float_env("SERVE_DEFAULT_TTL_SEC", _DEFAULT_TTL_SEC),
-            parse_float_env("SERVE_MAX_TTL_SEC", _MAX_TTL_SEC),
-        )
+        deadline = serve_deadline(spec.ttlSeconds, task.serve_elapsed_sec)
         readiness_timeout = (
             spec.readinessTimeoutSeconds or _DEFAULT_READINESS_TIMEOUT_SEC
         )
@@ -114,6 +108,9 @@ class VLLMServeExecutor(Executor):
         api_key = secrets.token_hex(32)
         bind_host = "127.0.0.1"
         port = resolve_bind_port(spec.port, bind_host)
+        if deadline <= time.time():
+            logger.info("Serve task %s TTL elapsed; not starting vLLM", task.task_id)
+            return ServeResult(model=model_id, port=port)
 
         cmd = [
             sys.executable,
@@ -162,7 +159,7 @@ class VLLMServeExecutor(Executor):
             model_id,
             port,
             task.task_id,
-            ttl_sec,
+            deadline - time.time(),
             readiness_timeout,
         )
 
@@ -221,7 +218,7 @@ class VLLMServeExecutor(Executor):
             }
             self.emit_update(task.task_id, update_payload)
             logger.info("vLLM server ready on port %d (task=%s)", port, task.task_id)
-            self._wait_for_serve(proc, ttl_sec)
+            self._wait_for_serve(proc, deadline)
         finally:
             self._proc = None
             self._terminate_process_group(proc)
@@ -279,8 +276,7 @@ class VLLMServeExecutor(Executor):
             tail,
         )
 
-    def _wait_for_serve(self, proc: subprocess.Popen[str], ttl_sec: float) -> None:
-        deadline = time.time() + ttl_sec
+    def _wait_for_serve(self, proc: subprocess.Popen[str], deadline: float) -> None:
         while time.time() < deadline:
             if self._signals.raise_if_cancelled():
                 logger.info("Serve task stop requested; terminating vLLM server")

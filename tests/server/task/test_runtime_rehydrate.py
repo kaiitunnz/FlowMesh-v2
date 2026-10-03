@@ -744,3 +744,42 @@ async def test_a_restart_keeps_live_vaults_and_drops_settled_and_unregistered_on
     assert live_key not in vault.redis.expiring
     assert workflow_credential_key(settled) not in vault.redis.hashes
     assert workflow_credential_key("wfl-never-registered") not in vault.redis.hashes
+
+
+SERVE = """
+apiVersion: mloc/v1
+kind: Workflow
+metadata:
+  name: serve
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: dev_model
+"""
+
+
+@pytest.mark.anyio
+async def test_rehydrate_keeps_a_requeued_serve_tasks_first_start() -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    _, ids = await _register(runtime, SERVE)
+    a = ids["a"]
+
+    worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
+    record_dispatch(runtime, a, cast(Any, worker))
+    runtime.mark_started(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    record = runtime.get_record(a)
+    assert record is not None and record.first_started_ts is not None
+    first_started = record.first_started_ts
+    runtime.return_dispatch(a, "wkr-1", increment_retry=False, front=True)
+
+    restored = _runtime(registry)
+    assert await restored.rehydrate() == 1
+
+    restored_record = restored.get_record(a)
+    assert restored_record is not None
+    assert restored_record.status == TaskStatus.PENDING
+    assert restored_record.started_ts is None
+    assert restored_record.first_started_ts == first_started

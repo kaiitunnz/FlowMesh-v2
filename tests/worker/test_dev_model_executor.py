@@ -3,6 +3,7 @@
 import json
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -422,7 +423,7 @@ class TestRunLifecycle:
         emit = MagicMock()
         bind: dict[str, object] = {}
 
-        def capture_bind(_ttl: float) -> None:
+        def capture_bind(_deadline: float) -> None:
             bind["host"] = ex._server.server_address[0]  # type: ignore[union-attr]
 
         with (
@@ -441,7 +442,7 @@ class TestRunLifecycle:
         ex = self._make_executor()
         reached: dict[str, object] = {}
 
-        def hit_then_stop(_ttl: float) -> None:
+        def hit_then_stop(_deadline: float) -> None:
             port = ex._server.server_address[1]  # type: ignore[union-attr]
             reached["payload"] = httpx.post(
                 f"http://127.0.0.1:{port}/v1/chat/completions",
@@ -504,7 +505,7 @@ class TestCancelStop:
         try:
             with ex._signals.running("tsk-test"):
                 ex.stop("tsk-test")
-                ex._wait_for_serve(ttl_sec=60.0)
+                ex._wait_for_serve(deadline=time.time() + 60.0)
         finally:
             mod._POLL_INTERVAL_SEC = orig
 
@@ -512,4 +513,35 @@ class TestCancelStop:
         ex = self._make_executor()
         with ex._signals.running("tsk-test"), pytest.raises(TaskCancelledError):
             ex.cancel("tsk-test")
-            ex._wait_for_serve(ttl_sec=60.0)
+            ex._wait_for_serve(deadline=time.time() + 60.0)
+
+
+class TestServeTtlAcrossReruns:
+    def _run(
+        self, tmp_path: Path, ttl: float, elapsed: float | None
+    ) -> tuple[MagicMock, list[float]]:
+        spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL, ttlSeconds=ttl)
+        task = make_worker_task_message(
+            spec=spec, task_type=TaskType.DEV_MODEL, serve_elapsed_sec=elapsed
+        )
+        ex = DevModelExecutor(
+            make_worker_config(enable_dev_model=True), make_worker_hardware()
+        )
+        emit = MagicMock()
+        deadlines: list[float] = []
+        with (
+            patch.object(ex, "emit_update", emit),
+            patch.object(ex, "_wait_for_serve", side_effect=deadlines.append),
+        ):
+            ex.run(task, tmp_path)
+        return emit, deadlines
+
+    def test_a_re_run_serves_what_remains_of_the_ttl(self, tmp_path: Path) -> None:
+        before = time.time()
+        _emit, deadlines = self._run(tmp_path, ttl=180.0, elapsed=100.0)
+        assert before + 80.0 - 1.0 <= deadlines[0] <= time.time() + 80.0
+
+    def test_an_elapsed_ttl_starts_no_server(self, tmp_path: Path) -> None:
+        emit, deadlines = self._run(tmp_path, ttl=180.0, elapsed=200.0)
+        emit.assert_not_called()
+        assert deadlines == []

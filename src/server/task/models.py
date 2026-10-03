@@ -194,6 +194,12 @@ class TaskRecord(BaseModel):
     started_ts: float | None = Field(
         default=None, description="Start timestamp (epoch seconds)."
     )
+    first_started_ts: float | None = Field(
+        default=None,
+        description="When control saw the task's first run start, across re-runs "
+        "(epoch seconds, control's clock).",
+        exclude=True,
+    )
     finished_ts: float | None = Field(
         default=None, description="Finish timestamp (epoch seconds)."
     )

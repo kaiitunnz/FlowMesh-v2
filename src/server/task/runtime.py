@@ -5293,6 +5293,8 @@ class TaskRuntime:
                     return EventEffect.SETTLED
                 record.status = TaskStatus.DISPATCHED
                 record.started_ts = started_ts
+                if record.first_started_ts is None:
+                    record.first_started_ts = time.time()
                 self._commit_transition_locked(
                     record.workflow_id,
                     records=self._records_locked(task_id),
