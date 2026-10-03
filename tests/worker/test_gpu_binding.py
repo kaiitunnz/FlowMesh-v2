@@ -23,6 +23,8 @@ from shared.tasks.worker_message import (
     WorkerHardware,
 )
 from tests.worker.factories import make_worker_config, make_worker_task_message
+from worker import hw
+from worker import main as worker_main
 from worker.executors.base_executor import ExecutionError, Executor
 from worker.executors.mp_executor import MPExecutor
 from worker.executors.transformers_executor import HFTransformersExecutor
@@ -355,3 +357,19 @@ class TestFreeGpusRead:
             for i in range(2)
         }
         assert self._read(reported, 2) == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("mig", "ambiguous", "splits"),
+    [(False, False, True), (True, False, False), (False, True, False)],
+)
+def test_a_worker_binds_only_gpus_it_can_name_exactly(
+    monkeypatch: pytest.MonkeyPatch, mig: bool, ambiguous: bool, splits: bool
+) -> None:
+    gpu = hw.VisibleGpu(
+        ordinal=0, nvml_index=0, uuid="GPU-0", name="H100", mig_slot=1 if mig else None
+    )
+    monkeypatch.setattr(worker_main, "visible_gpus", lambda: (gpu,))
+    monkeypatch.setattr(worker_main, "positions_may_name_other_gpus", lambda: ambiguous)
+
+    assert worker_main._gpus_split_safely() is splits

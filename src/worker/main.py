@@ -35,7 +35,12 @@ from .executors.mp_executor import MPExecutor
 from .executors.ssh_executor import SSHExecutor
 from .gpu_availability import GpuAvailabilityMonitor, NvmlDeviceProbe
 from .gpu_sampler import GpuSampler, build_gpu_sampler
-from .hw import collect_hw, device_uses_unified_memory, visible_gpus
+from .hw import (
+    collect_hw,
+    device_uses_unified_memory,
+    positions_may_name_other_gpus,
+    visible_gpus,
+)
 from .lifecycle import Lifecycle
 from .power import PowerMonitor
 from .runner import Runner
@@ -234,11 +239,16 @@ def build_capabilities(
     )
 
 
-def _sees_a_mig_slice() -> bool:
+def _gpus_split_safely() -> bool:
+    """Whether executors may run on a subset of this worker's GPUs: not on a MIG
+    slice, and not where the GPUs it reports may not be those CUDA gives it."""
     try:
-        return any(gpu.mig_slot is not None for gpu in visible_gpus())
+        return not (
+            any(gpu.mig_slot is not None for gpu in visible_gpus())
+            or positions_may_name_other_gpus()
+        )
     except pynvml.NVMLError:
-        return False
+        return True
 
 
 def _peer_material(
@@ -443,7 +453,7 @@ def main() -> None:
         resident_listener_port=(
             peer_sock.getsockname()[1] if peer_sock is not None else 0
         ),
-        binds_gpus=not _sees_a_mig_slice(),
+        binds_gpus=_gpus_split_safely(),
     )
     ssh_limits = cfg.ssh_limits
     if TaskType.SSH in capabilities.supported_task_types:

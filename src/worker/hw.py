@@ -184,17 +184,50 @@ def visible_device_order(
                 )
             break
         order.append((index, None))
-    if (
-        by_position
-        and len({name for _, name in devices}) > 1
-        and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"
-    ):
+    if by_position and _orders_may_differ(devices):
         logger.warning(
             "CUDA_VISIBLE_DEVICES lists GPUs by position on a host with mixed GPU "
             "models; reading positions in PCI bus order, which CUDA uses only under "
             "CUDA_DEVICE_ORDER=PCI_BUS_ID"
         )
     return order
+
+
+def _orders_may_differ(devices: list[tuple[str, str]]) -> bool:
+    """Whether CUDA may number `devices` other than NVML does: on mixed GPU models,
+    unless `CUDA_DEVICE_ORDER=PCI_BUS_ID`."""
+    return (
+        len({name for _, name in devices}) > 1
+        and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"
+    )
+
+
+def _nvml_devices() -> list[tuple[str, str]]:
+    """Each NVML device's (uuid, name), in NVML order."""
+    devices: list[tuple[str, str]] = []
+    for idx in range(pynvml.nvmlDeviceGetCount()):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+        devices.append(
+            (
+                _decode(pynvml.nvmlDeviceGetUUID(handle)),
+                _decode(pynvml.nvmlDeviceGetName(handle)),
+            )
+        )
+    return devices
+
+
+def positions_may_name_other_gpus() -> bool:
+    """Return whether the GPUs this process reports may not be those CUDA gives it.
+
+    That is the case when `CUDA_VISIBLE_DEVICES` names GPUs by position and CUDA may
+    number them other than NVML does. Needs NVML initialised, and raises
+    `pynvml.NVMLError` when it cannot be read.
+    """
+    value = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if value is None:
+        return False
+    by_position = any(entry.strip().lstrip("-").isdigit() for entry in value.split(","))
+    return by_position and _orders_may_differ(_nvml_devices())
 
 
 @dataclass(frozen=True)
@@ -219,15 +252,7 @@ def visible_gpus() -> tuple[VisibleGpu, ...]:
     Resolved once per process, as CUDA does, so an executor rewriting the variable
     later does not move the worker's devices.
     """
-    devices: list[tuple[str, str]] = []
-    for idx in range(pynvml.nvmlDeviceGetCount()):
-        handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
-        devices.append(
-            (
-                _decode(pynvml.nvmlDeviceGetUUID(handle)),
-                _decode(pynvml.nvmlDeviceGetName(handle)),
-            )
-        )
+    devices = _nvml_devices()
     return tuple(
         VisibleGpu(ordinal, nvml_index, *devices[nvml_index], mig_slot)
         for ordinal, (nvml_index, mig_slot) in enumerate(visible_device_order(devices))

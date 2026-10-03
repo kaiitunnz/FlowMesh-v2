@@ -353,3 +353,36 @@ class TestCudaDeviceEnv:
         with patch.object(hw, "visible_gpus", return_value=(mig,)):
             env = hw.cuda_device_env(("GPU-aaaa",))
         assert env == {"CUDA_VISIBLE_DEVICES": "GPU-aaaa"}
+
+
+class TestPositionsMayNameOtherGpus:
+    _MIXED = [("GPU-a", "NVIDIA H100"), ("GPU-b", "NVIDIA L4")]
+
+    @pytest.mark.parametrize(
+        ("value", "order", "devices", "expected"),
+        [
+            ("1", None, _MIXED, True),
+            ("1", "PCI_BUS_ID", _MIXED, False),
+            ("GPU-b", None, _MIXED, False),
+            (None, None, _MIXED, False),
+            ("1", None, [("GPU-a", "NVIDIA H100"), ("GPU-b", "NVIDIA H100")], False),
+        ],
+    )
+    def test_positions_are_ambiguous_only_on_mixed_models_without_bus_order(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str | None,
+        order: str | None,
+        devices: list[tuple[str, str]],
+        expected: bool,
+    ) -> None:
+        for key, setting in (
+            ("CUDA_VISIBLE_DEVICES", value),
+            ("CUDA_DEVICE_ORDER", order),
+        ):
+            if setting is None:
+                monkeypatch.delenv(key, raising=False)
+            else:
+                monkeypatch.setenv(key, setting)
+        with patch.object(hw, "_nvml_devices", return_value=devices):
+            assert hw.positions_may_name_other_gpus() is expected
