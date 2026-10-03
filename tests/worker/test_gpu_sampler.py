@@ -14,8 +14,8 @@ from shared.telemetry.semconv import (
     RESOURCE_NODE_ID,
     RESOURCE_WORKER_ID,
 )
-from worker import gpu_sampler
-from worker.gpu_sampler import build_gpu_sampler
+from worker.telemetry import gpu_sampler
+from worker.telemetry.gpu_sampler import build_gpu_sampler
 from worker.utils import nvml
 
 

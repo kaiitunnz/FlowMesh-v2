@@ -26,8 +26,8 @@ from shared.telemetry.semconv import (
     RESOURCE_WORKER_ID,
 )
 
-from .hw import nvml_memory_handle, visible_gpus
-from .utils import nvml
+from ..hw import nvml_memory_handle, visible_gpus
+from ..utils import nvml
 
 __all__ = ["GpuSampler", "build_gpu_sampler"]
 

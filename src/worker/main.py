@@ -34,7 +34,6 @@ from .executors.base_executor import Executor
 from .executors.mp_executor import MPExecutor
 from .executors.ssh_executor import SSHExecutor
 from .gpu_availability import GpuAvailabilityMonitor, NvmlDeviceProbe
-from .gpu_sampler import GpuSampler, build_gpu_sampler
 from .hw import (
     collect_hw,
     device_uses_unified_memory,
@@ -46,6 +45,7 @@ from .power import PowerMonitor
 from .runner import Runner
 from .ssh_relay import SshRelayLane
 from .supervisor_client import SupervisorClient
+from .telemetry.gpu_sampler import GpuSampler, build_gpu_sampler
 from .utils.logging import get_logger
 
 _EXECUTORS_TO_WRAP = {
