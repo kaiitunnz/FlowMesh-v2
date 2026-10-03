@@ -9,6 +9,7 @@ import grpc.aio
 from google.protobuf.empty_pb2 import Empty
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
+from pydantic import ValidationError
 
 from shared.grpc.supervisor.v1 import (
     supervisor_pb2,
@@ -28,7 +29,7 @@ from ...registries.worker import WorkerRegistry as WorkerRecords
 from ..adapters.base import WorkerAdapter, WorkerTokenType
 from ..manager import WorkerManager
 from ..registry import WorkerRegistry
-from ..schemas import WorkerStatus
+from ..schemas import WorkerHardware, WorkerStatus
 from ..services.relay_service import RelayService
 from ..services.task_listener import TaskListener
 
@@ -95,6 +96,19 @@ def _struct_from_payload(payload: dict) -> Struct:
 
 def _payload_from_struct(struct: Struct) -> dict:
     return MessageToDict(struct, preserving_proto_field_name=True)
+
+
+def _reported_hardware(
+    meta: dict, alias: str, logger: logging.Logger
+) -> WorkerHardware | None:
+    raw = meta.get("hardware_json")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return WorkerHardware.model_validate_json(raw)
+    except ValidationError as exc:
+        logger.warning("Worker %s reported unreadable hardware: %s", alias, exc)
+        return None
 
 
 class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
@@ -285,6 +299,13 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             self._registry.set_worker_id(token, worker_id)
         self._task_listener.add_worker(worker_id)
         worker.set_worker_id(worker_id)
+        hardware = _reported_hardware(worker_meta, worker.alias, self._logger)
+        try:
+            self._worker_manager.worker_registered(worker, hardware)
+        except Exception:
+            self._logger.exception(
+                "Failed to apply registration report for worker %s", worker_id
+            )
         self._logger.info("Registered worker %s", worker_id)
         return supervisor_pb2.RegisterResponse(
             worker_id=worker_id, incarnation=incarnation

@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 
 from ... import env
 from ...hooks import PrincipalContext
-from ..schemas import WorkerInfo, WorkerStatus
+from ..schemas import WorkerHardware, WorkerInfo, WorkerStatus
 from .utils import env_to_secret_str, to_env_str
 
 logger = logging.getLogger("supervisor")
@@ -188,6 +188,13 @@ class WorkerAdapter(ABC):
     @property
     def closed(self) -> bool:
         return self._closed
+
+    def observe_reported_hardware(self, hardware: WorkerHardware) -> None:
+        """Record the hardware the worker reported when it registered.
+
+        A no-op for providers that probe the hardware themselves.
+        """
+        return None
 
     async def prepare(self) -> None:
         """Prepare worker (e.g., collecting hardware information) without starting
@@ -401,6 +408,10 @@ class WorkerFactory(ABC):
     @abstractmethod
     def destroy_worker(self, worker: WorkerAdapter) -> None:
         pass
+
+    def on_worker_registered(self, worker: WorkerAdapter) -> bool:
+        """React to the worker registering. Returns whether node capacity changed."""
+        return False
 
     def cleanup(self) -> None:
         pass
