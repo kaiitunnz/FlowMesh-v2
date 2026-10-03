@@ -35,14 +35,10 @@ from worker.executors.ssh_session import (
     SSHSessionBackend,
     select_backend_cls,
 )
-from worker.executors.ssh_session.config import (
-    FreeGpus,
-    output_limit,
-    raise_if_exceeded,
-)
+from worker.executors.ssh_session.config import output_limit, raise_if_exceeded
 from worker.executors.ssh_session.inputs import resolve_inputs
 from worker.executors.utils.checkpoints import maybe_upload_artifacts
-from worker.gpu_binding import free_uuids
+from worker.gpu_binding import FreeGpus
 
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 
@@ -103,11 +99,7 @@ class SSHExecutor(Executor):
     def _free_gpus(self) -> FreeGpus | None:
         if self._lifecycle is None or self._hardware is None:
             return None
-        devices = self._hardware.gpu.devices
-        return FreeGpus(
-            latched=free_uuids(self._lifecycle.gpu_availability(), devices),
-            fresh=free_uuids(self._lifecycle.live_gpu_availability(), devices),
-        )
+        return FreeGpus.read(self._lifecycle, self._hardware.gpu.devices)
 
     def run(self, task: ExecutorTask, out_dir: Path) -> SSHResult:
         with self._signals.running(task.task_id):

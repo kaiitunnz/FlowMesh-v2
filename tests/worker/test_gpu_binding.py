@@ -25,11 +25,10 @@ from shared.tasks.worker_message import (
 from tests.worker.factories import make_worker_config, make_worker_task_message
 from worker.executors.base_executor import ExecutionError, Executor
 from worker.executors.mp_executor import MPExecutor
-from worker.executors.ssh_session.config import FreeGpus
 from worker.executors.transformers_executor import HFTransformersExecutor
 from worker.executors.vllm_serve_executor import VLLMServeExecutor
 from worker.gpu_availability import DeviceAvailability, GpuAvailabilityMonitor
-from worker.gpu_binding import pick_devices
+from worker.gpu_binding import FreeGpus, pick_devices
 from worker.main import build_capabilities
 from worker.runner import Runner
 
@@ -322,3 +321,37 @@ class TestMeasurementBesideABoundExecutor:
         assert set(monitor.live_snapshot()) == {"GPU-1"}
         assert monitor.live_snapshot()["GPU-1"].available is False
         assert "GPU-0" not in monitor.snapshot()
+
+
+class TestFreeGpusRead:
+    """The one place a tri-state availability report becomes a positive set."""
+
+    def _read(self, reported: dict[str, DeviceAvailability], n: int) -> frozenset[str]:
+        readings = MagicMock()
+        readings.gpu_availability.return_value = reported
+        readings.live_gpu_availability.return_value = {}
+        free = FreeGpus.read(readings, _devices(*["A100"] * n))
+        assert free.fresh == frozenset(f"GPU-{i}" for i in range(n))
+        return free.latched
+
+    def test_no_reading_at_all_withholds_nothing(self) -> None:
+        assert self._read({}, 2) == frozenset({"GPU-0", "GPU-1"})
+
+    def test_a_held_device_is_withheld(self) -> None:
+        reported = {
+            "GPU-0": DeviceAvailability(available=False, free_bytes=0),
+            "GPU-1": DeviceAvailability(available=True, free_bytes=1),
+        }
+        assert self._read(reported, 2) == frozenset({"GPU-1"})
+
+    def test_a_device_the_reading_did_not_cover_is_still_offered(self) -> None:
+        # A partial probe must not quietly shrink the session's device set.
+        reported = {"GPU-0": DeviceAvailability(available=False, free_bytes=0)}
+        assert self._read(reported, 4) == frozenset({"GPU-1", "GPU-2", "GPU-3"})
+
+    def test_every_device_held_yields_an_empty_set(self) -> None:
+        reported = {
+            f"GPU-{i}": DeviceAvailability(available=False, free_bytes=0)
+            for i in range(2)
+        }
+        assert self._read(reported, 2) == frozenset()

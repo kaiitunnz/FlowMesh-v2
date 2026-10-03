@@ -105,6 +105,32 @@ def select_matching_gpu_indices(
     return result
 
 
+def fitting_gpu_indices(
+    hw: WorkerHardware,
+    candidates: list[GpuInfo],
+    gpu_req: GPURequirements,
+    *,
+    limit: int | None = None,
+) -> list[int] | None:
+    """Return the indices of the ``candidates`` ``gpu_req`` takes; None if too few fit.
+
+    Takes ``limit`` of them, else every match. A device's own memory need not cover the
+    request when ``hw`` exposes a unified GPU/system pool large enough for it.
+    """
+    count = gpu_req.count if gpu_req.count is not None and gpu_req.count > 0 else None
+    needed = limit or count or 1
+    indices = select_matching_gpu_indices(candidates, gpu_req, limit=limit)
+    if len(indices) >= needed:
+        return indices
+    if (memory := parse_gpu_memory_bytes(gpu_req.memory)) is None:
+        return None
+    type_only = GPURequirements(count=gpu_req.count, type=gpu_req.type)
+    indices = select_matching_gpu_indices(candidates, type_only, limit=limit)
+    if len(indices) < needed or not unified_gpu_memory_satisfies(hw, memory, needed):
+        return None
+    return indices
+
+
 def gpu_meets_requirements(hw: WorkerHardware, gpu_req: GPURequirements) -> bool:
     """Whether ``hw``'s devices satisfy ``gpu_req``'s count, type and memory."""
     required_count = gpu_req.count
@@ -121,19 +147,7 @@ def gpu_meets_requirements(hw: WorkerHardware, gpu_req: GPURequirements) -> bool
     if entries:
         if required_count is not None and len(entries) < required_count:
             return False
-        if len(select_matching_gpu_indices(entries, gpu_req)) >= needed:
-            return True
-        # Unified-memory fallback: when memory is the binding constraint and
-        # the worker exposes a unified GPU/system pool large enough to cover
-        # the request, still admit it.
-        if required_memory_bytes is None:
-            return False
-        type_only_req = GPURequirements(
-            count=gpu_req.count, type=gpu_req.type, memory=None
-        )
-        if len(select_matching_gpu_indices(entries, type_only_req)) < needed:
-            return False
-        return unified_gpu_memory_satisfies(hw, required_memory_bytes, needed)
+        return fitting_gpu_indices(hw, entries, gpu_req) is not None
 
     # Fallback when workers report aggregate GPU data instead of per-device entries.
     count = 0 if hw is None else len(hw.gpu.devices)

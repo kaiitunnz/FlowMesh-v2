@@ -7,16 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from shared.tasks.components.resources import GPURequirements
 from shared.tasks.specs.ssh import SSHInputSpec, SSHOutputSpec, SSHSpecStrict
-from shared.tasks.worker_message import GpuInfo, WorkerHardware
+from shared.tasks.worker_message import WorkerHardware
 from shared.utils import parse_float_env, parse_mem_to_bytes
-from shared.utils.hardware import (
-    parse_gpu_memory_bytes,
-    select_matching_gpu_indices,
-    unified_gpu_memory_satisfies,
-)
+from shared.utils.hardware import parse_gpu_memory_bytes, select_matching_gpu_indices
 from worker.config import WorkerConfig
+from worker.gpu_binding import FreeGpus, free_matching, matching_positions
 
 from ..base_executor import ExecutionError
 
@@ -77,19 +73,6 @@ class SSHOutputConfig:
             mount_path=spec.mountPath or DEFAULT_OUTPUT_PATH,
             max_bytes=spec.maxBytes,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class FreeGpus:
-    """The UUIDs of the devices no process outside FlowMesh is known to hold.
-
-    ``latched`` follows the reading the worker last reported, the one placement used;
-    ``fresh`` follows only the reading just taken, so a device it did not measure
-    counts as free.
-    """
-
-    latched: frozenset[str]
-    fresh: frozenset[str]
 
 
 @dataclass(slots=True)
@@ -297,39 +280,21 @@ def _resolve_gpu_devices(
         )
         devices = []
 
-    required_mem_bytes: int | None = None
-    if gpu_req.memory:
-        required_mem_bytes = parse_gpu_memory_bytes(gpu_req.memory)
-        if required_mem_bytes is None:
-            raise ExecutionError(
-                f"resources.hardware.gpu.memory value {gpu_req.memory!r} is "
-                "not a valid memory string (e.g. '40Gi', '80GB')"
-            )
-
-    def pick(usable: frozenset[str] | None) -> list[str] | None:
-        # Held devices leave both lists together: selection returns positions, so the
-        # two stay aligned, and a held first match never hides a free one.
-        paired = [
-            (device, host_id)
-            for device, host_id in zip(devices, host_gpu_ids, strict=True)
-            if usable is None or device.uuid in usable
-        ]
-        return _select_gpu_devices(
-            gpu_req,
-            requested,
-            required_mem_bytes,
-            [device for device, _ in paired],
-            [host_id for _, host_id in paired],
-            hardware,
+    if gpu_req.memory and parse_gpu_memory_bytes(gpu_req.memory) is None:
+        raise ExecutionError(
+            f"resources.hardware.gpu.memory value {gpu_req.memory!r} is "
+            "not a valid memory string (e.g. '40Gi', '80GB')"
         )
 
+    def pick(usable: frozenset[str] | None) -> list[str] | None:
+        assert hardware is not None
+        positions = matching_positions(hardware, gpu_req, requested, usable)
+        return None if positions is None else [host_gpu_ids[i] for i in positions]
+
     if devices and free is not None:
-        if (picked := pick(free.latched)) is not None:
-            return picked
-        # Only a reading just taken may refuse a session: when the latched free set
-        # falls short, a device only the latch marks held may still be handed out.
-        if (picked := pick(free.fresh)) is not None:
-            return picked
+        assert hardware is not None
+        if (found := free_matching(hardware, gpu_req, requested, free)) is not None:
+            return [host_gpu_ids[i] for i in found[1]]
         if pick(None) is not None:
             raise ExecutionError(
                 f"SSH task requested {requested} GPU(s) but too few of this worker's "
@@ -351,34 +316,6 @@ def _resolve_gpu_devices(
             f"{len(host_gpu_ids)} are available on this worker"
         )
     return host_gpu_ids[:requested]
-
-
-def _select_gpu_devices(
-    gpu_req: GPURequirements,
-    requested: int,
-    required_mem_bytes: int | None,
-    devices: list[GpuInfo],
-    host_gpu_ids: list[str],
-    hardware: WorkerHardware | None,
-) -> list[str] | None:
-    """The host ids of ``requested`` devices satisfying ``gpu_req``, or None."""
-    matching_indices = select_matching_gpu_indices(devices, gpu_req, limit=requested)
-    if len(matching_indices) >= requested:
-        return [host_gpu_ids[idx] for idx in matching_indices]
-
-    # Unified memory fallback
-    if required_mem_bytes is not None and hardware is not None:
-        type_only_req = GPURequirements(
-            count=gpu_req.count, type=gpu_req.type, memory=None
-        )
-        type_matching = select_matching_gpu_indices(
-            devices, type_only_req, limit=requested
-        )
-        if len(type_matching) >= requested and unified_gpu_memory_satisfies(
-            hardware, required_mem_bytes, requested
-        ):
-            return [host_gpu_ids[idx] for idx in type_matching]
-    return None
 
 
 def _host_gpu_ids(hardware: WorkerHardware | None) -> list[str]:

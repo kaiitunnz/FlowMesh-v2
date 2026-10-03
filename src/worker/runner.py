@@ -68,9 +68,8 @@ from .executors.base_executor import ExecutionError, Executor, TaskCancelledErro
 from .executors.episode_support import EpisodeStepResult, discard_step_captures
 from .executors.inference.projection import generated_outputs
 from .executors.inference.resolution import resolve_task_contract
-from .executors.ssh_session.config import FreeGpus
 from .executors.utils.checkpoints import write_executor_result
-from .gpu_binding import free_uuids, pick_devices
+from .gpu_binding import FreeGpus, pick_devices
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
@@ -331,10 +330,7 @@ class Runner:
             bound = pick_devices(
                 self.hardware,
                 spec.gpu_requirements(),
-                FreeGpus(
-                    latched=free_uuids(self.lifecycle.gpu_availability(), devices),
-                    fresh=free_uuids(self.lifecycle.live_gpu_availability(), devices),
-                ),
+                FreeGpus.read(self.lifecycle, devices),
                 warm=self._active_executor_devices,
             )
         # The executor compares against its own binding, which outlives this mirror.
