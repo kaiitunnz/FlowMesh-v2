@@ -362,13 +362,16 @@ class TestPositionsMayNameOtherGpus:
         ("value", "order", "devices", "expected"),
         [
             ("1", None, _MIXED, True),
+            ("0,1", None, _MIXED, False),
+            ("1,0", None, _MIXED, False),
+            ("GPU-a,1", None, _MIXED, False),
             ("1", "PCI_BUS_ID", _MIXED, False),
             ("GPU-b", None, _MIXED, False),
             (None, None, _MIXED, False),
             ("1", None, [("GPU-a", "NVIDIA H100"), ("GPU-b", "NVIDIA H100")], False),
         ],
     )
-    def test_positions_are_ambiguous_only_on_mixed_models_without_bus_order(
+    def test_positions_are_ambiguous_only_on_a_strict_subset_of_mixed_models(
         self,
         monkeypatch: pytest.MonkeyPatch,
         value: str | None,

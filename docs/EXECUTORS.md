@@ -429,7 +429,7 @@ fit the next task, and restarts on others otherwise. SFT's `visible_devices` and
 task. Multi-GPU training runs its ranks on those devices. A task that sets
 `CUDA_VISIBLE_DEVICES` in `model.vllm.env_vars` picks its own devices, so its executor sees
 every device and the task waits while any is held. A worker on a MIG slice, or one whose
-`CUDA_VISIBLE_DEVICES` lists GPUs by position on a host with mixed GPU models without
+`CUDA_VISIBLE_DEVICES` lists some of a host's mixed GPU models by position without
 `CUDA_DEVICE_ORDER=PCI_BUS_ID`, runs every executor on all its GPUs.
 
 ## SSH executor GPUs

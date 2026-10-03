@@ -219,15 +219,18 @@ def _nvml_devices() -> list[tuple[str, str]]:
 def positions_may_name_other_gpus() -> bool:
     """Return whether the GPUs this process reports may not be those CUDA gives it.
 
-    That is the case when `CUDA_VISIBLE_DEVICES` names GPUs by position and CUDA may
-    number them other than NVML does. Needs NVML initialised, and raises
-    `pynvml.NVMLError` when it cannot be read.
+    That is the case when `CUDA_VISIBLE_DEVICES` names some but not all GPUs by
+    position and CUDA may number them other than NVML does: a position may then name a
+    GPU left out. Needs NVML initialised, and raises `pynvml.NVMLError` when it cannot
+    be read.
     """
     value = os.environ.get("CUDA_VISIBLE_DEVICES")
     if value is None:
         return False
     by_position = any(entry.strip().lstrip("-").isdigit() for entry in value.split(","))
-    return by_position and _orders_may_differ(_nvml_devices())
+    if not by_position or not _orders_may_differ(devices := _nvml_devices()):
+        return False
+    return len({gpu.nvml_index for gpu in visible_gpus()}) < len(devices)
 
 
 @dataclass(frozen=True)
