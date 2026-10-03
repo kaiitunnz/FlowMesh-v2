@@ -783,6 +783,24 @@ class TestExternalGpuHolds:
         assert rm.available_gpu_count() == 2
 
     @pytest.mark.asyncio
+    async def test_a_registration_racing_a_destroy_holds_nothing(self) -> None:
+        """A registration landing after the destroy released the holds, but before
+        the registry forgot the worker, claims nothing that outlives it."""
+        rm = _host_pool(2)
+        servicer = self._servicer(rm)
+        await self._register(servicer, "GPU-0")
+        manager = servicer._worker_manager
+        worker = servicer._registry.try_get(cast(Any, self.TOKEN))
+        assert worker is not None
+        worker.close()
+        manager._destroy_worker(worker)
+
+        await self._register(servicer, "GPU-1")
+        manager._forget_worker(worker.alias)
+
+        assert rm.available_gpu_count() == 2
+
+    @pytest.mark.asyncio
     async def test_supervisor_shutdown_releases(self) -> None:
         rm = _host_pool(2)
         servicer = self._servicer(rm)

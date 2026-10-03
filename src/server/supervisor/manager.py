@@ -256,6 +256,10 @@ class WorkerManager:
         """Apply what a worker reported when it registered."""
         if hardware is not None:
             worker.observe_reported_hardware(hardware)
+        # A closing worker's destroy has released or is about to release its holds,
+        # so a claim now would outlive it.
+        if worker.closed:
+            return
         if self._factory_for(worker).on_worker_registered(worker):
             self._report_capacity_change()
 
