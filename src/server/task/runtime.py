@@ -1550,7 +1550,8 @@ class TaskRuntime:
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
     ) -> None:
-        """Apply one workflow state delta, then report each resident task it ended."""
+        """Apply one workflow state delta, then report each resident task it ended or
+        that reported an update under its current dispatch."""
         self._workflow_registry.commit_transition(
             workflow_id,
             records=records,

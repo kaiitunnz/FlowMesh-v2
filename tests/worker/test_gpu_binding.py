@@ -150,23 +150,24 @@ class TestCapabilities:
         caps = build_capabilities({"default": HFTransformersExecutor(config)})
         assert caps.gpu_binding_task_types == frozenset()
 
-    def test_a_type_binds_only_when_every_executor_for_it_binds(self) -> None:
+    def test_a_type_binds_only_when_every_executor_for_it_binds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         config = make_worker_config()
         registry: dict[str, type[Executor] | None] = {
             "default": HFTransformersExecutor,
             "plain": _Plain,
         }
-        _Plain.supported_task_types = frozenset({TaskType.INFERENCE})
-        try:
-            caps = build_capabilities(
-                {
-                    "default": MPExecutor(HFTransformersExecutor, config),
-                    "plain": _Plain(config),
-                },
-                registry=registry,
-            )
-        finally:
-            _Plain.supported_task_types = frozenset()
+        monkeypatch.setattr(
+            _Plain, "supported_task_types", frozenset({TaskType.INFERENCE})
+        )
+        caps = build_capabilities(
+            {
+                "default": MPExecutor(HFTransformersExecutor, config),
+                "plain": _Plain(config),
+            },
+            registry=registry,
+        )
         assert caps.gpu_binding_task_types == {TaskType.EMBEDDING}
 
     def test_a_mig_slice_binds_nothing(self) -> None:

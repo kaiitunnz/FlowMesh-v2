@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from shared.schemas.result import BaseExecutorResult
-from worker.executors.base_executor import Executor
+from worker.executors.base_executor import Executor, ExecutorTask
 
 SEEN_AT_IMPORT = os.environ.get("CUDA_VISIBLE_DEVICES")
 
@@ -18,7 +18,7 @@ class SeenDevicesResult(BaseExecutorResult):
 class SeenDevicesExecutor(Executor):
     name = "seen_devices"
 
-    def run(self, task, out_dir: Path) -> SeenDevicesResult:
+    def run(self, task: ExecutorTask, out_dir: Path) -> SeenDevicesResult:
         return SeenDevicesResult(
             at_import=SEEN_AT_IMPORT,
             at_run=os.environ.get("CUDA_VISIBLE_DEVICES"),

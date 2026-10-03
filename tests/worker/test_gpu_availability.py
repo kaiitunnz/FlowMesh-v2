@@ -1,6 +1,5 @@
 """Per-device GPU availability: what the worker observes and what it reports."""
 
-from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -44,7 +43,6 @@ from worker.gpu_availability import (
     NvmlDeviceProbe,
     decide_availability,
 )
-from worker.hw import visible_gpus
 from worker.lifecycle import Lifecycle
 from worker.runner import Runner
 from worker.utils import nvml
@@ -103,11 +101,8 @@ class TestDecide:
 
 class TestNvmlDeviceProbe:
     @pytest.fixture(autouse=True)
-    def _fresh_visible_gpus(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    def _every_gpu_visible(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        visible_gpus.cache_clear()
-        yield
-        visible_gpus.cache_clear()
 
     def _install(
         self,

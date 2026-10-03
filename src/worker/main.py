@@ -211,8 +211,8 @@ def build_capabilities(
     resident_listener_port: int = 0,
     binds_gpus: bool = True,
 ) -> WorkerCapabilities:
-    """The worker's capabilities; ``binds_gpus`` is false where its GPUs cannot be
-    split, as on a MIG slice, so no executor binds."""
+    """Build the worker's capabilities; with ``binds_gpus`` false, as where its GPUs
+    cannot be split, no task type binds."""
     registry = registry or EXECUTOR_REGISTRY
     served = [
         (cls.supported_task_types, executor.binds_devices)

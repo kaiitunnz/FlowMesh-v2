@@ -2,7 +2,6 @@
 
 import inspect
 import time
-from collections.abc import Iterator
 
 import pytest
 from opentelemetry.sdk.metrics import MeterProvider
@@ -17,7 +16,6 @@ from shared.telemetry.semconv import (
 )
 from worker import gpu_sampler
 from worker.gpu_sampler import build_gpu_sampler
-from worker.hw import visible_gpus
 from worker.utils import nvml
 
 
@@ -82,11 +80,8 @@ class _CpuOnlyPynvml:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_visible_gpus(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def _every_gpu_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    visible_gpus.cache_clear()
-    yield
-    visible_gpus.cache_clear()
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, fake: type) -> None:

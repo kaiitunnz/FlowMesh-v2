@@ -82,13 +82,6 @@ def _registry(workers: list[Worker]) -> MagicMock:
             if (w.node_alias, w.alias) == (cordon.node_alias, cordon.alias)
         ]
     )
-    registry.live_worker_ids_for_cordon_async = AsyncMock(
-        side_effect=lambda cordon: [
-            w.id
-            for w in workers
-            if (w.node_alias, w.alias) == (cordon.node_alias, cordon.alias)
-        ]
-    )
     registry.list_cordons_async = AsyncMock(
         return_value=[
             WorkerCordon(node_alias="node", alias="alpha"),
@@ -248,7 +241,7 @@ async def test_list_cordons_filters_by_alias() -> None:
 @pytest.mark.anyio
 async def test_cordon_drains_the_resident_replicas_of_its_workers() -> None:
     registry = _registry([_worker("wkr-1")])
-    registry.live_worker_ids_for_cordon_async = AsyncMock(return_value=[])
+    registry.is_worker_stale_async = AsyncMock(return_value=True)
     resident = MagicMock()
     async with _client(registry) as ac:
         ac_app = ac._transport.app  # type: ignore[attr-defined]

@@ -827,10 +827,13 @@ class ResidentCapacityControl:
         return self._delivery.serve_worker_of(replica)
 
     def _on_cordoned_worker(self, replica: ReplicaIncarnation) -> bool:
-        if self._delivery is None or self._delivery.worker_cordoned is None:
+        if (worker_id := self._serve_worker(replica)) is None:
             return False
-        worker_id = self._delivery.serve_worker_of(replica)
-        return worker_id is not None and self._delivery.worker_cordoned(worker_id)
+        assert self._delivery is not None
+        return (
+            self._delivery.worker_cordoned is not None
+            and self._delivery.worker_cordoned(worker_id)
+        )
 
     def _retire_serve_task(self, serve_task_id: str) -> None:
         self._lifecycle.on_serve_task_end(

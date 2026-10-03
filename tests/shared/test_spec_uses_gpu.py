@@ -167,6 +167,17 @@ class TestUnresolvedTemplates:
         )
         assert spec.uses_gpu() is True
 
+    def test_a_template_naming_its_own_devices_pins_them(self) -> None:
+        spec = InferenceSpecTemplate(
+            taskType=TaskType.INFERENCE,
+            data=_DATA,
+            model=ModelConfigTemplate(
+                source=ModelSourceTemplate(identifier="org/m"),
+                vllm={"env_vars": {"CUDA_VISIBLE_DEVICES": "${params.devices}"}},
+            ),
+        )
+        assert spec.pins_cuda_devices() is True
+
 
 class TestEmbedding:
     def test_vllm_embedding_uses_gpu(self) -> None:

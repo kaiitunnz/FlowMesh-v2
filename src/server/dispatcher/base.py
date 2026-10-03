@@ -1610,7 +1610,7 @@ class Dispatcher:
 
 
 def _serve_elapsed_sec(record: TaskRecord) -> float | None:
-    """How long a serve task has run since its first start, which its TTL counts
+    """Return the seconds since a serve task's first start, which its TTL counts
     across re-runs; None for any other task or one that never started."""
     if record.task_type not in SERVE_TASK_TYPES or record.first_started_ts is None:
         return None

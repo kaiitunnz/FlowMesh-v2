@@ -102,8 +102,7 @@ class SFTExecutor(TrainingMixin, Executor):
         # Internal distributed launcher: spawn multi-GPU training as subprocesses
         try:
             allow_multi_cfg = training_cfg.get("allow_multi_gpu")
-            launcher_env_flag = _SFT_LAUNCHER_FLAG
-            already_spawned = os.environ.get(launcher_env_flag) == "1"
+            already_spawned = os.environ.get(_SFT_LAUNCHER_FLAG) == "1"
             # Determine requested GPU count
             vis = os.environ.get("CUDA_VISIBLE_DEVICES") or training_cfg.get(
                 "visible_devices"
@@ -180,7 +179,7 @@ class SFTExecutor(TrainingMixin, Executor):
                         nproc_per_node=nproc,
                         module="worker.executors.sft_dist_entry",
                         module_args=[task_file.as_posix(), out_dir.as_posix()],
-                        launcher_env_flag=launcher_env_flag,
+                        launcher_env_flag=_SFT_LAUNCHER_FLAG,
                     )
                 ipc_path = scratch_dir(out_dir) / "distributed_result.json"
                 if ipc_path.exists():
@@ -864,18 +863,17 @@ def _started_device_count() -> int:
 
 
 def _within_visible(ordinals: list[Any]) -> str:
-    """``CUDA_VISIBLE_DEVICES`` naming ``ordinals``, positions among the devices the
-    process was started on.
+    """Return the ``CUDA_VISIBLE_DEVICES`` naming ``ordinals``, positions among the
+    devices the process was started on.
 
     A comma-separated string is split into its entries. With no restriction set, the
     ordinals pass through.
     """
     entries = [token.strip() for value in ordinals for token in str(value).split(",")]
     entries = [token for token in entries if token]
-    current = _STARTED_ON
-    if current is None:
+    if _STARTED_ON is None:
         return ",".join(entries)
-    visible = [token.strip() for token in current.split(",") if token.strip()]
+    visible = [token.strip() for token in _STARTED_ON.split(",") if token.strip()]
     mapped: list[str] = []
     for entry in entries:
         try:

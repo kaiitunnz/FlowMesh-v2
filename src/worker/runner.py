@@ -236,15 +236,14 @@ class Runner:
         self._resident_host: ResidentLaneHost | None = None
 
     def gpu_devices_in_use(self) -> frozenset[str] | None:
-        """The devices the loaded executor may still hold GPU memory on: none, its
-        bound devices, or None for all of them.
+        """Return the devices the loaded executor may still hold GPU memory on: none,
+        its bound devices, or None for all of them.
 
         Executors stay warm between tasks, so a reading taken while one is resident
-        includes the worker's own model. The flag comes from each task's own dispatch
-        rather than the executor class: the wrapper an executor loads behind carries no
-        such attribute, and a transformers executor's device depends on the spec it
-        ran. Read lock-free, since the availability monitor needs only a best-effort
-        snapshot.
+        includes the worker's own model. Whether it used a GPU comes from the task it
+        ran: the subprocess wrapper an executor loads behind does not say, and a
+        transformers executor's device depends on its spec. Read lock-free, since the
+        availability monitor needs only a best-effort snapshot.
         """
         if self._active_executor is None or not self._active_executor_used_gpu:
             return frozenset()
