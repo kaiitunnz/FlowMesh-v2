@@ -49,6 +49,8 @@ WORKER_FILTER_FIELDS = frozenset(
     }
 )
 
+CORDON_FILTER_FIELDS = frozenset({"node_alias", "alias"})
+
 
 @router.get(
     "",
@@ -81,18 +83,20 @@ async def list_workers(
 )
 async def list_cordons(
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(CORDON_FILTER_FIELDS)),
     registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[WorkerCordon]:
-    cordons = await registry.list_cordons_async()
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.WORKER, ResourceAction.READ, logger
     )
-    if allowed is None:
-        return cordons
-    workers = await registry.get_workers_async(sorted(allowed))
-    keys = {(w.node_alias, w.alias) for w in workers if w is not None}
-    return [c for c in cordons if (c.node_alias, c.alias) in keys]
+    query = filters.parse()
+    cordons = await registry.list_cordons_async()
+    if allowed is not None:
+        workers = await registry.get_workers_async(sorted(allowed))
+        keys = {(w.node_alias, w.alias) for w in workers if w is not None}
+        cordons = [c for c in cordons if (c.node_alias, c.alias) in keys]
+    return query.filter(cordons)
 
 
 @router.get(

@@ -36,6 +36,7 @@ _ROUTES = [
     (tasks.router, "/tasks", tasks.TASK_FILTER_FIELDS),
     (workflows.router, "/workflows", workflows.WORKFLOW_FILTER_FIELDS),
     (workers.router, "/workers", workers.WORKER_FILTER_FIELDS),
+    (workers.router, "/workers/cordons", workers.CORDON_FILTER_FIELDS),
     (nodes.router, "/nodes", nodes.NODE_FILTER_FIELDS),
     (nodes.router, "/nodes/workers", nodes.NODE_WORKER_FILTER_FIELDS),
     (nodes.router, "/nodes/{node_id}/workers", nodes.NODE_WORKER_FILTER_FIELDS),

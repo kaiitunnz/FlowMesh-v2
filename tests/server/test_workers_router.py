@@ -225,3 +225,13 @@ async def test_get_worker_reports_cordon_state() -> None:
         resp = await ac.get(f"{PREFIX}/workers/wkr-1")
     assert resp.status_code == 200
     assert resp.json()["cordoned"] is True
+
+
+@pytest.mark.anyio
+async def test_list_cordons_filters_by_alias() -> None:
+    async with _client(_registry([])) as ac:
+        resp = await ac.get(f"{PREFIX}/workers/cordons", params={"alias": "beta"})
+        undeclared = await ac.get(f"{PREFIX}/workers/cordons", params={"id": "x"})
+    assert resp.status_code == 200
+    assert resp.json() == [{"node_alias": "node", "alias": "beta"}]
+    assert undeclared.status_code == 400
