@@ -20,6 +20,7 @@ from tests.worker.factories import (
     make_worker_hardware,
     make_worker_task_message,
 )
+from worker import hw
 from worker.executors import vllm_serve_executor as mod
 from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.utils.net import resolve_bind_port
@@ -182,6 +183,14 @@ class TestServeExecutorCmdBuilding:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+        monkeypatch.setattr(
+            hw,
+            "visible_gpus",
+            lambda: (
+                hw.VisibleGpu(ordinal=0, nvml_index=0, uuid="GPU-a", name="H100"),
+                hw.VisibleGpu(ordinal=1, nvml_index=1, uuid="GPU-b", name="H100"),
+            ),
+        )
         spec = ServeSpecStrict(
             taskType=TaskType.SERVE,
             model=ModelConfig(source=ModelSource(identifier="m")),
@@ -209,7 +218,8 @@ class TestServeExecutorCmdBuilding:
         ):
             ex.run(task, tmp_path)
 
-        assert envs[0]["CUDA_VISIBLE_DEVICES"] == "GPU-b"
+        assert envs[0]["CUDA_VISIBLE_DEVICES"] == "1"
+        assert envs[0]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
 
     def test_model_name_and_revision_in_cmd(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(

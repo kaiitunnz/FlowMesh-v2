@@ -234,6 +234,31 @@ def visible_gpus() -> tuple[VisibleGpu, ...]:
     )
 
 
+def cuda_device_env(uuids: tuple[str, ...]) -> dict[str, str]:
+    """Return the environment that confines a CUDA process to the GPUs `uuids` names.
+
+    Names each GPU by its NVML index under `CUDA_DEVICE_ORDER=PCI_BUS_ID`, the form
+    every CUDA library parses (DeepSpeed reads the entries as integers), and falls back
+    to the UUIDs when NVML cannot place one.
+    """
+    try:
+        index = {
+            gpu.uuid.lower(): gpu.nvml_index
+            for gpu in visible_gpus()
+            if gpu.mig_slot is None
+        }
+    except pynvml.NVMLError:
+        index = {}
+    if all(uuid.lower() in index for uuid in uuids):
+        return {
+            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+            "CUDA_VISIBLE_DEVICES": ",".join(
+                str(index[uuid.lower()]) for uuid in uuids
+            ),
+        }
+    return {"CUDA_VISIBLE_DEVICES": ",".join(uuids)}
+
+
 def nvml_memory_handle(gpu: VisibleGpu) -> Any:
     """The NVML handle whose memory is the process's: its MIG slice, if any."""
     handle = pynvml.nvmlDeviceGetHandleByIndex(gpu.nvml_index)

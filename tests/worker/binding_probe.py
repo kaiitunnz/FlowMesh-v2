@@ -12,6 +12,7 @@ SEEN_AT_IMPORT = os.environ.get("CUDA_VISIBLE_DEVICES")
 class SeenDevicesResult(BaseExecutorResult):
     at_import: str | None
     at_run: str | None
+    device_order: str | None
 
 
 class SeenDevicesExecutor(Executor):
@@ -19,5 +20,7 @@ class SeenDevicesExecutor(Executor):
 
     def run(self, task, out_dir: Path) -> SeenDevicesResult:
         return SeenDevicesResult(
-            at_import=SEEN_AT_IMPORT, at_run=os.environ.get("CUDA_VISIBLE_DEVICES")
+            at_import=SEEN_AT_IMPORT,
+            at_run=os.environ.get("CUDA_VISIBLE_DEVICES"),
+            device_order=os.environ.get("CUDA_DEVICE_ORDER"),
         )

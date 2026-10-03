@@ -422,7 +422,8 @@ address of the worker's host (`network`). When the server cannot carry a relayed
 A worker runs its model, diffusion, omni, training and `serve` executors on the GPUs no
 process outside FlowMesh holds: when it loads one for a GPU task, it picks the free
 devices that match the task's `gpu` block (`count` of them, or every free match without
-a positive one) and starts the executor seeing only those. A warm executor keeps its
+a positive one) and starts the executor seeing only those, listed by index under
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`. A warm executor keeps its
 devices while they stay free and fit the next task, and restarts on others otherwise.
 Training's `visible_devices` and `primary_gpu` are positions within the task's devices;
 a position past them fails the task. Multi-GPU training ranks launch under `torchrun` on

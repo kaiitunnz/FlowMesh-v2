@@ -27,6 +27,7 @@ import psutil
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.worker_message import WorkerHardware
 from worker.config import WorkerConfig
+from worker.hw import cuda_device_env
 
 from ..utils.process import signal_process_group
 from .base_executor import ExecutionError, Executor, ExecutorTask
@@ -239,7 +240,7 @@ def _configure_worker_logging(log_queue: Queue | None) -> None:
 
 def _executor_worker(
     executor_ref: str,
-    devices: tuple[str, ...] | None,
+    device_env: dict[str, str] | None,
     config: WorkerConfig,
     hardware: WorkerHardware | None,
     cmd_queue: mp.Queue,
@@ -262,7 +263,7 @@ def _executor_worker(
 
     Health check: Periodically verifies parent process is alive; exits if orphaned.
 
-    ``devices`` narrows ``CUDA_VISIBLE_DEVICES`` before ``executor_ref``, a
+    ``device_env`` narrows ``CUDA_VISIBLE_DEVICES`` before ``executor_ref``, a
     ``module:qualname``, is imported, so nothing CUDA reads at import sees the
     worker's full device set.
     """
@@ -272,8 +273,8 @@ def _executor_worker(
         os.setsid()
     except OSError:
         pass
-    if devices is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
+    if device_env is not None:
+        os.environ.update(device_env)
     module_name, _, qualname = executor_ref.partition(":")
     executor_cls: Any = importlib.import_module(module_name)
     for name in qualname.split("."):
@@ -434,7 +435,7 @@ class MPExecutor(Executor):
             target=_executor_worker,
             args=(
                 f"{self._executor_cls.__module__}:{self._executor_cls.__qualname__}",
-                self._devices,
+                None if self._devices is None else cuda_device_env(self._devices),
                 self._config,
                 self._hardware,
                 self._cmd_q,

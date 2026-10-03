@@ -23,6 +23,7 @@ from shared.schemas.result import ServeResult
 from shared.tasks.specs.serve import ServeSpecStrict
 from shared.tasks.task_type import TaskType
 from worker.config import WorkerConfig
+from worker.hw import cuda_device_env
 
 from ..utils.process import signal_process_group
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
@@ -145,7 +146,7 @@ class VLLMServeExecutor(Executor):
 
         env = dict(os.environ)
         if self._devices is not None:
-            env["CUDA_VISIBLE_DEVICES"] = ",".join(self._devices)
+            env.update(cuda_device_env(self._devices))
         env.setdefault("VLLM_CONFIGURE_LOGGING", "0")
         env["PYTHONUNBUFFERED"] = "1"
         if "--enable-lora" in rendered_flags:

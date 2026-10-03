@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from unittest.mock import mock_open, patch
 
+import pynvml
 import pytest
 
 from worker import hw
@@ -318,3 +319,37 @@ def test_collect_hw_reports_the_gpu_a_mig_slice_belongs_to(
     assert (device.index, device.uuid) == (0, "GPU-cccc-3333")
     # The slice's memory, not the whole GPU's.
     assert device.memory_total_bytes == 10 << 30
+
+
+class TestCudaDeviceEnv:
+    _GPUS = (
+        hw.VisibleGpu(ordinal=0, nvml_index=2, uuid="GPU-aaaa", name="NVIDIA H100"),
+        hw.VisibleGpu(ordinal=1, nvml_index=3, uuid="GPU-bbbb", name="NVIDIA H100"),
+    )
+
+    def test_names_the_gpus_by_nvml_index_in_pci_bus_order(self) -> None:
+        with patch.object(hw, "visible_gpus", return_value=self._GPUS):
+            env = hw.cuda_device_env(("GPU-bbbb", "GPU-aaaa"))
+        assert env == {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "3,2"}
+
+    def test_falls_back_to_uuids_for_a_gpu_nvml_cannot_place(self) -> None:
+        with patch.object(hw, "visible_gpus", return_value=self._GPUS):
+            env = hw.cuda_device_env(("GPU-aaaa", "GPU-cccc"))
+        assert env == {"CUDA_VISIBLE_DEVICES": "GPU-aaaa,GPU-cccc"}
+
+    def test_falls_back_to_uuids_without_nvml(self) -> None:
+        with patch.object(
+            hw,
+            "visible_gpus",
+            side_effect=pynvml.NVMLError(pynvml.NVML_ERROR_UNINITIALIZED),
+        ):
+            env = hw.cuda_device_env(("GPU-aaaa",))
+        assert env == {"CUDA_VISIBLE_DEVICES": "GPU-aaaa"}
+
+    def test_never_names_a_mig_slice_by_index(self) -> None:
+        mig = hw.VisibleGpu(
+            ordinal=0, nvml_index=0, uuid="GPU-aaaa", name="NVIDIA A100", mig_slot=1
+        )
+        with patch.object(hw, "visible_gpus", return_value=(mig,)):
+            env = hw.cuda_device_env(("GPU-aaaa",))
+        assert env == {"CUDA_VISIBLE_DEVICES": "GPU-aaaa"}
