@@ -2,6 +2,8 @@
 
 import json
 import os
+import sys
+import types
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -25,11 +27,24 @@ def _launch(
     """Run SFT on a worker bound to two GPUs, capturing its torchrun launch."""
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-b,GPU-c")
     monkeypatch.setattr(sft_executor, "_STARTED_ON", "GPU-b,GPU-c")
-    monkeypatch.delenv("KV_SFT_DISTRIBUTED", raising=False)
+    monkeypatch.delenv(sft_executor._SFT_LAUNCHER_FLAG, raising=False)
     monkeypatch.setattr(sft_executor.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(sft_executor.torch.cuda, "device_count", lambda: 2)
-    # Nothing may reach a real launcher, whichever launch path the code takes.
-    monkeypatch.setattr(sft_executor, "deepspeed_available", lambda: False)
+    # DeepSpeed reads as installed, and its own launcher refuses to run, so a run
+    # handed to it fails rather than reaching a real launcher.
+    monkeypatch.setattr(sft_executor, "deepspeed_available", lambda: True)
+    runner = types.ModuleType("deepspeed.launcher.runner")
+
+    def refuse(*_: Any, **__: Any) -> None:
+        raise AssertionError("the DeepSpeed launcher must not run")
+
+    runner.main = refuse  # type: ignore[attr-defined]
+    for name, module in (
+        ("deepspeed", types.ModuleType("deepspeed")),
+        ("deepspeed.launcher", types.ModuleType("deepspeed.launcher")),
+        ("deepspeed.launcher.runner", runner),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
     launched: dict[str, Any] = {}
 
     def fake_torchrun(
@@ -95,13 +110,13 @@ def test_a_launched_rank_keeps_the_devices_its_launch_chose(
     monkeypatch.setattr(sft_executor.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(sft_executor.torch.cuda, "device_count", lambda: 2)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-b,GPU-c")
-    monkeypatch.delenv("KV_SFT_DISTRIBUTED", raising=False)
+    monkeypatch.delenv(sft_executor._SFT_LAUNCHER_FLAG, raising=False)
     SFTExecutor._configure_devices({"visible_devices": [1, 0]})
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-c,GPU-b"
 
     # The rank, started on the parent's narrowed devices, applies the same config.
     monkeypatch.setattr(sft_executor, "_STARTED_ON", "GPU-c,GPU-b")
-    monkeypatch.setenv("KV_SFT_DISTRIBUTED", "1")
+    monkeypatch.setenv(sft_executor._SFT_LAUNCHER_FLAG, "1")
     SFTExecutor._configure_devices({"visible_devices": [1, 0]})
 
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-c,GPU-b"
