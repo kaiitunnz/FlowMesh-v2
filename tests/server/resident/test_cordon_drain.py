@@ -10,7 +10,12 @@ import asyncio
 from server.resident import ReplicaState
 from server.resident.state import AdmissionProfile, ClaimState
 from server.task.models import TaskStatus
-from tests.server.resident.node_harness import FAMILY, Node, admitted_boundary
+from tests.server.resident.node_harness import (
+    FAMILY,
+    Node,
+    admitted_boundary,
+    handoff_replicas,
+)
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
@@ -76,6 +81,47 @@ def test_a_cordon_drains_a_warm_demand_replica_after_its_in_flight_claim() -> No
         assert node.status(replica.serve_task_id) == TaskStatus.CANCELLING
         plan = node.control._lifecycle.plan_capacity(FAMILY.family, "m")
         assert plan.action == "materialize"
+
+    asyncio.run(run())
+
+
+def test_a_new_claim_cold_starts_elsewhere_while_the_family_replica_drains() -> None:
+    async def run() -> None:
+        node = Node()
+        draining = await admitted_boundary(node)
+        (first,) = node.control.stores.claims.all()
+        node.delivery.cordoned.add(_SERVE_WORKER)
+        node.control.on_workers_cordoned([_SERVE_WORKER])
+        await asyncio.sleep(0)
+        assert draining.state is ReplicaState.DRAINING
+
+        _, ids = await _register(node.runtime, _RESIDENT_WF)
+        _capture_resident_boundary(node.runtime, ids["writer"])
+        directory = node.control.stores.directory
+        await until(lambda: len(directory.all()) == 2)
+        (fresh,) = [r for r in directory.all() if r.replica_id != draining.replica_id]
+        assert fresh.serve_task_id is not None
+        node.delivery.serve_workers[fresh.serve_task_id] = "wkr-3"
+        node.serve(fresh.serve_task_id, "wkr-3")
+        await until(
+            lambda: any(rid == fresh.replica_id for rid, _ in handoff_replicas(node))
+        )
+        (second,) = [
+            c
+            for c in node.control.stores.claims.all()
+            if c.invocation_id != first.invocation_id
+        ]
+        assert second.replica_id == fresh.replica_id
+        assert draining.state is ReplicaState.DRAINING
+
+        node.control.on_invocation_terminal(first.invocation_id)
+        node.control.on_invocation_terminal(second.invocation_id)
+        await asyncio.sleep(0)
+
+        assert draining.state is ReplicaState.STOPPED
+        assert [
+            r.replica_id for r in directory.all() if r.state is ReplicaState.WARM
+        ] == [fresh.replica_id]
 
     asyncio.run(run())
 

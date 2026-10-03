@@ -107,7 +107,9 @@ class LifecycleScaleManager:
         decision = decide_materialization(
             model_ref=model_ref,
             limits=self._limits,
-            active_replicas=len(active),
+            active_replicas=sum(
+                1 for r in active if r.state is not ReplicaState.DRAINING
+            ),
             materializing_replicas=sum(
                 1 for r in active if r.state is ReplicaState.MATERIALIZING
             ),

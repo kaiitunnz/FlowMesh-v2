@@ -58,7 +58,8 @@ def decide_materialization(
 ) -> ProvisioningDecision:
     """Whether a family may materialize one more replica now.
 
-    ``active_replicas`` counts live incarnations (warm, busy, materializing, draining);
+    ``active_replicas`` counts the warm, busy, and materializing incarnations against
+    the family's quota; a draining one is leaving and does not count.
     ``materializing_replicas`` counts in-flight cold starts against the concurrency cap.
     """
     if limits.allowed_models and model_ref not in limits.allowed_models:

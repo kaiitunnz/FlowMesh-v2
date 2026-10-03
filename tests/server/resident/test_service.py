@@ -146,6 +146,8 @@ class _Delivery:
         self.deliver = deliver
         self.sessions = _FakeSessions()
         self.cordoned: set[str] = set()
+        # Every serve task runs on "wkr-replica" unless a test places it elsewhere.
+        self.serve_workers: dict[str, str] = {}
 
     def build(self) -> ResidentWorkerDelivery:
         self.network = _FakeNetwork()
@@ -153,7 +155,9 @@ class _Delivery:
             relay=self._relay,
             origin_worker_of_task=lambda task_id: "wkr-origin",
             serve_worker_of=lambda replica: (
-                "wkr-replica" if replica.serve_task_id is not None else None
+                self.serve_workers.get(replica.serve_task_id, "wkr-replica")
+                if replica.serve_task_id is not None
+                else None
             ),
             node_of_worker=lambda worker_id: "node-1" if worker_id else None,
             network=self.network,
