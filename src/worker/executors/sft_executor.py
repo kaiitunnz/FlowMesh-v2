@@ -854,10 +854,7 @@ def _started_device_count() -> int:
         return len([entry for entry in _STARTED_ON.split(",") if entry.strip()])
     try:
         pynvml.nvmlInit()
-        try:
-            return pynvml.nvmlDeviceGetCount()
-        finally:
-            pynvml.nvmlShutdown()
+        return pynvml.nvmlDeviceGetCount()
     except pynvml.NVMLError:
         return 0
 

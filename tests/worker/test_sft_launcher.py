@@ -137,3 +137,17 @@ def test_an_in_process_run_narrows_its_devices_before_cuda_starts(
     SFTExecutor._configure_devices({"allow_multi_gpu": False, "primary_gpu": 1})
 
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-c"
+
+
+def test_counting_the_started_devices_leaves_nvml_initialised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def shut_down() -> NoReturn:
+        raise AssertionError("NVML shut down under the worker's other readers")
+
+    monkeypatch.setattr(sft_executor, "_STARTED_ON", None)
+    monkeypatch.setattr(sft_executor.pynvml, "nvmlInit", lambda: None)
+    monkeypatch.setattr(sft_executor.pynvml, "nvmlDeviceGetCount", lambda: 2)
+    monkeypatch.setattr(sft_executor.pynvml, "nvmlShutdown", shut_down)
+
+    assert sft_executor._started_device_count() == 2
