@@ -100,9 +100,13 @@ class TaskLogArchiver:
             }:
                 if task_id in self._archived_ids:
                     continue
-                if task_id not in self._states and self._archived(task_id):
-                    self._archived_ids.add(task_id)
-                    continue
+                if task_id not in self._states:
+                    archived = self._archived(task_id)
+                    if archived is None:
+                        continue
+                    if archived:
+                        self._archived_ids.add(task_id)
+                        continue
                 terminal.add(task_id)
             self._ensure_task(task_id, now)
 
@@ -184,10 +188,11 @@ class TaskLogArchiver:
     def _base_dir(self, task_id: str) -> Path:
         return result_file_path(self._results_dir, task_id).parent
 
-    def _archived(self, task_id: str) -> bool:
+    def _archived(self, task_id: str) -> bool | None:
         """Whether a finished task's logs need no archiving: it was finalized, or,
         finalized before that was recorded, its log file holds lines or something
-        other than a file stands where it or a directory holding it belongs."""
+        other than a file stands where it or a directory holding it belongs. None
+        when its log file could not be checked."""
         if self._redis.get(task_log_archived_key(task_id)):
             return True
         if self._redis.get(task_log_archive_last_id_key(task_id)):
@@ -197,8 +202,11 @@ class TaskLogArchiver:
                 st = os.stat(_LOGS_NAME, dir_fd=logs_fd, follow_symlinks=False)
         except FileNotFoundError:
             return False
-        except OSError:
+        except PathRefused:
             return True
+        except OSError as exc:
+            self._logger.debug("Could not check %s's log file: %s", task_id, exc)
+            return None
         return not stat.S_ISREG(st.st_mode) or st.st_size > 0
 
     def _load_checkpoint(self, task_id: str) -> str | None:
