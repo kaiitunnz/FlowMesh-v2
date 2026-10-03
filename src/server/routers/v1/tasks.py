@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi import Path as ApiPath
-from fastapi import Query, Request, status
+from fastapi import Query, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import TypeAdapter
 
@@ -38,11 +38,12 @@ from ...utils.query import QueryFilter
 from ._listing import (
     PAGE_LIMIT_DEFAULT,
     PAGE_PARAMS,
+    ListFilter,
     PageAfter,
     PageBefore,
     PageLimit,
+    filter_params,
     page_bounds,
-    query_filter,
 )
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
@@ -107,15 +108,15 @@ TASK_FILTER_FIELDS = frozenset(
     response_model=TaskPage,
 )
 async def list_tasks(
-    request: Request,
     limit: PageLimit = PAGE_LIMIT_DEFAULT,
     before: PageBefore = None,
     after: PageAfter = None,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(TASK_FILTER_FIELDS, PAGE_PARAMS)),
     runtime: TaskRuntime = Depends(get_runtime),
     logger: logging.Logger = Depends(get_logger),
 ) -> Response:
-    query = query_filter(request, TASK_FILTER_FIELDS, PAGE_PARAMS)
+    query = filters.parse()
     after_bound, before_bound = page_bounds(after, before, _decode_task_cursor)
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.TASK, ResourceAction.READ, logger

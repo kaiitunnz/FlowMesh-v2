@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from ...app_state import (
     get_logger,
@@ -14,7 +14,7 @@ from ...auth.security import (
 )
 from ...hooks import ResourceAction, ResourceKind
 from ...registries.worker import WorkerInfo, WorkerRegistry
-from ._listing import query_filter
+from ._listing import ListFilter, filter_params
 
 router = APIRouter(prefix="/workers", tags=["Workers"])
 
@@ -50,12 +50,12 @@ WORKER_FILTER_FIELDS = frozenset(
     response_description="List of workers",
 )
 async def list_workers(
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(WORKER_FILTER_FIELDS)),
     registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[WorkerInfo]:
-    query = query_filter(request, WORKER_FILTER_FIELDS)
+    query = filters.parse()
     workers = await registry.list_workers_async()
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.WORKER, ResourceAction.READ, logger

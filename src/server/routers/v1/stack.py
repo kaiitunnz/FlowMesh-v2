@@ -19,7 +19,7 @@ from ...supervisor import WorkerSupervisor
 from ...supervisor.manager import WorkerInitConfig
 from ...supervisor.schemas import WorkerInfo
 from ._command import command_error
-from ._listing import query_filter
+from ._listing import ListFilter, filter_params
 
 router = APIRouter(prefix="/stack/workers", tags=["Stack"])
 
@@ -68,8 +68,8 @@ async def _exec(
 
 @router.get("")
 async def list_workers(
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(STACK_WORKER_FILTER_FIELDS)),
     supervisor: WorkerSupervisor = Depends(get_supervisor),
     node_id: str = Depends(get_node_id),
     logger: logging.Logger = Depends(get_logger),
@@ -77,7 +77,7 @@ async def list_workers(
     await require_permission(
         principal, ResourceKind.NODE, node_id, ResourceAction.READ, logger
     )
-    query = query_filter(request, STACK_WORKER_FILTER_FIELDS)
+    query = filters.parse()
     cmd = CommandMessage(command=CommandType.GET_WORKERS)
     data = await _exec(supervisor, cmd)
     workers = [WorkerInfo(**w) for w in data.get("workers", [])]

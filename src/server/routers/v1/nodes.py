@@ -28,7 +28,7 @@ from ...schemas.node import (
     WorkerRegisterResponse,
 )
 from ._command import command_error
-from ._listing import query_filter
+from ._listing import ListFilter, filter_params
 
 router = APIRouter(prefix="/nodes", tags=["Nodes"])
 
@@ -75,12 +75,12 @@ NODE_WORKER_FILTER_FIELDS = frozenset(
     response_description="List of nodes",
 )
 async def list_nodes(
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(NODE_FILTER_FIELDS)),
     node_registry: NodeRegistry = Depends(get_node_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[Node]:
-    query = query_filter(request, NODE_FILTER_FIELDS)
+    query = filters.parse()
     nodes = await node_registry.list_nodes_async()
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.NODE, ResourceAction.READ, logger
@@ -105,13 +105,13 @@ async def list_nodes(
     response_description="List of workers",
 )
 async def list_all_workers(
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(NODE_WORKER_FILTER_FIELDS)),
     node_registry: NodeRegistry = Depends(get_node_registry),
     worker_registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[NodeWorkerInfo]:
-    query = query_filter(request, NODE_WORKER_FILTER_FIELDS)
+    query = filters.parse()
     nodes = await node_registry.list_nodes_async()
     node_ids = [n.id for n in nodes]
 
@@ -182,8 +182,8 @@ async def register_node(
 )
 async def list_node_workers(
     node_id: str,
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(NODE_WORKER_FILTER_FIELDS)),
     node_registry: NodeRegistry = Depends(get_node_registry),
     worker_registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
@@ -191,7 +191,7 @@ async def list_node_workers(
     await require_permission(
         principal, ResourceKind.NODE, node_id, ResourceAction.READ, logger
     )
-    query = query_filter(request, NODE_WORKER_FILTER_FIELDS)
+    query = filters.parse()
     workers = await _fetch_node_workers(node_id, node_registry, worker_registry, logger)
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.WORKER, ResourceAction.READ, logger

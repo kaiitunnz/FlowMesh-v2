@@ -59,11 +59,12 @@ from ...utils.cursors import InvalidCursor, decode_position, encode_cursor
 from ._listing import (
     PAGE_LIMIT_DEFAULT,
     PAGE_PARAMS,
+    ListFilter,
     PageAfter,
     PageBefore,
     PageLimit,
+    filter_params,
     page_bounds,
-    query_filter,
 )
 
 _WORKFLOW_REQUEST_BODY_FORMAT = {
@@ -572,15 +573,15 @@ WORKFLOW_FILTER_FIELDS = frozenset(
     response_model=WorkflowPage,
 )
 async def list_workflows(
-    request: Request,
     limit: PageLimit = PAGE_LIMIT_DEFAULT,
     before: PageBefore = None,
     after: PageAfter = None,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(WORKFLOW_FILTER_FIELDS, PAGE_PARAMS)),
     registry: WorkflowRegistry = Depends(get_workflow_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> Response:
-    query = query_filter(request, WORKFLOW_FILTER_FIELDS, PAGE_PARAMS)
+    query = filters.parse()
     after_bound, before_bound = page_bounds(after, before, _decode_workflow_cursor)
     candidates = await resolve_accessible_ids(
         principal, ResourceKind.WORKFLOW, ResourceAction.READ, logger

@@ -7,14 +7,16 @@ from collections.abc import Callable, Collection, Coroutine, Iterator
 from typing import Annotated, Any, Union, cast, get_args, get_origin
 
 import pytest
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
 from lumid_hooks import PrincipalContext, ResourceRef
 from pydantic import BaseModel
 from starlette.datastructures import QueryParams
 
 from server.hooks import PERMISSION_CHECKERS
 from server.routers.v1 import nodes, resident, ssh, stack, tasks, workers, workflows
+from server.routers.v1._listing import PAGE_PARAMS, ListFilter
 from server.task.models import TaskRecord
 from server.utils.query import InvalidQuery, QueryFilter
 from tests.server.task.test_v2_orchestration import FakeRegistry, _live_runtime
@@ -28,6 +30,8 @@ _PRINCIPAL = PrincipalContext(
     scopes=[],
 )
 
+# The routes paging by cursor, whose own query parameters sit beside their filters.
+_PAGED = {"/tasks", "/workflows"}
 _ROUTES = [
     (tasks.router, "/tasks", tasks.TASK_FILTER_FIELDS),
     (workflows.router, "/workflows", workflows.WORKFLOW_FILTER_FIELDS),
@@ -183,27 +187,120 @@ def deny_all() -> Iterator[None]:
         PERMISSION_CHECKERS.clear()
 
 
-_GATED_LISTINGS: list[Callable[[Request], Coroutine[Any, Any, Any]]] = [
-    lambda request: resident.list_resident_replicas(request, _PRINCIPAL, None, _LOGGER),
-    lambda request: ssh.list_ssh_connections(request, _PRINCIPAL, None, _LOGGER),
-    lambda request: stack.list_workers(
-        request, _PRINCIPAL, cast(Any, None), "node-1", _LOGGER
+_GATED_LISTINGS: list[
+    tuple[Collection[str], Callable[[ListFilter], Coroutine[Any, Any, Any]]]
+] = [
+    (
+        resident.RESIDENT_REPLICA_FILTER_FIELDS,
+        lambda filters: resident.list_resident_replicas(
+            principal=_PRINCIPAL, filters=filters, control=None, logger=_LOGGER
+        ),
     ),
-    lambda request: nodes.list_node_workers(
-        "node-1", request, _PRINCIPAL, cast(Any, None), cast(Any, None), _LOGGER
+    (
+        ssh.SSH_CONNECTION_FILTER_FIELDS,
+        lambda filters: ssh.list_ssh_connections(
+            principal=_PRINCIPAL, filters=filters, ssh_connections=None, logger=_LOGGER
+        ),
+    ),
+    (
+        stack.STACK_WORKER_FILTER_FIELDS,
+        lambda filters: stack.list_workers(
+            principal=_PRINCIPAL,
+            filters=filters,
+            supervisor=cast(Any, None),
+            node_id="node-1",
+            logger=_LOGGER,
+        ),
+    ),
+    (
+        nodes.NODE_WORKER_FILTER_FIELDS,
+        lambda filters: nodes.list_node_workers(
+            node_id="node-1",
+            principal=_PRINCIPAL,
+            filters=filters,
+            node_registry=cast(Any, None),
+            worker_registry=cast(Any, None),
+            logger=_LOGGER,
+        ),
     ),
 ]
 
 
-@pytest.mark.parametrize("listing", _GATED_LISTINGS)
+@pytest.mark.parametrize(("fields", "listing"), _GATED_LISTINGS)
 def test_a_gated_listing_authorizes_before_it_reads_filters(
-    deny_all: None, listing: Callable[[Request], Coroutine[Any, Any, Any]]
+    deny_all: None,
+    fields: Collection[str],
+    listing: Callable[[ListFilter], Coroutine[Any, Any, Any]],
 ) -> None:
     request = Request(
         {"type": "http", "method": "GET", "query_string": b"undeclared=1"}
     )
+    filters = ListFilter(request, fields, ())
+    with pytest.raises(HTTPException) as invalid:
+        filters.parse()
+    assert invalid.value.status_code == status.HTTP_400_BAD_REQUEST
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(listing(request))
+        asyncio.run(listing(filters))
 
     assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.parametrize(("router", "path", "fields"), _ROUTES)
+def test_a_list_routes_schema_declares_each_of_its_filters(
+    router: APIRouter, path: str, fields: frozenset[str]
+) -> None:
+    app = FastAPI()
+    app.include_router(router)
+    operation = app.openapi()["paths"][path]["get"]
+    query = {
+        param["name"]: param
+        for param in operation.get("parameters", [])
+        if param["in"] == "query"
+    }
+
+    assert set(query) == fields | (PAGE_PARAMS if path in _PAGED else set())
+    for field in fields:
+        schema = query[field]["schema"]
+        assert {"type": "array", "items": {"type": "string"}} in schema["anyOf"]
+        assert "repeated key" in query[field]["description"]
+
+
+def test_a_filter_dependency_reads_dotted_and_repeated_keys() -> None:
+    app = FastAPI()
+    app.include_router(nodes.router)
+    seen: list[QueryFilter] = []
+
+    async def _list_nodes_async() -> list[Any]:
+        return []
+
+    registry = types.SimpleNamespace(list_nodes_async=_list_nodes_async)
+    app.dependency_overrides[nodes.authenticate_connection] = lambda: _PRINCIPAL
+    app.dependency_overrides[nodes.get_node_registry] = lambda: registry
+    app.dependency_overrides[nodes.get_worker_registry] = lambda: registry
+    app.dependency_overrides[nodes.get_logger] = lambda: _LOGGER
+    original = ListFilter.parse
+
+    def _parse(self: ListFilter) -> QueryFilter:
+        seen.append(query := original(self))
+        return query
+
+    client = TestClient(app)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ListFilter, "parse", _parse)
+        ok = client.get(
+            "/nodes/workers",
+            params=[
+                ("status", "ONLINE"),
+                ("status", "DRAINING"),
+                ("hardware.cpu.model", "x"),
+            ],
+        )
+        refused = client.get("/nodes/workers", params={"undeclared": "1"})
+
+    assert ok.status_code == status.HTTP_200_OK, ok.text
+    assert refused.status_code == status.HTTP_400_BAD_REQUEST
+    assert seen and seen[0] == QueryFilter.parse(
+        QueryParams("status=ONLINE&status=DRAINING&hardware.cpu.model=x"),
+        nodes.NODE_WORKER_FILTER_FIELDS,
+    )

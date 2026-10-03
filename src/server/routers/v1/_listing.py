@@ -1,6 +1,8 @@
 """Query filters and cursor pages for the list routes."""
 
+import inspect
 from collections.abc import Callable, Collection
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Query, Request, status
@@ -23,17 +25,69 @@ PageBefore = Annotated[
 PAGE_PARAMS = frozenset({"limit", "after", "before"})
 
 
-def query_filter(
-    request: Request, fields: Collection[str], params: Collection[str] = ()
-) -> QueryFilter:
-    """Parse the request's filter over ``fields``, past the route's own ``params``;
-    reject any other key with a 400."""
-    try:
-        return QueryFilter.parse(request.query_params, fields, params)
-    except InvalidQuery as exc:
-        raise api_error(
-            status.HTTP_400_BAD_REQUEST, "invalid_request", str(exc)
-        ) from exc
+@dataclass(frozen=True, slots=True)
+class ListFilter:
+    """A list route's filter over its declared fields, parsed when the route reads
+    it, so a route can authorize the caller first."""
+
+    request: Request
+    fields: Collection[str]
+    params: Collection[str]
+
+    def parse(self) -> QueryFilter:
+        """Parse the request's filter past the route's own ``params``; reject any
+        other key with a 400."""
+        try:
+            return QueryFilter.parse(
+                self.request.query_params, self.fields, self.params
+            )
+        except InvalidQuery as exc:
+            raise api_error(
+                status.HTTP_400_BAD_REQUEST, "invalid_request", str(exc)
+            ) from exc
+
+
+def filter_params(
+    fields: Collection[str], params: Collection[str] = ()
+) -> Callable[..., ListFilter]:
+    """A dependency declaring one optional query parameter per filter field, so the
+    route's schema lists its filters, and yielding the route's ``ListFilter``."""
+
+    def dependency(request: Request, **_: list[str] | None) -> ListFilter:
+        return ListFilter(request, fields, params)
+
+    declared = [
+        inspect.Parameter(
+            f"filter_{index}",
+            inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=Annotated[
+                list[str] | None,
+                Query(
+                    alias=field,
+                    description=(
+                        f"Match `{field}`; a repeated key matches any of its values."
+                    ),
+                ),
+            ],
+        )
+        for index, field in enumerate(sorted(fields))
+    ]
+    setattr(
+        dependency,
+        "__signature__",
+        inspect.Signature(
+            [
+                inspect.Parameter(
+                    "request",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=Request,
+                ),
+                *declared,
+            ]
+        ),
+    )
+    return dependency
 
 
 def page_bounds[K](
@@ -59,11 +113,12 @@ def page_bounds[K](
 
 
 __all__ = [
+    "ListFilter",
     "PAGE_LIMIT_DEFAULT",
     "PAGE_PARAMS",
     "PageAfter",
     "PageBefore",
     "PageLimit",
+    "filter_params",
     "page_bounds",
-    "query_filter",
 ]

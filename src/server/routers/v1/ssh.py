@@ -3,7 +3,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 from fastapi import Path as ApiPath
-from fastapi import Request, WebSocket, WebSocketDisconnect, status
+from fastapi import WebSocket, WebSocketDisconnect, status
 
 from shared.network.byte_stream import ByteStreamChannel, StreamClosed
 from shared.utils.json import safe_get
@@ -29,7 +29,7 @@ from ...services.ssh_connections import SshConnectionRegistry
 from ...ssh import SshRelayOrigin, resolve_relay_target
 from ...ssh.connections import tracked_ssh_connection
 from ...task.runtime import TaskRuntime
-from ._listing import query_filter
+from ._listing import ListFilter, filter_params
 
 router = APIRouter(prefix="/ssh", tags=["SSH"])
 
@@ -175,8 +175,8 @@ SSH_CONNECTION_FILTER_FIELDS = frozenset(
     response_description="List of active SSH connection records.",
 )
 async def list_ssh_connections(
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(SSH_CONNECTION_FILTER_FIELDS)),
     ssh_connections: SshConnectionRegistry | None = Depends(
         get_ssh_connection_registry
     ),
@@ -185,7 +185,7 @@ async def list_ssh_connections(
     await require_permission(
         principal, ResourceKind.SYSTEM, None, ResourceAction.ADMIN, logger
     )
-    query = query_filter(request, SSH_CONNECTION_FILTER_FIELDS)
+    query = filters.parse()
     if ssh_connections is None:
         return []
     connections = await ssh_connections.list_connections()

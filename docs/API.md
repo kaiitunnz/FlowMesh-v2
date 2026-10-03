@@ -185,4 +185,5 @@ A boolean field matches `true`, `1`, `yes` or `on` and `false`, `0`, `no` or
 A repeated filter matches any of its values, and different filters all apply. A
 list field matches when it holds a value, a dotted filter reads a nested field,
 and a field that is unset, or whose parent is unset, matches `null`. Any other
-query key is a `400` with `detail.code` `invalid_request`.
+query key is a `400` with `detail.code` `invalid_request`. `/docs` lists each route's
+filters as its query parameters.
