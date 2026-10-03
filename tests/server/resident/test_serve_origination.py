@@ -28,6 +28,7 @@ from server.resident import (
     ReplicaState,
     ResidentCapacityControl,
     ResidentPolicyLimits,
+    ResidentSnapshot,
     ResidentStores,
 )
 from server.resident.service import ResidentWorkerDelivery, ServeOrigination
@@ -566,3 +567,70 @@ def test_drain_keeps_an_in_flight_standing_replica_draining_until_it_settles() -
     assert settled_replica is not None and settled_replica.state is ReplicaState.STOPPED
     assert stores.directory.live_by_family(_FAMILY) == []
     assert reaped == []
+
+
+def _recording_materializations(svc: ResidentCapacityControl) -> list[str]:
+    materialized: list[str] = []
+
+    async def record(family: Any, replica: Any) -> str:
+        materialized.append(family.family)
+        return "tsk-cold"
+
+    svc._lifecycle._materialize_fn = record
+    return materialized
+
+
+def test_a_request_queued_on_a_stopped_serve_task_starts_no_replica() -> None:
+    async def run() -> None:
+        svc, stores, _settled, _deps = _build()
+        svc.bind_loop(asyncio.get_running_loop())
+        materialized = _recording_materializations(svc)
+        _adopt(svc)
+        deliveries = [_ServeDelivery() for _ in range(3)]
+        # Two requests fill the standing replica's admission slots.
+        for i in range(2):
+            await svc._originate_serve(_origination(deliveries[i], f"inv-{i}"))
+        queued = asyncio.create_task(
+            svc._originate_serve(_origination(deliveries[2], "inv-2"))
+        )
+        await asyncio.sleep(0.05)
+        assert not queued.done()
+
+        svc.drain_serve_replica(_SERVE_TASK)
+        (standing,) = stores.directory.by_family(_FAMILY)
+        assert standing.state is ReplicaState.DRAINING
+        await asyncio.wait_for(queued, timeout=1.0)
+
+        assert materialized == []
+        assert stores.directory.by_family(_FAMILY) == [standing]
+        assert deliveries[2].failed is not None
+        assert "no live standing allocation" in deliveries[2].failed
+
+    asyncio.run(run())
+
+
+def test_a_request_on_a_stopped_serve_replica_starts_no_replica() -> None:
+    svc, stores, _settled, _deps = _build()
+    materialized = _recording_materializations(svc)
+    _adopt(svc)
+    svc.drain_serve_replica(_SERVE_TASK)
+    assert stores.directory.by_family(_FAMILY)[0].state is ReplicaState.STOPPED
+
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+
+    assert materialized == []
+    assert delivery.failed is not None
+    assert "no live standing allocation" in delivery.failed
+
+
+def test_a_serve_family_stays_standing_across_a_snapshot() -> None:
+    svc, stores, _settled, _deps = _build()
+    _adopt(svc)
+    restored = ResidentStores()
+    restored.load_snapshot(
+        ResidentSnapshot.model_validate_json(stores.to_snapshot().model_dump_json())
+    )
+
+    family = restored.families.get(_FAMILY)
+    assert family is not None and family.standing is True

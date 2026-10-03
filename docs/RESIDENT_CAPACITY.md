@@ -211,10 +211,10 @@ idle-teardown path, a cold start by invalidation. The next demand materializes t
 family again. A standing replica never yields its worker.
 
 A cordon drains the demand replicas on its worker: each stops admitting claims and stops
-once its admitted work releases, and a cold start there is invalidated. A draining replica
-does not count toward its family's replica limit, so a new one starts elsewhere meanwhile.
-The drain holds across a root restart. A standing replica keeps serving until its serve
-task ends.
+once its admitted work releases, and a cold start there is invalidated. A draining demand
+replica does not count toward its family's replica limit, so a new one starts elsewhere
+meanwhile. The drain holds across a root restart. A standing replica keeps serving until
+its serve task ends, and its family never starts another.
 
 On a root restart, in-flight claims go `UNCERTAIN`, and each restored replica whose serve
 task holds the dispatch that reported its endpoint re-attaches and is reused; any other

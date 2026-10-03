@@ -95,7 +95,8 @@ class LifecycleScaleManager:
         or held-adapter claim joins a warm replica, while a new distinct adapter joins
         only where a free adapter slot remains. When no servable replica can take the
         adapter and policy cannot materialize another, the demand is denied promptly and
-        correctly rather than waiting out the cold-start deadline.
+        correctly rather than waiting out the cold-start deadline. A standing family
+        never materializes, so a claim finding its replica unservable is denied.
         """
         active = self._active_replicas(family)
         servable = [r for r in active if r.state in SERVABLE_REPLICA_STATES]
@@ -104,6 +105,21 @@ class LifecycleScaleManager:
             return CapacityPlan(action="join", replica_id=joinable.replica_id)
         if any(r.state is ReplicaState.MATERIALIZING for r in active):
             return CapacityPlan(action="materialize")
+        if (definition := self._stores.families.get(family)) and definition.standing:
+            return CapacityPlan(
+                action="deny",
+                denial=(
+                    ProvisioningDecision.deny(
+                        ProvisioningDenialReason.ADAPTER_SLOT_CAP,
+                        "no free adapter slot on the serve task's replica",
+                    )
+                    if servable
+                    else ProvisioningDecision.deny(
+                        ProvisioningDenialReason.QUOTA_EXCEEDED,
+                        "serve task has no live standing allocation",
+                    )
+                ),
+            )
         decision = decide_materialization(
             model_ref=model_ref,
             limits=self._limits,

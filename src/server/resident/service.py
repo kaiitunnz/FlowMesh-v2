@@ -694,7 +694,9 @@ class ResidentCapacityControl:
         # A standing allocation is pinned to its serve task for the task's lifetime,
         # so its family records the warm preference its residency node declares.
         self._stores.families.register(
-            self._family_definition(dependency, family, ResidencyWarmth.WARM)
+            self._family_definition(
+                dependency, family, ResidencyWarmth.WARM, standing=True
+            )
         )
         definition = self._stores.families.get(family)
         if definition is None:
@@ -1693,7 +1695,11 @@ class ResidentCapacityControl:
         return f"{split_host_port(endpoint.url)[0]}:{port}"
 
     def _family_definition(
-        self, dependency: ServiceDependency, family: str, warmth: ResidencyWarmth | None
+        self,
+        dependency: ServiceDependency,
+        family: str,
+        warmth: ResidencyWarmth | None,
+        standing: bool = False,
     ) -> ServiceFamily:
         """The family definition a dependency admits against, under one warmth.
 
@@ -1708,6 +1714,7 @@ class ResidentCapacityControl:
             isolation=dependency.isolation,
             selection_strategy=self._limits.selection_strategy,
             warmth=warmth,
+            standing=standing,
         )
 
     def _ensure_family(
