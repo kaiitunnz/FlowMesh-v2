@@ -287,9 +287,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   resumes beside a workspace from another private-state generation. While a generation is
   sealed local to the holder that produced it, that holder is a hard scheduler
   feasibility constraint resolved at dispatch: the episode lane yields as any other does,
-  and an episode waits while its holder is busy. A model server — a resident or `serve`
-  task — prefers a worker holding no agent's private state when one is idle, and a
-  demand replica occupying a waiting episode's holder retires once no claim holds it and
+  and an episode waits while its holder is busy. A resident replica prefers a worker
+  holding no agent's private state when one is idle, a public `serve` task waits for
+  one, and a demand replica occupying a waiting episode's holder retires once no claim holds it and
   no claim of its family is pending, so the episode resumes there. Owner loss, a
   worker-incarnation change, or a component that does not match its seal fails closed as
   a typed `PrivateStateUnavailable` rather than resuming against a fresh or partial home.
@@ -627,7 +627,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `(node_alias, alias)` and lasts until it is uncordoned, independent of any
   worker's lifecycle, so it also applies to a worker that registers under the
   key later. An agent whose private state is sealed on a cordoned worker resumes
-  there, since only that worker can supply it.
+  there, since only that worker can supply it. A cordon drains the demand resident
+  replicas on the worker, while a public `serve` task there keeps serving until it ends.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side. Task and workflow listings build their pages off

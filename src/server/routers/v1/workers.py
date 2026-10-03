@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from ...app_state import (
     get_logger,
+    get_resident_control,
     get_worker_registry,
 )
 from ...auth.security import (
@@ -14,6 +15,7 @@ from ...auth.security import (
 )
 from ...hooks import ResourceAction, ResourceKind
 from ...registries.worker import WorkerInfo, WorkerRegistry
+from ...resident.service import ResidentCapacityControl
 from ...schemas.worker import (
     WorkerCordon,
     WorkerCordonByAlias,
@@ -148,6 +150,7 @@ async def _set_cordon(
     registry: WorkerRegistry,
     principal: PrincipalContext,
     logger: logging.Logger,
+    resident: ResidentCapacityControl | None = None,
 ) -> WorkerCordonResult:
     # A cordon outlives its worker and applies to whichever worker registers
     # under the key next, so no per-worker permission can authorize it.
@@ -157,6 +160,8 @@ async def _set_cordon(
     cordon = await _resolve_cordon(request, registry)
     changed = await registry.set_cordon_async(cordon, cordoned=cordoned)
     worker_ids = await registry.live_worker_ids_for_cordon_async(cordon)
+    if cordoned and resident is not None:
+        resident.on_workers_cordoned(worker_ids)
     logger.info(
         "%s %s/%s (workers: %s)",
         "Cordoned" if cordoned else "Uncordoned",
@@ -184,8 +189,9 @@ async def cordon_worker(
     principal: PrincipalContext = Depends(authenticate_connection),
     registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
+    resident: ResidentCapacityControl | None = Depends(get_resident_control),
 ) -> WorkerCordonResult:
-    return await _set_cordon(request, True, registry, principal, logger)
+    return await _set_cordon(request, True, registry, principal, logger, resident)
 
 
 @router.post(

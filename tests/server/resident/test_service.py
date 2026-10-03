@@ -145,6 +145,7 @@ class _Delivery:
         self.relays: list[tuple[str, str, dict[str, Any]]] = []
         self.deliver = deliver
         self.sessions = _FakeSessions()
+        self.cordoned: set[str] = set()
 
     def build(self) -> ResidentWorkerDelivery:
         self.network = _FakeNetwork()
@@ -157,6 +158,7 @@ class _Delivery:
             node_of_worker=lambda worker_id: "node-1" if worker_id else None,
             network=self.network,
             sessions=self.sessions,
+            worker_cordoned=self.cordoned.__contains__,
         )
 
     def _relay(self, worker_id: str, frame_kind: str, payload: dict[str, Any]) -> bool:

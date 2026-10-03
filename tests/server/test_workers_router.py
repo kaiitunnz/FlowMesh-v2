@@ -94,6 +94,7 @@ def _registry(workers: list[Worker]) -> MagicMock:
 def _client(registry: MagicMock) -> AsyncClient:
     app = FastAPI()
     app.state.logger = logging.getLogger("test.workers_router")
+    app.state.resident_control = None
     app.include_router(workers_router.router, prefix=PREFIX)
     app.dependency_overrides[get_worker_registry] = lambda: registry
     app.dependency_overrides[authenticate_connection] = lambda: MagicMock(
@@ -235,3 +236,18 @@ async def test_list_cordons_filters_by_alias() -> None:
     assert resp.status_code == 200
     assert resp.json() == [{"node_alias": "node", "alias": "beta"}]
     assert undeclared.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_cordon_drains_the_resident_replicas_of_its_live_workers() -> None:
+    registry = _registry([_worker("wkr-1")])
+    resident = MagicMock()
+    async with _client(registry) as ac:
+        ac_app = ac._transport.app  # type: ignore[attr-defined]
+        ac_app.dependency_overrides[workers_router.get_resident_control] = (
+            lambda: resident
+        )
+        await ac.post(f"{PREFIX}/workers/cordon", json={"worker_id": "wkr-1"})
+        await ac.post(f"{PREFIX}/workers/uncordon", json={"worker_id": "wkr-1"})
+
+    resident.on_workers_cordoned.assert_called_once_with(["wkr-1"])
