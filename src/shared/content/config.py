@@ -29,14 +29,15 @@ class ObjectStoreConfig:
     """The shared store's backend and address.
 
     ``backend`` selects how the fleet's store is reached: ``s3`` for anything speaking
-    the S3 API — the co-located MinIO a default deployment runs, cloud S3, an external
-    MinIO — or ``filesystem`` for one durable filesystem mounted on every node.
+    the S3 API — the co-located Silo store a default deployment runs, cloud S3, another
+    S3-compatible service — or ``filesystem`` for one durable filesystem mounted on
+    every node.
 
     With nothing configured this describes the store a default deployment brings up
     beside the root, so a fresh deployment stores content without being told where. A
-    deployment whose store is elsewhere — cloud object storage, an external MinIO, a
-    node not the root's — names it, and every node other than the store's own host has
-    to, since the co-located address is only local to that host.
+    deployment whose store is elsewhere — cloud object storage, an external
+    S3-compatible store, a node not the root's — names it, and every node other than the
+    store's own host has to, since the co-located address is only local to that host.
     """
 
     backend: str = BACKEND_S3

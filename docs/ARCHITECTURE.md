@@ -448,25 +448,25 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   consumer each keep their own binding to a reference, so an object is never a name for
   what a consumer calls it, and identical bytes in two scopes are two objects.
 - **The shared content store.** Every content object lives in one shared durable store —
-  an S3-compatible service such as the MinIO a default deployment co-locates on the root
-  node, cloud S3, or a filesystem every node mounts — reached through the same
-  `FabricObjectStore` contract and selected with `CONTENT_STORE_BACKEND`. A deployment
-  that names no store runs the co-located one and points at it, so a fresh cluster stores
-  content without being configured; naming `CONTENT_STORE_ENDPOINT_URL` moves the fabric
-  onto real object storage and leaves the co-located store unstarted, which is the shape
-  a production deployment takes. The root provisions the bucket it is pointed at where
-  its credential allows, since the scoped session a worker reaches content under covers
-  one scope's prefix rather than the bucket. Its credential also needs list access on the
-  bucket for a missing object to read as missing. It is a service
-  beside the fabric, never the root process: the root and its supervisors hold no
-  payload. A worker writes an object there before it reports the reference naming it, so
-  a reference that reaches any binding names bytes that already outlive their producer,
-  and a worker's death loses nothing. The outcome-finalization index lives on the control
-  plane, binding an `idm-*` to a reference so a re-drive re-reports the first
-  materialization rather than re-running a sampled producer; the store holds only bytes
-  and never treats an idempotency key as a name. The scope that binding lands in is the
-  one control assigned the work when it authorized the key, so the producer reporting a
-  finalization is held to it rather than naming a scope of its own.
+  an S3-compatible service such as the Silo store (a MinIO-compatible server) a default
+  deployment co-locates on the root node, cloud S3, or a filesystem every node mounts —
+  reached through the same `FabricObjectStore` contract and selected with
+  `CONTENT_STORE_BACKEND`. A deployment that names no store runs the co-located one and
+  points at it, so a fresh cluster stores content without being configured; naming
+  `CONTENT_STORE_ENDPOINT_URL` moves the fabric onto real object storage and leaves the
+  co-located store unstarted, which is the shape a production deployment takes. The root
+  provisions the bucket it is pointed at where its credential allows, since the scoped
+  session a worker reaches content under covers one scope's prefix rather than the bucket.
+  Its credential also needs list access on the bucket for a missing object to read as
+  missing. It is a service beside the fabric, never the root process: the root and its
+  supervisors hold no payload. A worker writes an object there before it reports the
+  reference naming it, so a reference that reaches any binding names bytes that already
+  outlive their producer, and a worker's death loses nothing. The outcome-finalization
+  index lives on the control plane, binding an `idm-*` to a reference so a re-drive
+  re-reports the first materialization rather than re-running a sampled producer; the
+  store holds only bytes and never treats an idempotency key as a name. The scope that
+  binding lands in is the one control assigned the work when it authorized the key, so the
+  producer reporting a finalization is held to it rather than naming a scope of its own.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
   authorization scope, bound to the worker incarnation running it and expiring shortly

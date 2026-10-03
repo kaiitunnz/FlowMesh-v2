@@ -81,8 +81,9 @@ def _colocates_content_store(env: dict[str, str]) -> bool:
 
     The fabric's content has to live somewhere, so a root node brings up its own store
     unless the deployment says where its store already is. Naming an endpoint — cloud
-    object storage, an external MinIO, another node's — is what turns the co-located one
-    off, so pointing at real storage costs one setting and leaves no unused container.
+    object storage, an external S3-compatible store, another node's — is what turns the
+    co-located one off, so pointing at real storage costs one setting and leaves no
+    unused container.
     """
     role = env.get("NODE_ROLE", "").strip().lower()
     if role and role != NodeRole.ROOT.value:
