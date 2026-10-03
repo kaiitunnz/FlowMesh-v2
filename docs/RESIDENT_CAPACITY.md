@@ -193,21 +193,21 @@ preference only — it reserves nothing and changes no claim, admission, route, 
 
 A cold start goes warm once its serve task reports its endpoint, whether or not a claim
 still waits for it. A replica serves only on the endpoint its serve task's current
-dispatch reported. A warm
-demand replica lives only while its serve task holds that dispatch: when the serve task
-leaves it — its worker lost or drained, the task settled or cancelled — the replica is
-invalidated and the task is reaped; the next demand materializes the family again. A
-cold start whose dispatch ends retries the same serve task on an untried worker, under
-the task's own retry history, and is invalidated only once the task settles or is
-cancelled. A draining replica's task is reaped while the replica finishes draining. An
-admitted claim keeps its credit until its own fenced terminal.
+dispatch reported. A warm demand replica lives only while its serve task holds that
+dispatch: when the serve task leaves it — its worker lost or drained, the task settled
+or cancelled — the replica is invalidated and the task is reaped; the next demand
+materializes the family again. A cold start whose dispatch ends retries the same serve
+task on an untried worker, under the task's own retry history, and is invalidated only
+once the task settles or is cancelled. A draining replica's task is reaped while the
+replica finishes draining. An admitted claim keeps its credit until its own fenced
+terminal.
 
 A resident replica's serve task prefers a worker holding no agent's private state when
-one is idle, and a public `serve` task waits for one. When an
-agent waits to resume on the worker a demand replica occupies, the replica is retired
-once no claim holds it and no claim of its family is pending, freeing the worker: a
-serving replica through the idle-teardown path, a cold start by invalidation. The next demand materializes the family
-again. A standing replica never yields its worker.
+one is idle, and a public `serve` task waits for one. When an agent waits to resume on
+the worker a demand replica occupies, the replica is retired once no claim holds it and
+no claim of its family is pending, freeing the worker: a serving replica through the
+idle-teardown path, a cold start by invalidation. The next demand materializes the
+family again. A standing replica never yields its worker.
 
 A cordon on a worker drains the demand replicas it serves: each stops admitting claims and
 stops once its admitted work releases, and a cold start there is invalidated, also after a

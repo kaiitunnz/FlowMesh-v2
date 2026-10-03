@@ -289,10 +289,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   feasibility constraint resolved at dispatch: the episode lane yields as any other does,
   and an episode waits while its holder is busy. A resident replica prefers a worker
   holding no agent's private state when one is idle, a public `serve` task waits for
-  one, and a demand replica occupying a waiting episode's holder retires once no claim holds it and
-  no claim of its family is pending, so the episode resumes there. Owner loss, a
-  worker-incarnation change, or a component that does not match its seal fails closed as
-  a typed `PrivateStateUnavailable` rather than resuming against a fresh or partial home.
+  one, and a demand replica occupying a waiting episode's holder retires once no claim
+  holds it and no claim of its family is pending, so the episode resumes there. Owner
+  loss, a worker-incarnation change, or a component that does not match its seal fails
+  closed as a typed `PrivateStateUnavailable` rather than resuming against a fresh or
+  partial home.
   One activation reaches another's state only by holding a valid binding and attachment
   for it, which the ledger's owner and write-epoch fences decide; the `0700` private
   root, keyed by the opaque reference, separates a holder's lineages from other users on
@@ -569,17 +570,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   as the report persists. A worker shutting down reports itself busy until it leaves.
 - **Per-device GPU availability.** A GPU worker reads each device's memory on every
   heartbeat and reports any device a process outside FlowMesh holds. The worker stays
-  `IDLE` and keeps taking CPU work. A model dispatch places on enough free devices
-  and its executor runs on only those, as an SSH session that selects devices does; a
-  worker advertises the task types whose executor it binds that way, and a dispatch it
-  does not bind, or one naming its own devices, waits while any device is held. An input
-  preparation or a resident service episode places and runs regardless of a held
-  device. A reading counts only when nothing of the worker's own can be in it: no task
-  running, past `WORKER_FOREIGN_GPU_GRACE_SEC` after a task, and only on devices no
-  GPU-using executor still warm can hold, so a device a warm unbound executor sees is
-  read once it unloads, which `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` bounds. A worker that cannot reach
-  NVML clears its reading. A GPU dispatch that reaches a worker after its device was
-  taken is refused and retried. Disable with `WORKER_FOREIGN_GPU_GATE=false`.
+  `IDLE` and keeps taking CPU work. A model dispatch places on enough free devices, and
+  its executor runs on only those, as an SSH session that selects devices does. A
+  dispatch of a type its worker does not advertise in `gpu_binding_task_types`, or one
+  naming its own devices, waits while any device is held. An input preparation or a
+  resident service episode places and runs regardless of a held device. A reading counts
+  only when nothing of the worker's own can be in it: no task running, past
+  `WORKER_FOREIGN_GPU_GRACE_SEC` after a task, and only on devices no GPU-using executor
+  still warm can hold, so a device a warm unbound executor sees is read once it unloads,
+  which `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` bounds. A worker that cannot reach NVML
+  clears its reading. A GPU dispatch that reaches a worker after its device was taken is
+  refused and retried. Disable with `WORKER_FOREIGN_GPU_GATE=false`.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
   dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
   recreates a deleted record. A worker whose record is gone, as after a partition
@@ -630,7 +631,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   worker's lifecycle, so it also applies to a worker that registers under the
   key later. An agent whose private state is sealed on a cordoned worker resumes
   there, since only that worker can supply it. A cordon drains the demand resident
-  replicas on the worker, while a public `serve` task there keeps serving until it ends.
+  replicas on the worker, while a public `serve` task there keeps serving until it
+  ends.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side. Task and workflow listings build their pages off
