@@ -427,12 +427,13 @@ a positive one) and starts the executor seeing only those, listed by index under
 and fit the next task, and restarts on others otherwise, as for a task without a
 positive count once another device frees up. SFT's `visible_devices` and `primary_gpu`
 are positions within the task's devices; a position past them fails the task. Multi-GPU
-training runs its ranks on those devices. A task that sets `CUDA_VISIBLE_DEVICES` or
-`CUDA_DEVICE_ORDER` in `model.vllm.env_vars` picks its own devices, so its executor sees
-every device and the task waits while any is held, as does an omni task, whose executor
-sees every device. A worker on a MIG slice, or one whose `CUDA_VISIBLE_DEVICES` lists
-some of a host's mixed GPU models by position without `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
-runs every executor on all its GPUs.
+training runs its ranks on those devices. A vLLM inference, LoRA or embedding task that
+sets `CUDA_VISIBLE_DEVICES`, or a `CUDA_DEVICE_ORDER` other than `PCI_BUS_ID`, in
+`model.vllm.env_vars` picks its own devices, so its executor sees every device and the
+task waits while any is held, as does an omni task, whose executor sees every device. A
+worker on a MIG slice, or one whose `CUDA_VISIBLE_DEVICES` lists some of a host's mixed
+GPU models by position without `CUDA_DEVICE_ORDER=PCI_BUS_ID`, runs every executor on
+all its GPUs.
 
 ## SSH executor GPUs
 

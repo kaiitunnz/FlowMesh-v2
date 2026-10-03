@@ -313,14 +313,18 @@ def _model_uses_gpu(
     return config.get("device_map") != "cpu"
 
 
-_CUDA_DEVICE_ENV = ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")
-
-
 def _model_pins_cuda_devices(model: ModelConfig | ModelConfigTemplate | None) -> bool:
-    # Reordering devices re-points whatever ordinals a worker binds, so it pins too.
     env_vars = (model.vllm or {}).get("env_vars") if model is not None else None
-    return isinstance(env_vars, dict) and any(
-        key in env_vars for key in _CUDA_DEVICE_ENV
+    if not env_vars:
+        return False
+    if not isinstance(env_vars, dict):
+        # An unrendered placeholder may render to either, so it pins until it does.
+        return True
+    # A worker renders a binding under PCI bus order, so only another order re-points
+    # the ordinals it binds.
+    return (
+        "CUDA_VISIBLE_DEVICES" in env_vars
+        or env_vars.get("CUDA_DEVICE_ORDER", "PCI_BUS_ID") != "PCI_BUS_ID"
     )
 
 

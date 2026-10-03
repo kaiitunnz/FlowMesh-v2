@@ -178,6 +178,28 @@ class TestUnresolvedTemplates:
         )
         assert spec.pins_cuda_devices() is True
 
+    def test_a_template_keeping_pci_bus_order_still_binds(self) -> None:
+        spec = InferenceSpecTemplate(
+            taskType=TaskType.INFERENCE,
+            data=_DATA,
+            model=ModelConfigTemplate(
+                source=ModelSourceTemplate(identifier="org/m"),
+                vllm={"env_vars": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}},
+            ),
+        )
+        assert spec.pins_cuda_devices() is False
+
+    def test_a_template_whose_env_vars_are_a_placeholder_pins(self) -> None:
+        spec = InferenceSpecTemplate(
+            taskType=TaskType.INFERENCE,
+            data=_DATA,
+            model=ModelConfigTemplate(
+                source=ModelSourceTemplate(identifier="org/m"),
+                vllm={"env_vars": "{{ prep.env }}"},
+            ),
+        )
+        assert spec.pins_cuda_devices() is True
+
     def test_a_template_ordering_its_own_devices_pins_them(self) -> None:
         spec = InferenceSpecTemplate(
             taskType=TaskType.INFERENCE,
@@ -343,3 +365,12 @@ class TestBindingWorker:
         assert not gpus_fit_dispatch(
             _two_devices(held=1), spec, False, binds_devices=True
         )
+
+    def test_a_task_keeping_pci_bus_order_binds_beside_a_held_card(self) -> None:
+        spec = _inference(
+            model=_model(vllm={"env_vars": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}}),
+            resources=_with_gpus(1),
+        )
+
+        assert not spec.pins_cuda_devices()
+        assert gpus_fit_dispatch(_two_devices(held=1), spec, False, binds_devices=True)
