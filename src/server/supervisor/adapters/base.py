@@ -247,6 +247,9 @@ class WorkerAdapter(ABC):
             return False
         if await self.runs_held_worker():
             return True
+        # A destroy or a withdrawn start may have landed while the check ran.
+        if self._closed or not operation.callers:
+            return False
         operation.begun = True
         self.set_status(WorkerStatus.STARTING)
         try:
