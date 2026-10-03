@@ -674,3 +674,31 @@ async def test_a_vastai_worker_with_no_event_stream_stops_without_waiting() -> N
 
     assert time.monotonic() - started < 1.0
     assert world.adapter.status is WorkerStatus.STOPPED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_a_bulk_destroy_keeps_a_worker_added_while_it_ran(kind: str) -> None:
+    world = _world(kind)
+    await world.start()
+    wm = _manager(world, kind)
+    stopping = threading.Event()
+    release = threading.Event()
+    stop = world.adapter._stop
+
+    def gated_stop() -> bool:
+        stopping.set()
+        release.wait(5)
+        return stop()
+
+    world.adapter._stop = gated_stop
+    destroy = asyncio.ensure_future(wm.destroy_workers(None))
+    await asyncio.to_thread(stopping.wait, 5)
+    late = _world(kind).adapter
+    late.alias, late.token = "late", WorkerTokenType("late.token")
+    wm._registry.add(late)
+    release.set()
+    await destroy
+
+    assert wm._registry.try_get_by_alias(world.adapter.alias) is None
+    assert wm._registry.try_get_by_alias("late") is late

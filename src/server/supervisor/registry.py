@@ -86,6 +86,17 @@ class WorkerRegistry:
         self._release([released])
         return worker
 
+    def discard(self, worker: WorkerAdapter) -> bool:
+        """Remove ``worker`` if it is still the one registered under its token."""
+        with self._get_state() as state:
+            if state.registry.get(worker.token) is not worker:
+                return False
+            del state.registry[worker.token]
+            del state.alias_token_map[worker.alias]
+            released = state.token_id_map.pop(worker.token, None)
+        self._release([released])
+        return True
+
     def clear(self) -> None:
         with self._get_state() as state:
             state.registry.clear()

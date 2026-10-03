@@ -313,11 +313,8 @@ class WorkerManager:
             workers = [self._registry.get_by_alias(alias) for alias in aliases]
 
         def forget(_: asyncio.Future[None]) -> None:
-            if aliases is None:
-                self._registry.clear()
-            else:
-                for alias in aliases:
-                    self._registry.try_pop_by_alias(alias)
+            for worker in workers:
+                self._registry.discard(worker)
             self._report_capacity_change()
 
         destroying = asyncio.ensure_future(self._stop_and_destroy_workers(workers))
