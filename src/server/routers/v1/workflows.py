@@ -588,7 +588,7 @@ async def list_workflows(
     )
     if (named := query.values("workflow_id")) is not None:
         candidates = named if candidates is None else named & candidates
-    workflows = await registry.workflow_page(
+    workflows = await registry.workflow_page_async(
         query.without("workflow_id"), limit, after_bound, before_bound, candidates
     )
     page = WorkflowPage(

@@ -1,6 +1,6 @@
 import json
-from collections.abc import AsyncGenerator, Collection, Iterator, Sequence
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, Collection, Generator, Iterator, Sequence
+from contextlib import aclosing, closing
 from enum import StrEnum
 from itertools import batched
 from typing import Any
@@ -14,6 +14,8 @@ from pydantic import (
     field_validator,
     model_serializer,
 )
+from redis.asyncio.client import Pipeline as AsyncPipeline
+from redis.client import Pipeline
 
 from shared.tasks import PERSISTED_LOAD_CONTEXT
 from shared.utils.time import iso_to_ns
@@ -220,6 +222,135 @@ def _workflow_update(mapping: dict[str, Any] | None = None) -> dict[str, Any]:
     return mapping
 
 
+type _AnyPipeline = Pipeline | AsyncPipeline
+
+
+def _queue_workflow_reads(pipe: _AnyPipeline, workflow_ids: Sequence[str]) -> None:
+    for workflow_id in workflow_ids:
+        pipe.hgetall(workflow_key(workflow_id))
+        pipe.smembers(workflow_dispatched_tasks_key(workflow_id))
+        pipe.smembers(workflow_failed_tasks_key(workflow_id))
+        pipe.smembers(workflow_cancelled_tasks_key(workflow_id))
+        pipe.smembers(workflow_tasks_key(workflow_id))
+
+
+def _queue_submission_stamps(pipe: _AnyPipeline, ids: Sequence[str]) -> None:
+    for workflow_id in ids:
+        pipe.hget(workflow_key(workflow_id), "submitted_at")
+
+
+def _backfill_members(ids: Sequence[str], stamps: Sequence[str | None]) -> list[str]:
+    return [
+        _index_member(workflow_order(stamp, workflow_id))
+        for workflow_id, stamp in zip(ids, stamps, strict=True)
+        if stamp
+    ]
+
+
+def _queue_backfill(pipe: _AnyPipeline, members: Sequence[str]) -> None:
+    for chunk in batched(members, _BACKFILL_BATCH):
+        pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, dict.fromkeys(chunk, 0))
+
+
+def _index_scan_start(
+    after: WorkflowOrder | None, before: WorkflowOrder | None
+) -> tuple[bool, str | None]:
+    """Whether an index scan runs forward, and its exclusive start member."""
+    forward = after is not None
+    bound = after if forward else before
+    return forward, f"({_index_member(bound)}" if bound is not None else None
+
+
+def _candidate_chunks(
+    ids: Sequence[str],
+    stamps: Sequence[str | None],
+    sizes: Iterator[int],
+    after: WorkflowOrder | None,
+    before: WorkflowOrder | None,
+) -> Iterator[list[str]]:
+    """Yield the candidates past a position in scan order, as an index scan does."""
+    keys = sorted(
+        workflow_order(stamp, workflow_id)
+        for workflow_id, stamp in zip(ids, stamps, strict=True)
+        if stamp
+    )
+    window = keys[page_slice(keys, len(keys), after=after, before=before)]
+    scan = window if after is not None else window[::-1]
+    start = 0
+    for size in sizes:
+        if start >= len(scan):
+            return
+        yield [workflow_id for _, workflow_id in scan[start : start + size]]
+        start += size
+
+
+def _page_order(
+    page: list[Workflow], limit: int, after: WorkflowOrder | None
+) -> list[Workflow]:
+    page = page[:limit]
+    return page if after is not None else page[::-1]
+
+
+def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> None:
+    for item in items:
+        pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
+
+
+def _queue_transition(
+    pipe: _AnyPipeline,
+    workflow_id: str,
+    records: Sequence[PersistedTask],
+    dispatched: Sequence[str],
+    pending: Sequence[str],
+    done: Sequence[str],
+    failed: Sequence[str],
+    cancelled: Sequence[str],
+    sched: WorkflowSched | None,
+) -> None:
+    terminal = (*done, *failed, *cancelled)
+    touched_membership = bool(dispatched or pending or terminal)
+    _queue_task_states(pipe, records)
+    if dispatched:
+        pipe.sadd(workflow_dispatched_tasks_key(workflow_id), *dispatched)
+    if pending:
+        pipe.srem(workflow_dispatched_tasks_key(workflow_id), *pending)
+    if terminal:
+        pipe.srem(workflow_tasks_key(workflow_id), *terminal)
+        pipe.srem(workflow_dispatched_tasks_key(workflow_id), *terminal)
+    if failed:
+        pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed)
+    if cancelled:
+        pipe.sadd(workflow_cancelled_tasks_key(workflow_id), *cancelled)
+    if touched_membership or sched is not None:
+        pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
+    if sched is not None:
+        pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
+
+
+def _queue_dynamic_tasks(
+    pipe: _AnyPipeline,
+    workflow_id: str,
+    records: Sequence[PersistedTask],
+    snapshot: LedgerSnapshot,
+    retire: Sequence[str],
+) -> None:
+    ids = [item.record.task_id for item in records]
+    _queue_task_states(pipe, records)
+    if ids:
+        pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
+        pipe.sadd(workflow_tasks_key(workflow_id), *ids)
+    if retire:
+        pipe.srem(workflow_tasks_key(workflow_id), *retire)
+    pipe.set(workflow_ds_key(workflow_id), snapshot.model_dump_json())
+    pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
+
+
+def _sched_payload(in_epoch_order: bool, epoch_frontier: int) -> str:
+    return WorkflowSched(
+        in_epoch_order=in_epoch_order, epoch_frontier=epoch_frontier
+    ).model_dump_json()
+
+
 class WorkflowRegistry:
     def __init__(self, rds: RedisClient) -> None:
         self._rds = rds
@@ -289,7 +420,7 @@ class WorkflowRegistry:
             pipe.execute()
 
     async def unregister_workflows_async(self, *workflow_ids: str) -> None:
-        task_ids, members = self._collect(workflow_ids)
+        task_ids, members = await self._collect_async(workflow_ids)
         async with self._rds.asyncio.control_pipeline() as pipe:
             pipe.srem(WORKFLOWS_SET_KEY, *workflow_ids)
             if members:
@@ -330,32 +461,48 @@ class WorkflowRegistry:
     async def workflow_exists_async(self, workflow_id: str) -> bool:
         return await self._rds.asyncio.exists(workflow_key(workflow_id))
 
+    def get_workflow(self, workflow_id: str) -> Workflow | None:
+        workflows = self.get_workflows([workflow_id])
+        return workflows[0] if workflows else None
+
     async def get_workflow_async(self, workflow_id: str) -> Workflow | None:
         workflows = await self.get_workflows_async([workflow_id])
         return workflows[0] if workflows else None
+
+    def get_workflows(self, workflow_ids: Sequence[str]) -> list[Workflow]:
+        """Read the named workflows, in order, in one round trip; leave out a missing
+        one."""
+        with self._rds.sync.control_pipeline() as pipe:
+            _queue_workflow_reads(pipe, workflow_ids)
+            replies = pipe.execute()
+        return self._built_workflows(replies)
 
     async def get_workflows_async(self, workflow_ids: Sequence[str]) -> list[Workflow]:
         """Read the named workflows, in order, in one round trip; leave out a missing
         one."""
         async with self._rds.asyncio.control_pipeline() as pipe:
-            for workflow_id in workflow_ids:
-                pipe.hgetall(workflow_key(workflow_id))
-                pipe.smembers(workflow_dispatched_tasks_key(workflow_id))
-                pipe.smembers(workflow_failed_tasks_key(workflow_id))
-                pipe.smembers(workflow_cancelled_tasks_key(workflow_id))
-                pipe.smembers(workflow_tasks_key(workflow_id))
+            _queue_workflow_reads(pipe, workflow_ids)
             replies = await pipe.execute()
-        return [
-            self._build_workflow(
-                WorkflowRecord.model_validate(data),
-                dispatched,
-                failed,
-                cancelled,
-                remaining,
-            )
-            for data, dispatched, failed, cancelled, remaining in batched(replies, 5)
-            if data
-        ]
+        return self._built_workflows(replies)
+
+    def index_submissions(self) -> int:
+        """Add every registered workflow the submission index lacks; return how many
+        it added."""
+        with self._rds.sync.control_pipeline(transaction=False) as pipe:
+            pipe.scard(WORKFLOWS_SET_KEY)
+            pipe.zcard(WORKFLOWS_BY_SUBMISSION_KEY)
+            registered, indexed = pipe.execute()
+        # Registration and removal update the set and the index in one transaction,
+        # so an index as large as the set covers it.
+        if indexed >= registered:
+            return 0
+        ids = list(self.get_workflow_ids())
+        if not (members := _backfill_members(ids, self._submission_stamps(ids))):
+            return 0
+        with self._rds.sync.control_pipeline(transaction=False) as pipe:
+            _queue_backfill(pipe, members)
+            added = pipe.execute()
+        return sum(added)
 
     async def index_submissions_async(self) -> int:
         """Add every registered workflow the submission index lacks; return how many
@@ -369,21 +516,15 @@ class WorkflowRegistry:
         if indexed >= registered:
             return 0
         ids = list(await self.get_workflow_ids_async())
-        stamps = await self._submission_stamps(ids)
-        members = [
-            _index_member(workflow_order(stamp, workflow_id))
-            for workflow_id, stamp in zip(ids, stamps, strict=True)
-            if stamp
-        ]
-        if not members:
+        stamps = await self._submission_stamps_async(ids)
+        if not (members := _backfill_members(ids, stamps)):
             return 0
         async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
-            for chunk in batched(members, _BACKFILL_BATCH):
-                pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, dict.fromkeys(chunk, 0))
+            _queue_backfill(pipe, members)
             added = await pipe.execute()
         return sum(added)
 
-    async def workflow_page(
+    def workflow_page(
         self,
         query: QueryFilter,
         limit: int,
@@ -405,25 +546,66 @@ class WorkflowRegistry:
             else self._candidate_ids(candidates, sizes, after, before)
         )
         page: list[Workflow] = []
+        with closing(scan) as chunks:
+            for ids in chunks:
+                page.extend(query.filter(self.get_workflows(ids)))
+                if len(page) >= limit:
+                    break
+        return _page_order(page, limit, after)
+
+    async def workflow_page_async(
+        self,
+        query: QueryFilter,
+        limit: int,
+        after: WorkflowOrder | None = None,
+        before: WorkflowOrder | None = None,
+        candidates: Collection[str] | None = None,
+    ) -> list[Workflow]:
+        """Return the page ``workflow_page`` does."""
+        sizes = _scan_sizes(limit, bool(query))
+        scan = (
+            self._indexed_ids_async(sizes, after, before)
+            if candidates is None
+            else self._candidate_ids_async(candidates, sizes, after, before)
+        )
+        page: list[Workflow] = []
         async with aclosing(scan) as chunks:
             async for ids in chunks:
                 page.extend(query.filter(await self.get_workflows_async(ids)))
                 if len(page) >= limit:
                     break
-        page = page[:limit]
-        return page if after is not None else page[::-1]
+        return _page_order(page, limit, after)
 
-    async def _indexed_ids(
+    def _indexed_ids(
+        self,
+        sizes: Iterator[int],
+        after: WorkflowOrder | None,
+        before: WorkflowOrder | None,
+    ) -> Generator[list[str]]:
+        """Yield the indexed workflow ids past a position in scan order: ascending
+        after ``after``, else descending before ``before`` or from the newest."""
+        forward, start = _index_scan_start(after, before)
+        for size in sizes:
+            members = self._rds.sync.lex_range(
+                WORKFLOWS_BY_SUBMISSION_KEY,
+                start or ("-" if forward else "+"),
+                "+" if forward else "-",
+                size,
+                reverse=not forward,
+            )
+            if members:
+                yield [_indexed_id(member) for member in members]
+            if len(members) < size:
+                return
+            start = f"({members[-1]}"
+
+    async def _indexed_ids_async(
         self,
         sizes: Iterator[int],
         after: WorkflowOrder | None,
         before: WorkflowOrder | None,
     ) -> AsyncGenerator[list[str]]:
-        """Yield the indexed workflow ids past a position in scan order: ascending
-        after ``after``, else descending before ``before`` or from the newest."""
-        forward = after is not None
-        bound = after if forward else before
-        start = f"({_index_member(bound)}" if bound is not None else None
+        forward, start = _index_scan_start(after, before)
         for size in sizes:
             members = await self._rds.asyncio.lex_range(
                 WORKFLOWS_BY_SUBMISSION_KEY,
@@ -438,35 +620,37 @@ class WorkflowRegistry:
                 return
             start = f"({members[-1]}"
 
-    async def _candidate_ids(
+    def _candidate_ids(
+        self,
+        candidates: Collection[str],
+        sizes: Iterator[int],
+        after: WorkflowOrder | None,
+        before: WorkflowOrder | None,
+    ) -> Generator[list[str]]:
+        ids = list(candidates)
+        stamps = self._submission_stamps(ids)
+        yield from _candidate_chunks(ids, stamps, sizes, after, before)
+
+    async def _candidate_ids_async(
         self,
         candidates: Collection[str],
         sizes: Iterator[int],
         after: WorkflowOrder | None,
         before: WorkflowOrder | None,
     ) -> AsyncGenerator[list[str]]:
-        """Yield the candidates past a position in scan order, as ``_indexed_ids``
-        does."""
         ids = list(candidates)
-        stamps = await self._submission_stamps(ids)
-        keys = sorted(
-            workflow_order(stamp, workflow_id)
-            for workflow_id, stamp in zip(ids, stamps, strict=True)
-            if stamp
-        )
-        window = keys[page_slice(keys, len(keys), after=after, before=before)]
-        scan = window if after is not None else window[::-1]
-        start = 0
-        for size in sizes:
-            if start >= len(scan):
-                return
-            yield [workflow_id for _, workflow_id in scan[start : start + size]]
-            start += size
+        stamps = await self._submission_stamps_async(ids)
+        for chunk in _candidate_chunks(ids, stamps, sizes, after, before):
+            yield chunk
 
-    async def _submission_stamps(self, ids: Sequence[str]) -> list[str | None]:
+    def _submission_stamps(self, ids: Sequence[str]) -> list[str | None]:
+        with self._rds.sync.control_pipeline(transaction=False) as pipe:
+            _queue_submission_stamps(pipe, ids)
+            return pipe.execute()
+
+    async def _submission_stamps_async(self, ids: Sequence[str]) -> list[str | None]:
         async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
-            for workflow_id in ids:
-                pipe.hget(workflow_key(workflow_id), "submitted_at")
+            _queue_submission_stamps(pipe, ids)
             return await pipe.execute()
 
     def commit_transition(
@@ -490,27 +674,46 @@ class WorkflowRegistry:
         commit together or not at all, so a crash mid-persist can never leave
         durable state half-applied.
         """
-        terminal = (*done, *failed, *cancelled)
-        touched_membership = bool(dispatched or pending or terminal)
         with self._rds.sync.control_pipeline() as pipe:
-            for item in records:
-                pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
-            if dispatched:
-                pipe.sadd(workflow_dispatched_tasks_key(workflow_id), *dispatched)
-            if pending:
-                pipe.srem(workflow_dispatched_tasks_key(workflow_id), *pending)
-            if terminal:
-                pipe.srem(workflow_tasks_key(workflow_id), *terminal)
-                pipe.srem(workflow_dispatched_tasks_key(workflow_id), *terminal)
-            if failed:
-                pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed)
-            if cancelled:
-                pipe.sadd(workflow_cancelled_tasks_key(workflow_id), *cancelled)
-            if touched_membership or sched is not None:
-                pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
-            if sched is not None:
-                pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
+            _queue_transition(
+                pipe,
+                workflow_id,
+                records,
+                dispatched,
+                pending,
+                done,
+                failed,
+                cancelled,
+                sched,
+            )
             pipe.execute()
+
+    async def commit_transition_async(
+        self,
+        workflow_id: str,
+        *,
+        records: Sequence[PersistedTask] = (),
+        dispatched: Sequence[str] = (),
+        pending: Sequence[str] = (),
+        done: Sequence[str] = (),
+        failed: Sequence[str] = (),
+        cancelled: Sequence[str] = (),
+        sched: WorkflowSched | None = None,
+    ) -> None:
+        """Apply a workflow state delta as ``commit_transition`` does."""
+        async with self._rds.asyncio.control_pipeline() as pipe:
+            _queue_transition(
+                pipe,
+                workflow_id,
+                records,
+                dispatched,
+                pending,
+                done,
+                failed,
+                cancelled,
+                sched,
+            )
+            await pipe.execute()
 
     def commit_dynamic_tasks(
         self,
@@ -533,18 +736,26 @@ class WorkflowRegistry:
         """
         if not records and not retire:
             return
-        ids = [item.record.task_id for item in records]
         with self._rds.sync.control_pipeline() as pipe:
-            for item in records:
-                pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
-            if ids:
-                pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
-                pipe.sadd(workflow_tasks_key(workflow_id), *ids)
-            if retire:
-                pipe.srem(workflow_tasks_key(workflow_id), *retire)
-            pipe.set(workflow_ds_key(workflow_id), snapshot.model_dump_json())
-            pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
+            _queue_dynamic_tasks(pipe, workflow_id, records, snapshot, retire)
             pipe.execute()
+
+    async def commit_dynamic_tasks_async(
+        self,
+        workflow_id: str,
+        records: Sequence[PersistedTask],
+        snapshot: LedgerSnapshot,
+        retire: Sequence[str] = (),
+    ) -> None:
+        """Persist dynamic-child records as ``commit_dynamic_tasks`` does."""
+        if not records and not retire:
+            return
+        async with self._rds.asyncio.control_pipeline() as pipe:
+            _queue_dynamic_tasks(pipe, workflow_id, records, snapshot, retire)
+            await pipe.execute()
+
+    def get_dynamic_task_ids(self, workflow_id: str) -> set[str]:
+        return self._rds.sync.set_members(workflow_dynamic_tasks_key(workflow_id))
 
     async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
         return await self._rds.asyncio.set_members(
@@ -553,12 +764,18 @@ class WorkflowRegistry:
 
     # ---- Durable task state (for restart rehydration) ----------------- #
 
+    def save_task_states(self, items: Sequence[PersistedTask]) -> None:
+        if not items:
+            return
+        with self._rds.sync.control_pipeline() as pipe:
+            _queue_task_states(pipe, items)
+            pipe.execute()
+
     async def save_task_states_async(self, items: Sequence[PersistedTask]) -> None:
         if not items:
             return
         async with self._rds.asyncio.control_pipeline() as pipe:
-            for item in items:
-                pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
+            _queue_task_states(pipe, items)
             await pipe.execute()
 
     def load_task_states(self, *task_ids: str) -> list[PersistedTask | None]:
@@ -591,13 +808,25 @@ class WorkflowRegistry:
             for blob in blobs
         ]
 
+    def save_workflow_sched(
+        self, workflow_id: str, in_epoch_order: bool, epoch_frontier: int
+    ) -> None:
+        self._rds.sync.set_value(
+            workflow_sched_key(workflow_id),
+            _sched_payload(in_epoch_order, epoch_frontier),
+        )
+
     async def save_workflow_sched_async(
         self, workflow_id: str, in_epoch_order: bool, epoch_frontier: int
     ) -> None:
-        payload = WorkflowSched(
-            in_epoch_order=in_epoch_order, epoch_frontier=epoch_frontier
-        ).model_dump_json()
-        await self._rds.asyncio.set_value(workflow_sched_key(workflow_id), payload)
+        await self._rds.asyncio.set_value(
+            workflow_sched_key(workflow_id),
+            _sched_payload(in_epoch_order, epoch_frontier),
+        )
+
+    def load_workflow_sched(self, workflow_id: str) -> WorkflowSched | None:
+        blob = self._rds.sync.get(workflow_sched_key(workflow_id))
+        return WorkflowSched.model_validate_json(blob) if blob else None
 
     async def load_workflow_sched_async(self, workflow_id: str) -> WorkflowSched | None:
         blob = await self._rds.asyncio.get(workflow_sched_key(workflow_id))
@@ -617,6 +846,13 @@ class WorkflowRegistry:
 
     def save_ledger_snapshot(self, workflow_id: str, snapshot: LedgerSnapshot) -> None:
         self._rds.sync.set_value(
+            workflow_ds_key(workflow_id), snapshot.model_dump_json()
+        )
+
+    async def save_ledger_snapshot_async(
+        self, workflow_id: str, snapshot: LedgerSnapshot
+    ) -> None:
+        await self._rds.asyncio.set_value(
             workflow_ds_key(workflow_id), snapshot.model_dump_json()
         )
 
@@ -671,6 +907,19 @@ class WorkflowRegistry:
             cancelled_tasks=list(cancelled_tasks),
         )
 
+    def _built_workflows(self, replies: Sequence[Any]) -> list[Workflow]:
+        return [
+            self._build_workflow(
+                WorkflowRecord.model_validate(data),
+                dispatched,
+                failed,
+                cancelled,
+                remaining,
+            )
+            for data, dispatched, failed, cancelled, remaining in batched(replies, 5)
+            if data
+        ]
+
     def _collect(self, workflow_ids: Sequence[str]) -> tuple[list[str], list[str]]:
         """Return the workflows' task ids and their submission-index members."""
         task_ids: list[str] = []
@@ -681,4 +930,19 @@ class WorkflowRegistry:
                 task_ids.extend(record.task_ids)
                 members.append(_record_member(record))
             task_ids.extend(self._rds.sync.set_members(workflow_dynamic_tasks_key(wid)))
+        return task_ids, members
+
+    async def _collect_async(
+        self, workflow_ids: Sequence[str]
+    ) -> tuple[list[str], list[str]]:
+        task_ids: list[str] = []
+        members: list[str] = []
+        for wid in workflow_ids:
+            record = await self.get_workflow_record_async(wid)
+            if record:
+                task_ids.extend(record.task_ids)
+                members.append(_record_member(record))
+            task_ids.extend(
+                await self._rds.asyncio.set_members(workflow_dynamic_tasks_key(wid))
+            )
         return task_ids, members
