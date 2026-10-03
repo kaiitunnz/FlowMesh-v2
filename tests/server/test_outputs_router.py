@@ -11,8 +11,10 @@ from lumid_hooks import PrincipalContext, ResourceRef
 from server.hooks import PERMISSION_CHECKERS
 from server.routers.v1 import outputs as outputs_router
 from server.schemas.outputs import OutputOutcome, WorkflowOutputPage
+from server.task.outputs import decode_member_cursor
 from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime
+from server.utils.cursors import InvalidCursor, encode_cursor
 from shared.content import ContentReference, ContentUnavailable
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
@@ -186,6 +188,35 @@ async def test_a_collection_pages_by_cursor_in_key_order() -> None:
 
     back = await _list(wf, output="fanout", limit=3, before=everything[6])
     assert [e.cursor for e in back.entries] == everything[3:6]
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        ["fanout", "scp-1", "1", True],
+        ["fanout", "scp-1", "1", 1.5],
+        ["fanout", "scp-1", 1, None],
+    ],
+    ids=["bool-sequence", "float-sequence", "int-key"],
+)
+def test_a_member_cursor_of_the_wrong_shape_is_invalid(identity: list[Any]) -> None:
+    with pytest.raises(InvalidCursor):
+        decode_member_cursor(encode_cursor(identity))
+
+
+def test_a_child_index_of_any_length_orders_numerically() -> None:
+    keys = ["10", "9", "007", "0", "a", "9" * 5000]
+    orders = {
+        key: decode_member_cursor(encode_cursor(["o", "s", key, None])) for key in keys
+    }
+    assert sorted(keys, key=orders.__getitem__) == [
+        "0",
+        "007",
+        "9",
+        "10",
+        "9" * 5000,
+        "a",
+    ]
 
 
 @pytest.mark.anyio

@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import typer
+from flowmesh.exceptions import FlowMeshError
 from flowmesh.models import (
     WorkflowSubmitResponse,
 )
@@ -70,6 +71,16 @@ class TestWorkflowSubmit:
 
 class TestWorkflowList:
     @patch("flowmesh_cli.commands.workflow.FlowMesh")
+    def test_a_paging_key_is_reported_not_raised(self, mock_hc: MagicMock) -> None:
+        client = _mock_client()
+        client.workflows.list.side_effect = FlowMeshError("list() pages by itself")
+        mock_hc.return_value = client
+
+        result = runner.invoke(_app(), ["workflow", "list", "-q", "limit=5"])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+    @patch("flowmesh_cli.commands.workflow.FlowMesh")
     def test_status_filter(self, mock_hc: MagicMock) -> None:
         client = _mock_client()
         client.workflows.list.return_value = []
@@ -89,12 +100,12 @@ class TestWorkflowList:
 
         result = runner.invoke(
             _app(),
-            ["workflow", "list", "--query", "owner_id=u-1", "--query", "status=DONE"],
+            ["workflow", "list", "--query", "task_ids=tsk-1", "--query", "status=DONE"],
         )
         assert result.exit_code == 0
         call_kwargs = client.workflows.list.call_args.kwargs
         assert call_kwargs["query_params"] == [
-            ("owner_id", "u-1"),
+            ("task_ids", "tsk-1"),
             ("status", "DONE"),
         ]
 

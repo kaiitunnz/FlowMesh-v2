@@ -27,10 +27,45 @@ from ...schemas.node import (
     NodeWorkerStatus,
     WorkerRegisterResponse,
 )
-from ...utils.misc import filter_models_by_queries
 from ._command import command_error
+from ._listing import ListFilter, filter_params
 
 router = APIRouter(prefix="/nodes", tags=["Nodes"])
+
+
+NODE_FILTER_FIELDS = frozenset(
+    {
+        "id",
+        "alias",
+        "namespace",
+        "cluster",
+        "version",
+        "tags",
+    }
+)
+NODE_WORKER_FILTER_FIELDS = frozenset(
+    {
+        "id",
+        "alias",
+        "namespace",
+        "cluster",
+        "node_id",
+        "node_alias",
+        "provider",
+        "version",
+        "status",
+        "hardware.cpu.model",
+        "hardware.cpu.arch",
+        "hardware.cpu.name",
+        "hardware.gpu.driver_version",
+        "hardware.gpu.cuda_version",
+        "hardware.gpu.gpu_arch",
+        "hardware.network.ip",
+        "hardware.network.public_ipaddr",
+        "hardware.network.geolocation",
+        "hardware.host.os_version",
+    }
+)
 
 
 @router.get(
@@ -40,19 +75,19 @@ router = APIRouter(prefix="/nodes", tags=["Nodes"])
     response_description="List of nodes",
 )
 async def list_nodes(
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(NODE_FILTER_FIELDS)),
     node_registry: NodeRegistry = Depends(get_node_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[Node]:
-    queries = request.query_params
+    query = filters.parse()
     nodes = await node_registry.list_nodes_async()
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.NODE, ResourceAction.READ, logger
     )
     if allowed is not None:
         nodes = [node for node in nodes if node.id in allowed]
-    return filter_models_by_queries(nodes, queries)
+    return query.filter(nodes)
 
 
 @router.get(
@@ -70,12 +105,13 @@ async def list_nodes(
     response_description="List of workers",
 )
 async def list_all_workers(
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(NODE_WORKER_FILTER_FIELDS)),
     node_registry: NodeRegistry = Depends(get_node_registry),
     worker_registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[NodeWorkerInfo]:
+    query = filters.parse()
     nodes = await node_registry.list_nodes_async()
     node_ids = [n.id for n in nodes]
 
@@ -98,8 +134,7 @@ async def list_all_workers(
     )
     if allowed is not None:
         all_workers = [w for w in all_workers if w.id in allowed]
-    filtered = filter_models_by_queries(all_workers, request.query_params)
-    return filtered
+    return query.filter(all_workers)
 
 
 @router.post(
@@ -147,8 +182,8 @@ async def register_node(
 )
 async def list_node_workers(
     node_id: str,
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(NODE_WORKER_FILTER_FIELDS)),
     node_registry: NodeRegistry = Depends(get_node_registry),
     worker_registry: WorkerRegistry = Depends(get_worker_registry),
     logger: logging.Logger = Depends(get_logger),
@@ -156,14 +191,14 @@ async def list_node_workers(
     await require_permission(
         principal, ResourceKind.NODE, node_id, ResourceAction.READ, logger
     )
+    query = filters.parse()
     workers = await _fetch_node_workers(node_id, node_registry, worker_registry, logger)
     allowed = await resolve_accessible_ids(
         principal, ResourceKind.WORKER, ResourceAction.READ, logger
     )
     if allowed is not None:
         workers = [w for w in workers if w.id in allowed]
-    filtered = filter_models_by_queries(workers, request.query_params)
-    return filtered
+    return query.filter(workers)
 
 
 @router.post(

@@ -18,16 +18,20 @@ from ...schemas.outputs import (
     WorkflowOutputPage,
     WorkflowOutputValue,
 )
-from ...task.outputs import InvalidCursor, OutputMember, paginate_members
+from ...task.outputs import OutputMember, decode_member_cursor, paginate_members
 from ...task.results import ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
 from ...task.v2.representations.results import CardinalityKind
+from ._errors import api_error
+from ._listing import (
+    PAGE_LIMIT_DEFAULT,
+    PageAfter,
+    PageBefore,
+    PageLimit,
+    page_bounds,
+)
 
 router = APIRouter(prefix="/workflows", tags=["Outputs"])
-
-
-def _error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(status_code, detail={"code": code, "message": message})
 
 
 async def _authorize(
@@ -44,7 +48,7 @@ async def _authorize(
 
 
 def _no_outputs(workflow_id: str) -> HTTPException:
-    return _error(
+    return api_error(
         status.HTTP_404_NOT_FOUND,
         "output_not_found",
         f"workflow {workflow_id} has no published outputs",
@@ -82,34 +86,22 @@ def _present[M: WorkflowOutputMember](
 )
 async def list_outputs(
     workflow_id: str,
-    limit: int = Query(100, ge=1, le=1000, description="Maximum members to return."),
-    before: str | None = Query(
-        None, description="Return members strictly before this cursor."
-    ),
-    after: str | None = Query(
-        None, description="Return members strictly after this cursor."
-    ),
+    limit: PageLimit = PAGE_LIMIT_DEFAULT,
+    before: PageBefore = None,
+    after: PageAfter = None,
     output: str | None = Query(None, description="Only this output's members."),
     scope: str | None = Query(None, description="Only members in this scope."),
     principal: PrincipalContext = Depends(authenticate_connection),
     runtime: TaskRuntime = Depends(get_runtime),
     logger: logging.Logger = Depends(get_logger),
 ) -> WorkflowOutputPage:
-    if before and after:
-        raise _error(
-            status.HTTP_400_BAD_REQUEST,
-            "invalid_request",
-            "only one of before/after may be set",
-        )
+    after_bound, before_bound = page_bounds(after, before, decode_member_cursor)
     await _authorize(workflow_id, principal, logger)
     outputs = runtime.published_outputs(workflow_id, output)
     if outputs is None:
         raise _no_outputs(workflow_id)
     members = [m for m in outputs.members if scope is None or m.scope_id == scope]
-    try:
-        selected = paginate_members(members, limit, after=after, before=before)
-    except InvalidCursor as exc:
-        raise _error(status.HTTP_400_BAD_REQUEST, "invalid_cursor", str(exc)) from exc
+    selected = paginate_members(members, limit, after=after_bound, before=before_bound)
     entries = [
         _present(WorkflowOutputEntry, member, cursor=member.cursor)
         for member in selected
@@ -147,7 +139,7 @@ async def get_output(
     if found is None:
         raise _no_outputs(workflow_id)
     if (declaration := found.declaration) is None:
-        raise _error(
+        raise api_error(
             status.HTTP_404_NOT_FOUND,
             "output_not_found",
             f"workflow {workflow_id} publishes no output named {output_name!r}",
@@ -156,20 +148,20 @@ async def get_output(
     member = found.member
     # A collection whose spawn failed holds one member with no scope and no key.
     if keyed and (scope is None or key is None) and member is None:
-        raise _error(
+        raise api_error(
             status.HTTP_400_BAD_REQUEST,
             "invalid_request",
             f"output {output_name!r} is a collection; select a member by scope and key",
         )
     if member is None and (not keyed or not found.open):
         # A settled workflow publishes nothing more, so a missing member never comes.
-        raise _error(
+        raise api_error(
             status.HTTP_404_NOT_FOUND,
             "output_not_found",
             f"output {output_name!r} has no member at the given selectors",
         )
     if member is None or member.publication is None:
-        raise _error(
+        raise api_error(
             status.HTTP_409_CONFLICT,
             "output_pending",
             f"output {output_name!r} has not settled at the given selectors",
@@ -179,11 +171,11 @@ async def get_output(
     try:
         envelope = await asyncio.to_thread(runtime.read_output, member)
     except ResultUnavailable as exc:
-        raise _error(
+        raise api_error(
             status.HTTP_503_SERVICE_UNAVAILABLE, "content_unavailable", str(exc)
         ) from exc
     except ResultUnreadable as exc:
-        raise _error(
+        raise api_error(
             status.HTTP_500_INTERNAL_SERVER_ERROR, "output_unreadable", str(exc)
         ) from exc
     return _present(WorkflowOutputValue, member, value=envelope.result)

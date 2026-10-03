@@ -52,6 +52,7 @@ TASK_EVENT_CURSOR_KEY = "tasks:events:cursor"
 TASK_EVENT_STREAM_MAXLEN = 100_000
 
 WORKFLOWS_SET_KEY = "workflows:ids"
+WORKFLOWS_BY_SUBMISSION_KEY = "workflows:by_submission"
 
 TASK_LOGS_STREAM_PREFIX = "logs:task:"
 WORKFLOW_LOGS_STREAM_PREFIX = "logs:workflow:"
@@ -166,6 +167,10 @@ def workflow_log_stream_key(workflow_id: str) -> str:
 
 def task_log_archive_last_id_key(task_id: str) -> str:
     return f"task:{task_id}:logs:archived_last_id"
+
+
+def task_log_archived_key(task_id: str) -> str:
+    return f"task:{task_id}:logs:archived"
 
 
 def task_log_closed_key(task_id: str) -> str:
@@ -504,9 +509,22 @@ class SyncRedisClient:
         if members:
             self._telemetry.srem(key, *members)
 
+    # ---- Sorted-set helpers ----
+    def lex_range(
+        self, key: str, start: str, stop: str, count: int, reverse: bool = False
+    ) -> list[str]:
+        """Return up to ``count`` members of a sorted set whose members share one
+        score, from ``start`` toward ``stop`` (``ZRANGEBYLEX`` bounds), descending
+        when ``reverse``."""
+        if reverse:
+            members = self._control.zrevrangebylex(key, start, stop, start=0, num=count)
+        else:
+            members = self._control.zrangebylex(key, start, stop, start=0, num=count)
+        return list(_sync(members))
+
     # ---- Pipelines ----
-    def control_pipeline(self) -> Pipeline:
-        return self._control.pipeline()
+    def control_pipeline(self, transaction: bool = True) -> Pipeline:
+        return self._control.pipeline(transaction=transaction)
 
     # ---- Pub/Sub ----
     def publish_control(self, channel: str, message: str) -> int:
@@ -552,6 +570,12 @@ class SyncRedisClient:
         self, key: str, min_id: str = "-", max_id: str = "+", count: int | None = None
     ) -> list[tuple[str, dict[str, Any]]]:
         result = self._telemetry.xrange(key, min=min_id, max=max_id, count=count)
+        return list(_sync(result))
+
+    def xrevrange_telemetry(
+        self, key: str, max_id: str = "+", min_id: str = "-", count: int | None = None
+    ) -> list[tuple[str, dict[str, Any]]]:
+        result = self._telemetry.xrevrange(key, max=max_id, min=min_id, count=count)
         return list(_sync(result))
 
     def xread_telemetry(
@@ -724,9 +748,22 @@ class AsyncRedisClient:
         if members:
             await _awaitable(self._telemetry.srem(key, *members))
 
+    # ---- Sorted-set helpers ----
+    async def lex_range(
+        self, key: str, start: str, stop: str, count: int, reverse: bool = False
+    ) -> list[str]:
+        """Return up to ``count`` members of a sorted set whose members share one
+        score, from ``start`` toward ``stop`` (``ZRANGEBYLEX`` bounds), descending
+        when ``reverse``."""
+        if reverse:
+            members = self._control.zrevrangebylex(key, start, stop, start=0, num=count)
+        else:
+            members = self._control.zrangebylex(key, start, stop, start=0, num=count)
+        return list(await _awaitable(members))
+
     # ---- Pipelines ----
-    def control_pipeline(self):
-        return self._control.pipeline()
+    def control_pipeline(self, transaction: bool = True):
+        return self._control.pipeline(transaction=transaction)
 
     # ---- Pub/Sub ----
     async def publish_control(self, channel: str, message: str) -> int:

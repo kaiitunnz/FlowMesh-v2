@@ -113,7 +113,7 @@ src/
     task/                 parser, runtime, models, merge / epoch helpers
       v2/                   versioned representations, compiler
     tools/                Fabric-served external-tool control authority (broker)
-    utils/                concurrent, helpers, logging, misc, time
+    utils/                concurrent, cursors, helpers, logging, query, time
   shared/
     grpc/supervisor/v1/   Generated proto stubs (server + worker)
     schemas/              Cross-cutting schemas
@@ -609,7 +609,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   fresh permit, and an interrupt for each of its cancelling tasks.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
-  do not parse client-side.
+  do not parse client-side. Task and workflow listings build their pages off
+  the event loop.
 - **Cluster telemetry.** A workflow emits one OpenTelemetry trace spanning the processes
   that act on it — the root server's control plane and each worker that runs a task,
   with a supervisor relaying frames it never decodes and so never records — with a
@@ -623,13 +624,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
   settled. The span's end is the last durable finish among its tasks, so a workflow that
   closes again after a restart closes the same way it did the first time.
-- **Redis channels.** The runtime uses three namespaces:
-  - `flowmesh:control:*` — control plane (task assignments,
-    cancellations, worker lifecycle).
-  - `flowmesh:telemetry:*` — telemetry (heartbeats, status updates).
-  - `flowmesh:logs:task:{task_id}` and
-    `flowmesh:logs:workflow:{wfl_id}` — log streams, bounded by
-    `LOG_STREAM_MAXLEN_TASK` / `LOG_STREAM_MAXLEN_WORKFLOW` and
+- **Redis channels.** The runtime uses two Redis endpoints (separate instances in the
+  stack):
+  - control (`REDIS_CONTROL_URL`) — durable state and the control plane's
+    pub/sub: `node:{node_id}:dispatch` (task assignments, interrupts and other
+    frames for a node's workers), `node:{node_id}:cmds` and `nodes:responses`
+    (node commands).
+  - telemetry (`REDIS_TELEMETRY_URL`) — `workers:events` and `nodes:events`
+    (heartbeats, status updates), the `tasks:events:stream` task-event stream,
+    and the log streams `logs:task:{task_id}` and `logs:workflow:{wfl_id}`,
     expired `LOG_STREAM_TTL_SEC` after close.
 
 ## Service restarts

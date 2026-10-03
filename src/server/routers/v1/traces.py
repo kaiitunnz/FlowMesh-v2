@@ -1,20 +1,26 @@
 """Trace endpoints — per-task upload, workflow-level read + analyzer, span queries."""
 
 import functools
+import json
 import logging
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, BinaryIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
+from pydantic import TypeAdapter
+from starlette.types import Receive, Scope, Send
 
 from shared.schemas.result import result_file_path
 from shared.telemetry.ids import workflow_to_trace_id_int
-from shared.utils.json import encode_jsonl_bytes, read_jsonl
+from shared.utils.atomic import atomic_write_stream
+from shared.utils.json import encode_jsonl_bytes
+from shared.utils.manifest import LOGS_DIR
+from shared.utils.nofollow import PathRefused, open_below, open_dir
 
 from ...app_state import (
     get_logger,
@@ -55,16 +61,96 @@ _TYPE_TO_FILENAME: dict[str, str] = {
 }
 
 
-def _logs_dir_for_task(results_dir: Path, task_id: str) -> Path:
-    """Per-task ``logs/`` directory holding the trace JSONL artifacts."""
-    return result_file_path(results_dir, task_id).parent / "logs"
+def _task_dir(results_dir: Path, task_id: str) -> Path:
+    return result_file_path(results_dir, task_id).parent
 
 
-def _iter_workflow_jsonl(
-    results_dir: Path, task_ids: Iterable[str], filename: str
-) -> Iterator[dict[str, Any]]:
-    for task_id in task_ids:
-        yield from read_jsonl(_logs_dir_for_task(results_dir, task_id) / filename)
+# A trace file holds JSON lines our writers keep far shorter than this; a file with
+# a longer line, or with this many lines in a row that hold no row, is not a trace,
+# and the rest of it is not read.
+_MAX_TRACE_LINE_BYTES = 4 << 20
+_MAX_SKIPPED_TRACE_LINES = 100
+
+
+class _WorkflowRows:
+    """The rows of one trace file across a workflow's tasks, read one file and one
+    bounded line at a time; ``close`` closes the file being read, so an aborted
+    stream holds none."""
+
+    def __init__(
+        self,
+        results_dir: Path,
+        task_ids: Iterable[str],
+        filename: str,
+        logger: logging.Logger,
+    ):
+        self._results_dir = results_dir
+        self._task_ids = task_ids
+        self._filename = filename
+        self._logger = logger
+        self._current: BinaryIO | None = None
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        for task_id in self._task_ids:
+            opened = open_below(
+                _task_dir(self._results_dir, task_id),
+                PurePosixPath(LOGS_DIR, self._filename),
+            )
+            if opened is None:
+                continue
+            with opened as fh:
+                self._current = fh
+                yield from self._rows(fh, task_id)
+            self._current = None
+
+    def _rows(self, fh: BinaryIO, task_id: str) -> Iterator[dict[str, Any]]:
+        skipped = 0
+        while line := fh.readline(_MAX_TRACE_LINE_BYTES + 1):
+            if len(line) > _MAX_TRACE_LINE_BYTES and not line.endswith(b"\n"):
+                self._stop(task_id, f"a line longer than {_MAX_TRACE_LINE_BYTES} bytes")
+                return
+            row = _parse_row(line)
+            if row is None:
+                skipped += 1
+                if skipped >= _MAX_SKIPPED_TRACE_LINES:
+                    self._stop(task_id, f"{skipped} lines in a row that hold no row")
+                    return
+                continue
+            skipped = 0
+            yield row
+
+    def _stop(self, task_id: str, reason: str) -> None:
+        self._logger.warning(
+            "Not reading the rest of task %s's %s: %s", task_id, self._filename, reason
+        )
+
+    def close(self) -> None:
+        if self._current is not None:
+            self._current.close()
+
+
+def _parse_row(line: bytes) -> Any | None:
+    """The JSON value on ``line``, or None when it holds none."""
+    try:
+        return json.loads(line) if line.strip() else None
+    except (ValueError, RecursionError):
+        return None
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """A streaming response that runs ``on_close`` once it ends, sent or aborted."""
+
+    def __init__(
+        self, content: Iterator[bytes], on_close: Callable[[], None], media_type: str
+    ) -> None:
+        super().__init__(content, media_type=media_type)
+        self._on_close = on_close
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._on_close()
 
 
 async def _resolve_workflow(workflow_id: str, registry: WorkflowRegistry) -> Workflow:
@@ -92,15 +178,28 @@ async def analyze_workflow_trace(
     registry: WorkflowRegistry = Depends(get_workflow_registry),
     results_dir: Path = Depends(get_results_dir),
     logger: logging.Logger = Depends(get_logger),
-) -> ProfileSummary:
+) -> Response:
     await require_permission(
         principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.READ, logger
     )
     task_ids = await _resolve_task_ids(workflow_id, registry)
-    spans = list(_iter_workflow_jsonl(results_dir, task_ids, "spans.jsonl"))
-    assets = list(_iter_workflow_jsonl(results_dir, task_ids, "assets.jsonl"))
-    lineage = list(_iter_workflow_jsonl(results_dir, task_ids, "lineage.jsonl"))
-    return analyze(spans, assets, lineage, workflow_id=workflow_id)
+    body = await run_in_threadpool(
+        _analyze_workflow, results_dir, task_ids, workflow_id, logger
+    )
+    return Response(body, media_type="application/json")
+
+
+_PROFILE_SUMMARY = TypeAdapter(ProfileSummary)
+
+
+def _analyze_workflow(
+    results_dir: Path, task_ids: list[str], workflow_id: str, logger: logging.Logger
+) -> bytes:
+    spans = list(_WorkflowRows(results_dir, task_ids, "spans.jsonl", logger))
+    assets = list(_WorkflowRows(results_dir, task_ids, "assets.jsonl", logger))
+    lineage = list(_WorkflowRows(results_dir, task_ids, "lineage.jsonl", logger))
+    summary = analyze(spans, assets, lineage, workflow_id=workflow_id)
+    return _PROFILE_SUMMARY.dump_json(summary, by_alias=True)
 
 
 @router.get(
@@ -125,9 +224,9 @@ async def get_workflow_trace(
             detail=f"unknown type '{trace_type}'; expected spans, assets, or lineage",
         )
     task_ids = await _resolve_task_ids(workflow_id, registry)
-    return StreamingResponse(
-        encode_jsonl_bytes(_iter_workflow_jsonl(results_dir, task_ids, filename)),
-        media_type="application/x-ndjson",
+    rows = _WorkflowRows(results_dir, task_ids, filename, logger)
+    return _ClosingStreamingResponse(
+        encode_jsonl_bytes(rows), rows.close, media_type="application/x-ndjson"
     )
 
 
@@ -152,17 +251,24 @@ async def upload_task_trace(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"unknown type '{trace_type}'; expected spans, assets, or lineage",
         )
-    target_path = _logs_dir_for_task(results_dir, task_id) / filename
-    target_path.parent.mkdir(parents=True, exist_ok=True)
+    task_dir = _task_dir(results_dir, task_id)
     try:
-        with target_path.open("wb") as out:
-            out.write(await file.read())
+        await run_in_threadpool(_store_trace, task_dir, filename, file.file)
+    except PathRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path"
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to store trace: {exc}",
         ) from exc
-    return PathResponse(ok=True, path=target_path.as_posix())
+    return PathResponse(ok=True, path=(task_dir / LOGS_DIR / filename).as_posix())
+
+
+def _store_trace(task_dir: Path, filename: str, source: BinaryIO) -> None:
+    with open_dir(task_dir, LOGS_DIR, create=True) as logs_fd:
+        atomic_write_stream(Path(filename), source, dir_fd=logs_fd)
 
 
 def _require_telemetry_store(store: TelemetryStore | None) -> TelemetryStore:

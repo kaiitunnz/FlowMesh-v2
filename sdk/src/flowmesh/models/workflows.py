@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, SerializeAsAny
 
-from .common import TaskStatus, WorkflowStatus
+from .common import CursorPage, TaskStatus, WorkflowStatus
 from .result import AnyExecutorResult
 
 
@@ -77,6 +77,10 @@ class Workflow(BaseModel):
     cancelled_tasks: list[str]
 
 
+class WorkflowPage(CursorPage):
+    entries: list[Workflow]
+
+
 class OutputOutcome(StrEnum):
     PENDING = "pending"
     SUCCESS = "success"
@@ -98,10 +102,8 @@ class WorkflowOutputEntry(WorkflowOutputMember):
     cursor: str
 
 
-class WorkflowOutputPage(BaseModel):
+class WorkflowOutputPage(CursorPage):
     entries: list[WorkflowOutputEntry]
-    next_cursor: str | None = None
-    prev_cursor: str | None = None
     open: bool
 
 

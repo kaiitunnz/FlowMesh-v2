@@ -6,19 +6,13 @@ spawns, whose members are keyed by child index within their scope. Members order
 that stable identity, so a cursor names a fixed position.
 """
 
-import base64
-import binascii
-import json
 from dataclasses import dataclass
 from typing import Any
 
 from ..orchestration import OrchestrationEngine
 from ..orchestration.state import ResultPublication, ResultSlot
+from ..utils.cursors import InvalidCursor, decode_cursor, encode_cursor, page_slice
 from .v2.representations.results import CardinalityKind, ResultDeclaration
-
-
-class InvalidCursor(ValueError):
-    """A cursor that is not one this catalog issued."""
 
 
 @dataclass(frozen=True)
@@ -38,9 +32,7 @@ class OutputMember:
 
     @property
     def cursor(self) -> str:
-        identity = [self.name, self.scope_id, self.key, self.sequence]
-        raw = json.dumps(identity, separators=(",", ":")).encode()
-        return base64.urlsafe_b64encode(raw).decode("ascii")
+        return encode_cursor([self.name, self.scope_id, self.key, self.sequence])
 
     @property
     def order(self) -> tuple[Any, ...]:
@@ -95,18 +87,16 @@ def published_member(
 def paginate_members(
     members: list[OutputMember],
     limit: int,
-    after: str | None = None,
-    before: str | None = None,
+    after: tuple[Any, ...] | None = None,
+    before: tuple[Any, ...] | None = None,
 ) -> list[OutputMember]:
-    """The ``limit`` members strictly after, or strictly before, a cursor."""
+    """Select the ``limit`` members strictly after, or strictly before, a decoded
+    cursor position."""
     ordered = sorted(members, key=lambda member: member.order)
-    if after is not None:
-        bound = _decode_cursor(after)
-        return [m for m in ordered if m.order > bound][:limit]
-    if before is not None:
-        bound = _decode_cursor(before)
-        return [m for m in ordered if m.order < bound][-limit:]
-    return ordered[:limit]
+    window = page_slice(
+        [member.order for member in ordered], limit, after=after, before=before
+    )
+    return ordered[window]
 
 
 def _member(
@@ -124,35 +114,37 @@ def _member(
     )
 
 
-def _decode_cursor(cursor: str) -> tuple[Any, ...]:
-    try:
-        identity = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
-        name, scope_id, key, sequence = identity
-    except (binascii.Error, UnicodeError, ValueError, TypeError) as exc:
-        raise InvalidCursor(f"invalid cursor {cursor!r}") from exc
-    if not isinstance(name, str) or not all(
-        value is None or isinstance(value, str) for value in (scope_id, key)
-    ):
-        raise InvalidCursor(f"invalid cursor {cursor!r}")
-    if sequence is not None and not isinstance(sequence, int):
-        raise InvalidCursor(f"invalid cursor {cursor!r}")
-    return _order(name, scope_id, key, sequence)
+def decode_member_cursor(cursor: str) -> tuple[Any, ...]:
+    """Return the member position a cursor encodes; raise InvalidCursor otherwise."""
+    match decode_cursor(cursor):
+        case [
+            str() as name,
+            str() | None as scope_id,
+            str() | None as key,
+            int() | None as sequence,
+        ] if not isinstance(sequence, bool):
+            return _order(name, scope_id, key, sequence)
+    raise InvalidCursor(f"invalid cursor {cursor!r}")
 
 
 def _order(
     name: str, scope_id: str | None, key: str | None, sequence: int | None
 ) -> tuple[Any, ...]:
-    # A child index orders numerically, so member 10 follows member 9.
-    numeric = key is not None and key.isascii() and key.isdigit()
-    key_order = (0, int(key), "") if numeric and key else (1, 0, key or "")
+    # A child index orders numerically, so member 10 follows member 9: by its digit
+    # count without leading zeros, then by its digits.
+    if key and key.isascii() and key.isdigit():
+        digits = key.lstrip("0")
+        key_order: tuple[int, int, str] = (0, len(digits), digits)
+    else:
+        key_order = (1, 0, key or "")
     return (name, scope_id or "", key_order, -1 if sequence is None else sequence)
 
 
 __all__ = [
-    "InvalidCursor",
     "OutputMember",
     "PublishedOutput",
     "PublishedOutputs",
+    "decode_member_cursor",
     "paginate_members",
     "published_member",
     "published_members",

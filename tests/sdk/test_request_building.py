@@ -203,7 +203,7 @@ class TestQueryParams:
 
     @respx.mock
     def test_list_tasks_with_filters(self, mock_client: FlowMesh) -> None:
-        route = respx.get(route_url("list_tasks")).respond(json=[])
+        route = respx.get(route_url("list_tasks")).respond(json={"entries": []})
         mock_client.tasks.list(workflow_id="wf-1", status=["DONE", "FAILED"])
         request = route.calls[0].request
         url = str(request.url)

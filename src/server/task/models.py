@@ -298,6 +298,14 @@ class TaskInputElement(BaseModel):
     index: int = Field(description="Position of the element in that collection.")
 
 
+# A task's position in a listing: its submission time, then its id.
+type TaskOrder = tuple[float, str]
+
+
+def task_order(record: TaskRecord) -> TaskOrder:
+    return record.submitted_ts, record.task_id
+
+
 class TaskInfo(TaskRecord):
     depends_on: list[str] = Field(description="Dependency task IDs.")
     pending_dependencies: list[str] = Field(

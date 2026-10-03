@@ -1470,7 +1470,7 @@ class Runner:
 
     @staticmethod
     def _get_log_path(out_dir: Path) -> Path:
-        return out_dir / "logs" / "logs.jsonl"
+        return out_dir / "logs" / "worker.jsonl"
 
     def _build_task_metadata(
         self,

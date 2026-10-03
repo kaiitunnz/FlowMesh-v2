@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 
 from ...app_state import get_logger, get_resident_control
 from ...auth.security import (
@@ -17,9 +17,20 @@ from ...schemas.resident import (
     ResidentReplicaCredit,
     ResidentReplicaInfo,
 )
-from ...utils.misc import filter_models_by_queries
+from ._listing import ListFilter, filter_params
 
 router = APIRouter(prefix="/resident", tags=["Resident"])
+
+RESIDENT_REPLICA_FILTER_FIELDS = frozenset(
+    {
+        "replica_id",
+        "family",
+        "state",
+        "healthy",
+        "serve_task_id",
+        "worker_id",
+    }
+)
 
 
 async def _require_admin(principal: PrincipalContext, logger: logging.Logger) -> None:
@@ -52,19 +63,20 @@ async def list_resident_families(
     description="List live and inert resident replica incarnations.",
 )
 async def list_resident_replicas(
-    request: Request,
     principal: PrincipalContext = Depends(authenticate_connection),
+    filters: ListFilter = Depends(filter_params(RESIDENT_REPLICA_FILTER_FIELDS)),
     control: ResidentCapacityControl | None = Depends(get_resident_control),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[ResidentReplicaInfo]:
     await _require_admin(principal, logger)
+    query = filters.parse()
     if control is None:
         return []
     replicas = [
         ResidentReplicaInfo.project(replica)
         for replica in control.list_replica_incarnations()
     ]
-    return filter_models_by_queries(replicas, request.query_params)
+    return query.filter(replicas)
 
 
 @router.get(

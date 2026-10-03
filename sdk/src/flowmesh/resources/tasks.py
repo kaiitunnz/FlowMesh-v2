@@ -13,10 +13,11 @@ from ..models.common import (
     LogQueryResponse,
     OkResponse,
 )
-from ..models.tasks import TaskInfo
+from ..models.tasks import TaskInfo, TaskPage
 from ..params import append_param, extend_params
 from ..ssh import task_ssh_info, wait_for_ssh_info, wait_for_ssh_info_async
 from ._base import AsyncResource, SyncResource
+from ._pages import list_all, list_all_async
 
 
 class Tasks(SyncResource):
@@ -40,7 +41,7 @@ class Tasks(SyncResource):
         failed: bool | None = None,
         query_params: list[tuple[str, str]] | None = None,
     ) -> list[TaskInfo]:
-        """List tasks with optional filters."""
+        """List every task matching the filters, oldest first."""
         params: list[tuple[str, str]] = []
         append_param(params, "task_id", task_id)
         append_param(params, "workflow_id", workflow_id)
@@ -53,8 +54,8 @@ class Tasks(SyncResource):
         append_param(params, "failed", failed)
         if query_params:
             params.extend(query_params)
-        data = self._client._request("GET", "/tasks", params=params or None)
-        return [TaskInfo.model_validate(t) for t in data]
+        pages = list_all(self._client, "/tasks", params, TaskPage)
+        return [entry for page in pages for entry in page.entries]
 
     def stop(self, task_id: str) -> OkResponse:
         """Request a running task to stop."""
@@ -148,7 +149,7 @@ class AsyncTasks(AsyncResource):
         failed: bool | None = None,
         query_params: list[tuple[str, str]] | None = None,
     ) -> list[TaskInfo]:
-        """List tasks with optional filters."""
+        """List every task matching the filters, oldest first."""
         params: list[tuple[str, str]] = []
         append_param(params, "task_id", task_id)
         append_param(params, "workflow_id", workflow_id)
@@ -161,8 +162,8 @@ class AsyncTasks(AsyncResource):
         append_param(params, "failed", failed)
         if query_params:
             params.extend(query_params)
-        data = await self._client._request("GET", "/tasks", params=params or None)
-        return [TaskInfo.model_validate(t) for t in data]
+        pages = await list_all_async(self._client, "/tasks", params, TaskPage)
+        return [entry for page in pages for entry in page.entries]
 
     async def stop(self, task_id: str) -> OkResponse:
         """Request a running task to stop."""

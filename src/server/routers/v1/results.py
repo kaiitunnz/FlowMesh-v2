@@ -2,10 +2,14 @@ import asyncio
 import gzip
 import io
 import logging
+import mimetypes
+import os
+import stat
 import tarfile
 import tempfile
 import time
 from pathlib import Path
+from typing import BinaryIO
 
 from fastapi import (
     APIRouter,
@@ -18,14 +22,26 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, Response
+from starlette.types import Receive, Scope, Send
 
 from shared.schemas.result import RESULT_MEDIA_TYPE, AnyExecutorResult, result_file_path
+from shared.utils.atomic import atomic_write_stream, is_atomic_temp
 from shared.utils.manifest import (
     ARTIFACTS_DIR,
     LOGS_DIR,
     RESULTS_NAME,
     prepare_output_dir,
     sync_manifest,
+)
+from shared.utils.nofollow import (
+    PathRefused,
+    is_plain_segment,
+    join_relative,
+    open_below,
+    open_dir,
+    open_dir_at,
+    open_regular,
+    walk,
 )
 
 from ...app_state import (
@@ -48,21 +64,20 @@ from ...task.runtime import TaskRuntime
 _BUNDLE_SECTIONS_CONCRETE = ("results", "artifacts", "logs")
 _BUNDLE_SECTIONS_ACCEPTED = (*_BUNDLE_SECTIONS_CONCRETE, "all")
 _BUNDLE_SECTIONS_DEFAULT = ("results", "artifacts")
+_LOGS_NAME = "logs.jsonl"
 
 router = APIRouter(prefix="/results", tags=["Results"])
 
 
 def _resolve_artifact_path(filename: str) -> Path:
-    sanitized = Path(filename)
-    if (
-        sanitized.is_absolute()
-        or filename in {"", ".", ".."}
-        or any(part in {"", ".", ".."} for part in sanitized.parts)
+    segments = filename.split("/")
+    if not all(
+        is_plain_segment(part) and not is_atomic_temp(part) for part in segments
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
         )
-    return Path(ARTIFACTS_DIR) / sanitized
+    return Path(ARTIFACTS_DIR, *segments)
 
 
 @router.get(
@@ -118,32 +133,29 @@ async def upload_result_file(
     )
     base_dir = result_file_path(results_dir, task_id).parent
     relative_path = _resolve_artifact_path(file.filename or "")
-    target_path = (base_dir / relative_path).resolve()
+    target_path = base_dir / relative_path
 
+    record = runtime.get_record(task_id)
+    expected_artifacts = record.task.spec.get_artifacts() if record else []
     try:
-        target_path.relative_to(base_dir)
-    except ValueError:
+        await asyncio.to_thread(_store_artifact, file, base_dir, relative_path)
+    except PathRefused as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
-        )
-
-    prepare_output_dir(base_dir)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with target_path.open("wb") as out:
-            out.write(await file.read())
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to store artifact: {exc}",
         ) from exc
-
-    record = runtime.get_record(task_id)
-    expected_artifacts: list[str] = []
-    if record:
-        expected_artifacts = record.task.spec.get_artifacts()
-    sync_manifest(base_dir, task_id, expected_artifacts)
+    await asyncio.to_thread(sync_manifest, base_dir, task_id, expected_artifacts)
     return PathResponse(ok=True, path=str(target_path))
+
+
+def _store_artifact(file: UploadFile, base_dir: Path, relative_path: Path) -> None:
+    prepare_output_dir(base_dir)
+    with open_dir(base_dir, *relative_path.parent.parts, create=True) as dir_fd:
+        atomic_write_stream(Path(relative_path.name), file.file, dir_fd=dir_fd)
 
 
 @router.get(
@@ -167,16 +179,9 @@ async def download_result_file(
     sanitized = Path(filename)
     base_dir = result_file_path(results_dir, task_id).parent
     relative_path = _resolve_artifact_path(filename)
-    target_path = (base_dir / relative_path).resolve()
 
-    try:
-        target_path.relative_to(base_dir)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
-        )
-
-    if not target_path.exists() or not target_path.is_file():
+    opened = await asyncio.to_thread(open_below, base_dir, relative_path)
+    if opened is None:
         if len(sanitized.parts) != 1:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found"
@@ -186,20 +191,12 @@ async def download_result_file(
                 await _read_result_bytes(runtime, task_id),
                 media_type=RESULT_MEDIA_TYPE,
             )
-        fallback = (base_dir / sanitized.name).resolve()
-        try:
-            fallback.relative_to(base_dir)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
-            )
-        if not fallback.exists() or not fallback.is_file():
+        opened = await asyncio.to_thread(open_below, base_dir, sanitized)
+        if opened is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found"
             )
-        target_path = fallback
-
-    return FileResponse(target_path)
+    return _file_response(opened, sanitized.name)
 
 
 @router.get(
@@ -234,7 +231,7 @@ async def download_result_bundle(
         )
 
     base_dir = result_file_path(results_dir, task_id).parent
-    has_dir = base_dir.is_dir()
+    has_dir = await asyncio.to_thread(_has_dir, base_dir)
     try:
         result = (
             await asyncio.to_thread(runtime.read_result_bytes, task_id)
@@ -252,8 +249,8 @@ async def download_result_bundle(
         )
 
     try:
-        bundle_path = _create_result_bundle_archive(
-            task_id, base_dir, result, sections=sections
+        bundle_path = await asyncio.to_thread(
+            _create_result_bundle_archive, task_id, base_dir, result, sections
         )
     except Exception as exc:
         raise HTTPException(
@@ -282,23 +279,77 @@ async def download_task_logs(
     principal: PrincipalContext = Depends(authenticate_connection),
     results_dir: Path = Depends(get_results_dir),
     logger: logging.Logger = Depends(get_logger),
-) -> FileResponse:
+) -> Response:
     await require_permission(
         principal, ResourceKind.RESULT, task_id, ResourceAction.READ, logger
     )
     base_dir = result_file_path(results_dir, task_id).parent
-    target_path = (base_dir / LOGS_DIR / "logs.jsonl").resolve()
-    try:
-        target_path.relative_to(base_dir)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path"
-        )
-    if not target_path.exists() or not target_path.is_file():
+    opened = await asyncio.to_thread(open_below, base_dir, Path(LOGS_DIR) / _LOGS_NAME)
+    if opened is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="logs not found"
         )
-    return FileResponse(target_path)
+    return _file_response(opened, _LOGS_NAME)
+
+
+class _OpenFileResponse(FileResponse):
+    """A file response served from an already-opened file rather than a path, with
+    ``FileResponse``'s single ranges and validators.
+
+    The body is read through ``/dev/fd``, which reopens the opened file itself, and
+    the opened file is closed once the response ends, sent or aborted. A request
+    naming several ranges is answered whole: ``FileResponse`` never finishes sending
+    several ranges of a file truncated under it.
+    """
+
+    def __init__(self, opened: BinaryIO, media_type: str) -> None:
+        self._opened = opened
+        super().__init__(
+            f"/dev/fd/{opened.fileno()}",
+            media_type=media_type,
+            stat_result=os.fstat(opened.fileno()),
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        extensions = {
+            key: value
+            for key, value in scope.get("extensions", {}).items()
+            if key != "http.response.pathsend"
+        }
+        headers = [
+            (name, value)
+            for name, value in scope.get("headers", [])
+            if name.lower() != b"range" or not _names_several_ranges(value)
+        ]
+        try:
+            await super().__call__(
+                {**scope, "extensions": extensions, "headers": headers}, receive, send
+            )
+        finally:
+            self._opened.close()
+
+
+def _file_response(opened: BinaryIO, name: str) -> _OpenFileResponse:
+    return _OpenFileResponse(
+        opened,
+        media_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
+    )
+
+
+def _names_several_ranges(value: bytes) -> bool:
+    """Whether a ``Range`` header names more than one range. Every non-empty part
+    counts, including one ``FileResponse`` would ignore, so such a request is answered
+    whole rather than as a single range."""
+    _, _, ranges = value.decode("latin-1").partition("=")
+    return sum(1 for part in ranges.split(",") if part.strip() not in {"", "-"}) > 1
+
+
+def _has_dir(base_dir: Path) -> bool:
+    try:
+        with open_dir(base_dir):
+            return True
+    except (FileNotFoundError, PathRefused):
+        return False
 
 
 def _resolve_bundle_sections(include: list[str]) -> tuple[str, ...]:
@@ -347,10 +398,9 @@ def _create_result_bundle_archive(
                         info.mtime = int(time.time())
                         archive.addfile(info, io.BytesIO(result))
                     continue
-                candidate = _bundle_section_path(base_dir, section)
-                if candidate is None or not candidate.exists():
-                    continue
-                archive.add(candidate, arcname=f"{task_id}/{candidate.name}")
+                name = _bundle_section_name(section)
+                if name is not None:
+                    _add_section(archive, base_dir, name, f"{task_id}/{name}")
     except Exception:
         bundle_path.unlink(missing_ok=True)
         raise
@@ -358,11 +408,72 @@ def _create_result_bundle_archive(
     return bundle_path
 
 
-def _bundle_section_path(base_dir: Path, section: str) -> Path | None:
+def _add_section(
+    archive: tarfile.TarFile, base_dir: Path, name: str, arcname: str
+) -> None:
+    """Add the section ``name`` of a task's results and everything under it without
+    following a link.
+
+    The walk holds each directory open and reads every name relative to it, so a
+    link, or a directory swapped for one, is archived as the link. A task directory
+    that is a link has no sections. In-flight atomic writes and names removed or
+    replaced during the walk are left out.
+    """
+    try:
+        with open_dir(base_dir) as base_fd:
+            if not _add_entry(archive, base_fd, name, arcname):
+                return
+            with open_dir_at(base_fd, name) as top_fd:
+                for rel_dir, dirs, others, dirfd in walk(top_fd):
+                    dirs[:] = [entry for entry in dirs if not is_atomic_temp(entry)]
+                    for entry in sorted([*dirs, *others]):
+                        if not is_atomic_temp(entry):
+                            _add_entry(
+                                archive,
+                                dirfd,
+                                entry,
+                                f"{arcname}/{join_relative(rel_dir, entry)}",
+                            )
+    except (FileNotFoundError, PathRefused):
+        return
+
+
+def _add_entry(archive: tarfile.TarFile, dirfd: int, name: str, arcname: str) -> bool:
+    """Archive ``name`` in ``dirfd`` without following it; return whether it is a
+    directory to walk. A special file, and a name removed or replaced while it is
+    read, is left out."""
+    try:
+        st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+        if stat.S_ISREG(st.st_mode):
+            if (opened := open_regular(dirfd, name)) is not None:
+                with opened as fh:
+                    info = archive.gettarinfo(arcname=arcname, fileobj=fh)
+                    if info is not None and info.isreg():
+                        archive.addfile(info, fh)
+                    elif info is not None and info.islnk():
+                        archive.addfile(info)
+            return False
+        info = tarfile.TarInfo(arcname)
+        if stat.S_ISDIR(st.st_mode):
+            info.type = tarfile.DIRTYPE
+        elif stat.S_ISLNK(st.st_mode):
+            info.type = tarfile.SYMTYPE
+            info.linkname = os.readlink(name, dir_fd=dirfd)
+        else:
+            return False
+    except FileNotFoundError:
+        return False
+    info.mode = stat.S_IMODE(st.st_mode)
+    info.uid, info.gid, info.mtime = st.st_uid, st.st_gid, int(st.st_mtime)
+    archive.addfile(info)
+    return info.isdir()
+
+
+def _bundle_section_name(section: str) -> str | None:
     if section == "artifacts":
-        return base_dir / ARTIFACTS_DIR
+        return ARTIFACTS_DIR
     if section == "logs":
-        return base_dir / LOGS_DIR
+        return LOGS_DIR
     return None
 
 

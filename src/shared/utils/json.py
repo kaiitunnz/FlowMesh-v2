@@ -2,7 +2,6 @@ import datetime
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator
-from pathlib import Path
 from typing import Any
 
 
@@ -150,14 +149,6 @@ async def aparse_jsonl_lines(
             yield json.loads(line)
         except json.JSONDecodeError:
             continue
-
-
-def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
-    """Read a JSONL file and yield decoded dict rows. Missing file → empty."""
-    if not path.exists() or not path.is_file():
-        return
-    with path.open(encoding="utf-8") as fh:
-        yield from parse_jsonl_lines(fh)
 
 
 def encode_jsonl_bytes(rows: Iterable[dict[str, Any]]) -> Iterator[bytes]:

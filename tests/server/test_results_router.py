@@ -1,15 +1,23 @@
+import contextlib
+import gc
 import io
 import logging
+import os
+import socket
 import stat
+import tarfile
+import tempfile
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
+import anyio
 import pytest
-from fastapi import HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse, Response
 from fastapi.routing import APIRoute
 from lumid_hooks import PrincipalContext, ResourceRef
 
@@ -23,6 +31,8 @@ from shared.content import (
 )
 from shared.schemas.result import RESULT_MEDIA_TYPE, ResultEnvelope
 from shared.tasks.result_binding import ResultBinding
+from shared.utils import atomic
+from tests.server.asgi_responses import ClientGone, serve
 
 
 class _UnreachableStore(SharedFilesystemObjectStore):
@@ -142,8 +152,8 @@ async def test_download_result_file_resolves_flat_name_under_artifacts(
         results_dir=tmp_path,
     )
 
-    assert isinstance(response, FileResponse)
-    assert Path(response.path) == artifact_path
+    assert await _body(response) == b'{"ok":true}'
+    assert response.media_type == "application/json"
 
 
 @pytest.mark.anyio
@@ -162,8 +172,11 @@ async def test_download_result_file_falls_back_to_task_root_for_flat_filename(
         results_dir=tmp_path,
     )
 
-    assert isinstance(response, FileResponse)
-    assert Path(response.path) == root_file
+    assert await _body(response) == b'{"ok":true}'
+
+
+async def _body(response: Response) -> bytes:
+    return (await serve(response)).body
 
 
 def test_resolve_artifact_relative_path_scopes_nested_paths_to_artifacts() -> None:
@@ -186,6 +199,13 @@ def test_resolve_artifact_relative_path_rejects_invalid_paths() -> None:
         results_router._resolve_artifact_path("../result.json")
 
 
+@pytest.mark.parametrize("filename", [".fm-tmp-result.json", ".fm-tmp-dir/out.bin"])
+def test_an_artifact_named_as_an_in_flight_write_is_refused(filename: str) -> None:
+    with pytest.raises(HTTPException) as exc:
+        results_router._resolve_artifact_path(filename)
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
 @pytest.mark.anyio
 async def test_upload_result_file_denied_without_permission(
     deny_all_permissions: None, logger: logging.Logger
@@ -202,16 +222,16 @@ async def test_upload_result_file_shares_the_task_directories_before_writing(
     tmp_path: Path, logger: logging.Logger
 ) -> None:
     task_dir = tmp_path / "task-1"
-    open_path = Path.open
+    write = results_router.atomic_write_stream
     modes_at_write: dict[str, int] = {}
 
-    def _open(path: Path, *args: Any, **kwargs: Any) -> Any:
+    def _write(target: Path, source: Any, dir_fd: int) -> None:
         for directory in (task_dir, task_dir / "artifacts", task_dir / "logs"):
             if directory.is_dir():
                 modes_at_write[directory.name] = stat.S_IMODE(directory.stat().st_mode)
-        return open_path(path, *args, **kwargs)
+        write(target, source, dir_fd=dir_fd)
 
-    with patch.object(Path, "open", autospec=True, side_effect=_open):
+    with patch.object(results_router, "atomic_write_stream", _write):
         await results_router.upload_result_file(
             task_id="task-1",
             file=UploadFile(file=io.BytesIO(b"x"), filename="out.txt"),
@@ -295,3 +315,384 @@ async def test_download_results_json_reads_the_stored_envelope(
 
     assert response.body == stored
     assert response.media_type == RESULT_MEDIA_TYPE
+
+
+@pytest.mark.anyio
+async def test_upload_result_file_copies_in_chunks_off_the_event_loop(
+    tmp_path: Path, logger: logging.Logger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copies: list[tuple[int, int]] = []
+    copy = atomic.shutil.copyfileobj
+
+    def _recording(source: Any, target: Any, length: int = 0) -> None:
+        copies.append((threading.get_ident(), length))
+        copy(source, target, length)
+
+    async def _whole_read(*args: Any) -> bytes:
+        raise AssertionError("the upload was read whole")
+
+    monkeypatch.setattr(atomic.shutil, "copyfileobj", _recording)
+    upload = UploadFile(file=io.BytesIO(b"x" * 10), filename="out.bin")
+    monkeypatch.setattr(upload, "read", _whole_read)
+
+    await results_router.upload_result_file(
+        task_id="task-1",
+        file=upload,
+        runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+        principal=_principal(),
+        results_dir=tmp_path,
+        logger=logger,
+    )
+
+    assert copies == [(copies[0][0], 1 << 20)]
+    assert copies[0][0] != threading.get_ident()
+    assert (tmp_path / "task-1" / "artifacts" / "out.bin").read_bytes() == b"x" * 10
+
+
+@pytest.mark.anyio
+async def test_download_result_bundle_builds_off_the_event_loop(
+    tmp_path: Path, logger: logging.Logger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    threads: list[int] = []
+    build = results_router._create_result_bundle_archive
+
+    def _recording(*args: Any, **kwargs: Any) -> Path:
+        threads.append(threading.get_ident())
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(results_router, "_create_result_bundle_archive", _recording)
+    stub = SimpleNamespace(
+        get_record=lambda _task_id: None,
+        read_result_bytes=lambda _task_id: b"{}",
+    )
+
+    response = await results_router.download_result_bundle(
+        task_id="t-1",
+        background_tasks=BackgroundTasks(),
+        include=[],
+        principal=_principal(),
+        runtime=cast(Any, stub),
+        results_dir=tmp_path,
+        logger=logger,
+    )
+
+    assert isinstance(response, FileResponse)
+    assert threads and threads[0] != threading.get_ident()
+    Path(response.path).unlink()
+
+
+def test_a_bundle_leaves_out_in_flight_writes_and_files_removed_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "nested").mkdir(parents=True)
+    (artifacts / "nested" / "kept.bin").write_bytes(b"x")
+    in_flight = Path(tempfile.mkstemp(prefix=".fm-tmp-", dir=artifacts)[1])
+    assert atomic.is_atomic_temp(in_flight.name)
+    walk = results_router.walk
+
+    def _with_removed(top_fd: int) -> Iterator[Any]:
+        for rel_dir, dirs, others, dirfd in walk(top_fd):
+            yield rel_dir, dirs, [*others, "gone.bin"], dirfd
+
+    monkeypatch.setattr(results_router, "walk", _with_removed)
+
+    assert _bundle_members(tmp_path) == [
+        ("t-1/artifacts", tarfile.DIRTYPE, ""),
+        ("t-1/artifacts/nested", tarfile.DIRTYPE, ""),
+        ("t-1/artifacts/nested/kept.bin", tarfile.REGTYPE, ""),
+    ]
+
+
+def test_a_bundle_archives_a_symlinked_section_root_as_the_link(
+    tmp_path: Path,
+) -> None:
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "passwd").write_text("root:x:0:0")
+    task = tmp_path / "task"
+    task.mkdir()
+    (task / "logs").symlink_to(secret)
+
+    members = _bundle_members(task, ("logs",))
+
+    assert members == [("t-1/logs", tarfile.SYMTYPE, str(secret))]
+    assert members == _reference_members(task, ("logs",))
+
+
+def test_a_bundle_archives_a_symlinked_nested_directory_as_the_link(
+    tmp_path: Path,
+) -> None:
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "passwd").write_text("root:x:0:0")
+    artifacts = tmp_path / "task" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "out").symlink_to(secret)
+
+    members = _bundle_members(tmp_path / "task")
+
+    assert members == [
+        ("t-1/artifacts", tarfile.DIRTYPE, ""),
+        ("t-1/artifacts/out", tarfile.SYMTYPE, str(secret)),
+    ]
+    assert members == _reference_members(tmp_path / "task")
+
+
+def test_a_bundle_reads_a_directory_swapped_for_a_link_from_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "kept.bin").write_bytes(b"secret")
+    artifacts = tmp_path / "task" / "artifacts"
+    (artifacts / "nested").mkdir(parents=True)
+    (artifacts / "nested" / "kept.bin").write_bytes(b"x")
+    walk = results_router.walk
+
+    def _swapping(top_fd: int) -> Iterator[Any]:
+        for entry in walk(top_fd):
+            if entry[0] == "nested":
+                (artifacts / "nested").rename(tmp_path / "moved")
+                (artifacts / "nested").symlink_to(secret)
+            yield entry
+
+    monkeypatch.setattr(results_router, "walk", _swapping)
+
+    with _open_bundle(tmp_path / "task") as archive:
+        member = archive.extractfile("t-1/artifacts/nested/kept.bin")
+        assert member is not None and member.read() == b"x"
+    assert (artifacts / "nested").is_symlink()
+
+
+def test_a_bundle_keeps_links_empty_directories_and_modes_and_leaves_out_special_files(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "empty").mkdir(parents=True)
+    (artifacts / "loop").symlink_to("loop")
+    os.mkfifo(artifacts / "pipe")
+    held = socket.socket(socket.AF_UNIX)
+    held.bind(str(artifacts / "sock"))
+    script = artifacts / "run.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o750)
+    (artifacts / "empty").chmod(0o700)
+
+    try:
+        members = _bundle_members(tmp_path)
+        with _open_bundle(tmp_path) as archive:
+            modes = {member.name: member.mode for member in archive.getmembers()}
+            archive.extractall(tmp_path / "extracted", filter="data")
+    finally:
+        held.close()
+
+    special = {"t-1/artifacts/pipe", "t-1/artifacts/sock"}
+    assert sorted(members) == [
+        member for member in _reference_members(tmp_path) if member[0] not in special
+    ]
+    assert modes["t-1/artifacts/run.sh"] == 0o750
+    assert modes["t-1/artifacts/empty"] == 0o700
+
+
+def _bundle_members(
+    base_dir: Path, sections: tuple[str, ...] = ("artifacts",)
+) -> list[tuple[str, bytes, str]]:
+    with _open_bundle(base_dir, sections) as archive:
+        return [
+            (member.name, member.type, member.linkname)
+            for member in archive.getmembers()
+        ]
+
+
+@contextlib.contextmanager
+def _open_bundle(
+    base_dir: Path, sections: tuple[str, ...] = ("artifacts",)
+) -> Iterator[tarfile.TarFile]:
+    bundle = results_router._create_result_bundle_archive(
+        "t-1", base_dir, None, sections
+    )
+    try:
+        with tarfile.open(bundle, mode="r:gz") as archive:
+            yield archive
+    finally:
+        bundle.unlink()
+
+
+def _reference_members(
+    base_dir: Path, sections: tuple[str, ...] = ("artifacts",)
+) -> list[tuple[str, bytes, str]]:
+    """The members ``tarfile`` itself archives for each section, in walk order."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for section in sections:
+            archive.add(base_dir / section, arcname=f"t-1/{section}")
+    buffer.seek(0)
+    with tarfile.open(fileobj=buffer, mode="r") as archive:
+        members = [(m.name, m.type, m.linkname) for m in archive.getmembers()]
+    return sorted(members)
+
+
+def _conditional(etag: str, last_modified: str) -> list[dict[str, str]]:
+    return [
+        {},
+        {"Range": "bytes=0-9"},
+        {"Range": "bytes=10-"},
+        {"Range": "bytes=-5"},
+        {"Range": "bytes=999999-"},
+        {"Range": "bytes=abc"},
+        {"If-None-Match": etag},
+        {"If-Modified-Since": last_modified},
+        {"Range": "bytes=0-9", "If-Range": etag},
+        {"Range": "bytes=0-9", "If-Range": '"stale"'},
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("name", ["out.bin", "logs.jsonl", "notes.unknownext", "a.txt"])
+async def test_a_download_answers_as_a_file_response_does(
+    tmp_path: Path, name: str
+) -> None:
+    artifacts = tmp_path / "task-1" / "artifacts"
+    artifacts.mkdir(parents=True)
+    path = artifacts / name
+    path.write_bytes(bytes(range(256)) * 300)
+    plain = await serve(FileResponse(path))
+
+    for request in _conditional(plain.headers["etag"], plain.headers["last-modified"]):
+        response = await results_router.download_result_file(
+            task_id="task-1",
+            filename=name,
+            runtime=cast(Any, _RuntimeStub()),
+            results_dir=tmp_path,
+        )
+        assert await serve(response, request) == await serve(
+            FileResponse(path), request
+        ), request
+
+
+@pytest.mark.anyio
+async def test_a_logs_download_answers_as_a_file_response_does(tmp_path: Path) -> None:
+    logs = tmp_path / "task-1" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "logs.jsonl").write_bytes(b'{"message": "hi"}\n' * 5000)
+    plain = await serve(FileResponse(logs / "logs.jsonl"))
+
+    for request in _conditional(plain.headers["etag"], plain.headers["last-modified"]):
+        response = await results_router.download_task_logs(
+            task_id="task-1", results_dir=tmp_path
+        )
+        assert await serve(response, request) == await serve(
+            FileResponse(logs / "logs.jsonl"), request
+        ), request
+
+
+@pytest.mark.anyio
+async def test_an_aborted_download_closes_its_files_without_a_collection(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "task-1" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "big.bin").write_bytes(b"x" * (1 << 20))
+    open_fds = len(os.listdir("/dev/fd"))
+    gc.disable()
+    try:
+        for _ in range(5):
+            response = await results_router.download_result_file(
+                task_id="task-1",
+                filename="big.bin",
+                runtime=cast(Any, _RuntimeStub()),
+                results_dir=tmp_path,
+            )
+            with pytest.raises(ClientGone):
+                await serve(response, abort_after_chunks=1)
+        assert len(os.listdir("/dev/fd")) == open_fds
+    finally:
+        gc.enable()
+
+
+def test_a_bundle_keeps_hard_links_as_tarfile_does(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "d1").mkdir(parents=True)
+    (artifacts / "a.bin").write_bytes(b"shared")
+    os.link(artifacts / "a.bin", artifacts / "d1" / "hard.bin")
+
+    members = _bundle_members(tmp_path)
+
+    assert sorted(members) == _reference_members(tmp_path)
+    assert ("t-1/artifacts/d1/hard.bin", tarfile.LNKTYPE, "t-1/artifacts/a.bin") in (
+        members
+    )
+
+
+@pytest.mark.parametrize(
+    "filename", ["a//b.txt", "./x.txt", "dir/", "/abs.txt", "x\0y.txt", "a/../b"]
+)
+def test_an_artifact_name_with_a_non_plain_segment_is_refused(filename: str) -> None:
+    with pytest.raises(HTTPException) as exc:
+        results_router._resolve_artifact_path(filename)
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+@pytest.mark.anyio
+async def test_an_upload_through_a_link_loop_is_refused(
+    tmp_path: Path, logger: logging.Logger
+) -> None:
+    artifacts = tmp_path / "task-1" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "loop").symlink_to("loop")
+
+    with pytest.raises(HTTPException) as exc:
+        await results_router.upload_result_file(
+            task_id="task-1",
+            file=UploadFile(file=io.BytesIO(b"x"), filename="loop/out.txt"),
+            runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+            principal=_principal(),
+            results_dir=tmp_path,
+            logger=logger,
+        )
+
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ranges", ["bytes=0-9,20-29", "bytes=0-1, 5-", "bytes=-5,0-0"])
+async def test_a_download_naming_several_ranges_is_answered_whole(
+    tmp_path: Path, ranges: str
+) -> None:
+    artifacts = tmp_path / "task-1" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "out.bin").write_bytes(bytes(range(256)))
+
+    response = await results_router.download_result_file(
+        task_id="task-1",
+        filename="out.bin",
+        runtime=cast(Any, _RuntimeStub()),
+        results_dir=tmp_path,
+    )
+
+    assert await serve(response, {"Range": ranges}) == await serve(
+        FileResponse(artifacts / "out.bin")
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ranges", [None, "bytes=0-", "bytes=0-9,100-199"])
+async def test_a_download_of_a_file_truncated_under_it_ends(
+    tmp_path: Path, ranges: str | None
+) -> None:
+    artifacts = tmp_path / "task-1" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "out.bin").write_bytes(b"x" * (1 << 20))
+    response = await results_router.download_result_file(
+        task_id="task-1",
+        filename="out.bin",
+        runtime=cast(Any, _RuntimeStub()),
+        results_dir=tmp_path,
+    )
+    os.truncate(artifacts / "out.bin", 0)
+
+    with anyio.fail_after(5):
+        served = await serve(response, {"Range": ranges} if ranges else None)
+
+    assert served.body == b""

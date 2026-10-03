@@ -646,6 +646,12 @@ async def _lifespan(_: FastAPI):
                 # as its own timeouts allow, and a store that is slow or unreachable
                 # must not hold up the process that would report it.
                 await asyncio.to_thread(ensure_bucket, config.object_store, logger)
+            if WORKFLOW_REGISTRY is not None:
+                # A workflow missing from the submission index joins it before any
+                # listing reads it.
+                indexed = await WORKFLOW_REGISTRY.index_submissions_async()
+                if indexed:
+                    logger.info("Indexed %d workflow(s) by submission", indexed)
             await rehydrate_root_state(
                 RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY, GATED_SERVE
             )

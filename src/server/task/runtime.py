@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import Any, Self, cast
@@ -120,6 +120,8 @@ from ..orchestration.tool_dispatch import (
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.credential_vault import CredentialVault
+from ..utils.cursors import page_slice
+from ..utils.query import QueryFilter
 from ..utils.time import now_iso, parse_iso_ts, ts_to_iso
 from .credentials import (
     CredentialRefs,
@@ -143,6 +145,7 @@ from .models import (
     SettleOutcome,
     TaskInfo,
     TaskInputElement,
+    TaskOrder,
     TaskParsingResult,
     TaskRecord,
     TaskStatus,
@@ -150,6 +153,7 @@ from .models import (
     WorkerRecovery,
     WorkflowSettlement,
     categorize_task_type,
+    task_order,
 )
 from .outputs import (
     OutputMember,
@@ -634,6 +638,20 @@ def _captured_calls(
 
 def _unscrubbed(text: str) -> str:
     return text
+
+
+def _listing_fields(
+    task_id: str,
+    record: TaskRecord,
+    query: QueryFilter,
+    computed: Mapping[str, Callable[[str], Any]],
+) -> dict[str, Any]:
+    """Read the fields ``query`` names from a record, computing those ``TaskInfo``
+    derives from runtime state."""
+    return {
+        key: computed[key](task_id) if key in computed else getattr(record, key)
+        for key in query.terms
+    }
 
 
 class TaskRuntime:
@@ -6744,12 +6762,46 @@ class TaskRuntime:
                 return None
             return self._build_task_info_locked(task_id, record)
 
-    def list_tasks(self) -> list[TaskInfo]:
+    def task_statuses(self) -> dict[str, str]:
         with self._lock:
-            return [
-                self._build_task_info_locked(task_id, record)
+            return {task_id: record.status for task_id, record in self._tasks.items()}
+
+    def task_page(
+        self,
+        query: QueryFilter,
+        limit: int,
+        after: TaskOrder | None = None,
+        before: TaskOrder | None = None,
+        accessible: Collection[str] | None = None,
+    ) -> list[TaskInfo]:
+        """Return the tasks matching ``query``, ordered by submission: the ``limit``
+        just after or before a position, or the newest ``limit``.
+
+        One pass under the lock matches record attributes and copies out the page's
+        fields, so the page is one consistent snapshot; building runs outside it.
+        """
+        workflow_ids = query.values("workflow_id")
+        statuses = query.values("status")
+        rest = query.without("workflow_id", "status")
+        with self._lock:
+            computed = self._listing_computed_locked()
+            keys = sorted(
+                task_order(record)
                 for task_id, record in self._tasks.items()
+                if (workflow_ids is None or record.workflow_id in workflow_ids)
+                and (statuses is None or record.status in statuses)
+                and (accessible is None or task_id in accessible)
+                and (
+                    not rest
+                    or rest.matches(_listing_fields(task_id, record, rest, computed))
+                )
+            )
+            window = page_slice(keys, limit, after=after, before=before, newest=True)
+            fields = [
+                self._task_info_fields_locked(task_id, self._tasks[task_id])
+                for _, task_id in keys[window]
             ]
+        return [TaskInfo(**task) for task in fields]
 
     # ------------------------------------------------------------------ #
     # Misc helpers
@@ -7020,20 +7072,42 @@ class TaskRuntime:
             total = len(self._tasks)
             return queueing, dispatched, pending, done, total
 
+    def _listing_computed_locked(self) -> dict[str, Callable[[str], Any]]:
+        empty: frozenset[str] = frozenset()
+        return {
+            "completed": self._completed.__contains__,
+            "failed": self._failed.__contains__,
+            "depends_on": lambda task_id: self._original_deps.get(task_id, empty),
+            "pending_dependencies": lambda task_id: self._pending_deps.get(
+                task_id, empty
+            ),
+            "dependents": lambda task_id: self._dependents.get(task_id, empty),
+        }
+
     def _build_task_info_locked(self, task_id: str, record: TaskRecord) -> TaskInfo:
+        return TaskInfo(**self._task_info_fields_locked(task_id, record))
+
+    def _task_info_fields_locked(
+        self, task_id: str, record: TaskRecord
+    ) -> dict[str, Any]:
+        """Return a task's ``TaskInfo`` fields to build from after the lock is
+        released, duplicating the containers a record appends to in place."""
         element = self._input_element_locked(task_id)
-        return TaskInfo(
-            **dict(record),
-            depends_on=sorted(self._original_deps.get(task_id, set())),
-            pending_dependencies=sorted(self._pending_deps.get(task_id, set())),
-            dependents=sorted(self._dependents.get(task_id, set())),
-            completed=task_id in self._completed,
-            failed=task_id in self._failed,
-            input_element=(
+        return {
+            **{
+                name: value.copy() if isinstance(value, (list, dict)) else value
+                for name, value in record
+            },
+            "depends_on": sorted(self._original_deps.get(task_id, set())),
+            "pending_dependencies": sorted(self._pending_deps.get(task_id, set())),
+            "dependents": sorted(self._dependents.get(task_id, set())),
+            "completed": task_id in self._completed,
+            "failed": task_id in self._failed,
+            "input_element": (
                 TaskInputElement(
                     producer_task_id=element.producer_task_id, index=element.ref.element
                 )
                 if element is not None
                 else None
             ),
-        )
+        }

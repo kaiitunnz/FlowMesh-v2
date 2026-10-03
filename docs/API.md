@@ -25,7 +25,7 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 |--------|------|-------------|
 | POST | `/api/v1/workflows` | Submit a workflow. Body is YAML (`text/plain`) or JSON; set `Workflow-Format: n8n` for n8n graphs. |
 | POST | `/api/v1/workflows/validate` | Parse without executing; for `flowmesh/v2` returns the compiled template/plan inspection. |
-| GET | `/api/v1/workflows` | List workflows (`workflow_id`, `owner`, `status`, cursor pagination). |
+| GET | `/api/v1/workflows` | List workflows as cursor pages. |
 | GET | `/api/v1/workflows/{id}` | Workflow details + per-task summary. |
 | GET | `/api/v1/workflows/{id}/logs` | Query logs (`limit`, `before`/`after` cursors). |
 | GET | `/api/v1/workflows/{id}/logs/stream` | SSE log stream. |
@@ -51,7 +51,7 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/tasks` | List tasks. Filters: `workflow_id`, `status`, `task_type`, `assigned_worker`. |
+| GET | `/api/v1/tasks` | List tasks as cursor pages. |
 | GET | `/api/v1/tasks/{id}` | Task details. |
 | GET | `/api/v1/tasks/{id}/logs` | Query task logs. |
 | GET | `/api/v1/tasks/{id}/logs/stream` | SSE task log stream. |
@@ -63,7 +63,7 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 |--------|------|-------------|
 | GET | `/api/v1/results/{task_id}` | Get task result JSON, read from the shared content store. |
 | GET | `/api/v1/results/{task_id}/bundle` | Download tar.gz bundle (`?include=results,artifacts,logs,all`). |
-| POST | `/api/v1/results/{task_id}/files` | Upload artifact (multipart). |
+| POST | `/api/v1/results/{task_id}/files` | Upload artifact (multipart). A path segment starting with `.fm-tmp-` is reserved and refused. |
 | GET | `/api/v1/results/{task_id}/files/{filename}` | Download artifact. |
 | GET | `/api/v1/results/{task_id}/logs` | Download archived `logs.jsonl`. |
 
@@ -88,11 +88,12 @@ The outcome-finalization index: the binding from a fabric idempotency key to the
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/workers` | List workers. Filters: `alias`, `namespace`, `cluster`, `status`, `tags`. |
+| GET | `/api/v1/workers` | List workers. |
 | GET | `/api/v1/workers/{id}` | Worker details + hardware. |
 | GET | `/api/v1/nodes` | List nodes (supervisors). |
 | POST | `/api/v1/nodes/register` | Register a node; `409 Conflict` while another live node holds the same alias, with the held lease's `lease_remaining_ms`. |
 | GET | `/api/v1/nodes/{id}/workers` | List workers under a node. |
+| GET | `/api/v1/nodes/workers` | List workers across every node. |
 | POST | `/api/v1/nodes/{id}/workers/register` | Register worker under node. |
 | POST | `/api/v1/nodes/{id}/workers/{alias}/{start,stop}` | Start/stop a worker. |
 
@@ -102,6 +103,7 @@ calls.
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/api/v1/stack/workers` | List this node's workers. |
 | GET | `/api/v1/stack/workers/providers` | Worker providers available on this node (e.g. `docker`, `external`, `vastai`). |
 | POST | `/api/v1/stack/workers` | Create a worker on this node; `409 Conflict` when the requested `provider` is unavailable here. |
 
@@ -134,7 +136,7 @@ capacity is disabled.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/resident/families` | List registered service families. |
-| GET | `/api/v1/resident/replicas` | List replica incarnations (state, health, `serve_task_id`, endpoint host/port). Filter: `family`. |
+| GET | `/api/v1/resident/replicas` | List replica incarnations (state, health, `serve_task_id`, endpoint host/port). |
 | GET | `/api/v1/resident/claims` | List credit-bearing admission claims and per-replica held credit. |
 
 Endpoint responses carry host and port only — never an `api_key`. Read a replica's serving
@@ -166,3 +168,22 @@ resident traffic and dials only with `NETWORK_PLANE_PEER_ENABLED=true`. See
 List endpoints (`/api/v1/workflows`, `/api/v1/tasks`, log queries,
 published outputs) accept `limit` and `before` / `after` cursors.
 Cursors are opaque; do not parse them client-side.
+
+Workflows and tasks are ordered by submission and return
+`{entries, next_cursor, prev_cursor}`. Without a cursor, a request returns
+the newest page; `before=<prev_cursor>` returns the next older page and
+`after=<next_cursor>` the next newer one, each in submission order. `limit`
+defaults to 100, at most 1000. A request setting both cursors is a `400` with
+`detail.code` `invalid_request`, and a malformed cursor is a `400` with
+`invalid_cursor`.
+
+## List filters
+
+Each list route's filters are its query parameters in `/docs`, and each matches
+exactly, as a string.
+A boolean field matches `true`, `1`, `yes` or `on` and `false`, `0`, `no` or
+`off`, in any case, and a comma-separated `tags` string matches any of its tags.
+A repeated filter matches any of its values, and different filters all apply. A
+list field matches when it holds a value, a dotted filter reads a nested field,
+and a field that is unset, or whose parent is unset, matches `null`. Any other
+query key is a `400` with `detail.code` `invalid_request`.
