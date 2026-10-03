@@ -389,6 +389,20 @@ class TestDockerWorkerRuntimeSelection:
         assert environment["WORKER_FOREIGN_GPU_CONSECUTIVE"] == "5"
         assert environment["WORKER_FOREIGN_GPU_GRACE_SEC"] == "12.0"
 
+    def test_worker_environment_forwards_serve_ttl_settings(self) -> None:
+        worker = self._worker()
+        worker.config = DockerWorkerConfig(
+            worker_type=WorkerType.GPU,
+            cuda_devices=[3],
+            serve_default_ttl_sec=600.0,
+            serve_max_ttl_sec=7200.0,
+        )
+
+        environment = worker._base_environment()
+
+        assert environment["SERVE_DEFAULT_TTL_SEC"] == "600.0"
+        assert environment["SERVE_MAX_TTL_SEC"] == "7200.0"
+
 
 class TestCapacityChangeReporting:
     def _run(self, coro: object) -> object:  # type: ignore[return]

@@ -99,7 +99,12 @@ class VLLMServeExecutor(Executor):
         if model_id is None:
             raise ExecutionError("Serve spec is missing model.source.identifier")
 
-        deadline = serve_deadline(spec.ttlSeconds, task.serve_elapsed_sec)
+        deadline = serve_deadline(
+            spec.ttlSeconds,
+            task.serve_elapsed_sec,
+            self._config.serve_default_ttl_sec,
+            self._config.serve_max_ttl_sec,
+        )
         readiness_timeout = (
             spec.readinessTimeoutSeconds or _DEFAULT_READINESS_TIMEOUT_SEC
         )

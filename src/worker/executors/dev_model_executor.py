@@ -368,7 +368,12 @@ class DevModelExecutor(Executor):
         spec = self.require_spec(task, DevModelSpecStrict)
 
         model_id = spec.model_name or "dev-model"
-        deadline = serve_deadline(spec.ttlSeconds, task.serve_elapsed_sec)
+        deadline = serve_deadline(
+            spec.ttlSeconds,
+            task.serve_elapsed_sec,
+            self._config.serve_default_ttl_sec,
+            self._config.serve_max_ttl_sec,
+        )
         vllm = (spec.model.vllm if spec.model is not None else None) or {}
         raw_max_loras = vllm.get("max_loras")
         max_loras = raw_max_loras if isinstance(raw_max_loras, int) else None
