@@ -522,3 +522,39 @@ def test_a_finished_tasks_last_lines_are_archived(tmp_path: Path) -> None:
         archiver._tick()
 
     assert _lines(archiver, "tsk-1") == ['{"m": "last"}']
+
+
+def test_the_first_retry_waits_its_full_delay_after_a_blocking_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(log_archiver.time, "time", clock.time)
+
+    def _sleep(seconds: float) -> None:
+        clock.now += seconds
+
+    monkeypatch.setattr(log_archiver.time, "sleep", _sleep)
+    archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DISPATCHED})
+    read = streams.redis.xread_telemetry.side_effect
+
+    def _read_after_blocking(requested: dict[str, str], **kwargs: Any) -> list[Any]:
+        clock.now += kwargs["block_ms"] / 1000
+        return read(requested, **kwargs)
+
+    streams.redis.xread_telemetry.side_effect = _read_after_blocking
+    attempts: list[float] = []
+    failing = _Failing(archiver._base_dir("tsk-1"), 1)
+
+    def _prepare(base_dir: Path) -> None:
+        attempts.append(clock.now)
+        failing(base_dir)
+
+    monkeypatch.setattr(log_archiver, "prepare_output_dir", _prepare)
+    streams.publish("tsk-1", "late")
+
+    for _ in range(5):
+        archiver._tick()
+
+    assert len(attempts) >= 2
+    assert attempts[1] - attempts[0] >= log_archiver._FIRST_RETRY_SEC
+    assert _lines(archiver, "tsk-1") == ['{"m": "late"}']
