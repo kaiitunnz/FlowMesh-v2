@@ -16,6 +16,8 @@ from worker.executors import sft_executor
 from worker.executors.base_executor import ExecutionError
 from worker.executors.sft_executor import SFTExecutor
 
+_DEEPSPEED = {"zero_optimization": {"stage": 2}, "gradient_accumulation_steps": 1}
+
 
 def _launch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, training: dict[str, Any]
@@ -44,6 +46,19 @@ def _launch(
             make_worker_task_message(spec=spec, task_type=TaskType.SFT), tmp_path
         )
     return launched
+
+
+def test_a_deepspeed_run_launches_under_torchrun_on_the_bound_devices(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launched = _launch(
+        monkeypatch, tmp_path, {"allow_multi_gpu": True, "deepspeed": _DEEPSPEED}
+    )
+
+    assert launched["nproc"] == 2
+    assert launched["env"] == "GPU-b,GPU-c"
+    training = launched["task"]["data"]["task"]["spec"]["training"]
+    assert training["deepspeed"] == _DEEPSPEED
 
 
 def test_training_devices_are_positions_within_the_bound_devices(

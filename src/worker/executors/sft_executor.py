@@ -2,9 +2,8 @@
 """SFT executor powered by TRL's SFTTrainer/SFTConfig.
 
 Single-GPU runs execute in-process. Multi-GPU runs go through
-``torch.distributed.run.main`` (the same entry point ``torchrun`` calls),
-or through ``deepspeed.launcher.runner.main`` when a DeepSpeed configuration
-is supplied and the ``deepspeed`` package is importable.
+``torch.distributed.run.main`` (the same entry point ``torchrun`` calls), whose
+ranks apply a DeepSpeed configuration when one is supplied.
 """
 
 import gc
@@ -42,7 +41,6 @@ from .utils.data_utils import resolve_jsonl_path
 from .utils.distributed import (
     deepspeed_available,
     launcher_task_file,
-    run_deepspeed,
     run_torchrun,
 )
 from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
@@ -157,39 +155,27 @@ class SFTExecutor(TrainingMixin, Executor):
                 and (n_gpus or 0) > 1
             ):
                 nproc = int(training_cfg.get("nproc_per_node", n_gpus))
-                use_deepspeed = deepspeed_intent and deepspeed_available()
-                if deepspeed_intent and not use_deepspeed:
+                if deepspeed_intent and not deepspeed_available():
                     logger.warning(
                         "DeepSpeed configuration provided but the `deepspeed` "
-                        "package is not importable; falling back to torchrun."
+                        "package is not importable."
                     )
+                # torchrun keeps CUDA_VISIBLE_DEVICES, so the ranks run on this
+                # task's devices; each rank's Trainer applies the DeepSpeed config.
+                logger.info(
+                    "Launching torchrun for SFT "
+                    "(nproc=%d, deepspeed=%s, CUDA_VISIBLE_DEVICES=%s)",
+                    nproc,
+                    deepspeed_intent,
+                    os.environ.get("CUDA_VISIBLE_DEVICES"),
+                )
                 with launcher_task_file(out_dir, task) as task_file:
-                    if use_deepspeed:
-                        logger.info(
-                            "Launching DeepSpeed for SFT "
-                            "(num_gpus=%d, CUDA_VISIBLE_DEVICES=%s)",
-                            nproc,
-                            os.environ.get("CUDA_VISIBLE_DEVICES"),
-                        )
-                        run_deepspeed(
-                            num_gpus=nproc,
-                            module="worker.executors.sft_dist_entry",
-                            module_args=[task_file.as_posix(), out_dir.as_posix()],
-                            launcher_env_flag=launcher_env_flag,
-                        )
-                    else:
-                        logger.info(
-                            "Launching torchrun for SFT "
-                            "(nproc=%d, CUDA_VISIBLE_DEVICES=%s)",
-                            nproc,
-                            os.environ.get("CUDA_VISIBLE_DEVICES"),
-                        )
-                        run_torchrun(
-                            nproc_per_node=nproc,
-                            module="worker.executors.sft_dist_entry",
-                            module_args=[task_file.as_posix(), out_dir.as_posix()],
-                            launcher_env_flag=launcher_env_flag,
-                        )
+                    run_torchrun(
+                        nproc_per_node=nproc,
+                        module="worker.executors.sft_dist_entry",
+                        module_args=[task_file.as_posix(), out_dir.as_posix()],
+                        launcher_env_flag=launcher_env_flag,
+                    )
                 ipc_path = scratch_dir(out_dir) / "distributed_result.json"
                 if ipc_path.exists():
                     self._task_out_dir = None

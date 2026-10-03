@@ -5,8 +5,7 @@ Loads ``AutoModelForImageClassification`` + ``AutoImageProcessor``, prepares
 the dataset via the ``datasets`` library, and trains with the standard
 ``transformers.Trainer``. Single-GPU runs execute in-process; multi-GPU
 support can be added later by spawning ``image_classification_dist_entry``
-through ``run_torchrun`` / ``run_deepspeed`` in the same way ``SFTExecutor``
-does.
+through ``run_torchrun`` in the same way ``SFTExecutor`` does.
 """
 
 import gc
