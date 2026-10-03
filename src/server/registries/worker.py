@@ -740,10 +740,17 @@ class WorkerRegistry:
         return await self._rds.asyncio.srem(WORKERS_CORDONED_SET_KEY, member) > 0
 
     def idle_satisfying_pool(
-        self, task: TaskEnvelope, relays_only: bool
+        self,
+        task: TaskEnvelope,
+        relays_only: bool,
+        bound_worker_id: str | None = None,
     ) -> list[Worker]:
         """Idle, non-stale workers that can run a dispatch of ``task`` now: those
-        ``satisfying_workers`` returns, less any whose free GPUs fall short."""
+        ``satisfying_workers`` returns, less any whose free GPUs fall short.
+
+        A cordon does not exclude ``bound_worker_id``, the worker holding state only
+        it can resume the task from, so a cordoned worker drains the work bound to it.
+        """
         available: list[Worker] = []
         cordoned = self._cordoned_members()
         for worker_id in self.get_worker_ids():
@@ -752,7 +759,7 @@ class WorkerRegistry:
                 continue
             if self.is_worker_stale(worker.id):
                 continue
-            if _is_cordoned(worker, cordoned):
+            if worker.id != bound_worker_id and _is_cordoned(worker, cordoned):
                 continue
             if (
                 hw_satisfies(worker, task)

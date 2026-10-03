@@ -489,7 +489,12 @@ class Dispatcher:
             task_age = max(0.0, time.time() - record.last_queue_ts)
 
         # 1. Get idle worker pool
-        pool = self._worker_registry.idle_satisfying_pool(placement_task, relays_only)
+        owner = self._runtime.private_state_owner(task_id)
+        pool = self._worker_registry.idle_satisfying_pool(
+            placement_task,
+            relays_only,
+            bound_worker_id=owner.worker_id if owner is not None else None,
+        )
 
         # 2. Filter by selected_worker hint if present
         if record.selected_worker:
@@ -500,7 +505,7 @@ class Dispatcher:
         # resuming against a fresh or foreign one. Waiting holds no worker. This
         # governs a holder lost with no external effect in flight; an ambiguous
         # in-flight effect settles terminally in the ledger before placement is asked.
-        if (owner := self._runtime.private_state_owner(task_id)) is not None:
+        if owner is not None:
             if (loss := self._private_state_owner_loss(owner)) is not None:
                 self._end_owner_wait(task_id)
                 return self._fail_private_state_unavailable(

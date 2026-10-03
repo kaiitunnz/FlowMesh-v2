@@ -626,7 +626,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   set, so tasks neither go to it nor wait for it. The cordon is keyed on
   `(node_alias, alias)` and lasts until it is uncordoned, independent of any
   worker's lifecycle, so it also applies to a worker that registers under the
-  key later.
+  key later. An agent whose private state is sealed on a cordoned worker resumes
+  there, since only that worker can supply it.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side. Task and workflow listings build their pages off
