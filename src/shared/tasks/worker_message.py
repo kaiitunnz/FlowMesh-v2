@@ -130,11 +130,7 @@ class WorkerTaskMessage(BaseModel):
     )
     serve_elapsed_sec: float | None = Field(
         default=None,
-        description=(
-            "Seconds since a serve task's first start, measured by control at "
-            "dispatch: the TTL counts across re-runs, so a re-run serves only what "
-            "remains of it."
-        ),
+        description="Seconds since the serve task's first start, at dispatch.",
     )
 
     # What the worker hydrated from the references above: each upstream stage's stored

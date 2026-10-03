@@ -790,7 +790,7 @@ class ResidentCapacityControl:
 
     def on_serve_task_update(self, serve_task_id: str) -> None:
         """Promote, on the control loop, the cold start a serve task backs once it
-        reports its endpoint, whether or not a claim still waits for it.
+        reports its endpoint.
 
         Safe to call under the runtime's lock; a report before the loop is bound is
         dropped.

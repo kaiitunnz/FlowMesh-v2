@@ -256,7 +256,7 @@ class Runner:
         The dispatcher filters on what this worker last reported, so a task can still
         arrive for a device taken since; refusing beats dying in executor init. Only a
         reading just taken counts: a latched one advises the dispatcher, but a latch
-        cannot clear while a GPU executor stays warm.
+        cannot clear on a device a warm GPU executor may hold.
         """
         availability = self.lifecycle.live_gpu_availability()
         if not availability:

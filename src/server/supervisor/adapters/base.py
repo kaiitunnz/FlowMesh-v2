@@ -186,7 +186,7 @@ class WorkerAdapter(ABC):
             raise
 
     def has_pending_start(self) -> bool:
-        """Whether the last start or stop accepted is a start still to end."""
+        """Whether the last accepted operation is a start that has not finished."""
         last = self._last
         return (
             last is not None

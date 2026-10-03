@@ -302,7 +302,7 @@ class LifecycleScaleManager:
         self._persist()
 
     def stop(self, replica_id: str) -> None:
-        """Complete an idle teardown once a drained replica holds no admitted work.
+        """Stop a drained replica once it holds no admitted work.
 
         A demand replica's serve task is reaped with it. A standing replica's serve task
         owns the replica and is left to its own lifecycle, so a task drained on its way

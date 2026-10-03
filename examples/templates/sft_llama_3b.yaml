@@ -30,7 +30,7 @@ spec:
     max_samples: 200
 
   training:
-    # Enable multi-GPU execution; ``visible_devices`` limits torchrun to the listed GPU IDs.
+    # Enable multi-GPU execution; ``visible_devices`` picks positions within the task's GPUs.
     allow_multi_gpu: true
     visible_devices: "0,1"
 

@@ -30,7 +30,7 @@ def main(argv: list[str]) -> int:
         "--local_rank",
         type=int,
         default=None,
-        help="Rank a launcher may inject",
+        help="Rank injected by torchrun",
     )
     args = parser.parse_args(argv[1:])
 

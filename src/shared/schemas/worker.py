@@ -59,10 +59,7 @@ class WorkerCapabilities(BaseModel):
     )
     gpu_binding_task_types: frozenset[TaskType] = Field(
         default_factory=frozenset,
-        description=(
-            "Types of tasks whose executor this worker runs on the GPUs no process "
-            "outside FlowMesh holds."
-        ),
+        description="Types of tasks this worker runs on free GPUs it picks per task.",
     )
     resident_listener_port: int = Field(
         default=0,

@@ -576,9 +576,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   naming its own devices, waits while any device is held. An input preparation or a
   resident service episode places and runs regardless of a held device. A reading counts
   only when nothing of the worker's own can be in it: no task running, past
-  `WORKER_FOREIGN_GPU_GRACE_SEC` after a task, and only on devices no GPU-using executor
-  still warm can hold, so a device a warm unbound executor sees is read once it unloads,
-  which `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` bounds. A worker that cannot reach NVML
+  `WORKER_FOREIGN_GPU_GRACE_SEC` after a task, and outside the devices a warm GPU-using
+  executor is bound to — every device for an unbound one, until it unloads, which
+  `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` bounds. A worker that cannot reach NVML
   clears its reading. A GPU dispatch that reaches a worker after its device was taken is
   refused and retried. Disable with `WORKER_FOREIGN_GPU_GATE=false`.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
@@ -629,10 +629,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   set, so tasks neither go to it nor wait for it. The cordon is keyed on
   `(node_alias, alias)` and lasts until it is uncordoned, independent of any
   worker's lifecycle, so it also applies to a worker that registers under the
-  key later. An agent whose private state is sealed on a cordoned worker resumes
-  there, since only that worker can supply it. A cordon drains the demand resident
-  replicas on the worker, while a public `serve` task there keeps serving until it
-  ends.
+  key later. An agent sealed on a cordoned worker resumes there, and the worker's
+  demand resident replicas drain (see [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md)).
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side. Task and workflow listings build their pages off

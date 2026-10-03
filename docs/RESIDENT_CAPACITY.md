@@ -192,8 +192,7 @@ plan node carries is retained for twice the base, and every other family keeps t
 standing `serve` allocation is pinned to its task and exempt. Warmth is a retention
 preference only — it reserves nothing and changes no claim, admission, route, or credit.
 
-A cold start goes warm once its serve task reports its endpoint, whether or not a claim
-still waits for it. A replica serves only on the endpoint its serve task's current
+A cold start goes warm once its serve task reports its endpoint. A replica serves only on the endpoint its serve task's current
 dispatch reported. A warm demand replica lives only while its serve task holds that
 dispatch: when the serve task leaves it — its worker lost or drained, the task settled
 or cancelled — the replica is invalidated and the task is reaped; the next demand
@@ -211,9 +210,11 @@ no claim of its family is pending, freeing the worker: a serving replica through
 idle-teardown path, a cold start by invalidation. The next demand materializes the
 family again. A standing replica never yields its worker.
 
-A cordon on a worker drains the demand replicas it serves: each stops admitting claims and
-stops once its admitted work releases, and a cold start there is invalidated, also after a
-root restart. A standing replica keeps serving until its serve task ends.
+A cordon drains the demand replicas on its worker: each stops admitting claims and stops
+once its admitted work releases, and a cold start there is invalidated. A draining replica
+does not count toward its family's replica limit, so a new one starts elsewhere meanwhile.
+The drain holds across a root restart. A standing replica keeps serving until its serve
+task ends.
 
 On a root restart, in-flight claims go `UNCERTAIN`, and each restored replica whose serve
 task holds the dispatch that reported its endpoint re-attaches and is reused; any other
