@@ -374,6 +374,8 @@ class ResidentCapacityControl:
         self._stores = stores
         self._admission = admission
         self._lifecycle = lifecycle
+        # A replica drained while a claim held credit stops once its last one releases.
+        admission.set_release_hook(lifecycle.stop_if_drained)
         self._limits = limits
         self._resolve_dependency = dependency_resolver
         self._resolve_input_resolution = input_resolution_resolver
@@ -593,10 +595,6 @@ class ResidentCapacityControl:
             {"invocation_id": attempt.invocation_id},
         )
         self._reclaim_adapter_slot(attempt)
-        # A replica drained while an in-flight claim held credit is left DRAINING; its
-        # last release settles here, so stop it now rather than leave it lingering in
-        # the directory (the idle sweep is off by default).
-        self._lifecycle.stop_if_drained(attempt.replica_id)
         if self._loop is not None:
             self._loop.create_task(self._delivery.sessions.delete(attempt.session_id))
 
@@ -846,15 +844,23 @@ class ResidentCapacityControl:
         serve tasks. Reports are not snapshotted and endpoint credentials are not
         persisted, so each servable replica is re-probed: a serve task holding the
         dispatch that reported its endpoint re-attaches it and re-reports capacity, and
-        any other invalidates the incarnation to re-materialize. A resident serve task
-        that no active replica backs is reaped.
+        any other invalidates the incarnation to re-materialize. A draining replica
+        re-attaches only to finish the claims holding credit on it, and stops with
+        none. A resident serve task that no active replica backs is reaped.
         """
         try:
             for replica in self._stores.directory.all():
-                if (
-                    replica.state not in SERVABLE_REPLICA_STATES
-                    or replica.serve_task_id is None
-                ):
+                if replica.serve_task_id is None:
+                    continue
+                if replica.state is ReplicaState.DRAINING:
+                    if self._stores.credit_ledger.held(replica.replica_id) == 0:
+                        self._lifecycle.stop(replica.replica_id)
+                    elif (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
+                        self._lifecycle.on_preempt(replica.replica_id)
+                    else:
+                        replica.endpoint = fresh
+                    continue
+                if replica.state not in SERVABLE_REPLICA_STATES:
                     continue
                 if (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
                     self._lifecycle.on_preempt(replica.replica_id)

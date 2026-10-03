@@ -8,7 +8,8 @@ Each scenario drives the real task runtime against the resident control
 import asyncio
 
 from server.resident import ReplicaState
-from server.resident.state import AdmissionProfile, ClaimState
+from server.resident.claim import release_on_terminal
+from server.resident.state import AdmissionProfile, ClaimState, ClaimTerminalReason
 from server.task.models import TaskStatus
 from tests.server.resident.node_harness import (
     FAMILY,
@@ -165,6 +166,84 @@ def test_a_restart_drains_a_warm_demand_replica_on_a_cordoned_worker() -> None:
     )
 
     assert node.replica(warm.replica_id).state is ReplicaState.STOPPED
+
+
+def test_a_restart_with_a_cordon_finishes_the_in_flight_claim_then_stops() -> None:
+    async def run() -> None:
+        node = Node()
+        replica = await admitted_boundary(node)
+        (claim,) = node.control.stores.claims.all()
+
+        await node.restart_async(
+            lambda booted: booted.delivery.cordoned.add(_SERVE_WORKER)
+        )
+        await until(lambda: bool(handoff_replicas(node)))
+
+        assert handoff_replicas(node) == [(replica.replica_id, replica.incarnation)]
+        restored = node.replica(replica.replica_id)
+        assert restored.state is ReplicaState.DRAINING
+        assert claim.invocation_id in {
+            c.invocation_id for c in node.control.stores.claims.all() if c.holds_credit
+        }
+
+        node.control.on_invocation_terminal(claim.invocation_id)
+        await asyncio.sleep(0)
+
+        assert restored.state is ReplicaState.STOPPED
+        assert restored.serve_task_id is not None
+        assert node.status(restored.serve_task_id) == TaskStatus.CANCELLING
+
+    asyncio.run(run())
+
+
+def test_a_replica_drained_before_a_restart_finishes_its_claim_after_it() -> None:
+    async def run() -> None:
+        node = Node()
+        replica = await admitted_boundary(node)
+        (claim,) = node.control.stores.claims.all()
+        node.delivery.cordoned.add(_SERVE_WORKER)
+        node.control.on_workers_cordoned([_SERVE_WORKER])
+        await asyncio.sleep(0)
+        assert replica.state is ReplicaState.DRAINING
+
+        await node.restart_async(
+            lambda booted: booted.delivery.cordoned.add(_SERVE_WORKER)
+        )
+        await until(lambda: bool(handoff_replicas(node)))
+
+        assert handoff_replicas(node) == [(replica.replica_id, replica.incarnation)]
+        node.control.on_invocation_terminal(claim.invocation_id)
+        await asyncio.sleep(0)
+
+        assert node.replica(replica.replica_id).state is ReplicaState.STOPPED
+
+    asyncio.run(run())
+
+
+def test_a_restart_stops_a_drained_replica_holding_no_credit() -> None:
+    async def run() -> None:
+        node = Node()
+        replica = await admitted_boundary(node)
+        (claim,) = node.control.stores.claims.all()
+        node.delivery.cordoned.add(_SERVE_WORKER)
+        node.control.on_workers_cordoned([_SERVE_WORKER])
+        await asyncio.sleep(0)
+        # The root went down between the claim's release and the replica's stop.
+        release_on_terminal(claim, ClaimTerminalReason.COMPLETED)
+        node.persist()
+
+        await node.restart_async(
+            lambda booted: booted.delivery.cordoned.add(_SERVE_WORKER)
+        )
+
+        restored = node.replica(replica.replica_id)
+        assert restored.state is ReplicaState.STOPPED
+        assert restored.serve_task_id is not None
+        assert node.status(restored.serve_task_id) == TaskStatus.CANCELLING
+        plan = node.control._lifecycle.plan_capacity(FAMILY.family, "m")
+        assert plan.action == "materialize"
+
+    asyncio.run(run())
 
 
 def test_a_cordon_leaves_a_standing_replica_serving() -> None:

@@ -34,6 +34,7 @@ from .state import (
     InvocationRequest,
     InvocationSubject,
     ReplicaIncarnation,
+    ReplicaState,
     ServiceClaim,
 )
 from .stores import ResidentStores
@@ -48,6 +49,11 @@ class AdmissionController:
         self._stores = stores
         self._persist = persist or (lambda: None)
         self._strategies: dict[str, SelectionStrategy] = {}
+        self._on_release: Callable[[str], None] = lambda _replica_id: None
+
+    def set_release_hook(self, on_release: Callable[[str], None]) -> None:
+        """Call ``on_release`` with a replica's id when a claim on it releases."""
+        self._on_release = on_release
 
     def _build_handoff(
         self,
@@ -173,11 +179,15 @@ class AdmissionController:
         if claim.replica_id is None or claim.incarnation is None:
             return None
         replica = self._stores.directory.get(claim.replica_id)
+        # A draining replica still finishes the work it admitted.
         if (
             replica is None
             or replica.endpoint is None
             or replica.incarnation != claim.incarnation
-            or replica.state not in SERVABLE_REPLICA_STATES
+            or (
+                replica.state not in SERVABLE_REPLICA_STATES
+                and not (replica.state is ReplicaState.DRAINING and claim.holds_credit)
+            )
         ):
             return None
         request = self._stores.invocations.get(claim.invocation_id)
@@ -327,6 +337,8 @@ class AdmissionController:
         settle_terminal(claim, ClaimTerminalReason.ENQUEUE_FAILED)
         self._touch_replica(claim)
         self._persist()
+        if claim.replica_id is not None:
+            self._on_release(claim.replica_id)
 
     def _touch_replica(self, claim: ServiceClaim) -> None:
         """Stamp the claim's replica idle-clock so a retain window starts at release."""
@@ -368,12 +380,15 @@ class AdmissionController:
         either by ``invocation_id``, tolerant of the claim's source state; it never
         assumes a ``DS`` record exists.
         """
-        released = False
+        released: list[str | None] = []
         for claim in self._stores.claims.by_invocation(invocation_id):
             if claim.state is not ClaimState.TERMINAL:
                 release_on_terminal(claim, reason)
                 self._stores.demand.remove(claim.claim_id)
                 self._touch_replica(claim)
-                released = True
+                released.append(claim.replica_id)
         if released:
             self._persist()
+        for replica_id in released:
+            if replica_id is not None:
+                self._on_release(replica_id)
