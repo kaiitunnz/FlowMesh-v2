@@ -479,6 +479,35 @@ def test_a_tick_with_only_retrying_tasks_waits_for_the_earliest_retry(
     assert failing.attempts <= window / archiver._flush_interval_sec + 5
 
 
+def test_a_failed_write_never_cuts_another_writers_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DISPATCHED})
+    logs = archiver._base_dir("tsk-1") / "logs"
+    logs.mkdir(parents=True)
+    path = logs / "logs.jsonl"
+    path.write_text('{"m": "before"}\n')
+    write = os.write
+    calls = 0
+
+    def _partial_then_full(fd: int, data: Any) -> int:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        with path.open("ab") as other:
+            other.write(b'{"m": "theirs"}\n')
+        return write(fd, bytes(data[:4]))
+
+    monkeypatch.setattr(log_archiver.os, "write", _partial_then_full)
+    streams.publish("tsk-1", "ours")
+    with patch.object(log_archiver.time, "sleep"):
+        archiver._tick()
+
+    assert path.read_text().splitlines()[:2] == ['{"m": "before"}', '{"m": "theirs"}']
+    assert not archiver._buffers["tsk-1"]
+
+
 def test_a_finished_tasks_last_lines_are_archived(tmp_path: Path) -> None:
     # A buffer short of a full flush, read in the tick that finds the task finished.
     archiver, streams = _streaming_archiver(
