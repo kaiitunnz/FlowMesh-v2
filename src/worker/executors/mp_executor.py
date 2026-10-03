@@ -389,11 +389,9 @@ class MPExecutor(Executor):
     shut down the subprocess (and the inner executor).
 
     All logs from the subprocess are written to stderr and can be captured by the
-    server logging system or redirected to files. The subprocess sees only the GPUs
-    last bound.
+    server logging system or redirected to files. When the inner executor runs on
+    its visible GPUs, the subprocess sees only the GPUs last bound.
     """
-
-    binds_devices = True
 
     def __init__(
         self,
@@ -452,7 +450,13 @@ class MPExecutor(Executor):
             "Started worker process (PID: %s) for %s", self._proc.pid, self.name
         )
 
+    @property
+    def binds_devices(self) -> bool:
+        return self._executor_cls.runs_on_visible_gpus
+
     def bind_devices(self, devices: tuple[str, ...] | None) -> None:
+        if not self.binds_devices:
+            return
         with self._lock:
             if devices == self._devices:
                 return

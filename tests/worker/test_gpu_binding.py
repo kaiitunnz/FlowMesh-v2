@@ -25,6 +25,7 @@ from shared.tasks.worker_message import (
 from tests.worker.factories import make_worker_config, make_worker_task_message
 from worker import hw
 from worker import main as worker_main
+from worker.executors import EXECUTOR_REGISTRY
 from worker.executors.base_executor import ExecutionError, Executor
 from worker.executors.mp_executor import MPExecutor
 from worker.executors.transformers_executor import HFTransformersExecutor
@@ -125,6 +126,20 @@ class TestPickDevices:
         assert refused.value.retryable
 
 
+_BINDING_EXECUTORS = {
+    "default",
+    "vllm",
+    "vllm_lora",
+    "vllm_embedding",
+    "diffusers",
+    "sft",
+    "lora_sft",
+    "ppo",
+    "dpo",
+    "image_classification_training",
+}
+
+
 class _Plain(Executor):
     def run(self, task: Any, out_dir: Path) -> Any:
         raise NotImplementedError
@@ -170,6 +185,41 @@ class TestCapabilities:
         )
         assert caps.gpu_binding_task_types == {TaskType.EMBEDDING}
 
+    def test_only_wrapped_executors_that_run_on_their_visible_gpus_bind(self) -> None:
+        config = make_worker_config()
+        wrapped = {
+            key: MPExecutor(cls, config)
+            for key in worker_main._EXECUTORS_TO_WRAP
+            if (cls := EXECUTOR_REGISTRY.get(key)) is not None
+        }
+        binding = {key for key, executor in wrapped.items() if executor.binds_devices}
+        assert binding == _BINDING_EXECUTORS & wrapped.keys()
+        assert {"data_profiling", "data_retrieval"} <= wrapped.keys()
+
+    def test_a_cpu_executor_type_is_never_advertised(self) -> None:
+        config = make_worker_config()
+        executors: dict[str, Executor] = {
+            key: MPExecutor(cls, config)
+            for key in ("data_profiling", "data_retrieval")
+            if (cls := EXECUTOR_REGISTRY.get(key)) is not None
+        }
+        caps = build_capabilities(executors)
+        assert caps.supported_task_types
+        assert caps.gpu_binding_task_types == frozenset()
+
+    def test_a_wrapped_executor_without_the_promise_is_neither_advertised_nor_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            _Plain, "supported_task_types", frozenset({TaskType.INFERENCE})
+        )
+        mp = MPExecutor(_Plain, make_worker_config())
+        caps = build_capabilities({"plain": mp}, registry={"plain": _Plain})
+        mp.bind_devices(("GPU-0",))
+
+        assert caps.gpu_binding_task_types == frozenset()
+        assert mp._devices is None
+
     def test_a_mig_slice_binds_nothing(self) -> None:
         config = make_worker_config()
         caps = build_capabilities(
@@ -179,7 +229,9 @@ class TestCapabilities:
 
 
 class _Binding(Executor):
-    binds_devices = True
+    @property
+    def binds_devices(self) -> bool:
+        return True
 
     def __init__(self) -> None:
         self.devices: tuple[str, ...] | None = None

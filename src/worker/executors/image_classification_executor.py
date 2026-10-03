@@ -48,6 +48,7 @@ logger = logging.getLogger("worker.image_classification")
 class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
     name = "image_classification_training_executor"
     supported_task_types = frozenset({TaskType.IMAGE_CLASSIFICATION_TRAINING})
+    runs_on_visible_gpus = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

@@ -17,6 +17,7 @@ class SeenDevicesResult(BaseExecutorResult):
 
 class SeenDevicesExecutor(Executor):
     name = "seen_devices"
+    runs_on_visible_gpus = True
 
     def run(self, task: ExecutorTask, out_dir: Path) -> SeenDevicesResult:
         return SeenDevicesResult(

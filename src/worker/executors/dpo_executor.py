@@ -52,6 +52,7 @@ class DPOExecutor(TrainingMixin, Executor):
 
     name = "dpo_executor"
     supported_task_types = frozenset({TaskType.DPO})
+    runs_on_visible_gpus = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

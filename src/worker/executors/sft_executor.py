@@ -57,6 +57,7 @@ _STARTED_ON = os.environ.get("CUDA_VISIBLE_DEVICES")
 class SFTExecutor(TrainingMixin, Executor):
     name = "sft_executor"
     supported_task_types = frozenset({TaskType.SFT})
+    runs_on_visible_gpus = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

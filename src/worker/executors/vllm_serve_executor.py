@@ -67,13 +67,16 @@ def _raise_with_tail(message: str, tail: collections.deque[str]) -> NoReturn:
 class VLLMServeExecutor(Executor):
     name = "vllm_serve"
     supported_task_types = frozenset({TaskType.SERVE})
-    binds_devices = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._signals = RunSignals()
         self._proc: subprocess.Popen[str] | None = None
         self._devices: tuple[str, ...] | None = None
+
+    @property
+    def binds_devices(self) -> bool:
+        return True
 
     def bind_devices(self, devices: tuple[str, ...] | None) -> None:
         # Each run launches its own engine, so the next launch takes the binding.
