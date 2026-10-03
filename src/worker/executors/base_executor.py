@@ -162,8 +162,8 @@ class Executor(ABC):
     supported_task_types: ClassVar[frozenset[TaskType]] = frozenset()
     """Types of tasks this executor can service"""
     runs_on_visible_gpus: ClassVar[bool] = False
-    """Whether the executor runs only on the GPUs ``CUDA_VISIBLE_DEVICES`` leaves
-    visible when its process starts"""
+    """Whether the executor's work runs only on the GPUs ``CUDA_VISIBLE_DEVICES`` leaves
+    visible to the process running it: its own process, or an engine it launches"""
 
     def __init__(
         self,

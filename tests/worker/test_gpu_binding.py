@@ -196,6 +196,17 @@ class TestCapabilities:
         assert binding == _BINDING_EXECUTORS & wrapped.keys()
         assert {"data_profiling", "data_retrieval"} <= wrapped.keys()
 
+    def test_every_executor_that_binds_declares_it_on_its_class(self) -> None:
+        overrides = {
+            key: cls
+            for key in EXECUTOR_REGISTRY
+            if (cls := EXECUTOR_REGISTRY.get(key)) is not None
+            and cls.binds_devices is not Executor.binds_devices
+        }
+        assert "vllm_serve" in overrides
+        assert all(cls.runs_on_visible_gpus for cls in overrides.values()), overrides
+        assert VLLMServeExecutor(make_worker_config()).binds_devices
+
     def test_a_cpu_executor_type_is_never_advertised(self) -> None:
         config = make_worker_config()
         executors: dict[str, Executor] = {

@@ -67,6 +67,7 @@ def _raise_with_tail(message: str, tail: collections.deque[str]) -> NoReturn:
 class VLLMServeExecutor(Executor):
     name = "vllm_serve"
     supported_task_types = frozenset({TaskType.SERVE})
+    runs_on_visible_gpus = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -76,7 +77,7 @@ class VLLMServeExecutor(Executor):
 
     @property
     def binds_devices(self) -> bool:
-        return True
+        return self.runs_on_visible_gpus
 
     def bind_devices(self, devices: tuple[str, ...] | None) -> None:
         # Each run launches its own engine, so the next launch takes the binding.
