@@ -8,7 +8,6 @@ import queue
 import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
-from pathlib import Path
 from typing import Any
 
 import grpc
@@ -406,7 +405,6 @@ class SupervisorClient:
         workflow_id: str,
         owner_id: str,
         task_refs: list[dict[str, str]] | None = None,
-        log_paths: dict[str, Path] | None = None,
         scrub: Callable[[str], str] | None = None,
     ) -> TaskLogEmitter | None:
         if self._stub is None:
@@ -421,7 +419,6 @@ class SupervisorClient:
             owner_id=owner_id,
             worker_id=self.worker_id,
             task_refs=task_refs,
-            log_paths=log_paths,
             scrub=scrub,
         )
 

@@ -1243,7 +1243,7 @@ class Runner:
                             task_log_emitter,
                             log_handler_attached,
                             prev_root_log_level,
-                        ) = self._create_task_logger(task_id, msg, out_dir, scrub)
+                        ) = self._create_task_logger(task_id, msg, scrub)
 
                         # Notify task started just before execution
                         start_iso = now_iso()
@@ -1399,7 +1399,6 @@ class Runner:
         self,
         task_id: str,
         msg: WorkerTaskMessage,
-        out_dir: Path,
         scrub: Callable[[str], str],
     ) -> tuple[TaskLogEmitter | None, bool, int | None]:
         task_log_emitter: TaskLogEmitter | None = None
@@ -1407,7 +1406,6 @@ class Runner:
         prev_root_log_level: int | None = None
         try:
             owner_mismatch = False
-            log_paths: dict[str, Path] = {task_id: self._get_log_path(out_dir)}
             task_refs: list[dict[str, str]] = [
                 {"task_id": task_id, "workflow_id": msg.workflow_id}
             ]
@@ -1418,8 +1416,7 @@ class Runner:
                     task_refs.append(
                         {"task_id": child_id, "workflow_id": child_workflow_id}
                     )
-                    child_out_dir = self._resolve_output_dir(child_id)
-                    log_paths[child_id] = self._get_log_path(child_out_dir)
+                    self._resolve_output_dir(child_id)
                     if entry.owner_id != msg.owner_id:
                         owner_mismatch = True
                         continue
@@ -1430,7 +1427,6 @@ class Runner:
                     workflow_id=msg.workflow_id,
                     owner_id=msg.owner_id,
                     task_refs=task_refs,
-                    log_paths=log_paths,
                 )
                 if task_log_emitter is not None:
                     task_log_emitter.emit_warning_only(
@@ -1449,7 +1445,6 @@ class Runner:
                     workflow_id=msg.workflow_id,
                     owner_id=msg.owner_id,
                     task_refs=task_refs,
-                    log_paths=log_paths,
                     scrub=scrub,
                 )
                 if task_log_emitter is not None:
@@ -1467,10 +1462,6 @@ class Runner:
             prev_root_log_level = None
 
         return task_log_emitter, log_handler_attached, prev_root_log_level
-
-    @staticmethod
-    def _get_log_path(out_dir: Path) -> Path:
-        return out_dir / "logs" / "logs.jsonl"
 
     def _build_task_metadata(
         self,
