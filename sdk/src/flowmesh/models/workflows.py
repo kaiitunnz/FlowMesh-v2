@@ -102,10 +102,8 @@ class WorkflowOutputEntry(WorkflowOutputMember):
     cursor: str
 
 
-class WorkflowOutputPage(BaseModel):
+class WorkflowOutputPage(CursorPage):
     entries: list[WorkflowOutputEntry]
-    next_cursor: str | None = None
-    prev_cursor: str | None = None
     open: bool
 
 
