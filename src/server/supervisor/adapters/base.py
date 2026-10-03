@@ -181,6 +181,15 @@ class WorkerAdapter(ABC):
             operation.future.add_done_callback(self._on_abandoned_start)
             raise
 
+    def has_pending_start(self) -> bool:
+        """Whether the last start or stop accepted is a start still to end."""
+        last = self._last
+        return (
+            last is not None
+            and last.kind is _OperationKind.START
+            and not last.future.done()
+        )
+
     def close(self) -> None:
         """Refuse every later start, as the adapter is about to be destroyed."""
         self._closed = True

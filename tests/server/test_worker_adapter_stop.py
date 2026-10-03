@@ -702,3 +702,22 @@ async def test_a_bulk_destroy_keeps_a_worker_added_while_it_ran(kind: str) -> No
 
     assert wm._registry.try_get_by_alias(world.adapter.alias) is None
     assert wm._registry.try_get_by_alias("late") is late
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_an_operator_stop_behind_a_queued_start_stops_what_it_starts(
+    kind: str,
+) -> None:
+    world = _world(kind)
+    wm = _manager(world, kind)
+    release, first, stop, second = await _start_queued_behind_a_stop_on_a_start(
+        world, wm
+    )
+    late = asyncio.ensure_future(wm.stop_worker(world.adapter.alias))
+    await asyncio.sleep(0.05)
+
+    release.set()
+
+    assert await asyncio.gather(first, stop, second, late) == [True, True, True, True]
+    assert not world.adapter.holds_worker()

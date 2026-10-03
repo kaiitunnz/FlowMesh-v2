@@ -442,7 +442,9 @@ class WorkerManager:
 
     async def _stop_worker(self, worker: WorkerAdapter) -> bool:
         worker_alias = worker.alias
-        if not _is_live(worker):
+        # A start queued behind another operation sets no status until it begins, and
+        # the stop joins the chain behind it.
+        if not (_is_live(worker) or worker.has_pending_start()):
             raise ValueError(f"Worker '{worker_alias}' is not starting or running")
 
         self.logger.info("Stopping worker %s...", worker_alias)
