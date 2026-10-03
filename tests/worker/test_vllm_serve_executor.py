@@ -178,6 +178,39 @@ class TestServeExecutorCmdBuilding:
 
         return captured[0]
 
+    def test_a_bound_launch_sees_only_its_devices(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+        )
+        task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
+        ex = self._make_executor()
+        ex.bind_devices(("GPU-b",))
+        envs: list[dict[str, str]] = []
+
+        def fake_popen(cmd: list[str], env: dict[str, str], **_: object) -> MagicMock:
+            envs.append(env)
+            m = MagicMock()
+            m.stdout = io.StringIO("")
+            m.poll.return_value = 0
+            m.returncode = 0
+            m.pid = 12345
+            return m
+
+        with (
+            patch("subprocess.Popen", side_effect=fake_popen),
+            patch.object(ex, "_poll_health"),
+            patch.object(ex, "_wait_for_serve"),
+            patch.object(ex, "emit_update"),
+            patch.object(ex, "_terminate_process_group"),
+        ):
+            ex.run(task, tmp_path)
+
+        assert envs[0]["CUDA_VISIBLE_DEVICES"] == "GPU-b"
+
     def test_model_name_and_revision_in_cmd(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
             taskType=TaskType.SERVE,

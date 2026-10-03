@@ -356,7 +356,7 @@ def _lifecycle(
         gpu_monitor=monitor,
     )
     lc._status = WorkerStatus.IDLE  # as after start()
-    lc.set_gpu_executor_probe(lambda: False)
+    lc.set_gpu_executor_probe(lambda: frozenset())
     return lc, monitor, client
 
 
@@ -374,7 +374,7 @@ class TestLifecycleIntegration:
     def test_a_warm_gpu_executor_suppresses_the_reading(self, tmp_path: Path) -> None:
         # Reading the worker's own resident model as foreign must stay impossible.
         lc, monitor, _ = _lifecycle(tmp_path, [{GPU_A: _reading(44_000)}])
-        lc.set_gpu_executor_probe(lambda: True)
+        lc.set_gpu_executor_probe(lambda: None)
         lc._observe_gpu()
         assert monitor.snapshot() == {}
         assert monitor.live_snapshot() == {}
@@ -416,14 +416,14 @@ class TestLifecycleIntegration:
         lc, _, _ = _lifecycle(tmp_path, [{GPU_A: _reading(44_000)}])
         lc._observe_gpu()
         assert lc.live_gpu_availability()[GPU_A].available is False
-        lc.set_gpu_executor_probe(lambda: True)
+        lc.set_gpu_executor_probe(lambda: None)
         lc._observe_gpu()
         assert lc.live_gpu_availability() == {}
         assert lc._metrics()["gpu_availability"][GPU_A]["available"] is False
 
 
 class TestWarmExecutorGpuFlag:
-    """The flag behind ``has_active_gpu_executor``.
+    """The flag behind ``gpu_devices_in_use``.
 
     Reading GPU-ness off the executor class does not work: the default config
     wraps most executors in ``MPExecutor``, whose class carries no such
@@ -450,19 +450,19 @@ class TestWarmExecutorGpuFlag:
     def test_no_executor_means_no_gpu_held(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
         runner._note_gpu_usage(self._spec(gpu=True))
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     def test_a_gpu_task_marks_the_warm_executor(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
         runner._active_executor = MagicMock()
         runner._note_gpu_usage(self._spec(gpu=True))
-        assert runner.has_active_gpu_executor() is True
+        assert runner.gpu_devices_in_use() is None
 
     def test_a_cpu_task_alone_does_not(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
         runner._active_executor = MagicMock()
         runner._note_gpu_usage(self._spec(gpu=False))
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     def test_a_later_cpu_task_does_not_clear_an_earlier_gpu_task(
         self, tmp_path: Path
@@ -473,7 +473,7 @@ class TestWarmExecutorGpuFlag:
         runner._active_executor = MagicMock()
         runner._note_gpu_usage(self._spec(gpu=True))
         runner._note_gpu_usage(self._spec(gpu=False))
-        assert runner.has_active_gpu_executor() is True
+        assert runner.gpu_devices_in_use() is None
 
     def test_teardown_clears_the_flag(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
@@ -481,7 +481,7 @@ class TestWarmExecutorGpuFlag:
         runner._note_gpu_usage(self._spec(gpu=True))
         runner._cleanup_active_executor()
         assert runner._active_executor_used_gpu is False
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     def test_a_declared_gpu_alone_does_not_mark_the_executor(
         self, tmp_path: Path
@@ -501,7 +501,7 @@ class TestWarmExecutorGpuFlag:
                 )
             )
         )
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     def test_an_ssh_session_does_not_mark_the_executor(self, tmp_path: Path) -> None:
         # The session holds its devices only while it lives; the warm SSH executor
@@ -518,7 +518,7 @@ class TestWarmExecutorGpuFlag:
                 )
             )
         )
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     @pytest.mark.parametrize(
         "relay",
@@ -535,7 +535,7 @@ class TestWarmExecutorGpuFlag:
         runner = self._runner(tmp_path)
         runner._active_executor = MagicMock()
         runner._note_gpu_usage(self._spec(gpu=True, **relay))
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
 
 class TestAdmission:
@@ -674,7 +674,9 @@ class _Recording(Executor):
     def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
         self.ran.append(task.task_id)
         if self.runner is not None:
-            self.saw_gpu_executor.append(self.runner.has_active_gpu_executor())
+            self.saw_gpu_executor.append(
+                self.runner.gpu_devices_in_use() != frozenset()
+            )
         return BaseExecutorResult()
 
     def cancel(self, task_id: str) -> None:

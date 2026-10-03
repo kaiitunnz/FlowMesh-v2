@@ -4,6 +4,8 @@ import signal
 import socket
 from collections.abc import Callable, Mapping
 
+import pynvml
+
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
 from shared.outcome import FinalizationIndexClient
@@ -33,7 +35,7 @@ from .executors.mp_executor import MPExecutor
 from .executors.ssh_executor import SSHExecutor
 from .gpu_availability import GpuAvailabilityMonitor, NvmlDeviceProbe
 from .gpu_sampler import GpuSampler, build_gpu_sampler
-from .hw import collect_hw, device_uses_unified_memory
+from .hw import collect_hw, device_uses_unified_memory, visible_gpus
 from .lifecycle import Lifecycle
 from .power import PowerMonitor
 from .runner import Runner
@@ -43,6 +45,10 @@ from .utils.logging import get_logger
 
 _EXECUTORS_TO_WRAP = {
     "default",
+    "omni_text2image",
+    "omni_text2speech",
+    "omni_text2audio",
+    "omni_text2general",
     "vllm",
     "vllm_lora",
     "vllm_embedding",
@@ -198,14 +204,27 @@ def build_capabilities(
     executors: dict[str, Executor],
     registry: Mapping[str, type[Executor] | None] | None = None,
     resident_listener_port: int = 0,
+    binds_gpus: bool = True,
 ) -> WorkerCapabilities:
+    """The worker's capabilities; ``binds_gpus`` is false where its GPUs cannot be
+    split, as on a MIG slice, so no executor binds."""
     registry = registry or EXECUTOR_REGISTRY
-    supported_task_types = frozenset[TaskType]().union(
-        *(cls.supported_task_types for key in executors if (cls := registry.get(key)))
+    served = [
+        (cls.supported_task_types, executor.binds_devices)
+        for key, executor in executors.items()
+        if (cls := registry.get(key))
+    ]
+    supported_task_types = frozenset[TaskType]().union(*(types for types, _ in served))
+    # A type binds only when every executor that may run it does.
+    unbound = frozenset[TaskType]().union(
+        *(types for types, binds in served if not binds)
     )
     ssh = executors.get("ssh")
     return WorkerCapabilities(
         supported_task_types=supported_task_types,
+        gpu_binding_task_types=(
+            supported_task_types - unbound if binds_gpus else frozenset()
+        ),
         ssh_noninteractive=(
             ssh.backend.supports_noninteractive
             if isinstance(ssh, SSHExecutor)
@@ -213,6 +232,13 @@ def build_capabilities(
         ),
         resident_listener_port=resident_listener_port,
     )
+
+
+def _sees_a_mig_slice() -> bool:
+    try:
+        return any(gpu.mig_slot is not None for gpu in visible_gpus())
+    except pynvml.NVMLError:
+        return False
 
 
 def _peer_material(
@@ -417,6 +443,7 @@ def main() -> None:
         resident_listener_port=(
             peer_sock.getsockname()[1] if peer_sock is not None else 0
         ),
+        binds_gpus=not _sees_a_mig_slice(),
     )
     ssh_limits = cfg.ssh_limits
     if TaskType.SSH in capabilities.supported_task_types:
@@ -465,8 +492,9 @@ def main() -> None:
         peer_material=_peer_material(cfg, logger),
         peer_listener_sock=peer_sock,
         telemetry=cfg.telemetry,
+        gpu_binding_task_types=capabilities.gpu_binding_task_types,
     )
-    lifecycle.set_gpu_executor_probe(runner.has_active_gpu_executor)
+    lifecycle.set_gpu_executor_probe(runner.gpu_devices_in_use)
     lifecycle.set_abandon_handler(runner.abandon_running)
 
     # Install signal handlers to allow graceful shutdown

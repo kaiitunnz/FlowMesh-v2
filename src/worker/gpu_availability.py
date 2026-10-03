@@ -178,7 +178,8 @@ class GpuAvailabilityMonitor:
     def config(self) -> GpuGateConfig:
         return self._config
 
-    def observe(self, measurable: bool) -> None:
+    def observe(self, measurable: bool, skip: frozenset[str] = frozenset()) -> None:
+        """Take one reading, leaving the devices in ``skip`` as last latched."""
         if not self._config.enabled or not measurable:
             self._measured_uuids = frozenset()
             return
@@ -189,6 +190,7 @@ class GpuAvailabilityMonitor:
             self._devices = {}
             self._measured_uuids = frozenset()
             return
+        readings = {uuid: r for uuid, r in readings.items() if uuid not in skip}
         devices = self._devices.copy()
         for uuid, reading in readings.items():
             devices[uuid] = decide_availability(

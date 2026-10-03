@@ -989,7 +989,12 @@ def gpu_available_for(worker: Worker, task: TaskEnvelope, relays_only: bool) -> 
     rather than failing as unschedulable.
     """
     hw = worker.hardware
-    return hw is None or gpus_fit_dispatch(hw, task.spec, relays_only)
+    return hw is None or gpus_fit_dispatch(
+        hw,
+        task.spec,
+        relays_only,
+        binds_devices=task.spec.taskType in worker.capabilities.gpu_binding_task_types,
+    )
 
 
 def capability_satisfies(worker: Worker, task: TaskEnvelope) -> bool:

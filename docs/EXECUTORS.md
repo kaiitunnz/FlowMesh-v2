@@ -417,14 +417,27 @@ reachable only from that worker's host); a Docker session's port is published on
 address of the worker's host (`network`). When the server cannot carry a relayed mode,
 `forward` falls back to `proxy`, then to `direct` at that address.
 
+## Model executor GPUs
+
+A worker runs its model, diffusion, omni, training and `serve` executors on the GPUs no
+process outside FlowMesh holds: when it loads one for a GPU task, it picks the free devices
+that match the task's `gpu` block (`count` of them, or every free match without one) and
+starts the executor seeing only those. A warm executor keeps its devices while they stay
+free and fit the next task, and restarts on others otherwise. Training's `visible_devices`
+and `primary_gpu` are positions within the task's devices; a position past them fails the
+task. Multi-GPU training ranks launch under `torchrun` on those devices, with a DeepSpeed
+configuration applied by each rank. A task whose `model.vllm.env_vars` sets
+`CUDA_VISIBLE_DEVICES` chooses its own devices and sees every device, so it waits while any
+is held. With `WORKER_ENABLE_MP_EXECUTORS=false` only `serve` runs on chosen devices.
+
 ## SSH executor GPUs
 
 With `ENABLE_SSH_GPU_LIMIT`, a session whose `gpu` block sets a `count`, `type` or
 `memory` receives the smallest matching subset of the devices its worker last reported
 free of processes outside FlowMesh, or, when those fall short, of the devices a reading
 just taken shows free. Only a reading just taken refuses a session, which is retried. A
-`gpu` block setting none of them receives every device and waits while any is held, like
-a model task. A session that declares no `gpu` block receives every device.
+`gpu` block setting none of them receives every device and waits while any is held. A
+session that declares no `gpu` block receives every device.
 
 ## SSH executor (process backend)
 

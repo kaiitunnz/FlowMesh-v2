@@ -68,11 +68,17 @@ def _raise_with_tail(message: str, tail: collections.deque[str]) -> NoReturn:
 class VLLMServeExecutor(Executor):
     name = "vllm_serve"
     supported_task_types = frozenset({TaskType.SERVE})
+    binds_devices = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._signals = RunSignals()
         self._proc: subprocess.Popen[str] | None = None
+        self._devices: tuple[str, ...] | None = None
+
+    def bind_devices(self, devices: tuple[str, ...] | None) -> None:
+        # Each run launches its own engine, so the next launch takes the binding.
+        self._devices = devices
 
     @classmethod
     def is_available(cls, config: WorkerConfig) -> bool:
@@ -141,6 +147,8 @@ class VLLMServeExecutor(Executor):
             cmd.append("--trust-remote-code")
 
         env = dict(os.environ)
+        if self._devices is not None:
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(self._devices)
         env.setdefault("VLLM_CONFIGURE_LOGGING", "0")
         env["PYTHONUNBUFFERED"] = "1"
         if "--enable-lora" in rendered_flags:

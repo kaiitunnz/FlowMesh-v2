@@ -20,10 +20,11 @@ from shared.tasks.worker_message import (
 from tests.worker.factories import make_worker_config, make_worker_hardware
 from worker.config import WorkerConfig
 from worker.executors.base_executor import ExecutionError
-from worker.executors.ssh_executor import SSHExecutor, _free_uuids
+from worker.executors.ssh_executor import SSHExecutor
 from worker.executors.ssh_session import SSHConfig
 from worker.executors.ssh_session.config import FreeGpus
 from worker.gpu_availability import DeviceAvailability
+from worker.gpu_binding import free_uuids
 
 
 def _spec(resources: dict[str, object] | None = None) -> SSHSpecStrict:
@@ -574,19 +575,19 @@ class TestFreeUuids:
         ]
 
     def test_no_reading_at_all_withholds_nothing(self) -> None:
-        assert _free_uuids({}, self._devices(2)) == frozenset({"a100-0", "a100-1"})
+        assert free_uuids({}, self._devices(2)) == frozenset({"a100-0", "a100-1"})
 
     def test_a_held_device_is_withheld(self) -> None:
         reported = {
             "a100-0": DeviceAvailability(available=False, free_bytes=0),
             "a100-1": DeviceAvailability(available=True, free_bytes=1),
         }
-        assert _free_uuids(reported, self._devices(2)) == frozenset({"a100-1"})
+        assert free_uuids(reported, self._devices(2)) == frozenset({"a100-1"})
 
     def test_a_device_the_reading_did_not_cover_is_still_offered(self) -> None:
         # A partial probe must not quietly shrink the session's device set.
         reported = {"a100-0": DeviceAvailability(available=False, free_bytes=0)}
-        assert _free_uuids(reported, self._devices(4)) == frozenset(
+        assert free_uuids(reported, self._devices(4)) == frozenset(
             {"a100-1", "a100-2", "a100-3"}
         )
 
@@ -595,8 +596,8 @@ class TestFreeUuids:
             f"a100-{i}": DeviceAvailability(available=False, free_bytes=0)
             for i in range(2)
         }
-        assert _free_uuids(reported, self._devices(2)) == frozenset()
+        assert free_uuids(reported, self._devices(2)) == frozenset()
 
     def test_a_reading_for_a_device_the_worker_does_not_have_is_ignored(self) -> None:
         reported = {"a100-9": DeviceAvailability(available=True, free_bytes=1)}
-        assert _free_uuids(reported, self._devices(1)) == frozenset({"a100-0"})
+        assert free_uuids(reported, self._devices(1)) == frozenset({"a100-0"})

@@ -161,6 +161,8 @@ class Executor(ABC):
     """Human-readable identifier for logging/telemetry"""
     supported_task_types: ClassVar[frozenset[TaskType]] = frozenset()
     """Types of tasks this executor can service"""
+    binds_devices: ClassVar[bool] = False
+    """Whether ``bind_devices`` confines the executor to the GPUs it names"""
 
     def __init__(
         self,
@@ -252,6 +254,12 @@ class Executor(ABC):
                 f"{spec.__class__.__name__}; expected {spec_type.__name__}"
             )
         return spec
+
+    def bind_devices(self, devices: tuple[str, ...] | None) -> None:
+        """Run later tasks on only ``devices``, by UUID, or on every device for None,
+        restarting whatever runs on others. A no-op unless the executor
+        ``binds_devices``."""
+        return None
 
     def teardown(self) -> None:
         """Optional: called when the worker is shutting down."""

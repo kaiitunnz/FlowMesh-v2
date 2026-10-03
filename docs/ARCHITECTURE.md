@@ -569,13 +569,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   as the report persists. A worker shutting down reports itself busy until it leaves.
 - **Per-device GPU availability.** A GPU worker reads each device's memory on every
   heartbeat and reports any device a process outside FlowMesh holds. The worker stays
-  `IDLE` and keeps taking CPU work. A model dispatch waits while any device of its
-  worker is held, and an SSH session that selects devices takes free ones. An input
+  `IDLE` and keeps taking CPU work. A model dispatch places on enough free devices
+  and its executor runs on only those, as an SSH session that selects devices does; a
+  worker advertises the task types whose executor it binds that way, and a dispatch it
+  does not bind, or one naming its own devices, waits while any device is held. An input
   preparation or a resident service episode places and runs regardless of a held
   device. A reading counts only when nothing of the worker's own can be in it: no task
-  running, no GPU-using executor still warm, and past `WORKER_FOREIGN_GPU_GRACE_SEC`
-  after a task, so a device taken while an executor stays warm is seen once it
-  unloads, which `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` bounds. A worker that cannot reach
+  running, past `WORKER_FOREIGN_GPU_GRACE_SEC` after a task, and only on devices no
+  GPU-using executor still warm can hold, so a device a warm unbound executor sees is
+  read once it unloads, which `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` bounds. A worker that cannot reach
   NVML clears its reading. A GPU dispatch that reaches a worker after its device was
   taken is refused and retried. Disable with `WORKER_FOREIGN_GPU_GATE=false`.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker

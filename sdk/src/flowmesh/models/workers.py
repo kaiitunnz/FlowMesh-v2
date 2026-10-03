@@ -86,6 +86,7 @@ class SSHLimits(BaseModel):
 class WorkerCapabilities(BaseModel):
     supported_task_types: frozenset[TaskType] = Field(default_factory=frozenset)
     ssh_noninteractive: bool = True
+    gpu_binding_task_types: frozenset[TaskType] = Field(default_factory=frozenset)
     resident_listener_port: int = 0
 
 

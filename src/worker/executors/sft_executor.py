@@ -767,10 +767,8 @@ class SFTExecutor(TrainingMixin, Executor):
             allow_multi = bool(allow_multi_cfg)
 
         if requested:
-            devices = (
-                ",".join(str(x) for x in requested)
-                if isinstance(requested, (list, tuple))
-                else str(requested)
+            devices = _within_visible(
+                list(requested) if isinstance(requested, (list, tuple)) else [requested]
             )
             os.environ["CUDA_VISIBLE_DEVICES"] = devices
             logger.info("Using user-specified CUDA_VISIBLE_DEVICES=%s", devices)
@@ -781,8 +779,8 @@ class SFTExecutor(TrainingMixin, Executor):
         # Default to a single GPU when multiple devices are visible but not
         # explicitly allowed
         if n_devices > 1:
-            preferred = training_cfg.get("primary_gpu", 0)
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(preferred)
+            preferred = _within_visible([training_cfg.get("primary_gpu", 0)])
+            os.environ["CUDA_VISIBLE_DEVICES"] = preferred
             logger.info(
                 "Multiple GPUs detected (%d); restrict to device %s (set "
                 "training.allow_multi_gpu=false to override).",
@@ -859,3 +857,32 @@ class SFTExecutor(TrainingMixin, Executor):
             "fp16": {"enabled": fp16_enabled and not bf16_enabled},
             "steps_per_print": 2000,
         }
+
+
+def _within_visible(ordinals: list[Any]) -> str:
+    """``CUDA_VISIBLE_DEVICES`` naming ``ordinals``, positions among the devices the
+    process already sees.
+
+    A comma-separated string is split into its entries. With no restriction set, the
+    ordinals pass through.
+    """
+    entries = [token.strip() for value in ordinals for token in str(value).split(",")]
+    entries = [token for token in entries if token]
+    current = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if current is None:
+        return ",".join(entries)
+    visible = [token.strip() for token in current.split(",") if token.strip()]
+    mapped: list[str] = []
+    for entry in entries:
+        try:
+            position = int(entry)
+        except ValueError:
+            position = -1
+        if not 0 <= position < len(visible):
+            raise ExecutionError(
+                f"training device {entry!r} is not one of the {len(visible)} GPU(s) "
+                "this task was allocated (use positions 0.."
+                f"{max(len(visible) - 1, 0)})"
+            )
+        mapped.append(visible[position])
+    return ",".join(mapped)

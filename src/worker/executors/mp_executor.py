@@ -7,6 +7,7 @@ up a short-lived subprocess per task, run the real executor there, and
 forward the result/exception back to the parent.
 """
 
+import importlib
 import logging
 import multiprocessing as mp
 import os
@@ -237,7 +238,8 @@ def _configure_worker_logging(log_queue: Queue | None) -> None:
 
 
 def _executor_worker(
-    executor_cls: type[Executor],
+    executor_ref: str,
+    devices: tuple[str, ...] | None,
     config: WorkerConfig,
     hardware: WorkerHardware | None,
     cmd_queue: mp.Queue,
@@ -259,6 +261,10 @@ def _executor_worker(
     The worker keeps the executor instance alive across multiple `run` commands.
 
     Health check: Periodically verifies parent process is alive; exits if orphaned.
+
+    ``devices`` narrows ``CUDA_VISIBLE_DEVICES`` before ``executor_ref``, a
+    ``module:qualname``, is imported, so nothing CUDA reads at import sees the
+    worker's full device set.
     """
     # Lead a new session/process group so the parent can reap this process
     # together with any children it spawns.
@@ -266,6 +272,12 @@ def _executor_worker(
         os.setsid()
     except OSError:
         pass
+    if devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
+    module_name, _, qualname = executor_ref.partition(":")
+    executor_cls: Any = importlib.import_module(module_name)
+    for name in qualname.split("."):
+        executor_cls = getattr(executor_cls, name)
 
     _configure_worker_logging(log_queue)
     with MPLogHandler(enabled=log_queue is not None):
@@ -376,8 +388,11 @@ class MPExecutor(Executor):
     shut down the subprocess (and the inner executor).
 
     All logs from the subprocess are written to stderr and can be captured by the
-    server logging system or redirected to files.
+    server logging system or redirected to files. The subprocess sees only the GPUs
+    last bound.
     """
+
+    binds_devices = True
 
     def __init__(
         self,
@@ -388,6 +403,7 @@ class MPExecutor(Executor):
     ) -> None:
         super().__init__(config, hardware)
         self._executor_cls = executor_cls
+        self._devices: tuple[str, ...] | None = None
         self._ctx = mp.get_context(start_method)
         inner_name = getattr(executor_cls, "name", executor_cls.__name__)
         self.name = f"mp({inner_name})"
@@ -417,7 +433,8 @@ class MPExecutor(Executor):
         proc: mp.Process = self._ctx.Process(  # type: ignore
             target=_executor_worker,
             args=(
-                self._executor_cls,
+                f"{self._executor_cls.__module__}:{self._executor_cls.__qualname__}",
+                self._devices,
                 self._config,
                 self._hardware,
                 self._cmd_q,
@@ -433,6 +450,13 @@ class MPExecutor(Executor):
         logger.info(
             "Started worker process (PID: %s) for %s", self._proc.pid, self.name
         )
+
+    def bind_devices(self, devices: tuple[str, ...] | None) -> None:
+        with self._lock:
+            if devices == self._devices:
+                return
+            self._graceful_shutdown_locked()
+            self._devices = devices
 
     def _start_log_forwarder(self) -> None:
         if self._log_thread and self._log_thread.is_alive():
