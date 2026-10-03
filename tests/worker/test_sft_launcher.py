@@ -27,6 +27,8 @@ def _launch(
     monkeypatch.delenv("KV_SFT_DISTRIBUTED", raising=False)
     monkeypatch.setattr(sft_executor.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(sft_executor.torch.cuda, "device_count", lambda: 2)
+    # Nothing may reach a real launcher, whichever launch path the code takes.
+    monkeypatch.setattr(sft_executor, "deepspeed_available", lambda: False)
     launched: dict[str, Any] = {}
 
     def fake_torchrun(
