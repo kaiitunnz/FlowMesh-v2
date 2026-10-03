@@ -16,14 +16,13 @@ from ..clients.redis import (
     TASK_LOGS_STREAM_PREFIX,
     SyncRedisClient,
     task_log_archive_last_id_key,
+    task_log_archived_key,
     task_log_stream_key,
 )
 from ..task.models import TaskStatus
 from ..task.runtime import TaskRuntime
 
 _LOGS_NAME = "logs.jsonl"
-# The checkpoint a finalized task keeps, so a restart never archives it again.
-_ARCHIVED = "archived"
 # A failed flush is retried after a delay that doubles from the first, up to the flush
 # interval. A task whose writes keep failing for the give-up window has its buffer
 # dropped: a volume that fills briefly, as when another task's output is cleaned up,
@@ -171,9 +170,10 @@ class TaskLogArchiver:
         """Whether a finished task's logs need no archiving: it was finalized, or,
         finalized before that was recorded, its log file holds lines or something
         other than a file stands where it or a directory holding it belongs."""
-        checkpoint = self._redis.get(task_log_archive_last_id_key(task_id))
-        if checkpoint:
-            return checkpoint == _ARCHIVED
+        if self._redis.get(task_log_archived_key(task_id)):
+            return True
+        if self._redis.get(task_log_archive_last_id_key(task_id)):
+            return False
         try:
             with open_dir(self._base_dir(task_id), LOGS_DIR) as logs_fd:
                 st = os.stat(_LOGS_NAME, dir_fd=logs_fd, follow_symlinks=False)
@@ -184,8 +184,7 @@ class TaskLogArchiver:
         return not stat.S_ISREG(st.st_mode) or st.st_size > 0
 
     def _load_checkpoint(self, task_id: str) -> str | None:
-        last_id = self._redis.get(task_log_archive_last_id_key(task_id))
-        return last_id if last_id and last_id != _ARCHIVED else None
+        return self._redis.get(task_log_archive_last_id_key(task_id)) or None
 
     def _save_checkpoint(self, task_id: str, last_id: str) -> None:
         self._redis.set_value(task_log_archive_last_id_key(task_id), last_id)
@@ -321,7 +320,8 @@ class TaskLogArchiver:
         except Exception as exc:
             self._logger.debug("Failed to sync manifest for %s: %s", task_id, exc)
         try:
-            self._save_checkpoint(task_id, _ARCHIVED)
+            self._redis.set_value(task_log_archived_key(task_id), "1")
+            self._redis.delete(task_log_archive_last_id_key(task_id))
         except Exception as exc:
             self._logger.debug(
                 "Failed to record %s's logs as archived: %s", task_id, exc

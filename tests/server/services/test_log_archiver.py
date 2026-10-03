@@ -13,7 +13,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from server.clients.redis import task_log_archive_last_id_key, task_log_stream_key
+from server.clients.redis import (
+    task_log_archive_last_id_key,
+    task_log_archived_key,
+    task_log_stream_key,
+)
 from server.services import log_archiver
 from server.services.log_archiver import TaskLogArchiver
 from server.task import runtime as runtime_module
@@ -54,7 +58,10 @@ def test_probing_an_archived_task_leaves_its_directory_alone(
     logs_path.parent.mkdir(parents=True, exist_ok=True)
     if recorded:
         logs_path.touch()
-        cast(MagicMock, archiver._redis).get.return_value = "archived"
+        archived_key = task_log_archived_key("tsk-1")
+        cast(MagicMock, archiver._redis).get.side_effect = lambda key: (
+            "1" if key == archived_key else None
+        )
     else:
         logs_path.write_text('{"m": "old"}\n')
     task_dir = logs_path.parent.parent
@@ -219,6 +226,7 @@ class _Streams:
         self.checkpoints: dict[str, str] = {}
         self.redis.get.side_effect = lambda key: self.checkpoints.get(key)
         self.redis.set_value.side_effect = self.checkpoints.__setitem__
+        self.redis.delete.side_effect = lambda key: self.checkpoints.pop(key, None)
         self.redis.xread_telemetry.side_effect = self._read
         self.redis.xrange_telemetry.side_effect = self._range
         self._log: dict[str, list[tuple[str, dict[str, Any]]]] = {}
@@ -403,7 +411,31 @@ def test_a_restart_while_retrying_still_archives_the_lines(
     _ticks(restarted, clock, 3, 1.0)
 
     assert _lines(restarted, "tsk-1") == ['{"m": "kept"}']
-    assert streams.checkpoints[task_log_archive_last_id_key("tsk-1")] == "archived"
+    assert streams.checkpoints[task_log_archived_key("tsk-1")]
+
+
+def test_finalizing_records_the_task_archived_apart_from_its_stream_checkpoint(
+    tmp_path: Path,
+) -> None:
+    archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DISPATCHED})
+    streams.publish("tsk-1", "one")
+    with patch.object(log_archiver.time, "sleep"):
+        archiver._tick()
+    assert streams.checkpoints[task_log_archive_last_id_key("tsk-1")] == "1-0"
+
+    archiver._runtime.task_statuses.return_value = {  # type: ignore[attr-defined]
+        "tsk-1": TaskStatus.DONE
+    }
+    with patch.object(log_archiver.time, "sleep"):
+        archiver._tick()
+
+    # Older code reads the stream checkpoint as a stream id.
+    assert task_log_archive_last_id_key("tsk-1") not in streams.checkpoints
+    assert streams.checkpoints[task_log_archived_key("tsk-1")]
+    restarted, _ = _streaming_archiver(
+        tmp_path, {"tsk-1": TaskStatus.DONE}, streams=streams
+    )
+    assert restarted._archived("tsk-1")
 
 
 def test_a_finished_tasks_last_lines_are_archived(tmp_path: Path) -> None:
