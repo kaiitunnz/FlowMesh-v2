@@ -167,6 +167,50 @@ class TestUnresolvedTemplates:
         )
         assert spec.uses_gpu() is True
 
+    def test_a_template_naming_its_own_devices_pins_them(self) -> None:
+        spec = InferenceSpecTemplate(
+            taskType=TaskType.INFERENCE,
+            data=_DATA,
+            model=ModelConfigTemplate(
+                source=ModelSourceTemplate(identifier="org/m"),
+                vllm={"env_vars": {"CUDA_VISIBLE_DEVICES": "${params.devices}"}},
+            ),
+        )
+        assert spec.pins_cuda_devices() is True
+
+    def test_a_template_keeping_pci_bus_order_still_binds(self) -> None:
+        spec = InferenceSpecTemplate(
+            taskType=TaskType.INFERENCE,
+            data=_DATA,
+            model=ModelConfigTemplate(
+                source=ModelSourceTemplate(identifier="org/m"),
+                vllm={"env_vars": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}},
+            ),
+        )
+        assert spec.pins_cuda_devices() is False
+
+    def test_a_template_whose_env_vars_are_a_placeholder_pins(self) -> None:
+        spec = InferenceSpecTemplate(
+            taskType=TaskType.INFERENCE,
+            data=_DATA,
+            model=ModelConfigTemplate(
+                source=ModelSourceTemplate(identifier="org/m"),
+                vllm={"env_vars": "{{ prep.env }}"},
+            ),
+        )
+        assert spec.pins_cuda_devices() is True
+
+    def test_a_template_ordering_its_own_devices_pins_them(self) -> None:
+        spec = InferenceSpecTemplate(
+            taskType=TaskType.INFERENCE,
+            data=_DATA,
+            model=ModelConfigTemplate(
+                source=ModelSourceTemplate(identifier="org/m"),
+                vllm={"env_vars": {"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}},
+            ),
+        )
+        assert spec.pins_cuda_devices() is True
+
 
 class TestEmbedding:
     def test_vllm_embedding_uses_gpu(self) -> None:
@@ -256,3 +300,77 @@ class TestDispatchUsesGpu:
         echo = EchoSpecStrict(taskType=TaskType.ECHO, resources=zero)
         assert _uses_gpu(echo, relays_only=False) is False
         assert _uses_gpu(_inference(resources=zero), relays_only=False) is True
+
+
+def _two_devices(held: int) -> WorkerHardware:
+    devices = [
+        GpuInfo(
+            index=index,
+            name="A100",
+            uuid=f"GPU-{index}",
+            memory_total_bytes=80 * 1024**3,
+            gpu_available=index != held,
+        )
+        for index in range(2)
+    ]
+    return WorkerHardware(
+        cpu=CPUInfo(logical_cores=2, model="x"),
+        memory=MemoryInfo(total_bytes=1024**3),
+        gpu=GpuPlatformInfo(driver_version=None, cuda_version=None, devices=devices),
+        network=NetworkInfo(ip=None, bandwidth_bytes_per_sec=None),
+    )
+
+
+def _with_gpus(count: int | None) -> ResourcesSpec:
+    return ResourcesSpec(
+        hardware=HardwareRequirements(gpu=GPURequirements(count=count))
+    )
+
+
+class TestBindingWorker:
+    """A worker that binds a task's executor to free devices is placed per device."""
+
+    def test_a_binding_worker_fits_a_task_its_free_devices_satisfy(self) -> None:
+        spec = _inference(model=_model(vllm={"dtype": "auto"}), resources=_with_gpus(1))
+        hardware = _two_devices(held=0)
+
+        assert gpus_fit_dispatch(hardware, spec, False, binds_devices=True)
+        assert not gpus_fit_dispatch(hardware, spec, False)
+
+    def test_a_binding_worker_refuses_more_devices_than_are_free(self) -> None:
+        spec = _inference(model=_model(vllm={"dtype": "auto"}), resources=_with_gpus(2))
+
+        assert not gpus_fit_dispatch(
+            _two_devices(held=0), spec, False, binds_devices=True
+        )
+
+    def test_a_task_naming_its_own_devices_keeps_every_device(self) -> None:
+        spec = _inference(
+            model=_model(vllm={"env_vars": {"CUDA_VISIBLE_DEVICES": "0"}}),
+            resources=_with_gpus(1),
+        )
+
+        assert spec.pins_cuda_devices()
+        assert not gpus_fit_dispatch(
+            _two_devices(held=1), spec, False, binds_devices=True
+        )
+
+    def test_a_task_ordering_its_own_devices_keeps_every_device(self) -> None:
+        spec = _inference(
+            model=_model(vllm={"env_vars": {"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}}),
+            resources=_with_gpus(1),
+        )
+
+        assert spec.pins_cuda_devices()
+        assert not gpus_fit_dispatch(
+            _two_devices(held=1), spec, False, binds_devices=True
+        )
+
+    def test_a_task_keeping_pci_bus_order_binds_beside_a_held_card(self) -> None:
+        spec = _inference(
+            model=_model(vllm={"env_vars": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}}),
+            resources=_with_gpus(1),
+        )
+
+        assert not spec.pins_cuda_devices()
+        assert gpus_fit_dispatch(_two_devices(held=1), spec, False, binds_devices=True)

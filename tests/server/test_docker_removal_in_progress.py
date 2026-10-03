@@ -384,3 +384,18 @@ class TestConcurrentStops:
         assert await second is True
         assert await first is True
         worker.remove.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_start_creates_nothing_once_a_destroy_closes_it_mid_check() -> None:
+    adapter = _adapter(MagicMock())
+    adapter._start = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+    async def closed_while_checking() -> bool:
+        adapter.close()
+        return False
+
+    adapter.runs_held_worker = closed_while_checking  # type: ignore[method-assign]
+
+    assert await adapter.start() is False
+    adapter._start.assert_not_called()

@@ -98,6 +98,8 @@ class WorkerConfig:
     ssh_stop_timeout_sec: float = 30.0
     state_dirs: tuple[Path, ...] = ()
     foreign_gpu_gate: GpuGateConfig = GpuGateConfig()
+    serve_default_ttl_sec: float = 3600.0
+    serve_max_ttl_sec: float = 86400.0
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -309,6 +311,8 @@ class WorkerConfig:
             enable_dev_model=enable_dev_model,
             dev_model_forward_url=dev_model_forward_url,
             dev_model_response_delay_sec=dev_model_response_delay_sec,
+            serve_default_ttl_sec=parse_float_env("SERVE_DEFAULT_TTL_SEC", 3600.0),
+            serve_max_ttl_sec=parse_float_env("SERVE_MAX_TTL_SEC", 86400.0),
             web_search_provider=web_search_provider,
             web_search_api_key=web_search_api_key,
             model_api_key=model_api_key,

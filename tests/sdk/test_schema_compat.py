@@ -47,6 +47,8 @@ from flowmesh.models import (
     VersionResponse,
     Worker,
     WorkerCapabilities,
+    WorkerCordon,
+    WorkerCordonResult,
     WorkerHardware,
     WorkerInfo,
     WorkerRegisterResponse,
@@ -101,6 +103,8 @@ from server.schemas.traces import TraceAggregate as SrvTraceAggregate
 from server.schemas.traces import TraceAggregateBucket as SrvTraceAggregateBucket
 from server.schemas.traces import TraceSpanNode as SrvTraceSpanNode
 from server.schemas.traces import TraceTree as SrvTraceTree
+from server.schemas.worker import WorkerCordon as SrvWorkerCordon
+from server.schemas.worker import WorkerCordonResult as SrvWorkerCordonResult
 from server.schemas.workflow import WorkflowPage as SrvWorkflowPage
 from server.schemas.workflow import WorkflowSubmitResponse as SrvWorkflowSubmitResponse
 from server.schemas.workflow import (
@@ -216,6 +220,8 @@ MODEL_PAIRS = [
     # Worker models
     (SrvWorker, Worker),
     (SrvWorkerInfo, WorkerInfo),
+    (SrvWorkerCordon, WorkerCordon),
+    (SrvWorkerCordonResult, WorkerCordonResult),
     # Node schemas
     (SrvNode, Node),
     (SrvNodeRegisterResponse, NodeRegisterResponse),

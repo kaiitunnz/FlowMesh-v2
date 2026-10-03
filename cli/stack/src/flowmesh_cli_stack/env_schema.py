@@ -1490,12 +1490,16 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "SERVE_DEFAULT_TTL_SEC",
                     "3600",
+                    description=(
+                        "Serve task TTL, from its first start, when its spec sets none."
+                    ),
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                 ),
                 EnvVar(
                     "SERVE_MAX_TTL_SEC",
                     "86400",
+                    description="Upper bound on a serve task's TTL.",
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                 ),

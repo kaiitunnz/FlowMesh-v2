@@ -237,7 +237,7 @@ services:
       retries: 10
 
   content-store:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
     profiles: [content]
     container_name: ${FLOWMESH_STACK_SLUG:-flowmesh_node}_content_store
     command: server /data --console-address ":9001"

@@ -235,3 +235,27 @@ def test_the_stream_range_reads_agree() -> None:
     assert [
         fields["n"] for _, fields in client.sync.xrevrange_telemetry("logs:task:tsk-1")
     ] == ["4", "3", "2", "1", "0"]
+
+
+def test_the_set_writes_count_alike() -> None:
+    sync = fake_redis_client(fakeredis.FakeServer()).sync
+    async_ = fake_redis_client(fakeredis.FakeServer()).asyncio
+
+    async def async_counts() -> list[int]:
+        return [
+            await async_.sadd("s", "a", "b"),
+            await async_.sadd("s", "a"),
+            await async_.sadd("s"),
+            await async_.srem("s", "a", "c"),
+            await async_.srem("s"),
+        ]
+
+    expected = [2, 0, 0, 1, 0]
+    assert asyncio.run(async_counts()) == expected
+    assert [
+        sync.sadd("s", "a", "b"),
+        sync.sadd("s", "a"),
+        sync.sadd("s"),
+        sync.srem("s", "a", "c"),
+        sync.srem("s"),
+    ] == expected

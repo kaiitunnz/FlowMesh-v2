@@ -21,6 +21,7 @@ from server.resident import (
     ResidentPolicyLimits,
     ResidentStores,
     ServiceFamily,
+    decide_materialization,
     new_claim,
     reserve,
 )
@@ -154,13 +155,22 @@ def test_scale_from_zero_then_warm():
     assert mgr.plan_capacity("fam", "m").action == "join"
 
 
-def test_policy_denies_over_quota_and_unlisted_model():
-    stores = warm_stores()  # one active replica, draining so it is not joinable
+def test_a_draining_replica_does_not_count_toward_the_family_quota():
+    stores = warm_stores()
     mgr = _manager(stores, limits=ResidentPolicyLimits(max_replicas_per_family=1))
     mgr.drain("rpl-1")
-    denied = mgr.plan_capacity("fam", "m")
-    assert denied.action == "deny"
-    assert denied.denial.reason is ProvisioningDenialReason.QUOTA_EXCEEDED
+    assert mgr.plan_capacity("fam", "m").action == "materialize"
+
+
+def test_policy_denies_over_quota_and_unlisted_model():
+    denied = decide_materialization(
+        model_ref="m",
+        limits=ResidentPolicyLimits(max_replicas_per_family=1),
+        active_replicas=1,
+        materializing_replicas=0,
+    )
+    assert not denied.allowed
+    assert denied.reason is ProvisioningDenialReason.QUOTA_EXCEEDED
 
     gated = _manager(
         ResidentStores(),

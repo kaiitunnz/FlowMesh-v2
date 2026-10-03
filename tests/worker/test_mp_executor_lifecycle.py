@@ -15,11 +15,13 @@ from shared.schemas.result import BaseExecutorResult
 from shared.tasks import TaskType
 from shared.tasks.specs import EchoSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
+from tests.worker.binding_probe import SeenDevicesExecutor, SeenDevicesResult
 from tests.worker.factories import (
     make_live_worker_config,
     make_worker_hardware,
     make_worker_task_message,
 )
+from worker import hw
 from worker.executors import mp_executor as mp_executor_module
 from worker.executors.base_executor import ExecutionError, Executor
 from worker.executors.mp_executor import MPExecutor
@@ -317,3 +319,38 @@ def test_mp_executor_cleanup_before_run_is_noop(tmp_path: Path) -> None:
     assert mp._proc is None
     assert mp._cmd_q is None
     assert mp._res_q is None
+
+
+def test_mp_executor_child_sees_only_the_bound_devices_from_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
+    monkeypatch.setattr(
+        hw,
+        "visible_gpus",
+        lambda: tuple(
+            hw.VisibleGpu(ordinal=i, nvml_index=i, uuid=uuid, name="NVIDIA H100")
+            for i, uuid in enumerate(("GPU-a", "GPU-b", "GPU-c"))
+        ),
+    )
+    mp = MPExecutor(
+        SeenDevicesExecutor,
+        config=make_live_worker_config(tmp_path),
+        hardware=make_worker_hardware(),
+    )
+    try:
+        mp.bind_devices(("GPU-b", "GPU-c"))
+        first = mp.run(_simple_task_message(), tmp_path)
+        mp.bind_devices(("GPU-a",))
+        second = mp.run(_simple_task_message(), tmp_path)
+    finally:
+        mp.cleanup_after_run()
+
+    assert isinstance(first, SeenDevicesResult)
+    # Integer entries under PCI bus order, which every CUDA library parses: DeepSpeed
+    # maps each entry to an NVML index with int().
+    assert (first.at_import, first.at_run) == ("1,2", "1,2")
+    assert first.device_order == "PCI_BUS_ID"
+    assert isinstance(second, SeenDevicesResult)
+    assert (second.at_import, second.at_run) == ("0", "0")
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0,1,2"

@@ -96,6 +96,8 @@ from .workers import (
     StorageInfo,
     Worker,
     WorkerCapabilities,
+    WorkerCordon,
+    WorkerCordonResult,
     WorkerHardware,
     WorkerInfo,
 )
@@ -210,6 +212,8 @@ __all__ = [
     "VersionResponse",
     "Worker",
     "WorkerCapabilities",
+    "WorkerCordon",
+    "WorkerCordonResult",
     "WorkerHardware",
     "WorkerInfo",
     "WorkerRegisterResponse",

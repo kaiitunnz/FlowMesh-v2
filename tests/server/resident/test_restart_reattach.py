@@ -141,7 +141,23 @@ def test_reaping_a_serve_task_twice_cancels_it_once() -> None:
     assert node.status(warm.serve_task_id) == TaskStatus.CANCELLING
 
 
-def test_a_restart_keeps_a_draining_replica_serve_task() -> None:
+def test_a_restart_keeps_a_draining_replica_serve_task_while_it_holds_credit() -> None:
+    async def run() -> None:
+        node = Node()
+        replica = await admitted_boundary(node)
+        assert replica.serve_task_id is not None
+        node.control._lifecycle.drain(replica.replica_id)
+        node.persist()
+
+        await node.restart_async()
+
+        assert node.replica(replica.replica_id).state is ReplicaState.DRAINING
+        assert node.status(replica.serve_task_id) == TaskStatus.DISPATCHED
+
+    asyncio.run(run())
+
+
+def test_a_restart_stops_a_draining_replica_holding_no_credit() -> None:
     node = Node()
     warm = node.warm()
     assert warm.serve_task_id is not None
@@ -150,8 +166,8 @@ def test_a_restart_keeps_a_draining_replica_serve_task() -> None:
 
     node.restart()
 
-    assert node.replica(warm.replica_id).state is ReplicaState.DRAINING
-    assert node.status(warm.serve_task_id) == TaskStatus.DISPATCHED
+    assert node.replica(warm.replica_id).state is ReplicaState.STOPPED
+    assert node.status(warm.serve_task_id) == TaskStatus.CANCELLING
 
 
 def test_a_restart_reattaches_a_standing_replica_with_its_engine_key() -> None:

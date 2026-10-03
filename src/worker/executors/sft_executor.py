@@ -2,9 +2,8 @@
 """SFT executor powered by TRL's SFTTrainer/SFTConfig.
 
 Single-GPU runs execute in-process. Multi-GPU runs go through
-``torch.distributed.run.main`` (the same entry point ``torchrun`` calls),
-or through ``deepspeed.launcher.runner.main`` when a DeepSpeed configuration
-is supplied and the ``deepspeed`` package is importable.
+``torch.distributed.run.main`` (the same entry point ``torchrun`` calls), whose
+ranks apply a DeepSpeed configuration when one is supplied.
 """
 
 import gc
@@ -16,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+import pynvml
 import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -42,7 +42,6 @@ from .utils.data_utils import resolve_jsonl_path
 from .utils.distributed import (
     deepspeed_available,
     launcher_task_file,
-    run_deepspeed,
     run_torchrun,
 )
 from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
@@ -50,9 +49,15 @@ from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 logger = logging.getLogger("worker.sft")
 
 
+_SFT_LAUNCHER_FLAG = "KV_SFT_DISTRIBUTED"
+# The devices this process was started on, before a run narrows them.
+_STARTED_ON = os.environ.get("CUDA_VISIBLE_DEVICES")
+
+
 class SFTExecutor(TrainingMixin, Executor):
     name = "sft_executor"
     supported_task_types = frozenset({TaskType.SFT})
+    runs_on_visible_gpus = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -98,8 +103,7 @@ class SFTExecutor(TrainingMixin, Executor):
         # Internal distributed launcher: spawn multi-GPU training as subprocesses
         try:
             allow_multi_cfg = training_cfg.get("allow_multi_gpu")
-            launcher_env_flag = "KV_SFT_DISTRIBUTED"
-            already_spawned = os.environ.get(launcher_env_flag) == "1"
+            already_spawned = os.environ.get(_SFT_LAUNCHER_FLAG) == "1"
             # Determine requested GPU count
             vis = os.environ.get("CUDA_VISIBLE_DEVICES") or training_cfg.get(
                 "visible_devices"
@@ -157,39 +161,27 @@ class SFTExecutor(TrainingMixin, Executor):
                 and (n_gpus or 0) > 1
             ):
                 nproc = int(training_cfg.get("nproc_per_node", n_gpus))
-                use_deepspeed = deepspeed_intent and deepspeed_available()
-                if deepspeed_intent and not use_deepspeed:
+                if deepspeed_intent and not deepspeed_available():
                     logger.warning(
                         "DeepSpeed configuration provided but the `deepspeed` "
-                        "package is not importable; falling back to torchrun."
+                        "package is not importable."
                     )
+                # torchrun keeps CUDA_VISIBLE_DEVICES, so the ranks run on this
+                # task's devices; each rank's Trainer applies the DeepSpeed config.
+                logger.info(
+                    "Launching torchrun for SFT "
+                    "(nproc=%d, deepspeed=%s, CUDA_VISIBLE_DEVICES=%s)",
+                    nproc,
+                    deepspeed_intent,
+                    os.environ.get("CUDA_VISIBLE_DEVICES"),
+                )
                 with launcher_task_file(out_dir, task) as task_file:
-                    if use_deepspeed:
-                        logger.info(
-                            "Launching DeepSpeed for SFT "
-                            "(num_gpus=%d, CUDA_VISIBLE_DEVICES=%s)",
-                            nproc,
-                            os.environ.get("CUDA_VISIBLE_DEVICES"),
-                        )
-                        run_deepspeed(
-                            num_gpus=nproc,
-                            module="worker.executors.sft_dist_entry",
-                            module_args=[task_file.as_posix(), out_dir.as_posix()],
-                            launcher_env_flag=launcher_env_flag,
-                        )
-                    else:
-                        logger.info(
-                            "Launching torchrun for SFT "
-                            "(nproc=%d, CUDA_VISIBLE_DEVICES=%s)",
-                            nproc,
-                            os.environ.get("CUDA_VISIBLE_DEVICES"),
-                        )
-                        run_torchrun(
-                            nproc_per_node=nproc,
-                            module="worker.executors.sft_dist_entry",
-                            module_args=[task_file.as_posix(), out_dir.as_posix()],
-                            launcher_env_flag=launcher_env_flag,
-                        )
+                    run_torchrun(
+                        nproc_per_node=nproc,
+                        module="worker.executors.sft_dist_entry",
+                        module_args=[task_file.as_posix(), out_dir.as_posix()],
+                        launcher_env_flag=_SFT_LAUNCHER_FLAG,
+                    )
                 ipc_path = scratch_dir(out_dir) / "distributed_result.json"
                 if ipc_path.exists():
                     self._task_out_dir = None
@@ -274,7 +266,7 @@ class SFTExecutor(TrainingMixin, Executor):
             # going. Hugging Face will still initialize DeepSpeed on the current rank
             # (often rank 0 only).
             if deepspeed_cfg and not dist_initialized:
-                if os.environ.get("KV_SFT_DISTRIBUTED") == "1":
+                if os.environ.get(_SFT_LAUNCHER_FLAG) == "1":
                     logger.info(
                         "DeepSpeed runtime will initialize torch.distributed "
                         "(local_rank=%s)",
@@ -752,43 +744,39 @@ class SFTExecutor(TrainingMixin, Executor):
 
     @staticmethod
     def _configure_devices(training_cfg: dict[str, Any]) -> None:
-        """Control CUDA_VISIBLE_DEVICES only; no model.to() here."""
-        if not torch.cuda.is_available():
-            return
-        requested = training_cfg.get("visible_devices")
-        allow_multi_cfg = training_cfg.get("allow_multi_gpu")
-        try:
-            n_devices = torch.cuda.device_count()
-        except Exception:
-            n_devices = 0
-        if allow_multi_cfg is None:
-            allow_multi = n_devices > 1
-        else:
-            allow_multi = bool(allow_multi_cfg)
+        """Narrow CUDA_VISIBLE_DEVICES to the run's training devices.
 
-        if requested:
-            devices = (
-                ",".join(str(x) for x in requested)
-                if isinstance(requested, (list, tuple))
-                else str(requested)
+        Runs before anything initialises CUDA, which reads the variable once. Each run
+        starts from the devices the process was started on, and a launched rank keeps
+        the devices its launch already chose.
+        """
+        if os.environ.get(_SFT_LAUNCHER_FLAG) == "1":
+            return
+        if _STARTED_ON is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = _STARTED_ON
+        if requested := training_cfg.get("visible_devices"):
+            devices = _within_visible(
+                list(requested) if isinstance(requested, (list, tuple)) else [requested]
             )
             os.environ["CUDA_VISIBLE_DEVICES"] = devices
             logger.info("Using user-specified CUDA_VISIBLE_DEVICES=%s", devices)
             return
-        if allow_multi:
-            logger.info("Multi-GPU allowed; using all visible GPUs.")
+        n_devices = _started_device_count()
+        allow_multi_cfg = training_cfg.get("allow_multi_gpu")
+        if n_devices <= 1 or allow_multi_cfg is None or bool(allow_multi_cfg):
+            if n_devices > 1:
+                logger.info("Multi-GPU allowed; using all visible GPUs.")
             return
-        # Default to a single GPU when multiple devices are visible but not
-        # explicitly allowed
-        if n_devices > 1:
-            preferred = training_cfg.get("primary_gpu", 0)
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(preferred)
-            logger.info(
-                "Multiple GPUs detected (%d); restrict to device %s (set "
-                "training.allow_multi_gpu=false to override).",
-                n_devices,
-                preferred,
-            )
+        preferred = _within_visible([training_cfg.get("primary_gpu", 0)])
+        os.environ["CUDA_VISIBLE_DEVICES"] = preferred
+        logger.info(
+            "Multiple GPUs detected (%d); restrict to device %s (set "
+            "training.allow_multi_gpu=false to override).",
+            n_devices,
+            preferred,
+        )
 
     @staticmethod
     def _resolve_deepspeed_config(training_cfg: dict[str, Any], log) -> Any | None:
@@ -859,3 +847,42 @@ class SFTExecutor(TrainingMixin, Executor):
             "fp16": {"enabled": fp16_enabled and not bf16_enabled},
             "steps_per_print": 2000,
         }
+
+
+def _started_device_count() -> int:
+    """Count the GPUs the process was started on, without initialising CUDA."""
+    if _STARTED_ON is not None:
+        return len([entry for entry in _STARTED_ON.split(",") if entry.strip()])
+    try:
+        pynvml.nvmlInit()
+        return pynvml.nvmlDeviceGetCount()
+    except pynvml.NVMLError:
+        return 0
+
+
+def _within_visible(ordinals: list[Any]) -> str:
+    """Return the ``CUDA_VISIBLE_DEVICES`` naming ``ordinals``, positions among the
+    devices the process was started on.
+
+    A comma-separated string is split into its entries. With no restriction set, the
+    ordinals pass through.
+    """
+    entries = [token.strip() for value in ordinals for token in str(value).split(",")]
+    entries = [token for token in entries if token]
+    if _STARTED_ON is None:
+        return ",".join(entries)
+    visible = [token.strip() for token in _STARTED_ON.split(",") if token.strip()]
+    mapped: list[str] = []
+    for entry in entries:
+        try:
+            position = int(entry)
+        except ValueError:
+            position = -1
+        if not 0 <= position < len(visible):
+            raise ExecutionError(
+                f"training device {entry!r} is not one of the {len(visible)} GPU(s) "
+                "this task was allocated (use positions 0.."
+                f"{max(len(visible) - 1, 0)})"
+            )
+        mapped.append(visible[position])
+    return ",".join(mapped)

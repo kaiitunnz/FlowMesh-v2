@@ -133,6 +133,7 @@ class VLLMExecutor(InferenceMixin, Executor):
 
     name = "vllm"
     supported_task_types = frozenset({TaskType.INFERENCE})
+    runs_on_visible_gpus = True
 
     summarization_template = """Summarize the following document concisely in 2-3 \
 sentences. Focus on the main topic and key information.

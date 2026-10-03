@@ -417,14 +417,32 @@ reachable only from that worker's host); a Docker session's port is published on
 address of the worker's host (`network`). When the server cannot carry a relayed mode,
 `forward` falls back to `proxy`, then to `direct` at that address.
 
+## Model executor GPUs
+
+A worker runs its model, diffusion, training and `serve` executors on the GPUs no
+process outside FlowMesh holds: when it loads one for a GPU task, it picks the free
+devices that match the task's `gpu` block (`count` of them, or every free match without
+a positive one) and starts the executor seeing only those, listed by index under
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`. A warm executor keeps its devices while they stay free
+and fit the next task, and restarts on others otherwise, as for a task without a
+positive count once another device frees up. SFT's `visible_devices` and `primary_gpu`
+are positions within the task's devices; a position past them fails the task. Multi-GPU
+training runs its ranks on those devices. A vLLM inference, LoRA or embedding task that
+sets `CUDA_VISIBLE_DEVICES`, or a `CUDA_DEVICE_ORDER` other than `PCI_BUS_ID`, in
+`model.vllm.env_vars` picks its own devices, so its executor sees every device and the
+task waits while any is held, as does an omni task, whose executor sees every device. A
+worker on a MIG slice, or one whose `CUDA_VISIBLE_DEVICES` lists some of a host's mixed
+GPU models by position without `CUDA_DEVICE_ORDER=PCI_BUS_ID`, runs every executor on
+all its GPUs.
+
 ## SSH executor GPUs
 
 With `ENABLE_SSH_GPU_LIMIT`, a session whose `gpu` block sets a `count`, `type` or
 `memory` receives the smallest matching subset of the devices its worker last reported
 free of processes outside FlowMesh, or, when those fall short, of the devices a reading
 just taken shows free. Only a reading just taken refuses a session, which is retried. A
-`gpu` block setting none of them receives every device and waits while any is held, like
-a model task. A session that declares no `gpu` block receives every device.
+`gpu` block setting none of them receives every device and waits while any is held. A
+session that declares no `gpu` block receives every device.
 
 ## SSH executor (process backend)
 

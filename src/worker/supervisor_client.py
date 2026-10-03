@@ -371,10 +371,13 @@ class SupervisorClient:
         task_type: str | None = None,
         dispatched_at: str | None = None,
         started_at: str | None = None,
+        executing: bool = True,
     ) -> None:
         payload: dict[str, Any] = {}
         if task_type is not None:
             payload["taskType"] = task_type
+        if not executing:
+            payload["executing"] = False
         if dispatched_at is not None:
             payload["dispatched_at"] = dispatched_at
         if started_at is not None:

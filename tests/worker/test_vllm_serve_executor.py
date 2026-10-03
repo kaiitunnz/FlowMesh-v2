@@ -20,6 +20,7 @@ from tests.worker.factories import (
     make_worker_hardware,
     make_worker_task_message,
 )
+from worker import hw
 from worker.executors import vllm_serve_executor as mod
 from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.utils.net import resolve_bind_port
@@ -177,6 +178,48 @@ class TestServeExecutorCmdBuilding:
             ex.run(task, tmp_path)
 
         return captured[0]
+
+    def test_a_bound_launch_sees_only_its_devices(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+        monkeypatch.setattr(
+            hw,
+            "visible_gpus",
+            lambda: (
+                hw.VisibleGpu(ordinal=0, nvml_index=0, uuid="GPU-a", name="H100"),
+                hw.VisibleGpu(ordinal=1, nvml_index=1, uuid="GPU-b", name="H100"),
+            ),
+        )
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+        )
+        task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
+        ex = self._make_executor()
+        ex.bind_devices(("GPU-b",))
+        envs: list[dict[str, str]] = []
+
+        def fake_popen(cmd: list[str], env: dict[str, str], **_: object) -> MagicMock:
+            envs.append(env)
+            m = MagicMock()
+            m.stdout = io.StringIO("")
+            m.poll.return_value = 0
+            m.returncode = 0
+            m.pid = 12345
+            return m
+
+        with (
+            patch("subprocess.Popen", side_effect=fake_popen),
+            patch.object(ex, "_poll_health"),
+            patch.object(ex, "_wait_for_serve"),
+            patch.object(ex, "emit_update"),
+            patch.object(ex, "_terminate_process_group"),
+        ):
+            ex.run(task, tmp_path)
+
+        assert envs[0]["CUDA_VISIBLE_DEVICES"] == "1"
+        assert envs[0]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
 
     def test_model_name_and_revision_in_cmd(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
@@ -462,7 +505,7 @@ class TestWaitForServe:
         mock_proc.poll.return_value = None
         with ex._signals.running("tsk-test"), pytest.raises(TaskCancelledError):
             ex.cancel("tsk-test")
-            ex._wait_for_serve(mock_proc, ttl_sec=60.0)
+            ex._wait_for_serve(mock_proc, deadline=time.time() + 60.0)
 
     def test_exits_on_stop(self) -> None:
         ex = self._make_executor()
@@ -470,7 +513,7 @@ class TestWaitForServe:
         mock_proc.poll.return_value = None
         with ex._signals.running("tsk-test"):
             ex.stop("tsk-test")
-            ex._wait_for_serve(mock_proc, ttl_sec=60.0)
+            ex._wait_for_serve(mock_proc, deadline=time.time() + 60.0)
 
     def test_raises_on_unexpected_proc_exit(self) -> None:
         ex = self._make_executor()
@@ -478,7 +521,7 @@ class TestWaitForServe:
         mock_proc.poll.return_value = 1
         mock_proc.returncode = 1
         with pytest.raises(ExecutionError):
-            ex._wait_for_serve(mock_proc, ttl_sec=60.0)
+            ex._wait_for_serve(mock_proc, deadline=time.time() + 60.0)
 
     def test_exits_when_ttl_expires(self) -> None:
         ex = self._make_executor()
@@ -489,7 +532,7 @@ class TestWaitForServe:
         mod._POLL_INTERVAL_SEC = 0.01
         try:
             start = time.time()
-            ex._wait_for_serve(mock_proc, ttl_sec=0.02)
+            ex._wait_for_serve(mock_proc, deadline=time.time() + 0.02)
             elapsed = time.time() - start
         finally:
             mod._POLL_INTERVAL_SEC = original
@@ -787,3 +830,48 @@ class TestPollHealthEofFastFail:
                     )
         finally:
             mod._HEALTH_POLL_INTERVAL_SEC = orig
+
+
+class TestServeTtlAcrossReruns:
+    def _run(
+        self, tmp_path: Path, ttl: float, elapsed: float | None
+    ) -> tuple[MagicMock, list[float]]:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+            ttlSeconds=ttl,
+        )
+        task = make_worker_task_message(
+            spec=spec, task_type=TaskType.SERVE, serve_elapsed_sec=elapsed
+        )
+        ex = VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+        deadlines: list[float] = []
+        proc = MagicMock()
+        proc.stdout = io.StringIO("")
+        with (
+            patch("subprocess.Popen", return_value=proc) as popen,
+            patch.object(ex, "_poll_health"),
+            patch.object(
+                ex, "_wait_for_serve", side_effect=lambda _p, d: deadlines.append(d)
+            ),
+            patch.object(ex, "emit_update"),
+            patch.object(ex, "_terminate_process_group"),
+        ):
+            ex.run(task, tmp_path)
+        return popen, deadlines
+
+    def test_a_re_run_serves_what_remains_of_the_ttl(self, tmp_path: Path) -> None:
+        before = time.time()
+        _popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=100.0)
+        assert before + 80.0 - 1.0 <= deadlines[0] <= time.time() + 80.0
+
+    def test_an_elapsed_ttl_starts_no_engine(self, tmp_path: Path) -> None:
+        popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=180.0)
+        popen.assert_not_called()
+        assert deadlines == []
+
+    def test_an_elapsed_ttl_ends_without_binding_its_port(self, tmp_path: Path) -> None:
+        with patch.object(mod, "resolve_bind_port", side_effect=ExecutionError("busy")):
+            popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=180.0)
+        popen.assert_not_called()
+        assert deadlines == []

@@ -228,3 +228,17 @@ def test_off_lane_work_runs_for_the_dispatch_its_boundary_was_captured_under(
     else:
         lifecycle.resident_requests.delete("tsk-a", "c0")
     assert lifecycle.dispatch_for("tsk-a") is None
+
+
+def test_a_start_reported_only_to_end_a_task_says_it_is_not_executing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client()
+    sent: list[Any] = []
+    monkeypatch.setattr(client, "_send_event", lambda event, *_: sent.append(event))
+
+    client.task_started("tsk-a")
+    client.task_started("tsk-a", executing=False)
+
+    assert "executing" not in sent[0].payload
+    assert sent[1].payload["executing"] is False

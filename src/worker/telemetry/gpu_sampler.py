@@ -26,7 +26,8 @@ from shared.telemetry.semconv import (
     RESOURCE_WORKER_ID,
 )
 
-from .utils import nvml
+from ..hw import nvml_memory_handle, visible_gpus
+from ..utils import nvml
 
 __all__ = ["GpuSampler", "build_gpu_sampler"]
 
@@ -124,13 +125,12 @@ class GpuSampler:
             RESOURCE_NODE_ID: self._node_id() or "",
             RESOURCE_WORKER_ID: self._worker_id() or "",
         }
-        for idx, handle in nvml.device_handles():
+        for gpu in visible_gpus():
             attrs = dict(base_attrs)
-            attrs[GPU_INDEX] = str(idx)
-            try:
-                attrs[GPU_UUID] = nvml.device_uuid(handle)
-            except pynvml.NVMLError:
-                pass
+            attrs[GPU_INDEX] = str(gpu.ordinal)
+            attrs[GPU_UUID] = gpu.uuid
+            # Memory is the visible slice's own; the other readings are per GPU.
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu.nvml_index)
 
             try:
                 util = pynvml.nvmlDeviceGetUtilizationRates(handle)
@@ -139,7 +139,9 @@ class GpuSampler:
                 pass
 
             try:
-                self._memory_used.set(nvml.device_memory(handle).used_bytes, attrs)
+                self._memory_used.set(
+                    nvml.device_memory(nvml_memory_handle(gpu)).used_bytes, attrs
+                )
             except pynvml.NVMLError:
                 pass
 

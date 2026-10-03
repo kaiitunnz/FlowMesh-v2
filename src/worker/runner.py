@@ -38,6 +38,7 @@ from shared.tasks.specs import (
     SSHSpecStrict,
     TaskSpecStrictBase,
 )
+from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
 from shared.telemetry.config import (
     DISABLED_TELEMETRY_CONFIG,
@@ -68,6 +69,7 @@ from .executors.episode_support import EpisodeStepResult, discard_step_captures
 from .executors.inference.projection import generated_outputs
 from .executors.inference.resolution import resolve_task_contract
 from .executors.utils.checkpoints import write_executor_result
+from .gpu_binding import FreeGpus, pick_devices
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
@@ -147,6 +149,7 @@ class Runner:
         peer_material: MutualTlsMaterial | None = None,
         peer_listener_sock: socket.socket | None = None,
         telemetry: TelemetryConfig | None = None,
+        gpu_binding_task_types: frozenset[TaskType] = frozenset(),
     ):
         otel.configure(telemetry or DISABLED_TELEMETRY_CONFIG)
         self.lifecycle = lifecycle
@@ -173,6 +176,9 @@ class Runner:
         self._active_executor_last_used_at: float | None = None
         # Whether the loaded executor has run anything GPU-bound since it came up.
         self._active_executor_used_gpu = False
+        self._gpu_binding_task_types = gpu_binding_task_types
+        # The GPUs the active executor is bound to; None when it sees them all.
+        self._active_executor_devices: tuple[str, ...] | None = None
         # Lock to protect concurrent access to active executor state
         self._active_executor_lock = threading.Lock()
 
@@ -229,17 +235,20 @@ class Runner:
         # attachment (once the worker id is known).
         self._resident_host: ResidentLaneHost | None = None
 
-    def has_active_gpu_executor(self) -> bool:
-        """Whether the loaded executor may still hold GPU memory.
+    def gpu_devices_in_use(self) -> frozenset[str] | None:
+        """Return the devices the loaded executor may still hold GPU memory on: none,
+        its bound devices, or None for all of them.
 
         Executors stay warm between tasks, so a reading taken while one is resident
-        includes the worker's own model. The flag comes from each task's own dispatch
-        rather than the executor class: the wrapper an executor loads behind carries no
-        such attribute, and a transformers executor's device depends on the spec it
-        ran. Read lock-free, since the availability monitor needs only a best-effort
-        snapshot.
+        includes the worker's own model. Whether it used a GPU comes from the task it
+        ran: the subprocess wrapper an executor loads behind does not say, and a
+        transformers executor's device depends on its spec. Read lock-free, since the
+        availability monitor needs only a best-effort snapshot.
         """
-        return self._active_executor is not None and self._active_executor_used_gpu
+        if self._active_executor is None or not self._active_executor_used_gpu:
+            return frozenset()
+        devices = self._active_executor_devices
+        return None if devices is None else frozenset(devices)
 
     def _refuse_if_gpu_is_held(self, msg: WorkerTaskMessage) -> None:
         """Refuse a dispatch whose GPUs another tenant holds.
@@ -247,7 +256,7 @@ class Runner:
         The dispatcher filters on what this worker last reported, so a task can still
         arrive for a device taken since; refusing beats dying in executor init. Only a
         reading just taken counts: a latched one advises the dispatcher, but a latch
-        cannot clear while a GPU executor stays warm.
+        cannot clear on a device a warm GPU executor may hold.
         """
         availability = self.lifecycle.live_gpu_availability()
         if not availability:
@@ -264,7 +273,12 @@ class Runner:
         hardware = self.hardware.model_copy(
             update={"gpu": gpu.model_copy(update={"devices": devices})}
         )
-        if gpus_fit_dispatch(hardware, msg.spec, msg.relays_only):
+        if gpus_fit_dispatch(
+            hardware,
+            msg.spec,
+            msg.relays_only,
+            binds_devices=msg.spec.taskType in self._gpu_binding_task_types,
+        ):
             return
         held = len(devices) - len(available_devices(devices))
         raise ExecutionError(
@@ -288,6 +302,39 @@ class Runner:
             and not isinstance(spec, SSHSpecStrict)
             and spec.uses_gpu()
         )
+
+    def _bind_active_executor(self, msg: WorkerTaskMessage) -> None:
+        """Bind a binding executor to the GPUs a GPU dispatch runs on.
+
+        A spec that names its own devices, or a type this worker does not bind, sees
+        every device. A changed binding restarts the executor, since CUDA reads its
+        devices once per process.
+        """
+        executor = self._active_executor
+        spec = msg.spec
+        if (
+            executor is None
+            or not executor.binds_devices
+            or msg.relays_only
+            or not spec.uses_gpu()
+        ):
+            return
+        devices = self.hardware.gpu.devices
+        bound: tuple[str, ...] | None = None
+        if (
+            devices
+            and spec.taskType in self._gpu_binding_task_types
+            and not spec.pins_cuda_devices()
+        ):
+            bound = pick_devices(
+                self.hardware,
+                spec.gpu_requirements(),
+                FreeGpus.read(self.lifecycle, devices),
+                warm=self._active_executor_devices,
+            )
+        # The executor compares against its own binding, which outlives this mirror.
+        executor.bind_devices(bound)
+        self._active_executor_devices = bound
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
@@ -333,6 +380,7 @@ class Runner:
                 self._active_executor_key = None
                 self._active_executor_last_used_at = None
                 self._active_executor_used_gpu = False
+                self._active_executor_devices = None
 
     @property
     def shutdown_requested(self) -> bool:
@@ -859,6 +907,7 @@ class Runner:
                 self._active_executor_key = None
                 self._active_executor_last_used_at = None
                 self._active_executor_used_gpu = False
+                self._active_executor_devices = None
 
     def _idle_check_loop(self, stop_event: threading.Event) -> None:
         """Background loop that periodically checks for idle executors.
@@ -1218,6 +1267,7 @@ class Runner:
                             self._active_executor = None
                             self._active_executor_key = None
                             self._active_executor_used_gpu = False
+                            self._active_executor_devices = None
 
                         if not self._active_executor:
                             if (
@@ -1238,6 +1288,7 @@ class Runner:
                             )
                             self._active_executor_key = desired_key
                         self._note_gpu_usage(msg)
+                        self._bind_active_executor(msg)
 
                         (
                             task_log_emitter,
@@ -1311,6 +1362,7 @@ class Runner:
                             task_type=task_type,
                             dispatched_at=dispatched_at,
                             started_at=start_iso,
+                            executing=False,
                         )
                         notified_task_started = True
                     metadata = self._build_task_metadata(
@@ -1330,6 +1382,7 @@ class Runner:
                             task_type=task_type,
                             dispatched_at=dispatched_at,
                             started_at=start_iso,
+                            executing=False,
                         )
                         notified_task_started = True
                     metadata = self._build_task_metadata(

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 
 import pynvml
 
+from .hw import nvml_memory_handle, visible_gpus
 from .utils import nvml
 
 logger = logging.getLogger(__name__)
@@ -106,11 +107,11 @@ def decide_availability(
 
 
 class NvmlDeviceProbe:
-    """Per-UUID memory readings for the GPUs this process can see.
+    """Per-UUID memory readings for the worker's own GPUs (see `visible_gpus`).
 
-    A worker container is only given its own GPU(s), so every device NVML enumerates
-    here belongs to this worker. Unified-memory devices (e.g. GB10) are omitted: their
-    "used" figure is system RAM, not a card another tenant is holding.
+    A MIG slice is read on its own, so a tenant of a sibling slice does not show.
+    Unified-memory devices (e.g. GB10) are omitted: their "used" figure is system
+    RAM, not a card another tenant is holding.
 
     Returns ``{}`` when NVML itself cannot be reached, which the monitor reads as total
     probe failure. A device that individually fails to read is simply absent from the
@@ -128,17 +129,16 @@ class NvmlDeviceProbe:
                 pynvml.nvmlInit()
                 self._initialised = True
             readings: dict[str, DeviceReading] = {}
-            for idx, handle in nvml.device_handles():
+            for gpu in visible_gpus():
                 if self._is_unified is not None and self._is_unified(
-                    idx, nvml.device_name(handle)
+                    gpu.ordinal, gpu.name
                 ):
                     continue
                 try:
-                    memory = nvml.device_memory(handle)
-                    uuid = nvml.device_uuid(handle)
+                    memory = nvml.device_memory(nvml_memory_handle(gpu))
                 except pynvml.NVMLError:
                     continue
-                readings[uuid] = DeviceReading(
+                readings[gpu.uuid] = DeviceReading(
                     used_mib=memory.used_bytes / MIB, free_bytes=memory.free_bytes
                 )
             return readings
@@ -178,7 +178,8 @@ class GpuAvailabilityMonitor:
     def config(self) -> GpuGateConfig:
         return self._config
 
-    def observe(self, measurable: bool) -> None:
+    def observe(self, measurable: bool, skip: frozenset[str] = frozenset()) -> None:
+        """Take one reading, leaving the devices in ``skip`` as last latched."""
         if not self._config.enabled or not measurable:
             self._measured_uuids = frozenset()
             return
@@ -189,6 +190,7 @@ class GpuAvailabilityMonitor:
             self._devices = {}
             self._measured_uuids = frozenset()
             return
+        readings = {uuid: r for uuid, r in readings.items() if uuid not in skip}
         devices = self._devices.copy()
         for uuid, reading in readings.items():
             devices[uuid] = decide_availability(

@@ -3,10 +3,7 @@
 
 Loads ``AutoModelForImageClassification`` + ``AutoImageProcessor``, prepares
 the dataset via the ``datasets`` library, and trains with the standard
-``transformers.Trainer``. Single-GPU runs execute in-process; multi-GPU
-support can be added later by spawning ``image_classification_dist_entry``
-through ``run_torchrun`` / ``run_deepspeed`` in the same way ``SFTExecutor``
-does.
+``transformers.Trainer``. Single-GPU runs execute in-process.
 """
 
 import gc
@@ -51,6 +48,7 @@ logger = logging.getLogger("worker.image_classification")
 class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
     name = "image_classification_training_executor"
     supported_task_types = frozenset({TaskType.IMAGE_CLASSIFICATION_TRAINING})
+    runs_on_visible_gpus = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

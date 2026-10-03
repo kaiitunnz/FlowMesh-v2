@@ -145,6 +145,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
 
     name = "transformers"
     supported_task_types = frozenset({TaskType.INFERENCE, TaskType.EMBEDDING})
+    runs_on_visible_gpus = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

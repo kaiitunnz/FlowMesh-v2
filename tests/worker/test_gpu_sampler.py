@@ -3,17 +3,19 @@
 import inspect
 import time
 
+import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.resources import Resource
 
 from shared.telemetry.semconv import (
     GPU_INDEX,
+    GPU_UUID,
     RESOURCE_NODE_ID,
     RESOURCE_WORKER_ID,
 )
-from worker import gpu_sampler
-from worker.gpu_sampler import build_gpu_sampler
+from worker.telemetry import gpu_sampler
+from worker.telemetry.gpu_sampler import build_gpu_sampler
 from worker.utils import nvml
 
 
@@ -31,7 +33,7 @@ class _FakePynvml:
 
     @staticmethod
     def nvmlDeviceGetCount() -> int:
-        return 1
+        return 2
 
     @staticmethod
     def nvmlDeviceGetHandleByIndex(index: int) -> int:
@@ -39,7 +41,11 @@ class _FakePynvml:
 
     @staticmethod
     def nvmlDeviceGetUUID(handle: int) -> bytes:
-        return b"GPU-0"
+        return f"GPU-{handle}".encode()
+
+    @staticmethod
+    def nvmlDeviceGetName(handle: int) -> bytes:
+        return b"H100"
 
     @staticmethod
     def nvmlDeviceGetUtilizationRates(handle: int):
@@ -73,6 +79,17 @@ class _CpuOnlyPynvml:
         raise _FakeNvmlError("no GPU")
 
 
+@pytest.fixture(autouse=True)
+def _every_gpu_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, fake: type) -> None:
+    monkeypatch.setattr(gpu_sampler, "pynvml", fake)
+    monkeypatch.setattr(nvml, "pynvml", fake)
+    monkeypatch.setattr("worker.hw.pynvml", fake)
+
+
 def _meter_with_reader():
     reader = InMemoryMetricReader()
     provider = MeterProvider(resource=Resource.create({}), metric_readers=[reader])
@@ -99,8 +116,7 @@ def test_nvml_shutdown_is_never_called_anywhere_in_the_module():
 
 
 def test_sample_once_emits_gauges_with_node_and_worker_id(monkeypatch):
-    monkeypatch.setattr(gpu_sampler, "pynvml", _FakePynvml)
-    monkeypatch.setattr(nvml, "pynvml", _FakePynvml)
+    _install(monkeypatch, _FakePynvml)
     reader, meter = _meter_with_reader()
     sampler = build_gpu_sampler(
         meter,
@@ -118,15 +134,35 @@ def test_sample_once_emits_gauges_with_node_and_worker_id(monkeypatch):
     assert util_attrs[RESOURCE_NODE_ID] == "nde-1"
     assert util_attrs[RESOURCE_WORKER_ID] == "wkr-1"
     assert util_attrs[GPU_INDEX] == "0"
+    assert len(points["flowmesh.gpu.utilization_ratio"]) == 2
 
     assert points["flowmesh.gpu.memory_used_bytes"][0][0] == 1024
     assert points["flowmesh.gpu.power_watts"][0][0] == 50.0
     assert points["flowmesh.gpu.temperature_celsius"][0][0] == 65.0
 
 
+def test_samples_only_the_gpus_cuda_leaves_visible(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    _install(monkeypatch, _FakePynvml)
+    reader, meter = _meter_with_reader()
+    sampler = build_gpu_sampler(
+        meter,
+        node_id=lambda: "nde-1",
+        worker_id=lambda: "wkr-1",
+        interval_sec=1.0,
+        enabled=True,
+    )
+
+    sampler._sample_once()
+
+    points = _datapoints(reader)["flowmesh.gpu.utilization_ratio"]
+    assert [(attrs[GPU_INDEX], attrs[GPU_UUID]) for _, attrs in points] == [
+        ("0", "GPU-1")
+    ]
+
+
 def test_cpu_only_worker_degrades_silently(monkeypatch, caplog):
-    monkeypatch.setattr(gpu_sampler, "pynvml", _CpuOnlyPynvml)
-    monkeypatch.setattr(nvml, "pynvml", _CpuOnlyPynvml)
+    _install(monkeypatch, _CpuOnlyPynvml)
     reader, meter = _meter_with_reader()
     sampler = build_gpu_sampler(
         meter,
@@ -162,8 +198,7 @@ def test_disabled_sampler_never_starts_a_thread():
 def test_enabled_sampler_starts_a_thread_and_shuts_down_without_shutdown_call(
     monkeypatch,
 ):
-    monkeypatch.setattr(gpu_sampler, "pynvml", _FakePynvml)
-    monkeypatch.setattr(nvml, "pynvml", _FakePynvml)
+    _install(monkeypatch, _FakePynvml)
     _, meter = _meter_with_reader()
     sampler = build_gpu_sampler(
         meter,

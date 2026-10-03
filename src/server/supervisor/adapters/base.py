@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 
 from ... import env
 from ...hooks import PrincipalContext
-from ..schemas import WorkerInfo, WorkerStatus
+from ..schemas import WorkerHardware, WorkerInfo, WorkerStatus
 from .utils import env_to_secret_str, to_env_str
 
 logger = logging.getLogger("supervisor")
@@ -73,6 +73,10 @@ class WorkerConfig(BaseModel):
     """Consecutive readings required before a device changes availability"""
     foreign_gpu_grace_sec: float = env.WORKER_FOREIGN_GPU_GRACE_SEC
     """Seconds to wait after a task ends before trusting a reading"""
+    serve_default_ttl_sec: float = env.SERVE_DEFAULT_TTL_SEC
+    """Serve task TTL, from its first start, when its spec sets none"""
+    serve_max_ttl_sec: float = env.SERVE_MAX_TTL_SEC
+    """Upper bound on a serve task's TTL"""
     enable_dev_model: bool = env.WORKER_ENABLE_DEV_MODEL
     """Whether the worker advertises the GPU-free dev_model serving executor"""
     dev_model_forward_url: str = env.DEV_MODEL_FORWARD_URL
@@ -181,6 +185,15 @@ class WorkerAdapter(ABC):
             operation.future.add_done_callback(self._on_abandoned_start)
             raise
 
+    def has_pending_start(self) -> bool:
+        """Whether the last accepted operation is a start that has not finished."""
+        last = self._last
+        return (
+            last is not None
+            and last.kind is _OperationKind.START
+            and not last.future.done()
+        )
+
     def close(self) -> None:
         """Refuse every later start, as the adapter is about to be destroyed."""
         self._closed = True
@@ -188,6 +201,13 @@ class WorkerAdapter(ABC):
     @property
     def closed(self) -> bool:
         return self._closed
+
+    def observe_reported_hardware(self, hardware: WorkerHardware) -> None:
+        """Record the hardware the worker reported when it registered.
+
+        A no-op for providers that probe the hardware themselves.
+        """
+        return None
 
     async def prepare(self) -> None:
         """Prepare worker (e.g., collecting hardware information) without starting
@@ -225,8 +245,11 @@ class WorkerAdapter(ABC):
             await asyncio.wait({before.future})
         if self._closed or not operation.callers:
             return False
-        if self.holds_worker():
+        if await self.runs_held_worker():
             return True
+        # A destroy or a withdrawn start may have landed while the check ran.
+        if self._closed or not operation.callers:
+            return False
         operation.begun = True
         self.set_status(WorkerStatus.STARTING)
         try:
@@ -269,6 +292,15 @@ class WorkerAdapter(ABC):
     def holds_worker(self) -> bool:
         """Whether this adapter started a worker it has not stopped."""
         pass
+
+    async def runs_held_worker(self) -> bool:
+        """Whether this adapter holds a worker that is still running."""
+        return self.holds_worker() and await asyncio.to_thread(self._held_worker_runs)
+
+    def _held_worker_runs(self) -> bool:
+        """Whether the held worker runs, blocking; a stop that failed partway can
+        leave a held worker that no longer does."""
+        return True
 
     def _on_abandoned_start(self, starting: asyncio.Future[bool]) -> None:
         if not starting.cancelled() and (exc := starting.exception()) is not None:
@@ -352,6 +384,8 @@ class WorkerAdapter(ABC):
                 config.foreign_gpu_consecutive
             ),
             "WORKER_FOREIGN_GPU_GRACE_SEC": to_env_str(config.foreign_gpu_grace_sec),
+            "SERVE_DEFAULT_TTL_SEC": to_env_str(config.serve_default_ttl_sec),
+            "SERVE_MAX_TTL_SEC": to_env_str(config.serve_max_ttl_sec),
             "WORKER_ENABLE_DEV_MODEL": to_env_str(config.enable_dev_model),
             "DEV_MODEL_FORWARD_URL": config.dev_model_forward_url,
             "DEV_MODEL_RESPONSE_DELAY_SEC": to_env_str(
@@ -401,6 +435,10 @@ class WorkerFactory(ABC):
     @abstractmethod
     def destroy_worker(self, worker: WorkerAdapter) -> None:
         pass
+
+    def on_worker_registered(self, worker: WorkerAdapter) -> bool:
+        """React to the worker registering. Returns whether node capacity changed."""
+        return False
 
     def cleanup(self) -> None:
         pass

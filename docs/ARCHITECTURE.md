@@ -287,12 +287,13 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   resumes beside a workspace from another private-state generation. While a generation is
   sealed local to the holder that produced it, that holder is a hard scheduler
   feasibility constraint resolved at dispatch: the episode lane yields as any other does,
-  and an episode waits while its holder is busy. A model server — a resident or `serve`
-  task — prefers a worker holding no agent's private state when one is idle, and a
-  demand replica occupying a waiting episode's holder retires once no claim holds it and
-  no claim of its family is pending, so the episode resumes there. Owner loss, a
-  worker-incarnation change, or a component that does not match its seal fails closed as
-  a typed `PrivateStateUnavailable` rather than resuming against a fresh or partial home.
+  and an episode waits while its holder is busy. A resident replica prefers a worker
+  holding no agent's private state when one is idle, a public `serve` task waits for
+  one, and a demand replica occupying a waiting episode's holder retires once no claim
+  holds it and no claim of its family is pending, so the episode resumes there. Owner
+  loss, a worker-incarnation change, or a component that does not match its seal fails
+  closed as a typed `PrivateStateUnavailable` rather than resuming against a fresh or
+  partial home.
   One activation reaches another's state only by holding a valid binding and attachment
   for it, which the ledger's owner and write-epoch fences decide; the `0700` private
   root, keyed by the opaque reference, separates a holder's lineages from other users on
@@ -447,25 +448,25 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   consumer each keep their own binding to a reference, so an object is never a name for
   what a consumer calls it, and identical bytes in two scopes are two objects.
 - **The shared content store.** Every content object lives in one shared durable store —
-  an S3-compatible service such as the MinIO a default deployment co-locates on the root
-  node, cloud S3, or a filesystem every node mounts — reached through the same
-  `FabricObjectStore` contract and selected with `CONTENT_STORE_BACKEND`. A deployment
-  that names no store runs the co-located one and points at it, so a fresh cluster stores
-  content without being configured; naming `CONTENT_STORE_ENDPOINT_URL` moves the fabric
-  onto real object storage and leaves the co-located store unstarted, which is the shape
-  a production deployment takes. The root provisions the bucket it is pointed at where
-  its credential allows, since the scoped session a worker reaches content under covers
-  one scope's prefix rather than the bucket. Its credential also needs list access on the
-  bucket for a missing object to read as missing. It is a service
-  beside the fabric, never the root process: the root and its supervisors hold no
-  payload. A worker writes an object there before it reports the reference naming it, so
-  a reference that reaches any binding names bytes that already outlive their producer,
-  and a worker's death loses nothing. The outcome-finalization index lives on the control
-  plane, binding an `idm-*` to a reference so a re-drive re-reports the first
-  materialization rather than re-running a sampled producer; the store holds only bytes
-  and never treats an idempotency key as a name. The scope that binding lands in is the
-  one control assigned the work when it authorized the key, so the producer reporting a
-  finalization is held to it rather than naming a scope of its own.
+  an S3-compatible service such as the Silo store (a MinIO-compatible server) a default
+  deployment co-locates on the root node, cloud S3, or a filesystem every node mounts —
+  reached through the same `FabricObjectStore` contract and selected with
+  `CONTENT_STORE_BACKEND`. A deployment that names no store runs the co-located one and
+  points at it, so a fresh cluster stores content without being configured; naming
+  `CONTENT_STORE_ENDPOINT_URL` moves the fabric onto real object storage and leaves the
+  co-located store unstarted, which is the shape a production deployment takes. The root
+  provisions the bucket it is pointed at where its credential allows, since the scoped
+  session a worker reaches content under covers one scope's prefix rather than the bucket.
+  Its credential also needs list access on the bucket for a missing object to read as
+  missing. It is a service beside the fabric, never the root process: the root and its
+  supervisors hold no payload. A worker writes an object there before it reports the
+  reference naming it, so a reference that reaches any binding names bytes that already
+  outlive their producer, and a worker's death loses nothing. The outcome-finalization
+  index lives on the control plane, binding an `idm-*` to a reference so a re-drive
+  re-reports the first materialization rather than re-running a sampled producer; the
+  store holds only bytes and never treats an idempotency key as a name. The scope that
+  binding lands in is the one control assigned the work when it authorized the key, so the
+  producer reporting a finalization is held to it rather than naming a scope of its own.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
   authorization scope, bound to the worker incarnation running it and expiring shortly
@@ -569,15 +570,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   as the report persists. A worker shutting down reports itself busy until it leaves.
 - **Per-device GPU availability.** A GPU worker reads each device's memory on every
   heartbeat and reports any device a process outside FlowMesh holds. The worker stays
-  `IDLE` and keeps taking CPU work. A model dispatch waits while any device of its
-  worker is held, and an SSH session that selects devices takes free ones. An input
-  preparation or a resident service episode places and runs regardless of a held
-  device. A reading counts only when nothing of the worker's own can be in it: no task
-  running, no GPU-using executor still warm, and past `WORKER_FOREIGN_GPU_GRACE_SEC`
-  after a task, so a device taken while an executor stays warm is seen once it
-  unloads, which `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` bounds. A worker that cannot reach
-  NVML clears its reading. A GPU dispatch that reaches a worker after its device was
-  taken is refused and retried. Disable with `WORKER_FOREIGN_GPU_GATE=false`.
+  `IDLE` and keeps taking CPU work. A model dispatch places on enough free devices, and
+  its executor runs on only those, as an SSH session that selects devices does. A
+  dispatch of a type its worker does not advertise in `gpu_binding_task_types`, or one
+  naming its own devices, waits while any device is held. An input preparation or a
+  resident service episode places and runs regardless of a held device. A reading counts
+  only when nothing of the worker's own can be in it: no task running, past
+  `WORKER_FOREIGN_GPU_GRACE_SEC` after a task, and outside the devices a warm GPU-using
+  executor is bound to — every device for an unbound one, until it unloads, which
+  `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` bounds. A worker that cannot reach NVML
+  clears its reading. A GPU dispatch that reaches a worker after its device was taken is
+  refused and retried. Disable with `WORKER_FOREIGN_GPU_GATE=false`.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
   dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
   recreates a deleted record. A worker whose record is gone, as after a partition
@@ -607,6 +610,27 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   answering is treated as one whose stream closed. When a worker's task stream attaches,
   control re-sends each pending mediated operation the worker originated, under a
   fresh permit, and an interrupt for each of its cancelling tasks.
+- **External workers' hardware and GPUs.** An `external` worker's hardware is
+  the report it sends at registration. The supervisor holds the GPUs of its own
+  host that the report names (by UUID) out of its pool, so Docker workers are
+  not given them. The hold lasts until the worker is destroyed (`flowmesh stack
+  worker down <alias>`), re-registers with other GPUs, or the supervisor stops;
+  a worker that exits or crashes keeps it for its restart. A card two workers
+  hold returns to the pool once both release it. Worker listings show each
+  worker's host GPUs as `held_gpus`.
+- **A worker's GPUs are the ones CUDA lets it use.** A worker reports, probes,
+  and samples power for only the GPUs `CUDA_VISIBLE_DEVICES` leaves visible,
+  each under its CUDA ordinal. Integer entries are read in PCI bus order, so
+  set `CUDA_DEVICE_ORDER=PCI_BUS_ID` on a host with mixed GPU models. A MIG
+  slice reports its own memory and is probed on its own, under the UUID of its
+  GPU.
+- **Worker cordon.** A cordoned worker keeps running and finishes what it was
+  already dispatched, but is left out of both the idle pool and the eligibility
+  set, so tasks neither go to it nor wait for it. The cordon is keyed on
+  `(node_alias, alias)` and lasts until it is uncordoned, independent of any
+  worker's lifecycle, so it also applies to a worker that registers under the
+  key later. An agent sealed on a cordoned worker resumes there, and the worker's
+  demand resident replicas drain (see [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md)).
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side. Task and workflow listings build their pages off

@@ -22,6 +22,7 @@ _MODULES = [
     "worker.executors",
     "worker.executors.base_executor",
     "worker.telemetry.otel",
+    "worker.telemetry.gpu_sampler",
     "worker.resident",
     "worker.sandbox.agent_runtime",
 ]

@@ -86,6 +86,7 @@ class SSHLimits(BaseModel):
 class WorkerCapabilities(BaseModel):
     supported_task_types: frozenset[TaskType] = Field(default_factory=frozenset)
     ssh_noninteractive: bool = True
+    gpu_binding_task_types: frozenset[TaskType] = Field(default_factory=frozenset)
     resident_listener_port: int = 0
 
 
@@ -124,3 +125,15 @@ class Worker(BaseModel):
 
 class WorkerInfo(Worker):
     stale: bool = False
+    cordoned: bool = False
+
+
+class WorkerCordon(BaseModel):
+    node_alias: str
+    alias: str
+
+
+class WorkerCordonResult(WorkerCordon):
+    cordoned: bool
+    changed: bool
+    worker_ids: list[str] = Field(default_factory=list)

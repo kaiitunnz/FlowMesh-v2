@@ -9,13 +9,13 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..hooks import PrincipalContext
-from .adapters.base import ProviderSpec, WorkerAdapter, WorkerTokenType
+from .adapters.base import ProviderSpec, WorkerAdapter, WorkerFactory, WorkerTokenType
 from .adapters.docker import get_provider_spec as docker_provider_spec
 from .adapters.external import get_provider_spec as external_provider_spec
 from .adapters.external import verify_external_token
 from .adapters.vastai import get_provider_spec as vastai_provider_spec
 from .registry import WorkerRegistry
-from .schemas import WorkerInfo, WorkerStatus
+from .schemas import WorkerHardware, WorkerInfo, WorkerStatus
 
 _MAX_PARALLELISM: int = 16
 
@@ -250,6 +250,19 @@ class WorkerManager:
             self.logger.warning("Failed to admit worker: %s", exc)
             return None
 
+    def worker_registered(
+        self, worker: WorkerAdapter, hardware: WorkerHardware | None
+    ) -> None:
+        """Apply what a worker reported when it registered."""
+        if hardware is not None:
+            worker.observe_reported_hardware(hardware)
+        # A closing worker's destroy has released or is about to release its holds,
+        # so a claim now would outlive it.
+        if worker.closed:
+            return
+        if self._factory_for(worker).on_worker_registered(worker):
+            self._report_capacity_change()
+
     def available_providers(self) -> list[str]:
         return sorted(self._providers)
 
@@ -313,11 +326,8 @@ class WorkerManager:
             workers = [self._registry.get_by_alias(alias) for alias in aliases]
 
         def forget(_: asyncio.Future[None]) -> None:
-            if aliases is None:
-                self._registry.clear()
-            else:
-                for alias in aliases:
-                    self._registry.try_pop_by_alias(alias)
+            for worker in workers:
+                self._registry.discard(worker)
             self._report_capacity_change()
 
         destroying = asyncio.ensure_future(self._stop_and_destroy_workers(workers))
@@ -353,7 +363,7 @@ class WorkerManager:
             raise ManagerNotStartedError()
         if worker.closed:
             raise ValueError(f"Worker '{worker.alias}' is being destroyed")
-        if _is_live(worker):
+        if worker.status is not WorkerStatus.STOPPED or await worker.runs_held_worker():
             raise ValueError(
                 f"Worker '{worker.alias}' is starting, running or stopping"
             )
@@ -368,10 +378,12 @@ class WorkerManager:
         if worker in self._destroyed:
             return
         self._destroyed.add(worker)
+        self._factory_for(worker).destroy_worker(worker)
+
+    def _factory_for(self, worker: WorkerAdapter) -> WorkerFactory:
         for spec in self._providers.values():
             if isinstance(worker, spec.adapter_cls):
-                spec.factory.destroy_worker(worker)
-                return
+                return spec.factory
         raise ValueError(f"Unsupported worker type: {type(worker)}")
 
     def _report_capacity_change(self) -> None:
@@ -430,7 +442,9 @@ class WorkerManager:
 
     async def _stop_worker(self, worker: WorkerAdapter) -> bool:
         worker_alias = worker.alias
-        if not _is_live(worker):
+        # A start queued behind another operation sets no status until it begins, and
+        # the stop joins the chain behind it.
+        if not (_is_live(worker) or worker.has_pending_start()):
             raise ValueError(f"Worker '{worker_alias}' is not starting or running")
 
         self.logger.info("Stopping worker %s...", worker_alias)

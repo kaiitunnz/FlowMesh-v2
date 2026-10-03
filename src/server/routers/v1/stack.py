@@ -34,6 +34,7 @@ STACK_WORKER_FILTER_FIELDS = frozenset(
         "node_alias",
         "provider",
         "status",
+        "held_gpus",
         "hardware.cpu.model",
         "hardware.cpu.arch",
         "hardware.cpu.name",

@@ -58,6 +58,7 @@ class LoRASFTExecutor(TrainingMixin, Executor):
 
     name = "lora_sft_executor"
     supported_task_types = frozenset({TaskType.LORA_SFT})
+    runs_on_visible_gpus = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

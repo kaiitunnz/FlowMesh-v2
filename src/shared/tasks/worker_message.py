@@ -128,6 +128,10 @@ class WorkerTaskMessage(BaseModel):
             "parents on, when telemetry is enabled."
         ),
     )
+    serve_elapsed_sec: float | None = Field(
+        default=None,
+        description="Seconds since the serve task's first start, at dispatch.",
+    )
 
     # What the worker hydrated from the references above: each upstream stage's stored
     # envelope bytes, and the fan-out element as a one-item tuple.

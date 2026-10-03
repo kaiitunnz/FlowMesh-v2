@@ -22,17 +22,16 @@ import requests
 from shared.schemas.result import ServeResult
 from shared.tasks.specs.serve import ServeSpecStrict
 from shared.tasks.task_type import TaskType
-from shared.utils.parsing import parse_float_env
 from worker.config import WorkerConfig
+from worker.hw import cuda_device_env
 
 from ..utils.process import signal_process_group
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 from .utils.net import resolve_bind_port
+from .utils.serve_ttl import serve_deadline
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TTL_SEC = 3600.0
-_MAX_TTL_SEC = 86400.0
 _HEALTH_POLL_INTERVAL_SEC = 2.0
 # 600s default: cold-start includes model download, engine init, and CUDA graph capture
 _DEFAULT_READINESS_TIMEOUT_SEC = 600.0
@@ -68,11 +67,21 @@ def _raise_with_tail(message: str, tail: collections.deque[str]) -> NoReturn:
 class VLLMServeExecutor(Executor):
     name = "vllm_serve"
     supported_task_types = frozenset({TaskType.SERVE})
+    runs_on_visible_gpus = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._signals = RunSignals()
         self._proc: subprocess.Popen[str] | None = None
+        self._devices: tuple[str, ...] | None = None
+
+    @property
+    def binds_devices(self) -> bool:
+        return self.runs_on_visible_gpus
+
+    def bind_devices(self, devices: tuple[str, ...] | None) -> None:
+        # Each run launches its own engine, so the next launch takes the binding.
+        self._devices = devices
 
     @classmethod
     def is_available(cls, config: WorkerConfig) -> bool:
@@ -94,11 +103,15 @@ class VLLMServeExecutor(Executor):
         if model_id is None:
             raise ExecutionError("Serve spec is missing model.source.identifier")
 
-        ttl_sec = min(
-            spec.ttlSeconds
-            or parse_float_env("SERVE_DEFAULT_TTL_SEC", _DEFAULT_TTL_SEC),
-            parse_float_env("SERVE_MAX_TTL_SEC", _MAX_TTL_SEC),
+        deadline = serve_deadline(
+            spec.ttlSeconds,
+            task.serve_elapsed_sec,
+            self._config.serve_default_ttl_sec,
+            self._config.serve_max_ttl_sec,
         )
+        if deadline <= time.time():
+            logger.info("Serve task %s TTL elapsed; not starting vLLM", task.task_id)
+            return ServeResult(model=model_id, port=spec.port or 0)
         readiness_timeout = (
             spec.readinessTimeoutSeconds or _DEFAULT_READINESS_TIMEOUT_SEC
         )
@@ -141,6 +154,8 @@ class VLLMServeExecutor(Executor):
             cmd.append("--trust-remote-code")
 
         env = dict(os.environ)
+        if self._devices is not None:
+            env.update(cuda_device_env(self._devices))
         env.setdefault("VLLM_CONFIGURE_LOGGING", "0")
         env["PYTHONUNBUFFERED"] = "1"
         if "--enable-lora" in rendered_flags:
@@ -154,7 +169,7 @@ class VLLMServeExecutor(Executor):
             model_id,
             port,
             task.task_id,
-            ttl_sec,
+            deadline - time.time(),
             readiness_timeout,
         )
 
@@ -213,7 +228,7 @@ class VLLMServeExecutor(Executor):
             }
             self.emit_update(task.task_id, update_payload)
             logger.info("vLLM server ready on port %d (task=%s)", port, task.task_id)
-            self._wait_for_serve(proc, ttl_sec)
+            self._wait_for_serve(proc, deadline)
         finally:
             self._proc = None
             self._terminate_process_group(proc)
@@ -271,8 +286,7 @@ class VLLMServeExecutor(Executor):
             tail,
         )
 
-    def _wait_for_serve(self, proc: subprocess.Popen[str], ttl_sec: float) -> None:
-        deadline = time.time() + ttl_sec
+    def _wait_for_serve(self, proc: subprocess.Popen[str], deadline: float) -> None:
         while time.time() < deadline:
             if self._signals.raise_if_cancelled():
                 logger.info("Serve task stop requested; terminating vLLM server")
