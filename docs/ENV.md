@@ -160,7 +160,9 @@ listed here is in `.env.example`.
 **Notes:**
 - In Docker deployments, `SERVER_RESULTS_DIR` and `WORKER_RESULTS_DIR`
 are the host directories or Docker volumes mounted into the server and
-worker containers for task logs and artifacts. Task results live in the
+worker containers. The server's holds each task's archived logs and
+uploaded artifacts and traces; a worker's holds the artifacts and trace
+files its tasks write. Task results live in the
 shared content store, so a downstream task reads its upstream's result
 wherever that task ran.
 - When multiple deployments share one host, you can set `FLOWMESH_STACK_SUFFIX`

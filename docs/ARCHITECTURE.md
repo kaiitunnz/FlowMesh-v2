@@ -633,7 +633,6 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   - telemetry (`REDIS_TELEMETRY_URL`) — `workers:events` and `nodes:events`
     (heartbeats, status updates), the `tasks:events:stream` task-event stream,
     and the log streams `logs:task:{task_id}` and `logs:workflow:{wfl_id}`,
-    bounded by `LOG_STREAM_MAXLEN_TASK` / `LOG_STREAM_MAXLEN_WORKFLOW` and
     expired `LOG_STREAM_TTL_SEC` after close.
 
 ## Service restarts
