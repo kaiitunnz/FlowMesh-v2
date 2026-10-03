@@ -162,7 +162,7 @@ listed here is in `.env.example`.
 are the host directories or Docker volumes mounted into the server and
 worker containers. The server's holds each task's archived logs and
 uploaded artifacts and traces; a worker's holds the artifacts and trace
-files its tasks write. Task results live in the
+files its tasks write and its own copy of their logs. Task results live in the
 shared content store, so a downstream task reads its upstream's result
 wherever that task ran.
 - When multiple deployments share one host, you can set `FLOWMESH_STACK_SUFFIX`

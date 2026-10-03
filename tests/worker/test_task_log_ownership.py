@@ -1,5 +1,6 @@
 """A task's ``logs/logs.jsonl`` has one writer, the server's log archiver, even where
-the worker's results directory is the server's own."""
+the worker's results directory is the server's own; the worker keeps its own copy of
+the task's logs beside it in ``logs/worker.jsonl``."""
 
 import json
 import logging
@@ -93,10 +94,18 @@ def _run_task(results_dir: Path, task_id: str) -> list[dict[str, Any]]:
     return sent
 
 
-def test_a_worker_writes_no_task_log_file(tmp_path: Path) -> None:
-    _run_task(tmp_path, "tsk-1")
+def _lines(path: Path) -> list[str]:
+    return path.read_text().splitlines()
 
-    assert not (tmp_path / "tsk-1" / "logs" / "logs.jsonl").exists()
+
+def test_a_worker_keeps_its_own_copy_apart_from_the_archive(tmp_path: Path) -> None:
+    sent = _run_task(tmp_path, "tsk-1")
+
+    logs = tmp_path / "tsk-1" / "logs"
+    assert _lines(logs / "worker.jsonl") == [
+        json.dumps(payload, ensure_ascii=False) for payload in sent
+    ]
+    assert not (logs / "logs.jsonl").exists()
 
 
 def test_a_task_on_the_servers_results_volume_archives_each_line_once(
@@ -120,5 +129,6 @@ def test_a_task_on_the_servers_results_volume_archives_each_line_once(
     with patch.object(log_archiver.time, "sleep"):
         archiver._tick()
 
-    lines = (tmp_path / "tsk-1" / "logs" / "logs.jsonl").read_text().splitlines()
-    assert lines == payloads
+    logs = tmp_path / "tsk-1" / "logs"
+    assert _lines(logs / "logs.jsonl") == payloads
+    assert _lines(logs / "worker.jsonl") == payloads[:-1]

@@ -1,10 +1,13 @@
+import json
 import logging
 import os
 import queue
 import threading
+import time
 from collections.abc import Callable, Iterable
 from io import TextIOWrapper
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 import grpc
@@ -160,6 +163,123 @@ class _GrpcLogStream:
             self._logger.debug("Server log stream crashed: %s", exc)
 
 
+class _JsonlLogSink:
+    _SENTINEL = object()
+
+    def __init__(
+        self,
+        log_paths: dict[str, Path],
+        logger: logging.Logger,
+        flush_interval_sec: float = 5.0,
+        flush_max_entries: int = 100,
+    ) -> None:
+        self._log_paths = log_paths
+        self._logger = logger
+        self._flush_interval_sec = max(0.1, float(flush_interval_sec))
+        self._flush_max_entries = max(1, int(flush_max_entries))
+
+        self._q: queue.Queue[dict[str, Any] | object] = queue.Queue(maxsize=10_000)
+        self._closed = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="TaskJsonlLogSink",
+            daemon=True,
+        )
+        self._files: dict[str, TextIOWrapper] = {}
+        self._buffer: list[dict[str, Any]] = []
+        self._thread.start()
+
+    def send(self, payload: dict[str, Any]) -> None:
+        if self._closed.is_set():
+            return
+        try:
+            self._q.put(payload, timeout=0.1)
+        except queue.Full:
+            pass
+
+    def close(self) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        self._q.put(self._SENTINEL)
+        try:
+            self._thread.join(timeout=2.0)
+        except Exception:
+            pass
+
+    def _ensure_handle(self, task_id: str) -> TextIOWrapper | None:
+        handle = self._files.get(task_id)
+        if handle is not None:
+            return handle
+        path = self._log_paths.get(task_id)
+        if path is None:
+            return None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = path.open("a", encoding="utf-8")
+        except Exception:
+            self._logger.debug(
+                "Failed to open task log file for %s at %s", task_id, path
+            )
+            return None
+        self._files[task_id] = handle
+        return handle
+
+    def _flush(self) -> None:
+        if not self._buffer:
+            return
+        buffered = self._buffer
+        self._buffer = []
+        try:
+            for payload in buffered:
+                line = json.dumps(payload, ensure_ascii=False)
+                task_refs = payload["task_refs"]
+                for ref in task_refs:
+                    task_id = ref["task_id"]
+                    handle = self._ensure_handle(task_id)
+                    if handle is None:
+                        continue
+                    try:
+                        handle.write(line + "\n")
+                    except Exception:
+                        continue
+            for handle in self._files.values():
+                try:
+                    handle.flush()
+                except Exception:
+                    pass
+        except Exception:
+            self._logger.debug("Task JSONL log sink flush failed", exc_info=True)
+
+    def _run(self) -> None:
+        last_flush = 0.0
+        try:
+            last_flush = time.time()
+            while True:
+                timeout = max(0.1, self._flush_interval_sec / 2.0)
+                try:
+                    item = self._q.get(timeout=timeout)
+                except queue.Empty:
+                    item = None
+                if item is self._SENTINEL:
+                    break
+                now = time.time()
+                if isinstance(item, dict):
+                    self._buffer.append(item)
+                if (len(self._buffer) >= self._flush_max_entries) or (
+                    now - last_flush >= self._flush_interval_sec
+                ):
+                    self._flush()
+                    last_flush = now
+        finally:
+            self._flush()
+            for handle in self._files.values():
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
+
 class TaskLogEmitter(logging.Handler):
     """Per-task log handler that emits Python logging records to the server."""
 
@@ -176,6 +296,9 @@ class TaskLogEmitter(logging.Handler):
         owner_id: str,
         worker_id: str,
         task_refs: list[dict[str, str]] | None = None,
+        log_paths: dict[str, Path] | None = None,
+        flush_interval_sec: float = 5.0,
+        flush_max_entries: int = 100,
         scrub: Callable[[str], str] | None = None,
     ) -> None:
         super().__init__(level=logging.NOTSET)
@@ -196,6 +319,14 @@ class TaskLogEmitter(logging.Handler):
             struct_from_payload=struct_from_payload,
             logger=logger,
         )
+        self._sink: _JsonlLogSink | None = None
+        if log_paths:
+            self._sink = _JsonlLogSink(
+                log_paths=log_paths,
+                logger=logger,
+                flush_interval_sec=flush_interval_sec,
+                flush_max_entries=flush_max_entries,
+            )
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -232,9 +363,13 @@ class TaskLogEmitter(logging.Handler):
             "message": message,
         }
         self._stream.send(payload)
+        if self._sink is not None:
+            self._sink.send(payload)
 
     def close(self) -> None:
         try:
+            if self._sink is not None:
+                self._sink.close()
             self._stream.close()
         finally:
             super().close()
@@ -256,5 +391,9 @@ class TaskLogEmitter(logging.Handler):
         }
         try:
             self._stream.send(payload)
+            if self._sink is not None:
+                self._sink.send(payload)
         finally:
+            if self._sink is not None:
+                self._sink.close()
             self._stream.close()
