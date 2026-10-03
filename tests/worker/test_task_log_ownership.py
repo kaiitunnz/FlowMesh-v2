@@ -28,7 +28,7 @@ _LOGGER = logging.getLogger("tests.task_code")
 class _LoggingExecutor(Executor):
     name = "echo"
 
-    def __init__(self) -> None:  # noqa: D107
+    def __init__(self) -> None:
         pass
 
     def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
