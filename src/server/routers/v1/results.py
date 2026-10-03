@@ -65,7 +65,6 @@ _BUNDLE_SECTIONS_CONCRETE = ("results", "artifacts", "logs")
 _BUNDLE_SECTIONS_ACCEPTED = (*_BUNDLE_SECTIONS_CONCRETE, "all")
 _BUNDLE_SECTIONS_DEFAULT = ("results", "artifacts")
 _LOGS_NAME = "logs.jsonl"
-_DOWNLOAD_CHUNK_BYTES = 1 << 20
 
 router = APIRouter(prefix="/results", tags=["Results"])
 
