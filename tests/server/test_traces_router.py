@@ -9,7 +9,7 @@ import tracemalloc
 from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from unittest.mock import AsyncMock
 
 import pytest
@@ -447,7 +447,7 @@ class _CountingFile:
     def close(self) -> None:
         self._fh.close()
 
-    def __enter__(self) -> "_CountingFile":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: Any) -> None:

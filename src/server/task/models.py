@@ -302,7 +302,7 @@ class TaskInputElement(BaseModel):
 type TaskOrder = tuple[float, str]
 
 
-def task_order(record: "TaskRecord") -> TaskOrder:
+def task_order(record: TaskRecord) -> TaskOrder:
     return record.submitted_ts, record.task_id
 
 

@@ -292,13 +292,6 @@ async def download_task_logs(
     return _file_response(opened, _LOGS_NAME)
 
 
-def _file_response(opened: BinaryIO, name: str) -> "_OpenFileResponse":
-    return _OpenFileResponse(
-        opened,
-        media_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
-    )
-
-
 class _OpenFileResponse(FileResponse):
     """A file response served from an already-opened file rather than a path, with
     ``FileResponse``'s single ranges and validators.
@@ -334,6 +327,13 @@ class _OpenFileResponse(FileResponse):
             )
         finally:
             self._opened.close()
+
+
+def _file_response(opened: BinaryIO, name: str) -> _OpenFileResponse:
+    return _OpenFileResponse(
+        opened,
+        media_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
+    )
 
 
 def _names_several_ranges(value: bytes) -> bool:

@@ -166,7 +166,7 @@ def _index_member(order: WorkflowOrder) -> str:
     return f"{micros:0{_SUBMISSION_DIGITS}d}:{workflow_id}"
 
 
-def _record_member(record: "WorkflowRecord") -> str:
+def _record_member(record: WorkflowRecord) -> str:
     return _index_member(workflow_order(record.submitted_at, record.workflow_id))
 
 
