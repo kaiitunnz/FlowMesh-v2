@@ -9,7 +9,7 @@ from typing import Any
 
 from shared.schemas.result import result_file_path
 from shared.utils.manifest import LOGS_DIR, prepare_output_dir, sync_manifest
-from shared.utils.nofollow import open_append, open_dir
+from shared.utils.nofollow import PathRefused, open_append, open_dir
 
 from ..clients.redis import (
     TASK_LOGS_STREAM_PREFIX,
@@ -21,6 +21,8 @@ from ..task.models import TaskStatus
 from ..task.runtime import TaskRuntime
 
 _LOGS_NAME = "logs.jsonl"
+# Consecutive failed flushes of one task's logs after which its buffer is dropped.
+_MAX_FLUSH_FAILURES = 10
 
 
 @dataclass(slots=True)
@@ -28,6 +30,7 @@ class _TaskArchiveState:
     last_id: str
     last_flush_ts: float
     done: bool
+    flush_failures: int = 0
 
 
 class TaskLogArchiver:
@@ -71,7 +74,11 @@ class TaskLogArchiver:
                 TaskStatus.FAILED,
                 TaskStatus.CANCELLED,
             }:
-                if self._load_checkpoint(task_id) is None and self._archived(task_id):
+                if (
+                    task_id not in self._states
+                    and self._load_checkpoint(task_id) is None
+                    and self._archived(task_id)
+                ):
                     continue
                 terminal.add(task_id)
             self._ensure_task(task_id, now)
@@ -103,22 +110,27 @@ class TaskLogArchiver:
                 buffer and (now - state.last_flush_ts) >= self._flush_interval_sec
             )
             if should_flush:
-                self._flush_task(task_id, buffer)
-                self._buffers[task_id] = []
+                self._flush_buffer(task_id)
                 state.last_flush_ts = now
 
-        # Finalize terminal tasks
+        # Finalize terminal tasks once their last lines are written
         for task_id in terminal:
             maybe_state = self._states.get(task_id)
             if not maybe_state or maybe_state.done:
                 continue
             try:
-                self._drain_task(task_id)
+                if not self._drain_task(task_id):
+                    continue
                 self._finalize_manifest(task_id)
                 maybe_state.done = True
-            finally:
-                self._buffers.pop(task_id, None)
-                self._states.pop(task_id, None)
+            except Exception:
+                self._forget(task_id)
+                raise
+            self._forget(task_id)
+
+    def _forget(self, task_id: str) -> None:
+        self._buffers.pop(task_id, None)
+        self._states.pop(task_id, None)
 
     def _ensure_task(self, task_id: str, now: float) -> None:
         if task_id in self._states:
@@ -151,12 +163,25 @@ class TaskLogArchiver:
     def _save_checkpoint(self, task_id: str, last_id: str) -> None:
         self._redis.set_value(task_log_archive_last_id_key(task_id), last_id)
 
+    def _flush_buffer(self, task_id: str) -> bool:
+        """Flush the task's buffer; return whether it is done with, written or
+        dropped, rather than kept for a retry."""
+        if not (buffer := self._buffers.get(task_id)):
+            return True
+        if not self._flush_task(task_id, buffer):
+            return False
+        self._buffers[task_id] = []
+        return True
+
     def _flush_task(
         self, task_id: str, items: list[tuple[str, dict[str, Any]]]
-    ) -> None:
+    ) -> bool:
+        """Append ``items`` to the task's log file; return whether they are done
+        with, written or dropped, rather than kept for a retry."""
         if not items:
-            return
-        last_id = self._states[task_id].last_id
+            return True
+        state = self._states[task_id]
+        last_id = state.last_id
         lines: list[str] = []
         for _, fields in items:
             payload = fields.get("payload")
@@ -176,26 +201,42 @@ class TaskLogArchiver:
                 open_append(logs_fd, _LOGS_NAME) as fh,
             ):
                 fh.write("".join(f"{line}\n" for line in lines).encode("utf-8"))
-        except OSError as exc:
-            # Dropped rather than retried, so one task's results never stall the
-            # others' archiving.
+        except PathRefused as exc:
             self._logger.warning("Not archiving logs for %s: %s", task_id, exc)
+        except OSError as exc:
+            state.flush_failures += 1
+            if state.flush_failures < _MAX_FLUSH_FAILURES:
+                self._logger.warning(
+                    "Archiving logs for %s failed, retrying: %s", task_id, exc
+                )
+                return False
+            self._logger.error(
+                "Dropping %d log lines for %s after %d failed writes: %s",
+                len(lines),
+                task_id,
+                state.flush_failures,
+                exc,
+            )
+        state.flush_failures = 0
         self._save_checkpoint(task_id, last_id)
+        return True
 
-    def _drain_task(self, task_id: str) -> None:
+    def _drain_task(self, task_id: str) -> bool:
+        """Read and write the rest of the task's log stream; return whether every
+        line is done with, written or dropped."""
         state = self._states[task_id]
         start = state.last_id
         while True:
             key = task_log_stream_key(task_id)
             batch = self._redis.xrange_telemetry(key, min_id=f"({start}", count=1000)
             if not batch:
-                return
+                return self._flush_buffer(task_id)
             self._buffers.setdefault(task_id, []).extend(batch)
             start = batch[-1][0]
             state.last_id = start
             if len(self._buffers[task_id]) >= self._flush_max_entries:
-                self._flush_task(task_id, self._buffers[task_id])
-                self._buffers[task_id] = []
+                if not self._flush_buffer(task_id):
+                    return False
 
     def _finalize_manifest(self, task_id: str) -> None:
         record = self._runtime.get_record(task_id)
