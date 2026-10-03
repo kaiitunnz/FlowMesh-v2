@@ -114,6 +114,26 @@ class TestMaybeUploadArtifacts:
         assert checkpoints.maybe_upload_artifacts(_task(), out_dir) == ["report.txt"]
         assert bodies == {"report.txt": b"ok"}
 
+    def test_in_flight_atomic_writes_are_not_uploaded(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        artifacts_dir = tmp_path / "task-1" / "artifacts"
+        (artifacts_dir / ".fm-tmp-dir").mkdir(parents=True)
+        (artifacts_dir / ".fm-tmp-dir" / "inner.bin").write_bytes(b"x")
+        (artifacts_dir / ".fm-tmp-abc123").write_bytes(b"partial")
+        (artifacts_dir / "report.txt").write_text("ok", encoding="utf-8")
+
+        class _Response:
+            def raise_for_status(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            checkpoints.requests, "request", lambda *args, **kwargs: _Response()
+        )
+
+        uploaded = checkpoints.maybe_upload_artifacts(_task(), tmp_path / "task-1")
+        assert uploaded == ["report.txt"]
+
     @pytest.mark.skipif(os.getuid() == 0, reason="root reads any file")
     @pytest.mark.parametrize("skip_errors", [False, True])
     def test_a_file_that_cannot_be_read_follows_the_error_policy(

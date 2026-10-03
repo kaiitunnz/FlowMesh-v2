@@ -3,23 +3,24 @@
 import functools
 import io
 import logging
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import TypeAdapter
+from starlette.types import Receive, Scope, Send
 
 from shared.schemas.result import result_file_path
 from shared.telemetry.ids import workflow_to_trace_id_int
 from shared.utils.atomic import atomic_write_stream
 from shared.utils.json import encode_jsonl_bytes, parse_jsonl_lines
 from shared.utils.manifest import LOGS_DIR
-from shared.utils.nofollow import LinkRefused, open_below, open_dir
+from shared.utils.nofollow import PathRefused, open_below, open_dir
 
 from ...app_state import (
     get_logger,
@@ -64,15 +65,48 @@ def _task_dir(results_dir: Path, task_id: str) -> Path:
     return result_file_path(results_dir, task_id).parent
 
 
-def _iter_workflow_jsonl(
-    results_dir: Path, task_ids: Iterable[str], filename: str
-) -> Iterator[dict[str, Any]]:
-    for task_id in task_ids:
-        opened = open_below(_task_dir(results_dir, task_id), Path(LOGS_DIR) / filename)
-        if opened is None:
-            continue
-        with io.TextIOWrapper(opened, encoding="utf-8") as fh:
-            yield from parse_jsonl_lines(fh)
+class _WorkflowRows:
+    """The rows of one trace file across a workflow's tasks, read one file at a
+    time; ``close`` closes the file being read, so an aborted stream holds none."""
+
+    def __init__(self, results_dir: Path, task_ids: Iterable[str], filename: str):
+        self._results_dir = results_dir
+        self._task_ids = task_ids
+        self._filename = filename
+        self._current: io.TextIOWrapper | None = None
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        for task_id in self._task_ids:
+            opened = open_below(
+                _task_dir(self._results_dir, task_id),
+                PurePosixPath(LOGS_DIR, self._filename),
+            )
+            if opened is None:
+                continue
+            with io.TextIOWrapper(opened, encoding="utf-8") as fh:
+                self._current = fh
+                yield from parse_jsonl_lines(fh)
+            self._current = None
+
+    def close(self) -> None:
+        if self._current is not None:
+            self._current.close()
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """A streaming response that runs ``on_close`` once it ends, sent or aborted."""
+
+    def __init__(
+        self, content: Iterator[bytes], on_close: Callable[[], None], media_type: str
+    ) -> None:
+        super().__init__(content, media_type=media_type)
+        self._on_close = on_close
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._on_close()
 
 
 async def _resolve_workflow(workflow_id: str, registry: WorkflowRegistry) -> Workflow:
@@ -117,9 +151,9 @@ _PROFILE_SUMMARY = TypeAdapter(ProfileSummary)
 def _analyze_workflow(
     results_dir: Path, task_ids: list[str], workflow_id: str
 ) -> bytes:
-    spans = list(_iter_workflow_jsonl(results_dir, task_ids, "spans.jsonl"))
-    assets = list(_iter_workflow_jsonl(results_dir, task_ids, "assets.jsonl"))
-    lineage = list(_iter_workflow_jsonl(results_dir, task_ids, "lineage.jsonl"))
+    spans = list(_WorkflowRows(results_dir, task_ids, "spans.jsonl"))
+    assets = list(_WorkflowRows(results_dir, task_ids, "assets.jsonl"))
+    lineage = list(_WorkflowRows(results_dir, task_ids, "lineage.jsonl"))
     summary = analyze(spans, assets, lineage, workflow_id=workflow_id)
     return _PROFILE_SUMMARY.dump_json(summary, by_alias=True)
 
@@ -146,9 +180,9 @@ async def get_workflow_trace(
             detail=f"unknown type '{trace_type}'; expected spans, assets, or lineage",
         )
     task_ids = await _resolve_task_ids(workflow_id, registry)
-    return StreamingResponse(
-        encode_jsonl_bytes(_iter_workflow_jsonl(results_dir, task_ids, filename)),
-        media_type="application/x-ndjson",
+    rows = _WorkflowRows(results_dir, task_ids, filename)
+    return _ClosingStreamingResponse(
+        encode_jsonl_bytes(rows), rows.close, media_type="application/x-ndjson"
     )
 
 
@@ -176,7 +210,7 @@ async def upload_task_trace(
     task_dir = _task_dir(results_dir, task_id)
     try:
         await run_in_threadpool(_store_trace, task_dir, filename, file.file)
-    except LinkRefused as exc:
+    except PathRefused as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path"
         ) from exc

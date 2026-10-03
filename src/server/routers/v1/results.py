@@ -8,9 +8,8 @@ import stat
 import tarfile
 import tempfile
 import time
-from collections.abc import Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from fastapi import (
     APIRouter,
@@ -22,7 +21,8 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response
+from starlette.types import Receive, Scope, Send
 
 from shared.schemas.result import RESULT_MEDIA_TYPE, AnyExecutorResult, result_file_path
 from shared.utils.atomic import atomic_write_stream, is_atomic_temp
@@ -33,7 +33,15 @@ from shared.utils.manifest import (
     prepare_output_dir,
     sync_manifest,
 )
-from shared.utils.nofollow import LinkRefused, open_below, open_dir, open_regular
+from shared.utils.nofollow import (
+    PathRefused,
+    is_plain_segment,
+    open_below,
+    open_dir,
+    open_dir_at,
+    open_regular,
+    walk,
+)
 
 from ...app_state import (
     get_logger,
@@ -62,18 +70,14 @@ router = APIRouter(prefix="/results", tags=["Results"])
 
 
 def _resolve_artifact_path(filename: str) -> Path:
-    sanitized = Path(filename)
-    if (
-        sanitized.is_absolute()
-        or filename in {"", ".", ".."}
-        or any(
-            part in {"", ".", ".."} or is_atomic_temp(part) for part in sanitized.parts
-        )
+    segments = filename.split("/")
+    if not all(
+        is_plain_segment(part) and not is_atomic_temp(part) for part in segments
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
         )
-    return Path(ARTIFACTS_DIR) / sanitized
+    return Path(ARTIFACTS_DIR, *segments)
 
 
 @router.get(
@@ -129,20 +133,13 @@ async def upload_result_file(
     )
     base_dir = result_file_path(results_dir, task_id).parent
     relative_path = _resolve_artifact_path(file.filename or "")
-    target_path = (base_dir / relative_path).resolve()
-
-    try:
-        target_path.relative_to(base_dir)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
-        )
+    target_path = base_dir / relative_path
 
     record = runtime.get_record(task_id)
     expected_artifacts = record.task.spec.get_artifacts() if record else []
     try:
         await asyncio.to_thread(_store_artifact, file, base_dir, relative_path)
-    except LinkRefused as exc:
+    except PathRefused as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
         ) from exc
@@ -295,27 +292,53 @@ async def download_task_logs(
     return _file_response(opened, _LOGS_NAME)
 
 
-def _file_response(opened: BinaryIO, name: str) -> StreamingResponse:
-    """Stream an opened file, typed by its name as a file response would be."""
-    size = os.fstat(opened.fileno()).st_size
-
-    def chunks() -> Iterator[bytes]:
-        with opened:
-            while chunk := opened.read(_DOWNLOAD_CHUNK_BYTES):
-                yield chunk
-
-    return StreamingResponse(
-        chunks(),
-        media_type=mimetypes.guess_type(name)[0] or "text/plain",
-        headers={"Content-Length": str(size)},
+def _file_response(opened: BinaryIO, name: str) -> "_OpenFileResponse":
+    return _OpenFileResponse(
+        opened,
+        media_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
     )
+
+
+class _OpenFileResponse(FileResponse):
+    """A file response served from an already-opened file rather than a path, with
+    ``FileResponse``'s ranges and validators.
+
+    ``FileResponse`` opens ``path`` for each body it sends; here ``path`` hands out
+    a fresh duplicate of the opened descriptor, which that open takes over and
+    closes. The opened file is closed once the response ends, sent or aborted.
+    """
+
+    def __init__(self, opened: BinaryIO, media_type: str) -> None:
+        self._opened = opened
+        super().__init__(
+            "", media_type=media_type, stat_result=os.fstat(opened.fileno())
+        )
+
+    @property  # type: ignore[override]
+    def path(self) -> int:
+        return os.dup(self._opened.fileno())
+
+    @path.setter
+    def path(self, value: Any) -> None:
+        pass
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        extensions = {
+            key: value
+            for key, value in scope.get("extensions", {}).items()
+            if key != "http.response.pathsend"
+        }
+        try:
+            await super().__call__({**scope, "extensions": extensions}, receive, send)
+        finally:
+            self._opened.close()
 
 
 def _has_dir(base_dir: Path) -> bool:
     try:
         with open_dir(base_dir):
             return True
-    except (FileNotFoundError, LinkRefused):
+    except (FileNotFoundError, PathRefused):
         return False
 
 
@@ -390,20 +413,18 @@ def _add_section(
         with open_dir(base_dir) as base_fd:
             if not _add_entry(archive, base_fd, name, arcname):
                 return
-            for dirpath, dirs, files, dirfd in os.fwalk(
-                name, follow_symlinks=False, dir_fd=base_fd
-            ):
-                dirs[:] = sorted(entry for entry in dirs if not is_atomic_temp(entry))
-                rel_dir = Path(dirpath).relative_to(name)
-                for entry in sorted([*dirs, *files]):
-                    if not is_atomic_temp(entry):
-                        _add_entry(
-                            archive,
-                            dirfd,
-                            entry,
-                            f"{arcname}/{(rel_dir / entry).as_posix()}",
-                        )
-    except (FileNotFoundError, LinkRefused):
+            with open_dir_at(base_fd, name) as top_fd:
+                for rel_dir, dirs, others, dirfd in walk(top_fd):
+                    dirs[:] = [entry for entry in dirs if not is_atomic_temp(entry)]
+                    for entry in sorted([*dirs, *others]):
+                        if not is_atomic_temp(entry):
+                            _add_entry(
+                                archive,
+                                dirfd,
+                                entry,
+                                f"{arcname}/{(rel_dir / entry).as_posix()}",
+                            )
+    except (FileNotFoundError, PathRefused):
         return
 
 
@@ -418,6 +439,8 @@ def _add_entry(archive: tarfile.TarFile, dirfd: int, name: str, arcname: str) ->
                     info = archive.gettarinfo(arcname=arcname, fileobj=fh)
                     if info is not None and info.isreg():
                         archive.addfile(info, fh)
+                    elif info is not None and info.islnk():
+                        archive.addfile(info)
             return False
         info = tarfile.TarInfo(arcname)
         if stat.S_ISDIR(st.st_mode):

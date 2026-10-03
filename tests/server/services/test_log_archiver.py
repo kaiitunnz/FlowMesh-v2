@@ -1,12 +1,16 @@
 import asyncio
 import logging
+import os
+import socket
 import stat
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from server.clients.redis import task_log_stream_key
 from server.services import log_archiver
 from server.services.log_archiver import TaskLogArchiver
 from server.task import runtime as runtime_module
@@ -116,3 +120,81 @@ def test_a_tick_builds_no_task_info(
 
     assert built == []
     assert sorted(tracked) == sorted(runtime.tasks)
+
+
+def _flush_within(archiver: TaskLogArchiver, task_id: str, bound: float) -> bool:
+    """Whether a flush of one entry for ``task_id`` returns within ``bound`` s."""
+    archiver._ensure_task(task_id, 0.0)
+    flush = threading.Thread(
+        target=archiver._flush_task,
+        args=(task_id, [("1-0", {"payload": '{"message": "hi"}'})]),
+        daemon=True,
+    )
+    flush.start()
+    flush.join(bound)
+    return not flush.is_alive()
+
+
+def test_a_fifo_at_the_log_file_never_blocks_the_archiver(
+    archiver: TaskLogArchiver,
+) -> None:
+    logs = archiver._base_dir("tsk-1") / "logs"
+    logs.mkdir(parents=True)
+    os.mkfifo(logs / "logs.jsonl")
+
+    assert _flush_within(archiver, "tsk-1", 2.0)
+
+
+def test_a_fifo_with_a_reader_never_blocks_the_archiver(
+    archiver: TaskLogArchiver,
+) -> None:
+    logs = archiver._base_dir("tsk-1") / "logs"
+    logs.mkdir(parents=True)
+    os.mkfifo(logs / "logs.jsonl")
+    reader = os.open(logs / "logs.jsonl", os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        assert _flush_within(archiver, "tsk-1", 2.0)
+        assert os.read(reader, 1 << 16) == b""
+    finally:
+        os.close(reader)
+
+
+@pytest.mark.parametrize("planted", ["directory", "socket"])
+def test_a_task_whose_log_file_is_not_a_file_never_stops_another_tasks_archiving(
+    tmp_path: Path, planted: str
+) -> None:
+    redis = MagicMock()
+    redis.get.return_value = None
+    redis.xrange_telemetry.return_value = []
+    redis.xread_telemetry.return_value = [
+        (
+            task_log_stream_key(task_id),
+            [("1-0", {"payload": f'{{"task": "{task_id}"}}'})],
+        )
+        for task_id in ("tsk-a", "tsk-b")
+    ]
+    runtime = MagicMock()
+    runtime.get_record.return_value = None
+    runtime.task_statuses.return_value = {
+        "tsk-a": TaskStatus.DISPATCHED,
+        "tsk-b": TaskStatus.DONE,
+    }
+    archiver = TaskLogArchiver(
+        redis, runtime, tmp_path, logging.getLogger("test"), flush_max_entries=1
+    )
+    planted_path = archiver._base_dir("tsk-a") / "logs" / "logs.jsonl"
+    planted_path.parent.mkdir(parents=True)
+    held = socket.socket(socket.AF_UNIX)
+    if planted == "directory":
+        planted_path.mkdir()
+    else:
+        held.bind(str(planted_path))
+    try:
+        with patch.object(log_archiver.time, "sleep"):
+            archiver._tick()
+    finally:
+        held.close()
+
+    task_b = archiver._base_dir("tsk-b")
+    assert (task_b / "logs" / "logs.jsonl").read_text() == '{"task": "tsk-b"}\n'
+    assert (task_b / "manifest.json").is_file()

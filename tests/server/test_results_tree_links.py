@@ -130,17 +130,15 @@ def test_the_log_archiver_appends_through_no_link(
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("linked", "filename"),
-    [("", "out.txt"), ("artifacts", "out.txt"), ("artifacts/out.txt", "out.txt")],
+    [("", "out.txt"), ("artifacts", "out.txt")],
 )
 async def test_an_artifact_upload_writes_through_no_link(
     results: Path, outside: _Outside, linked: str, filename: str
 ) -> None:
     if linked == "":
         (results / "tsk-1").symlink_to(outside.dir)
-    elif linked == "artifacts":
-        (_task(results) / "artifacts").symlink_to(outside.dir)
     else:
-        (_task(results, "artifacts") / linked).symlink_to(outside.file)
+        (_task(results) / "artifacts").symlink_to(outside.dir)
 
     with pytest.raises(HTTPException) as exc:
         await results_router.upload_result_file(
@@ -153,6 +151,27 @@ async def test_an_artifact_upload_writes_through_no_link(
         )
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+    outside.assert_untouched()
+
+
+@pytest.mark.anyio
+async def test_an_artifact_upload_replaces_a_linked_file(
+    results: Path, outside: _Outside
+) -> None:
+    task_dir = _task(results, "logs", "artifacts")
+    (task_dir / "artifacts" / "out.txt").symlink_to(outside.file)
+
+    await results_router.upload_result_file(
+        task_id="tsk-1",
+        file=UploadFile(file=io.BytesIO(b"x"), filename="out.txt"),
+        runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+        principal=cast(Any, None),
+        results_dir=results,
+        logger=_LOGGER,
+    )
+
+    written = task_dir / "artifacts" / "out.txt"
+    assert not written.is_symlink() and written.read_bytes() == b"x"
     outside.assert_untouched()
 
 
@@ -224,7 +243,7 @@ def test_trace_reads_follow_no_link(
     else:
         (task_dir / linked).symlink_to(outside.file)
 
-    rows = list(traces_router._iter_workflow_jsonl(results, ["tsk-1"], "spans.jsonl"))
+    rows = list(traces_router._WorkflowRows(results, ["tsk-1"], "spans.jsonl"))
 
     assert rows == []
 

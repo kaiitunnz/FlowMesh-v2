@@ -99,3 +99,11 @@ def test_an_existing_entry_that_is_not_a_file_is_present(tmp_path: Path) -> None
     pipe = entries["pipe"]
     assert (pipe["status"], pipe["size"], pipe["file_count"]) == ("present", 0, 0)
     assert entries["gone.bin"]["status"] == "missing"
+
+
+def test_a_declared_name_holding_a_nul_reads_as_missing(tmp_path: Path) -> None:
+    entries = {
+        e["path"]: e for e in sync_manifest(tmp_path, "t", ["bad\0name"])["entries"]
+    }
+
+    assert entries["bad\0name"]["status"] == "missing"

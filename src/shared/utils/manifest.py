@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from .atomic import atomic_write_text, is_atomic_temp
-from .nofollow import LinkRefused, open_dir, open_dir_at, open_regular, regular_files
+from .nofollow import (
+    PathRefused,
+    is_plain_segment,
+    open_dir,
+    open_dir_at,
+    open_regular,
+    walk,
+)
 from .time import now_iso
 
 MANIFEST_NAME = "manifest.json"
@@ -32,7 +39,7 @@ _MANIFEST_LOCKS_GUARD = threading.Lock()
 
 def prepare_output_dir(base_dir: Path) -> None:
     """Ensure the base directory and standard sub-directories exist, writable by peer
-    UIDs; raises ``LinkRefused`` when any of them is a link."""
+    UIDs; raises ``PathRefused`` when any of them is a link."""
     for parts in ((), (LOGS_DIR,), (ARTIFACTS_DIR,)):
         with open_dir(base_dir, *parts, create=True, mode=_SHARED_DIR_MODE):
             pass
@@ -56,7 +63,7 @@ def sync_manifest(
 
 
 def _manifest_lock(base_dir: Path) -> threading.Lock:
-    key = base_dir.resolve()
+    key = Path(os.path.abspath(base_dir))
     with _MANIFEST_LOCKS_GUARD:
         if (lock := _MANIFEST_LOCKS.get(key)) is None:
             lock = _MANIFEST_LOCKS[key] = threading.Lock()
@@ -143,9 +150,7 @@ def _describe_path(base_fd: int, rel_path: Path, *, required: bool) -> dict[str,
 def _stats(base_fd: int, rel_path: Path) -> dict[str, Any] | None:
     """The size and digest or file count of ``rel_path``, or None when it is missing
     or reached only through a link."""
-    if rel_path.is_absolute() or any(
-        part in {"", ".", ".."} for part in rel_path.parts
-    ):
+    if rel_path.is_absolute() or not all(map(is_plain_segment, rel_path.parts)):
         return None
     try:
         with open_dir_at(base_fd, *rel_path.parent.parts) as dir_fd:
@@ -162,9 +167,10 @@ def _stats(base_fd: int, rel_path: Path) -> dict[str, Any] | None:
                     }
             if not stat.S_ISDIR(st.st_mode):
                 return {"size": 0, "file_count": 0}
-            size, count = _directory_stats(rel_path.name, dir_fd)
+            with open_dir_at(dir_fd, rel_path.name) as top_fd:
+                size, count = _directory_stats(top_fd)
             return {"size": size, "file_count": count}
-    except (FileNotFoundError, LinkRefused):
+    except (FileNotFoundError, PathRefused):
         return None
 
 
@@ -184,13 +190,19 @@ def _sha256(fh: BinaryIO) -> str:
     return hasher.hexdigest()
 
 
-def _directory_stats(name: str, dir_fd: int) -> tuple[int, int]:
+def _directory_stats(top_fd: int) -> tuple[int, int]:
     total_size = 0
     file_count = 0
-    for rel_name, opened in regular_files(name, dir_fd):
-        if isinstance(opened, OSError) or is_atomic_temp(Path(rel_name).name):
-            continue
-        with opened as fh:
-            total_size += os.fstat(fh.fileno()).st_size
-        file_count += 1
+    for _, dirs, others, dir_fd in walk(top_fd):
+        dirs[:] = [name for name in dirs if not is_atomic_temp(name)]
+        for name in others:
+            if is_atomic_temp(name):
+                continue
+            try:
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                total_size += st.st_size
+                file_count += 1
     return total_size, file_count

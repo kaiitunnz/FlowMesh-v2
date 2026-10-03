@@ -2,19 +2,22 @@
 
 import os
 import stat
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 
+from shared.utils import nofollow
 from shared.utils.atomic import atomic_write_text
 from shared.utils.nofollow import (
-    LinkRefused,
+    PathRefused,
     open_append,
     open_below,
     open_dir,
     open_dir_at,
     open_regular,
     regular_files,
+    walk,
 )
 
 
@@ -34,7 +37,7 @@ def test_a_link_at_or_below_the_base_is_refused(tmp_path: Path, target: Path) ->
 
     for path, parts in [(tmp_path / "linked", ()), (base, ("logs",))]:
         with (
-            pytest.raises(LinkRefused),
+            pytest.raises(PathRefused),
             open_dir(path, *parts, create=True, mode=0o777),
         ):
             pass
@@ -63,9 +66,9 @@ def test_regular_reads_skip_links_and_special_files(
         assert opened is not None
         with opened:
             assert opened.read() == b"ok"
-        with pytest.raises(LinkRefused), open_dir_at(fd, "plain"):
+        with pytest.raises(PathRefused), open_dir_at(fd, "plain"):
             pass
-        with pytest.raises(LinkRefused):
+        with pytest.raises(PathRefused):
             open_append(fd, "link")
     finally:
         os.close(fd)
@@ -102,3 +105,54 @@ def test_an_atomic_write_replaces_a_link_rather_than_writing_through_it(
     assert (tmp_path / "out.json").read_text() == "{}"
     assert (target / "file").read_bytes() == b"secret"
     assert stat.S_IMODE((tmp_path / "out.json").stat().st_mode) == 0o666
+
+
+def test_a_walk_never_opens_a_linked_directory(
+    tmp_path: Path, target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "top" / "sub").mkdir(parents=True)
+    (tmp_path / "top" / "linked").symlink_to(target)
+    opened: list[str] = []
+    open_child = nofollow._open_child
+
+    def _recording(fd: int, name: str, *args: Any, **kwargs: Any) -> int:
+        opened.append(name)
+        return open_child(fd, name, *args, **kwargs)
+
+    monkeypatch.setattr(nofollow, "_open_child", _recording)
+
+    with open_dir(tmp_path / "top") as top_fd:
+        seen = [(rel.as_posix(), dirs, others) for rel, dirs, others, _ in walk(top_fd)]
+
+    assert seen == [(".", ["sub"], ["linked"]), ("sub", [], [])]
+    assert opened == ["top", "sub"]
+
+
+def test_a_special_file_is_never_opened_to_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    os.mkfifo(tmp_path / "pipe")
+    opened: list[str] = []
+    real_open = os.open
+
+    def _recording(path: Any, *args: Any, **kwargs: Any) -> int:
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        monkeypatch.setattr(nofollow.os, "open", _recording)
+        assert open_regular(fd, "pipe") is None
+    finally:
+        monkeypatch.undo()
+        os.close(fd)
+    assert opened == []
+
+
+@pytest.mark.parametrize("segment", ["", ".", "..", "a/b", "a\0b"])
+def test_a_segment_that_leaves_its_directory_is_refused(
+    tmp_path: Path, segment: str
+) -> None:
+    with pytest.raises(PathRefused), open_dir(tmp_path, segment):
+        pass
+    assert open_below(tmp_path, PurePosixPath("x", segment or "y", "z")) is None

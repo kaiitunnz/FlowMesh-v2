@@ -5,7 +5,7 @@ import subprocess
 import tarfile
 import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,7 +15,7 @@ from shared.schemas.artifact import ArtifactContext
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.telemetry.propagation import inject_ambient_traceparent
-from shared.utils.atomic import atomic_write_text
+from shared.utils.atomic import atomic_write_text, is_atomic_temp
 from shared.utils.http import add_auth_headers
 from shared.utils.nofollow import regular_files
 from shared.utils.parsing import parse_bool_env
@@ -435,7 +435,6 @@ def write_executor_result(
     return envelope
 
 
-# A link under O_NOFOLLOW, a socket, and a name removed mid-walk.
 def maybe_upload_artifacts(
     task: TaskReference,
     out_dir: Path,
@@ -458,6 +457,10 @@ def maybe_upload_artifacts(
     uploaded: list[str] = []
 
     for rel_name, opened in regular_files(artifacts_dir):
+        if any(map(is_atomic_temp, PurePosixPath(rel_name).parts)):
+            if not isinstance(opened, OSError):
+                opened.close()
+            continue
         try:
             if isinstance(opened, OSError):
                 raise opened

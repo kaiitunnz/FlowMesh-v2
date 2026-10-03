@@ -1,7 +1,9 @@
 """Tests for the workflow traces router."""
 
+import gc
 import json
 import logging
+import os
 import threading
 from collections.abc import Iterator
 from io import BytesIO
@@ -18,6 +20,7 @@ from server.governance import ProfileSummary
 from server.hooks import PERMISSION_CHECKERS
 from server.routers.v1 import traces as traces_router
 from shared.utils import atomic
+from tests.server.asgi_responses import ClientGone, serve
 
 
 @pytest.fixture
@@ -402,3 +405,27 @@ async def test_analyze_workflow_trace_runs_off_the_event_loop(
     # The analysis and the response's serialization both run in a worker thread.
     assert len(threads) == 2
     assert threading.get_ident() not in threads
+
+
+@pytest.mark.anyio
+async def test_an_aborted_trace_stream_closes_its_file_without_a_collection(
+    tmp_path: Path,
+) -> None:
+    logs = tmp_path / "tsk-a" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "spans.jsonl").write_text('{"n": 1}\n' * 100, encoding="utf-8")
+    open_fds = len(os.listdir("/dev/fd"))
+    gc.disable()
+    try:
+        for _ in range(5):
+            response = await traces_router.get_workflow_trace(
+                workflow_id="wfl-1",
+                trace_type="spans",
+                registry=_registry(["tsk-a"]),
+                results_dir=tmp_path,
+            )
+            with pytest.raises(ClientGone):
+                await serve(response, abort_after_chunks=1)
+        assert len(os.listdir("/dev/fd")) == open_fds
+    finally:
+        gc.enable()

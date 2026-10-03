@@ -9,7 +9,7 @@ from typing import Any
 
 from shared.schemas.result import result_file_path
 from shared.utils.manifest import LOGS_DIR, prepare_output_dir, sync_manifest
-from shared.utils.nofollow import LinkRefused, open_append, open_dir
+from shared.utils.nofollow import open_append, open_dir
 
 from ..clients.redis import (
     TASK_LOGS_STREAM_PREFIX,
@@ -133,14 +133,14 @@ class TaskLogArchiver:
         return result_file_path(self._results_dir, task_id).parent
 
     def _archived(self, task_id: str) -> bool:
-        """Whether the task's log file exists, or a link stands where it or a
-        directory holding it belongs, so it is never written."""
+        """Whether anything stands where the task's log file belongs, or where a
+        directory holding it belongs, so it is not written again."""
         try:
             with open_dir(self._base_dir(task_id), LOGS_DIR) as logs_fd:
                 os.stat(_LOGS_NAME, dir_fd=logs_fd, follow_symlinks=False)
         except FileNotFoundError:
             return False
-        except LinkRefused:
+        except OSError:
             return True
         return True
 
@@ -176,12 +176,10 @@ class TaskLogArchiver:
                 open_append(logs_fd, _LOGS_NAME) as fh,
             ):
                 fh.write("".join(f"{line}\n" for line in lines).encode("utf-8"))
-        except LinkRefused as exc:
-            self._logger.warning(
-                "Not archiving logs for %s: a link stands in its results: %s",
-                task_id,
-                exc,
-            )
+        except OSError as exc:
+            # Dropped rather than retried, so one task's results never stall the
+            # others' archiving.
+            self._logger.warning("Not archiving logs for %s: %s", task_id, exc)
         self._save_checkpoint(task_id, last_id)
 
     def _drain_task(self, task_id: str) -> None:
