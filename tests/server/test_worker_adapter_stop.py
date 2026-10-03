@@ -29,14 +29,21 @@ from tests.server.test_docker_removal_in_progress import _adapter
 class _Docker:
     def __init__(self) -> None:
         self.container = MagicMock()
+        self.container.status = "exited"
         self.client = MagicMock()
         self.client.containers.get.return_value = self.container
+        self.client.containers.run.side_effect = self._run
         self.client.containers.list.return_value = []
         self.client.volumes.list.return_value = []
         self.adapter = _adapter(self.client)
 
+    def _run(self, **_: Any) -> MagicMock:
+        self.container.status = "running"
+        return self.container
+
     async def start(self) -> None:
         # What a successful start leaves behind.
+        self.container.status = "running"
         self.adapter._is_started = True
         self.adapter.set_status(WorkerStatus.RUNNING)
 
@@ -721,3 +728,45 @@ async def test_an_operator_stop_behind_a_queued_start_stops_what_it_starts(
 
     assert await asyncio.gather(first, stop, second, late) == [True, True, True, True]
     assert not world.adapter.holds_worker()
+
+
+@pytest.mark.asyncio
+async def test_a_start_after_a_failed_removal_runs_the_container_again() -> None:
+    world = _Docker()
+    await world.start()
+    world.container.remove.side_effect = RuntimeError("daemon refused")
+    wm = _manager(world, "docker")
+    assert not await wm.stop_worker(world.adapter.alias)
+    assert world.adapter.holds_worker()
+    world.container.status = "exited"
+    world.container.remove.side_effect = None
+    world.adapter.set_status(WorkerStatus.STOPPED)  # the stream closed
+
+    assert await wm.start_worker(world.adapter.alias)
+
+    assert world.client.containers.run.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_start_queued_behind_a_failed_removal_runs_the_container_again() -> (
+    None
+):
+    world = _Docker()
+
+    def stop(**_: Any) -> None:
+        world.container.status = "exited"
+
+    world.container.stop.side_effect = stop
+    # The first start clears the exited container, the stop fails to remove the one it
+    # stopped, and the queued start clears that one.
+    world.container.remove.side_effect = [None, RuntimeError("daemon refused"), None]
+    wm = _manager(world, "docker")
+    release, first, stopping, second = await _start_queued_behind_a_stop_on_a_start(
+        world, wm
+    )
+
+    release.set()
+
+    assert await asyncio.gather(first, stopping, second) == [True, False, True]
+    assert _created(world) == 2
+    assert world.container.status == "running"

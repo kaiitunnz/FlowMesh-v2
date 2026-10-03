@@ -241,7 +241,7 @@ class WorkerAdapter(ABC):
             await asyncio.wait({before.future})
         if self._closed or not operation.callers:
             return False
-        if self.holds_worker():
+        if await self.runs_held_worker():
             return True
         operation.begun = True
         self.set_status(WorkerStatus.STARTING)
@@ -285,6 +285,15 @@ class WorkerAdapter(ABC):
     def holds_worker(self) -> bool:
         """Whether this adapter started a worker it has not stopped."""
         pass
+
+    async def runs_held_worker(self) -> bool:
+        """Whether this adapter holds a worker that is still running."""
+        return self.holds_worker() and await asyncio.to_thread(self._held_worker_runs)
+
+    def _held_worker_runs(self) -> bool:
+        """Whether the held worker runs, blocking; a stop that failed partway can
+        leave a held worker that no longer does."""
+        return True
 
     def _on_abandoned_start(self, starting: asyncio.Future[bool]) -> None:
         if not starting.cancelled() and (exc := starting.exception()) is not None:

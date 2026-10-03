@@ -387,6 +387,9 @@ class DockerWorkerAdapter(WorkerAdapter):
     def holds_worker(self) -> bool:
         return self._is_started
 
+    def _held_worker_runs(self) -> bool:
+        return self._get_running_container() is not None
+
     def _stop(self) -> bool:
         is_started = self._is_started
         try:

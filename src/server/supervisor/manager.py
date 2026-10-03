@@ -363,7 +363,7 @@ class WorkerManager:
             raise ManagerNotStartedError()
         if worker.closed:
             raise ValueError(f"Worker '{worker.alias}' is being destroyed")
-        if _is_live(worker):
+        if worker.status is not WorkerStatus.STOPPED or await worker.runs_held_worker():
             raise ValueError(
                 f"Worker '{worker.alias}' is starting, running or stopping"
             )
