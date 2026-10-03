@@ -313,9 +313,15 @@ def _model_uses_gpu(
     return config.get("device_map") != "cpu"
 
 
+_CUDA_DEVICE_ENV = ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")
+
+
 def _model_pins_cuda_devices(model: ModelConfig | ModelConfigTemplate | None) -> bool:
+    # Reordering devices re-points whatever ordinals a worker binds, so it pins too.
     env_vars = (model.vllm or {}).get("env_vars") if model is not None else None
-    return isinstance(env_vars, dict) and "CUDA_VISIBLE_DEVICES" in env_vars
+    return isinstance(env_vars, dict) and any(
+        key in env_vars for key in _CUDA_DEVICE_ENV
+    )
 
 
 class ModelSpecStrict(TaskSpecStrictBase):

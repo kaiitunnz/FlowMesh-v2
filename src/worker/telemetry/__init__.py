@@ -1,1 +1,1 @@
-"""The worker's own telemetry wiring: the process-wide tracer provider."""
+"""The worker's own telemetry: its process-wide tracer provider and GPU gauges."""

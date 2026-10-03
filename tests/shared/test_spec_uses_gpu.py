@@ -178,6 +178,17 @@ class TestUnresolvedTemplates:
         )
         assert spec.pins_cuda_devices() is True
 
+    def test_a_template_ordering_its_own_devices_pins_them(self) -> None:
+        spec = InferenceSpecTemplate(
+            taskType=TaskType.INFERENCE,
+            data=_DATA,
+            model=ModelConfigTemplate(
+                source=ModelSourceTemplate(identifier="org/m"),
+                vllm={"env_vars": {"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}},
+            ),
+        )
+        assert spec.pins_cuda_devices() is True
+
 
 class TestEmbedding:
     def test_vllm_embedding_uses_gpu(self) -> None:
@@ -314,6 +325,17 @@ class TestBindingWorker:
     def test_a_task_naming_its_own_devices_keeps_every_device(self) -> None:
         spec = _inference(
             model=_model(vllm={"env_vars": {"CUDA_VISIBLE_DEVICES": "0"}}),
+            resources=_with_gpus(1),
+        )
+
+        assert spec.pins_cuda_devices()
+        assert not gpus_fit_dispatch(
+            _two_devices(held=1), spec, False, binds_devices=True
+        )
+
+    def test_a_task_ordering_its_own_devices_keeps_every_device(self) -> None:
+        spec = _inference(
+            model=_model(vllm={"env_vars": {"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}}),
             resources=_with_gpus(1),
         )
 
