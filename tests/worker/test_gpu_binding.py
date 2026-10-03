@@ -47,10 +47,25 @@ def _free(*uuids: str, fresh: tuple[str, ...] | None = None) -> FreeGpus:
     return FreeGpus(latched=frozenset(uuids), fresh=frozenset(fresh or uuids))
 
 
+def _host(devices: list[GpuInfo], unified: bool = False) -> WorkerHardware:
+    return WorkerHardware(
+        cpu=CPUInfo(logical_cores=8, model="CPU"),
+        memory=MemoryInfo(total_bytes=128 * 1024**3),
+        gpu=GpuPlatformInfo(
+            driver_version=None,
+            cuda_version=None,
+            devices=devices,
+            memory_is_unified=unified,
+            shared_memory_total_bytes=128 * 1024**3 if unified else None,
+        ),
+        network=NetworkInfo(ip=None, bandwidth_bytes_per_sec=None),
+    )
+
+
 class TestPickDevices:
     def test_a_count_takes_that_many_free_devices_in_order(self) -> None:
         picked = pick_devices(
-            _devices("A100", "A100", "A100"),
+            _host(_devices("A100", "A100", "A100")),
             GPURequirements(count=2),
             _free("GPU-0", "GPU-2"),
         )
@@ -58,7 +73,7 @@ class TestPickDevices:
 
     def test_no_count_takes_every_free_matching_device(self) -> None:
         picked = pick_devices(
-            _devices("A100", "L4", "A100"),
+            _host(_devices("A100", "L4", "A100")),
             GPURequirements(type="A100"),
             _free("GPU-0", "GPU-1", "GPU-2"),
         )
@@ -66,7 +81,7 @@ class TestPickDevices:
 
     def test_a_warm_binding_still_free_and_fitting_is_kept(self) -> None:
         picked = pick_devices(
-            _devices("A100", "A100"),
+            _host(_devices("A100", "A100")),
             GPURequirements(count=1),
             _free("GPU-0", "GPU-1"),
             warm=("GPU-1",),
@@ -75,15 +90,31 @@ class TestPickDevices:
 
     def test_a_warm_binding_on_a_held_device_is_replaced(self) -> None:
         picked = pick_devices(
-            _devices("A100", "A100"),
+            _host(_devices("A100", "A100")),
             GPURequirements(count=1),
             _free("GPU-0"),
             warm=("GPU-1",),
         )
         assert picked == ("GPU-0",)
 
+    def test_a_count_less_task_keeps_a_warm_binding_only_if_it_is_every_match(
+        self,
+    ) -> None:
+        devices = _host(_devices("A100", "A100", "A100"))
+        free = _free("GPU-0", "GPU-1", "GPU-2")
+        everything = ("GPU-0", "GPU-1", "GPU-2")
+        assert pick_devices(devices, None, free, warm=("GPU-0",)) == everything
+        assert pick_devices(devices, None, free, warm=everything) == everything
+
+    def test_a_unified_pool_covers_memory_a_device_does_not_report(self) -> None:
+        gb10 = GpuInfo(index=0, name="GB10", uuid="GPU-0", memory_total_bytes=None)
+        picked = pick_devices(
+            _host([gb10], unified=True), GPURequirements(memory="40GB"), _free("GPU-0")
+        )
+        assert picked == ("GPU-0",)
+
     def test_only_a_fresh_reading_refuses(self) -> None:
-        devices = _devices("A100", "A100")
+        devices = _host(_devices("A100", "A100"))
         # The latch holds GPU-1 but the reading just taken frees it.
         assert pick_devices(
             devices, GPURequirements(count=2), _free("GPU-0", fresh=("GPU-0", "GPU-1"))
@@ -149,10 +180,13 @@ class _Binding(Executor):
     binds_devices = True
 
     def __init__(self) -> None:
-        self.bound: list[tuple[str, ...] | None] = []
+        self.devices: tuple[str, ...] | None = None
+        self.restarts: list[tuple[str, ...] | None] = []
 
     def bind_devices(self, devices: tuple[str, ...] | None) -> None:
-        self.bound.append(devices)
+        if devices != self.devices:
+            self.devices = devices
+            self.restarts.append(devices)
 
     def run(self, task: Any, out_dir: Path) -> Any:
         raise NotImplementedError
@@ -222,7 +256,7 @@ class TestRunnerBinding:
         lifecycle.live_gpu_availability.return_value = {}
         self._dispatch(runner, _inference())
 
-        assert executor.bound == [("GPU-1",)]
+        assert executor.restarts == [("GPU-1",)]
         assert runner.gpu_devices_in_use() == {"GPU-1"}
 
     def test_a_dispatch_needing_more_devices_rebinds(self, tmp_path: Path) -> None:
@@ -230,15 +264,26 @@ class TestRunnerBinding:
         self._dispatch(runner, _inference(1))
         self._dispatch(runner, _inference(2))
 
-        assert executor.bound == [("GPU-1",), ("GPU-1", "GPU-2")]
+        assert executor.restarts == [("GPU-1",), ("GPU-1", "GPU-2")]
 
     def test_a_task_naming_its_devices_sees_every_device(self, tmp_path: Path) -> None:
         runner, executor, _ = self._runner(tmp_path)
         self._dispatch(runner, _inference())
         self._dispatch(runner, _inference(env_vars={"CUDA_VISIBLE_DEVICES": "2"}))
 
-        assert executor.bound == [("GPU-0",), None]
+        assert executor.restarts == [("GPU-0",), None]
         assert runner.gpu_devices_in_use() is None
+
+    def test_an_unbound_dispatch_after_a_cleanup_restarts_on_every_device(
+        self, tmp_path: Path
+    ) -> None:
+        runner, executor, _ = self._runner(tmp_path)
+        self._dispatch(runner, _inference())
+        runner._active_executor_devices = None  # as the runner's cleanup leaves it
+        self._dispatch(runner, _inference(env_vars={"CUDA_VISIBLE_DEVICES": "2"}))
+
+        assert executor.restarts == [("GPU-0",), None]
+        assert executor.devices is None
 
     def test_a_worker_that_does_not_bind_the_type_leaves_every_device(
         self, tmp_path: Path
@@ -246,7 +291,7 @@ class TestRunnerBinding:
         runner, executor, _ = self._runner(tmp_path, binds=False)
         self._dispatch(runner, _inference())
 
-        assert executor.bound == []
+        assert executor.restarts == []
         assert runner.gpu_devices_in_use() is None
 
     def test_a_binding_refuses_when_too_few_devices_are_free(

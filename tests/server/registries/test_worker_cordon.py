@@ -199,3 +199,18 @@ async def test_live_worker_ids_for_cordon_match_the_key_and_skip_stale() -> None
     cordon = _cordon("alpha")
     assert await registry.live_worker_ids_for_cordon_async(cordon) == ["wkr-2"]
     assert registry.live_worker_ids_for_cordon(cordon) == ["wkr-2"]
+
+
+@pytest.mark.asyncio
+async def test_worker_ids_for_cordon_include_stale_workers() -> None:
+    registry = _Registry(
+        [
+            _worker("wkr-1", "alpha", "node-a"),
+            _worker("wkr-2", "alpha", "node-a"),
+            _worker("wkr-3", "alpha", "node-b"),
+        ],
+        stale=frozenset({"wkr-1"}),
+    )
+    cordon = _cordon("alpha")
+    assert await registry.worker_ids_for_cordon_async(cordon) == ["wkr-1", "wkr-2"]
+    assert registry.worker_ids_for_cordon(cordon) == ["wkr-1", "wkr-2"]

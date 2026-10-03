@@ -24,6 +24,7 @@ def _launch(
 ) -> dict[str, Any]:
     """Run SFT on a worker bound to two GPUs, capturing its torchrun launch."""
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-b,GPU-c")
+    monkeypatch.setattr(sft_executor, "_STARTED_ON", "GPU-b,GPU-c")
     monkeypatch.delenv("KV_SFT_DISTRIBUTED", raising=False)
     monkeypatch.setattr(sft_executor.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(sft_executor.torch.cuda, "device_count", lambda: 2)
@@ -76,3 +77,31 @@ def test_a_training_device_outside_the_bound_devices_is_refused(
 ) -> None:
     with pytest.raises(ExecutionError, match="not one of the 2 GPU"):
         _launch(monkeypatch, tmp_path, {"visible_devices": [2]})
+
+
+def test_a_warm_process_maps_each_run_from_the_devices_it_started_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _launch(monkeypatch, tmp_path, {"visible_devices": [1, 0]})
+    launched = _launch(monkeypatch, tmp_path, {"visible_devices": [0, 1]})
+
+    assert launched["env"] == "GPU-b,GPU-c"
+
+
+def test_a_launched_rank_keeps_the_devices_its_launch_chose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sft_executor, "_STARTED_ON", "GPU-b,GPU-c")
+    monkeypatch.setattr(sft_executor.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(sft_executor.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-b,GPU-c")
+    monkeypatch.delenv("KV_SFT_DISTRIBUTED", raising=False)
+    SFTExecutor._configure_devices({"visible_devices": [1, 0]})
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-c,GPU-b"
+
+    # The rank, started on the parent's narrowed devices, applies the same config.
+    monkeypatch.setattr(sft_executor, "_STARTED_ON", "GPU-c,GPU-b")
+    monkeypatch.setenv("KV_SFT_DISTRIBUTED", "1")
+    SFTExecutor._configure_devices({"visible_devices": [1, 0]})
+
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-c,GPU-b"

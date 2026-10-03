@@ -701,6 +701,18 @@ class WorkerRegistry:
     async def list_cordons_async(self) -> list[WorkerCordon]:
         return _parse_cordon_members(await self._cordoned_members_async())
 
+    def worker_ids_for_cordon(self, cordon: WorkerCordon) -> list[str]:
+        """Ids of every worker registered under the cordon's key, stale ones too."""
+        workers = self.get_workers(sorted(self.get_worker_ids()))
+        return [w.id for w in workers if w is not None and _matches_cordon(w, cordon)]
+
+    async def worker_ids_for_cordon_async(self, cordon: WorkerCordon) -> list[str]:
+        """Ids of every worker registered under the cordon's key, stale ones too."""
+        workers = await self.get_workers_async(
+            sorted(await self.get_worker_ids_async())
+        )
+        return [w.id for w in workers if w is not None and _matches_cordon(w, cordon)]
+
     def live_worker_ids_for_cordon(self, cordon: WorkerCordon) -> list[str]:
         """Ids of non-stale workers registered under the cordon's key."""
         workers = self.get_workers(sorted(self.get_worker_ids()))

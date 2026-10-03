@@ -48,6 +48,11 @@ from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 logger = logging.getLogger("worker.sft")
 
 
+_SFT_LAUNCHER_FLAG = "KV_SFT_DISTRIBUTED"
+# The devices this process was started on, before a run narrows them.
+_STARTED_ON = os.environ.get("CUDA_VISIBLE_DEVICES")
+
+
 class SFTExecutor(TrainingMixin, Executor):
     name = "sft_executor"
     supported_task_types = frozenset({TaskType.SFT})
@@ -96,7 +101,7 @@ class SFTExecutor(TrainingMixin, Executor):
         # Internal distributed launcher: spawn multi-GPU training as subprocesses
         try:
             allow_multi_cfg = training_cfg.get("allow_multi_gpu")
-            launcher_env_flag = "KV_SFT_DISTRIBUTED"
+            launcher_env_flag = _SFT_LAUNCHER_FLAG
             already_spawned = os.environ.get(launcher_env_flag) == "1"
             # Determine requested GPU count
             vis = os.environ.get("CUDA_VISIBLE_DEVICES") or training_cfg.get(
@@ -260,7 +265,7 @@ class SFTExecutor(TrainingMixin, Executor):
             # going. Hugging Face will still initialize DeepSpeed on the current rank
             # (often rank 0 only).
             if deepspeed_cfg and not dist_initialized:
-                if os.environ.get("KV_SFT_DISTRIBUTED") == "1":
+                if os.environ.get(_SFT_LAUNCHER_FLAG) == "1":
                     logger.info(
                         "DeepSpeed runtime will initialize torch.distributed "
                         "(local_rank=%s)",
@@ -738,7 +743,17 @@ class SFTExecutor(TrainingMixin, Executor):
 
     @staticmethod
     def _configure_devices(training_cfg: dict[str, Any]) -> None:
-        """Control CUDA_VISIBLE_DEVICES only; no model.to() here."""
+        """Control CUDA_VISIBLE_DEVICES only; no model.to() here.
+
+        Each run starts from the devices the process was started on, and a launched
+        rank keeps the devices its launch already chose.
+        """
+        if os.environ.get(_SFT_LAUNCHER_FLAG) == "1":
+            return
+        if _STARTED_ON is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = _STARTED_ON
         if not torch.cuda.is_available():
             return
         requested = training_cfg.get("visible_devices")
@@ -847,14 +862,14 @@ class SFTExecutor(TrainingMixin, Executor):
 
 def _within_visible(ordinals: list[Any]) -> str:
     """``CUDA_VISIBLE_DEVICES`` naming ``ordinals``, positions among the devices the
-    process already sees.
+    process was started on.
 
     A comma-separated string is split into its entries. With no restriction set, the
     ordinals pass through.
     """
     entries = [token.strip() for value in ordinals for token in str(value).split(",")]
     entries = [token for token in entries if token]
-    current = os.environ.get("CUDA_VISIBLE_DEVICES")
+    current = _STARTED_ON
     if current is None:
         return ",".join(entries)
     visible = [token.strip() for token in current.split(",") if token.strip()]

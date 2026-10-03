@@ -420,15 +420,16 @@ address of the worker's host (`network`). When the server cannot carry a relayed
 ## Model executor GPUs
 
 A worker runs its model, diffusion, omni, training and `serve` executors on the GPUs no
-process outside FlowMesh holds: when it loads one for a GPU task, it picks the free devices
-that match the task's `gpu` block (`count` of them, or every free match without one) and
-starts the executor seeing only those. A warm executor keeps its devices while they stay
-free and fit the next task, and restarts on others otherwise. Training's `visible_devices`
-and `primary_gpu` are positions within the task's devices; a position past them fails the
-task. Multi-GPU training ranks launch under `torchrun` on those devices, with a DeepSpeed
-configuration applied by each rank. A task whose `model.vllm.env_vars` sets
-`CUDA_VISIBLE_DEVICES` chooses its own devices and sees every device, so it waits while any
-is held. With `WORKER_ENABLE_MP_EXECUTORS=false` only `serve` runs on chosen devices.
+process outside FlowMesh holds: when it loads one for a GPU task, it picks the free
+devices that match the task's `gpu` block (`count` of them, or every free match without
+a positive one) and starts the executor seeing only those. A warm executor keeps its
+devices while they stay free and fit the next task, and restarts on others otherwise.
+Training's `visible_devices` and `primary_gpu` are positions within the task's devices;
+a position past them fails the task. Multi-GPU training ranks launch under `torchrun` on
+those devices, with a DeepSpeed configuration applied by each rank. A task whose
+`model.vllm.env_vars` sets `CUDA_VISIBLE_DEVICES` chooses its own devices and sees every
+device, so it waits while any is held. With `WORKER_ENABLE_MP_EXECUTORS=false` only
+`serve` runs on chosen devices.
 
 ## SSH executor GPUs
 

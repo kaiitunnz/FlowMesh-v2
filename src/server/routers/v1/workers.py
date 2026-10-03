@@ -161,7 +161,8 @@ async def _set_cordon(
     changed = await registry.set_cordon_async(cordon, cordoned=cordoned)
     worker_ids = await registry.live_worker_ids_for_cordon_async(cordon)
     if cordoned and resident is not None:
-        resident.on_workers_cordoned(worker_ids)
+        # A stale worker may recover with its replicas, so it drains too.
+        resident.on_workers_cordoned(await registry.worker_ids_for_cordon_async(cordon))
     logger.info(
         "%s %s/%s (workers: %s)",
         "Cordoned" if cordoned else "Uncordoned",

@@ -329,7 +329,7 @@ class Runner:
             and not spec.pins_cuda_devices()
         ):
             bound = pick_devices(
-                devices,
+                self.hardware,
                 spec.gpu_requirements(),
                 FreeGpus(
                     latched=free_uuids(self.lifecycle.gpu_availability(), devices),
@@ -337,9 +337,9 @@ class Runner:
                 ),
                 warm=self._active_executor_devices,
             )
-        if bound != self._active_executor_devices:
-            executor.bind_devices(bound)
-            self._active_executor_devices = bound
+        # The executor compares against its own binding, which outlives this mirror.
+        executor.bind_devices(bound)
+        self._active_executor_devices = bound
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
