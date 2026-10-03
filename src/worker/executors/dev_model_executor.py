@@ -374,6 +374,9 @@ class DevModelExecutor(Executor):
             self._config.serve_default_ttl_sec,
             self._config.serve_max_ttl_sec,
         )
+        if deadline <= time.time():
+            logger.info("dev_model task %s TTL elapsed; not starting", task.task_id)
+            return DevModelResult(model=model_id, port=spec.port or 0)
         vllm = (spec.model.vllm if spec.model is not None else None) or {}
         raw_max_loras = vllm.get("max_loras")
         max_loras = raw_max_loras if isinstance(raw_max_loras, int) else None
@@ -386,9 +389,6 @@ class DevModelExecutor(Executor):
         out_dir.mkdir(parents=True, exist_ok=True)
         if self._signals.raise_if_cancelled():
             logger.info("dev_model task %s stopped before launch", task.task_id)
-            return DevModelResult(model=model_id, port=port)
-        if deadline <= time.time():
-            logger.info("dev_model task %s TTL elapsed; not starting", task.task_id)
             return DevModelResult(model=model_id, port=port)
 
         client = httpx.Client() if forward_url is not None else None

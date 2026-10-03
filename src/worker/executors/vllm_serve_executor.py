@@ -105,6 +105,9 @@ class VLLMServeExecutor(Executor):
             self._config.serve_default_ttl_sec,
             self._config.serve_max_ttl_sec,
         )
+        if deadline <= time.time():
+            logger.info("Serve task %s TTL elapsed; not starting vLLM", task.task_id)
+            return ServeResult(model=model_id, port=spec.port or 0)
         readiness_timeout = (
             spec.readinessTimeoutSeconds or _DEFAULT_READINESS_TIMEOUT_SEC
         )
@@ -114,9 +117,6 @@ class VLLMServeExecutor(Executor):
         api_key = secrets.token_hex(32)
         bind_host = "127.0.0.1"
         port = resolve_bind_port(spec.port, bind_host)
-        if deadline <= time.time():
-            logger.info("Serve task %s TTL elapsed; not starting vLLM", task.task_id)
-            return ServeResult(model=model_id, port=port)
 
         cmd = [
             sys.executable,

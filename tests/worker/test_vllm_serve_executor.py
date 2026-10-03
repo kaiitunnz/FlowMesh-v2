@@ -869,3 +869,9 @@ class TestServeTtlAcrossReruns:
         popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=180.0)
         popen.assert_not_called()
         assert deadlines == []
+
+    def test_an_elapsed_ttl_ends_without_binding_its_port(self, tmp_path: Path) -> None:
+        with patch.object(mod, "resolve_bind_port", side_effect=ExecutionError("busy")):
+            popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=180.0)
+        popen.assert_not_called()
+        assert deadlines == []

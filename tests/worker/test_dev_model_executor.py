@@ -23,7 +23,7 @@ from tests.worker.factories import (
     make_worker_task_message,
 )
 from worker.executors import dev_model_executor as mod
-from worker.executors.base_executor import TaskCancelledError
+from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.dev_model_executor import (
     _CANNED_TEXT,
     DevModelExecutor,
@@ -543,5 +543,11 @@ class TestServeTtlAcrossReruns:
 
     def test_an_elapsed_ttl_starts_no_server(self, tmp_path: Path) -> None:
         emit, deadlines = self._run(tmp_path, ttl=180.0, elapsed=200.0)
+        emit.assert_not_called()
+        assert deadlines == []
+
+    def test_an_elapsed_ttl_ends_without_binding_its_port(self, tmp_path: Path) -> None:
+        with patch.object(mod, "resolve_bind_port", side_effect=ExecutionError("busy")):
+            emit, deadlines = self._run(tmp_path, ttl=180.0, elapsed=200.0)
         emit.assert_not_called()
         assert deadlines == []
