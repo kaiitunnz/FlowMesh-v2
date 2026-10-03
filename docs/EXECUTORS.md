@@ -426,9 +426,10 @@ a positive one) and starts the executor seeing only those, listed by index under
 `CUDA_DEVICE_ORDER=PCI_BUS_ID`. A warm executor keeps its devices while they stay free and
 fit the next task, and restarts on others otherwise, as for a task without a positive
 count once another device frees up. SFT's `visible_devices` and `primary_gpu` are
-positions within the task's devices; a position past them fails the task. Multi-GPU training runs its ranks on those devices. A task that sets
-`CUDA_VISIBLE_DEVICES` in `model.vllm.env_vars` picks its own devices, so its executor sees
-every device and the task waits while any is held. A worker on a MIG slice, or one whose
+positions within the task's devices; a position past them fails the task. Multi-GPU
+training runs its ranks on those devices. A task that sets `CUDA_VISIBLE_DEVICES` in
+`model.vllm.env_vars` picks its own devices, so its executor sees every device and the
+task waits while any is held. A worker on a MIG slice, or one whose
 `CUDA_VISIBLE_DEVICES` lists some of a host's mixed GPU models by position without
 `CUDA_DEVICE_ORDER=PCI_BUS_ID`, runs every executor on all its GPUs.
 
