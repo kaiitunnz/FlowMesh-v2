@@ -580,8 +580,9 @@ class Dispatcher:
         record.no_eligible_since = None
 
         # 4b. A long-lived allocation keeps off a worker holding an unsettled
-        # activation's private state while another is idle: that activation can resume
-        # only there.
+        # activation's private state, since only that worker can resume the
+        # activation. A resident replica falls back onto a holder, as it yields the
+        # worker to a waiting owner; a serve task cannot yield, so it waits.
         if self._runtime.long_lived_allocation(task_id):
             holders = self._runtime.private_state_holders()
             free = [
@@ -589,6 +590,12 @@ class Dispatcher:
                 for c in pool
                 if OwnerFence(worker_id=c.id, incarnation=c.incarnation) not in holders
             ]
+            if not free and not record.resident:
+                self._logger.debug(
+                    "Only private-state holders are idle for %s; requeueing", task_id
+                )
+                self.requeue_task(task_id, reason="no_idle_worker", count_retry=False)
+                return False
             pool = free or pool
 
         # 5. Worker selection (best-fit scoring by default)

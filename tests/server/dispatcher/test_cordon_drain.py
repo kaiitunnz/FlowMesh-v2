@@ -22,6 +22,7 @@ from tests.server.task.test_worker_originated_boundary import (
     _report,
     _runtime,
 )
+from tests.worker.factories import make_worker_hardware
 
 _ECHO_WF = """
 apiVersion: flowmesh/v2
@@ -37,19 +38,23 @@ spec:
 """
 
 
-def _registry() -> WorkerRegistry:
-    """The sealed agent's holder ``wkr-1`` and a second idle worker ``wkr-2``."""
+def _registry(*aliases: str) -> WorkerRegistry:
+    """Idle workers ``wkr-1``, ``wkr-2``, ... under ``aliases``; ``wkr-1`` holds the
+    sealed agent."""
     registry = WorkerRegistry(fake_redis_client(fakeredis.FakeServer()))
     capabilities = WorkerCapabilities(
-        supported_task_types=frozenset({TaskType.AGENT, TaskType.ECHO})
+        supported_task_types=frozenset(
+            {TaskType.AGENT, TaskType.ECHO, TaskType.DEV_MODEL}
+        )
     )
-    for alias in ("holder", "other"):
+    for alias in aliases or ("holder", "other"):
         meta = {
             "alias": alias,
             "namespace": "ns",
             "cluster": "c",
             "status": WorkerStatus.IDLE.value,
             "capabilities_json": capabilities.model_dump_json(),
+            "hardware_json": make_worker_hardware().model_dump_json(),
         }
         worker_id = registry.register_worker("nde-1", "node", meta)
         registry.update_worker_hb(worker_id, "2026-01-01T00:00:00Z", 60)
