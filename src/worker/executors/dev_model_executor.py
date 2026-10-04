@@ -387,7 +387,8 @@ class DevModelExecutor(Executor):
                     task, model_id, vllm, max_loras, deadline, socket_path, out_dir
                 )
         except EngineSocketPathTooLong as exc:
-            raise ExecutionError(str(exc)) from exc
+            # The worker's temp directory decides the path, so another worker may fit.
+            raise ExecutionError(str(exc), retryable=True) from exc
 
     def _serve_on(
         self,

@@ -551,10 +551,14 @@ class TestServeLoopbackEndpoint:
         ex = make_serve_executor(engine_parent=parent)
         with (
             patch("subprocess.Popen") as popen,
-            pytest.raises(ExecutionError, match="107-byte Unix socket limit"),
+            patch.object(ex, "_poll_health"),
+            patch.object(ex, "_wait_for_serve"),
+            patch.object(ex, "_terminate_process_group"),
+            pytest.raises(ExecutionError, match="107-byte Unix socket limit") as raised,
         ):
             ex.run(task, tmp_path / "out")
         popen.assert_not_called()
+        assert raised.value.retryable
         assert list(parent.iterdir()) == []
 
     def test_the_socket_directory_is_removed_when_the_engine_fails(

@@ -417,8 +417,13 @@ class TestRunLifecycle:
         )
         task = make_worker_task_message(spec=spec, task_type=TaskType.DEV_MODEL)
         ex = make_dev_model_executor(engine_parent=parent)
-        with pytest.raises(ExecutionError, match="107-byte Unix socket limit"):
+        with (
+            patch.object(ex, "emit_update"),
+            patch.object(ex, "_wait_for_serve"),
+            pytest.raises(ExecutionError, match="107-byte Unix socket limit") as raised,
+        ):
             ex.run(task, tmp_path / "out")
+        assert raised.value.retryable
         assert list(parent.iterdir()) == []
 
     def test_pooling_runner_serves_the_embedding_interface(

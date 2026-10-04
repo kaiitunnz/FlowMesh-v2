@@ -130,7 +130,8 @@ class VLLMServeExecutor(Executor):
                     out_dir,
                 )
         except EngineSocketPathTooLong as exc:
-            raise ExecutionError(str(exc)) from exc
+            # The worker's temp directory decides the path, so another worker may fit.
+            raise ExecutionError(str(exc), retryable=True) from exc
 
     def _launch(
         self,
