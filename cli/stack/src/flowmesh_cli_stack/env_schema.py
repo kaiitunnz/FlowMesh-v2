@@ -116,7 +116,8 @@ def collector_serves_tls(env: Mapping[str, str]) -> bool:
     )
 
 
-def _telemetry_profile_on(env: Mapping[str, str]) -> bool:
+def telemetry_profile_on(env: Mapping[str, str]) -> bool:
+    """Return whether the node runs the telemetry profile's collector and store."""
     profiles = (env.get("COMPOSE_PROFILES", "") or "").split(",")
     return "telemetry" in {profile.strip() for profile in profiles}
 
@@ -126,7 +127,7 @@ def _require_collector_token(
 ) -> None:
     """Require ``TELEMETRY_OTLP_TOKEN`` while the telemetry profile is on."""
     if (
-        _telemetry_profile_on(env)
+        telemetry_profile_on(env)
         and not (env.get("TELEMETRY_OTLP_TOKEN", "") or "").strip()
     ):
         errors.append(
@@ -140,7 +141,7 @@ def _require_collector_scheme(
 ) -> None:
     """Require the OTLP endpoint's scheme to match the bundled collector's TLS."""
     endpoint = (env.get("SERVER_METRICS_OTLP_ENDPOINT", "") or "").strip()
-    if not (_telemetry_profile_on(env) and endpoint):
+    if not (telemetry_profile_on(env) and endpoint):
         return
     parts = urlsplit(endpoint)
     if collector_serves_tls(env):

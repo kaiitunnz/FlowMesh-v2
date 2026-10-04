@@ -13,7 +13,7 @@ from flowmesh_stack.env import EnvFileError, load_env, parse_env_file
 from flowmesh_stack.node_client import NodeClient
 from flowmesh_stack.paths import ensure_dir, ensure_file, resolve_path
 
-from .env_schema import STACK_ENV_SCHEMA, collector_serves_tls
+from .env_schema import STACK_ENV_SCHEMA, collector_serves_tls, telemetry_profile_on
 
 DEFAULT_ENV_FILE = Path(".env")
 _SCHEMA_DEFAULTS = {
@@ -96,44 +96,56 @@ def apply_collector_tls_env() -> None:
     """Hand the collector the server's TLS certificate and key alone, and run it as
     the key's owner, who alone can read it.
 
-    Without that material the collector serves plaintext as the invoking user, with
-    the null device bound in place of the files.
+    A node without the telemetry profile, or a stack without that material, runs the
+    collector in plaintext as the invoking user, with the null device bound in place of
+    the files. Raises ``ValueError`` naming a configured file the collector cannot be
+    handed.
     """
-    cert = _server_tls_host_file("SERVER_GRPC_TLS_CERT_FILE")
-    key = _server_tls_host_file("SERVER_GRPC_TLS_KEY_FILE")
-    if cert is None or key is None:
-        owner = (os.getuid(), os.getgid())
+    if not (telemetry_profile_on(os.environ) and collector_serves_tls(os.environ)):
         os.environ.update(
             {
                 COLLECTOR_TLS_CONFIG_ARG_ENV: "",
                 COLLECTOR_TLS_CERT_ENV: os.devnull,
                 COLLECTOR_TLS_KEY_ENV: os.devnull,
+                COLLECTOR_USER_ENV: f"{os.getuid()}:{os.getgid()}",
             }
         )
-    else:
-        stat = key.stat()
-        owner = (stat.st_uid, stat.st_gid)
-        os.environ.update(
-            {
-                COLLECTOR_TLS_CONFIG_ARG_ENV: _COLLECTOR_TLS_CONFIG_ARG,
-                COLLECTOR_TLS_CERT_ENV: cert.as_posix(),
-                COLLECTOR_TLS_KEY_ENV: key.as_posix(),
-            }
-        )
-    os.environ[COLLECTOR_USER_ENV] = f"{owner[0]}:{owner[1]}"
-
-
-def _server_tls_host_file(key: str) -> Path | None:
-    """Return the host file behind a server TLS path, which the server reads from its
-    ``SERVER_TLS_DIR`` mount; None when the stack has no such file."""
-    if not collector_serves_tls(os.environ):
-        return None
+        return
+    cert = _server_tls_host_file("SERVER_GRPC_TLS_CERT_FILE")
+    key = _server_tls_host_file("SERVER_GRPC_TLS_KEY_FILE")
     try:
-        relative = PurePosixPath(os.environ[key].strip()).relative_to(_SERVER_TLS_MOUNT)
+        owner = key.stat()
+    except OSError as exc:
+        raise ValueError(f"Cannot read the collector's TLS key {key}: {exc}") from exc
+    os.environ.update(
+        {
+            COLLECTOR_TLS_CONFIG_ARG_ENV: _COLLECTOR_TLS_CONFIG_ARG,
+            COLLECTOR_TLS_CERT_ENV: cert.as_posix(),
+            COLLECTOR_TLS_KEY_ENV: key.as_posix(),
+            COLLECTOR_USER_ENV: f"{owner.st_uid}:{owner.st_gid}",
+        }
+    )
+
+
+def _server_tls_host_file(key: str) -> Path:
+    """Return the host file behind a server TLS path, which the server reads from its
+    ``SERVER_TLS_DIR`` mount."""
+    value = os.environ[key].strip()
+    try:
+        relative = PurePosixPath(value).relative_to(_SERVER_TLS_MOUNT)
     except ValueError:
-        return None
+        raise ValueError(
+            f"{key}={value} is outside {_SERVER_TLS_MOUNT}, so the collector cannot "
+            "be handed it"
+        ) from None
     path = Path(os.environ.get("SERVER_TLS_DIR", ""), relative)
-    return path if path.is_file() else None
+    try:
+        is_file = path.is_file()
+    except OSError as exc:
+        raise ValueError(f"Cannot read {key} at {path}: {exc}") from exc
+    if not is_file:
+        raise ValueError(f"{key} names {path} on this host, which is not a file")
+    return path
 
 
 def apply_plugin_data_env(base_dir: Path) -> None:

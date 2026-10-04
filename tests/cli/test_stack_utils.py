@@ -140,9 +140,13 @@ def _server_tls(tmp_path: Path) -> Path:
     return tls
 
 
+_TELEMETRY = {"COMPOSE_PROFILES": "root,telemetry"}
+
+
 def test_the_collector_gets_the_server_cert_and_key_alone(tmp_path: Path) -> None:
     tls = _server_tls(tmp_path)
     env = {
+        **_TELEMETRY,
         "SERVER_TLS_DIR": tls.as_posix(),
         "SERVER_GRPC_TLS_CERT_FILE": "/etc/ssl/server/server.pem",
         "SERVER_GRPC_TLS_KEY_FILE": "/etc/ssl/server/server.key",
@@ -158,26 +162,80 @@ def test_the_collector_gets_the_server_cert_and_key_alone(tmp_path: Path) -> Non
         assert os.environ[COLLECTOR_USER_ENV] == f"{key.st_uid}:{key.st_gid}"
 
 
+def _assert_plaintext_collector() -> None:
+    assert os.environ[COLLECTOR_TLS_CONFIG_ARG_ENV] == ""
+    assert os.environ[COLLECTOR_TLS_CERT_ENV] == os.devnull
+    assert os.environ[COLLECTOR_TLS_KEY_ENV] == os.devnull
+    assert os.environ[COLLECTOR_USER_ENV] == f"{os.getuid()}:{os.getgid()}"
+
+
 @pytest.mark.parametrize(
-    ("cert", "key"),
-    [
-        ("/etc/ssl/server/server.pem", ""),
-        ("", ""),
-        ("/etc/ssl/server/missing.pem", "/etc/ssl/server/server.key"),
-    ],
+    ("cert", "key"), [("/etc/ssl/server/server.pem", ""), ("", "")]
 )
 def test_without_server_material_the_collector_binds_nothing_from_disk(
     tmp_path: Path, cert: str, key: str
 ) -> None:
     tls = _server_tls(tmp_path)
     env = {
+        **_TELEMETRY,
         "SERVER_TLS_DIR": tls.as_posix(),
         "SERVER_GRPC_TLS_CERT_FILE": cert,
         "SERVER_GRPC_TLS_KEY_FILE": key,
     }
     with patch.dict(os.environ, env, clear=True):
         apply_collector_tls_env()
-        assert os.environ[COLLECTOR_TLS_CONFIG_ARG_ENV] == ""
-        assert os.environ[COLLECTOR_TLS_CERT_ENV] == os.devnull
-        assert os.environ[COLLECTOR_TLS_KEY_ENV] == os.devnull
-        assert os.environ[COLLECTOR_USER_ENV] == f"{os.getuid()}:{os.getgid()}"
+        _assert_plaintext_collector()
+
+
+def test_a_node_without_the_telemetry_profile_reads_no_tls_file(
+    tmp_path: Path,
+) -> None:
+    env = {
+        "COMPOSE_PROFILES": "root",
+        "SERVER_TLS_DIR": (tmp_path / "unreadable").as_posix(),
+        "SERVER_GRPC_TLS_CERT_FILE": "/etc/ssl/server/server.pem",
+        "SERVER_GRPC_TLS_KEY_FILE": "/etc/ssl/server/server.key",
+    }
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch.object(Path, "is_file", side_effect=PermissionError("denied")),
+        patch.object(Path, "stat", side_effect=PermissionError("denied")),
+    ):
+        apply_collector_tls_env()
+        _assert_plaintext_collector()
+
+
+@pytest.mark.parametrize(
+    ("cert", "named"),
+    [
+        ("/etc/ssl/server/missing.pem", "missing.pem"),
+        ("/opt/tls/server.pem", "/opt/tls/server.pem"),
+    ],
+)
+def test_a_tls_file_the_collector_cannot_be_handed_is_an_error(
+    tmp_path: Path, cert: str, named: str
+) -> None:
+    env = {
+        **_TELEMETRY,
+        "SERVER_TLS_DIR": _server_tls(tmp_path).as_posix(),
+        "SERVER_GRPC_TLS_CERT_FILE": cert,
+        "SERVER_GRPC_TLS_KEY_FILE": "/etc/ssl/server/server.key",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        with pytest.raises(ValueError, match=named):
+            apply_collector_tls_env()
+
+
+def test_an_unreadable_tls_directory_is_an_error_naming_it(tmp_path: Path) -> None:
+    env = {
+        **_TELEMETRY,
+        "SERVER_TLS_DIR": _server_tls(tmp_path).as_posix(),
+        "SERVER_GRPC_TLS_CERT_FILE": "/etc/ssl/server/server.pem",
+        "SERVER_GRPC_TLS_KEY_FILE": "/etc/ssl/server/server.key",
+    }
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch.object(Path, "is_file", side_effect=PermissionError("denied")),
+    ):
+        with pytest.raises(ValueError, match="server.pem"):
+            apply_collector_tls_env()

@@ -62,12 +62,12 @@ def _stack() -> DockerComposeStack:
         load_stack_env(env_file)
         try:
             apply_stack_resource_env()
+            apply_stack_path_env(Path.cwd())
+            apply_plugin_data_env(Path.cwd())
+            apply_collector_tls_env()
         except ValueError as exc:
             logging.error(str(exc))
             raise typer.Exit(code=1)
-        apply_stack_path_env(Path.cwd())
-        apply_plugin_data_env(Path.cwd())
-        apply_collector_tls_env()
 
     return DockerComposeStack(
         compose_file=stack_compose_file(),
