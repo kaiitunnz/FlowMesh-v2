@@ -1,8 +1,12 @@
 """Tests for the API executor url override and Nebula credential handling."""
 
+import email.utils
 import json
+import logging
 import tempfile
 import threading
+import time
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -13,8 +17,13 @@ import pytest
 
 from shared.schemas.result import APIResult
 from shared.tasks.worker_message import WorkerTaskMessage
-from worker.executors.api_executor import APIExecutor
-from worker.executors.base_executor import ExecutionError
+from tests.worker.factories import DEFAULT_WORKER_CONFIG
+from worker.executors.api_executor import (
+    _MAX_RETRIES,
+    _RETRY_BACKOFF_MAX_SEC,
+    APIExecutor,
+)
+from worker.executors.base_executor import ExecutionError, TaskCancelledError
 
 
 def _task_message(**spec_updates: object) -> WorkerTaskMessage:
@@ -60,7 +69,7 @@ class _RecordingTransport(httpx.MockTransport):
 
 
 def _run(
-    executor: APIExecutor, task: WorkerTaskMessage, transport: _RecordingTransport
+    executor: APIExecutor, task: WorkerTaskMessage, transport: httpx.MockTransport
 ) -> APIResult:
     with patch.object(
         APIExecutor, "_get_client", return_value=httpx.Client(transport=transport)
@@ -76,7 +85,7 @@ class TestNebulaPath:
         monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
         task = _task_message()
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         assert transport.request.url == "https://nebula.example.com/v1/chat/completions"
         assert transport.request.headers["Authorization"] == "Bearer nebula-token"
@@ -88,7 +97,7 @@ class TestNebulaPath:
         monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
         task = _task_message(headers={"Authorization": "Bearer custom"})
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         assert transport.request.url == "https://nebula.example.com/v1/chat/completions"
         assert transport.request.headers["Authorization"] == "Bearer custom"
@@ -100,7 +109,7 @@ class TestNebulaPath:
         monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
         task = _task_message(headers={"X-API-Key": "custom-key"})
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         assert "Authorization" not in transport.request.headers
         assert transport.request.headers["X-API-Key"] == "custom-key"
@@ -112,7 +121,7 @@ class TestNebulaPath:
         monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
         task = _task_message(headers={"Content-Type": "application/json"})
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         assert transport.request.headers["Authorization"] == "Bearer nebula-token"
 
@@ -135,7 +144,7 @@ class TestNebulaPath:
             }
         )
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         sent = transport.request.headers
         assert sent["Host"] == "nebula.example.com"
@@ -156,7 +165,7 @@ class TestNebulaPath:
             headers={"Authorization": "Bearer custom", "X-Forwarded-For": "10.0.0.1"}
         )
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         assert transport.request.headers["X-Forwarded-For"] == "10.0.0.1"
         assert transport.request.headers["Authorization"] == "Bearer custom"
@@ -175,7 +184,7 @@ class TestNebulaPath:
         with patch.object(
             APIExecutor, "_get_client", return_value=httpx.Client(transport=transport)
         ) as get_client:
-            APIExecutor.__new__(APIExecutor).run(task, Path(tempfile.gettempdir()))
+            APIExecutor(DEFAULT_WORKER_CONFIG).run(task, Path(tempfile.gettempdir()))
         assert get_client.call_args.args[2] is verified
 
     def test_no_url_no_header_without_token_raises(
@@ -185,7 +194,7 @@ class TestNebulaPath:
         monkeypatch.delenv("NEBULA_API_TOKEN", raising=False)
         transport = _RecordingTransport()
         with pytest.raises(ExecutionError, match="no credential configured"):
-            _run(APIExecutor.__new__(APIExecutor), _task_message(), transport)
+            _run(APIExecutor(DEFAULT_WORKER_CONFIG), _task_message(), transport)
         assert transport.request is None
 
     def test_neither_url_nor_base_url_raises(
@@ -194,7 +203,7 @@ class TestNebulaPath:
         monkeypatch.delenv("NEBULA_API_BASE_URL", raising=False)
         task = _task_message()
         with pytest.raises(ExecutionError, match="spec.api.url or NEBULA_API_BASE_URL"):
-            _run(APIExecutor.__new__(APIExecutor), task, _RecordingTransport())
+            _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, _RecordingTransport())
 
 
 class TestCustomUrl:
@@ -205,7 +214,7 @@ class TestCustomUrl:
         monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
         task = _task_message(url="https://custom.example.com/v1/chat/completions")
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         assert transport.request.url == "https://custom.example.com/v1/chat/completions"
         assert "Authorization" not in transport.request.headers
@@ -219,7 +228,7 @@ class TestCustomUrl:
             headers={"Authorization": "Bearer custom"},
         )
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         assert transport.request.url == "https://custom.example.com/v1/chat/completions"
         assert transport.request.headers["Authorization"] == "Bearer custom"
@@ -233,7 +242,7 @@ class TestCustomUrl:
             headers={"X-API-Key": "custom-key"},
         )
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         assert transport.request.url == "https://custom.example.com/v1/chat/completions"
         assert transport.request.headers["X-API-Key"] == "custom-key"
@@ -247,7 +256,7 @@ class TestCustomUrl:
             headers={"Content-Type": "application/json"},
         )
         transport = _RecordingTransport()
-        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
         assert transport.request is not None
         assert transport.request.headers["Content-Type"] == "application/json"
         assert "Authorization" not in transport.request.headers
@@ -284,7 +293,7 @@ def test_a_pooled_client_carries_no_cookie_between_tasks() -> None:
     try:
         url = f"http://127.0.0.1:{server.server_address[1]}/v1"
         for _ in range(2):
-            APIExecutor.__new__(APIExecutor).run(
+            APIExecutor(DEFAULT_WORKER_CONFIG).run(
                 _task_message(url=url), Path(tempfile.gettempdir())
             )
     finally:
@@ -301,7 +310,7 @@ def test_the_stored_url_carries_no_credential_the_request_sent() -> None:
         headers={"Authorization": "Bearer custom"},
     )
     transport = _RecordingTransport()
-    result = _run(APIExecutor.__new__(APIExecutor), task, transport)
+    result = _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
 
     assert transport.request is not None
     assert "query-secret" in str(transport.request.url)
@@ -321,6 +330,396 @@ def test_a_failed_request_quotes_no_url_credential() -> None:
         return_value=httpx.Client(transport=httpx.MockTransport(refuse)),
     ):
         with pytest.raises(ExecutionError) as raised:
-            APIExecutor.__new__(APIExecutor).run(task, Path(tempfile.gettempdir()))
+            APIExecutor(DEFAULT_WORKER_CONFIG).run(task, Path(tempfile.gettempdir()))
     assert "inline-SECRET" not in str(raised.value)
     assert "api.example" in str(raised.value)
+
+
+def test_a_retry_warning_quotes_no_url_credential(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(f"cannot reach {request.url}", request=request)
+
+    task = _task_message(
+        url="https://user:pw-inline-SECRET@api.example/v1?api_key=q-inline-SECRET",
+        retries=1,
+    )
+    with (
+        patch.object(APIExecutor, "_wait_for_backoff"),
+        patch.object(
+            APIExecutor,
+            "_get_client",
+            return_value=httpx.Client(transport=httpx.MockTransport(refuse)),
+        ),
+        caplog.at_level(logging.WARNING, logger="worker.executors.api_executor"),
+        pytest.raises(ExecutionError),
+    ):
+        APIExecutor(DEFAULT_WORKER_CONFIG).run(task, Path(tempfile.gettempdir()))
+    assert "attempt 1/1" in caplog.text
+    assert "api.example" in caplog.text
+    assert "inline-SECRET" not in caplog.text
+
+
+class _BlockingTransport(httpx.MockTransport):
+    """MockTransport that blocks on the first request, then serves a sequence."""
+
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.responses = list(responses)
+        self.calls = 0
+        super().__init__(self._handler)
+
+    def _handler(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            if not self.release.wait(5.0):
+                raise AssertionError("blocking transport was not released")
+        return self.responses.pop(0)
+
+
+class _NotifyTransport(httpx.MockTransport):
+    """MockTransport that sets an event once it has served a request."""
+
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        self.served = threading.Event()
+        self.responses = list(responses)
+        self.calls = 0
+        super().__init__(self._handler)
+
+    def _handler(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        self.served.set()
+        return self.responses.pop(0)
+
+
+class _SequenceTransport(httpx.MockTransport):
+    """MockTransport that serves a fixed sequence of responses."""
+
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        self.responses = list(responses)
+        self.calls = 0
+        super().__init__(self._handler)
+
+    def _handler(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+def _ok_response() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": "hello"}}],
+            "usage": {"total_tokens": 3},
+        },
+    )
+
+
+def _error_response(status_code: int) -> httpx.Response:
+    return httpx.Response(status_code, json={"error": "boom"})
+
+
+class TestRetries:
+    def _task(self, **spec_updates: object) -> WorkerTaskMessage:
+        return _task_message(
+            url="https://custom.example.com/v1/chat/completions",
+            response={"parse_json": False},
+            **spec_updates,
+        )
+
+    def test_retry_succeeds_after_transient_failures(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 504 followed by a 200 succeeds when retries are configured."""
+        monkeypatch.setattr("worker.executors.api_executor._RETRY_BACKOFF_SEC", 0.0)
+        task = self._task(retries=2)
+        transport = _SequenceTransport(
+            [_error_response(504), _error_response(504), _ok_response()]
+        )
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
+        assert transport.calls == 3
+
+    def test_retries_exhausted_still_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Persistent 5xx failures exhaust retries and raise loudly."""
+        monkeypatch.setattr("worker.executors.api_executor._RETRY_BACKOFF_SEC", 0.0)
+        task = self._task(retries=2)
+        transport = _SequenceTransport(
+            [_error_response(504), _error_response(504), _error_response(504)]
+        )
+        with pytest.raises(ExecutionError, match="status 504"):
+            _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
+        assert transport.calls == 3
+
+    def test_no_retry_by_default(self) -> None:
+        """Without a retries field, a transient failure fails immediately."""
+        task = self._task()
+        transport = _SequenceTransport([_error_response(504)])
+        with pytest.raises(ExecutionError, match="status 504"):
+            _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
+        assert transport.calls == 1
+
+    def test_non_retryable_status_not_retried(self) -> None:
+        """A 4xx (other than 408/429) is never retried."""
+        task = self._task(retries=3)
+        transport = _SequenceTransport([_error_response(400)])
+        with pytest.raises(ExecutionError, match="status 400"):
+            _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
+        assert transport.calls == 1
+
+    def test_cancelled_task_stops_retrying(self) -> None:
+        """A cancelled task does not keep retrying."""
+        executor = APIExecutor(DEFAULT_WORKER_CONFIG)
+        task = self._task(retries=3)
+        executor.cancel(task.task_id)
+        transport = _SequenceTransport([_error_response(504)])
+        with patch.object(
+            APIExecutor, "_get_client", return_value=httpx.Client(transport=transport)
+        ):
+            with pytest.raises(TaskCancelledError):
+                executor.run(task, Path(tempfile.gettempdir()))
+        assert transport.calls == 0
+
+    def test_invalid_retries_rejected(self) -> None:
+        """A negative or non-integer retries value is rejected."""
+        for bad in (-1, "2", 1.5, True):
+            task = self._task(retries=bad)
+            with pytest.raises(ExecutionError, match="spec.api.retries"):
+                _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, _RecordingTransport())
+
+    def test_cancel_previous_task_does_not_cancel_next(self) -> None:
+        """A cancellation left over from a prior task does not cancel the next."""
+        executor = APIExecutor(DEFAULT_WORKER_CONFIG)
+
+        task_a = self._task(retries=0)
+        task_a.task_id = "task-a"
+        executor.cancel(task_a.task_id)
+
+        task_b = self._task(retries=0)
+        task_b.task_id = "task-b"
+        transport = _RecordingTransport()
+        with patch.object(
+            APIExecutor, "_get_client", return_value=httpx.Client(transport=transport)
+        ):
+            executor.run(task_b, Path(tempfile.gettempdir()))
+        assert transport.request is not None
+
+    def test_late_cancel_of_previous_task_does_not_overwrite_next(self) -> None:
+        """A late cancel for A cannot overwrite a recorded cancel for B."""
+        executor = APIExecutor(DEFAULT_WORKER_CONFIG)
+
+        task_b = self._task(retries=0)
+        task_b.task_id = "task-b"
+        executor.cancel(task_b.task_id)
+        executor.cancel("task-a")
+
+        transport = _RecordingTransport()
+        with patch.object(
+            APIExecutor, "_get_client", return_value=httpx.Client(transport=transport)
+        ):
+            with pytest.raises(TaskCancelledError):
+                executor.run(task_b, Path(tempfile.gettempdir()))
+        assert transport.request is None
+
+    def test_delayed_cancel_of_previous_task_does_not_cancel_next(self) -> None:
+        """A late cancellation for a prior task does not cancel a running task."""
+        executor = APIExecutor(DEFAULT_WORKER_CONFIG)
+
+        task_b = self._task(retries=1)
+        task_b.task_id = "task-b"
+        # First request blocks; once released it returns a retryable 503 so the
+        # loop re-checks the cancel event, then a 200 succeeds.
+        transport = _BlockingTransport([_error_response(503), _ok_response()])
+
+        errors: list[BaseException] = []
+
+        def _run_b() -> None:
+            try:
+                with patch.object(
+                    APIExecutor,
+                    "_get_client",
+                    return_value=httpx.Client(transport=transport),
+                ):
+                    executor.run(task_b, Path(tempfile.gettempdir()))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=_run_b)
+        thread.start()
+        try:
+            assert transport.started.wait(2.0)
+            executor.cancel("task-a")
+        finally:
+            transport.release.set()
+        thread.join(2.0)
+        assert not thread.is_alive()
+        assert errors == []
+        assert transport.calls == 2
+
+    def test_cancel_of_active_task_still_cancels(self) -> None:
+        """A cancellation addressed to the running task still cancels it."""
+        executor = APIExecutor(DEFAULT_WORKER_CONFIG)
+
+        task_b = self._task(retries=3)
+        task_b.task_id = "task-b"
+        transport = _BlockingTransport([_error_response(503)])
+
+        errors: list[BaseException] = []
+
+        def _run_b() -> None:
+            try:
+                with patch.object(
+                    APIExecutor,
+                    "_get_client",
+                    return_value=httpx.Client(transport=transport),
+                ):
+                    executor.run(task_b, Path(tempfile.gettempdir()))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=_run_b)
+        thread.start()
+        try:
+            assert transport.started.wait(2.0)
+            executor.cancel("task-b")
+        finally:
+            transport.release.set()
+        thread.join(2.0)
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], TaskCancelledError)
+
+    def test_cancel_during_backoff_stops_retrying(self) -> None:
+        """A cancellation during the retry backoff aborts well before it ends."""
+        executor = APIExecutor(DEFAULT_WORKER_CONFIG)
+
+        task = self._task(retries=3)
+        task.task_id = "task-b"
+        transport = _NotifyTransport([_error_response(503)])
+
+        def _cancel_on_served() -> None:
+            transport.served.wait(2.0)
+            executor.cancel(task.task_id)
+
+        canceller = threading.Thread(target=_cancel_on_served)
+        canceller.start()
+        start = time.monotonic()
+        with patch.object(
+            APIExecutor, "_get_client", return_value=httpx.Client(transport=transport)
+        ):
+            with pytest.raises(TaskCancelledError):
+                executor.run(task, Path(tempfile.gettempdir()))
+        elapsed = time.monotonic() - start
+        canceller.join()
+        assert elapsed < 0.5
+        assert transport.calls == 1
+
+    def _run_recording_delays(
+        self, task: WorkerTaskMessage, transport: httpx.MockTransport
+    ) -> list[float]:
+        """Run a task, recording each backoff delay instead of waiting."""
+        delays: list[float] = []
+
+        def _record(delay: float) -> None:
+            delays.append(delay)
+
+        executor = APIExecutor(DEFAULT_WORKER_CONFIG)
+        with patch.object(APIExecutor, "_wait_for_backoff", side_effect=_record):
+            with patch.object(
+                APIExecutor,
+                "_get_client",
+                return_value=httpx.Client(transport=transport),
+            ):
+                executor.run(task, Path(tempfile.gettempdir()))
+        return delays
+
+    def test_retry_after_seconds_is_honoured(self) -> None:
+        """A Retry-After in seconds sets the wait for the next attempt."""
+        task = self._task(retries=1)
+        transport = _SequenceTransport(
+            [
+                httpx.Response(429, headers={"Retry-After": "5"}),
+                _ok_response(),
+            ]
+        )
+        delays = self._run_recording_delays(task, transport)
+        assert delays == [5.0]
+
+    def test_retry_after_date_is_honoured(self) -> None:
+        """A Retry-After HTTP date sets the wait for the next attempt."""
+        task = self._task(retries=1)
+        retry_at = datetime.now(UTC) + timedelta(seconds=5)
+        transport = _SequenceTransport(
+            [
+                httpx.Response(
+                    429, headers={"Retry-After": email.utils.format_datetime(retry_at)}
+                ),
+                _ok_response(),
+            ]
+        )
+        delays = self._run_recording_delays(task, transport)
+        assert delays == [pytest.approx(5.0, abs=1.0)]
+
+    def test_invalid_retry_after_falls_back_to_exponential(self) -> None:
+        """A broken Retry-After falls back to the exponential schedule."""
+        task = self._task(retries=2)
+        transport = _SequenceTransport(
+            [
+                httpx.Response(429, headers={"Retry-After": "nan"}),
+                httpx.Response(429, headers={"Retry-After": "not-a-date"}),
+                _ok_response(),
+            ]
+        )
+        delays = self._run_recording_delays(task, transport)
+        assert delays == [1.0, 2.0]
+
+    def test_exponential_backoff_schedule(self) -> None:
+        """Retries back off exponentially from the base delay."""
+        task = self._task(retries=3)
+        transport = _SequenceTransport(
+            [
+                _error_response(503),
+                _error_response(503),
+                _error_response(503),
+                _ok_response(),
+            ]
+        )
+        delays = self._run_recording_delays(task, transport)
+        assert delays == [1.0, 2.0, 4.0]
+
+    def test_retry_after_is_capped(self) -> None:
+        """A hostile Retry-After cannot stall a worker past the cap."""
+        task = self._task(retries=1)
+        transport = _SequenceTransport(
+            [
+                httpx.Response(429, headers={"Retry-After": "999999"}),
+                _ok_response(),
+            ]
+        )
+        delays = self._run_recording_delays(task, transport)
+        assert delays == [_RETRY_BACKOFF_MAX_SEC]
+
+    def test_retries_above_maximum_rejected(self) -> None:
+        """A retries value above the maximum is rejected."""
+        task = self._task(retries=_MAX_RETRIES + 1)
+        with pytest.raises(ExecutionError, match=f"at most {_MAX_RETRIES}"):
+            _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, _RecordingTransport())
+
+    def test_one_warning_per_retry(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Each retry logs one warning naming the attempt and the delay."""
+        task = self._task(retries=2)
+        transport = _SequenceTransport(
+            [_error_response(504), _error_response(504), _ok_response()]
+        )
+        with caplog.at_level(logging.WARNING, logger="worker.executors.api_executor"):
+            self._run_recording_delays(task, transport)
+        warnings = [
+            r for r in caplog.records if r.name == "worker.executors.api_executor"
+        ]
+        assert len(warnings) == 2
+        assert "attempt 1/2" in warnings[0].getMessage()
+        assert "attempt 2/2" in warnings[1].getMessage()

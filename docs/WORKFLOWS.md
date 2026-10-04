@@ -78,6 +78,8 @@ contract.
 deployment's Nebula endpoint (`NEBULA_API_BASE_URL`, with `/v1/chat/completions`
 appended).
 
+`spec.api.retries` (default `0`, at most `10`) sets how many times a transient failure is retried before the task fails. A transient failure is a connection error or an HTTP status of 5xx, 408, or 429; other 4xx statuses are never retried. Retries back off exponentially: the first waits 1s and each later one doubles, capped at 60s. When a retryable response carries a `Retry-After` header (seconds or an HTTP date), that wait is used instead, also capped at 60s. Each retry logs a warning with the attempt count and the wait. A cancelled task stops retrying immediately.
+
 ## Inline credentials
 
 A credential written inline in a task spec — a credential-named header, parameter, or

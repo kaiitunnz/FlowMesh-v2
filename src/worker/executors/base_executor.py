@@ -93,6 +93,7 @@ class RunSignals:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
         self._running: str | None = None
         self._cancels: set[str] = set()
         self._stops: set[str] = set()
@@ -113,6 +114,7 @@ class RunSignals:
         """Request a cancel; returns whether the task is running."""
         with self._lock:
             self._cancels.add(task_id)
+            self._changed.notify_all()
             return task_id == self._running
 
     def stop(self, task_id: str) -> bool:
@@ -124,7 +126,16 @@ class RunSignals:
     @property
     def cancelled(self) -> bool:
         with self._lock:
-            return self._running is not None and self._running in self._cancels
+            return self._cancelled_locked()
+
+    def wait_cancelled(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the running task's cancel; return
+        whether it is cancelled."""
+        with self._changed:
+            return self._changed.wait_for(self._cancelled_locked, timeout)
+
+    def _cancelled_locked(self) -> bool:
+        return self._running is not None and self._running in self._cancels
 
     @property
     def stopped(self) -> bool:
