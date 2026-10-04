@@ -13,6 +13,9 @@ class OmniSpecStrict(ModelInferSpecStrict):
     omni: dict[str, Any] | None = None
     storyboard: dict[str, Any] | None = None
 
+    def validate_dispatchable(self) -> None:
+        _validate_omni_config(self.omni)
+
     def uses_gpu(self) -> bool:
         return True
 
@@ -26,8 +29,16 @@ class OmniSpecTemplate(ModelInferSpecTemplate):
     omni: dict[str, Any] | None = None
     storyboard: dict[str, Any] | None = None
 
+    def validate_dispatchable(self) -> None:
+        _validate_omni_config(self.omni)
+
     def uses_gpu(self) -> bool:
         return True
+
+
+def _validate_omni_config(omni: dict[str, Any] | None) -> None:
+    if omni is not None and "stage_configs" in omni:
+        raise ValueError("omni.stage_configs is not supported")
 
 
 # ── Text-to-Image ────────────────────────────────────────────────────────────
