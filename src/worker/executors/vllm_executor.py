@@ -401,7 +401,6 @@ Summary:"""
             "hf_token": str,
             "tokenizer_revision": str,
             "cpu_offload_gb": float,
-            "swap_space": float,
         }
 
         kwargs_base: dict[str, Any] = dict(
