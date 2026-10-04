@@ -78,6 +78,8 @@ class OmniExecutorBase(InferenceMixin, Executor):
         self._model_name: str | None = None
         self._omni_spec: tuple[Any, ...] | None = None
         self._deploy_config_tmp: Path | None = None
+        # Set by a run whose generation closed the engine on its own completion.
+        self._omni_closed_by_generation = False
 
     @classmethod
     def is_available(cls, config: WorkerConfig) -> bool:
@@ -87,10 +89,19 @@ class OmniExecutorBase(InferenceMixin, Executor):
         spec = self.require_spec(task, self._TASK_SPEC_TYPE)
         spec_dict = spec.model_dump(by_alias=True)
         out_dir = Path(out_dir).resolve()
-        with self._task_span(
-            task.task_id, task.workflow_id, out_dir, owner_id=task.owner_id
-        ):
-            result = self._run_inner(task, spec, spec_dict, out_dir)
+        self._omni_closed_by_generation = False
+        try:
+            with self._task_span(
+                task.task_id, task.workflow_id, out_dir, owner_id=task.owner_id
+            ):
+                result = self._run_inner(task, spec, spec_dict, out_dir)
+        except BaseException:
+            # vllm_omni closes its engine inside generate() when a generation fails,
+            # so a failed run leaves no engine a later task could reuse.
+            self._close_omni()
+            raise
+        if self._omni_closed_by_generation:
+            self._close_omni()
         maybe_upload_artifacts(task, out_dir, logger=logger)
         maybe_upload_traces(task, out_dir, logger=logger)
         return result

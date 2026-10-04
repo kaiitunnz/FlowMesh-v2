@@ -112,6 +112,8 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
         ]
         sampling_params = _build_sampling_params(cfg)
 
+        # vllm_omni closes the engine once a py_generator generation finishes.
+        self._omni_closed_by_generation = py_generator
         audio_results: list[dict[str, Any]] = []
         text_results: dict[str, str] = {}
         stage_errors: list[str] = []
