@@ -6,7 +6,8 @@ The canonical declared set lives in
 `uv run scripts/dev/check_env_examples.py --write` after schema edits.
 
 The tables below curate the knobs you actually tune. Anything not
-listed here is in `.env.example`.
+listed here is in `.env.example`. A relative host path resolves against the
+directory `flowmesh stack` runs in.
 
 ## Server
 
@@ -123,6 +124,10 @@ listed here is in `.env.example`.
 | `ENABLE_WORKER_REAPER` | `true` | Dead worker record deletion |
 | `WORKER_REAP_GRACE_SEC` | `900` | Grace period after death before deleting the record |
 | `FLOWMESH_PLUGINS` | – | Comma-separated plugin module names |
+| `FLOWMESH_PLUGIN_DIR` | `./plugins` | Host directory mounted at `/app/plugins` |
+| `REDIS_TLS_DIR` | `./secrets/tls/redis` | Host directory mounted at `/etc/ssl/redis` |
+| `SERVER_TLS_DIR` | `./secrets/tls/server` | Host directory mounted at `/etc/ssl/server` |
+| `SERVER_WORKER_CONFIG` | `./configs/worker_config.yaml` | Host file mounted at `/etc/flowmesh/worker_config.yaml` |
 | `FLOWMESH_PLUGIN_DATA_DIR` | `./plugin-data` | Writable mount at `/app/plugin-data` for plugin state. A path -> host bind-mount (auto-created); a bare name -> external Docker volume of that name. |
 | `SERVER_CUDA_PROBE_IMAGE` | `nvidia/cuda:12.9.1-base-ubuntu24.04` | CUDA image the server runs briefly to query local GPU names/indices |
 | `DOCKER_GPU_RUNTIME` | nvidia | Optional Docker runtime name for GPU probe/worker containers; leave empty unless the host requires a named runtime such as `nvidia` |

@@ -38,7 +38,7 @@ services:
       - "${REDIS_CONTROL_PORT:-6379}:6379"
     volumes:
       - redis_control_data:/data
-      - ${REDIS_TLS_DIR:-./secrets/tls/redis}:/etc/ssl/redis:ro
+      - ${REDIS_TLS_DIR:?set by flowmesh stack}:/etc/ssl/redis:ro
     restart: unless-stopped
     networks:
       - flowmesh_node_network
@@ -106,7 +106,7 @@ services:
       - "${REDIS_TELEMETRY_PORT:-6380}:6379"
     volumes:
       - redis_telemetry_data:/data
-      - ${REDIS_TLS_DIR:-./secrets/tls/redis}:/etc/ssl/redis:ro
+      - ${REDIS_TLS_DIR:?set by flowmesh stack}:/etc/ssl/redis:ro
     restart: unless-stopped
     networks:
       - flowmesh_node_network
@@ -164,12 +164,12 @@ services:
       - flowmesh_metrics:/mnt/flowmesh-metrics
       - flowmesh_server_logs:/var/log/flowmesh-server
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${SERVER_WORKER_CONFIG:-./configs/worker_config.yaml}:/etc/flowmesh/worker_config.yaml:ro
-      - ${FLOWMESH_PLUGIN_DIR:-./plugins}:/app/plugins:ro
-      - ${FLOWMESH_PLUGIN_DATA_DIR:-./plugin-data}:/app/plugin-data
-      - ${REDIS_TLS_DIR:-./secrets/tls/redis}:/etc/ssl/redis:ro
-      - ${SERVER_TLS_DIR:-./secrets/tls/server}:/etc/ssl/server:ro
-      - ${NETWORK_PLANE_PEER_TLS_DIR:-./secrets/tls/peer}:/etc/ssl/peer:ro
+      - ${SERVER_WORKER_CONFIG:?set by flowmesh stack}:/etc/flowmesh/worker_config.yaml:ro
+      - ${FLOWMESH_PLUGIN_DIR:?set by flowmesh stack}:/app/plugins:ro
+      - ${FLOWMESH_PLUGIN_DATA_DIR:?set by flowmesh stack}:/app/plugin-data
+      - ${REDIS_TLS_DIR:?set by flowmesh stack}:/etc/ssl/redis:ro
+      - ${SERVER_TLS_DIR:?set by flowmesh stack}:/etc/ssl/server:ro
+      - ${NETWORK_PLANE_PEER_TLS_DIR:?set by flowmesh stack}:/etc/ssl/peer:ro
     restart: unless-stopped
     network_mode: host
     healthcheck:

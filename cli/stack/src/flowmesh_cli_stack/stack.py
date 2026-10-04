@@ -39,6 +39,7 @@ from .utils import (
     DEFAULT_ENV_FILE,
     STACK_PATH_KEYS,
     apply_plugin_data_env,
+    apply_stack_path_env,
     apply_stack_resource_env,
     ensure_deploy_paths,
     parse_node_role,
@@ -62,6 +63,7 @@ def _stack() -> DockerComposeStack:
         except ValueError as exc:
             logging.error(str(exc))
             raise typer.Exit(code=1)
+        apply_stack_path_env(Path.cwd())
         apply_plugin_data_env(Path.cwd())
 
     return DockerComposeStack(

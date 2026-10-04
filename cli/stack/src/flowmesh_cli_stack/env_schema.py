@@ -196,7 +196,7 @@ STACK_ENV_SCHEMA = EnvSchema(
         ),
         EnvSection(
             title="Server gRPC TLS",
-            description=["Leave empty to disable"],
+            description=["Leave the TLS file paths empty to disable TLS."],
             vars=[
                 EnvVar(
                     "SERVER_TLS_DIR",
@@ -950,7 +950,7 @@ STACK_ENV_SCHEMA = EnvSchema(
         ),
         EnvSection(
             title="Redis TLS",
-            description=["Leave empty to disable"],
+            description=["Leave the TLS file paths empty to disable TLS."],
             vars=[
                 EnvVar(
                     "REDIS_TLS_DIR",

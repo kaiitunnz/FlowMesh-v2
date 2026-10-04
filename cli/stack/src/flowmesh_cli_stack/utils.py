@@ -14,13 +14,17 @@ from flowmesh_stack.node_client import NodeClient
 from flowmesh_stack.paths import ensure_dir, ensure_file, resolve_path
 
 DEFAULT_ENV_FILE = Path(".env")
-STACK_PATH_KEYS = {
-    "REDIS_TLS_DIR",
-    "SERVER_TLS_DIR",
-    "NETWORK_PLANE_PEER_TLS_DIR",
-    "SERVER_WORKER_CONFIG",
-    "FLOWMESH_PLUGIN_DIR",
+# Compose resolves a relative bind source against the packaged compose file, so the CLI
+# anchors each of the stack's mount sources to the working directory.
+STACK_PATH_DEFAULTS = {
+    "REDIS_TLS_DIR": "./secrets/tls/redis",
+    "SERVER_TLS_DIR": "./secrets/tls/server",
+    "NETWORK_PLANE_PEER_TLS_DIR": "./secrets/tls/peer",
+    "SERVER_WORKER_CONFIG": "./configs/worker_config.yaml",
+    "FLOWMESH_PLUGIN_DIR": "./plugins",
 }
+STACK_PATH_KEYS = set(STACK_PATH_DEFAULTS)
+_STACK_FILE_KEYS = {"SERVER_WORKER_CONFIG"}
 STACK_SUFFIX_ENV = "FLOWMESH_STACK_SUFFIX"
 STACK_SLUG_ENV = "FLOWMESH_STACK_SLUG"
 WORKER_RESULTS_DIR_ENV = "WORKER_RESULTS_DIR"
@@ -62,6 +66,12 @@ _PLUGIN_DATA_PATH_PREFIXES = ("/", "./", "../", "~")
 _PLUGIN_DATA_ALIAS = "flowmesh_plugin_data"
 _PLUGIN_DATA_DEFAULT = "./plugin-data"
 _PLUGIN_DATA_VOLUME_ENV = "FLOWMESH_PLUGIN_DATA_VOLUME"
+
+
+def apply_stack_path_env(base_dir: Path) -> None:
+    """Set each stack mount source to an absolute path, its default when unset."""
+    for key, default in STACK_PATH_DEFAULTS.items():
+        os.environ[key] = resolve_path(os.getenv(key, ""), default, base_dir).as_posix()
 
 
 def apply_plugin_data_env(base_dir: Path) -> None:
@@ -107,41 +117,9 @@ def flowmesh_client(
 
 
 def ensure_deploy_paths(base_dir: Path) -> None:
-    ensure_dir(
-        resolve_path(
-            os.getenv("REDIS_TLS_DIR", ""),
-            default="./secrets/tls/redis",
-            base_dir=base_dir,
-        )
-    )
-    ensure_dir(
-        resolve_path(
-            os.getenv("SERVER_TLS_DIR", ""),
-            default="./secrets/tls/server",
-            base_dir=base_dir,
-        )
-    )
-    ensure_dir(
-        resolve_path(
-            os.getenv("NETWORK_PLANE_PEER_TLS_DIR", ""),
-            default="./secrets/tls/peer",
-            base_dir=base_dir,
-        )
-    )
-    ensure_file(
-        resolve_path(
-            os.getenv("SERVER_WORKER_CONFIG", ""),
-            default="./configs/worker_config.yaml",
-            base_dir=base_dir,
-        )
-    )
-    ensure_dir(
-        resolve_path(
-            os.getenv("FLOWMESH_PLUGIN_DIR", ""),
-            default="./plugins",
-            base_dir=base_dir,
-        )
-    )
+    for key, default in STACK_PATH_DEFAULTS.items():
+        path = resolve_path(os.getenv(key, ""), default, base_dir)
+        (ensure_file if key in _STACK_FILE_KEYS else ensure_dir)(path)
     if not os.environ.get(_PLUGIN_DATA_VOLUME_ENV):
         ensure_dir(
             resolve_path(

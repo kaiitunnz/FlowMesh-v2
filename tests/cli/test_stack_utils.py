@@ -5,11 +5,15 @@ from unittest.mock import patch
 import pytest
 from flowmesh_cli_stack.utils import (
     _PLUGIN_DATA_ALIAS,
+    STACK_PATH_DEFAULTS,
     STACK_SLUG_ENV,
     STACK_SUFFIX_ENV,
     WORKER_RESULTS_DIR_ENV,
     apply_plugin_data_env,
+    apply_stack_path_env,
     apply_stack_resource_env,
+    ensure_deploy_paths,
+    stack_compose_file,
     stack_resource_env_overrides,
 )
 
@@ -83,3 +87,40 @@ def test_apply_plugin_data_env_bare_name_routes_to_volume(tmp_path: Path) -> Non
         apply_plugin_data_env(tmp_path)
         assert os.environ["FLOWMESH_PLUGIN_DATA_VOLUME"] == "my_external_vol"
         assert os.environ["FLOWMESH_PLUGIN_DATA_DIR"] == _PLUGIN_DATA_ALIAS
+
+
+@pytest.mark.parametrize("raw", [None, "", "./custom"])
+def test_every_stack_mount_source_is_set_to_an_absolute_path(
+    tmp_path: Path, raw: str | None
+) -> None:
+    env = {} if raw is None else dict.fromkeys(STACK_PATH_DEFAULTS, raw)
+    with patch.dict(os.environ, env, clear=True):
+        apply_stack_path_env(tmp_path)
+        for key, default in STACK_PATH_DEFAULTS.items():
+            expected = tmp_path / (raw or default)
+            assert os.environ[key] == expected.resolve().as_posix()
+
+
+def test_an_absolute_stack_mount_source_is_kept(tmp_path: Path) -> None:
+    env = {"REDIS_TLS_DIR": "/srv/tls/redis"}
+    with patch.dict(os.environ, env, clear=True):
+        apply_stack_path_env(tmp_path)
+        assert os.environ["REDIS_TLS_DIR"] == "/srv/tls/redis"
+
+
+def test_deploy_paths_create_each_mount_source_as_compose_mounts_it(
+    tmp_path: Path,
+) -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        apply_stack_path_env(tmp_path)
+        ensure_deploy_paths(tmp_path)
+        for key in STACK_PATH_DEFAULTS:
+            path = Path(os.environ[key])
+            assert path.is_file() if key == "SERVER_WORKER_CONFIG" else path.is_dir()
+
+
+def test_compose_requires_every_mount_source_from_the_cli() -> None:
+    compose = stack_compose_file().read_text()
+    for key in (*STACK_PATH_DEFAULTS, "FLOWMESH_PLUGIN_DATA_DIR"):
+        assert f"${{{key}:?" in compose
+        assert f"${{{key}:-" not in compose
