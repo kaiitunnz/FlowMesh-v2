@@ -121,7 +121,7 @@ def test_the_log_archiver_appends_through_no_link(
     archiver._ensure_task("tsk-1", 0.0)
 
     archiver._flush_task("tsk-1", [("1-0", {"payload": '{"message": "hi"}'})], 0.0)
-    archiver._finalize_manifest("tsk-1")
+    archiver._finalize_manifest("tsk-1", archiver._states["tsk-1"], 0.0)
 
     outside.assert_untouched()
     assert archiver._archived("tsk-1")

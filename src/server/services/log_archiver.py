@@ -163,7 +163,8 @@ class TaskLogArchiver:
             try:
                 if not self._drain_task(task_id, now):
                     continue
-                self._finalize_manifest(task_id)
+                if not self._finalize_manifest(task_id, maybe_state, now):
+                    continue
                 maybe_state.done = True
                 self._archived_ids.add(task_id)
             except Exception:
@@ -245,10 +246,7 @@ class TaskLogArchiver:
                 wrapper = {"message": payload, "level": "INFO", "stream": "system"}
                 lines.append(json.dumps(wrapper, ensure_ascii=False))
         data = "".join(f"{line}\n" for line in lines).encode("utf-8")
-        if not state.checkpointed:
-            # A log file with no checkpoint beside it reads as finalized.
-            self._save_checkpoint(task_id, "0-0")
-            state.checkpointed = True
+        self._ensure_checkpointed(task_id, state)
         try:
             self._append(task_id, data)
         except PathRefused as exc:
@@ -258,32 +256,48 @@ class TaskLogArchiver:
                 "Dropping %d log lines for %s: %s", len(lines), task_id, exc
             )
         except OSError as exc:
-            if state.first_failure_ts is None:
-                state.first_failure_ts = now
-            if now - state.first_failure_ts < _GIVE_UP_SEC:
-                delay = min(
-                    _FIRST_RETRY_SEC * 2**state.failures, self._flush_interval_sec
-                )
-                state.failures += 1
-                state.next_attempt_ts = now + delay
-                self._logger.warning(
-                    "Archiving logs for %s failed, retrying in %.0f s: %s",
-                    task_id,
-                    delay,
-                    exc,
-                )
+            if self._retry_later(task_id, state, now, "Archiving logs", exc):
                 return False
             self._logger.error(
                 "Dropping %d log lines for %s after %.0f s of failed writes: %s",
                 len(lines),
                 task_id,
-                now - state.first_failure_ts,
+                now - (state.first_failure_ts or now),
                 exc,
             )
         state.failures = 0
         state.first_failure_ts = None
         state.next_attempt_ts = 0.0
         self._save_checkpoint(task_id, last_id)
+        return True
+
+    def _ensure_checkpointed(self, task_id: str, state: _TaskArchiveState) -> None:
+        """Save the task's stream checkpoint before anything is written at its log
+        path, since a log file with no checkpoint beside it reads as finalized."""
+        if not state.checkpointed:
+            self._save_checkpoint(task_id, "0-0")
+            state.checkpointed = True
+
+    def _retry_later(
+        self,
+        task_id: str,
+        state: _TaskArchiveState,
+        now: float,
+        action: str,
+        exc: Exception,
+    ) -> bool:
+        """Schedule another try after a failed write; return False once the writes
+        have failed for the give-up bound."""
+        if state.first_failure_ts is None:
+            state.first_failure_ts = now
+        if now - state.first_failure_ts >= _GIVE_UP_SEC:
+            return False
+        delay = min(_FIRST_RETRY_SEC * 2**state.failures, self._flush_interval_sec)
+        state.failures += 1
+        state.next_attempt_ts = now + delay
+        self._logger.warning(
+            "%s for %s failed, retrying in %.0f s: %s", action, task_id, delay, exc
+        )
         return True
 
     def _append(self, task_id: str, data: bytes) -> None:
@@ -343,13 +357,18 @@ class TaskLogArchiver:
                 if not self._flush_buffer(task_id, now):
                     return False
 
-    def _finalize_manifest(self, task_id: str) -> None:
+    def _finalize_manifest(
+        self, task_id: str, state: _TaskArchiveState, now: float
+    ) -> bool:
+        """Write the task's manifest and drop its stream checkpoint; return False to
+        try again later, the checkpoint kept so a restart finalizes it too."""
         record = self._runtime.get_record(task_id)
         expected_artifacts: list[str] = []
         if record:
             expected_artifacts = record.task.spec.get_artifacts()
         expected_artifacts.append("logs/logs.jsonl")
         base_dir = self._base_dir(task_id)
+        self._ensure_checkpointed(task_id, state)
         try:
             prepare_output_dir(base_dir)
             with (
@@ -358,9 +377,19 @@ class TaskLogArchiver:
             ):
                 pass
             sync_manifest(base_dir, task_id, expected_artifacts)
+        except PathRefused as exc:
+            self._logger.warning("Not writing the manifest for %s: %s", task_id, exc)
         except Exception as exc:
-            self._logger.debug("Failed to sync manifest for %s: %s", task_id, exc)
+            if self._retry_later(task_id, state, now, "Writing the manifest", exc):
+                return False
+            self._logger.error(
+                "Not writing the manifest for %s after %.0f s of failures: %s",
+                task_id,
+                now - (state.first_failure_ts or now),
+                exc,
+            )
         try:
             self._redis.delete(task_log_archive_last_id_key(task_id))
         except Exception as exc:
             self._logger.debug("Failed to clear %s's log checkpoint: %s", task_id, exc)
+        return True

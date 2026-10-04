@@ -84,7 +84,8 @@ def test_a_flush_shares_the_logs_directory_it_writes_into(
 def test_finalizing_shares_the_logs_directory_it_writes_into(
     archiver: TaskLogArchiver,
 ) -> None:
-    archiver._finalize_manifest("tsk-1")
+    archiver._ensure_task("tsk-1", 0.0)
+    assert archiver._finalize_manifest("tsk-1", archiver._states["tsk-1"], 0.0)
 
     logs_path = archiver._base_dir("tsk-1") / "logs" / "logs.jsonl"
     assert logs_path.is_file()
@@ -625,3 +626,65 @@ def test_a_transient_error_probing_a_finished_task_still_archives_it(
             archiver._tick()
 
     assert _lines(archiver, "tsk-1") == ['{"m": "kept"}']
+
+
+class _Crash(BaseException):
+    """A process dying mid-call: nothing the archiver catches."""
+
+
+def _manifest(archiver: TaskLogArchiver, task_id: str) -> Path:
+    return archiver._base_dir(task_id) / "manifest.json"
+
+
+def test_a_lineless_task_crashing_inside_finalize_finalizes_after_restart(
+    tmp_path: Path,
+) -> None:
+    archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DONE})
+
+    def crash(*_args: Any, **_kwargs: Any) -> None:
+        raise _Crash()
+
+    with (
+        patch.object(log_archiver.time, "sleep"),
+        patch.object(log_archiver, "sync_manifest", crash),
+        pytest.raises(_Crash),
+    ):
+        archiver._tick()
+    assert (archiver._base_dir("tsk-1") / "logs" / "logs.jsonl").exists()
+
+    restarted, _ = _streaming_archiver(
+        tmp_path, {"tsk-1": TaskStatus.DONE}, streams=streams
+    )
+    with patch.object(log_archiver.time, "sleep"):
+        restarted._tick()
+
+    assert _manifest(restarted, "tsk-1").is_file()
+    assert restarted._archived("tsk-1") is True
+
+
+def test_a_failed_manifest_write_keeps_its_checkpoint_and_retries(
+    tmp_path: Path,
+) -> None:
+    archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DONE})
+    real_sync = log_archiver.sync_manifest
+    failures = [OSError(28, "No space left on device")]
+
+    def flaky(*args: Any, **kwargs: Any) -> None:
+        if failures:
+            raise failures.pop()
+        real_sync(*args, **kwargs)
+
+    clock = [1000.0]
+    with (
+        patch.object(log_archiver.time, "sleep"),
+        patch.object(log_archiver.time, "time", lambda: clock[0]),
+        patch.object(log_archiver, "sync_manifest", flaky),
+    ):
+        archiver._tick()
+        assert not _manifest(archiver, "tsk-1").exists()
+        assert archiver._archived("tsk-1") is False
+        clock[0] += 60
+        archiver._tick()
+
+    assert _manifest(archiver, "tsk-1").is_file()
+    assert archiver._archived("tsk-1") is True
