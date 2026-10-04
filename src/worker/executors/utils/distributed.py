@@ -212,25 +212,22 @@ def run_rank(out_dir: Path, run: Callable[[], BaseModel]) -> None:
         )
 
 
-def _staged(path: Path, text: str) -> Path:
+def _publish(path: Path, text: str) -> None:
     fd, staged = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(text)
-    return Path(staged)
-
-
-def _publish(path: Path, text: str) -> None:
-    os.replace(_staged(path, text), path)
+    os.replace(staged, path)
 
 
 def _publish_once(path: Path, text: str) -> None:
-    staged = _staged(path, text)
+    # The launcher reads the record only after every rank exits, so an exclusive
+    # create is enough to keep the first writer's record whole.
     try:
-        os.link(staged, path)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        pass
-    finally:
-        staged.unlink(missing_ok=True)
+        return
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
 
 
 def _read_rank_failure(path: Path) -> ExecutionError | None:

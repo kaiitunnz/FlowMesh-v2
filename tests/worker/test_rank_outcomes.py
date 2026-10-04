@@ -137,3 +137,16 @@ def test_a_rank_killed_before_it_records_a_failure_is_retryable(
     with pytest.raises(ExecutionError, match="distributed training failed") as raised:
         _launch(tmp_path)
     assert raised.value.retryable
+
+
+def test_a_rank_failure_is_recorded_where_hard_links_are_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def no_links(*_: Any, **__: Any) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(distributed.os, "link", no_links)
+    _ranks(monkeypatch, ("0", ExecutionError("CUDA out of memory", retryable=True)))
+    with pytest.raises(ExecutionError, match="^CUDA out of memory$") as raised:
+        _launch(tmp_path)
+    assert raised.value.retryable
