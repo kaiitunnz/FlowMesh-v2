@@ -1,7 +1,6 @@
 """Tests for preparing an undeclared-envelope leaf's inputs before it is selected."""
 
 import logging
-import threading
 from typing import Any, cast
 
 import pytest
@@ -27,6 +26,7 @@ from tests.server.task.test_v2_embodiment_fence import (
     _workflow_of,
 )
 from tests.server.task.test_v2_orchestration import FakeRegistry, _planned
+from tests.support.waiting import pop_ready
 
 
 def _runtime(
@@ -66,7 +66,7 @@ def _materialization(
 def _next(runtime: TaskRuntime) -> str | None:
     if runtime.ready_queue_length() == 0:
         return None
-    return runtime.next_ready(threading.Event(), timeout=0.01)
+    return pop_ready(runtime)
 
 
 def _report(runtime: TaskRuntime, task_id: str, **kwargs: Any) -> SettleOutcome:

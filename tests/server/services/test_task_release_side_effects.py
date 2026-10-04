@@ -2,7 +2,6 @@
 task that fails with its worker's loss closes like any failed task."""
 
 import logging
-import threading
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -25,6 +24,7 @@ from tests.server.task.test_v2_orchestration import (
     _runtime,
     _worker,
 )
+from tests.support.waiting import pop_ready
 
 SERVE_V1 = """
 apiVersion: flowmesh/v1
@@ -84,7 +84,7 @@ async def _dispatched(
     harness: _Harness, workflow: str, node: str
 ) -> tuple[str, dict[str, str]]:
     workflow_id, ids = await _register(harness.runtime, workflow)
-    assert harness.runtime.next_ready(threading.Event(), timeout=0.01) == ids[node]
+    assert pop_ready(harness.runtime) == ids[node]
     record_dispatch(harness.runtime, ids[node], cast(Any, _worker()), "dsp-1")
     return workflow_id, ids
 

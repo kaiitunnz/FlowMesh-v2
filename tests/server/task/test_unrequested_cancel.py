@@ -3,7 +3,6 @@ returns without spending an attempt, or fails as on its worker's loss when it is
 task that cannot safely re-run."""
 
 import logging
-import threading
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -37,6 +36,7 @@ from tests.server.task.test_worker_originated_boundary import (
 from tests.server.task.test_worker_originated_boundary import (
     _runtime as _boundary_runtime,
 )
+from tests.support.waiting import pop_ready
 
 _USAGE = {
     "started_at": _TS,
@@ -111,7 +111,7 @@ def _statuses(runtime: TaskRuntime, task_ids: Any) -> set[str]:
 def _next(runtime: TaskRuntime) -> str | None:
     if runtime.ready_queue_length() == 0:
         return None
-    return runtime.next_ready(threading.Event(), timeout=0.01)
+    return pop_ready(runtime)
 
 
 @pytest.mark.anyio

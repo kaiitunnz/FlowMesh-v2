@@ -3,7 +3,6 @@ the reservation only for a dispatch no report of the worker's holds."""
 
 import asyncio
 import logging
-import threading
 from typing import Any, cast
 from unittest import mock
 
@@ -16,6 +15,7 @@ from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry
+from tests.support.waiting import pop_ready
 
 _WORKFLOW = """
 apiVersion: mloc/v1
@@ -53,7 +53,7 @@ def _setup() -> tuple[TaskRuntime, str, mock.Mock, list[str]]:
         runtime.register("owner", "org", _WORKFLOW, format="native")
     )
     task_id = results[0].task_id
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id
     registry = mock.Mock()
     registry.idle_satisfying_pool.return_value = [_WORKER]
     registry.satisfying_workers.return_value = [_WORKER]
@@ -148,4 +148,4 @@ def test_a_worker_gone_before_its_reservation_is_handed_nothing() -> None:
     assert record is not None
     assert record.status == TaskStatus.PENDING and record.attempts == 0
     assert runtime.ready_queue_length() == 1
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id

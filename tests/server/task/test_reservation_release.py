@@ -3,7 +3,6 @@ release that fails is retried at the next."""
 
 import asyncio
 import logging
-import threading
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -24,6 +23,7 @@ from tests.server.task.test_v2_orchestration import (
     _register,
     _worker,
 )
+from tests.support.waiting import pop_ready
 
 
 def _runtime(worker_registry: Any) -> TaskRuntime:
@@ -41,7 +41,7 @@ def _dispatched(worker_registry: Any) -> tuple[TaskRuntime, str]:
     runtime = _runtime(worker_registry)
     _, ids = asyncio.run(_register(runtime, LINEAR))
     task_id = ids["a"]
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id
     record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
     return runtime, task_id
 
@@ -127,7 +127,7 @@ def test_a_redispatch_releases_the_earlier_reservation_it_ends(
     )
     _, ids = asyncio.run(_register(runtime, LINEAR))
     task_id = ids["a"]
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     # The failure's commit is lost, so its release waits for the next dispatch.
     workflows.fail_next = True
@@ -135,7 +135,7 @@ def test_a_redispatch_releases_the_earlier_reservation_it_ends(
         runtime.fail_dispatch(task_id, "wkr-1", {}, _TS, "dsp-1", retryable=True)
     registry.release_worker.reset_mock()
     assert runtime.ready_queue_length() == 1
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id
 
     runtime.begin_publish(
         task_id, cast(Any, _worker("wkr-2")), "dsp-2", input_preparation=False

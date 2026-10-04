@@ -3,7 +3,6 @@ dispatch revoked, once in each resend interval."""
 
 import asyncio
 import json
-import threading
 from typing import Any, cast
 
 import fakeredis
@@ -22,6 +21,7 @@ from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import LINEAR, FakeRegistry
 from tests.server.task.test_v2_orchestration import _register as _register_v2
 from tests.server.task.test_v2_orchestration import _runtime as _runtime_v2
+from tests.support.waiting import pop_ready
 
 _WORKER = "wkr-1"
 
@@ -55,7 +55,7 @@ def _setup(sync: _RecordingSync) -> tuple[TaskRuntime, EventMonitor, str]:
     runtime = _runtime_v2(FakeRegistry())
     _, ids = asyncio.run(_register_v2(runtime, LINEAR))
     task_id = ids["a"]
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id
     monitor = _monitor(runtime)
     registry = WorkerRegistry(cast(Any, _Rds(sync)))
     runtime._worker_registry = registry
@@ -87,7 +87,7 @@ def test_a_run_of_a_resolved_dispatch_is_revoked_once(sync: _RecordingSync) -> N
     assert runtime.resolve_disowned_dispatch(task_id, "dsp-1", _WORKER, 0)
     assert _revokes(sync) == [(task_id, "dsp-1")]
     sync.published.clear()
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id
     record_dispatch(runtime, task_id, _WORKER, "dsp-2")
 
     # The late dsp-1 started on the worker, which reports it and then repeats it.

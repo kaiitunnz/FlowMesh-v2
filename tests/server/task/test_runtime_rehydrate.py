@@ -16,6 +16,7 @@ from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.support.waiting import pop_ready
 
 
 class FakeWorkflowRegistry:
@@ -280,8 +281,8 @@ async def test_rehydrate_restores_completed_and_ready_state() -> None:
 
     # b's only dependency completed, so it is the sole ready task.
     assert restored.ready_queue_length() == 1
-    stop = threading.Event()
-    assert restored.next_ready(stop, timeout=0.01) == b
+    threading.Event()
+    assert pop_ready(restored) == b
     assert restored.ready_queue_length() == 0
 
 
@@ -320,8 +321,8 @@ async def test_rehydrate_restores_epoch_frontier() -> None:
     await restored.rehydrate()
 
     assert restored._workflow_epoch_frontier[workflow_id] == 1
-    stop = threading.Event()
-    assert restored.next_ready(stop, timeout=0.01) == ids["c"]
+    threading.Event()
+    assert pop_ready(restored) == ids["c"]
 
 
 @pytest.mark.anyio
@@ -340,8 +341,8 @@ async def test_mark_succeeded_is_idempotent_under_replay() -> None:
 
     # b is enqueued exactly once despite the replay.
     assert runtime.ready_queue_length() == 1
-    stop = threading.Event()
-    assert runtime.next_ready(stop, timeout=0.01) == b
+    threading.Event()
+    assert pop_ready(runtime) == b
     assert runtime.ready_queue_length() == 0
 
 

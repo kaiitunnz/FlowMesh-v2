@@ -9,7 +9,6 @@ they own; the runtime-only tests always run.
 import asyncio
 import logging
 import os
-import threading
 from collections.abc import Callable, Iterator
 from typing import Any, cast
 from unittest.mock import Mock
@@ -41,6 +40,7 @@ from tests.server.task.test_v2_orchestration import LINEAR, FakeRegistry, _drain
 from tests.server.task.test_v2_orchestration import _register as _register_v2
 from tests.server.task.test_v2_orchestration import _runtime as _runtime_v2
 from tests.server.task.test_v2_orchestration import _worker as _worker_v2
+from tests.support.waiting import pop_ready
 
 _LIVE_URL = os.getenv("FLOWMESH_TEST_REDIS_URL")
 
@@ -248,7 +248,7 @@ def _v2_disowned(workflow: str, node: str) -> tuple[TaskRuntime, str, dict[str, 
     runtime = _runtime_v2(FakeRegistry())
     workflow_id, ids = asyncio.run(_register_v2(runtime, workflow))
     task_id = ids[node]
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id
     record_dispatch(runtime, task_id, cast(Any, _worker_v2()), "dsp-1")
     return runtime, workflow_id, ids
 
