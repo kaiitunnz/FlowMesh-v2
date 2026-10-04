@@ -2,11 +2,10 @@
 relayed session's."""
 
 import asyncio
-import gc
 import socket
 import threading
 import time
-import warnings
+from collections.abc import Coroutine
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -153,10 +152,32 @@ def test_a_lane_stopped_with_no_time_left_still_ends_its_connections() -> None:
         listener.close()
 
 
-def test_a_frame_after_the_lane_stopped_is_dropped_quietly() -> None:
-    lane = SshRelayLane(registry=SshEndpointRegistry(), push_frame=lambda wire: None)
-    lane.start()
-    lane.stop(1)
+class _ClosingLane(SshRelayLane):
+    """Records each frame's handling and holds the window between its loop stopping
+    and closing."""
+
+    def __init__(self) -> None:
+        super().__init__(registry=SshEndpointRegistry(), push_frame=lambda wire: None)
+        self.handled: list[Coroutine[Any, Any, None]] = []
+        self.loop_stopped = threading.Event()
+        self.close_loop = threading.Event()
+
+    def _on_frame(self, wire: dict[str, Any]) -> Coroutine[Any, Any, None]:
+        handling = super()._on_frame(wire)
+        self.handled.append(handling)
+        return handling
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_forever()
+        finally:
+            self.loop_stopped.set()
+            self.close_loop.wait(5)
+            self._loop.close()
+
+
+def _opening() -> dict[str, Any]:
     opening: list[RelayFrame] = []
 
     async def capture(frame: RelayFrame) -> None:
@@ -167,8 +188,25 @@ def test_a_frame_after_the_lane_stopped_is_dropped_quietly() -> None:
             "rly-1", RelaySessionRole.ORIGIN, MagicMock(send=capture)
         ).send_open("ssn-1")
     )
+    return opening[0].to_wire()
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        assert lane.route(SSH_FRAME_KIND, opening[0].to_wire()) is True
-        gc.collect()
+
+@pytest.mark.parametrize("window", ["closed", "stopping"])
+def test_a_frame_after_the_lane_stopped_is_dropped_quietly(window: str) -> None:
+    lane = _ClosingLane()
+    lane.start()
+    stopping = threading.Thread(target=lane.stop, args=(5,))
+    stopping.start()
+    assert lane.loop_stopped.wait(5)
+    if window == "closed":
+        lane.close_loop.set()
+        stopping.join(5)
+
+    assert lane.route(SSH_FRAME_KIND, _opening()) is True
+
+    lane.close_loop.set()
+    stopping.join(5)
+    (handling,) = lane.handled
+    # A closed coroutine has no frame; one queued on a loop that never runs it keeps
+    # its frame and is reported never awaited when collected.
+    assert cast(Any, handling).cr_frame is None
