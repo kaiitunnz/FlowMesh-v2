@@ -1,6 +1,9 @@
 """Stack env schema."""
 
+import ipaddress
 import secrets
+from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 from flowmesh.models.nodes import NodeRole
 from flowmesh_stack.env import parse_bool
@@ -104,31 +107,82 @@ def _require_peer_trust(
         )
 
 
-def _require_otlp_token_for_collector(
+def collector_serves_tls(env: Mapping[str, str]) -> bool:
+    """Return whether the bundled collector serves TLS: the stack has server TLS
+    material for it."""
+    return all(
+        (env.get(key, "") or "").strip()
+        for key in ("SERVER_GRPC_TLS_CERT_FILE", "SERVER_GRPC_TLS_KEY_FILE")
+    )
+
+
+def _telemetry_profile_on(env: Mapping[str, str]) -> bool:
+    profiles = (env.get("COMPOSE_PROFILES", "") or "").split(",")
+    return "telemetry" in {profile.strip() for profile in profiles}
+
+
+def _require_collector_token(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
-    """The bundled collector refuses every export without its token, and fails to start
-    when none is set; an ``https://`` collector is verified against the server CA."""
-    profiles = {p.strip() for p in (env.get("COMPOSE_PROFILES", "") or "").split(",")}
+    """Require ``TELEMETRY_OTLP_TOKEN`` while the telemetry profile is on."""
     if (
-        "telemetry" in profiles
+        _telemetry_profile_on(env)
         and not (env.get("TELEMETRY_OTLP_TOKEN", "") or "").strip()
     ):
         errors.append(
             "COMPOSE_PROFILES includes telemetry, which requires TELEMETRY_OTLP_TOKEN: "
             "the collector refuses an unauthenticated export"
         )
+
+
+def _require_collector_scheme(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """Require the OTLP endpoint's scheme to match the bundled collector's TLS."""
     endpoint = (env.get("SERVER_METRICS_OTLP_ENDPOINT", "") or "").strip()
-    if (
-        endpoint.startswith("https://")
-        and not (env.get("SERVER_GRPC_TLS_CA_FILE", "") or "").strip()
+    if not (_telemetry_profile_on(env) and endpoint):
+        return
+    parts = urlsplit(endpoint)
+    if collector_serves_tls(env):
+        if parts.scheme == "http":
+            errors.append(
+                "SERVER_METRICS_OTLP_ENDPOINT is http:// but the collector serves TLS "
+                "with the server certificate; use https://"
+            )
+    elif parts.scheme == "https" and _is_loopback(parts.hostname or ""):
+        errors.append(
+            "SERVER_METRICS_OTLP_ENDPOINT is https:// but the local collector serves "
+            "plaintext without SERVER_GRPC_TLS_CERT_FILE and SERVER_GRPC_TLS_KEY_FILE; "
+            "use http://"
+        )
+
+
+def _warn_collector_ca_unset(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """Warn when an ``https://`` collector has no configured CA to verify it."""
+    endpoint = (env.get("SERVER_METRICS_OTLP_ENDPOINT", "") or "").strip()
+    if not endpoint.startswith("https://"):
+        return
+    if not any(
+        (env.get(key, "") or "").strip()
+        for key in ("SERVER_METRICS_OTLP_CA_FILE", "SERVER_GRPC_TLS_CA_FILE")
     ):
         warnings.append(
-            "SERVER_METRICS_OTLP_ENDPOINT is https:// but SERVER_GRPC_TLS_CA_FILE is "
-            "unset, so the collector is verified against the system CAs; set it to the "
-            "CA scripts/dev/generate_server_tls_certs.sh issued, run with the root's "
-            "routable host"
+            "SERVER_METRICS_OTLP_ENDPOINT is https:// with neither "
+            "SERVER_METRICS_OTLP_CA_FILE nor SERVER_GRPC_TLS_CA_FILE set, so the "
+            "collector is verified against the system CAs; see cross-node export in "
+            "docs/TELEMETRY.md"
         )
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _warn_reaper_without_watchdog(
@@ -1276,13 +1330,22 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "SERVER_METRICS_OTLP_ENDPOINT",
-                    "http://localhost:4317",
+                    "https://localhost:4317",
                     description="OTLP collector endpoint; unset disables export.",
                 ),
                 EnvVar(
                     "SERVER_METRICS_OTLP_TOKEN",
                     "",
                     description="Bearer token sent with every OTLP export.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_OTLP_CA_FILE",
+                    "",
+                    description=(
+                        "CA that verifies an https:// collector; defaults to "
+                        "SERVER_GRPC_TLS_CA_FILE."
+                    ),
+                    var_type=EnvVarType.FILE_PATH,
                 ),
                 EnvVar(
                     "SERVER_METRICS_OTLP_TIMEOUT_SEC",
@@ -1663,7 +1726,9 @@ STACK_ENV_SCHEMA = EnvSchema(
             errors,
         ),
         _require_peer_trust,
-        _require_otlp_token_for_collector,
+        _require_collector_token,
+        _require_collector_scheme,
+        _warn_collector_ca_unset,
         _require_network_plane_for_resident,
         _require_network_plane_for_content,
         _warn_reaper_without_watchdog,

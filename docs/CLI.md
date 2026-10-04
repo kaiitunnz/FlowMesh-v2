@@ -117,8 +117,8 @@ worker node (`NODE_ROLE=worker`), Redis services are skipped — the worker
 server connects to the root node's Redis via `REDIS_CONTROL_URL` and
 `REDIS_TELEMETRY_URL`, which must be set in the worker's `.env` to reachable
 endpoints on the root node, and authenticates with the root's `REDIS_PASSWORD`. A worker
-node that exports telemetry to the root's collector also copies the root's
-`SERVER_METRICS_OTLP_TOKEN` and points `SERVER_METRICS_OTLP_ENDPOINT` at it.
+node exporting telemetry to the root's collector follows the cross-node flow in
+[`TELEMETRY.md`](TELEMETRY.md).
 
 `flowmesh stack init --role root` writes random Redis, content store, and ClickHouse
 credentials and the collector's OTLP token into the root's `.env`.

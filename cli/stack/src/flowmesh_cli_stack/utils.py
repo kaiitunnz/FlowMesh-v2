@@ -13,6 +13,8 @@ from flowmesh_stack.env import load_env
 from flowmesh_stack.node_client import NodeClient
 from flowmesh_stack.paths import ensure_dir, ensure_file, resolve_path
 
+from .env_schema import collector_serves_tls
+
 DEFAULT_ENV_FILE = Path(".env")
 # Compose resolves a relative bind source against the packaged compose file, so the CLI
 # anchors each of the stack's mount sources to the working directory.
@@ -80,12 +82,8 @@ _COLLECTOR_TLS_CONFIG_ARG = "--config=/etc/otelcol-contrib/tls.yaml"
 def apply_collector_tls_env() -> None:
     """Layer TLS over the collector's receivers when the stack has server TLS
     material, which the collector serves."""
-    has_tls = all(
-        os.environ.get(key, "").strip()
-        for key in ("SERVER_GRPC_TLS_CERT_FILE", "SERVER_GRPC_TLS_KEY_FILE")
-    )
     os.environ["TELEMETRY_OTLP_TLS_CONFIG_ARG"] = (
-        _COLLECTOR_TLS_CONFIG_ARG if has_tls else ""
+        _COLLECTOR_TLS_CONFIG_ARG if collector_serves_tls(os.environ) else ""
     )
 
 

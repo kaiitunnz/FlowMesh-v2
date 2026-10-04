@@ -356,13 +356,26 @@ class GatewayMode(StrEnum):
     PROXY = "proxy"
 
 
-def _read_ca(path: str) -> bytes | None:
-    return Path(path).read_bytes() if path else None
-
-
 def _env_or_none(name: str) -> str | None:
     """The env var's non-empty, stripped value, else None."""
     return (os.getenv(name) or "").strip() or None
+
+
+def _otlp_collector_ca(server_ca_file: str) -> bytes | None:
+    """Read the CA that verifies an ``https://`` collector.
+
+    ``SERVER_METRICS_OTLP_CA_FILE`` names it, defaulting to the server gRPC CA.
+    """
+    endpoint = (os.getenv("SERVER_METRICS_OTLP_ENDPOINT") or "").strip()
+    if not endpoint.startswith("https://"):
+        return None
+    path = _env_or_none("SERVER_METRICS_OTLP_CA_FILE") or server_ca_file
+    if not path:
+        return None
+    try:
+        return Path(path).read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"Failed to read the OTLP collector CA: {exc}") from exc
 
 
 @dataclass
@@ -787,7 +800,9 @@ class ServerConfig:
             dispatch=DispatchConfig.from_env(),
             watchdog=WatchdogConfig.from_env(),
             metrics=MetricsConfig.from_env(results_dir),
-            telemetry=TelemetryConfig.from_env(_read_ca(grpc_config.tls_ca_file)),
+            telemetry=TelemetryConfig.from_env(
+                _otlp_collector_ca(grpc_config.tls_ca_file)
+            ),
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),
             orchestration=OrchestrationConfig.from_env(),

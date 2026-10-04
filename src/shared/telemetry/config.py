@@ -61,8 +61,8 @@ class TelemetryConfig:
 
         Root, supervisor and worker all read this one parser so they agree on the
         level: two independent copies of the level default and validation is how they
-        would end up disagreeing. ``otlp_ca_pem`` is the CA the process verifies an
-        ``https://`` collector with, the one its caller already trusts.
+        would end up disagreeing. ``otlp_ca_pem`` is the CA that verifies an
+        ``https://`` collector.
         """
         level_raw = (
             (os.getenv("SERVER_METRICS_TELEMETRY_LEVEL") or TelemetryLevel.OFF.value)

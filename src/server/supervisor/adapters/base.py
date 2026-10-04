@@ -418,6 +418,7 @@ class WorkerAdapter(ABC):
             ),
             "SERVER_METRICS_OTLP_ENDPOINT": env.SERVER_METRICS_OTLP_ENDPOINT,
             "SERVER_METRICS_OTLP_TOKEN": to_env_str(env.SERVER_METRICS_OTLP_TOKEN),
+            "SERVER_METRICS_OTLP_CA_B64": env.SERVER_METRICS_OTLP_CA_B64,
             "SERVER_METRICS_OTLP_TIMEOUT_SEC": to_env_str(
                 env.SERVER_METRICS_OTLP_TIMEOUT_SEC
             ),

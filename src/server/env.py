@@ -223,6 +223,15 @@ SERVER_METRICS_OTLP_ENDPOINT: str = (
 SERVER_METRICS_OTLP_TOKEN: SecretStr | None = parse_secret_env(
     "SERVER_METRICS_OTLP_TOKEN"
 )
+SERVER_METRICS_OTLP_CA_FILE: str = (
+    os.getenv("SERVER_METRICS_OTLP_CA_FILE") or ""
+).strip()
+SERVER_METRICS_OTLP_CA_B64: str = (
+    _read_file_b64(SERVER_METRICS_OTLP_CA_FILE, "OTLP collector CA file")
+    if SERVER_METRICS_OTLP_CA_FILE
+    and SERVER_METRICS_OTLP_ENDPOINT.startswith("https://")
+    else ""
+)
 SERVER_METRICS_OTLP_TIMEOUT_SEC: int = parse_int_env(
     "SERVER_METRICS_OTLP_TIMEOUT_SEC", 10
 )

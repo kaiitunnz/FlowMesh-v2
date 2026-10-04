@@ -270,10 +270,11 @@ class WorkerConfig:
             "SSH_STOP_TIMEOUT_SEC", WorkerConfig.ssh_stop_timeout_sec
         )
 
+        otlp_ca_b64 = (
+            os.getenv("SERVER_METRICS_OTLP_CA_B64") or ""
+        ).strip() or supervisor_grpc_tls_ca_b64
         telemetry = TelemetryConfig.from_env(
-            base64.b64decode(supervisor_grpc_tls_ca_b64)
-            if supervisor_grpc_tls_ca_b64
-            else None
+            base64.b64decode(otlp_ca_b64) if otlp_ca_b64 else None
         )
 
         return WorkerConfig(

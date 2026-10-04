@@ -18,12 +18,13 @@ default (`docs/ENV.md` lists the knobs).
 `SERVER_METRICS_TRACES_ENABLED` / `SERVER_METRICS_METRICS_ENABLED` gate traces and metrics
 independently within the selected level. `SERVER_METRICS_OTLP_ENDPOINT` names the
 collector; leaving it unset builds no exporter at all, whatever the level.
-`SERVER_METRICS_OTLP_TOKEN` is the bearer token every export presents.
+`SERVER_METRICS_OTLP_TOKEN` is the bearer token every export presents, and
+`SERVER_METRICS_OTLP_CA_FILE` the CA that verifies an `https://` collector.
 `SERVER_METRICS_TRACE_SAMPLE_RATIO` sets the fraction of workflows traced,
 `SERVER_METRICS_OTLP_TIMEOUT_SEC` bounds an export, and
 `SERVER_METRICS_RESOURCE_SAMPLE_SEC` sets the worker-side resource-sampling interval.
 
-All eight are read once at the config edge into a `TelemetryConfig` and reach every
+All nine are read once at the config edge into a `TelemetryConfig` and reach every
 supervisor and worker process through the worker-environment allowlist, so the root,
 supervisors, and workers always agree on the level.
 
@@ -129,20 +130,24 @@ discard a trace.
 `TELEMETRY_CLICKHOUSE_PASSWORD` and `SERVER_METRICS_CLICKHOUSE_PASSWORD`, and one random
 token into both `TELEMETRY_OTLP_TOKEN` and `SERVER_METRICS_OTLP_TOKEN`.
 
-Both receivers refuse an export without `TELEMETRY_OTLP_TOKEN` as its bearer token, and
-the Collector does not start without one. Where the stack has server gRPC TLS material
+Both receivers require `TELEMETRY_OTLP_TOKEN` as every export's bearer token, and the
+Collector requires it to start. Where the stack has server gRPC TLS material
 (`SERVER_GRPC_TLS_CERT_FILE` and `SERVER_GRPC_TLS_KEY_FILE`), both receivers serve that
-certificate over TLS, and a producer verifies it with the CA it already trusts: the root
-and supervisors with `SERVER_GRPC_TLS_CA_FILE`, a worker with
-`SUPERVISOR_GRPC_TLS_CA_B64`. A process that sends its token over plaintext to a host
-other than its own warns at startup. The token is set as an `authorization` header, so it
-replaces any `OTEL_EXPORTER_OTLP_HEADERS` while set. Rotating it means recreating the
-Collector, each node's server, and every worker.
+certificate over TLS at the default endpoint, `https://localhost:4317`; a stack without it
+exports to `http://localhost:4317`. A producer verifies the Collector with the deployment
+CA, `SERVER_METRICS_OTLP_CA_FILE`, which defaults to the server gRPC CA and reaches each
+worker its supervisor launches. A process that sends its token over plaintext to a host
+other than its own warns at startup. While set, the token replaces any
+`OTEL_EXPORTER_OTLP_HEADERS`. Rotating it means recreating the Collector, each node's
+server, and every worker.
 
 A worker node exports to the root's Collector by setting `SERVER_METRICS_OTLP_ENDPOINT` to
-`https://<root-host>:4317` and copying the root's `SERVER_METRICS_OTLP_TOKEN`, as it copies
-`REDIS_PASSWORD`. The server certificate must cover that host: pass the root's routable
-host or IP to `scripts/dev/generate_server_tls_certs.sh`.
+`https://<root-host>:4317`, copying the root's `SERVER_METRICS_OTLP_TOKEN` as it copies
+`REDIS_PASSWORD`, and pointing `SERVER_METRICS_OTLP_CA_FILE` at a copy of the root's
+`server-ca.pem` in its own `SERVER_TLS_DIR` (for example
+`/etc/ssl/server/root-ca.pem`), since each node's server CA is its own. The root's
+certificate must cover that host: pass the root's routable host or IP to
+`scripts/dev/generate_server_tls_certs.sh`.
 
 The server's read path is configured separately, through `SERVER_METRICS_CLICKHOUSE_*`,
 and never writes. The two halves commonly address the same instance but are never the
