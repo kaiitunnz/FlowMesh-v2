@@ -1198,6 +1198,9 @@ class Runner:
                 # A step's captures reach control only on its success report; until it
                 # is sent, the worker drops them if the task ends another way.
                 unreported_step: EpisodeStepResult | None = None
+                # A failure once the executor returned follows whatever external effect
+                # it had, so it may not be safe to run again.
+                executor_returned = False
                 try:
                     self._raise_if_cancel_pending(task_id)
                     self._current_task_id = task_id
@@ -1327,6 +1330,7 @@ class Runner:
                         # end the task's next dispatch.
                         with self._cancel_lock:
                             self._executing = None
+                    executor_returned = True
                     if isinstance(out, EpisodeStepResult):
                         unreported_step = out
                     references = self._write_results(msg, out_dir, out)
@@ -1403,7 +1407,8 @@ class Runner:
                         scrub(str(e)),
                         metadata=metadata,
                         retryable=controlled is None or controlled.retryable,
-                        ambiguous=controlled is not None and controlled.ambiguous,
+                        ambiguous=executor_returned
+                        or (controlled is not None and controlled.ambiguous),
                         failure_kind=controlled.failure_kind if controlled else None,
                         unavailable_inputs=(
                             controlled.unavailable_inputs if controlled else ()
