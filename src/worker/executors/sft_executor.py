@@ -741,15 +741,15 @@ class SFTExecutor(TrainingMixin, Executor):
             return n_gpus
         return 0
 
-    @staticmethod
-    def deepspeed_ranks(training_cfg: dict[str, Any], max_ranks: int) -> int:
+    @classmethod
+    def deepspeed_ranks(cls, training_cfg: dict[str, Any], max_ranks: int) -> int:
         """Return how many torchrun ranks a DeepSpeed run launches here, or 0.
 
         A run launches one rank per visible GPU, up to ``max_ranks``; a run already
         inside a launched rank, or with no GPU, trains in-process.
         """
-        return SFTExecutor._launch_ranks(
-            min(SFTExecutor._visible_gpu_count(training_cfg), max_ranks),
+        return cls._launch_ranks(
+            min(cls._visible_gpu_count(training_cfg), max_ranks),
             allow_multi=False,
             deepspeed_intent=True,
             already_spawned=os.environ.get(SFT_LAUNCHER_FLAG) == "1",
