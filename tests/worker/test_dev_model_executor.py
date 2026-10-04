@@ -25,7 +25,7 @@ from tests.worker.factories import (
     make_worker_task_message,
 )
 from worker.executors import dev_model_executor as mod
-from worker.executors.base_executor import TaskCancelledError
+from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.dev_model_executor import (
     _CANNED_TEXT,
     DevModelExecutor,
@@ -405,6 +405,21 @@ class TestRunLifecycle:
         assert isinstance(result, DevModelResult)
         assert result.model == "dev/model"
         assert result.port is None
+
+    def test_a_socket_path_past_the_unix_limit_fails_the_task_clearly(
+        self, tmp_path: Path
+    ) -> None:
+        parent = tmp_path / ("d" * 100)
+        parent.mkdir()
+        spec = DevModelSpecStrict(
+            taskType=TaskType.DEV_MODEL,
+            model=ModelConfig(source=ModelSource(identifier="dev/model")),
+        )
+        task = make_worker_task_message(spec=spec, task_type=TaskType.DEV_MODEL)
+        ex = make_dev_model_executor(engine_parent=parent)
+        with pytest.raises(ExecutionError, match="107-byte Unix socket limit"):
+            ex.run(task, tmp_path / "out")
+        assert list(parent.iterdir()) == []
 
     def test_pooling_runner_serves_the_embedding_interface(
         self, tmp_path: Path

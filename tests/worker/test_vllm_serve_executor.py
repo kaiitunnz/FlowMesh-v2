@@ -462,18 +462,12 @@ class TestServeLoopbackEndpoint:
 
         engines = ex._local_engines()
         self.published: list[LocalEngine | None] = []
-        self.socket_dirs: list[tuple[Path, int, int]] = []
+        self.socket_dirs: list[tuple[Path, int]] = []
 
         def emit_update(task_id: str, payload: dict[str, Any]) -> None:
             self.published.append(engines.lookup(task_id))
             directory = Path(payload["serve"]["_socket"]).parent
-            self.socket_dirs.append(
-                (
-                    directory,
-                    stat.S_IMODE(directory.stat().st_mode),
-                    stat.S_IMODE(directory.parent.stat().st_mode),
-                )
-            )
+            self.socket_dirs.append((directory, stat.S_IMODE(directory.stat().st_mode)))
 
         emit = MagicMock(side_effect=emit_update)
         with (
@@ -536,12 +530,32 @@ class TestServeLoopbackEndpoint:
             model=ModelConfig(source=ModelSource(identifier="m")),
         )
         self._run(spec, tmp_path)
-        ((first, first_mode, root_mode),) = self.socket_dirs
+        ((first, first_mode),) = self.socket_dirs
         self._run(spec, tmp_path)
-        ((second, second_mode, _),) = self.socket_dirs
+        ((second, second_mode),) = self.socket_dirs
         assert first != second
-        assert first_mode == second_mode == root_mode == 0o700
+        assert first.parent == second.parent == Path(tempfile.gettempdir())
+        assert first_mode == second_mode == 0o700
         assert not first.exists() and not second.exists()
+
+    def test_a_socket_path_past_the_unix_limit_fails_the_task_clearly(
+        self, tmp_path: Path
+    ) -> None:
+        parent = tmp_path / ("d" * 100)
+        parent.mkdir()
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+        )
+        task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
+        ex = make_serve_executor(engine_parent=parent)
+        with (
+            patch("subprocess.Popen") as popen,
+            pytest.raises(ExecutionError, match="107-byte Unix socket limit"),
+        ):
+            ex.run(task, tmp_path / "out")
+        popen.assert_not_called()
+        assert list(parent.iterdir()) == []
 
     def test_the_socket_directory_is_removed_when_the_engine_fails(
         self, tmp_path: Path

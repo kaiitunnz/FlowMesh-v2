@@ -122,20 +122,20 @@ def make_ssh_executor(config: WorkerConfig, **kwargs: Any) -> SSHExecutor:
 def make_serve_executor(
     config: WorkerConfig | None = None,
     hardware: WorkerHardware | None = None,
-    engine_root: Path | None = None,
+    engine_parent: Path | None = None,
 ) -> VLLMServeExecutor:
     """Build a vLLM serve executor on a lifecycle holding a real engine registry."""
     lifecycle = MagicMock()
-    lifecycle.local_engines = LocalEngineRegistry(engine_root)
+    lifecycle.local_engines = LocalEngineRegistry(engine_parent)
     return VLLMServeExecutor(
         config or make_worker_config(), hardware or make_worker_hardware(), lifecycle
     )
 
 
-def make_dev_model_executor() -> DevModelExecutor:
+def make_dev_model_executor(engine_parent: Path | None = None) -> DevModelExecutor:
     """Build a dev_model executor on a lifecycle holding a real engine registry."""
     lifecycle = MagicMock()
-    lifecycle.local_engines = LocalEngineRegistry()
+    lifecycle.local_engines = LocalEngineRegistry(engine_parent)
     return DevModelExecutor(
         make_worker_config(enable_dev_model=True), make_worker_hardware(), lifecycle
     )

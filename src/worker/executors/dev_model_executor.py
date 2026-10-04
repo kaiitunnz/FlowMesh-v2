@@ -24,9 +24,9 @@ from shared.tasks.specs.dev_model import DevModelSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils.redact import redact_url
 from worker.config import WorkerConfig
-from worker.resident.local_engines import LocalEngine
+from worker.resident.local_engines import EngineSocketPathTooLong, LocalEngine
 
-from .base_executor import Executor, ExecutorTask, RunSignals
+from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 from .utils.serve_ttl import serve_deadline
 
 logger = logging.getLogger(__name__)
@@ -381,10 +381,13 @@ class DevModelExecutor(Executor):
         vllm = (spec.model.vllm if spec.model is not None else None) or {}
         raw_max_loras = vllm.get("max_loras")
         max_loras = raw_max_loras if isinstance(raw_max_loras, int) else None
-        with self._local_engines().socket_path() as socket_path:
-            return self._serve_on(
-                task, model_id, vllm, max_loras, deadline, socket_path, out_dir
-            )
+        try:
+            with self._local_engines().socket_path() as socket_path:
+                return self._serve_on(
+                    task, model_id, vllm, max_loras, deadline, socket_path, out_dir
+                )
+        except EngineSocketPathTooLong as exc:
+            raise ExecutionError(str(exc)) from exc
 
     def _serve_on(
         self,

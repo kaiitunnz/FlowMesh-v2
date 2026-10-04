@@ -1,6 +1,7 @@
 """The serve engines this worker launched, reached only from inside the worker."""
 
 import contextlib
+import os
 import shutil
 import tempfile
 import threading
@@ -9,7 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _SOCKET_NAME = "engine.sock"
-_ROOT_PREFIX = "flowmesh-engines-"
+_DIR_PREFIX = "flowmesh-engine-"
+# ``sun_path`` holds 108 bytes, including the terminating NUL.
+_MAX_SOCKET_PATH_BYTES = 107
+
+
+class EngineSocketPathTooLong(ValueError):
+    """An engine's socket path exceeds the Unix socket path limit."""
 
 
 @dataclass(frozen=True)
@@ -27,32 +34,34 @@ class LocalEngine:
 class LocalEngineRegistry:
     """The live engine of each serve task this worker runs, keyed by its task id.
 
-    Each engine listens on a Unix socket in its own ``0700`` directory under a root
-    only this worker's user can open, so only the worker's replica sidecar reaches it.
-    A serve executor publishes its engine once it is ready and withdraws it when it
-    stops, and the sidecar resolves the engine by serve task id when it binds.
+    Each engine listens on a Unix socket in its own ``0700`` directory, created under
+    ``parent`` (the temp directory by default), so only the worker's replica sidecar
+    reaches it. A serve executor publishes its engine once it is ready and withdraws it
+    when it stops, and the sidecar resolves the engine by serve task id when it binds.
     """
 
-    def __init__(self, root: Path | None = None) -> None:
-        self._root = root
+    def __init__(self, parent: Path | None = None) -> None:
+        self._parent = parent
         self._engines: dict[str, LocalEngine] = {}
         self._lock = threading.Lock()
 
-    def _ensure_root(self) -> Path:
-        with self._lock:
-            if self._root is None:
-                self._root = Path(tempfile.mkdtemp(prefix=_ROOT_PREFIX))
-            else:
-                self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
-                self._root.chmod(0o700)
-            return self._root
-
     @contextlib.contextmanager
     def socket_path(self) -> Iterator[Path]:
-        """Yield a fresh socket path for one engine, removed with its directory."""
-        directory = Path(tempfile.mkdtemp(prefix="engine-", dir=self._ensure_root()))
+        """Yield a fresh socket path for one engine, removed with its directory.
+
+        Raises :class:`EngineSocketPathTooLong` when the path would not fit a Unix
+        socket address.
+        """
+        directory = Path(tempfile.mkdtemp(prefix=_DIR_PREFIX, dir=self._parent))
         try:
-            yield directory / _SOCKET_NAME
+            path = directory / _SOCKET_NAME
+            if (size := len(os.fsencode(path))) > _MAX_SOCKET_PATH_BYTES:
+                raise EngineSocketPathTooLong(
+                    f"the engine socket path {path} is {size} bytes, past the "
+                    f"{_MAX_SOCKET_PATH_BYTES}-byte Unix socket limit; point TMPDIR "
+                    "at a shorter directory"
+                )
+            yield path
         finally:
             shutil.rmtree(directory, ignore_errors=True)
 

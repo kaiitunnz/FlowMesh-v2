@@ -26,7 +26,7 @@ from shared.tasks.specs.serve import ServeSpecStrict, engine_env_vars
 from shared.tasks.task_type import TaskType
 from worker.config import WorkerConfig
 from worker.hw import cuda_device_env
-from worker.resident.local_engines import LocalEngine
+from worker.resident.local_engines import EngineSocketPathTooLong, LocalEngine
 
 from ..utils.process import signal_process_group
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
@@ -118,10 +118,19 @@ class VLLMServeExecutor(Executor):
         readiness_timeout = (
             spec.readinessTimeoutSeconds or _DEFAULT_READINESS_TIMEOUT_SEC
         )
-        with self._local_engines().socket_path() as socket_path:
-            return self._launch(
-                task, spec, model_id, deadline, readiness_timeout, socket_path, out_dir
-            )
+        try:
+            with self._local_engines().socket_path() as socket_path:
+                return self._launch(
+                    task,
+                    spec,
+                    model_id,
+                    deadline,
+                    readiness_timeout,
+                    socket_path,
+                    out_dir,
+                )
+        except EngineSocketPathTooLong as exc:
+            raise ExecutionError(str(exc)) from exc
 
     def _launch(
         self,
