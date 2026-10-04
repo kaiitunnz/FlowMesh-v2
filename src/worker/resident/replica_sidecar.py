@@ -12,6 +12,7 @@ gate.
 import asyncio
 import contextlib
 import logging
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -63,6 +64,37 @@ from .engine import (
 
 # Claim-tagged load evidence one admitted operation emits for control-plane accounting.
 LoadSink = Callable[[LoadEvidence], None]
+
+# An engine refusal's own message reaches the reason only for these request parameters
+# or a context-window message, whose text names counts; any other message may echo the
+# worker-private request, so only its status and error type cross to control.
+_COUNTED_PARAMS = frozenset(
+    {"input_tokens", "input_text", "max_tokens", "max_completion_tokens"}
+)
+_CONTEXT_WINDOW = re.compile(r"maximum (context|model) length", re.IGNORECASE)
+_REASON_MAX_CHARS = 300
+_ERROR_TYPE = re.compile(r"[A-Za-z][\w.-]{0,63}")
+
+
+def _engine_refusal(exc: httpx.HTTPStatusError) -> str:
+    """The failure reason for an engine's error response, bounded to what it may say."""
+    status = exc.response.status_code
+    try:
+        body = exc.response.json()
+    except (ValueError, httpx.ResponseNotRead):
+        return f"engine {status}"
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        error = body if isinstance(body, dict) else {}
+    message, kind, param = error.get("message"), error.get("type"), error.get("param")
+    if isinstance(message, str) and (
+        param in _COUNTED_PARAMS or _CONTEXT_WINDOW.search(message)
+    ):
+        text = " ".join("".join(c if c.isprintable() else " " for c in message).split())
+        return f"engine {status}: {text[:_REASON_MAX_CHARS]}"
+    if isinstance(kind, str) and _ERROR_TYPE.fullmatch(kind):
+        return f"engine {status} {kind}"
+    return f"engine {status}"
 
 
 @dataclass
@@ -379,7 +411,7 @@ class ResidentReplicaSidecar:
             # re-drives.
             definite = 400 <= status < 500 and status != 429
             await session.send_wire(
-                KIND_FAILED, definite=definite, reason=f"engine {status}"
+                KIND_FAILED, definite=definite, reason=_engine_refusal(exc)
             )
             return
         except (KeyError, TypeError, ValueError) as exc:
