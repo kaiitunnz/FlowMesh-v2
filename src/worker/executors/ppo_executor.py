@@ -37,7 +37,6 @@ from shared.schemas.artifact import ArtifactRef
 from shared.schemas.result import PPOResult
 from shared.tasks.specs import PPOSpecStrict
 from shared.tasks.task_type import TaskType
-from shared.utils.manifest import scratch_dir
 from shared.utils.parsing import safe_float, safe_int, to_bool
 
 from ..utils.logging import configure_hf_library_logging
@@ -50,7 +49,7 @@ from .utils.checkpoints import (
     write_executor_result,
 )
 from .utils.data_utils import resolve_jsonl_path
-from .utils.distributed import launcher_task_file, run_torchrun
+from .utils.distributed import launch_ranks
 from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 
 logger = logging.getLogger("worker.ppo")
@@ -441,19 +440,12 @@ class PPOExecutor(TrainingMixin, Executor):
         )
 
         if allow_multi and not already_spawned and gpu_count > 1:
-            self._spawn_distributed(
-                task, out_dir, gpu_count, launcher_flag, training_config
-            )
-            ipc_path = scratch_dir(out_dir) / "distributed_result.json"
-            if ipc_path.exists():
+            try:
+                return self._spawn_distributed(
+                    task, out_dir, gpu_count, launcher_flag, training_config
+                )
+            finally:
                 self._task_out_dir = None
-                return PPOResult.model_validate(self.load_json(ipc_path))
-            self._task_out_dir = None
-            return PPOResult(
-                spawned_torchrun=True,
-                model_name=spec.model_name,
-                output_dir=out_dir.as_posix(),
-            )
 
         start_time = time.time()
 
@@ -1222,20 +1214,21 @@ class PPOExecutor(TrainingMixin, Executor):
         n_gpus: int,
         launcher_flag: str,
         training_config: dict[str, Any],
-    ) -> None:
+    ) -> PPOResult:
         nproc = int(training_config.get("nproc_per_node", n_gpus))
         logger.info(
             "Launching torchrun for PPO (nproc=%d, CUDA_VISIBLE_DEVICES=%s)",
             nproc,
             os.environ.get("CUDA_VISIBLE_DEVICES"),
         )
-        with launcher_task_file(out_dir, task) as task_file:
-            run_torchrun(
-                nproc_per_node=nproc,
-                module="worker.executors.ppo_dist_entry",
-                module_args=[task_file.as_posix(), out_dir.as_posix()],
-                launcher_env_flag=launcher_flag,
-            )
+        return launch_ranks(
+            nproc_per_node=nproc,
+            module="worker.executors.ppo_dist_entry",
+            out_dir=out_dir,
+            task=task,
+            launcher_env_flag=launcher_flag,
+            result_type=PPOResult,
+        )
 
     @staticmethod
     def _detect_gpu_count(training_config: dict[str, Any]) -> int:

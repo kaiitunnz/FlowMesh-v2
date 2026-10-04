@@ -16,6 +16,7 @@ from tests.worker.factories import make_worker_config, make_worker_task_message
 from worker.executors import lora_sft_executor, sft_executor
 from worker.executors.base_executor import ExecutionError
 from worker.executors.lora_sft_executor import LoRASFTExecutor
+from worker.executors.utils import distributed
 
 _DEEPSPEED = {"zero_optimization": {"stage": 2}}
 
@@ -58,7 +59,7 @@ def _run(
         model=ModelConfig(source=ModelSource(identifier="m")),
         training=training,
     )
-    with patch.object(lora_sft_executor, "run_torchrun", side_effect=fake_torchrun):
+    with patch.object(distributed, "run_torchrun", side_effect=fake_torchrun):
         result = LoRASFTExecutor(make_worker_config()).run(
             make_worker_task_message(spec=spec, task_type=TaskType.LORA_SFT), tmp_path
         )

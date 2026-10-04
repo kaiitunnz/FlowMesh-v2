@@ -26,7 +26,6 @@ from shared.schemas.artifact import ArtifactRef
 from shared.schemas.result import SFTResult
 from shared.tasks.specs import SFTSpecStrict, TaskSpecStrictBase
 from shared.tasks.task_type import TaskType
-from shared.utils.manifest import scratch_dir
 
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
@@ -39,11 +38,7 @@ from .utils.checkpoints import (
     write_executor_result,
 )
 from .utils.data_utils import resolve_jsonl_path
-from .utils.distributed import (
-    deepspeed_available,
-    launcher_task_file,
-    run_torchrun,
-)
+from .utils.distributed import deepspeed_available, launch_ranks
 from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 
 logger = logging.getLogger("worker.sft")
@@ -157,23 +152,19 @@ class SFTExecutor(TrainingMixin, Executor):
                     deepspeed_intent,
                     os.environ.get("CUDA_VISIBLE_DEVICES"),
                 )
-                with launcher_task_file(out_dir, task) as task_file:
-                    run_torchrun(
+                try:
+                    return launch_ranks(
                         nproc_per_node=nproc,
                         module="worker.executors.sft_dist_entry",
-                        module_args=[task_file.as_posix(), out_dir.as_posix()],
+                        out_dir=out_dir,
+                        task=task,
                         launcher_env_flag=_SFT_LAUNCHER_FLAG,
+                        result_type=SFTResult,
                     )
-                ipc_path = scratch_dir(out_dir) / "distributed_result.json"
-                if ipc_path.exists():
+                finally:
                     self._task_out_dir = None
-                    return SFTResult.model_validate(self.load_json(ipc_path))
-                self._task_out_dir = None
-                return SFTResult(
-                    spawned_torchrun=True,
-                    model_name=spec.model_name,
-                    output_dir=out_dir.as_posix(),
-                )
+        except ExecutionError:
+            raise
         except Exception as spawn_exc:
             logger.exception("Failed to launch distributed SFT: %s", spawn_exc)
             raise ExecutionError(

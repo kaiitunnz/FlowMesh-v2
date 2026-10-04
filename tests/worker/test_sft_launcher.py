@@ -10,13 +10,16 @@ from unittest.mock import patch
 
 import pytest
 
+from shared.schemas.result import SFTResult
 from shared.tasks import TaskType
 from shared.tasks.components.model import ModelConfig, ModelSource
 from shared.tasks.specs import SFTSpecStrict
+from shared.utils.manifest import scratch_dir
 from tests.worker.factories import make_worker_config, make_worker_task_message
 from worker.executors import sft_executor
 from worker.executors.base_executor import ExecutionError
 from worker.executors.sft_executor import SFTExecutor
+from worker.executors.utils import distributed
 
 _DEEPSPEED = {"zero_optimization": {"stage": 2}, "gradient_accumulation_steps": 1}
 
@@ -72,13 +75,16 @@ def _launch(
         launched["nproc"] = nproc_per_node
         launched["env"] = os.environ.get("CUDA_VISIBLE_DEVICES")
         launched["task"] = json.loads(Path(module_args[0]).read_text())
+        (scratch_dir(Path(module_args[1])) / "distributed_result.json").write_text(
+            SFTResult(model_name="m").model_dump_json()
+        )
 
     spec = SFTSpecStrict(
         taskType=TaskType.SFT,
         model=ModelConfig(source=ModelSource(identifier="m")),
         training=training,
     )
-    with patch.object(sft_executor, "run_torchrun", side_effect=fake_torchrun):
+    with patch.object(distributed, "run_torchrun", side_effect=fake_torchrun):
         SFTExecutor(make_worker_config()).run(
             make_worker_task_message(spec=spec, task_type=TaskType.SFT), tmp_path
         )

@@ -11,10 +11,10 @@ import sys
 from pathlib import Path
 
 from shared.tasks.worker_message import WorkerTaskMessage
-from shared.utils.manifest import scratch_dir
 from worker.config import WorkerConfig
 
 from .lora_sft_executor import LoRASFTExecutor
+from .utils.distributed import run_rank
 
 
 def main(argv: list[str]) -> int:
@@ -39,10 +39,7 @@ def main(argv: list[str]) -> int:
         task = WorkerTaskMessage.model_validate(json.load(fh))
     ex = LoRASFTExecutor(WorkerConfig.from_env())
     try:
-        result = ex.run(task, args.out_dir)
-        (scratch_dir(args.out_dir) / "distributed_result.json").write_text(
-            result.model_dump_json(indent=2), encoding="utf-8"
-        )
+        run_rank(args.out_dir, lambda: ex.run(task, args.out_dir))
     finally:
         try:
             ex.cleanup_after_run()

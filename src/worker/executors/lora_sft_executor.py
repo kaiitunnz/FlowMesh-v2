@@ -23,7 +23,6 @@ from shared.schemas.artifact import ArtifactRef
 from shared.schemas.result import LoRAResult
 from shared.tasks.specs import LoRASFTSpecStrict
 from shared.tasks.task_type import TaskType
-from shared.utils.manifest import scratch_dir
 
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
@@ -35,7 +34,7 @@ from .utils.checkpoints import (
     maybe_upload_artifacts,
     write_executor_result,
 )
-from .utils.distributed import launcher_task_file, run_torchrun
+from .utils.distributed import launch_ranks
 from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 
 try:
@@ -350,23 +349,14 @@ class LoRASFTExecutor(TrainingMixin, Executor):
             ranks,
             os.environ.get("CUDA_VISIBLE_DEVICES"),
         )
-        try:
-            with launcher_task_file(out_dir, task) as task_file:
-                run_torchrun(
-                    nproc_per_node=ranks,
-                    module="worker.executors.lora_sft_dist_entry",
-                    module_args=[task_file.as_posix(), out_dir.as_posix()],
-                    launcher_env_flag=_SFT_LAUNCHER_FLAG,
-                )
-        except Exception as exc:
-            logger.exception("Failed to launch distributed LoRA SFT: %s", exc)
-            raise ExecutionError(
-                "Failed to launch distributed LoRA SFT subprocess"
-            ) from exc
-        ipc_path = scratch_dir(out_dir) / "distributed_result.json"
-        if not ipc_path.exists():
-            raise ExecutionError("Distributed LoRA SFT returned no result")
-        return LoRAResult.model_validate(self.load_json(ipc_path))
+        return launch_ranks(
+            nproc_per_node=ranks,
+            module="worker.executors.lora_sft_dist_entry",
+            out_dir=out_dir,
+            task=task,
+            launcher_env_flag=_SFT_LAUNCHER_FLAG,
+            result_type=LoRAResult,
+        )
 
     def cleanup_after_run(self) -> None:
         self._current_trainer = None
