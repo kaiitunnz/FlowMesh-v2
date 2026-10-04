@@ -195,6 +195,9 @@ services:
       - source: flowmesh_otel_collector_tls
         target: /etc/otelcol-contrib/tls.yaml
     command: --config=/etc/otelcol-contrib/config.yaml ${TELEMETRY_OTLP_TLS_CONFIG_ARG:-}
+    # The server's TLS key is readable by its owner alone, and a bind mount keeps the
+    # host's ownership, so the collector runs as root as the server does.
+    user: "0:0"
     volumes:
       - ${SERVER_TLS_DIR:?set by flowmesh stack}:/etc/ssl/server:ro
     environment:

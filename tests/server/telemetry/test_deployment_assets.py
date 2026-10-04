@@ -174,3 +174,7 @@ def test_the_collector_gets_its_token_and_the_tls_overlay() -> None:
             "cert_file": "${env:SERVER_GRPC_TLS_CERT_FILE}",
             "key_file": "${env:SERVER_GRPC_TLS_KEY_FILE}",
         }
+
+
+def test_the_collector_can_read_the_server_key() -> None:
+    assert _load_compose()["services"]["otel_collector"]["user"] == "0:0"
