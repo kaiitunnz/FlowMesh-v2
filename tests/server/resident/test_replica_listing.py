@@ -45,7 +45,7 @@ async def test_a_listed_replica_names_the_worker_running_its_serve_task() -> Non
     assert set(await _replicas(node, worker_id="wkr-2")) == {standing.replica_id}
 
 
-def test_a_replica_stored_with_a_worker_field_still_loads() -> None:
+def test_a_replica_stored_with_a_worker_field_loads() -> None:
     stored = {
         "replica_id": "rpl-1",
         "family": "fam",

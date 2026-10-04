@@ -433,24 +433,24 @@ address of the worker's host (`network`). When the server cannot carry a relayed
 
 ## Model executor GPUs
 
-A worker runs its model, diffusion, training and `serve` executors on the GPUs no
-process outside FlowMesh holds: when it loads one for a GPU task, it picks the free
-devices that match the task's `gpu` block (`count` of them, or every free match without
-a positive one) and starts the executor seeing only those, listed by index under
+A worker runs its model, diffusion, training and `serve` executors on the GPUs no process
+outside FlowMesh holds: when it loads one for a GPU task, it picks the free devices that
+match the task's `gpu` block (`count` of them, or every free match without a positive
+one) and starts the executor seeing only those, listed by index under
 `CUDA_DEVICE_ORDER=PCI_BUS_ID`. A warm executor keeps its devices while they stay free
-and fit the next task, and restarts on others otherwise, as for a task without a
-positive count once another device frees up. SFT's `visible_devices` and `primary_gpu`
-are positions within the task's devices; a position past them fails the task. Multi-GPU
-training runs its ranks on those devices, and an SFT or LoRA SFT task with a
-`training.deepspeed` config runs as torchrun ranks on any number of them, LoRA SFT as one. A
-Docker GPU worker runs with an 8 GiB `/dev/shm` ceiling, which vLLM's multi-GPU engines
-need. A vLLM inference, LoRA or embedding task that
-sets `CUDA_VISIBLE_DEVICES`, or a `CUDA_DEVICE_ORDER` other than `PCI_BUS_ID`, in
-`model.vllm.env_vars` picks its own devices, so its executor sees every device and the
-task waits while any is held, as does an omni task, whose executor sees every device. A
-worker on a MIG slice, or one whose `CUDA_VISIBLE_DEVICES` lists some of a host's mixed
-GPU models by position without `CUDA_DEVICE_ORDER=PCI_BUS_ID`, runs every executor on
-all its GPUs.
+and fit the next task, and restarts on others otherwise, as for a task without a positive
+count once another device frees up. SFT's `visible_devices` and `primary_gpu` are
+positions within the task's devices; a position past them fails the task. Multi-GPU
+training runs its ranks on those devices. An SFT task with a `training.deepspeed` config
+runs as one torchrun rank per device, on any number of devices, and a LoRA SFT task with
+one runs as a single rank; the task reports rank 0's result, or the first failing rank's
+error. A Docker GPU worker runs with an 8 GiB `/dev/shm` ceiling, which vLLM's multi-GPU
+engines need. A vLLM inference, LoRA or embedding task that sets `CUDA_VISIBLE_DEVICES`,
+or a `CUDA_DEVICE_ORDER` other than `PCI_BUS_ID`, in `model.vllm.env_vars` picks its own
+devices, so its executor sees every device and the task waits while any is held, as does
+an omni task, whose executor sees every device. A worker on a MIG slice, or one whose
+`CUDA_VISIBLE_DEVICES` lists some of a host's mixed GPU models by position without
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`, runs every executor on all its GPUs.
 
 ## SSH executor GPUs
 

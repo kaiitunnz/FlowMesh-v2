@@ -56,7 +56,7 @@ def _refused_engine_option(key: str) -> bool:
 
 
 def engine_env_vars(value: Any) -> dict[str, str]:
-    """The environment a serve spec's ``model.vllm.env_vars`` sets for its engine."""
+    """Return the environment a serve spec's ``model.vllm.env_vars`` sets."""
     if value is None:
         return {}
     if not isinstance(value, dict) or not all(

@@ -49,7 +49,7 @@ class LocalEngineRegistry:
 
     @contextlib.contextmanager
     def socket_path(self) -> Iterator[Path]:
-        """A fresh socket path for one engine, removed with its directory on exit."""
+        """Yield a fresh socket path for one engine, removed with its directory."""
         directory = Path(tempfile.mkdtemp(prefix="engine-", dir=self._ensure_root()))
         try:
             yield directory / _SOCKET_NAME
@@ -65,5 +65,6 @@ class LocalEngineRegistry:
             self._engines.pop(serve_task_id, None)
 
     def lookup(self, serve_task_id: str) -> LocalEngine | None:
+        """Return the live engine this worker launched for a serve task, if any."""
         with self._lock:
             return self._engines.get(serve_task_id)

@@ -1,4 +1,4 @@
-"""An SFT run launches its ranks under torchrun on the task's devices."""
+"""An SFT run with a DeepSpeed config, or on several GPUs, launches torchrun ranks."""
 
 import json
 import os

@@ -104,7 +104,7 @@ EngineUnload = Callable[[ReplicaEndpoint, str], Awaitable[None]]
 
 
 def engine_client(endpoint: ReplicaEndpoint, timeout: float) -> httpx.AsyncClient:
-    """A client that reaches the endpoint's engine, over its socket when it has one."""
+    """Build a client reaching the endpoint's engine, over its socket if it has one."""
     transport = (
         httpx.AsyncHTTPTransport(uds=endpoint.socket_path)
         if endpoint.socket_path is not None

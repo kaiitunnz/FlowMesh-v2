@@ -171,7 +171,8 @@ class VLLMServeExecutor(Executor):
             cmd.extend(["--revision", revision])
 
         env = dict(os.environ)
-        # A spec setting its own CUDA variables runs unbound, so they outrank a binding.
+        # A spec setting its own CUDA variables runs unbound, so no binding replaces
+        # them.
         env.update(env_vars)
         if self._devices is not None:
             env.update(cuda_device_env(self._devices))

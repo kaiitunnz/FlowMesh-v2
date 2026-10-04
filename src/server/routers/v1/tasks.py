@@ -211,7 +211,7 @@ async def stop_task(
         # TODO: Support stopping other task types.
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="Stopping is only supported for SSH and serve tasks currently",
+            detail="Stopping is supported for SSH, serve and dev_model tasks",
         )
     if record.status != "DISPATCHED":
         raise HTTPException(

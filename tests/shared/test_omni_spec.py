@@ -1,4 +1,4 @@
-"""An omni spec carrying the removed inline stage_configs is not dispatchable."""
+"""An omni spec carrying inline stage_configs is not dispatchable."""
 
 import pytest
 
@@ -45,7 +45,7 @@ def test_a_submission_carrying_stage_configs_is_rejected() -> None:
         parse_workflow(_WORKFLOW, "native")
 
 
-def test_a_stored_task_carrying_stage_configs_still_loads() -> None:
+def test_a_stored_task_carrying_stage_configs_loads() -> None:
     envelope = TaskEnvelopeTemplate.model_validate(
         {"apiVersion": "flowmesh/v1", "kind": "Omni", "metadata": {}, "spec": _SPEC}
     )
@@ -53,7 +53,7 @@ def test_a_stored_task_carrying_stage_configs_still_loads() -> None:
     assert envelope.spec.taskType == TaskType.OMNI_TEXT2GENERAL
 
 
-def test_stage_overrides_stay_dispatchable() -> None:
+def test_stage_overrides_are_dispatchable() -> None:
     spec = OmniText2GeneralSpecStrict.model_validate(
         _SPEC | {"omni": {"stage_overrides": {"0": {"devices": "0"}}}}
     )

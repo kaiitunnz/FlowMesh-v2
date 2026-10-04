@@ -1,4 +1,4 @@
-"""A serve result reports no engine port, and a stored one with a port still reads."""
+"""A serve result reports no engine port; a stored one with a port reads unchanged."""
 
 import pytest
 from flowmesh.models.result import DevModelResult as SdkDevModelResult

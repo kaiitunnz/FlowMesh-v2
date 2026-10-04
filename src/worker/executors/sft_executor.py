@@ -95,7 +95,6 @@ class SFTExecutor(TrainingMixin, Executor):
         checkpoint_dir = artifacts_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Internal distributed launcher: run training as torchrun ranks
         try:
             allow_multi_cfg = training_cfg.get("allow_multi_gpu")
             already_spawned = os.environ.get(SFT_LAUNCHER_FLAG) == "1"

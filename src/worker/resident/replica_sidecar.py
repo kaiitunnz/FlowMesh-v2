@@ -77,7 +77,7 @@ _ERROR_TYPE = re.compile(r"[A-Za-z][\w.-]{0,63}")
 
 
 def _engine_refusal(exc: httpx.HTTPStatusError) -> str:
-    """The failure reason for an engine's error response, bounded to what it may say."""
+    """Name an engine error response's failure, bounded to what the engine may say."""
     status = exc.response.status_code
     try:
         body = exc.response.json()

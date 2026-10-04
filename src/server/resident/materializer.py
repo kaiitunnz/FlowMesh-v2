@@ -107,7 +107,7 @@ async def materialize_resident_replica(
 
 
 def _rendered_profile(profile: str | None) -> dict[str, Any]:
-    """A family's engine profile as the serve task's own engine configuration.
+    """Render a family's engine profile as the serve task's engine configuration.
 
     The engine takes RoPE settings as config overrides, as the local executor passes
     them.

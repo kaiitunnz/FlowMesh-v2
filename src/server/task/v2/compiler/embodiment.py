@@ -151,7 +151,7 @@ def unproven_reason(
 def replica_unfit_reason(
     task: ParsedTask, spec: InferenceSpecStrict | InferenceSpecTemplate
 ) -> str | None:
-    """Why a resident replica cannot run a leaf as it declares itself, or ``None``.
+    """Return why a resident replica cannot run a leaf as declared, or ``None``.
 
     A replica runs on one GPU with the deployment's own model access, serves the base
     model, and is chosen before any upstream value is known, so a leaf whose engine

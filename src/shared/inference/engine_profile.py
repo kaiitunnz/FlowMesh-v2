@@ -57,7 +57,7 @@ _DEFAULT_OFF = frozenset({"enable_mm_embeds", "trust_remote_code"})
 def engine_profile(
     vllm: Mapping[str, Any] | None, revision: str | None, *, embedding: bool = False
 ) -> str | None:
-    """The canonical profile a chat or embedding leaf's engine configuration declares.
+    """Return the profile a chat or embedding leaf's engine configuration declares.
 
     A credential-named engine variable is access rather than outcome, so no profile
     carries one. A value that renders from upstream at dispatch is unknown when a
@@ -89,7 +89,7 @@ def engine_profile(
 
 
 def hf_overrides(rope_scaling: Any, rope_theta: Any) -> dict[str, Any]:
-    """The config overrides a vLLM engine takes a leaf's RoPE settings as."""
+    """Return the config overrides a vLLM engine takes a leaf's RoPE settings as."""
     overrides: dict[str, Any] = {}
     if rope_scaling is not None:
         overrides["rope_scaling"] = rope_scaling
@@ -99,5 +99,5 @@ def hf_overrides(rope_scaling: Any, rope_theta: Any) -> dict[str, Any]:
 
 
 def engine_profile_key(profile: str) -> str:
-    """The short identity a profile adds to a service family."""
+    """Return the short identity a profile adds to a service family."""
     return hashlib.sha256(profile.encode()).hexdigest()[:16]

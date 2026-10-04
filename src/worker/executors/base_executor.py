@@ -207,7 +207,7 @@ class Executor(ABC):
             self._lifecycle.ssh_endpoints.withdraw(endpoint_id)
 
     def _require_lifecycle(self) -> "Lifecycle":
-        """The injected worker lifecycle.
+        """Return the injected worker lifecycle.
 
         Raises if none was injected, so a misconfigured worker fails cleanly rather than
         raising ``AttributeError`` deep in an executor.
@@ -225,7 +225,7 @@ class Executor(ABC):
         return self._require_lifecycle().resident_requests
 
     def _local_engines(self) -> "LocalEngineRegistry":
-        """The serve engines this worker launched, reached only from inside it."""
+        """Return the serve engines this worker launched, reached only inside it."""
         return self._require_lifecycle().local_engines
 
     def prepare(self) -> None:

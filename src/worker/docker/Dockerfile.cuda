@@ -28,6 +28,7 @@ ENV TZ=${TZ} \
 # The CUDA base image ships an NVIDIA apt source, but these Dockerfiles only
 # need standard Ubuntu packages. Dropping the external repo avoids transient
 # mirror-sync failures during apt metadata refresh.
+#
 # vllm-omni's dependencies install the non-headless opencv-python, whose cv2
 # links libGL, glib and libxcb. Without them a failed `import cv2` leaves cv2's
 # directory on sys.path, and a spawned child then resolves `typing` to cv2's.

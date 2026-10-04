@@ -822,7 +822,7 @@ class ResidentCapacityControl:
             self._lifecycle.stop(replica.replica_id)
 
     def serve_worker(self, replica: ReplicaIncarnation) -> str | None:
-        """The worker running a replica's serve task, while one is."""
+        """Return the worker running a replica's serve task, while one runs it."""
         if self._delivery is None:
             return None
         return self._delivery.serve_worker_of(replica)
