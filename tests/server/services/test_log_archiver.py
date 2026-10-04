@@ -352,6 +352,23 @@ def test_a_persistent_write_error_backs_off_and_drops_only_after_its_window(
     assert failing.attempts <= window / archiver._flush_interval_sec + 10
 
 
+def test_a_short_flush_interval_still_gives_up_after_its_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(log_archiver.time, "time", clock.time)
+    archiver, streams = _streaming_archiver(tmp_path, {"tsk-a": TaskStatus.DISPATCHED})
+    archiver._flush_interval_sec = 0.1
+    failing = _Failing(archiver._base_dir("tsk-a"), -1)
+    monkeypatch.setattr(log_archiver, "prepare_output_dir", failing)
+
+    streams.publish("tsk-a", "lost")
+    _ticks(archiver, clock, int(log_archiver._GIVE_UP_SEC * 10) + 50, 0.1)
+
+    assert not archiver._buffers["tsk-a"]
+    assert failing.attempts <= log_archiver._GIVE_UP_SEC / 0.1 + 10
+
+
 def test_a_failed_write_is_truncated_so_a_retry_writes_each_line_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

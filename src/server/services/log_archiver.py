@@ -30,6 +30,8 @@ _LOGS_NAME = "logs.jsonl"
 # as a stream read blocks.
 _FIRST_RETRY_SEC = 1.0
 _GIVE_UP_SEC = 300.0
+# Doubling the first retry this many times already outlasts the give-up window.
+_MAX_RETRY_DOUBLINGS = 9
 _READ_BLOCK_SEC = 1.0
 
 
@@ -292,7 +294,8 @@ class TaskLogArchiver:
             state.first_failure_ts = now
         if now - state.first_failure_ts >= _GIVE_UP_SEC:
             return False
-        delay = min(_FIRST_RETRY_SEC * 2**state.failures, self._flush_interval_sec)
+        doublings = min(state.failures, _MAX_RETRY_DOUBLINGS)
+        delay = min(_FIRST_RETRY_SEC * 2**doublings, self._flush_interval_sec)
         state.failures += 1
         state.next_attempt_ts = now + delay
         self._logger.warning(
