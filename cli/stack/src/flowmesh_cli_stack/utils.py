@@ -9,7 +9,7 @@ from flowmesh import FlowMesh
 from flowmesh.models.nodes import NodeRole
 from flowmesh_cli.core import logging
 from flowmesh_cli.core.assets import asset_path
-from flowmesh_stack.env import load_env
+from flowmesh_stack.env import EnvFileError, load_env, parse_env_file
 from flowmesh_stack.node_client import NodeClient
 from flowmesh_stack.paths import ensure_dir, ensure_file, resolve_path
 
@@ -162,10 +162,28 @@ def stack_bake_file() -> Path:
     return asset_path("flowmesh_cli_stack.assets", "docker-bake.hcl")
 
 
+def load_stack_env(env_file: Path) -> None:
+    """Load the stack env file, exiting with its error when Compose would refuse it."""
+    try:
+        load_env(env_file, base_dir=Path.cwd(), path_keys=STACK_PATH_KEYS)
+    except EnvFileError as exc:
+        logging.error(str(exc))
+        raise typer.Exit(code=1)
+
+
+def read_stack_env(env_file: Path) -> dict[str, str]:
+    """Read the stack env file, exiting with its error when Compose would refuse it."""
+    try:
+        return parse_env_file(env_file)
+    except EnvFileError as exc:
+        logging.error(str(exc))
+        raise typer.Exit(code=1)
+
+
 def stack_node_client(
     env_file: Path, base_url: str | None, token: str | None
 ) -> NodeClient:
-    load_env(env_file, base_dir=Path.cwd(), path_keys=STACK_PATH_KEYS)
+    load_stack_env(env_file)
     default_base = "http://{}:{}".format(
         os.getenv("SERVER_HOST", "localhost"),
         os.getenv("SERVER_HTTP_PORT", os.getenv("SERVER_APP_PORT", "8000")),
@@ -178,7 +196,7 @@ def stack_node_client(
 def flowmesh_client(
     env_file: Path, base_url: str | None, api_key: str | None
 ) -> FlowMesh:
-    load_env(env_file, base_dir=Path.cwd(), path_keys=STACK_PATH_KEYS)
+    load_stack_env(env_file)
     return FlowMesh(base_url=base_url, api_key=api_key)
 
 

@@ -3,16 +3,27 @@
 import os
 import re
 from collections import ChainMap
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from urllib.parse import urlparse
+
+
+class EnvFileError(ValueError):
+    """An env file Docker Compose would refuse to read."""
 
 
 def parse_env_file(env_file: Path) -> dict[str, str]:
     """Parse a .env file into key/value pairs, as Docker Compose reads it."""
     if not env_file.exists():
         return {}
-    return parse_env_text(env_file.read_text(), os.environ)
+    return _parse_file(env_file, os.environ)
+
+
+def _parse_file(env_file: Path, environ: Mapping[str, str]) -> dict[str, str]:
+    try:
+        return parse_env_text(env_file.read_text(), environ)
+    except EnvFileError as exc:
+        raise EnvFileError(f"{env_file}: {exc}") from exc
 
 
 def parse_bool(value: str) -> bool | None:
@@ -68,17 +79,24 @@ def validate_env_file(
         return None, [f"env file not found: {env_file}"]
     if expected_keys is None:
         if example is None or not example.exists():
-            return parse_env_file(env_file), errors
+            try:
+                return parse_env_file(env_file), errors
+            except EnvFileError as exc:
+                return None, [str(exc)]
         expected_keys = _parse_env_keys(example)
 
-    actual_keys = _parse_env_keys(env_file)
+    try:
+        actual_keys = _parse_env_keys(env_file)
+        values = parse_env_file(env_file)
+    except EnvFileError as exc:
+        return None, [str(exc)]
     missing = sorted(expected_keys - actual_keys)
     unexpected = sorted(actual_keys - expected_keys)
     if missing:
         errors.append(f"Missing required env vars in {env_file}: {', '.join(missing)}")
     if unexpected:
         errors.append(f"Unexpected env vars in {env_file}: {', '.join(unexpected)}")
-    return parse_env_file(env_file), errors
+    return values, errors
 
 
 def ensure_env_file(env_file: Path, example: Path) -> bool:
@@ -94,13 +112,16 @@ def load_env(
     base_dir: Path | None = None,
     path_keys: set[str] | None = None,
 ) -> None:
-    """Load env vars from a file into ``os.environ``, as Docker Compose reads it."""
+    """Load env vars from a file into ``os.environ``, as Docker Compose reads it.
+
+    Raises ``EnvFileError`` for a file Docker Compose would refuse to read.
+    """
     env_key = (env_file, base_dir, path_keys)
     if getattr(load_env, "_loaded", None) == env_key:
         return
     if not env_file.exists():
         return
-    for key, value in parse_env_text(env_file.read_text(), os.environ).items():
+    for key, value in _parse_file(env_file, os.environ).items():
         if path_keys and key in path_keys and value:
             expanded = Path(value).expanduser()
             if expanded.is_absolute():
@@ -117,26 +138,56 @@ def load_env(
 def _parse_env_keys(path: Path) -> set[str]:
     if not path.exists():
         return set()
-    return set(parse_env_text(path.read_text(), {}))
+    try:
+        return {key for key, _, _ in _entries(path.read_text())}
+    except EnvFileError as exc:
+        raise EnvFileError(f"{path}: {exc}") from exc
 
 
 _DOUBLE_QUOTED_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _BRACED = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])(.*))?\}", re.DOTALL)
+_EXPORT = re.compile(r"^export\s+")
 
 
 def parse_env_text(text: str, environ: Mapping[str, str]) -> dict[str, str]:
     """Parse .env text the way Docker Compose's ``env_file`` and ``--env-file`` do.
 
     A double-quoted value takes ``\\n``, ``\\r``, ``\\t``, ``\\\\``, ``\\"`` and
-    ``\\$`` escapes and may span lines; a single-quoted value is literal; an unquoted
-    value ends at a `` #`` comment. Unquoted and double-quoted values interpolate
-    ``$NAME`` and ``${NAME}`` with the ``:-``, ``-``, ``:+``, ``+``, ``:?`` and ``?``
-    modifiers, reading the file's earlier keys and then ``environ``; ``$$`` is a literal
-    ``$``.
+    ``\\$`` escapes and may span lines; a single-quoted value is literal but for
+    ``\\'``; an unquoted value ends at a `` #`` comment. Unquoted and double-quoted
+    values interpolate ``$NAME`` and ``${NAME}`` with the ``:-``, ``-``, ``:+``, ``+``,
+    ``:?`` and ``?`` modifiers, reading the file's earlier keys, then ``environ``, then
+    its later keys, which the stack's commands export before Compose reads the file;
+    ``$$`` is a literal ``$``. Raises ``EnvFileError`` where Compose fails.
     """
+    entries = list(_entries(text))
+    ahead = _interpolate(entries, environ, {}, strict=False)
+    return _interpolate(entries, environ, ahead, strict=True)
+
+
+def _interpolate(
+    entries: list[tuple[str, str, str]],
+    environ: Mapping[str, str],
+    ahead: Mapping[str, str],
+    strict: bool,
+) -> dict[str, str]:
     values: dict[str, str] = {}
-    lookup = ChainMap(values, dict(environ))
+    later = dict(ahead)
+    lookup = ChainMap(values, dict(environ), later)
+    for key, body, quote in entries:
+        later.pop(key, None)
+        if quote == "'":
+            values[key] = body
+        elif quote == '"':
+            values[key] = _expand(_unescape(body), lookup, key, strict)
+        else:
+            values[key] = _expand(body, lookup, key, strict)
+    return values
+
+
+def _entries(text: str) -> Iterator[tuple[str, str, str]]:
+    """Yield each assignment's key, its value before interpolation, and its quote."""
     lines = text.splitlines()
     index = 0
     while index < len(lines):
@@ -144,30 +195,27 @@ def parse_env_text(text: str, environ: Mapping[str, str]) -> dict[str, str]:
         index += 1
         if not line or line.startswith("#") or "=" not in line:
             continue
-        key, raw = line.removeprefix("export ").split("=", 1)
+        key, raw = _EXPORT.sub("", line, count=1).split("=", 1)
         key = key.strip()
         raw = raw.lstrip()
         quote = raw[:1]
-        if quote in ("'", '"'):
-            body = raw[1:]
-            while (end := _closing_quote(body, quote)) is None:
-                if index >= len(lines):
-                    raise ValueError(f"{key}: unterminated quoted value")
-                body += "\n" + lines[index]
-                index += 1
-            body = body[:end]
-            values[key] = (
-                body if quote == "'" else _expand(_unescape(body), lookup, key)
-            )
-        else:
-            values[key] = _expand(_strip_comment(raw), lookup, key)
-    return values
+        if quote not in ("'", '"'):
+            yield key, _strip_comment(raw), ""
+            continue
+        body = raw[1:]
+        while (end := _closing_quote(body, quote)) is None:
+            if index >= len(lines):
+                raise EnvFileError(f"{key}: unterminated quoted value")
+            body += "\n" + lines[index]
+            index += 1
+        body = body[:end]
+        yield key, body.replace("\\'", "'") if quote == "'" else body, quote
 
 
 def _closing_quote(body: str, quote: str) -> int | None:
     escaped = False
     for position, char in enumerate(body):
-        if quote == '"' and char == "\\" and not escaped:
+        if char == "\\" and not escaped:
             escaped = True
             continue
         if char == quote and not escaped:
@@ -192,11 +240,11 @@ def _unescape(body: str) -> str:
 
 
 def _strip_comment(raw: str) -> str:
-    match = re.search(r"\s#", raw)
-    return (raw[: match.start()] if match else raw).rstrip()
+    comment = raw.find(" #")
+    return (raw if comment < 0 else raw[:comment]).rstrip()
 
 
-def _expand(value: str, lookup: Mapping[str, str], key: str) -> str:
+def _expand(value: str, lookup: Mapping[str, str], key: str, strict: bool) -> str:
     out: list[str] = []
     position = 0
     while position < len(value):
@@ -214,7 +262,7 @@ def _expand(value: str, lookup: Mapping[str, str], key: str) -> str:
             out.append("$")
             position += 2
         elif following == "{" and (end := _closing_brace(value, position + 1)):
-            out.append(_substitute(value[position + 1 : end + 1], lookup, key))
+            out.append(_substitute(value[position + 1 : end + 1], lookup, key, strict))
             position = end + 1
         elif name := _NAME.match(value, position + 1):
             out.append(lookup.get(name.group(), ""))
@@ -237,7 +285,7 @@ def _closing_brace(value: str, start: int) -> int | None:
     return None
 
 
-def _substitute(braced: str, lookup: Mapping[str, str], key: str) -> str:
+def _substitute(braced: str, lookup: Mapping[str, str], key: str, strict: bool) -> str:
     match = _BRACED.fullmatch(braced)
     if match is None:
         return "$" + braced
@@ -248,9 +296,10 @@ def _substitute(braced: str, lookup: Mapping[str, str], key: str) -> str:
     if current is not None and not current and modifier.startswith(":"):
         current = None
     if modifier.endswith("-"):
-        return current if current is not None else _expand(word, lookup, key)
+        return current if current is not None else _expand(word, lookup, key, strict)
     if modifier.endswith("+"):
-        return _expand(word, lookup, key) if current is not None else ""
-    if current is None:
-        raise ValueError(f"{key}: {name} {_expand(word, lookup, key) or 'is required'}")
-    return current
+        return _expand(word, lookup, key, strict) if current is not None else ""
+    if current is None and strict:
+        message = _expand(word, lookup, key, strict) or "is required"
+        raise EnvFileError(f"{key}: {name} {message}")
+    return current or ""

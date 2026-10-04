@@ -19,7 +19,7 @@ from flowmesh_stack.docker import (
     profile_args,
 )
 from flowmesh_stack.doctor import DoctorFinding, run_doctor_checks
-from flowmesh_stack.env import ensure_env_file, load_env, parse_env_file
+from flowmesh_stack.env import ensure_env_file
 from flowmesh_stack.env_schema import render_env_example
 from flowmesh_stack.images import (
     BUILD_GROUPS,
@@ -37,13 +37,14 @@ from .env_schema import (
 )
 from .utils import (
     DEFAULT_ENV_FILE,
-    STACK_PATH_KEYS,
     apply_collector_tls_env,
     apply_plugin_data_env,
     apply_stack_path_env,
     apply_stack_resource_env,
     ensure_deploy_paths,
+    load_stack_env,
     parse_node_role,
+    read_stack_env,
     resolve_package_version,
     stack_bake_file,
     stack_compose_file,
@@ -58,7 +59,7 @@ app = get_typer(help="Build, manage, and run the FlowMesh stack.")
 def _stack() -> DockerComposeStack:
     def _load(env_file: Path) -> None:
         ensure_env_file(env_file, stack_env_example())
-        load_env(env_file, base_dir=Path.cwd(), path_keys=STACK_PATH_KEYS)
+        load_stack_env(env_file)
         try:
             apply_stack_resource_env()
         except ValueError as exc:
@@ -102,7 +103,7 @@ def _profiles(env_file: Path, profile: str | None) -> list[str]:
     passed explicitly here, de-duplicated and order-preserving.
     """
     selected = [profile] if profile else []
-    env = parse_env_file(env_file)
+    env = read_stack_env(env_file)
     raw = env.get("COMPOSE_PROFILES", "")
     selected.extend(name for part in raw.split(",") if (name := part.strip()))
     if _colocates_content_store(env):
@@ -129,7 +130,7 @@ def _compose(
 
 def _node_role(env_file: Path) -> NodeRole:
     """Return the configured NODE_ROLE (root | worker), defaulting to root if unset."""
-    raw = parse_env_file(env_file).get("NODE_ROLE", "").strip()
+    raw = read_stack_env(env_file).get("NODE_ROLE", "").strip()
     try:
         return NodeRole(raw.lower()) if raw else NodeRole.ROOT
     except ValueError:
@@ -287,7 +288,7 @@ def _run_bake(
     build_ref: str | None = None,
 ) -> None:
     ensure_env_file(env_file, stack_env_example())
-    load_env(env_file, base_dir=Path.cwd(), path_keys=STACK_PATH_KEYS)
+    load_stack_env(env_file)
 
     try:
         ensure_docker_available()

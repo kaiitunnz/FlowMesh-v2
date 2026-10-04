@@ -10,7 +10,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from flowmesh_stack.env import load_env, parse_env_file, parse_env_text
+from flowmesh_stack.doctor import run_doctor_checks
+from flowmesh_stack.env import (
+    EnvFileError,
+    load_env,
+    parse_env_file,
+    parse_env_text,
+    validate_env_file,
+)
+from flowmesh_stack.env_schema import EnvSchema
 
 _CASES = r"""A=plain
 B="double quoted"
@@ -101,8 +109,38 @@ _EXPECTED = {
 }
 
 
+# Lines a raw string cannot hold: tabs, a no-break space, and escaped single quotes.
+_MORE_CASES = (
+    "C1=value\t# c\n"
+    "C2=value \t# c\n"
+    "C3=value\u00a0# c\n"
+    "export\tC4=x\n"
+    "C5='it\\'s'\n"
+    "C6='x\\'y' # c\n"
+)
+
+_MORE_EXPECTED = {
+    "C1": "value\t# c",
+    "C2": "value \t# c",
+    "C3": "value\u00a0# c",
+    "C4": "x",
+    "C5": "it's",
+    "C6": "x'y",
+}
+
+
 def test_values_parse_as_compose_reads_them() -> None:
     assert parse_env_text(_CASES, {}) == _EXPECTED
+    assert parse_env_text(_MORE_CASES, {}) == _MORE_EXPECTED
+
+
+def test_a_reference_to_a_later_key_reads_the_value_the_cli_exports() -> None:
+    text = "A=${B}-a\nR=${C:?C is required}\nB=b\nC=c\n"
+    assert parse_env_text(text, {}) == {"A": "b-a", "R": "c", "B": "b", "C": "c"}
+
+
+def test_a_key_reads_its_own_name_from_the_environment() -> None:
+    assert parse_env_text("P=$P:/x\n", {"P": "/bin"}) == {"P": "/bin:/x"}
 
 
 def test_interpolation_reads_the_environment_after_the_file() -> None:
@@ -110,11 +148,38 @@ def test_interpolation_reads_the_environment_after_the_file() -> None:
 
 
 @pytest.mark.parametrize(
-    "text", ['A="unterminated\n', "A=${NOPE:?must be set}\n", "A=${NOPE?}\n"]
+    "text",
+    [
+        'A="unterminated\n',
+        "A='ends in an escaped quote\\'\n",
+        "A=${NOPE:?must be set}\n",
+        "A=${NOPE?}\n",
+    ],
 )
 def test_compose_errors_are_errors(text: str) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(EnvFileError):
         parse_env_text(text, {})
+
+
+def test_the_doctor_reports_a_malformed_file_as_a_finding(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text('REDIS_PASSWORD="abc\n')
+
+    values, errors = validate_env_file(env_file, expected_keys={"REDIS_PASSWORD"})
+    assert values is None
+    assert errors == [f"{env_file}: REDIS_PASSWORD: unterminated quoted value"]
+
+    report = run_doctor_checks(env_file, EnvSchema(name="t", header=[], sections=[]))
+    assert any("unterminated quoted value" in f.message for f in report.findings)
+
+
+def test_the_doctor_reads_keys_without_interpolating_them(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("A=${HOME:?HOME must be set}\n")
+    with patch.dict(os.environ, {"HOME": "/home/user"}):
+        values, errors = validate_env_file(env_file, expected_keys={"A"})
+    assert errors == []
+    assert values == {"A": "/home/user"}
 
 
 def test_a_quoted_secret_is_exported_as_the_container_reads_it(

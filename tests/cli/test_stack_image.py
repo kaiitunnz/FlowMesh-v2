@@ -37,7 +37,7 @@ def _img(
 @pytest.fixture(autouse=True)
 def _stub_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(image_module, "ensure_docker_available", lambda: None)
-    monkeypatch.setattr(image_module, "load_env", lambda *a, **k: None)
+    monkeypatch.setattr(image_module, "load_stack_env", lambda *a, **k: None)
     monkeypatch.setattr(image_module, "container_image_refs", lambda: set())
     monkeypatch.setenv("FLOWMESH_REGISTRY", REGISTRY)
 

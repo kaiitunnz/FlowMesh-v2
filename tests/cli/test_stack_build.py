@@ -190,7 +190,7 @@ def _capture_bake_args(
     )
     monkeypatch.setattr(stack_module, "_platform_overrides", lambda _m, _t: [])
     monkeypatch.setattr(stack_module, "ensure_env_file", lambda *_a, **_k: None)
-    monkeypatch.setattr(stack_module, "load_env", lambda *_a, **_k: None)
+    monkeypatch.setattr(stack_module, "load_stack_env", lambda *_a, **_k: None)
     bake_file = tmp_path / "bake.hcl"
     bake_file.write_text("")
     monkeypatch.setattr(stack_module, "stack_bake_file", lambda: bake_file)
