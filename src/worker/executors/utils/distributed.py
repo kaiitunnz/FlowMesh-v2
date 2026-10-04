@@ -31,6 +31,7 @@ from torch.distributed.run import main as _torchrun_main
 from shared.utils.manifest import scratch_dir
 
 from ..base_executor import ExecutionError
+from .collective import loopback_collective_env
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,11 @@ def _launch_env(launcher_env_flag: str) -> dict[str, str]:
     existing = os.environ.get("PYTHONPATH", "")
     if existing:
         pythonpath = f"{pythonpath}{os.pathsep}{existing}"
-    return {"PYTHONPATH": pythonpath, launcher_env_flag: "1"}
+    return {
+        **loopback_collective_env(),
+        "PYTHONPATH": pythonpath,
+        launcher_env_flag: "1",
+    }
 
 
 def run_torchrun(

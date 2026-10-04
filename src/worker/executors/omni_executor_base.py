@@ -28,6 +28,7 @@ from worker.config import WorkerConfig
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.inference import InferenceMixin
 from .utils.checkpoints import maybe_upload_artifacts, maybe_upload_traces
+from .utils.collective import loopback_collective_env
 
 try:
     import numpy as np
@@ -90,6 +91,7 @@ class OmniExecutorBase(InferenceMixin, Executor):
         spec_dict = spec.model_dump(by_alias=True)
         out_dir = Path(out_dir).resolve()
         self._omni_closed_by_generation = False
+        os.environ.update(loopback_collective_env())
         try:
             with self._task_span(
                 task.task_id, task.workflow_id, out_dir, owner_id=task.owner_id

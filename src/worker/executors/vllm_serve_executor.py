@@ -30,6 +30,7 @@ from worker.resident.local_engines import LocalEngine
 
 from ..utils.process import signal_process_group
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
+from .utils.collective import loopback_collective_env
 from .utils.serve_ttl import serve_deadline
 
 logger = logging.getLogger(__name__)
@@ -171,6 +172,7 @@ class VLLMServeExecutor(Executor):
             cmd.extend(["--revision", revision])
 
         env = dict(os.environ)
+        env.update(loopback_collective_env())
         # A spec setting its own CUDA variables runs unbound, so no binding replaces
         # them.
         env.update(env_vars)

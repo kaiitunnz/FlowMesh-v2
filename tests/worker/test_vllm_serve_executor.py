@@ -38,6 +38,12 @@ from worker.resident import LocalEngine
 
 _SOCKET = Path("/nonexistent/engine.sock")
 
+_LOOPBACK = {
+    "NCCL_SOCKET_IFNAME": "lo",
+    "GLOO_SOCKET_IFNAME": "lo",
+    "VLLM_HOST_IP": "127.0.0.1",
+}
+
 
 class TestVLLMServeExecutorInit:
     def test_supported_task_types(self) -> None:
@@ -347,6 +353,31 @@ class TestServeExecutorCmdBuilding:
         assert spec.pins_cuda_devices()
         _, env = self._run_capture(spec, tmp_path)
         assert env["CUDA_VISIBLE_DEVICES"] == "3"
+
+    def test_the_engine_keeps_its_collective_traffic_on_loopback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NCCL_SOCKET_IFNAME", "eth0")
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+        )
+        _, env = self._run_capture(spec, tmp_path)
+        assert {k: env[k] for k in _LOOPBACK} == _LOOPBACK
+
+    def test_a_spec_choosing_its_own_collective_interface_keeps_it(
+        self, tmp_path: Path
+    ) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(
+                source=ModelSource(identifier="m"),
+                vllm={"env_vars": {"GLOO_SOCKET_IFNAME": "ib0"}},
+            ),
+        )
+        _, env = self._run_capture(spec, tmp_path)
+        assert env["GLOO_SOCKET_IFNAME"] == "ib0"
+        assert env["NCCL_SOCKET_IFNAME"] == "lo"
 
     def test_env_vars_that_are_not_strings_fail_the_task(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(

@@ -445,7 +445,9 @@ training runs its ranks on those devices. An SFT task with a `training.deepspeed
 runs as one torchrun rank per device, on any number of devices, and a LoRA SFT task with
 one runs as a single rank; the task reports rank 0's result, or the first failing rank's
 error. A Docker GPU worker runs with an 8 GiB `/dev/shm` ceiling, which vLLM's multi-GPU
-engines need. A vLLM inference, LoRA or embedding task that sets `CUDA_VISIBLE_DEVICES`,
+engines need. Engines and training ranks keep their internal collective traffic on
+loopback, through `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME` and `VLLM_HOST_IP`, which
+a vLLM spec's `model.vllm.env_vars` overrides. A vLLM inference, LoRA or embedding task that sets `CUDA_VISIBLE_DEVICES`,
 or a `CUDA_DEVICE_ORDER` other than `PCI_BUS_ID`, in `model.vllm.env_vars` picks its own
 devices, so its executor sees every device and the task waits while any is held, as does
 an omni task, whose executor sees every device. A worker on a MIG slice, or one whose

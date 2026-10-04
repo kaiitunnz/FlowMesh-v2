@@ -85,6 +85,7 @@ from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry, produced_items
 from .utils.checkpoints import resolve_checkpoint_load
+from .utils.collective import loopback_collective_env
 
 logger = logging.getLogger(__name__)
 
@@ -420,6 +421,7 @@ Summary:"""
             vllm_cfg.pop("rope_scaling", None), vllm_cfg.pop("rope_theta", None)
         ):
             kwargs_base["hf_overrides"] = overrides
+        os.environ.update(loopback_collective_env())
         if "env_vars" in vllm_cfg:
             env_vars = vllm_cfg.pop("env_vars")
             assert isinstance(env_vars, dict)

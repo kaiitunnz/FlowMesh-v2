@@ -5,6 +5,7 @@ forwards from ``model.vllm`` must be one vLLM accepts.
 """
 
 import dataclasses
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -57,3 +58,35 @@ def test_every_example_engine_arg_reaches_a_real_engine_config() -> None:
     accepted = {field.name for field in dataclasses.fields(EngineArgs)}
     assert set(forwarded) <= accepted
     assert {"quantization", "max_model_len", "hf_overrides"} <= set(forwarded)
+
+
+def test_the_engine_starts_with_its_collective_traffic_on_loopback() -> None:
+    names = ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "VLLM_HOST_IP")
+    seen: dict[str, str | None] = {}
+
+    def engine(**_: Any) -> MagicMock:
+        seen.update({name: os.environ.get(name) for name in names})
+        return MagicMock()
+
+    with (
+        patch.dict(os.environ, {"NCCL_SOCKET_IFNAME": "eth0"}),
+        patch.object(torch.cuda, "is_available", return_value=False),
+        patch.object(vllm_executor, "LLM", side_effect=engine),
+    ):
+        VLLMExecutor(DEFAULT_WORKER_CONFIG, lifecycle=None)._init_vllm_engine(
+            ident="org/model",
+            vllm_cfg={"env_vars": {"GLOO_SOCKET_IFNAME": "ib0"}},
+            checkpoint_cfg={},
+            new_inference_spec={},
+            requested_gpu_count=1,
+            revision=None,
+            extra_llm_kwargs={},
+            adjust_tp=lambda size: size,
+            task_ids=None,
+        )
+
+    assert seen == {
+        "NCCL_SOCKET_IFNAME": "lo",
+        "GLOO_SOCKET_IFNAME": "ib0",
+        "VLLM_HOST_IP": "127.0.0.1",
+    }

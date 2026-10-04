@@ -4,9 +4,11 @@ vllm_omni closes its engine inside ``generate()`` when a generation fails, and w
 ``py_generator`` generation finishes, so the executor must not reuse it.
 """
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -96,3 +98,29 @@ def test_a_successful_run_keeps_its_engine_warm(
     executor = _executor(monkeypatch, omni)
     _run(executor, tmp_path)
     assert executor._omni is omni and not omni.closed
+
+
+def test_the_engine_starts_with_its_collective_traffic_on_loopback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = _executor(monkeypatch, _Omni(fail=False))
+    started = executor._ensure_omni
+    seen: dict[str, str | None] = {}
+
+    def ensure(spec_dict: dict[str, Any]) -> None:
+        seen.update(
+            {
+                k: os.environ.get(k)
+                for k in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "VLLM_HOST_IP")
+            }
+        )
+        started(spec_dict)
+
+    monkeypatch.setattr(executor, "_ensure_omni", ensure)
+    with patch.dict(os.environ, {"NCCL_SOCKET_IFNAME": "eth0"}):
+        _run(executor, tmp_path)
+    assert seen == {
+        "NCCL_SOCKET_IFNAME": "lo",
+        "GLOO_SOCKET_IFNAME": "lo",
+        "VLLM_HOST_IP": "127.0.0.1",
+    }
