@@ -413,8 +413,8 @@ Summary:"""
         )
         kwargs_base.update(extra_llm_kwargs)
         for arg, arg_type in _ACCEPTED_ENGINE_ARGS.items():
-            if arg in vllm_cfg:
-                kwargs_base[arg] = arg_type(vllm_cfg.pop(arg))
+            if (value := vllm_cfg.pop(arg, None)) is not None:
+                kwargs_base[arg] = arg_type(value)
         if revision:
             kwargs_base["revision"] = revision
         if overrides := hf_overrides(

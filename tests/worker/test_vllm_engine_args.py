@@ -90,3 +90,23 @@ def test_the_engine_starts_with_its_collective_traffic_on_loopback() -> None:
         "GLOO_SOCKET_IFNAME": "ib0",
         "VLLM_HOST_IP": "127.0.0.1",
     }
+
+
+@pytest.mark.parametrize("key", sorted(vllm_executor._ACCEPTED_ENGINE_ARGS))
+def test_an_engine_option_set_to_null_reaches_the_engine_unset(key: str) -> None:
+    with (
+        patch.object(torch.cuda, "is_available", return_value=False),
+        patch.object(vllm_executor, "LLM", return_value=MagicMock()) as llm,
+    ):
+        VLLMExecutor(DEFAULT_WORKER_CONFIG, lifecycle=None)._init_vllm_engine(
+            ident="org/model",
+            vllm_cfg={key: None},
+            checkpoint_cfg={},
+            new_inference_spec={},
+            requested_gpu_count=1,
+            revision=None,
+            extra_llm_kwargs={},
+            adjust_tp=lambda size: size,
+            task_ids=None,
+        )
+    assert key not in llm.call_args.kwargs
