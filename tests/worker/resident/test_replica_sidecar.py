@@ -307,7 +307,7 @@ _OVER_WINDOW = (
 
 
 def _engine_error(
-    status: int, message: str, kind: str, param: str | None
+    status: int, message: str, kind: str, param: Any
 ) -> Callable[[httpx.Request], httpx.Response]:
     return _answer(
         status,
@@ -341,8 +341,26 @@ def _engine_error(
             _engine_error(500, "the tenant prompt", "InternalServerError", None),
             "engine 500 InternalServerError",
         ),
+        (
+            _engine_error(400, "the tenant prompt", "BadRequestError", ["messages"]),
+            "engine 400 BadRequestError",
+        ),
+        (
+            _engine_error(400, "the tenant prompt", "BadRequestError", {"a": 1}),
+            "engine 400 BadRequestError",
+        ),
+        (_answer(400, json=["the tenant prompt"]), "engine 400"),
     ],
-    ids=["over-window", "echoing-validation", "unsafe-type", "non-json", "server"],
+    ids=[
+        "over-window",
+        "echoing-validation",
+        "unsafe-type",
+        "non-json",
+        "server",
+        "list-param",
+        "dict-param",
+        "list-body",
+    ],
 )
 def test_an_engine_refusal_names_only_what_the_engine_may_disclose(
     reply: Callable[[httpx.Request], httpx.Response], reason: str

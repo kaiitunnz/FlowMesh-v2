@@ -83,12 +83,15 @@ def _engine_refusal(exc: httpx.HTTPStatusError) -> str:
         body = exc.response.json()
     except (ValueError, httpx.ResponseNotRead):
         return f"engine {status}"
-    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(body, dict):
+        return f"engine {status}"
+    error = body.get("error")
     if not isinstance(error, dict):
-        error = body if isinstance(body, dict) else {}
+        error = body
     message, kind, param = error.get("message"), error.get("type"), error.get("param")
     if isinstance(message, str) and (
-        param in _COUNTED_PARAMS or _CONTEXT_WINDOW.search(message)
+        (isinstance(param, str) and param in _COUNTED_PARAMS)
+        or _CONTEXT_WINDOW.search(message)
     ):
         text = " ".join("".join(c if c.isprintable() else " " for c in message).split())
         return f"engine {status}: {text[:_REASON_MAX_CHARS]}"
