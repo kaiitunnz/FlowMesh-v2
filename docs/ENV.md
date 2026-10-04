@@ -144,6 +144,7 @@ directory `flowmesh stack` runs in.
 | `SERVER_METRICS_METRICS_ENABLED` | `true` | Whether to emit OTel metrics |
 | `SERVER_METRICS_TRACE_SAMPLE_RATIO` | `1.0` | Per-workflow trace sampling ratio |
 | `SERVER_METRICS_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint; unset disables export |
+| `SERVER_METRICS_OTLP_TOKEN` | – | Bearer token sent with every OTLP export |
 | `SERVER_METRICS_OTLP_TIMEOUT_SEC` | `10` | OTLP export request timeout (seconds) |
 | `SERVER_METRICS_RESOURCE_SAMPLE_SEC` | `15` | Worker GPU/resource sampling interval (seconds) |
 | `SERVER_METRICS_CLICKHOUSE_URL` | – | ClickHouse HTTP URL for the store read port (e.g. `http://localhost:8123`); unset disables queries |
@@ -159,6 +160,7 @@ directory `flowmesh stack` runs in.
 | `TELEMETRY_CLICKHOUSE_NATIVE_PORT` | `9000` | Host port for the ClickHouse native interface |
 | `TELEMETRY_OTLP_GRPC_PORT` | `4317` | Host port for the collector's OTLP gRPC receiver |
 | `TELEMETRY_OTLP_HTTP_PORT` | `4318` | Host port for the collector's OTLP HTTP receiver |
+| `TELEMETRY_OTLP_TOKEN` | – | Bearer token the collector's OTLP receivers require |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**
@@ -208,7 +210,7 @@ supervisor passes the workers it launches: a `WORKER_TOKEN` of the form
 `SUPERVISOR_GRPC_TARGET` with `SUPERVISOR_GRPC_TLS_CA_B64`, and the deployment's
 network-plane peer (`NETWORK_PLANE_PEER_*`), content cache and store
 (`WORKER_CONTENT_DIR`, `CONTENT_*`), `WORKER_PRIVATE_STATE_DIR`, and telemetry
-(`SERVER_METRICS_*`) settings. An external worker on a host other than its node's
+(`SERVER_METRICS_*`, the OTLP token included) settings. An external worker on a host other than its node's
 carries resident traffic over `control_relay`.
 
 ## Supervisor

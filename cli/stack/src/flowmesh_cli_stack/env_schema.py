@@ -17,18 +17,22 @@ from flowmesh_stack.env_schema import (
 def credential_overrides(role: NodeRole) -> dict[str, str]:
     """Fresh credentials for the services a root node runs itself.
 
-    A worker node reaches the root's Redis with the root's password, so it gets none.
-    The server reads the ClickHouse the collector writes to, so both carry one password.
+    A worker node reaches the root's Redis and collector with the root's password and
+    token, so it gets none. The server reads the ClickHouse the collector writes to, so
+    both carry one password; the root's own exporters present the collector's token.
     """
     if role != NodeRole.ROOT:
         return {}
     clickhouse_password = secrets.token_urlsafe(32)
+    otlp_token = secrets.token_urlsafe(32)
     return {
         "REDIS_PASSWORD": secrets.token_urlsafe(32),
         "CONTENT_STORE_ACCESS_KEY": secrets.token_hex(12),
         "CONTENT_STORE_SECRET_KEY": secrets.token_urlsafe(32),
         "TELEMETRY_CLICKHOUSE_PASSWORD": clickhouse_password,
         "SERVER_METRICS_CLICKHOUSE_PASSWORD": clickhouse_password,
+        "TELEMETRY_OTLP_TOKEN": otlp_token,
+        "SERVER_METRICS_OTLP_TOKEN": otlp_token,
     }
 
 
@@ -97,6 +101,33 @@ def _require_peer_trust(
             "NETWORK_PLANE_PEER_ENABLED requires "
             f"{', '.join(missing)}: a peer transport is carried over mutual TLS unless "
             "NETWORK_PLANE_PEER_DISABLE_MTLS is set"
+        )
+
+
+def _require_otlp_token_for_collector(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """The bundled collector refuses every export without its token, and fails to start
+    when none is set; an ``https://`` collector is verified against the server CA."""
+    profiles = {p.strip() for p in (env.get("COMPOSE_PROFILES", "") or "").split(",")}
+    if (
+        "telemetry" in profiles
+        and not (env.get("TELEMETRY_OTLP_TOKEN", "") or "").strip()
+    ):
+        errors.append(
+            "COMPOSE_PROFILES includes telemetry, which requires TELEMETRY_OTLP_TOKEN: "
+            "the collector refuses an unauthenticated export"
+        )
+    endpoint = (env.get("SERVER_METRICS_OTLP_ENDPOINT", "") or "").strip()
+    if (
+        endpoint.startswith("https://")
+        and not (env.get("SERVER_GRPC_TLS_CA_FILE", "") or "").strip()
+    ):
+        warnings.append(
+            "SERVER_METRICS_OTLP_ENDPOINT is https:// but SERVER_GRPC_TLS_CA_FILE is "
+            "unset, so the collector is verified against the system CAs; set it to the "
+            "CA scripts/dev/generate_server_tls_certs.sh issued, run with the root's "
+            "routable host"
         )
 
 
@@ -1249,6 +1280,11 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="OTLP collector endpoint; unset disables export.",
                 ),
                 EnvVar(
+                    "SERVER_METRICS_OTLP_TOKEN",
+                    "",
+                    description="Bearer token sent with every OTLP export.",
+                ),
+                EnvVar(
                     "SERVER_METRICS_OTLP_TIMEOUT_SEC",
                     "10",
                     description="OTLP export request timeout (seconds).",
@@ -1339,6 +1375,11 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Host port for the collector's OTLP HTTP receiver.",
                     var_type=EnvVarType.INT,
                     min_value=1,
+                ),
+                EnvVar(
+                    "TELEMETRY_OTLP_TOKEN",
+                    "",
+                    description="Bearer token the collector's OTLP receivers require.",
                 ),
             ],
         ),
@@ -1622,6 +1663,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             errors,
         ),
         _require_peer_trust,
+        _require_otlp_token_for_collector,
         _require_network_plane_for_resident,
         _require_network_plane_for_content,
         _warn_reaper_without_watchdog,

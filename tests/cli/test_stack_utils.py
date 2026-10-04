@@ -9,6 +9,7 @@ from flowmesh_cli_stack.utils import (
     STACK_SLUG_ENV,
     STACK_SUFFIX_ENV,
     WORKER_RESULTS_DIR_ENV,
+    apply_collector_tls_env,
     apply_plugin_data_env,
     apply_stack_path_env,
     apply_stack_resource_env,
@@ -124,3 +125,21 @@ def test_compose_requires_every_mount_source_from_the_cli() -> None:
     for key in (*STACK_PATH_DEFAULTS, "FLOWMESH_PLUGIN_DATA_DIR"):
         assert f"${{{key}:?" in compose
         assert f"${{{key}:-" not in compose
+
+
+@pytest.mark.parametrize(
+    ("cert", "key", "arg"),
+    [
+        ("/etc/ssl/server/server.pem", "/etc/ssl/server/server.key", True),
+        ("/etc/ssl/server/server.pem", "", False),
+        ("", "", False),
+    ],
+)
+def test_the_collector_serves_tls_only_with_the_server_material(
+    cert: str, key: str, arg: bool
+) -> None:
+    env = {"SERVER_GRPC_TLS_CERT_FILE": cert, "SERVER_GRPC_TLS_KEY_FILE": key}
+    with patch.dict(os.environ, env, clear=True):
+        apply_collector_tls_env()
+        expected = "--config=/etc/otelcol-contrib/tls.yaml" if arg else ""
+        assert os.environ["TELEMETRY_OTLP_TLS_CONFIG_ARG"] == expected

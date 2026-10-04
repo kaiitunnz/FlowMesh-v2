@@ -74,6 +74,21 @@ def apply_stack_path_env(base_dir: Path) -> None:
         os.environ[key] = resolve_path(os.getenv(key, ""), default, base_dir).as_posix()
 
 
+_COLLECTOR_TLS_CONFIG_ARG = "--config=/etc/otelcol-contrib/tls.yaml"
+
+
+def apply_collector_tls_env() -> None:
+    """Layer TLS over the collector's receivers when the stack has server TLS
+    material, which the collector serves."""
+    has_tls = all(
+        os.environ.get(key, "").strip()
+        for key in ("SERVER_GRPC_TLS_CERT_FILE", "SERVER_GRPC_TLS_KEY_FILE")
+    )
+    os.environ["TELEMETRY_OTLP_TLS_CONFIG_ARG"] = (
+        _COLLECTOR_TLS_CONFIG_ARG if has_tls else ""
+    )
+
+
 def apply_plugin_data_env(base_dir: Path) -> None:
     raw = os.environ.get("FLOWMESH_PLUGIN_DATA_DIR", "").strip()
     if not raw or raw.startswith(_PLUGIN_DATA_PATH_PREFIXES):

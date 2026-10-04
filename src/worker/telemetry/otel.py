@@ -43,7 +43,7 @@ from shared.telemetry.config import (
     TelemetryLevel,
 )
 from shared.telemetry.ids import trace_sampled, workflow_to_trace_id_int
-from shared.telemetry.provider import PayloadFreeSpanExporter
+from shared.telemetry.provider import PayloadFreeSpanExporter, otlp_exporter_kwargs
 
 _TRACER_NAME = "flowmesh.worker"
 _SERVICE_NAME = "flowmesh-worker"
@@ -178,10 +178,7 @@ def _ensure_tracer_provider() -> None:
                     _SampledSpanExporter(
                         _telemetry_config.sample_ratio,
                         PayloadFreeSpanExporter(
-                            OTLPSpanExporter(
-                                endpoint=_telemetry_config.otlp_endpoint,
-                                timeout=_telemetry_config.otlp_timeout_sec,
-                            )
+                            OTLPSpanExporter(**otlp_exporter_kwargs(_telemetry_config))
                         ),
                     )
                 )

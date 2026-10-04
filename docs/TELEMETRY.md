@@ -18,11 +18,12 @@ default (`docs/ENV.md` lists the knobs).
 `SERVER_METRICS_TRACES_ENABLED` / `SERVER_METRICS_METRICS_ENABLED` gate traces and metrics
 independently within the selected level. `SERVER_METRICS_OTLP_ENDPOINT` names the
 collector; leaving it unset builds no exporter at all, whatever the level.
+`SERVER_METRICS_OTLP_TOKEN` is the bearer token every export presents.
 `SERVER_METRICS_TRACE_SAMPLE_RATIO` sets the fraction of workflows traced,
 `SERVER_METRICS_OTLP_TIMEOUT_SEC` bounds an export, and
 `SERVER_METRICS_RESOURCE_SAMPLE_SEC` sets the worker-side resource-sampling interval.
 
-All seven are read once at the config edge into a `TelemetryConfig` and reach every
+All eight are read once at the config edge into a `TelemetryConfig` and reach every
 supervisor and worker process through the worker-environment allowlist, so the root,
 supervisors, and workers always agree on the level.
 
@@ -125,7 +126,23 @@ already runs. ClickHouse keeps its data in a named volume, so a stack restart do
 discard a trace.
 
 `flowmesh stack init --role root` writes one random password into both
-`TELEMETRY_CLICKHOUSE_PASSWORD` and `SERVER_METRICS_CLICKHOUSE_PASSWORD`.
+`TELEMETRY_CLICKHOUSE_PASSWORD` and `SERVER_METRICS_CLICKHOUSE_PASSWORD`, and one random
+token into both `TELEMETRY_OTLP_TOKEN` and `SERVER_METRICS_OTLP_TOKEN`.
+
+Both receivers refuse an export without `TELEMETRY_OTLP_TOKEN` as its bearer token, and
+the Collector does not start without one. Where the stack has server gRPC TLS material
+(`SERVER_GRPC_TLS_CERT_FILE` and `SERVER_GRPC_TLS_KEY_FILE`), both receivers serve that
+certificate over TLS, and a producer verifies it with the CA it already trusts: the root
+and supervisors with `SERVER_GRPC_TLS_CA_FILE`, a worker with
+`SUPERVISOR_GRPC_TLS_CA_B64`. A process that sends its token over plaintext to a host
+other than its own warns at startup. The token is set as an `authorization` header, so it
+replaces any `OTEL_EXPORTER_OTLP_HEADERS` while set. Rotating it means recreating the
+Collector, each node's server, and every worker.
+
+A worker node exports to the root's Collector by setting `SERVER_METRICS_OTLP_ENDPOINT` to
+`https://<root-host>:4317` and copying the root's `SERVER_METRICS_OTLP_TOKEN`, as it copies
+`REDIS_PASSWORD`. The server certificate must cover that host: pass the root's routable
+host or IP to `scripts/dev/generate_server_tls_certs.sh`.
 
 The server's read path is configured separately, through `SERVER_METRICS_CLICKHOUSE_*`,
 and never writes. The two halves commonly address the same instance but are never the

@@ -1,10 +1,17 @@
 """The telemetry knob every producer checks before emitting a span or metric."""
 
+import ipaddress
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from urllib.parse import urlsplit
+
+from pydantic import SecretStr
 
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
+
+logger = logging.getLogger(__name__)
 
 
 class TelemetryLevel(StrEnum):
@@ -31,6 +38,8 @@ class TelemetryConfig:
     otlp_endpoint: str | None
     otlp_timeout_sec: int = 10
     resource_sample_sec: int = 15
+    otlp_token: SecretStr | None = field(default=None, repr=False)
+    otlp_ca_pem: bytes | None = field(default=None, repr=False)
 
     def emits(self, minimum: TelemetryLevel) -> bool:
         """Whether this config's level is at least as verbose as ``minimum``.
@@ -42,12 +51,13 @@ class TelemetryConfig:
         return _LEVEL_ORDER[self.level] >= _LEVEL_ORDER[minimum]
 
     @staticmethod
-    def from_env() -> "TelemetryConfig":
+    def from_env(otlp_ca_pem: bytes | None = None) -> "TelemetryConfig":
         """Parse the ``SERVER_METRICS_*`` telemetry vars, shared by every process.
 
         Root, supervisor and worker all read this one parser so they agree on the
         level: two independent copies of the level default and validation is how they
-        would end up disagreeing.
+        would end up disagreeing. ``otlp_ca_pem`` is the CA the process verifies an
+        ``https://`` collector with, the one its caller already trusts.
         """
         level_raw = (
             (os.getenv("SERVER_METRICS_TELEMETRY_LEVEL") or TelemetryLevel.OFF.value)
@@ -62,18 +72,28 @@ class TelemetryConfig:
                 f"SERVER_METRICS_TELEMETRY_LEVEL must be one of: {allowed} "
                 f"(got {level_raw!r})"
             ) from exc
+        endpoint = _otlp_endpoint()
+        token = (os.getenv("SERVER_METRICS_OTLP_TOKEN") or "").strip()
+        if token and endpoint and _sends_in_plaintext(endpoint):
+            logger.warning(
+                "OTLP export to %s sends its token over plaintext; use an https:// "
+                "endpoint",
+                urlsplit(endpoint).hostname,
+            )
         return TelemetryConfig(
             level=level,
             traces_enabled=parse_bool_env("SERVER_METRICS_TRACES_ENABLED", True),
             metrics_enabled=parse_bool_env("SERVER_METRICS_METRICS_ENABLED", True),
             sample_ratio=_sample_ratio(),
-            otlp_endpoint=_otlp_endpoint(),
+            otlp_endpoint=endpoint,
             otlp_timeout_sec=max(
                 1, parse_int_env("SERVER_METRICS_OTLP_TIMEOUT_SEC", 10)
             ),
             resource_sample_sec=max(
                 1, parse_int_env("SERVER_METRICS_RESOURCE_SAMPLE_SEC", 15)
             ),
+            otlp_token=SecretStr(token) if token else None,
+            otlp_ca_pem=otlp_ca_pem,
         )
 
 
@@ -103,6 +123,20 @@ def _otlp_endpoint() -> str | None:
             f"(got {endpoint!r}); use http://<host>:4317 for a plaintext collector."
         )
     return endpoint
+
+
+def _sends_in_plaintext(endpoint: str) -> bool:
+    """Whether ``endpoint`` is a plaintext collector off this host."""
+    parts = urlsplit(endpoint)
+    if parts.scheme != "http":
+        return False
+    host = parts.hostname or ""
+    if host == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return True
 
 
 def _sample_ratio() -> float:

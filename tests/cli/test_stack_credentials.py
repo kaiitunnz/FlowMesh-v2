@@ -14,6 +14,8 @@ _CREDENTIALS = (
     "CONTENT_STORE_SECRET_KEY",
     "TELEMETRY_CLICKHOUSE_PASSWORD",
     "SERVER_METRICS_CLICKHOUSE_PASSWORD",
+    "TELEMETRY_OTLP_TOKEN",
+    "SERVER_METRICS_OTLP_TOKEN",
 )
 
 
@@ -41,6 +43,7 @@ def test_a_root_init_replaces_every_placeholder_with_fresh_credentials(
         first["SERVER_METRICS_CLICKHOUSE_PASSWORD"]
         == first["TELEMETRY_CLICKHOUSE_PASSWORD"]
     )
+    assert first["SERVER_METRICS_OTLP_TOKEN"] == first["TELEMETRY_OTLP_TOKEN"]
 
 
 def test_a_root_init_writes_an_env_only_its_owner_reads(tmp_path):
@@ -57,6 +60,8 @@ def test_a_worker_init_leaves_the_redis_password_placeholder(tmp_path):
     env = _init(tmp_path, "worker")
 
     assert env["REDIS_PASSWORD"] == _PASSWORD_PLACEHOLDER
+    assert env["SERVER_METRICS_OTLP_TOKEN"] == ""
+    assert env["TELEMETRY_OTLP_TOKEN"] == ""
 
 
 def test_the_content_store_console_listens_on_loopback():

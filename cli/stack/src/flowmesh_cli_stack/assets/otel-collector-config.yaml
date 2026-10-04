@@ -5,15 +5,27 @@
 # exports to ClickHouse. It never serves a query -- the server-side TelemetryStore reads
 # ClickHouse directly, and this file must never gain an endpoint the server, CLI or SDK
 # call. ${env:VAR} placeholders are expanded by the Collector process itself from its own
-# container environment (set in compose.yml), not by docker compose.
+# container environment (set in compose.yml), not by docker compose. Both receivers
+# require TELEMETRY_OTLP_TOKEN as a bearer token, and the Collector refuses to start
+# without one. otel-collector-tls.yaml layers TLS over them when the stack has server
+# TLS material.
+
+extensions:
+  bearertokenauth/otlp:
+    scheme: Bearer
+    token: ${env:TELEMETRY_OTLP_TOKEN}
 
 receivers:
   otlp:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        auth:
+          authenticator: bearertokenauth/otlp
       http:
         endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: bearertokenauth/otlp
 
 processors:
   memory_limiter:
@@ -113,6 +125,7 @@ exporters:
         name: flowmesh_metrics_histogram
 
 service:
+  extensions: [bearertokenauth/otlp]
   pipelines:
     traces:
       receivers: [otlp]

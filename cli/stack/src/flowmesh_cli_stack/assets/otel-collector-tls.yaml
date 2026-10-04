@@ -1,0 +1,16 @@
+# TLS for the Collector's OTLP receivers, layered over otel-collector-config.yaml when the
+# stack has server TLS material. It serves the server's gRPC certificate, mounted at the
+# same path the server reads it from, so a producer verifies the Collector with the CA
+# it already trusts.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        tls:
+          cert_file: ${env:SERVER_GRPC_TLS_CERT_FILE}
+          key_file: ${env:SERVER_GRPC_TLS_KEY_FILE}
+      http:
+        tls:
+          cert_file: ${env:SERVER_GRPC_TLS_CERT_FILE}
+          key_file: ${env:SERVER_GRPC_TLS_KEY_FILE}

@@ -192,7 +192,15 @@ services:
     configs:
       - source: flowmesh_otel_collector_config
         target: /etc/otelcol-contrib/config.yaml
+      - source: flowmesh_otel_collector_tls
+        target: /etc/otelcol-contrib/tls.yaml
+    command: --config=/etc/otelcol-contrib/config.yaml ${TELEMETRY_OTLP_TLS_CONFIG_ARG:-}
+    volumes:
+      - ${SERVER_TLS_DIR:?set by flowmesh stack}:/etc/ssl/server:ro
     environment:
+      TELEMETRY_OTLP_TOKEN: ${TELEMETRY_OTLP_TOKEN:-}
+      SERVER_GRPC_TLS_CERT_FILE: ${SERVER_GRPC_TLS_CERT_FILE:-}
+      SERVER_GRPC_TLS_KEY_FILE: ${SERVER_GRPC_TLS_KEY_FILE:-}
       TELEMETRY_CLICKHOUSE_DSN: ${TELEMETRY_CLICKHOUSE_DSN:-clickhouse://clickhouse:9000?dial_timeout=10s}
       TELEMETRY_CLICKHOUSE_DATABASE: ${TELEMETRY_CLICKHOUSE_DATABASE:-flowmesh}
       TELEMETRY_CLICKHOUSE_USERNAME: ${TELEMETRY_CLICKHOUSE_USERNAME:-default}
@@ -266,6 +274,8 @@ networks:
 configs:
   flowmesh_otel_collector_config:
     file: ./otel-collector-config.yaml
+  flowmesh_otel_collector_tls:
+    file: ./otel-collector-tls.yaml
   flowmesh_clickhouse_init:
     file: ./clickhouse-init.sql
 

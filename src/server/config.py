@@ -356,6 +356,10 @@ class GatewayMode(StrEnum):
     PROXY = "proxy"
 
 
+def _read_ca(path: str) -> bytes | None:
+    return Path(path).read_bytes() if path else None
+
+
 def _env_or_none(name: str) -> str | None:
     """The env var's non-empty, stripped value, else None."""
     return (os.getenv(name) or "").strip() or None
@@ -772,17 +776,18 @@ class ServerConfig:
             for raw in os.getenv("FLOWMESH_PLUGINS", "").split(",")
             if (p := raw.strip())
         ]
+        grpc_config = GrpcConfig.from_env()
         return cls(
             logging=LoggingConfig.from_env(),
             redis=RedisConfig.from_env(),
             http=HttpConfig.from_env(),
-            grpc=GrpcConfig.from_env(),
+            grpc=grpc_config,
             port_forward=PortForwardConfig.from_env(),
             identity=IdentityConfig.from_env(),
             dispatch=DispatchConfig.from_env(),
             watchdog=WatchdogConfig.from_env(),
             metrics=MetricsConfig.from_env(results_dir),
-            telemetry=TelemetryConfig.from_env(),
+            telemetry=TelemetryConfig.from_env(_read_ca(grpc_config.tls_ca_file)),
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),
             orchestration=OrchestrationConfig.from_env(),
