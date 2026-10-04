@@ -100,27 +100,11 @@ class SFTExecutor(TrainingMixin, Executor):
         checkpoint_dir = artifacts_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Internal distributed launcher: spawn multi-GPU training as subprocesses
+        # Internal distributed launcher: run training as torchrun ranks
         try:
             allow_multi_cfg = training_cfg.get("allow_multi_gpu")
             already_spawned = os.environ.get(_SFT_LAUNCHER_FLAG) == "1"
-            # Determine requested GPU count
-            vis = os.environ.get("CUDA_VISIBLE_DEVICES") or training_cfg.get(
-                "visible_devices"
-            )
-            available_gpus = None
-            if vis:
-                available_gpus = len(
-                    [dev for dev in str(vis).split(",") if dev.strip()]
-                )
-            if available_gpus is None:
-                try:
-                    if torch.cuda.is_available():
-                        available_gpus = torch.cuda.device_count()
-                except Exception:
-                    available_gpus = None
-            if available_gpus is None:
-                available_gpus = 0
+            available_gpus = self._visible_gpu_count(training_cfg)
 
             if requested_gpu_count and requested_gpu_count > 1:
                 n_gpus = min(requested_gpu_count, available_gpus)
@@ -155,12 +139,10 @@ class SFTExecutor(TrainingMixin, Executor):
                 already_spawned,
                 n_gpus,
             )
-            if (
-                (allow_multi or deepspeed_intent)
-                and not already_spawned
-                and (n_gpus or 0) > 1
+            if ranks := self._launch_ranks(
+                n_gpus, allow_multi, deepspeed_intent, already_spawned
             ):
-                nproc = int(training_cfg.get("nproc_per_node", n_gpus))
+                nproc = int(training_cfg.get("nproc_per_node", ranks))
                 if deepspeed_intent and not deepspeed_available():
                     logger.warning(
                         "DeepSpeed configuration provided but the `deepspeed` "
@@ -741,6 +723,33 @@ class SFTExecutor(TrainingMixin, Executor):
         if gpu_count is not None and gpu_count > 0:
             return gpu_count
         return None
+
+    @staticmethod
+    def _visible_gpu_count(training_cfg: dict[str, Any]) -> int:
+        """Count the GPUs this process may train on."""
+        if vis := os.environ.get("CUDA_VISIBLE_DEVICES") or training_cfg.get(
+            "visible_devices"
+        ):
+            return len([dev for dev in str(vis).split(",") if dev.strip()])
+        try:
+            return torch.cuda.device_count() if torch.cuda.is_available() else 0
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _launch_ranks(
+        n_gpus: int, allow_multi: bool, deepspeed_intent: bool, already_spawned: bool
+    ) -> int:
+        """Return how many torchrun ranks a run launches, or 0 to train in-process.
+
+        DeepSpeed initializes torch.distributed from the rank env a launcher sets, so a
+        run with a DeepSpeed config launches even on one GPU.
+        """
+        if already_spawned or n_gpus < 1:
+            return 0
+        if deepspeed_intent or (allow_multi and n_gpus > 1):
+            return n_gpus
+        return 0
 
     @staticmethod
     def _configure_devices(training_cfg: dict[str, Any]) -> None:

@@ -51,7 +51,7 @@ spec:
     fp16: false
     bf16: true
 
-    # DeepSpeed stage-2 ZeRO configuration used by SFTExecutor when multi GPU is enabled.
+    # DeepSpeed stage-2 ZeRO configuration; SFTExecutor trains it as one torchrun rank per GPU.
     deepspeed:
       train_micro_batch_size_per_gpu: 2
       gradient_accumulation_steps: 4

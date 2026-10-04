@@ -1,4 +1,4 @@
-"""A multi-GPU SFT run launches its ranks under torchrun on the task's devices."""
+"""An SFT run launches its ranks under torchrun on the task's devices."""
 
 import json
 import os
@@ -21,15 +21,34 @@ from worker.executors.sft_executor import SFTExecutor
 _DEEPSPEED = {"zero_optimization": {"stage": 2}, "gradient_accumulation_steps": 1}
 
 
+class _InProcess(Exception):
+    pass
+
+
+def _train_in_process(*_: Any, **__: Any) -> NoReturn:
+    raise _InProcess("the run trained in-process")
+
+
 def _launch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, training: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    training: dict[str, Any],
+    devices: str = "GPU-b,GPU-c",
 ) -> dict[str, Any]:
-    """Run SFT on a worker bound to two GPUs, capturing its torchrun launch."""
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-b,GPU-c")
-    monkeypatch.setattr(sft_executor, "_STARTED_ON", "GPU-b,GPU-c")
+    """Run SFT on a worker bound to ``devices``, capturing its torchrun launch."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", devices)
+    monkeypatch.setattr(sft_executor, "_STARTED_ON", devices)
     monkeypatch.delenv(sft_executor._SFT_LAUNCHER_FLAG, raising=False)
     monkeypatch.setattr(sft_executor.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(sft_executor.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(
+        sft_executor.torch.cuda, "device_count", lambda: len(devices.split(","))
+    )
+    monkeypatch.setattr(
+        sft_executor, "_started_device_count", lambda: len(devices.split(","))
+    )
+    monkeypatch.setattr(
+        sft_executor.AutoTokenizer, "from_pretrained", _train_in_process
+    )
     # DeepSpeed reads as installed, and its own launcher refuses to run, so a run
     # handed to it fails rather than reaching a real launcher.
     monkeypatch.setattr(sft_executor, "deepspeed_available", lambda: True)
@@ -77,6 +96,33 @@ def test_a_deepspeed_run_launches_under_torchrun_on_the_bound_devices(
     assert launched["env"] == "GPU-b,GPU-c"
     training = launched["task"]["data"]["task"]["spec"]["training"]
     assert training["deepspeed"] == _DEEPSPEED
+
+
+def test_a_deepspeed_run_on_one_gpu_launches_one_torchrun_rank(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launched = _launch(monkeypatch, tmp_path, {"deepspeed": _DEEPSPEED}, "GPU-b")
+
+    assert launched["nproc"] == 1
+    assert launched["env"] == "GPU-b"
+
+
+def test_a_deepspeed_run_held_to_one_gpu_launches_one_torchrun_rank(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launched = _launch(
+        monkeypatch, tmp_path, {"allow_multi_gpu": False, "deepspeed": _DEEPSPEED}
+    )
+
+    assert launched["nproc"] == 1
+    assert launched["env"] == "GPU-b"
+
+
+def test_a_one_gpu_run_without_deepspeed_trains_in_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with pytest.raises(ExecutionError, match="trained in-process"):
+        _launch(monkeypatch, tmp_path, {}, "GPU-b")
 
 
 def test_training_devices_are_positions_within_the_bound_devices(

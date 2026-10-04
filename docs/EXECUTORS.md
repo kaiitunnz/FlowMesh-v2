@@ -432,7 +432,8 @@ a positive one) and starts the executor seeing only those, listed by index under
 and fit the next task, and restarts on others otherwise, as for a task without a
 positive count once another device frees up. SFT's `visible_devices` and `primary_gpu`
 are positions within the task's devices; a position past them fails the task. Multi-GPU
-training runs its ranks on those devices. A vLLM inference, LoRA or embedding task that
+training runs its ranks on those devices, and an SFT or LoRA SFT task with a
+`training.deepspeed` config runs as torchrun ranks on any number of them, LoRA SFT as one. A vLLM inference, LoRA or embedding task that
 sets `CUDA_VISIBLE_DEVICES`, or a `CUDA_DEVICE_ORDER` other than `PCI_BUS_ID`, in
 `model.vllm.env_vars` picks its own devices, so its executor sees every device and the
 task waits while any is held, as does an omni task, whose executor sees every device. A
