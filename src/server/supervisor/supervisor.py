@@ -316,9 +316,9 @@ def _endpoint_advertisement_provider(
 
     url = network_cfg.endpoint_url or ""
     peer = network_cfg.peer
-    # The peer protocol says the node's workers can dial a peer; the peer listener is
-    # advertised only when the node serves one, so a node without it is never offered
-    # as a node_relay hop no listener answers.
+    # The peer protocol says the node's peer plane is on; whether an origin dials is its
+    # worker's own. Only a node serving a peer listener advertises it and is offered as
+    # a node_relay hop.
     peer_url = peer.node_listener_url if peer.enabled else ""
     protocols = (PEER_PROTOCOL,) if peer.enabled else ()
     try:

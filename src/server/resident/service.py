@@ -290,12 +290,6 @@ class ServeOrigination:
     profile: AdmissionProfile
     envelope: ServeRequestEnvelope
     delivery: ServeDelivery
-    # Both gated serve modes (proxy and the root forward ingress) originate on the root
-    # and leave these unset. A worker-originated workflow boundary sets its own worker
-    # as the origin (so the route resolves peer-capable from that worker's node) and
-    # the worker-minted request id its rendezvous keys the admission decision by.
-    origin_worker: str | None = None
-    request_id: str | None = None
 
 
 @dataclass
@@ -1061,10 +1055,9 @@ class ResidentCapacityControl:
             invocation_id=request.invocation_id,
             idempotency_key=request.idempotency_key,
             subject=request.subject,
-            origin_worker=request.origin_worker,
+            origin_worker=None,
             family=request.family,
             serve=request.delivery,
-            request_id=request.request_id,
         )
         # A serve subject admits against its pre-registered allocation family, which
         # its adoption defined; no workflow plan node backs it.
@@ -1189,13 +1182,14 @@ class ResidentCapacityControl:
         assert deps is not None
         serve = orig.serve
         # The route fence resolves from the origin's registered endpoint, which is also
-        # what dials an admitted peer session. A gated serve origination has no origin
-        # worker, so the root is itself the origin and resolves from the root node over
-        # the edge stream; the root dials no peer, so its call rides control_relay. A
-        # worker-originated workflow boundary resolves from the origin worker's own
-        # node, so its payload never reaches the root at all.
+        # what dials an admitted peer session. A gated serve origination's origin is the
+        # root, which resolves from the root node over the edge stream, with the peer
+        # transports off: the root carries only control_relay. A worker-originated
+        # workflow boundary resolves from the origin worker's own node, so its payload
+        # never reaches the root at all, and rides a peer transport only when that
+        # worker can dial one.
         trust: TrustedPeerPolicy | None = None
-        if serve is not None and orig.origin_worker is None:
+        if serve is not None:
             trust = TrustedPeerPolicy()
             origin_worker = None
             resolve_node: str | None = (
@@ -1214,6 +1208,8 @@ class ResidentCapacityControl:
                     orig, claim, "no origin worker for boundary"
                 )
                 return
+            if not self._dials_peers(origin_worker):
+                trust = TrustedPeerPolicy()
         target_worker = deps.serve_worker_of(replica)
         target_node = deps.node_of_worker(target_worker)
         if target_worker is None or target_node is None:
@@ -1677,6 +1673,20 @@ class ResidentCapacityControl:
         )
         self._persist()
         return replica.listener
+
+    def _dials_peers(self, worker_id: str) -> bool:
+        """Whether a worker can dial a peer transport.
+
+        A worker binds its peer listener exactly when its peer plane is on, which is
+        also what gives it the peer carriage and material to dial, so a reported
+        listener port is the worker's own dial capability.
+        """
+        deps = self._delivery
+        return (
+            deps is not None
+            and deps.resident_listener_port_of is not None
+            and deps.resident_listener_port_of(worker_id) > 0
+        )
 
     async def _peer_listener_of(self, worker_id: str, node_id: str) -> str | None:
         """The address an origin dials for this worker's claim-gated peer listener.

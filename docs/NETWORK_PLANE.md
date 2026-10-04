@@ -91,7 +91,7 @@ substitutes a peer.
 
 Eligibility is a property of the pair, not of topology. The resolver offers a peer
 transport only when the deployment enables it, both ends sit in the configured trust
-domain, the target is exposed at an admitted reachability class, the origin's node has
+domain, the target is exposed at an admitted reachability class, the origin worker has
 the peer plane enabled, the target serves the transport — its listener for
 `worker_direct`, its node's peer listener for `node_relay` — and directional evidence has
 not demoted the path.
