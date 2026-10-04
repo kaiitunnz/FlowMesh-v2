@@ -731,6 +731,10 @@ class ResidentCapacityControl:
         """Every replica incarnation in the directory, inert ones included."""
         return self._stores.directory.all()
 
+    def replica_worker(self, replica: ReplicaIncarnation) -> str | None:
+        """The worker running a replica's serve task, while one is."""
+        return self._serve_worker(replica)
+
     def list_credit_bearing_claims(self) -> tuple[list[ServiceClaim], dict[str, int]]:
         """The credit-bearing claims and the per-replica held credit derived on read.
 

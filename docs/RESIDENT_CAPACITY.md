@@ -250,7 +250,7 @@ is disabled.
 | Method | Path | Returns |
 | --- | --- | --- |
 | GET | `/api/v1/resident/families` | Registered service families (family, engine/batch key, model ref, isolation, selection strategy, warmth). |
-| GET | `/api/v1/resident/replicas` | Replica incarnations — live and inert — with state, health, backing `serve_task_id`, worker, lease, and endpoint host and port. Filterable by `family`. |
+| GET | `/api/v1/resident/replicas` | Replica incarnations — live and inert — with state, health, backing `serve_task_id`, the worker running it, whether it is a serve task's standing replica, lease, and endpoint host and port. Filterable by `family`. |
 | GET | `/api/v1/resident/claims` | Credit-bearing admission claims and per-replica held credit, recomputed on read from the authoritative claims. |
 
 A replica's endpoint is projected to host and port only; no `api_key` or serving credential

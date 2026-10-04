@@ -54,7 +54,6 @@ def _seeded_stores() -> ResidentStores:
             state=ReplicaState.WARM,
             healthy=True,
             serve_task_id="tsk-serve-1",
-            worker_id="wkr-1",
             lease_id="lse-1",
             endpoint=ReplicaEndpoint(
                 base_url="http://10.0.0.5:8001/v1", model="m", api_key="SECRET-KEY"

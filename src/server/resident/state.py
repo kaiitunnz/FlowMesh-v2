@@ -209,7 +209,6 @@ class ReplicaIncarnation(BaseModel):
     serve_task_id: str | None = None
     binding_generation: int | None = None
     standing: bool = False
-    worker_id: str | None = None
     lease_id: str | None = None
     report_epoch: int = 0
     created_at: str = Field(default_factory=now_iso)

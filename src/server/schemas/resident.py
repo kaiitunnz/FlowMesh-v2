@@ -62,6 +62,10 @@ class ResidentReplicaInfo(BaseModel):
     worker_id: str | None = Field(
         default=None, description="Worker hosting the replica."
     )
+    standing: bool = Field(
+        default=False,
+        description="Whether the replica is a public serve task's own.",
+    )
     lease_id: str | None = Field(
         default=None, description="Allocation lease identifier."
     )
@@ -73,7 +77,9 @@ class ResidentReplicaInfo(BaseModel):
     last_active_at: str = Field(description="Last admission-activity timestamp.")
 
     @classmethod
-    def project(cls, replica: ReplicaIncarnation) -> "ResidentReplicaInfo":
+    def project(
+        cls, replica: ReplicaIncarnation, worker_id: str | None
+    ) -> "ResidentReplicaInfo":
         endpoint = (
             ResidentReplicaEndpointInfo.parse(replica.endpoint.base_url)
             if replica.endpoint is not None
@@ -86,7 +92,8 @@ class ResidentReplicaInfo(BaseModel):
             state=replica.state.value,
             healthy=replica.healthy,
             serve_task_id=replica.serve_task_id,
-            worker_id=replica.worker_id,
+            worker_id=worker_id,
+            standing=replica.standing,
             lease_id=replica.lease_id,
             endpoint=endpoint,
             created_at=replica.created_at,
