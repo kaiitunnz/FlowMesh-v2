@@ -91,6 +91,21 @@ def test_restart_redis_service_does_not_drain_workers() -> None:
     drain.assert_not_called()
 
 
+def test_restart_recreates_the_collector_alone() -> None:
+    with (
+        patch.object(stack_module, "_drain_workers") as drain,
+        patch.object(stack_module, "_compose") as compose,
+        patch.object(stack_module, "_node_role", return_value=NodeRole.ROOT),
+        patch.object(stack_module, "image_env_overrides", return_value={}),
+    ):
+        _restart(services=["otel_collector"])
+
+    drain.assert_not_called()
+    up_args = compose.call_args.args[0]
+    assert "--force-recreate" in up_args
+    assert up_args[-1] == "otel_collector"
+
+
 def test_restart_unknown_service_exits_without_acting() -> None:
     with (
         patch.object(stack_module, "_drain_workers") as drain,

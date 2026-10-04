@@ -5,6 +5,10 @@ from unittest.mock import patch
 import pytest
 from flowmesh_cli_stack.utils import (
     _PLUGIN_DATA_ALIAS,
+    COLLECTOR_TLS_CERT_ENV,
+    COLLECTOR_TLS_CONFIG_ARG_ENV,
+    COLLECTOR_TLS_KEY_ENV,
+    COLLECTOR_USER_ENV,
     STACK_PATH_DEFAULTS,
     STACK_SLUG_ENV,
     STACK_SUFFIX_ENV,
@@ -127,19 +131,53 @@ def test_compose_requires_every_mount_source_from_the_cli() -> None:
         assert f"${{{key}:-" not in compose
 
 
-@pytest.mark.parametrize(
-    ("cert", "key", "arg"),
-    [
-        ("/etc/ssl/server/server.pem", "/etc/ssl/server/server.key", True),
-        ("/etc/ssl/server/server.pem", "", False),
-        ("", "", False),
-    ],
-)
-def test_the_collector_serves_tls_only_with_the_server_material(
-    cert: str, key: str, arg: bool
-) -> None:
-    env = {"SERVER_GRPC_TLS_CERT_FILE": cert, "SERVER_GRPC_TLS_KEY_FILE": key}
+def _server_tls(tmp_path: Path) -> Path:
+    tls = tmp_path / "tls"
+    tls.mkdir()
+    for name in ("server.pem", "server.key", "server-ca.pem", "server-ca.key"):
+        (tls / name).write_text(name)
+    (tls / "server.key").chmod(0o600)
+    return tls
+
+
+def test_the_collector_gets_the_server_cert_and_key_alone(tmp_path: Path) -> None:
+    tls = _server_tls(tmp_path)
+    env = {
+        "SERVER_TLS_DIR": tls.as_posix(),
+        "SERVER_GRPC_TLS_CERT_FILE": "/etc/ssl/server/server.pem",
+        "SERVER_GRPC_TLS_KEY_FILE": "/etc/ssl/server/server.key",
+    }
     with patch.dict(os.environ, env, clear=True):
         apply_collector_tls_env()
-        expected = "--config=/etc/otelcol-contrib/tls.yaml" if arg else ""
-        assert os.environ["TELEMETRY_OTLP_TLS_CONFIG_ARG"] == expected
+        assert os.environ[COLLECTOR_TLS_CONFIG_ARG_ENV] == (
+            "--config=/etc/otelcol-contrib/tls.yaml"
+        )
+        assert os.environ[COLLECTOR_TLS_CERT_ENV] == (tls / "server.pem").as_posix()
+        assert os.environ[COLLECTOR_TLS_KEY_ENV] == (tls / "server.key").as_posix()
+        key = (tls / "server.key").stat()
+        assert os.environ[COLLECTOR_USER_ENV] == f"{key.st_uid}:{key.st_gid}"
+
+
+@pytest.mark.parametrize(
+    ("cert", "key"),
+    [
+        ("/etc/ssl/server/server.pem", ""),
+        ("", ""),
+        ("/etc/ssl/server/missing.pem", "/etc/ssl/server/server.key"),
+    ],
+)
+def test_without_server_material_the_collector_binds_nothing_from_disk(
+    tmp_path: Path, cert: str, key: str
+) -> None:
+    tls = _server_tls(tmp_path)
+    env = {
+        "SERVER_TLS_DIR": tls.as_posix(),
+        "SERVER_GRPC_TLS_CERT_FILE": cert,
+        "SERVER_GRPC_TLS_KEY_FILE": key,
+    }
+    with patch.dict(os.environ, env, clear=True):
+        apply_collector_tls_env()
+        assert os.environ[COLLECTOR_TLS_CONFIG_ARG_ENV] == ""
+        assert os.environ[COLLECTOR_TLS_CERT_ENV] == os.devnull
+        assert os.environ[COLLECTOR_TLS_KEY_ENV] == os.devnull
+        assert os.environ[COLLECTOR_USER_ENV] == f"{os.getuid()}:{os.getgid()}"

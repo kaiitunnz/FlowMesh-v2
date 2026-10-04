@@ -164,17 +164,33 @@ def test_the_collector_gets_its_token_and_the_tls_overlay() -> None:
     assert collector["environment"]["TELEMETRY_OTLP_TOKEN"] == (
         "${TELEMETRY_OTLP_TOKEN:-}"
     )
-    assert "${TELEMETRY_OTLP_TLS_CONFIG_ARG:-}" in collector["command"]
-    assert any(v.endswith(":/etc/ssl/server:ro") for v in collector["volumes"])
+    assert (
+        "${FLOWMESH_COLLECTOR_TLS_CONFIG_ARG?set by flowmesh stack}"
+        in collector["command"]
+    )
     tls = yaml.safe_load(
         asset_path("flowmesh_cli_stack.assets", "otel-collector-tls.yaml").read_text()
     )
     for protocol in ("grpc", "http"):
         assert tls["receivers"]["otlp"]["protocols"][protocol]["tls"] == {
-            "cert_file": "${env:SERVER_GRPC_TLS_CERT_FILE}",
-            "key_file": "${env:SERVER_GRPC_TLS_KEY_FILE}",
+            "cert_file": "/etc/otelcol-contrib/tls/server.pem",
+            "key_file": "/etc/otelcol-contrib/tls/server.key",
         }
 
 
-def test_the_collector_can_read_the_server_key() -> None:
-    assert _load_compose()["services"]["otel_collector"]["user"] == "0:0"
+def test_the_collector_mounts_only_the_server_cert_and_key() -> None:
+    collector = _load_compose()["services"]["otel_collector"]
+    assert collector["volumes"] == [
+        "${FLOWMESH_COLLECTOR_TLS_CERT:?set by flowmesh stack}"
+        ":/etc/otelcol-contrib/tls/server.pem:ro",
+        "${FLOWMESH_COLLECTOR_TLS_KEY:?set by flowmesh stack}"
+        ":/etc/otelcol-contrib/tls/server.key:ro",
+    ]
+
+
+def test_the_collector_runs_unprivileged() -> None:
+    collector = _load_compose()["services"]["otel_collector"]
+    assert collector["user"] == "${FLOWMESH_COLLECTOR_USER:?set by flowmesh stack}"
+    assert collector["read_only"] is True
+    assert collector["cap_drop"] == ["ALL"]
+    assert collector["security_opt"] == ["no-new-privileges:true"]

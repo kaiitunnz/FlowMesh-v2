@@ -194,16 +194,16 @@ services:
         target: /etc/otelcol-contrib/config.yaml
       - source: flowmesh_otel_collector_tls
         target: /etc/otelcol-contrib/tls.yaml
-    command: --config=/etc/otelcol-contrib/config.yaml ${TELEMETRY_OTLP_TLS_CONFIG_ARG:-}
-    # The server's TLS key is readable by its owner alone, and a bind mount keeps the
-    # host's ownership, so the collector runs as root as the server does.
-    user: "0:0"
+    command: --config=/etc/otelcol-contrib/config.yaml ${FLOWMESH_COLLECTOR_TLS_CONFIG_ARG?set by flowmesh stack}
+    user: ${FLOWMESH_COLLECTOR_USER:?set by flowmesh stack}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     volumes:
-      - ${SERVER_TLS_DIR:?set by flowmesh stack}:/etc/ssl/server:ro
+      - ${FLOWMESH_COLLECTOR_TLS_CERT:?set by flowmesh stack}:/etc/otelcol-contrib/tls/server.pem:ro
+      - ${FLOWMESH_COLLECTOR_TLS_KEY:?set by flowmesh stack}:/etc/otelcol-contrib/tls/server.key:ro
     environment:
       TELEMETRY_OTLP_TOKEN: ${TELEMETRY_OTLP_TOKEN:-}
-      SERVER_GRPC_TLS_CERT_FILE: ${SERVER_GRPC_TLS_CERT_FILE:-}
-      SERVER_GRPC_TLS_KEY_FILE: ${SERVER_GRPC_TLS_KEY_FILE:-}
       TELEMETRY_CLICKHOUSE_DSN: ${TELEMETRY_CLICKHOUSE_DSN:-clickhouse://clickhouse:9000?dial_timeout=10s}
       TELEMETRY_CLICKHOUSE_DATABASE: ${TELEMETRY_CLICKHOUSE_DATABASE:-flowmesh}
       TELEMETRY_CLICKHOUSE_USERNAME: ${TELEMETRY_CLICKHOUSE_USERNAME:-default}

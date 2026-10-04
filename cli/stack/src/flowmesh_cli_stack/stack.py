@@ -575,7 +575,7 @@ def down(
     logging.success("FlowMesh stack stopped.")
 
 
-STACK_SERVICES = ("server", "redis_control", "redis_telemetry")
+STACK_SERVICES = ("server", "redis_control", "redis_telemetry", "otel_collector")
 """Compose services that can be restarted individually."""
 
 WORKER_MANAGING_SERVICES = ("server",)
