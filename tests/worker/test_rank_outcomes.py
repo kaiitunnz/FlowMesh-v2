@@ -150,3 +150,62 @@ def test_a_rank_failure_is_recorded_where_hard_links_are_refused(
     with pytest.raises(ExecutionError, match="^CUDA out of memory$") as raised:
         _launch(tmp_path)
     assert raised.value.retryable
+
+
+def _child_failed() -> ChildFailedError:
+    failure = ProcessFailure(local_rank=1, pid=4242, exitcode=-6, error_file="")
+    return ChildFailedError(
+        name="worker.executors.sft_dist_entry", failures={1: failure}
+    )
+
+
+def test_a_rank_crash_after_rank_zero_published_returns_the_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def torchrun(*, module_args: list[str], **_: Any) -> None:
+        monkeypatch.setenv("RANK", "0")
+        distributed.run_rank(Path(module_args[1]), lambda: SFTResult(model_name="m"))
+        raise _child_failed()
+
+    monkeypatch.setattr(distributed, "run_torchrun", torchrun)
+    assert _launch(tmp_path).model_name == "m"
+
+
+def test_a_recorded_failure_wins_over_a_published_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def torchrun(*, module_args: list[str], **_: Any) -> None:
+        out_dir = Path(module_args[1])
+        monkeypatch.setenv("RANK", "0")
+        distributed.run_rank(out_dir, lambda: SFTResult(model_name="m"))
+        monkeypatch.setenv("RANK", "1")
+
+        def fail() -> SFTResult:
+            raise ExecutionError("rank 1 diverged")
+
+        with pytest.raises(ExecutionError):
+            distributed.run_rank(out_dir, fail)
+        raise _child_failed()
+
+    monkeypatch.setattr(distributed, "run_torchrun", torchrun)
+    with pytest.raises(ExecutionError, match="^rank 1 diverged$"):
+        _launch(tmp_path)
+
+
+def test_a_rank_that_exits_inside_its_run_records_the_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def torchrun(*, module_args: list[str], **_: Any) -> None:
+        monkeypatch.setenv("RANK", "0")
+
+        def exit_run() -> SFTResult:
+            raise SystemExit(1)
+
+        with pytest.raises(SystemExit):
+            distributed.run_rank(Path(module_args[1]), exit_run)
+        raise _child_failed()
+
+    monkeypatch.setattr(distributed, "run_torchrun", torchrun)
+    with pytest.raises(ExecutionError, match="SystemExit") as raised:
+        _launch(tmp_path)
+    assert not raised.value.retryable

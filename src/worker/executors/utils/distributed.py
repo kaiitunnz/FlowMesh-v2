@@ -156,7 +156,9 @@ def launch_ranks[ResultT: BaseModel](
     A launch that fails raises the first rank failure with its own message and
     retryability, and a launch whose rank 0 handed back no result fails. A rank that
     died before recording a failure, as one the OOM killer or a watchdog signal ends,
-    fails the launch retryably.
+    fails the launch retryably, unless rank 0 already handed back its result: rank 0
+    finishes only after every rank has left the collectives, so a rank dying after
+    that, as in a teardown abort, ends a finished training.
     """
     ipc = scratch_dir(out_dir)
     ipc.mkdir(parents=True, exist_ok=True)
@@ -174,6 +176,15 @@ def launch_ranks[ResultT: BaseModel](
     except BaseException as exc:
         if (failure := _read_rank_failure(failure_path)) is not None:
             raise failure from exc
+        if isinstance(exc, ChildFailedError) and result_path.exists():
+            logger.warning(
+                "A rank of %s failed after rank 0 handed back its result: %s",
+                module,
+                exc,
+            )
+            return result_type.model_validate_json(
+                result_path.read_text(encoding="utf-8")
+            )
         logger.exception("Distributed launch of %s failed", module)
         raise ExecutionError(
             f"distributed training failed: {exc}",
@@ -193,12 +204,16 @@ def run_rank(out_dir: Path, run: Callable[[], BaseModel]) -> None:
     ipc = scratch_dir(out_dir)
     try:
         result = run()
-    except Exception as exc:
+    except BaseException as exc:
         _publish_once(
             ipc / _FAILURE_FILE,
             json.dumps(
                 {
-                    "message": str(exc) or type(exc).__name__,
+                    "message": (
+                        str(exc) or type(exc).__name__
+                        if isinstance(exc, Exception)
+                        else f"{type(exc).__name__}: {exc}"
+                    ),
                     "retryable": isinstance(exc, ExecutionError) and exc.retryable,
                 }
             ),
