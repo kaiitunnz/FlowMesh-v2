@@ -31,7 +31,7 @@ from ...registries.worker import WorkerRegistry
 from ...schemas.common import OkResponse
 from ...schemas.logs import LogEntry, LogEvent, LogQueryResponse
 from ...schemas.tasks import TaskPage
-from ...task.models import TaskOrder, task_order
+from ...task.models import SERVE_TASK_TYPES, TaskOrder, task_order
 from ...task.runtime import TaskInfo, TaskRuntime
 from ...utils.cursors import decode_position, encode_cursor
 from ...utils.query import QueryFilter
@@ -47,6 +47,8 @@ from ._listing import (
 )
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
+
+_STOPPABLE_TASK_TYPES = SERVE_TASK_TYPES | {TaskType.SSH}
 
 
 def _strip_private_fields(data: dict[str, Any]) -> dict[str, Any]:
@@ -205,11 +207,11 @@ async def stop_task(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
         )
-    if record.task.spec.taskType not in (TaskType.SSH, TaskType.SERVE):
+    if record.task.spec.taskType not in _STOPPABLE_TASK_TYPES:
         # TODO: Support stopping other task types.
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="Stopping is only supported for SSH and SERVE tasks currently",
+            detail="Stopping is only supported for SSH and serve tasks currently",
         )
     if record.status != "DISPATCHED":
         raise HTTPException(
