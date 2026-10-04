@@ -15,9 +15,8 @@ from shared.tasks.specs import DevModelSpecStrict
 from shared.tasks.specs.serve import ServeSpecStrict
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import (
+    make_dev_model_executor,
     make_serve_executor,
-    make_worker_config,
-    make_worker_hardware,
     make_worker_task_message,
 )
 from worker.executors import dev_model_executor
@@ -26,9 +25,7 @@ from worker.executors.dev_model_executor import DevModelExecutor
 
 
 def _dev_model() -> DevModelExecutor:
-    return DevModelExecutor(
-        make_worker_config(enable_dev_model=True), make_worker_hardware()
-    )
+    return make_dev_model_executor()
 
 
 def _dev_model_task(task_id: str, ttl: float = 60.0) -> Any:

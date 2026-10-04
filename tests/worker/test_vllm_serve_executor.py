@@ -3,14 +3,19 @@
 import collections
 import io
 import logging
-import socket
+import shutil
+import socketserver
+import stat
+import tempfile
 import threading
 import time
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
-import requests
 
 from shared.tasks.components.model import ModelConfig, ModelSource
 from shared.tasks.specs.serve import ServeSpecStrict
@@ -24,12 +29,14 @@ from tests.worker.factories import (
 from worker import hw
 from worker.executors import vllm_serve_executor as mod
 from worker.executors.base_executor import ExecutionError, TaskCancelledError
-from worker.executors.utils.net import resolve_bind_port
 from worker.executors.vllm_serve_executor import (
     ServeResult,
     VLLMServeExecutor,
     _drain_to_log,
 )
+from worker.resident import LocalEngine
+
+_SOCKET = Path("/nonexistent/engine.sock")
 
 
 class TestVLLMServeExecutorInit:
@@ -253,7 +260,6 @@ class TestServeExecutorCmdBuilding:
                     "served_model_name": "alias",
                     "revision": "v1",
                     "model": "evil/model",
-                    "host": "0.0.0.0",
                 },
             ),
         )
@@ -261,7 +267,7 @@ class TestServeExecutorCmdBuilding:
         last = {flag: cmd[i + 1] for i, flag in enumerate(cmd) if flag.startswith("--")}
         assert last["--served-model-name"] == "alias"
         assert last["--model"] == "Qwen/Qwen3-0.6B"
-        assert last["--host"] == "127.0.0.1"
+        assert "--uds" in last
         assert last["--revision"] == "v2"
 
     def test_vllm_dict_keys_become_flags(self, tmp_path: Path) -> None:
@@ -411,13 +417,22 @@ class TestServeLoopbackEndpoint:
             m.pid = 12345
             return m
 
-        keys = ex._engine_keys()
-        self.published: list[str | None] = []
-        emit = MagicMock(
-            side_effect=lambda task_id, _payload: self.published.append(
-                keys.resolve(task_id)
+        engines = ex._local_engines()
+        self.published: list[LocalEngine | None] = []
+        self.socket_dirs: list[tuple[Path, int, int]] = []
+
+        def emit_update(task_id: str, payload: dict[str, Any]) -> None:
+            self.published.append(engines.lookup(task_id))
+            directory = Path(payload["serve"]["_socket"]).parent
+            self.socket_dirs.append(
+                (
+                    directory,
+                    stat.S_IMODE(directory.stat().st_mode),
+                    stat.S_IMODE(directory.parent.stat().st_mode),
+                )
             )
-        )
+
+        emit = MagicMock(side_effect=emit_update)
         with (
             patch("subprocess.Popen", side_effect=fake_popen),
             patch.object(ex, "_poll_health"),
@@ -427,7 +442,7 @@ class TestServeLoopbackEndpoint:
         ):
             result = ex.run(task, tmp_path)
 
-        self.withdrawn = keys.resolve(task.task_id) is None
+        self.withdrawn = engines.lookup(task.task_id) is None
         serve = emit.call_args.args[1]["serve"]
         return captured[0], serve, result
 
@@ -450,22 +465,67 @@ class TestServeLoopbackEndpoint:
             taskType=TaskType.SERVE,
             model=ModelConfig(source=ModelSource(identifier="m")),
         )
-        self._run(spec, tmp_path)
-        assert self.published == [self.envs[0]["VLLM_API_KEY"]]
+        _, serve, _ = self._run(spec, tmp_path)
+        assert self.published == [
+            LocalEngine(str(serve["_socket"]), self.envs[0]["VLLM_API_KEY"])
+        ]
         assert self.withdrawn
 
-    def test_binds_loopback_and_emits_private_facts(self, tmp_path: Path) -> None:
+    def test_listens_only_on_a_worker_private_socket(self, tmp_path: Path) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            port=8001,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+        )
+        cmd, serve, _ = self._run(spec, tmp_path)
+        assert cmd[cmd.index("--uds") + 1] == serve["_socket"]
+        assert "--host" not in cmd and "--port" not in cmd
+        assert serve["model"] == "m"
+        # No listener or credential is ever publicly exposed.
+        assert set(serve) == {"model", "interface", "_socket"}
+        assert serve["interface"] == "chat"
+
+    def test_each_engine_socket_lives_in_its_own_private_directory(
+        self, tmp_path: Path
+    ) -> None:
         spec = ServeSpecStrict(
             taskType=TaskType.SERVE,
             model=ModelConfig(source=ModelSource(identifier="m")),
         )
-        cmd, serve, _ = self._run(spec, tmp_path)
-        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
-        assert serve["_host"] == "127.0.0.1"
-        assert serve["model"] == "m"
-        # No raw routable host, listener, or credential is ever publicly exposed.
-        assert set(serve) == {"model", "interface", "_host", "_port"}
-        assert serve["interface"] == "chat"
+        self._run(spec, tmp_path)
+        ((first, first_mode, root_mode),) = self.socket_dirs
+        self._run(spec, tmp_path)
+        ((second, second_mode, _),) = self.socket_dirs
+        assert first != second
+        assert first_mode == second_mode == root_mode == 0o700
+        assert not first.exists() and not second.exists()
+
+    def test_the_socket_directory_is_removed_when_the_engine_fails(
+        self, tmp_path: Path
+    ) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+        )
+        task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
+        ex = self._make_executor()
+        sockets: list[Path] = []
+
+        def fake_popen(cmd: list[str], **_: object) -> MagicMock:
+            sockets.append(Path(cmd[cmd.index("--uds") + 1]))
+            m = MagicMock()
+            m.stdout = io.StringIO("")
+            m.pid = 12345
+            return m
+
+        with (
+            patch("subprocess.Popen", side_effect=fake_popen),
+            patch.object(ex, "_poll_health", side_effect=ExecutionError("exited")),
+            patch.object(ex, "_terminate_process_group"),
+            pytest.raises(ExecutionError, match="exited"),
+        ):
+            ex.run(task, tmp_path)
+        assert sockets and not sockets[0].parent.exists()
 
     def test_result_never_carries_api_key(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
@@ -474,72 +534,36 @@ class TestServeLoopbackEndpoint:
         )
         _, _, result = self._run(spec, tmp_path)
         assert "api_key" not in result.model_dump()
+        assert result.port is None
 
-    def test_unset_port_auto_selects_free_port(self, tmp_path: Path) -> None:
-        spec = ServeSpecStrict(
-            taskType=TaskType.SERVE,
-            model=ModelConfig(source=ModelSource(identifier="m")),
-        )
-        cmd, serve, _ = self._run(spec, tmp_path)
-        port = int(cmd[cmd.index("--port") + 1])
-        assert 1 <= port <= 65535
-        assert serve["_port"] == port
 
-    def test_explicit_free_port_is_used(self, tmp_path: Path) -> None:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.bind(("127.0.0.1", 0))
-            free_port = probe.getsockname()[1]
-        spec = ServeSpecStrict(
-            taskType=TaskType.SERVE,
-            port=free_port,
-            model=ModelConfig(source=ModelSource(identifier="m")),
-        )
-        cmd, serve, _ = self._run(spec, tmp_path)
-        assert cmd[cmd.index("--port") + 1] == str(free_port)
-        assert serve["_port"] == free_port
+class TestReadinessOverTheSocket:
+    def test_the_health_poll_reaches_the_engine_over_its_socket(self) -> None:
+        directory = Path(tempfile.mkdtemp())
+        path = directory / "engine.sock"
 
-    def test_explicit_occupied_port_fails_with_clear_error(
-        self, tmp_path: Path
-    ) -> None:
-        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        class _Health(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200 if self.path == "/health" else 404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return None
+
+        server = socketserver.ThreadingUnixStreamServer(path.as_posix(), _Health)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        proc = MagicMock()
+        proc.poll.return_value = None
         try:
-            holder.bind(("127.0.0.1", 0))
-            holder.listen(1)
-            occupied = holder.getsockname()[1]
-            spec = ServeSpecStrict(
-                taskType=TaskType.SERVE,
-                port=occupied,
-                model=ModelConfig(source=ModelSource(identifier="m")),
+            make_serve_executor()._poll_health(
+                proc, path, "tsk-test", 5.0, collections.deque()
             )
-            task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
-            ex = self._make_executor()
-            with pytest.raises(ExecutionError, match=f"port {occupied} is unavailable"):
-                ex.run(task, tmp_path)
         finally:
-            holder.close()
-
-
-class TestResolvePort:
-    def test_none_returns_free_ephemeral_port(self) -> None:
-        port = resolve_bind_port(None, "127.0.0.1")
-        assert 1 <= port <= 65535
-
-    def test_two_calls_can_return_distinct_usable_ports(self) -> None:
-        first = resolve_bind_port(None, "127.0.0.1")
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
-            holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            holder.bind(("127.0.0.1", first))
-            holder.listen(1)
-            second = resolve_bind_port(None, "127.0.0.1")
-            assert second != first
-
-    def test_occupied_requested_port_raises(self) -> None:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
-            holder.bind(("127.0.0.1", 0))
-            holder.listen(1)
-            occupied = holder.getsockname()[1]
-            with pytest.raises(ExecutionError, match="unavailable"):
-                resolve_bind_port(occupied, "127.0.0.1")
+            server.shutdown()
+            server.server_close()
+            shutil.rmtree(directory)
 
 
 class TestDefaultReadinessTimeout:
@@ -674,10 +698,12 @@ class TestPollHealth:
         orig = mod._HEALTH_POLL_INTERVAL_SEC
         mod._HEALTH_POLL_INTERVAL_SEC = 0.001
         try:
-            with patch("requests.get", side_effect=requests.ConnectionError()):
+            with patch.object(
+                httpx.Client, "get", side_effect=httpx.ConnectError("refused")
+            ):
                 with pytest.raises(ExecutionError) as exc_info:
                     ex._poll_health(
-                        mock_proc, 8000, "tsk-test", timeout_sec=0.01, tail=tail
+                        mock_proc, _SOCKET, "tsk-test", timeout_sec=0.01, tail=tail
                     )
         finally:
             mod._HEALTH_POLL_INTERVAL_SEC = orig
@@ -697,10 +723,12 @@ class TestPollHealth:
             ["CUDA error: device-side assert triggered"], maxlen=200
         )
 
-        with patch("requests.get", side_effect=requests.ConnectionError()):
+        with patch.object(
+            httpx.Client, "get", side_effect=httpx.ConnectError("refused")
+        ):
             with pytest.raises(ExecutionError) as exc_info:
                 ex._poll_health(
-                    mock_proc, 8000, "tsk-test", timeout_sec=30.0, tail=tail
+                    mock_proc, _SOCKET, "tsk-test", timeout_sec=30.0, tail=tail
                 )
 
         assert "CUDA error: device-side assert triggered" in str(exc_info.value)
@@ -715,10 +743,12 @@ class TestPollHealth:
         orig = mod._HEALTH_POLL_INTERVAL_SEC
         mod._HEALTH_POLL_INTERVAL_SEC = 0.001
         try:
-            with patch("requests.get", side_effect=requests.ConnectionError()):
+            with patch.object(
+                httpx.Client, "get", side_effect=httpx.ConnectError("refused")
+            ):
                 with pytest.raises(ExecutionError, match=r"within 3s"):
                     ex._poll_health(
-                        mock_proc, 8000, "tsk-x", timeout_sec=3.0, tail=tail
+                        mock_proc, _SOCKET, "tsk-x", timeout_sec=3.0, tail=tail
                     )
         finally:
             mod._HEALTH_POLL_INTERVAL_SEC = orig
@@ -732,8 +762,8 @@ class TestPollHealth:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("requests.get", return_value=mock_resp):
-            ex._poll_health(mock_proc, 8000, "tsk-ok", timeout_sec=30.0, tail=tail)
+        with patch.object(httpx.Client, "get", return_value=mock_resp):
+            ex._poll_health(mock_proc, _SOCKET, "tsk-ok", timeout_sec=30.0, tail=tail)
 
     def test_cancel_during_poll_raises(self) -> None:
         ex = self._make_executor()
@@ -741,11 +771,13 @@ class TestPollHealth:
         mock_proc.poll.return_value = None
         tail = self._empty_tail()
 
-        with patch("requests.get", side_effect=requests.ConnectionError()):
+        with patch.object(
+            httpx.Client, "get", side_effect=httpx.ConnectError("refused")
+        ):
             with ex._signals.running("tsk-cancel"), pytest.raises(TaskCancelledError):
                 ex.cancel("tsk-cancel")
                 ex._poll_health(
-                    mock_proc, 8000, "tsk-cancel", timeout_sec=60.0, tail=tail
+                    mock_proc, _SOCKET, "tsk-cancel", timeout_sec=60.0, tail=tail
                 )
 
     def test_stop_during_poll_returns(self) -> None:
@@ -754,11 +786,13 @@ class TestPollHealth:
         mock_proc.poll.return_value = None
         tail = self._empty_tail()
 
-        with patch("requests.get", side_effect=requests.ConnectionError()):
+        with patch.object(
+            httpx.Client, "get", side_effect=httpx.ConnectError("refused")
+        ):
             with ex._signals.running("tsk-stop"):
                 ex.stop("tsk-stop")
                 ex._poll_health(
-                    mock_proc, 8000, "tsk-stop", timeout_sec=60.0, tail=tail
+                    mock_proc, _SOCKET, "tsk-stop", timeout_sec=60.0, tail=tail
                 )
 
     def test_empty_tail_no_snippet_in_message(self) -> None:
@@ -771,10 +805,12 @@ class TestPollHealth:
         orig = mod._HEALTH_POLL_INTERVAL_SEC
         mod._HEALTH_POLL_INTERVAL_SEC = 0.001
         try:
-            with patch("requests.get", side_effect=requests.ConnectionError()):
+            with patch.object(
+                httpx.Client, "get", side_effect=httpx.ConnectError("refused")
+            ):
                 with pytest.raises(ExecutionError) as exc_info:
                     ex._poll_health(
-                        mock_proc, 8000, "tsk-empty", timeout_sec=0.01, tail=tail
+                        mock_proc, _SOCKET, "tsk-empty", timeout_sec=0.01, tail=tail
                     )
         finally:
             mod._HEALTH_POLL_INTERVAL_SEC = orig
@@ -881,11 +917,13 @@ class TestPollHealthEofFastFail:
         eof_event.set()  # simulate pipe EOF arriving before readiness timeout
 
         start = time.time()
-        with patch("requests.get", side_effect=requests.ConnectionError()):
+        with patch.object(
+            httpx.Client, "get", side_effect=httpx.ConnectError("refused")
+        ):
             with pytest.raises(ExecutionError):
                 ex._poll_health(
                     mock_proc,
-                    8000,
+                    _SOCKET,
                     "tsk-eof",
                     timeout_sec=600.0,
                     tail=tail,
@@ -908,11 +946,13 @@ class TestPollHealthEofFastFail:
         eof_event = threading.Event()
         eof_event.set()
 
-        with patch("requests.get", side_effect=requests.ConnectionError()):
+        with patch.object(
+            httpx.Client, "get", side_effect=httpx.ConnectError("refused")
+        ):
             with pytest.raises(ExecutionError) as exc_info:
                 ex._poll_health(
                     mock_proc,
-                    8000,
+                    _SOCKET,
                     "tsk-eof-output",
                     timeout_sec=600.0,
                     tail=tail,
@@ -933,11 +973,13 @@ class TestPollHealthEofFastFail:
         orig = mod._HEALTH_POLL_INTERVAL_SEC
         mod._HEALTH_POLL_INTERVAL_SEC = 0.001
         try:
-            with patch("requests.get", side_effect=requests.ConnectionError()):
+            with patch.object(
+                httpx.Client, "get", side_effect=httpx.ConnectError("refused")
+            ):
                 with pytest.raises(ExecutionError, match=r"within 1s"):
                     ex._poll_health(
                         mock_proc,
-                        8000,
+                        _SOCKET,
                         "tsk-no-eof",
                         timeout_sec=1.0,
                         tail=self._empty_tail(),
@@ -982,11 +1024,5 @@ class TestServeTtlAcrossReruns:
 
     def test_an_elapsed_ttl_starts_no_engine(self, tmp_path: Path) -> None:
         popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=180.0)
-        popen.assert_not_called()
-        assert deadlines == []
-
-    def test_an_elapsed_ttl_ends_without_binding_its_port(self, tmp_path: Path) -> None:
-        with patch.object(mod, "resolve_bind_port", side_effect=ExecutionError("busy")):
-            popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=180.0)
         popen.assert_not_called()
         assert deadlines == []

@@ -23,10 +23,11 @@ from shared.tasks.worker_message import (
 )
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from worker.config import ObjectStoreConfig, WorkerConfig
+from worker.executors.dev_model_executor import DevModelExecutor
 from worker.executors.ssh_executor import SSHExecutor
 from worker.executors.ssh_session import DockerSessionBackend
 from worker.executors.vllm_serve_executor import VLLMServeExecutor
-from worker.resident import EngineKeyRegistry
+from worker.resident import LocalEngineRegistry
 
 DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     owner_principal=PrincipalContext(
@@ -119,13 +120,24 @@ def make_ssh_executor(config: WorkerConfig, **kwargs: Any) -> SSHExecutor:
 
 
 def make_serve_executor(
-    config: WorkerConfig | None = None, hardware: WorkerHardware | None = None
+    config: WorkerConfig | None = None,
+    hardware: WorkerHardware | None = None,
+    engine_root: Path | None = None,
 ) -> VLLMServeExecutor:
-    """Build a vLLM serve executor on a stand-in lifecycle holding real engine keys."""
+    """Build a vLLM serve executor on a lifecycle holding a real engine registry."""
     lifecycle = MagicMock()
-    lifecycle.engine_keys = EngineKeyRegistry()
+    lifecycle.local_engines = LocalEngineRegistry(engine_root)
     return VLLMServeExecutor(
         config or make_worker_config(), hardware or make_worker_hardware(), lifecycle
+    )
+
+
+def make_dev_model_executor() -> DevModelExecutor:
+    """Build a dev_model executor on a lifecycle holding a real engine registry."""
+    lifecycle = MagicMock()
+    lifecycle.local_engines = LocalEngineRegistry()
+    return DevModelExecutor(
+        make_worker_config(enable_dev_model=True), make_worker_hardware(), lifecycle
     )
 
 

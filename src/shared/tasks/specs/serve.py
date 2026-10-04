@@ -41,7 +41,7 @@ class ServeSpecTemplate(ModelSpecTemplate):
 # listens, and the key its sidecar presents. vLLM's parser also reads a config file and
 # accepts any unambiguous prefix of an option, so a spec key must be a plain option name
 # that neither names a config file nor abbreviates an owned option.
-_EXECUTOR_OWNED_ENGINE_OPTIONS = ("api_key", "host", "model", "port")
+_EXECUTOR_OWNED_ENGINE_OPTIONS = ("api_key", "host", "model", "port", "uds")
 _ENGINE_CONFIG_OPTION = "config"
 _PLAIN_ENGINE_OPTION = re.compile(r"[a-z0-9_]+")
 

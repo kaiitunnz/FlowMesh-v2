@@ -254,7 +254,7 @@ async def test_a_serve_task_returned_before_its_adoption_is_not_adopted() -> Non
             task_id=task_id,
             worker_id="wkr-1",
             dispatch_id="dsp-1",
-            payload={"serve": {"_host": "h", "_port": 8000, "model": "org/served"}},
+            payload={"serve": {"_socket": "/run/engine.sock", "model": "org/served"}},
             ts=_TS,
         )
     )

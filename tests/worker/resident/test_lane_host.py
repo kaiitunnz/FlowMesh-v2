@@ -17,6 +17,7 @@ import pytest
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import (
+    LOCAL_ENGINE_BASE_URL,
     AdmissionHandoff,
     ReplicaEndpoint,
     RouteAuthorization,
@@ -29,8 +30,8 @@ from shared.resident.reports import (
 )
 from tests.shared.outcome_helpers import InMemoryContentStore
 from worker.resident.engine import EngineResponse
-from worker.resident.engine_keys import EngineKeyRegistry
 from worker.resident.lane_host import ResidentLaneHost
+from worker.resident.local_engines import LocalEngine, LocalEngineRegistry
 
 _COMPLETION = "a resident completion streamed across two lane hosts in pieces"
 
@@ -145,6 +146,7 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
         peek_request=lambda _t, _c: None,
         delete_request=lambda _t, _c: None,
         engine_open=_fake_engine,
+        lookup_local_engine=_stand_in_engine,
     )
     hosts["origin"], hosts["replica"] = origin, replica
     origin.start()
@@ -156,6 +158,7 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
                 "replica_id": "rpl-1",
                 "incarnation": 1,
                 "listener_generation": 1,
+                "serve_task_id": "tsk-serve",
                 "engine": {
                     "base_url": "http://engine/v1",
                     "model": "m",
@@ -199,21 +202,9 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
 
 
 def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
-    captured: dict[str, Any] = {}
-
-    class _Spy:
-        def bind(self, **kwargs: Any) -> None:
-            captured.update(kwargs)
-
-    host = ResidentLaneHost(
-        push_frame=lambda _f: None,
-        report_ack=lambda _a: None,
-        report_outcome=lambda _o: None,
-        content_store_for=lambda task_id: None,
-        peek_request=lambda _t, _c: None,
-        delete_request=lambda _t, _c: None,
-    )
-    host._replica = _Spy()  # type: ignore[assignment]
+    engines = LocalEngineRegistry()
+    engines.publish("tsk-serve", LocalEngine("/run/engine.sock", "local-key"))
+    host, captured = _bind_spy_host(engines)
     try:
         host._bind(
             {
@@ -238,7 +229,13 @@ def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
         host._loop.close()
 
 
-def _bind_spy_host(keys: EngineKeyRegistry) -> tuple[ResidentLaneHost, dict[str, Any]]:
+def _stand_in_engine(_serve_task_id: str) -> LocalEngine:
+    return LocalEngine("/run/engine.sock")
+
+
+def _bind_spy_host(
+    engines: LocalEngineRegistry,
+) -> tuple[ResidentLaneHost, dict[str, Any]]:
     """A lane host whose replica sidecar records its binds and unbinds."""
     captured: dict[str, Any] = {}
 
@@ -256,7 +253,7 @@ def _bind_spy_host(keys: EngineKeyRegistry) -> tuple[ResidentLaneHost, dict[str,
         content_store_for=lambda task_id: None,
         peek_request=lambda _t, _c: None,
         delete_request=lambda _t, _c: None,
-        lookup_engine_key=keys.lookup,
+        lookup_local_engine=engines.lookup,
     )
     host._replica = _Spy()  # type: ignore[assignment]
     return host, captured
@@ -268,38 +265,46 @@ def _bind_frame(frame_key: str | None) -> dict[str, Any]:
         "incarnation": 1,
         "listener_generation": 1,
         "serve_task_id": "tsk-serve",
-        "engine": {"base_url": "http://engine/v1", "model": "m", "api_key": frame_key},
+        "engine": {
+            "base_url": "http://10.0.0.9:8000/v1",
+            "model": "m",
+            "api_key": frame_key,
+        },
     }
 
 
 @pytest.mark.parametrize(
-    ("published", "frame_key", "expected"),
+    ("engine_key", "frame_key", "expected"),
     [
-        (True, None, "worker-local-key"),
-        (True, "forward-or-stale-key", "worker-local-key"),
-        (False, "forward-key", "forward-key"),
+        ("worker-local-key", None, "worker-local-key"),
+        ("worker-local-key", "forward-or-stale-key", "worker-local-key"),
+        (None, "forward-key", "forward-key"),
     ],
     ids=["no-frame-key", "frame-key-ignored", "keyless-stand-in"],
 )
-def test_bind_resolves_the_engine_key_inside_the_worker(
-    published: bool, frame_key: str | None, expected: str
+def test_bind_reaches_the_local_engine_over_its_socket(
+    engine_key: str | None, frame_key: str | None, expected: str
 ) -> None:
-    keys = EngineKeyRegistry()
-    if published:
-        keys.publish("tsk-serve", "worker-local-key")
-    host, captured = _bind_spy_host(keys)
+    engines = LocalEngineRegistry()
+    engines.publish("tsk-serve", LocalEngine("/run/engine.sock", engine_key))
+    host, captured = _bind_spy_host(engines)
     try:
         host._bind(_bind_frame(frame_key))
-        assert captured["endpoint"].api_key == expected
+        endpoint = captured["endpoint"]
+        assert endpoint.api_key == expected
+        assert endpoint.socket_path == "/run/engine.sock"
+        assert endpoint.base_url == LOCAL_ENGINE_BASE_URL
     finally:
         host._loop.close()
 
 
-def test_a_bind_after_the_engine_stopped_never_presents_the_frame_key() -> None:
-    keys = EngineKeyRegistry()
-    keys.publish("tsk-serve", "worker-local-key")
-    keys.withdraw("tsk-serve")
-    host, captured = _bind_spy_host(keys)
+@pytest.mark.parametrize("withdrawn", [False, True], ids=["never-ran", "stopped"])
+def test_a_bind_to_no_running_local_engine_fails_closed(withdrawn: bool) -> None:
+    engines = LocalEngineRegistry()
+    if withdrawn:
+        engines.publish("tsk-serve", LocalEngine("/run/engine.sock", "local-key"))
+        engines.withdraw("tsk-serve")
+    host, captured = _bind_spy_host(engines)
     try:
         host._bind(_bind_frame("forward-key"))
         assert "endpoint" not in captured
@@ -389,6 +394,7 @@ def test_siblings_sharing_a_call_keep_their_own_resident_drivers(
         peek_request=lambda _t, _c: None,
         delete_request=lambda _t, _c: None,
         engine_open=_gated_engine(gate),
+        lookup_local_engine=_stand_in_engine,
     )
     hosts["origin"], hosts["replica"] = origin, replica
     origin.start()
@@ -400,6 +406,7 @@ def test_siblings_sharing_a_call_keep_their_own_resident_drivers(
                 "replica_id": "rpl-1",
                 "incarnation": 1,
                 "listener_generation": 1,
+                "serve_task_id": "tsk-serve",
                 "engine": {
                     "base_url": "http://engine/v1",
                     "model": "m",

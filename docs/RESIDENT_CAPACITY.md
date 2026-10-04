@@ -140,8 +140,9 @@ Every public user-declared `serve` task is a resident-gated standing allocation 
 only by its task ID, over one FlowMesh-authenticated, claim-gated endpoint:
 `/api/v1/serve/tasks/{task_id}/{upstream_path}`. The request relays to the task's standing
 replica unchanged and the engine's own response comes back unchanged, so an
-OpenAI-compatible client can drive any endpoint the engine serves. The engine binds to
-loopback and is reached only through its claim-gated sidecar.
+OpenAI-compatible client can drive any endpoint the engine serves. The engine listens on
+a Unix socket private to its worker, so only that worker's claim-gated sidecar reaches it,
+and a serve task's `port` has no effect.
 
 A serve task's `model.vllm` keys become the engine's flags and `model.vllm.env_vars` its
 environment. The executor sets the model, listener, and engine key itself, so a spec

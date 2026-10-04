@@ -18,17 +18,18 @@ import time
 from pathlib import Path
 from typing import Any, NoReturn
 
-import requests
+import httpx
 
+from shared.resident.contracts import LOCAL_ENGINE_ORIGIN
 from shared.schemas.result import ServeResult
 from shared.tasks.specs.serve import ServeSpecStrict
 from shared.tasks.task_type import TaskType
 from worker.config import WorkerConfig
 from worker.hw import cuda_device_env
+from worker.resident.local_engines import LocalEngine
 
 from ..utils.process import signal_process_group
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
-from .utils.net import resolve_bind_port
 from .utils.serve_ttl import serve_deadline
 
 logger = logging.getLogger(__name__)
@@ -123,17 +124,34 @@ class VLLMServeExecutor(Executor):
         )
         if deadline <= time.time():
             logger.info("Serve task %s TTL elapsed; not starting vLLM", task.task_id)
-            return ServeResult(model=model_id, port=spec.port or 0)
+            return ServeResult(model=model_id)
         readiness_timeout = (
             spec.readinessTimeoutSeconds or _DEFAULT_READINESS_TIMEOUT_SEC
         )
-        # The engine listens on loopback only and is reached solely by its co-located
-        # claim-gated sidecar, which resolves the internally generated key inside this
-        # worker. External access is only through the gated task-ID serve route.
-        engine_keys = self._engine_keys()
+        with self._local_engines().socket_path() as socket_path:
+            return self._launch(
+                task, spec, model_id, deadline, readiness_timeout, socket_path, out_dir
+            )
+
+    def _launch(
+        self,
+        task: ExecutorTask,
+        spec: ServeSpecStrict,
+        model_id: str,
+        deadline: float,
+        readiness_timeout: float,
+        socket_path: Path,
+        out_dir: Path,
+    ) -> ServeResult:
+        """Run the engine on ``socket_path`` until its TTL elapses or it is stopped.
+
+        The engine listens only on the worker-private socket, so only this worker's
+        claim-gated sidecar reaches it, presenting the internally generated key it
+        resolves inside the worker. External access is only through the gated task-ID
+        serve route.
+        """
+        local_engines = self._local_engines()
         api_key = secrets.token_hex(32)
-        bind_host = "127.0.0.1"
-        port = resolve_bind_port(spec.port, bind_host)
 
         cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
         vllm_kwargs = dict(spec.model.vllm or {}) if spec.model is not None else {}
@@ -154,7 +172,7 @@ class VLLMServeExecutor(Executor):
             cmd.append("--trust-remote-code")
         # The executor's own options come last: vLLM keeps the last value of a repeated
         # option.
-        cmd.extend(["--model", model_id, "--host", bind_host, "--port", str(port)])
+        cmd.extend(["--model", model_id, "--uds", socket_path.as_posix()])
         if revision := spec.model_revision:
             cmd.extend(["--revision", revision])
 
@@ -173,10 +191,9 @@ class VLLMServeExecutor(Executor):
             env["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
 
         logger.info(
-            "Starting vLLM server for model %s on port %d "
+            "Starting vLLM server for model %s "
             "(task=%s ttl=%.0fs readiness_timeout=%.0fs)",
             model_id,
-            port,
             task.task_id,
             deadline - time.time(),
             readiness_timeout,
@@ -186,7 +203,7 @@ class VLLMServeExecutor(Executor):
 
         if self._signals.raise_if_cancelled():
             logger.info("Serve task %s stopped before vLLM launch", task.task_id)
-            return ServeResult(model=model_id, port=port)
+            return ServeResult(model=model_id)
 
         tail: collections.deque[str] = collections.deque(maxlen=_TAIL_MAX_LINES)
         try:
@@ -213,14 +230,14 @@ class VLLMServeExecutor(Executor):
         self._proc = proc
         try:
             self._poll_health(
-                proc, port, task.task_id, readiness_timeout, tail, eof_event
+                proc, socket_path, task.task_id, readiness_timeout, tail, eof_event
             )
             if self._signals.raise_if_cancelled():
                 logger.info("Serve task stop requested before vLLM became ready")
-                return ServeResult(model=model_id, port=port)
+                return ServeResult(model=model_id)
             # Worker-private endpoint facts ("_"-prefixed so task metadata never
-            # discloses the raw loopback listener); the resident endpoint probe reads
-            # them to bind the claim-gated sidecar in front of the engine.
+            # discloses them); the resident endpoint probe reads them to bind the
+            # claim-gated sidecar in front of the engine.
             interface = (
                 "embedding" if vllm_kwargs.get("runner") == "pooling" else "chat"
             )
@@ -228,32 +245,46 @@ class VLLMServeExecutor(Executor):
                 "serve": {
                     "model": model_id,
                     "interface": interface,
-                    "_host": "127.0.0.1",
-                    "_port": port,
+                    "_socket": socket_path.as_posix(),
                 }
             }
-            engine_keys.publish(task.task_id, api_key)
+            local_engines.publish(
+                task.task_id, LocalEngine(socket_path.as_posix(), api_key)
+            )
             self.emit_update(task.task_id, update_payload)
-            logger.info("vLLM server ready on port %d (task=%s)", port, task.task_id)
+            logger.info("vLLM server ready (task=%s)", task.task_id)
             self._wait_for_serve(proc, deadline)
         finally:
-            engine_keys.withdraw(task.task_id)
+            local_engines.withdraw(task.task_id)
             self._proc = None
             self._terminate_process_group(proc)
             drain_thread.join(timeout=5.0)
 
-        return ServeResult(model=model_id, port=port)
+        return ServeResult(model=model_id)
 
     def _poll_health(
         self,
         proc: subprocess.Popen[str],
-        port: int,
+        socket_path: Path,
         task_id: str,
         timeout_sec: float,
         tail: collections.deque[str],
         eof_event: threading.Event | None = None,
     ) -> None:
-        url = f"http://127.0.0.1:{port}/health"
+        with httpx.Client(
+            transport=httpx.HTTPTransport(uds=socket_path.as_posix()), timeout=2.0
+        ) as client:
+            self._poll_health_over(client, proc, task_id, timeout_sec, tail, eof_event)
+
+    def _poll_health_over(
+        self,
+        client: httpx.Client,
+        proc: subprocess.Popen[str],
+        task_id: str,
+        timeout_sec: float,
+        tail: collections.deque[str],
+        eof_event: threading.Event | None,
+    ) -> None:
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
             if self._signals.raise_if_cancelled():
@@ -282,10 +313,9 @@ class VLLMServeExecutor(Executor):
                     tail,
                 )
             try:
-                resp = requests.get(url, timeout=2.0)  # nosec B113 - explicit timeout
-                if resp.status_code == 200:
+                if client.get(f"{LOCAL_ENGINE_ORIGIN}/health").status_code == 200:
                     return
-            except requests.RequestException:
+            except httpx.HTTPError:
                 pass
             time.sleep(_HEALTH_POLL_INTERVAL_SEC)
         _raise_with_tail(

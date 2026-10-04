@@ -61,6 +61,7 @@ _GPU = {"hardware": {"gpu": {"count": 1}}}
         "host",
         "port",
         "model",
+        "uds",
         "hos",
         "api-ke",
         "mod",

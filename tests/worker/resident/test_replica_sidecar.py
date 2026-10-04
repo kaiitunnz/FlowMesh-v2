@@ -112,7 +112,7 @@ def _http_engine(
     reply: Callable[[httpx.Request], httpx.Response],
 ) -> HttpEngineDelivery:
     delivery = HttpEngineDelivery()
-    delivery._client = httpx.AsyncClient(transport=httpx.MockTransport(reply))
+    delivery._clients[None] = httpx.AsyncClient(transport=httpx.MockTransport(reply))
     return delivery
 
 

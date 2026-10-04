@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     # cycle. They are only ever annotations.
     from worker.egress import PendingEgressRequestStore
     from worker.lifecycle import Lifecycle
-    from worker.resident import EngineKeyRegistry, ResidentRequestStore
+    from worker.resident import LocalEngineRegistry, ResidentRequestStore
 
 type ExecutorTask = WorkerTaskMessage
 type TaskReference = WorkerTaskMessage | MergedChildTaskStrict
@@ -222,11 +222,11 @@ class Executor(ABC):
             raise ExecutionError("executor has no worker lifecycle")
         return self._lifecycle.resident_requests
 
-    def _engine_keys(self) -> "EngineKeyRegistry":
-        """The worker-private keys this worker's serve engines accept."""
+    def _local_engines(self) -> "LocalEngineRegistry":
+        """The serve engines this worker launched, reached only from inside it."""
         if self._lifecycle is None:
             raise ExecutionError("executor has no worker lifecycle")
-        return self._lifecycle.engine_keys
+        return self._lifecycle.local_engines
 
     def prepare(self) -> None:
         """Optional: called once before the first `run`.

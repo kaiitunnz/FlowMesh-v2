@@ -14,7 +14,7 @@ from typing import Any
 from lumid_hooks import PrincipalContext
 
 from server.telemetry.tracing import ControlPlaneTracer
-from shared.resident.contracts import ReplicaEndpoint
+from shared.resident.contracts import LOCAL_ENGINE_BASE_URL, ReplicaEndpoint
 from shared.schemas.command import MediatedOpMessage
 from shared.tasks.task_type import TaskType
 
@@ -23,7 +23,11 @@ from ..network.reverse_relay import RelaySessionStore
 from ..network.service import NetworkPlane
 from ..registries import WorkerRegistry
 from ..registries.resident import ResidentRegistry
-from ..task.models import SETTLING_TASK_STATUSES, TaskStatus
+from ..task.models import (
+    SETTLING_TASK_STATUSES,
+    TaskStatus,
+    serve_engine_reported,
+)
 from ..task.runtime import TaskRuntime
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
@@ -99,18 +103,14 @@ def build_resident_capacity(
         ):
             return None
         serve = record.latest_update.get("serve")
-        if not isinstance(serve, dict):
+        if not isinstance(serve, dict) or not serve_engine_reported(serve):
             return None
-        # The raw listener host/port are worker-private ("_"-prefixed) so task metadata
-        # never discloses them; only the co-located sidecar reaches the loopback engine,
-        # with a key it resolves inside its worker, and only the gated task-ID route
-        # reaches the sidecar. Only the keyless dev_model stand-in carries the forward
-        # key, which it presents to its keyed upstream.
-        host, port = serve.get("_host"), serve.get("_port")
-        if not host or not port:
-            return None
+        # Only the co-located sidecar reaches the engine, over the worker-private
+        # socket its worker resolves, and only the gated task-ID route reaches the
+        # sidecar. Only the keyless dev_model stand-in carries the forward key, which
+        # it presents to its keyed upstream.
         return ReplicaEndpoint(
-            base_url=f"http://{host}:{port}/v1",
+            base_url=LOCAL_ENGINE_BASE_URL,
             model=str(serve.get("model") or ""),
             api_key=(
                 cfg.forward_api_key if record.task_type == TaskType.DEV_MODEL else None

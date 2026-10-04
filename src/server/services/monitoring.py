@@ -68,6 +68,7 @@ from ..task.models import (
     TaskRecord,
     TaskStatus,
     TaskUsage,
+    serve_engine_reported,
 )
 from ..task.runtime import TaskRuntime
 from ..utils.logging import log_node_event, log_worker_event
@@ -1235,7 +1236,7 @@ class EventMonitor:
         url at all: an address that could only fail closed is worse than none.
         """
         inner = payload.get("serve") if isinstance(payload, dict) else None
-        if not isinstance(inner, dict) or not inner.get("_port"):
+        if not isinstance(inner, dict) or not serve_engine_reported(inner):
             return payload
         payload = payload.copy()
         inner = inner.copy()
@@ -1306,7 +1307,7 @@ class EventMonitor:
         ):
             return
         serve = record.latest_update.get("serve") if record.latest_update else None
-        if isinstance(serve, dict) and serve.get("_port"):
+        if serve_engine_reported(serve):
             self._gated_serve.adopt(
                 task_id,
                 _serve_access_mode(record),

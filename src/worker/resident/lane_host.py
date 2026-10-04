@@ -27,6 +27,7 @@ from shared.resident.carriage import (
     ResidentCarriagePlan,
 )
 from shared.resident.contracts import (
+    LOCAL_ENGINE_BASE_URL,
     AdmissionHandoff,
     ReplicaEndpoint,
     RouteAuthorization,
@@ -41,7 +42,7 @@ from shared.resident.reports import (
 from shared.schemas.network import RouteObservationOutcome, Transport
 
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
-from .engine_keys import LocalEngineKey
+from .local_engines import LocalEngine
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .peer_listener import ResidentPeerListener
 from .replica_sidecar import ResidentReplicaSidecar
@@ -55,8 +56,8 @@ OutcomeSink = Callable[[ResidentOpOutcome], None]
 ObservationReport = Callable[[ResidentRouteObservation], None]
 # Resolves where one task's outcomes materialize, or None when it can finalize none.
 OutcomeStoreFor = Callable[[str], FabricContentStore | None]
-# The key of the engine this worker launched for a serve task; None if it launched none.
-EngineKeyLookup = Callable[[str], LocalEngineKey | None]
+# The live engine this worker launched for a serve task, or None if it runs none.
+LocalEngineLookup = Callable[[str], LocalEngine | None]
 
 
 # A lane busy sending waits on the event stream; a re-registration waits this long.
@@ -83,11 +84,11 @@ class ResidentLaneHost:
         peer_enabled: bool = False,
         peer_listener_sock: socket.socket | None = None,
         connect_budget_sec: float = 5.0,
-        lookup_engine_key: EngineKeyLookup | None = None,
+        lookup_local_engine: LocalEngineLookup | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._push_frame = push_frame
-        self._lookup_engine_key = lookup_engine_key
+        self._lookup_local_engine = lookup_local_engine
         self._report_ack = report_ack
         self._report_outcome = report_outcome
         self._content_store_for = content_store_for
@@ -279,31 +280,31 @@ class ResidentLaneHost:
         serve_task_id = frame.get("serve_task_id")
         binding_generation = frame.get("binding_generation")
         replica_id = str(frame["replica_id"])
-        # An engine this worker launched is reached only with its own key, never the
-        # frame's; once that engine stopped, its port may belong to another process.
-        # A frame's key reaches a keyless stand-in's upstream.
+        # The sidecar reaches only an engine this worker launched and still runs, over
+        # its worker-private socket and with its own key; the frame names no address.
+        # A keyless stand-in presents the frame's key to its own upstream.
         local = (
-            self._lookup_engine_key(str(serve_task_id))
-            if serve_task_id and self._lookup_engine_key is not None
+            self._lookup_local_engine(str(serve_task_id))
+            if serve_task_id and self._lookup_local_engine is not None
             else None
         )
-        if local is not None and local.key is None:
+        if local is None:
             self._logger.warning(
-                "Refusing sidecar bind for %s: serve task %s engine stopped",
+                "Refusing sidecar bind for %s: serve task %s runs no engine here",
                 replica_id,
                 serve_task_id,
             )
             self._replica.unbind(replica_id)
             return
-        api_key = local.key if local is not None else engine.get("api_key")
         self._replica.bind(
             replica_id=replica_id,
             incarnation=int(frame["incarnation"]),
             listener_generation=int(frame["listener_generation"]),
             endpoint=ReplicaEndpoint(
-                base_url=str(engine["base_url"]),
+                base_url=LOCAL_ENGINE_BASE_URL,
                 model=str(engine.get("model") or ""),
-                api_key=api_key,
+                api_key=local.api_key or engine.get("api_key"),
+                socket_path=local.socket_path,
                 interface=str(engine.get("interface") or "chat"),
             ),
             serve_task_id=str(serve_task_id) if serve_task_id is not None else None,

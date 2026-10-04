@@ -161,8 +161,7 @@ class Node:
         self.dispatch(serve_task_id, worker_id, dispatch_id)
         self.runtime.mark_started(serve_task_id, worker_id, {}, TS, dispatch_id)
         serve: dict[str, Any] = {
-            "_host": "10.0.0.5",
-            "_port": port,
+            "_socket": f"/run/engine-{port}.sock",
             "model": "m",
             "interface": "chat",
         }

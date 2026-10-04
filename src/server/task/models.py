@@ -53,6 +53,15 @@ SETTLING_TASK_STATUSES = TERMINAL_TASK_STATUSES | {TaskStatus.CANCELLING}
 SERVE_TASK_TYPES = frozenset({TaskType.SERVE, TaskType.DEV_MODEL})
 
 
+def serve_engine_reported(serve: Any) -> bool:
+    """Whether a serve task's ``serve`` update reports its running engine.
+
+    The engine's worker-private socket ("_"-prefixed so task metadata never discloses
+    it) marks an engine the worker's sidecar can bind to.
+    """
+    return isinstance(serve, dict) and bool(serve.get("_socket"))
+
+
 class WorkflowSettlement(NamedTuple):
     """Whether every task of a workflow has settled, and the last of their
     finishes."""
