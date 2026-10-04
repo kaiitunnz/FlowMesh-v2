@@ -12,6 +12,7 @@ pytest.importorskip("vllm", reason="vllm not installed (needs --extra inference-
 pytest.importorskip("torch", reason="torch not installed (needs --extra inference)")
 
 from pydantic import TypeAdapter
+from vllm.exceptions import VLLMValidationError
 
 from shared.schemas.result import InferenceResult
 from shared.tasks import MergedChildTaskStrict, TaskSpecStrict
@@ -65,7 +66,9 @@ def _run(
 
     def _generate(prompts: list[Any], **_kwargs: Any) -> list[SimpleNamespace]:
         if rejected in prompts:
-            raise ValueError("The decoder prompt is longer than max_model_len")
+            raise VLLMValidationError(
+                "The decoder prompt is longer than the maximum model length"
+            )
         return [
             SimpleNamespace(
                 outputs=(
@@ -141,7 +144,7 @@ def test_the_parents_own_input_still_fails_the_dispatch(tmp_path: Path) -> None:
 def test_a_batch_the_engine_rejects_fails_the_dispatch(tmp_path: Path) -> None:
     # The dispatch fails rather than running again on an engine the failure may have
     # left unusable; the root decides whose failure it was.
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         _run(
             _spec("parent"),
             [_child("tsk-ok", _spec("ok")), _child("tsk-long", _spec("too-long"))],
