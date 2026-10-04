@@ -130,9 +130,10 @@ The NUS runners sit inside the NUS network, so only triggers that required write
 Runtime dependency versions live in two places with different styles:
 
 - **`pyproject.toml` dependency groups** — `>=X.Y.Z` lower bounds. Expresses a compatibility floor; lets uv resolve the current acceptable version.
-- **`src/worker/requirements/requirements{,.gpu}.txt`** — exact `==X.Y.Z` pins for deterministic, reproducible environment of worker environment.
+- **`src/server/requirements.txt` and `src/worker/requirements/requirements{,.gpu}.txt`** — the images' direct dependencies, pinned `==X.Y.Z`.
+- **`src/server/constraints.txt` and `src/worker/requirements/constraints.txt`** — every package `uv.lock` resolves for the images, which each image install takes as `--constraint`, so an image installs the versions CI tests. The CUDA libraries the torch backend brings, and setuptools, are left for each image to resolve.
 
-The requirements files are **auto-generated** from runtime dependency groups
+These files are **auto-generated** from runtime dependency groups
 in `pyproject.toml` + `uv.lock` by `scripts/dev/sync_requirements.py`. Do not
 edit them by hand.
 
@@ -143,13 +144,13 @@ When you bump a dependency:
 # 2. Re-lock.
 uv lock
 
-# 3. Regenerate the worker requirements files.
+# 3. Regenerate the requirements and constraints files.
 uv run scripts/dev/sync_requirements.py --write
 
-# 4. Commit all three together: pyproject.toml, uv.lock, requirements*.txt.
+# 4. Commit them together: pyproject.toml, uv.lock, requirements*.txt, constraints.txt.
 ```
 
-The `sync-requirements` pre-commit hook (and the `Requirements Sync Check` CI job) enforces this — a PR that edits `pyproject.toml` or `uv.lock` without regenerating the requirements files will fail with a diff pointing at the stale file.
+The `sync-requirements` pre-commit hook (and the `Requirements Sync Check` CI job) enforces this — a PR that edits `pyproject.toml` or `uv.lock` without regenerating these files will fail with a diff pointing at the stale file.
 
 ## Releases
 

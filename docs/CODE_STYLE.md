@@ -90,10 +90,11 @@ widen the skip list silently.
 
 ## Dependency CVE scanning (pip-audit)
 
-CI runs `pip-audit` against each generated requirements file
-(`src/server/requirements.txt`,
-`src/worker/requirements/requirements.txt`,
-`src/worker/requirements/requirements.gpu.txt`). The job lives in
+CI runs `pip-audit` against the locked set each image installs — the
+generated `src/server/constraints.txt` and
+`src/worker/requirements/constraints.txt` — and against a resolution of
+`src/worker/requirements/requirements.gpu.txt`, which covers the packages
+the CUDA image resolves for itself. The job lives in
 `.github/workflows/security.yml`.
 
 When pip-audit reports a new CVE, the only real fix is to bump the
@@ -117,8 +118,8 @@ CVE exposure tracks PyPI `vllm 0.28.0` regardless of the build variant.
 | PYSEC-2026-3804 | accelerate | (none) | no fix version published; the latest release (1.14.0) is still affected |
 
 The worker GPU audit ignores `PYSEC-2026-3447`, `PYSEC-2026-3740`, and
-`PYSEC-2026-3804`; the worker CPU audit ignores `PYSEC-2026-3804`; the
-server audit ignores nothing.
+`PYSEC-2026-3804`; the worker audit ignores `PYSEC-2026-3740` and
+`PYSEC-2026-3804`; the server audit ignores nothing.
 
 When a blocker lifts, drop the corresponding `--ignore-vuln` flag from
 the workflow and the row from this table — don't extend the rationale to
