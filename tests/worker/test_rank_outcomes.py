@@ -4,6 +4,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from torch.distributed.elastic.multiprocessing.errors import (
+    ChildFailedError,
+    ProcessFailure,
+)
 
 from shared.schemas.result import SFTResult
 from shared.tasks import TaskType
@@ -115,5 +119,21 @@ def test_a_launch_that_fails_before_any_rank_reports_names_the_launch_error(
         raise RuntimeError("torchrun could not start")
 
     monkeypatch.setattr(distributed, "run_torchrun", torchrun)
-    with pytest.raises(ExecutionError, match="torchrun could not start"):
+    with pytest.raises(ExecutionError, match="torchrun could not start") as raised:
         _launch(tmp_path)
+    assert not raised.value.retryable
+
+
+def test_a_rank_killed_before_it_records_a_failure_is_retryable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def torchrun(**_: Any) -> None:
+        failure = ProcessFailure(local_rank=1, pid=4242, exitcode=-9, error_file="")
+        raise ChildFailedError(
+            name="worker.executors.sft_dist_entry", failures={1: failure}
+        )
+
+    monkeypatch.setattr(distributed, "run_torchrun", torchrun)
+    with pytest.raises(ExecutionError, match="distributed training failed") as raised:
+        _launch(tmp_path)
+    assert raised.value.retryable

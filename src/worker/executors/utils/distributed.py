@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from pydantic import BaseModel
+from torch.distributed.elastic.multiprocessing.errors import ChildFailedError
 from torch.distributed.run import main as _torchrun_main
 
 from shared.utils.manifest import scratch_dir
@@ -148,7 +149,9 @@ def launch_ranks[ResultT: BaseModel](
     """Run ``module`` as torchrun ranks over ``task`` and return rank 0's result.
 
     A launch that fails raises the first rank failure with its own message and
-    retryability, and a launch whose rank 0 handed back no result fails.
+    retryability, and a launch whose rank 0 handed back no result fails. A rank that
+    died before recording a failure, as one the OOM killer or a watchdog signal ends,
+    fails the launch retryably.
     """
     ipc = scratch_dir(out_dir)
     ipc.mkdir(parents=True, exist_ok=True)
@@ -167,7 +170,10 @@ def launch_ranks[ResultT: BaseModel](
         if (failure := _read_rank_failure(failure_path)) is not None:
             raise failure from exc
         logger.exception("Distributed launch of %s failed", module)
-        raise ExecutionError(f"distributed training failed: {exc}") from exc
+        raise ExecutionError(
+            f"distributed training failed: {exc}",
+            retryable=isinstance(exc, ChildFailedError),
+        ) from exc
     if not result_path.exists():
         raise ExecutionError("distributed training returned no result from rank 0")
     return result_type.model_validate_json(result_path.read_text(encoding="utf-8"))
