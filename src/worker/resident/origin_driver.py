@@ -245,7 +245,7 @@ class ResidentOriginDriver:
             await self._stream(origin)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001 - any escape holds the credit uncertain
+        except Exception as exc:  # any escape holds the credit uncertain
             self._logger.exception("resident origin drive failed")
             self._report_outcome(self._uncertain(req, f"origin drive error: {exc}"))
         finally:

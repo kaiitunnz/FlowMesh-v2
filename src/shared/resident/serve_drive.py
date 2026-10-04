@@ -197,7 +197,7 @@ class ServeOriginDrive:
             await self._stream(drive)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001 - any escape holds the credit uncertain
+        except Exception as exc:  # any escape holds the credit uncertain
             self._logger.exception("serve relay drive failed")
             self._control.on_outcome(
                 self._uncertain(drive, f"serve relay error: {exc}")

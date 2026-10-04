@@ -463,9 +463,7 @@ class ResidentReplicaSidecar:
                 KIND_FAILED, definite=True, reason=f"engine request rejected: {exc}"
             )
             return
-        except (
-            Exception
-        ) as exc:  # noqa: BLE001 - any other open failure still terminates
+        except Exception as exc:  # any other open failure still terminates
             await session.send_wire(
                 KIND_FAILED, definite=False, reason=f"engine open failed: {exc}"
             )
@@ -483,7 +481,7 @@ class ResidentReplicaSidecar:
             await session.send_wire(
                 KIND_FAILED, definite=False, reason=f"engine stream lost: {exc}"
             )
-        except Exception as exc:  # noqa: BLE001 - any after-head error still terminates
+        except Exception as exc:  # any after-head error still terminates
             # Any other after-HEAD failure holds the credit uncertain rather than dying
             # silently after the head; a reap's CancelledError is a BaseException and
             # still propagates, emitting no terminal.
