@@ -238,6 +238,40 @@ def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
         host._loop.close()
 
 
+def _bind_spy_host(keys: EngineKeyRegistry) -> tuple[ResidentLaneHost, dict[str, Any]]:
+    """A lane host whose replica sidecar records its binds and unbinds."""
+    captured: dict[str, Any] = {}
+
+    class _Spy:
+        def bind(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def unbind(self, replica_id: str) -> None:
+            captured["unbound"] = replica_id
+
+    host = ResidentLaneHost(
+        push_frame=lambda _f: None,
+        report_ack=lambda _a: None,
+        report_outcome=lambda _o: None,
+        content_store_for=lambda task_id: None,
+        peek_request=lambda _t, _c: None,
+        delete_request=lambda _t, _c: None,
+        lookup_engine_key=keys.lookup,
+    )
+    host._replica = _Spy()  # type: ignore[assignment]
+    return host, captured
+
+
+def _bind_frame(frame_key: str | None) -> dict[str, Any]:
+    return {
+        "replica_id": "rpl-1",
+        "incarnation": 1,
+        "listener_generation": 1,
+        "serve_task_id": "tsk-serve",
+        "engine": {"base_url": "http://engine/v1", "model": "m", "api_key": frame_key},
+    }
+
+
 @pytest.mark.parametrize(
     ("published", "frame_key", "expected"),
     [
@@ -250,40 +284,26 @@ def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
 def test_bind_resolves_the_engine_key_inside_the_worker(
     published: bool, frame_key: str | None, expected: str
 ) -> None:
-    captured: dict[str, Any] = {}
-
-    class _Spy:
-        def bind(self, **kwargs: Any) -> None:
-            captured.update(kwargs)
-
     keys = EngineKeyRegistry()
     if published:
         keys.publish("tsk-serve", "worker-local-key")
-    host = ResidentLaneHost(
-        push_frame=lambda _f: None,
-        report_ack=lambda _a: None,
-        report_outcome=lambda _o: None,
-        content_store_for=lambda task_id: None,
-        peek_request=lambda _t, _c: None,
-        delete_request=lambda _t, _c: None,
-        resolve_engine_key=keys.resolve,
-    )
-    host._replica = _Spy()  # type: ignore[assignment]
+    host, captured = _bind_spy_host(keys)
     try:
-        host._bind(
-            {
-                "replica_id": "rpl-1",
-                "incarnation": 1,
-                "listener_generation": 1,
-                "serve_task_id": "tsk-serve",
-                "engine": {
-                    "base_url": "http://engine/v1",
-                    "model": "m",
-                    "api_key": frame_key,
-                },
-            }
-        )
+        host._bind(_bind_frame(frame_key))
         assert captured["endpoint"].api_key == expected
+    finally:
+        host._loop.close()
+
+
+def test_a_bind_after_the_engine_stopped_never_presents_the_frame_key() -> None:
+    keys = EngineKeyRegistry()
+    keys.publish("tsk-serve", "worker-local-key")
+    keys.withdraw("tsk-serve")
+    host, captured = _bind_spy_host(keys)
+    try:
+        host._bind(_bind_frame("forward-key"))
+        assert "endpoint" not in captured
+        assert captured["unbound"] == "rpl-1"
     finally:
         host._loop.close()
 

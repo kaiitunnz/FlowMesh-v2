@@ -82,8 +82,15 @@ class _Workers(_WorkerStub):
 class Node:
     """One root's durable state, shared across its restarts."""
 
-    def __init__(self, cold_start_deadline_sec: float = 60.0) -> None:
+    def __init__(
+        self,
+        cold_start_deadline_sec: float = 60.0,
+        substrate: str = "dev_model",
+        forward_api_key: str | None = None,
+    ) -> None:
         self.cold_start_deadline_sec = cold_start_deadline_sec
+        self.substrate = substrate
+        self.forward_api_key = forward_api_key
         self.tasks = _YieldingRegistry()
         self.resident = _SnapshotRegistry()
         self.runtime, self.control = self._boot()
@@ -102,9 +109,10 @@ class Node:
             orchestration=OrchestrationConfig(
                 resident=ResidentCapacityConfig(
                     enabled=True,
-                    substrate="dev_model",
+                    substrate=self.substrate,
                     poll_interval_sec=0.01,
                     cold_start_deadline_sec=self.cold_start_deadline_sec,
+                    forward_api_key=self.forward_api_key,
                 )
             ),
             system_principal=lambda: SYSTEM,

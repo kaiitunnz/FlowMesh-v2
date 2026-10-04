@@ -16,6 +16,7 @@ from lumid_hooks import PrincipalContext
 from server.telemetry.tracing import ControlPlaneTracer
 from shared.resident.contracts import ReplicaEndpoint
 from shared.schemas.command import MediatedOpMessage
+from shared.tasks.task_type import TaskType
 
 from ..config import OrchestrationConfig, ResidentCapacityConfig
 from ..network.reverse_relay import RelaySessionStore
@@ -103,13 +104,17 @@ def build_resident_capacity(
         # The raw listener host/port are worker-private ("_"-prefixed) so task metadata
         # never discloses them; only the co-located sidecar reaches the loopback engine,
         # with a key it resolves inside its worker, and only the gated task-ID route
-        # reaches the sidecar.
+        # reaches the sidecar. Only the keyless dev_model stand-in carries the forward
+        # key, which it presents to its keyed upstream.
         host, port = serve.get("_host"), serve.get("_port")
         if not host or not port:
             return None
         return ReplicaEndpoint(
             base_url=f"http://{host}:{port}/v1",
             model=str(serve.get("model") or ""),
+            api_key=(
+                cfg.forward_api_key if record.task_type == TaskType.DEV_MODEL else None
+            ),
             interface=str(serve.get("interface") or "chat"),
         )
 
@@ -219,7 +224,6 @@ def wire_worker_delivery(
             sessions=sessions,
             directly_routable=resident_cfg.sidecar_directly_routable,
             resident_listener_port_of=_resident_listener_port_of,
-            forward_api_key=resident_cfg.forward_api_key,
             root_node_id=root_node_id,
             edge_id=edge_id,
             worker_cordoned=_worker_cordoned,

@@ -93,7 +93,7 @@ listed here is in `.env.example`.
 | `RESIDENT_MAX_TRANSIENT_REDRIVES` | `3` | Transient resident losses before a replica preempt |
 | `RESIDENT_SERVE_TTL_SEC` | – | Materialized replica TTL (seconds) |
 | `RESIDENT_ALLOWED_MODELS` | – | Comma-separated allowed model catalog; any if empty |
-| `RESIDENT_FORWARD_API_KEY` | – | Credential the adapter presents to a keyless replica |
+| `RESIDENT_FORWARD_API_KEY` | – | Credential control relays to a `dev_model` replica |
 | `RESIDENT_SELECTION_STRATEGY` | `batch-aware-best-fit` | Per-family replica-selection strategy |
 | `RESIDENT_IDLE_RETAIN_SEC` | `0` | Base idle retain window before teardown; 0 disables |
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |

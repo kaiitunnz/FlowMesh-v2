@@ -193,8 +193,7 @@ class ResidentWorkerDelivery:
     Present only when the network plane is enabled; resident-capacity control requires
     it. The resolvers map an agent task to its origin worker, a replica to its serving
     worker, and a worker to its node — in a single-node deployment every node is the
-    root node. ``forward_api_key`` lets a keyless sidecar stand-in reach a keyed
-    upstream.
+    root node.
     """
 
     relay: WorkerRelay
@@ -205,7 +204,6 @@ class ResidentWorkerDelivery:
     sessions: ResidentSessionWriter
     directly_routable: bool = False
     resident_listener_port_of: ResidentListenerPortOf | None = None
-    forward_api_key: str | None = None
     # The gated serve edge is the transport-only origin: it resolves its fence from the
     # root node's registered endpoint (read lazily — the node id is known only after the
     # supervisor handshake) and rides its own dedicated relay stream id, so a
@@ -1637,12 +1635,7 @@ class ResidentCapacityControl:
         ):
             return replica.listener
         generation = replica.listener_generation + 1
-        # The sidecar reaches its co-located engine with the endpoint's own key, or the
-        # deployment forward key so a keyless stand-in can still forward to a keyed
-        # upstream.
         engine = replica.endpoint
-        if engine.api_key is None and deps.forward_api_key is not None:
-            engine = engine.model_copy(update={"api_key": deps.forward_api_key})
         family = self._stores.families.get(replica.family)
         interface = family.interface if family is not None else engine.interface
         delivered = deps.relay(

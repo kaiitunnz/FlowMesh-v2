@@ -41,6 +41,7 @@ from shared.resident.reports import (
 from shared.schemas.network import RouteObservationOutcome, Transport
 
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
+from .engine_keys import LocalEngineKey
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .peer_listener import ResidentPeerListener
 from .replica_sidecar import ResidentReplicaSidecar
@@ -54,6 +55,8 @@ OutcomeSink = Callable[[ResidentOpOutcome], None]
 ObservationReport = Callable[[ResidentRouteObservation], None]
 # Resolves where one task's outcomes materialize, or None when it can finalize none.
 OutcomeStoreFor = Callable[[str], FabricContentStore | None]
+# The key of the engine this worker launched for a serve task; None if it launched none.
+EngineKeyLookup = Callable[[str], LocalEngineKey | None]
 
 
 # A lane busy sending waits on the event stream; a re-registration waits this long.
@@ -80,11 +83,11 @@ class ResidentLaneHost:
         peer_enabled: bool = False,
         peer_listener_sock: socket.socket | None = None,
         connect_budget_sec: float = 5.0,
-        resolve_engine_key: Callable[[str], str | None] | None = None,
+        lookup_engine_key: EngineKeyLookup | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._push_frame = push_frame
-        self._resolve_engine_key = resolve_engine_key
+        self._lookup_engine_key = lookup_engine_key
         self._report_ack = report_ack
         self._report_outcome = report_outcome
         self._content_store_for = content_store_for
@@ -275,16 +278,26 @@ class ResidentLaneHost:
         engine = frame["engine"]
         serve_task_id = frame.get("serve_task_id")
         binding_generation = frame.get("binding_generation")
-        # An engine this worker launched accepts only its own key, whatever key the
-        # frame carries; a frame's key reaches a keyless stand-in's upstream.
-        local_key = (
-            self._resolve_engine_key(str(serve_task_id))
-            if serve_task_id and self._resolve_engine_key is not None
+        replica_id = str(frame["replica_id"])
+        # An engine this worker launched is reached only with its own key, never the
+        # frame's; once that engine stopped, its port may belong to another process.
+        # A frame's key reaches a keyless stand-in's upstream.
+        local = (
+            self._lookup_engine_key(str(serve_task_id))
+            if serve_task_id and self._lookup_engine_key is not None
             else None
         )
-        api_key = local_key if local_key is not None else engine.get("api_key")
+        if local is not None and local.key is None:
+            self._logger.warning(
+                "Refusing sidecar bind for %s: serve task %s engine stopped",
+                replica_id,
+                serve_task_id,
+            )
+            self._replica.unbind(replica_id)
+            return
+        api_key = local.key if local is not None else engine.get("api_key")
         self._replica.bind(
-            replica_id=str(frame["replica_id"]),
+            replica_id=replica_id,
             incarnation=int(frame["incarnation"]),
             listener_generation=int(frame["listener_generation"]),
             endpoint=ReplicaEndpoint(
