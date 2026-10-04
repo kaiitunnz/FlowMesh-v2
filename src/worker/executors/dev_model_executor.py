@@ -433,7 +433,6 @@ class DevModelExecutor(Executor):
                         "interface": interface,
                         "_host": "127.0.0.1",
                         "_port": port,
-                        "_api_key": None,
                     }
                 },
             )

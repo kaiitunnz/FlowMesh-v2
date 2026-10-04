@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Final
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from lumid_hooks import PrincipalContext
 
@@ -25,6 +25,8 @@ from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from worker.config import ObjectStoreConfig, WorkerConfig
 from worker.executors.ssh_executor import SSHExecutor
 from worker.executors.ssh_session import DockerSessionBackend
+from worker.executors.vllm_serve_executor import VLLMServeExecutor
+from worker.resident import EngineKeyRegistry
 
 DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     owner_principal=PrincipalContext(
@@ -114,6 +116,17 @@ def make_ssh_executor(config: WorkerConfig, **kwargs: Any) -> SSHExecutor:
     daemon is reachable from the test."""
     with patch.object(DockerSessionBackend, "is_available", return_value=True):
         return SSHExecutor(config, **kwargs)
+
+
+def make_serve_executor(
+    config: WorkerConfig | None = None, hardware: WorkerHardware | None = None
+) -> VLLMServeExecutor:
+    """Build a vLLM serve executor on a stand-in lifecycle holding real engine keys."""
+    lifecycle = MagicMock()
+    lifecycle.engine_keys = EngineKeyRegistry()
+    return VLLMServeExecutor(
+        config or make_worker_config(), hardware or make_worker_hardware(), lifecycle
+    )
 
 
 def make_worker_task_message(

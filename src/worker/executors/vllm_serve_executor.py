@@ -116,8 +116,9 @@ class VLLMServeExecutor(Executor):
             spec.readinessTimeoutSeconds or _DEFAULT_READINESS_TIMEOUT_SEC
         )
         # The engine listens on loopback only and is reached solely by its co-located
-        # claim-gated sidecar; the api key is generated internally, never from the
-        # caller. External access is only through the gated task-ID serve route.
+        # claim-gated sidecar, which resolves the internally generated key inside this
+        # worker. External access is only through the gated task-ID serve route.
+        engine_keys = self._engine_keys()
         api_key = secrets.token_hex(32)
         bind_host = "127.0.0.1"
         port = resolve_bind_port(spec.port, bind_host)
@@ -132,8 +133,6 @@ class VLLMServeExecutor(Executor):
             bind_host,
             "--port",
             str(port),
-            "--api-key",
-            api_key,
         ]
         if revision := spec.model_revision:
             cmd.extend(["--revision", revision])
@@ -156,6 +155,8 @@ class VLLMServeExecutor(Executor):
         env = dict(os.environ)
         if self._devices is not None:
             env.update(cuda_device_env(self._devices))
+        # The key rides the engine's environment: argv is readable by every local user.
+        env["VLLM_API_KEY"] = api_key
         env.setdefault("VLLM_CONFIGURE_LOGGING", "0")
         env["PYTHONUNBUFFERED"] = "1"
         if "--enable-lora" in rendered_flags:
@@ -210,8 +211,8 @@ class VLLMServeExecutor(Executor):
                 logger.info("Serve task stop requested before vLLM became ready")
                 return ServeResult(model=model_id, port=port)
             # Worker-private endpoint facts ("_"-prefixed so task metadata never
-            # discloses the raw loopback listener or engine key); the resident endpoint
-            # probe reads them to bind the claim-gated sidecar in front of the engine.
+            # discloses the raw loopback listener); the resident endpoint probe reads
+            # them to bind the claim-gated sidecar in front of the engine.
             interface = (
                 "embedding"
                 if (vllm_kwargs or {}).get("runner") == "pooling"
@@ -223,13 +224,14 @@ class VLLMServeExecutor(Executor):
                     "interface": interface,
                     "_host": "127.0.0.1",
                     "_port": port,
-                    "_api_key": api_key,
                 }
             }
+            engine_keys.publish(task.task_id, api_key)
             self.emit_update(task.task_id, update_payload)
             logger.info("vLLM server ready on port %d (task=%s)", port, task.task_id)
             self._wait_for_serve(proc, deadline)
         finally:
+            engine_keys.withdraw(task.task_id)
             self._proc = None
             self._terminate_process_group(proc)
             drain_thread.join(timeout=5.0)

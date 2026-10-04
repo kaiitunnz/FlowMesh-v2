@@ -46,10 +46,10 @@ from worker.config import WorkerConfig
 if TYPE_CHECKING:
     # worker.egress, worker.resident and worker.lifecycle all reach this module
     # through worker.executors, so importing any of them here at runtime closes a
-    # cycle. All three are only ever annotations.
+    # cycle. They are only ever annotations.
     from worker.egress import PendingEgressRequestStore
     from worker.lifecycle import Lifecycle
-    from worker.resident import ResidentRequestStore
+    from worker.resident import EngineKeyRegistry, ResidentRequestStore
 
 type ExecutorTask = WorkerTaskMessage
 type TaskReference = WorkerTaskMessage | MergedChildTaskStrict
@@ -221,6 +221,12 @@ class Executor(ABC):
         if self._lifecycle is None:
             raise ExecutionError("executor has no worker lifecycle")
         return self._lifecycle.resident_requests
+
+    def _engine_keys(self) -> "EngineKeyRegistry":
+        """The worker-private keys this worker's serve engines accept."""
+        if self._lifecycle is None:
+            raise ExecutionError("executor has no worker lifecycle")
+        return self._lifecycle.engine_keys
 
     def prepare(self) -> None:
         """Optional: called once before the first `run`.

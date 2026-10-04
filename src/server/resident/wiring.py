@@ -100,16 +100,16 @@ def build_resident_capacity(
         serve = record.latest_update.get("serve")
         if not isinstance(serve, dict):
             return None
-        # The raw listener host/port and engine key are worker-private ("_"-prefixed) so
-        # task metadata never discloses them; only the co-located sidecar reaches the
-        # loopback engine, and only the gated task-ID route reaches the sidecar.
+        # The raw listener host/port are worker-private ("_"-prefixed) so task metadata
+        # never discloses them; only the co-located sidecar reaches the loopback engine,
+        # with a key it resolves inside its worker, and only the gated task-ID route
+        # reaches the sidecar.
         host, port = serve.get("_host"), serve.get("_port")
         if not host or not port:
             return None
         return ReplicaEndpoint(
             base_url=f"http://{host}:{port}/v1",
             model=str(serve.get("model") or ""),
-            api_key=serve.get("_api_key"),
             interface=str(serve.get("interface") or "chat"),
         )
 

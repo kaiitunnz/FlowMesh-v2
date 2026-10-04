@@ -12,11 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class ReplicaEndpoint(BaseModel):
     """The reachable address of a materialized replica.
 
-    ``api_key`` never reaches a workflow; it is held out of the durable snapshot
-    (``exclude=True``) so no credential is persisted in cleartext, and is re-attached
-    from a live probe on rehydrate. ``base_url`` is OpenAI-compatible for the inference
-    family. ``interface`` selects the engine route the replica serves (``chat`` or
-    ``embedding``).
+    ``api_key`` is a deployment forward key for a keyless stand-in, held out of the
+    durable snapshot (``exclude=True``); a serve engine's own key stays on its worker,
+    where the replica sidecar resolves it. ``base_url`` is OpenAI-compatible for the
+    inference family. ``interface`` selects the engine route the replica serves
+    (``chat`` or ``embedding``).
     """
 
     model_config = ConfigDict(frozen=True)

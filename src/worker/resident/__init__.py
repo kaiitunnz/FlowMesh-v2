@@ -11,12 +11,14 @@ from shared.network.session import FramedRelaySession, RelaySessionRole
 
 from .capture import capture_resident_request
 from .engine import EngineOpen, EngineResponse, HttpEngineDelivery
+from .engine_keys import EngineKeyRegistry
 from .lane_host import ResidentLaneHost
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
 from .request_store import ResidentRequestStore
 
 __all__ = [
+    "EngineKeyRegistry",
     "EngineOpen",
     "EngineResponse",
     "HttpEngineDelivery",

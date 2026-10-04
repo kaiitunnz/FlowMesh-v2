@@ -80,9 +80,11 @@ class ResidentLaneHost:
         peer_enabled: bool = False,
         peer_listener_sock: socket.socket | None = None,
         connect_budget_sec: float = 5.0,
+        resolve_engine_key: Callable[[str], str | None] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._push_frame = push_frame
+        self._resolve_engine_key = resolve_engine_key
         self._report_ack = report_ack
         self._report_outcome = report_outcome
         self._content_store_for = content_store_for
@@ -273,6 +275,9 @@ class ResidentLaneHost:
         engine = frame["engine"]
         serve_task_id = frame.get("serve_task_id")
         binding_generation = frame.get("binding_generation")
+        api_key = engine.get("api_key")
+        if api_key is None and serve_task_id and self._resolve_engine_key is not None:
+            api_key = self._resolve_engine_key(str(serve_task_id))
         self._replica.bind(
             replica_id=str(frame["replica_id"]),
             incarnation=int(frame["incarnation"]),
@@ -280,7 +285,7 @@ class ResidentLaneHost:
             endpoint=ReplicaEndpoint(
                 base_url=str(engine["base_url"]),
                 model=str(engine.get("model") or ""),
-                api_key=engine.get("api_key"),
+                api_key=api_key,
                 interface=str(engine.get("interface") or "chat"),
             ),
             serve_task_id=str(serve_task_id) if serve_task_id is not None else None,

@@ -16,6 +16,7 @@ from shared.tasks.components.model import ModelConfig, ModelSource
 from shared.tasks.specs.serve import ServeSpecStrict
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import (
+    make_serve_executor,
     make_worker_config,
     make_worker_hardware,
     make_worker_task_message,
@@ -152,7 +153,7 @@ class TestServeExecutorCmdBuilding:
     """Executor maps model.vllm + model_name + revision to vllm api_server flags."""
 
     def _make_executor(self) -> VLLMServeExecutor:
-        return VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+        return make_serve_executor()
 
     def _run_capture_cmd(self, spec: ServeSpecStrict, tmp_path: Path) -> list[str]:
         task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
@@ -298,7 +299,7 @@ class TestServeLoopbackEndpoint:
     """
 
     def _make_executor(self) -> VLLMServeExecutor:
-        return VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+        return make_serve_executor()
 
     def _run(
         self, spec: ServeSpecStrict, tmp_path: Path
@@ -306,9 +307,11 @@ class TestServeLoopbackEndpoint:
         task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
         ex = self._make_executor()
         captured: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
 
-        def fake_popen(cmd: list[str], **_: object) -> MagicMock:
+        def fake_popen(cmd: list[str], env: dict[str, str], **_: object) -> MagicMock:
             captured.append(list(cmd))
+            self.envs.append(env)
             m = MagicMock()
             m.stdout = io.StringIO("")
             m.poll.return_value = 0
@@ -316,7 +319,13 @@ class TestServeLoopbackEndpoint:
             m.pid = 12345
             return m
 
-        emit = MagicMock()
+        keys = ex._engine_keys()
+        self.published: list[str | None] = []
+        emit = MagicMock(
+            side_effect=lambda task_id, _payload: self.published.append(
+                keys.resolve(task_id)
+            )
+        )
         with (
             patch("subprocess.Popen", side_effect=fake_popen),
             patch.object(ex, "_poll_health"),
@@ -326,6 +335,7 @@ class TestServeLoopbackEndpoint:
         ):
             result = ex.run(task, tmp_path)
 
+        self.withdrawn = keys.resolve(task.task_id) is None
         serve = emit.call_args.args[1]["serve"]
         return captured[0], serve, result
 
@@ -335,9 +345,22 @@ class TestServeLoopbackEndpoint:
             model=ModelConfig(source=ModelSource(identifier="m")),
         )
         cmd, serve, _ = self._run(spec, tmp_path)
-        generated = cmd[cmd.index("--api-key") + 1]
+        generated = self.envs[0]["VLLM_API_KEY"]
         assert len(generated) == 64
-        assert serve["_api_key"] == generated
+        assert "--api-key" not in cmd
+        assert generated not in cmd
+        assert generated not in serve.values()
+
+    def test_the_sidecar_resolves_the_key_inside_the_worker(
+        self, tmp_path: Path
+    ) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+        )
+        self._run(spec, tmp_path)
+        assert self.published == [self.envs[0]["VLLM_API_KEY"]]
+        assert self.withdrawn
 
     def test_binds_loopback_and_emits_private_facts(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
@@ -349,7 +372,7 @@ class TestServeLoopbackEndpoint:
         assert serve["_host"] == "127.0.0.1"
         assert serve["model"] == "m"
         # No raw routable host, listener, or credential is ever publicly exposed.
-        assert set(serve) == {"model", "interface", "_host", "_port", "_api_key"}
+        assert set(serve) == {"model", "interface", "_host", "_port"}
         assert serve["interface"] == "chat"
 
     def test_result_never_carries_api_key(self, tmp_path: Path) -> None:
@@ -436,7 +459,7 @@ class TestVLLMServeExecutorCancelStop:
     def _make_executor(self) -> VLLMServeExecutor:
         cfg = make_worker_config()
         hw = make_worker_hardware()
-        return VLLMServeExecutor(cfg, hw)
+        return make_serve_executor(cfg, hw)
 
     def test_cancel_signals_the_running_task(self) -> None:
         ex = self._make_executor()
@@ -497,7 +520,7 @@ class TestVLLMServeExecutorCancelStop:
 class TestWaitForServe:
     def _make_executor(self) -> VLLMServeExecutor:
         cfg = make_worker_config()
-        return VLLMServeExecutor(cfg, make_worker_hardware())
+        return make_serve_executor(cfg)
 
     def test_exits_on_cancel(self) -> None:
         ex = self._make_executor()
@@ -541,7 +564,7 @@ class TestWaitForServe:
 
 class TestPollHealth:
     def _make_executor(self) -> VLLMServeExecutor:
-        return VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+        return make_serve_executor()
 
     def _empty_tail(self) -> "collections.deque[str]":
         return collections.deque(maxlen=200)
@@ -746,7 +769,7 @@ class TestPollHealthEofFastFail:
     """
 
     def _make_executor(self) -> VLLMServeExecutor:
-        return VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+        return make_serve_executor()
 
     def _empty_tail(self) -> "collections.deque[str]":
         return collections.deque(maxlen=200)
@@ -844,7 +867,7 @@ class TestServeTtlAcrossReruns:
         task = make_worker_task_message(
             spec=spec, task_type=TaskType.SERVE, serve_elapsed_sec=elapsed
         )
-        ex = VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+        ex = make_serve_executor()
         deadlines: list[float] = []
         proc = MagicMock()
         proc.stdout = io.StringIO("")

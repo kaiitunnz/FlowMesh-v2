@@ -389,7 +389,7 @@ class TestRunLifecycle:
         assert serve["model"] == "dev/model"
         # Only worker-private ("_"-prefixed) endpoint facts plus the model name and
         # served interface; no raw routable host, public listener, or credential.
-        assert set(serve) == {"model", "interface", "_host", "_port", "_api_key"}
+        assert set(serve) == {"model", "interface", "_host", "_port"}
         assert serve["interface"] == "chat"
         assert isinstance(result, DevModelResult)
         assert result.model == "dev/model"

@@ -142,24 +142,26 @@ class Node:
         worker_id: str = "wkr-1",
         dispatch_id: str | None = None,
         port: int = 8001,
+        reported_key: str | None = None,
     ) -> None:
-        """Dispatch the serve task and have it report its engine endpoint."""
+        """Dispatch the serve task and have it report its engine endpoint.
+
+        ``reported_key`` is an engine key the update carries, as an earlier worker
+        build reported one.
+        """
         dispatch_id = dispatch_id or new_dispatch_id()
         self.dispatch(serve_task_id, worker_id, dispatch_id)
         self.runtime.mark_started(serve_task_id, worker_id, {}, TS, dispatch_id)
+        serve: dict[str, Any] = {
+            "_host": "10.0.0.5",
+            "_port": port,
+            "model": "m",
+            "interface": "chat",
+        }
+        if reported_key is not None:
+            serve["_api_key"] = reported_key
         self.runtime.mark_updated(
-            serve_task_id,
-            worker_id,
-            {
-                "serve": {
-                    "_host": "10.0.0.5",
-                    "_port": port,
-                    "_api_key": ENGINE_KEY,
-                    "model": "m",
-                    "interface": "chat",
-                }
-            },
-            dispatch_id,
+            serve_task_id, worker_id, {"serve": serve}, dispatch_id
         )
 
     def dispatch(

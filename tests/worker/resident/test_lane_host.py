@@ -29,6 +29,7 @@ from shared.resident.reports import (
 )
 from tests.shared.outcome_helpers import InMemoryContentStore
 from worker.resident.engine import EngineResponse
+from worker.resident.engine_keys import EngineKeyRegistry
 from worker.resident.lane_host import ResidentLaneHost
 
 _COMPLETION = "a resident completion streamed across two lane hosts in pieces"
@@ -233,6 +234,51 @@ def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
         # serve_task_id=None and refuses every real serve bootstrap as wrong_serve_task.
         assert captured["serve_task_id"] == "tsk-serve"
         assert captured["binding_generation"] == 5
+    finally:
+        host._loop.close()
+
+
+@pytest.mark.parametrize(
+    ("frame_key", "expected"),
+    [(None, "worker-local-key"), ("forward-key", "forward-key")],
+    ids=["resolved-in-worker", "frame-carried"],
+)
+def test_bind_resolves_the_engine_key_inside_the_worker(
+    frame_key: str | None, expected: str
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Spy:
+        def bind(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    keys = EngineKeyRegistry()
+    keys.publish("tsk-serve", "worker-local-key")
+    host = ResidentLaneHost(
+        push_frame=lambda _f: None,
+        report_ack=lambda _a: None,
+        report_outcome=lambda _o: None,
+        content_store_for=lambda task_id: None,
+        peek_request=lambda _t, _c: None,
+        delete_request=lambda _t, _c: None,
+        resolve_engine_key=keys.resolve,
+    )
+    host._replica = _Spy()  # type: ignore[assignment]
+    try:
+        host._bind(
+            {
+                "replica_id": "rpl-1",
+                "incarnation": 1,
+                "listener_generation": 1,
+                "serve_task_id": "tsk-serve",
+                "engine": {
+                    "base_url": "http://engine/v1",
+                    "model": "m",
+                    "api_key": frame_key,
+                },
+            }
+        )
+        assert captured["endpoint"].api_key == expected
     finally:
         host._loop.close()
 
