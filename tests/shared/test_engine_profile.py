@@ -119,3 +119,10 @@ def test_a_profile_is_canonical() -> None:
     assert engine_profile({"dtype": "bf16", "max_model_len": 8}, None) == (
         engine_profile({"max_model_len": 8, "dtype": "bf16"}, None)
     )
+
+
+def test_a_null_engine_key_keys_no_profile() -> None:
+    assert engine_profile({"max_model_len": None, "rope_scaling": None}, None) is None
+    assert engine_profile({"dtype": "bfloat16", "max_model_len": None}, None) == (
+        engine_profile({"dtype": "bfloat16"}, None)
+    )

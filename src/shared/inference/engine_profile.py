@@ -59,15 +59,16 @@ def engine_profile(
 ) -> str | None:
     """Return the profile a chat or embedding leaf's engine configuration declares.
 
-    A credential-named engine variable is access rather than outcome, so no profile
-    carries one. A value that renders from upstream at dispatch is unknown when a
-    replica is chosen, so no profile carries one either.
+    A key set to null is unset. A credential-named engine variable is access rather
+    than outcome, so no profile carries one. A value that renders from upstream at
+    dispatch is unknown when a replica is chosen, so no profile carries one either.
     """
     keys = EMBEDDING_PROFILE_KEYS if embedding else ENGINE_PROFILE_KEYS
     profile: dict[str, Any] = {}
     for key, value in (vllm or {}).items():
         if (
             key not in keys
+            or value is None
             or (key in _DEFAULT_OFF and value is False)
             or contains_placeholder(value)
         ):
