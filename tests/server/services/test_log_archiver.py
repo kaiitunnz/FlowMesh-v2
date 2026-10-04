@@ -8,14 +8,13 @@ import socket
 import stat
 import threading
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from server.clients.redis import (
     task_log_archive_last_id_key,
-    task_log_archived_key,
     task_log_stream_key,
 )
 from server.services import log_archiver
@@ -49,21 +48,13 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-@pytest.mark.parametrize("recorded", [True, False])
+@pytest.mark.parametrize("content", ["", '{"m": "old"}\n'])
 def test_probing_an_archived_task_leaves_its_directory_alone(
-    archiver: TaskLogArchiver, runtime: MagicMock, recorded: bool
+    archiver: TaskLogArchiver, runtime: MagicMock, content: str
 ) -> None:
-    # Recorded as archived, or archived before that was recorded, with lines.
     logs_path = archiver._base_dir("tsk-1") / "logs" / "logs.jsonl"
     logs_path.parent.mkdir(parents=True, exist_ok=True)
-    if recorded:
-        logs_path.touch()
-        archived_key = task_log_archived_key("tsk-1")
-        cast(MagicMock, archiver._redis).get.side_effect = lambda key: (
-            "1" if key == archived_key else None
-        )
-    else:
-        logs_path.write_text('{"m": "old"}\n')
+    logs_path.write_text(content)
     task_dir = logs_path.parent.parent
     for directory in (task_dir, logs_path.parent):
         directory.chmod(0o755)
@@ -282,6 +273,12 @@ def _lines(archiver: TaskLogArchiver, task_id: str) -> list[str]:
     return path.read_text().splitlines() if path.exists() else []
 
 
+def _finalized(archiver: TaskLogArchiver, task_id: str) -> None:
+    logs = archiver._base_dir(task_id) / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "logs.jsonl").touch()
+
+
 class _Failing:
     """``prepare_output_dir`` failing with ENOSPC for one task while ``left`` is
     nonzero (negative: always), counting the attempts."""
@@ -411,12 +408,10 @@ def test_a_restart_while_retrying_still_archives_the_lines(
     _ticks(restarted, clock, 3, 1.0)
 
     assert _lines(restarted, "tsk-1") == ['{"m": "kept"}']
-    assert streams.checkpoints[task_log_archived_key("tsk-1")]
+    assert not streams.checkpoints
 
 
-def test_finalizing_records_the_task_archived_apart_from_its_stream_checkpoint(
-    tmp_path: Path,
-) -> None:
+def test_finalizing_leaves_no_per_task_key(tmp_path: Path) -> None:
     archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DISPATCHED})
     streams.publish("tsk-1", "one")
     with patch.object(log_archiver.time, "sleep"):
@@ -429,13 +424,48 @@ def test_finalizing_records_the_task_archived_apart_from_its_stream_checkpoint(
     with patch.object(log_archiver.time, "sleep"):
         archiver._tick()
 
-    # Older code reads the stream checkpoint as a stream id.
-    assert task_log_archive_last_id_key("tsk-1") not in streams.checkpoints
-    assert streams.checkpoints[task_log_archived_key("tsk-1")]
+    assert not streams.checkpoints
     restarted, _ = _streaming_archiver(
         tmp_path, {"tsk-1": TaskStatus.DONE}, streams=streams
     )
     assert restarted._archived("tsk-1")
+
+
+def test_a_finalized_task_without_lines_reads_archived_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DONE})
+    with patch.object(log_archiver.time, "sleep"):
+        archiver._tick()
+    assert (archiver._base_dir("tsk-1") / "manifest.json").is_file()
+    assert not streams.checkpoints
+
+    restarted, _ = _streaming_archiver(
+        tmp_path, {"tsk-1": TaskStatus.DONE}, streams=streams
+    )
+    with (
+        patch.object(log_archiver.time, "sleep"),
+        patch.object(restarted, "_finalize_manifest") as finalize,
+    ):
+        restarted._tick()
+
+    assert restarted._archived("tsk-1") is True
+    finalize.assert_not_called()
+
+
+def test_a_failed_starting_checkpoint_never_appends(tmp_path: Path) -> None:
+    archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DISPATCHED})
+    streams.redis.set_value.side_effect = ConnectionError("control Redis down")
+    streams.publish("tsk-1", "held")
+
+    with (
+        patch.object(log_archiver.time, "sleep"),
+        pytest.raises(ConnectionError),
+    ):
+        archiver._tick()
+
+    assert not (archiver._base_dir("tsk-1") / "logs" / "logs.jsonl").exists()
+    assert archiver._buffers["tsk-1"]
 
 
 def test_a_tick_with_only_retrying_tasks_waits_for_the_earliest_retry(
@@ -453,7 +483,7 @@ def test_a_tick_with_only_retrying_tasks_waits_for_the_earliest_retry(
     archiver, streams = _streaming_archiver(
         tmp_path, {"tsk-1": TaskStatus.DISPATCHED, "tsk-old": TaskStatus.DONE}
     )
-    streams.checkpoints[task_log_archived_key("tsk-old")] = "1"
+    _finalized(archiver, "tsk-old")
     read = streams.redis.xread_telemetry.side_effect
 
     def _blocking_read(requested: dict[str, str], **kwargs: Any) -> list[Any]:
@@ -564,7 +594,7 @@ def test_each_archived_task_is_probed_once(tmp_path: Path) -> None:
     finished = {f"tsk-{n}": TaskStatus.DONE for n in range(50)}
     archiver, streams = _streaming_archiver(tmp_path, finished)
     for task_id in finished:
-        streams.checkpoints[task_log_archived_key(task_id)] = "1"
+        _finalized(archiver, task_id)
 
     with patch.object(log_archiver.time, "sleep"):
         for _ in range(20):
