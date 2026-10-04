@@ -164,21 +164,61 @@ def test_a_withdrawn_engine_releases_the_lane_hosts_client() -> None:
         host.stop(5)
 
 
-def test_a_call_to_a_stopped_engine_creates_no_client() -> None:
-    endpoint = ReplicaEndpoint(
-        base_url=LOCAL_ENGINE_BASE_URL, model="m", socket_path="/run/engine-a.sock"
+def _endpoint(socket_path: str) -> ReplicaEndpoint:
+    return ReplicaEndpoint(
+        base_url=LOCAL_ENGINE_BASE_URL, model="m", socket_path=socket_path
     )
 
+
+def test_a_call_to_a_withdrawn_engine_creates_no_client() -> None:
+    engines = LocalEngineRegistry()
+    engines.publish("tsk-a", LocalEngine("/run/engine-a.sock"))
+    engines.withdraw("tsk-a")
+
     async def run() -> HttpEngineDelivery:
-        delivery = HttpEngineDelivery()
-        await delivery._shared_client(endpoint)
-        await delivery.evict("/run/engine-a.sock")
-        with pytest.raises(httpx.ConnectError, match="has stopped"):
-            await delivery(endpoint, '{"prompt": "hi"}')
+        delivery = HttpEngineDelivery(engine_live=engines.serves)
+        with pytest.raises(httpx.ConnectError, match="no engine listens"):
+            await delivery(_endpoint("/run/engine-a.sock"), '{"prompt": "hi"}')
         return delivery
 
-    delivery = asyncio.run(run())
+    assert asyncio.run(run())._clients == {}
+
+
+def test_engines_run_and_withdrawn_leave_no_state_in_the_delivery() -> None:
+    engines = LocalEngineRegistry()
+    delivery = HttpEngineDelivery(engine_live=engines.serves)
+
+    async def run() -> None:
+        for n in range(5):
+            path = f"/run/engine-{n}.sock"
+            engines.publish(f"tsk-{n}", LocalEngine(path))
+            await delivery._shared_client(_endpoint(path))
+            engines.withdraw(f"tsk-{n}")
+            await delivery.evict(path)
+
+    asyncio.run(run())
     assert delivery._clients == {}
+    assert set(vars(delivery)) == {
+        "_timeout",
+        "_chunk_chars",
+        "_engine_live",
+        "_clients",
+        "_client_lock",
+    }
+
+
+def test_a_live_engine_keeps_one_shared_client() -> None:
+    engines = LocalEngineRegistry()
+    engines.publish("tsk-a", LocalEngine("/run/engine-a.sock"))
+
+    async def run() -> HttpEngineDelivery:
+        delivery = HttpEngineDelivery(engine_live=engines.serves)
+        first = await delivery._shared_client(_endpoint("/run/engine-a.sock"))
+        assert await delivery._shared_client(_endpoint("/run/engine-a.sock")) is first
+        await delivery.aclose()
+        return delivery
+
+    asyncio.run(run())
 
 
 def test_a_failing_withdraw_listener_does_not_stop_the_others() -> None:

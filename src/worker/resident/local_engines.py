@@ -97,6 +97,11 @@ class LocalEngineRegistry:
             if listener in self._withdraw_listeners:
                 self._withdraw_listeners.remove(listener)
 
+    def serves(self, socket_path: str) -> bool:
+        """Return whether a live engine this worker launched listens on a socket."""
+        with self._lock:
+            return any(e.socket_path == socket_path for e in self._engines.values())
+
     def lookup(self, serve_task_id: str) -> LocalEngine | None:
         """Return the live engine this worker launched for a serve task, if any."""
         with self._lock:

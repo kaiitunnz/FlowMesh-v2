@@ -85,6 +85,7 @@ class ResidentLaneHost:
         peer_listener_sock: socket.socket | None = None,
         connect_budget_sec: float = 5.0,
         lookup_local_engine: LocalEngineLookup | None = None,
+        local_engine_live: Callable[[str], bool] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._push_frame = push_frame
@@ -95,7 +96,7 @@ class ResidentLaneHost:
         self._peek_request = peek_request
         self._delete_request = delete_request
         self._engine_open = engine_open or HttpEngineDelivery(
-            timeout_sec=engine_timeout_sec
+            timeout_sec=engine_timeout_sec, engine_live=local_engine_live
         )
         self._engine_open_raw = engine_open_raw or RawHttpEngineDelivery(
             timeout_sec=engine_timeout_sec

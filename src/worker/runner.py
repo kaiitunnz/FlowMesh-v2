@@ -547,6 +547,7 @@ class Runner:
             peer_material=self._peer_material,
             peer_listener_sock=self._peer_listener_sock,
             lookup_local_engine=self.lifecycle.local_engines.lookup,
+            local_engine_live=self.lifecycle.local_engines.serves,
             logger=self.logger,
         )
         host.start()

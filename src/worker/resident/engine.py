@@ -143,13 +143,17 @@ async def unload_adapter(
 class HttpEngineDelivery:
     """Delivers a completion from the co-located OpenAI-compatible engine."""
 
-    def __init__(self, *, timeout_sec: float = 300.0, chunk_chars: int = 8192) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_sec: float = 300.0,
+        chunk_chars: int = 8192,
+        engine_live: Callable[[str], bool] | None = None,
+    ) -> None:
         self._timeout = timeout_sec
         self._chunk_chars = max(1, chunk_chars)
+        self._engine_live = engine_live
         self._clients: dict[str | None, httpx.AsyncClient] = {}
-        # Each engine run gets a fresh socket path, so a stopped engine's path is
-        # never served again.
-        self._stopped: set[str] = set()
         self._client_lock = asyncio.Lock()
 
     async def _shared_client(self, endpoint: ReplicaEndpoint) -> httpx.AsyncClient:
@@ -161,17 +165,22 @@ class HttpEngineDelivery:
         so the conversations of a batch share it.
         """
         key = endpoint.socket_path
-        if key in self._stopped:
-            raise httpx.ConnectError(f"the engine on {key} has stopped")
         if (client := self._clients.get(key)) is None:
             async with self._client_lock:
                 if (client := self._clients.get(key)) is None:
+                    # An engine withdrawn before this point never gets a client; one
+                    # withdrawn after it has its client closed by ``evict``.
+                    if (
+                        key is not None
+                        and self._engine_live is not None
+                        and not self._engine_live(key)
+                    ):
+                        raise httpx.ConnectError(f"no engine listens on {key}")
                     client = self._clients[key] = engine_client(endpoint, self._timeout)
         return client
 
     async def evict(self, socket_path: str) -> None:
-        """Close the client of an engine that stopped, and refuse it from then on."""
-        self._stopped.add(socket_path)
+        """Close the client of an engine that stopped."""
         if (client := self._clients.pop(socket_path, None)) is not None:
             await client.aclose()
 

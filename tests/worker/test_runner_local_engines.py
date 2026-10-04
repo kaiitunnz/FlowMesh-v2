@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from tests.worker.factories import make_worker_hardware, no_mediated_op
 from worker.lifecycle import Lifecycle
-from worker.resident import LocalEngine
+from worker.resident import HttpEngineDelivery, LocalEngine
 from worker.resident.lane_host import ResidentLaneHost
 from worker.runner import Runner
 
@@ -35,6 +35,9 @@ def test_the_resident_lane_resolves_engines_from_the_worker_registry(
         assert host._lookup_local_engine is not None
         assert host._lookup_local_engine("tsk-serve") == engine
         assert lifecycle.local_engines._withdraw_listeners == [host.release_engine]
+        delivery = host._engine_open
+        assert isinstance(delivery, HttpEngineDelivery)
+        assert delivery._engine_live == lifecycle.local_engines.serves
         lifecycle.local_engines.withdraw("tsk-serve")
         assert host._lookup_local_engine("tsk-serve") is None
     finally:
