@@ -150,6 +150,8 @@ class VLLMServeExecutor(Executor):
             raise ExecutionError(str(exc)) from exc
         rendered_flags: set[str] = set()
         for k, v in vllm_kwargs.items():
+            if v is None:
+                continue
             flag = f"--{k.replace('_', '-')}"
             if isinstance(v, bool):
                 if v:

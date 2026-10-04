@@ -270,6 +270,18 @@ class TestServeExecutorCmdBuilding:
         assert "--uds" in last
         assert last["--revision"] == "v2"
 
+    def test_an_unset_engine_option_renders_no_flag(self, tmp_path: Path) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(
+                source=ModelSource(identifier="m"),
+                vllm={"max_model_len": None, "dtype": "bfloat16"},
+            ),
+        )
+        cmd = self._run_capture_cmd(spec, tmp_path)
+        assert "--max-model-len" not in cmd and "None" not in cmd
+        assert cmd[cmd.index("--dtype") + 1] == "bfloat16"
+
     def test_vllm_dict_keys_become_flags(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
             taskType=TaskType.SERVE,
