@@ -17,7 +17,6 @@ from ..utils.redact import is_credential_key
 
 ENGINE_PROFILE_KEYS = frozenset(
     {
-        "convert",
         "dtype",
         "enable_mm_embeds",
         "env_vars",
@@ -31,6 +30,9 @@ ENGINE_PROFILE_KEYS = frozenset(
         "trust_remote_code",
     }
 )
+
+# The pooling conversion shapes only an embedding engine; a chat engine ignores it.
+EMBEDDING_PROFILE_KEYS = ENGINE_PROFILE_KEYS | {"convert"}
 
 # ``seed`` seeds an engine whose requests are sampled draws either way, so it changes
 # which sample a request gets, not what the request returns.
@@ -52,17 +54,20 @@ _DEFAULT_REVISION = "main"
 _DEFAULT_OFF = frozenset({"enable_mm_embeds", "trust_remote_code"})
 
 
-def engine_profile(vllm: Mapping[str, Any] | None, revision: str | None) -> str | None:
-    """The canonical profile a leaf's engine configuration declares, or None.
+def engine_profile(
+    vllm: Mapping[str, Any] | None, revision: str | None, *, embedding: bool = False
+) -> str | None:
+    """The canonical profile a chat or embedding leaf's engine configuration declares.
 
     A credential-named engine variable is access rather than outcome, so no profile
     carries one. A value that renders from upstream at dispatch is unknown when a
     replica is chosen, so no profile carries one either.
     """
+    keys = EMBEDDING_PROFILE_KEYS if embedding else ENGINE_PROFILE_KEYS
     profile: dict[str, Any] = {}
     for key, value in (vllm or {}).items():
         if (
-            key not in ENGINE_PROFILE_KEYS
+            key not in keys
             or (key in _DEFAULT_OFF and value is False)
             or contains_placeholder(value)
         ):

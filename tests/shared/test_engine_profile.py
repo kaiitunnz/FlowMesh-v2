@@ -5,13 +5,15 @@ import json
 from pathlib import Path
 
 from shared.inference.engine_profile import (
+    EMBEDDING_PROFILE_KEYS,
     ENGINE_LOCAL_KEYS,
     ENGINE_PROFILE_KEYS,
     engine_profile,
 )
 
 _EXECUTORS = Path(__file__).resolve().parents[2] / "src" / "worker" / "executors"
-_READERS = ("vllm_executor.py", "vllm_embedding_executor.py", "vllm_lora_executor.py")
+_CHAT_READERS = ("vllm_executor.py", "vllm_lora_executor.py")
+_EMBEDDING_READERS = ("vllm_executor.py", "vllm_embedding_executor.py")
 
 
 def _key(node: ast.expr) -> str | None:
@@ -21,11 +23,21 @@ def _key(node: ast.expr) -> str | None:
 
 
 def _keys_read(source: str) -> set[str]:
-    """Keys read from a ``vllm_cfg`` mapping or listed as accepted engine args."""
+    """Keys read from a ``vllm_cfg`` mapping or listed as accepted engine args.
+
+    A key popped only to discard it is not read.
+    """
+    tree = ast.parse(source)
+    discarded = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+    }
     keys: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
+            and id(node) not in discarded
             and isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id == "vllm_cfg"
@@ -55,11 +67,21 @@ def _keys_read(source: str) -> set[str]:
     return keys
 
 
-def test_every_engine_key_a_local_executor_reads_is_classified() -> None:
-    read = set().union(*(_keys_read((_EXECUTORS / f).read_text()) for f in _READERS))
+def _read_by(readers: tuple[str, ...]) -> set[str]:
+    return set().union(*(_keys_read((_EXECUTORS / f).read_text()) for f in readers))
 
-    assert read == ENGINE_PROFILE_KEYS | ENGINE_LOCAL_KEYS
-    assert not ENGINE_PROFILE_KEYS & ENGINE_LOCAL_KEYS
+
+def test_every_engine_key_a_local_executor_reads_is_classified() -> None:
+    assert _read_by(_CHAT_READERS) == ENGINE_PROFILE_KEYS | ENGINE_LOCAL_KEYS
+    assert _read_by(_EMBEDDING_READERS) == EMBEDDING_PROFILE_KEYS | ENGINE_LOCAL_KEYS
+    assert not EMBEDDING_PROFILE_KEYS & ENGINE_LOCAL_KEYS
+
+
+def test_the_pooling_conversion_keys_only_an_embedding_profile() -> None:
+    assert engine_profile({"convert": "embed"}, None) is None
+    assert engine_profile({"convert": "embed"}, None, embedding=True) == (
+        '{"convert":"embed"}'
+    )
 
 
 def test_an_undeclared_or_engine_local_configuration_has_no_profile() -> None:

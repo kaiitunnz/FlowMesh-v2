@@ -303,6 +303,7 @@ def _leaf_service_dependency(
             engine_profile(
                 spec.model.vllm if spec.model is not None else None,
                 spec.model_revision,
+                embedding=interface is ServiceInterface.EMBEDDING,
             )
             if service_ref.strip() == (own_model or "").strip()
             else None

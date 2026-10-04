@@ -382,8 +382,8 @@ and cannot share a batch or route on a matching model name alone. The engine pro
 the configuration that changes what the engine returns, which the replica serves:
 `model.source.revision` and the `model.vllm` keys `max_model_len`, `tokenizer_revision`,
 `dtype`, `quantization`, `kv_cache_dtype`, `rope_scaling`, `rope_theta`,
-`limit_mm_per_prompt`, `enable_mm_embeds`, `trust_remote_code`, `convert`, and
-`env_vars`. Every other `model.vllm` key stays local to each engine. A leaf served by a
+`limit_mm_per_prompt`, `enable_mm_embeds`, `trust_remote_code`, and `env_vars`, plus
+`convert` for an embedding leaf. Every other `model.vllm` key stays local to each engine. A leaf served by a
 model other than its own lends that model no profile.
 
 An adapter does not fork a family: it co-batches on the base replica through its own
