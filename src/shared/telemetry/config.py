@@ -9,7 +9,12 @@ from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
-from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
+from shared.utils.parsing import (
+    parse_bool_env,
+    parse_float_env,
+    parse_int_env,
+    parse_secret_env,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +78,7 @@ class TelemetryConfig:
                 f"(got {level_raw!r})"
             ) from exc
         endpoint = _otlp_endpoint()
-        token = (os.getenv("SERVER_METRICS_OTLP_TOKEN") or "").strip()
+        token = parse_secret_env("SERVER_METRICS_OTLP_TOKEN")
         if token and endpoint and _sends_in_plaintext(endpoint):
             logger.warning(
                 "OTLP export to %s sends its token over plaintext; use an https:// "
@@ -92,7 +97,7 @@ class TelemetryConfig:
             resource_sample_sec=max(
                 1, parse_int_env("SERVER_METRICS_RESOURCE_SAMPLE_SEC", 15)
             ),
-            otlp_token=SecretStr(token) if token else None,
+            otlp_token=token,
             otlp_ca_pem=otlp_ca_pem,
         )
 

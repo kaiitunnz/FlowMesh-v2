@@ -10,10 +10,12 @@ from typing import NewType
 
 from pydantic import BaseModel, ConfigDict, SecretStr
 
+from shared.utils import parse_secret_env
+
 from ... import env
 from ...hooks import PrincipalContext
 from ..schemas import WorkerHardware, WorkerInfo, WorkerStatus
-from .utils import env_to_secret_str, to_env_str
+from .utils import to_env_str
 
 logger = logging.getLogger("supervisor")
 
@@ -51,13 +53,13 @@ class WorkerConfig(BaseModel):
     """Path to tar binary"""
     network_bandwidth: float | None = None
     """Bandwidth in bytes per second to throttle HTTP uploads"""
-    hf_token: SecretStr | None = env_to_secret_str("HF_TOKEN")
+    hf_token: SecretStr | None = parse_secret_env("HF_TOKEN")
     """Hugging Face API token"""
     hf_cache_dir: str | None = env.HF_CACHE_DIR
     """Hugging Face cache directory"""
     predownload_model_list: str = env.PREDOWNLOAD_MODEL_LIST
     """Comma-separated list of models to pre-download during worker startup"""
-    nebula_api_token: SecretStr | None = env_to_secret_str("NEBULA_API_TOKEN")
+    nebula_api_token: SecretStr | None = parse_secret_env("NEBULA_API_TOKEN")
     """Nebula API token"""
     upload_results: bool = env.WORKER_UPLOAD_RESULTS
     """Whether to always upload results to the server if spec.output.destination

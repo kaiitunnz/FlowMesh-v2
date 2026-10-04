@@ -1,16 +1,8 @@
-import os
 from typing import Any
 
 from pydantic import SecretStr
 
 from ..resource_manager import GpuArch
-
-
-def env_to_secret_str(env_var: str) -> SecretStr | None:
-    value = os.getenv(env_var, "").strip()
-    if not value:
-        return None
-    return SecretStr(value)
 
 
 def to_env_str(val: Any) -> str:

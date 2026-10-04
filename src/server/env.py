@@ -7,12 +7,12 @@ from pydantic import SecretStr
 
 from shared.schemas.worker import SSHBackendName
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
-from shared.utils import parse_bool_env, parse_float_env, parse_int_env
-
-
-def _secret_or_none(name: str) -> SecretStr | None:
-    value = (os.getenv(name) or "").strip()
-    return SecretStr(value) if value else None
+from shared.utils import (
+    parse_bool_env,
+    parse_float_env,
+    parse_int_env,
+    parse_secret_env,
+)
 
 
 def _read_file_b64(path: str, what: str) -> str:
@@ -220,7 +220,7 @@ SERVER_METRICS_TRACE_SAMPLE_RATIO: float = parse_float_env(
 SERVER_METRICS_OTLP_ENDPOINT: str = (
     os.getenv("SERVER_METRICS_OTLP_ENDPOINT") or ""
 ).strip()
-SERVER_METRICS_OTLP_TOKEN: SecretStr | None = _secret_or_none(
+SERVER_METRICS_OTLP_TOKEN: SecretStr | None = parse_secret_env(
     "SERVER_METRICS_OTLP_TOKEN"
 )
 SERVER_METRICS_OTLP_TIMEOUT_SEC: int = parse_int_env(
