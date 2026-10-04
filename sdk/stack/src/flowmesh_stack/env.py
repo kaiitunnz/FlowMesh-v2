@@ -1,23 +1,18 @@
 """Environment file helpers shared by FlowMesh tooling."""
 
 import os
+import re
+from collections import ChainMap
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
 
 def parse_env_file(env_file: Path) -> dict[str, str]:
-    """Parse a .env file into key/value pairs."""
-    values: dict[str, str] = {}
+    """Parse a .env file into key/value pairs, as Docker Compose reads it."""
     if not env_file.exists():
-        return values
-    for line in env_file.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        stripped = stripped.removeprefix("export ").strip()
-        key, value = stripped.split("=", 1)
-        values[key.strip()] = _normalize_env_value(value)
-    return values
+        return {}
+    return parse_env_text(env_file.read_text(), os.environ)
 
 
 def parse_bool(value: str) -> bool | None:
@@ -99,17 +94,13 @@ def load_env(
     base_dir: Path | None = None,
     path_keys: set[str] | None = None,
 ) -> None:
-    """Load env vars from a file into ``os.environ``."""
+    """Load env vars from a file into ``os.environ``, as Docker Compose reads it."""
     env_key = (env_file, base_dir, path_keys)
     if getattr(load_env, "_loaded", None) == env_key:
         return
     if not env_file.exists():
         return
-    for line in env_file.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
+    for key, value in parse_env_text(env_file.read_text(), os.environ).items():
         if path_keys and key in path_keys and value:
             expanded = Path(value).expanduser()
             if expanded.is_absolute():
@@ -124,22 +115,142 @@ def load_env(
 
 
 def _parse_env_keys(path: Path) -> set[str]:
-    keys: set[str] = set()
     if not path.exists():
-        return keys
-    for line in path.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return set()
+    return set(parse_env_text(path.read_text(), {}))
+
+
+_DOUBLE_QUOTED_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_BRACED = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])(.*))?\}", re.DOTALL)
+
+
+def parse_env_text(text: str, environ: Mapping[str, str]) -> dict[str, str]:
+    """Parse .env text the way Docker Compose's ``env_file`` and ``--env-file`` do.
+
+    A double-quoted value takes ``\\n``, ``\\r``, ``\\t``, ``\\\\``, ``\\"`` and
+    ``\\$`` escapes and may span lines; a single-quoted value is literal; an unquoted
+    value ends at a `` #`` comment. Unquoted and double-quoted values interpolate
+    ``$NAME`` and ``${NAME}`` with the ``:-``, ``-``, ``:+``, ``+``, ``:?`` and ``?``
+    modifiers, reading the file's earlier keys and then ``environ``; ``$$`` is a literal
+    ``$``.
+    """
+    values: dict[str, str] = {}
+    lookup = ChainMap(values, dict(environ))
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
+        if not line or line.startswith("#") or "=" not in line:
             continue
-        stripped = stripped.removeprefix("export ").strip()
-        key = stripped.split("=", 1)[0].strip()
-        if key:
-            keys.add(key)
-    return keys
+        key, raw = line.removeprefix("export ").split("=", 1)
+        key = key.strip()
+        raw = raw.lstrip()
+        quote = raw[:1]
+        if quote in ("'", '"'):
+            body = raw[1:]
+            while (end := _closing_quote(body, quote)) is None:
+                if index >= len(lines):
+                    raise ValueError(f"{key}: unterminated quoted value")
+                body += "\n" + lines[index]
+                index += 1
+            body = body[:end]
+            values[key] = (
+                body if quote == "'" else _expand(_unescape(body), lookup, key)
+            )
+        else:
+            values[key] = _expand(_strip_comment(raw), lookup, key)
+    return values
 
 
-def _normalize_env_value(value: str) -> str:
-    stripped = value.strip()
-    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "\"'":
-        stripped = stripped[1:-1]
-    return stripped.strip()
+def _closing_quote(body: str, quote: str) -> int | None:
+    escaped = False
+    for position, char in enumerate(body):
+        if quote == '"' and char == "\\" and not escaped:
+            escaped = True
+            continue
+        if char == quote and not escaped:
+            return position
+        escaped = False
+    return None
+
+
+def _unescape(body: str) -> str:
+    out: list[str] = []
+    chars = iter(body)
+    for char in chars:
+        if char != "\\":
+            out.append(char)
+            continue
+        following = next(chars, "")
+        if following == "$":
+            out.append("\0")
+        else:
+            out.append(_DOUBLE_QUOTED_ESCAPES.get(following, "\\" + following))
+    return "".join(out)
+
+
+def _strip_comment(raw: str) -> str:
+    match = re.search(r"\s#", raw)
+    return (raw[: match.start()] if match else raw).rstrip()
+
+
+def _expand(value: str, lookup: Mapping[str, str], key: str) -> str:
+    out: list[str] = []
+    position = 0
+    while position < len(value):
+        char = value[position]
+        if char == "\0":
+            out.append("$")
+            position += 1
+            continue
+        if char != "$":
+            out.append(char)
+            position += 1
+            continue
+        following = value[position + 1 : position + 2]
+        if following == "$":
+            out.append("$")
+            position += 2
+        elif following == "{" and (end := _closing_brace(value, position + 1)):
+            out.append(_substitute(value[position + 1 : end + 1], lookup, key))
+            position = end + 1
+        elif name := _NAME.match(value, position + 1):
+            out.append(lookup.get(name.group(), ""))
+            position = name.end()
+        else:
+            out.append("$")
+            position += 1
+    return "".join(out)
+
+
+def _closing_brace(value: str, start: int) -> int | None:
+    depth = 0
+    for position in range(start, len(value)):
+        if value[position] == "{":
+            depth += 1
+        elif value[position] == "}":
+            depth -= 1
+            if depth == 0:
+                return position
+    return None
+
+
+def _substitute(braced: str, lookup: Mapping[str, str], key: str) -> str:
+    match = _BRACED.fullmatch(braced)
+    if match is None:
+        return "$" + braced
+    name, modifier, word = match.groups()
+    current = lookup.get(name)
+    if modifier is None:
+        return current or ""
+    if current is not None and not current and modifier.startswith(":"):
+        current = None
+    if modifier.endswith("-"):
+        return current if current is not None else _expand(word, lookup, key)
+    if modifier.endswith("+"):
+        return _expand(word, lookup, key) if current is not None else ""
+    if current is None:
+        raise ValueError(f"{key}: {name} {_expand(word, lookup, key) or 'is required'}")
+    return current
