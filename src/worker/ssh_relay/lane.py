@@ -93,7 +93,12 @@ class SshRelayLane:
         """Marshal one relay frame onto the lane loop; return whether it is ours."""
         if frame_kind != SSH_FRAME_KIND:
             return False
-        asyncio.run_coroutine_threadsafe(self._on_frame(frame), self._loop)
+        handling = self._on_frame(frame)
+        try:
+            asyncio.run_coroutine_threadsafe(handling, self._loop)
+        except RuntimeError:
+            # A frame that lands after the lane stopped has no connection to reach.
+            handling.close()
         return True
 
     async def _on_frame(self, wire: dict[str, Any]) -> None:

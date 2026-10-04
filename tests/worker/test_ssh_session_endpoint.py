@@ -2,9 +2,11 @@
 relayed session's."""
 
 import asyncio
+import gc
 import socket
 import threading
 import time
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -149,3 +151,24 @@ def test_a_lane_stopped_with_no_time_left_still_ends_its_connections() -> None:
         for conn in accepted:
             conn.close()
         listener.close()
+
+
+def test_a_frame_after_the_lane_stopped_is_dropped_quietly() -> None:
+    lane = SshRelayLane(registry=SshEndpointRegistry(), push_frame=lambda wire: None)
+    lane.start()
+    lane.stop(1)
+    opening: list[RelayFrame] = []
+
+    async def capture(frame: RelayFrame) -> None:
+        opening.append(frame)
+
+    asyncio.run(
+        ByteStreamChannel(
+            "rly-1", RelaySessionRole.ORIGIN, MagicMock(send=capture)
+        ).send_open("ssn-1")
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert lane.route(SSH_FRAME_KIND, opening[0].to_wire()) is True
+        gc.collect()
