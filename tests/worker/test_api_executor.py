@@ -757,3 +757,80 @@ def test_a_body_that_is_not_json_fails_without_a_retry() -> None:
             _SequenceTransport([httpx.Response(200, text="plain text")]),
         )
     assert raised.value.retryable is False
+
+
+class _RaisingTransport(httpx.MockTransport):
+    """Raise ``error`` on the first request and answer 200 after it."""
+
+    def __init__(self, error: type[httpx.RequestError]) -> None:
+        self.calls = 0
+        self._error = error
+        super().__init__(self._handler)
+
+    def _handler(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if self.calls == 1:
+            raise self._error("failed", request=request)
+        return _ok_response()
+
+
+@pytest.mark.parametrize(
+    "error", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
+)
+def test_a_request_that_never_left_is_retried(
+    monkeypatch: pytest.MonkeyPatch, error: type[httpx.TransportError]
+) -> None:
+    monkeypatch.setattr("worker.executors.api_executor._RETRY_BACKOFF_SEC", 0.0)
+    task = _task_message(
+        url="https://api.example/v1", retries=1, response={"parse_json": False}
+    )
+    transport = _RaisingTransport(error)
+    _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
+    assert transport.calls == 2
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.ReadError,
+        httpx.RemoteProtocolError,
+        httpx.TooManyRedirects,
+        httpx.UnsupportedProtocol,
+    ],
+)
+def test_a_request_that_may_have_left_is_sent_once(
+    monkeypatch: pytest.MonkeyPatch, error: type[httpx.RequestError]
+) -> None:
+    monkeypatch.setattr("worker.executors.api_executor._RETRY_BACKOFF_SEC", 0.0)
+    task = _task_message(url="https://api.example/v1", retries=3)
+    transport = _RaisingTransport(error)
+    with pytest.raises(ExecutionError, match="API request failed"):
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
+    assert transport.calls == 1
+
+
+def test_an_unrepresentable_retry_after_date_backs_off_instead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("worker.executors.api_executor._RETRY_BACKOFF_SEC", 0.0)
+    task = _task_message(
+        url="https://api.example/v1", retries=1, response={"parse_json": False}
+    )
+    far = httpx.Response(
+        503, headers={"Retry-After": "Fri, 31 Dec 99999999999999999999 23:59:59 GMT"}
+    )
+    transport = _SequenceTransport([far, _ok_response()])
+    _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, transport)
+    assert transport.calls == 2
+
+
+def test_a_body_nested_past_the_parser_fails_as_invalid_json() -> None:
+    task = _task_message(url="https://api.example/v1/chat/completions")
+    deep = httpx.Response(
+        200, content=b"[" * 200_000, headers={"content-type": "application/json"}
+    )
+    with pytest.raises(ExecutionError, match="not a valid JSON") as raised:
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, _SequenceTransport([deep]))
+    assert raised.value.retryable is False

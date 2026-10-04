@@ -47,6 +47,9 @@ _RETRY_BACKOFF_SEC = 1.0
 _RETRY_BACKOFF_MAX_SEC = 60.0
 # Upper bound on spec.api.retries.
 _MAX_RETRIES = 10
+# Failures before the request left the worker, so sending it again cannot repeat its
+# effect.
+_UNSENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
 
 def _is_routing_header(name: str) -> bool:
@@ -142,9 +145,10 @@ class APIExecutor(Executor):
     ) -> httpx.Response:
         """Issue the request, retrying transient failures up to ``retries`` times.
 
-        A retryable failure is a connection error or a transient HTTP status
-        (5xx, 408, 429). Non-retryable failures and a cancelled task stop the
-        loop immediately. The final attempt's failure propagates to the caller.
+        A retryable failure is a connection error, where the request never left, or a
+        transient HTTP status (5xx, 408, 429). Any other failure and a cancelled task
+        stop the loop immediately. The final attempt's failure propagates to the
+        caller.
         """
         attempt = 0
         while True:
@@ -157,7 +161,7 @@ class APIExecutor(Executor):
                     params=params,
                     **request_kwargs,
                 )
-            except httpx.RequestError as exc:
+            except _UNSENT_ERRORS as exc:
                 if attempt >= retries:
                     raise
                 attempt += 1
@@ -210,7 +214,7 @@ class APIExecutor(Executor):
                 return seconds
         try:
             retry_at = email.utils.parsedate_to_datetime(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=UTC)
@@ -374,7 +378,7 @@ class APIExecutor(Executor):
         if parse_json:
             try:
                 result.response_json = resp.json()
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:
                 raise ExecutionError("Response is not a valid JSON mapping") from exc
             if not isinstance(result.response_json, dict):
                 raise ExecutionError("Response is not a valid JSON mapping")
