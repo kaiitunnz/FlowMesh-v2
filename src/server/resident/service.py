@@ -62,6 +62,7 @@ from ..network.state import (
     RouteObservationOutcome,
     RouteOrigin,
     Transport,
+    TrustedPeerPolicy,
 )
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
 from ..task.v2.representations.admission import ResidentAdmissionBinding
@@ -151,7 +152,11 @@ class RouteResolver(Protocol):
     """
 
     async def resolve(
-        self, origin_node_id: str, listener: ReplicaListenerAdvertisement
+        self,
+        origin_node_id: str,
+        listener: ReplicaListenerAdvertisement,
+        *,
+        trust: TrustedPeerPolicy | None = None,
     ) -> tuple[RouteOrigin, ResolvedRoute] | None: ...
 
     async def endpoint_for(
@@ -1186,9 +1191,12 @@ class ResidentCapacityControl:
         # The route fence resolves from the origin's registered endpoint, which is also
         # what dials an admitted peer session. A gated serve origination has no origin
         # worker, so the root is itself the origin and resolves from the root node over
-        # the edge stream. A worker-originated workflow boundary resolves from the
-        # origin worker's own node, so its payload never reaches the root at all.
+        # the edge stream; the root dials no peer, so its call rides control_relay. A
+        # worker-originated workflow boundary resolves from the origin worker's own
+        # node, so its payload never reaches the root at all.
+        trust: TrustedPeerPolicy | None = None
         if serve is not None and orig.origin_worker is None:
+            trust = TrustedPeerPolicy()
             origin_worker = None
             resolve_node: str | None = (
                 deps.root_node_id() if deps.root_node_id is not None else None
@@ -1215,7 +1223,7 @@ class ResidentCapacityControl:
         if listener is None:
             await self._hold_and_redrive(orig, claim, "resident sidecar is unavailable")
             return
-        resolved = await deps.network.resolve(resolve_node, listener)
+        resolved = await deps.network.resolve(resolve_node, listener, trust=trust)
         if resolved is None:
             await self._hold_and_redrive(
                 orig, claim, "no origin route for the boundary"

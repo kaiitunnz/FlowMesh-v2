@@ -85,8 +85,8 @@ Where a deployment declares an origin-to-target pair trusted, an admitted reside
 invocation leaves the relay for a socket the origin opens itself. The `RouteOrigin` is
 both the route's source identity and its dialer: for a workflow boundary that is the
 invocation's own worker, so the request and response bypass the root and the rendezvous
-entirely; for a gated serve request the root is itself the origin and dials on its own
-behalf. Only the pair the resolver admitted is reachable — an origin never scans for or
+entirely. A gated serve request has the root as its origin and rides `control_relay`.
+Only the pair the resolver admitted is reachable — an origin never scans for or
 substitutes a peer.
 
 Eligibility is a property of the pair, not of topology. The resolver offers a peer

@@ -12,13 +12,17 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from server.network.reachability import NetworkReachabilityView
+from server.network.resolver import resolve_route
 from server.network.state import (
+    NetworkEndpointAdvertisement,
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteCandidate,
     RouteOrigin,
     Transport,
+    TrustedPeerPolicy,
 )
 from server.resident import (
     AdmissionController,
@@ -50,6 +54,7 @@ from shared.resident.reports import (
     ResidentStreamHead,
     ResidentStreamStatus,
 )
+from shared.schemas.network import PEER_PROTOCOL
 
 _SERVE_TASK = "tsk-serve"
 _FAMILY = "serve/tsk-serve"
@@ -65,7 +70,11 @@ class _FakeNetwork:
         self._base_candidate = base_candidate
 
     async def resolve(
-        self, origin_node_id: str, listener: ReplicaListenerAdvertisement
+        self,
+        origin_node_id: str,
+        listener: ReplicaListenerAdvertisement,
+        *,
+        trust: TrustedPeerPolicy | None = None,
     ) -> tuple[RouteOrigin, ResolvedRoute]:
         origin = RouteOrigin(
             origin_id="rog-1",
@@ -92,6 +101,63 @@ class _FakeNetwork:
 
     async def endpoint_for(self, node_id: str):
         return None
+
+
+class _TrustedPeerNetwork(_FakeNetwork):
+    """A deployment whose policy trusts the root node's pair with a directly routable
+    replica, graded by the real resolver."""
+
+    _TRUSTED = TrustedPeerPolicy(
+        enabled=True,
+        trust_domain="td",
+        classes=frozenset(ReachabilityClass),
+        protocol=PEER_PROTOCOL,
+    )
+
+    async def resolve(
+        self,
+        origin_node_id: str,
+        listener: ReplicaListenerAdvertisement,
+        *,
+        trust: TrustedPeerPolicy | None = None,
+    ) -> tuple[RouteOrigin, ResolvedRoute]:
+        origin = RouteOrigin(
+            origin_id="rog-1",
+            endpoint_id="ep-root",
+            node_id=origin_node_id,
+            reachability_class=ReachabilityClass.ROUTABLE,
+            trust_domain="td",
+            protocols=(PEER_PROTOCOL,),
+            relay_attachment_id="att-root",
+        )
+        target = listener.model_copy(
+            update={
+                "routes": ("10.0.0.2:9500",),
+                "protocols": (PEER_PROTOCOL,),
+                "directly_routable": True,
+            }
+        )
+        endpoint = NetworkEndpointAdvertisement(
+            endpoint_id="ep-1",
+            node_id=listener.node_id,
+            url="10.0.0.2:9101",
+            peer_url="10.0.0.2:9102",
+            generation=1,
+            trust_domain="td",
+            reachability_class=ReachabilityClass.ROUTABLE,
+            protocols=(PEER_PROTOCOL,),
+            relay_attachment_id="att-1",
+        )
+        route = resolve_route(
+            origin,
+            target,
+            endpoint,
+            NetworkReachabilityView(),
+            trust=self._TRUSTED if trust is None else trust,
+            now=0.0,
+            route_epoch=1,
+        )
+        return origin, route
 
 
 class _FakeSessions:
@@ -155,10 +221,13 @@ class _ServeDelivery:
 
 
 class _Deps:
-    def __init__(self, base_candidate: bool = True) -> None:
+    def __init__(
+        self, base_candidate: bool = True, trusted_peers: bool = False
+    ) -> None:
         self.relays: list[tuple[str, str, dict[str, Any]]] = []
         self.sessions = _FakeSessions()
         self._base_candidate = base_candidate
+        self._trusted_peers = trusted_peers
 
     def build(self) -> ResidentWorkerDelivery:
         return ResidentWorkerDelivery(
@@ -168,7 +237,11 @@ class _Deps:
                 "wkr-replica" if replica.serve_task_id is not None else None
             ),
             node_of_worker=lambda worker_id: "node-1" if worker_id else None,
-            network=_FakeNetwork(self._base_candidate),
+            network=(
+                _TrustedPeerNetwork()
+                if self._trusted_peers
+                else _FakeNetwork(self._base_candidate)
+            ),
             sessions=self.sessions,
             root_node_id=lambda: "node-root",
             edge_id="serve-edge",
@@ -185,6 +258,7 @@ class _Deps:
 def _build(
     base_candidate: bool = True,
     stop_fn: Callable[[str], None] | None = None,
+    trusted_peers: bool = False,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Deps]:
     stores = ResidentStores()
     limits = ResidentPolicyLimits()
@@ -209,7 +283,7 @@ def _build(
         materialize_fn=materialize_fn,
         stop_fn=stop_fn,
     )
-    deps = _Deps(base_candidate=base_candidate)
+    deps = _Deps(base_candidate=base_candidate, trusted_peers=trusted_peers)
     svc = ResidentCapacityControl(
         stores=stores,
         admission=admission,
@@ -331,6 +405,21 @@ def test_originate_admits_against_the_family_and_opens_the_edge_relay() -> None:
     # transport; the session record keeps the selection as diagnostics.
     assert delivery.plans[0].selected_transport == CONTROL_RELAY
     assert record["selected_transport"] == CONTROL_RELAY
+
+
+def test_a_root_origin_rides_the_relay_beside_a_trusted_peer_pair() -> None:
+    # The deployment trusts the pair and the replica is directly routable, but the root
+    # dials no peer, so its call takes control_relay rather than a plan its carriage
+    # refuses.
+    svc, stores, _settled, _deps = _build(trusted_peers=True)
+    _adopt(svc)
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+
+    assert len(delivery.opened) == 1
+    assert delivery.plans[0].selected_transport == CONTROL_RELAY
+    claim = stores.claims.by_invocation("inv-1")[0]
+    assert claim.state is ClaimState.RESERVED
 
 
 def test_no_control_relay_candidate_holds_the_credit_without_opening() -> None:
