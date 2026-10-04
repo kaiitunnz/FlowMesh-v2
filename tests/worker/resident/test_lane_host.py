@@ -239,12 +239,16 @@ def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
 
 
 @pytest.mark.parametrize(
-    ("frame_key", "expected"),
-    [(None, "worker-local-key"), ("forward-key", "forward-key")],
-    ids=["resolved-in-worker", "frame-carried"],
+    ("published", "frame_key", "expected"),
+    [
+        (True, None, "worker-local-key"),
+        (True, "forward-or-stale-key", "worker-local-key"),
+        (False, "forward-key", "forward-key"),
+    ],
+    ids=["no-frame-key", "frame-key-ignored", "keyless-stand-in"],
 )
 def test_bind_resolves_the_engine_key_inside_the_worker(
-    frame_key: str | None, expected: str
+    published: bool, frame_key: str | None, expected: str
 ) -> None:
     captured: dict[str, Any] = {}
 
@@ -253,7 +257,8 @@ def test_bind_resolves_the_engine_key_inside_the_worker(
             captured.update(kwargs)
 
     keys = EngineKeyRegistry()
-    keys.publish("tsk-serve", "worker-local-key")
+    if published:
+        keys.publish("tsk-serve", "worker-local-key")
     host = ResidentLaneHost(
         push_frame=lambda _f: None,
         report_ack=lambda _a: None,

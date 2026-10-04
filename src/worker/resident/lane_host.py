@@ -275,9 +275,14 @@ class ResidentLaneHost:
         engine = frame["engine"]
         serve_task_id = frame.get("serve_task_id")
         binding_generation = frame.get("binding_generation")
-        api_key = engine.get("api_key")
-        if api_key is None and serve_task_id and self._resolve_engine_key is not None:
-            api_key = self._resolve_engine_key(str(serve_task_id))
+        # An engine this worker launched accepts only its own key, whatever key the
+        # frame carries; a frame's key reaches a keyless stand-in's upstream.
+        local_key = (
+            self._resolve_engine_key(str(serve_task_id))
+            if serve_task_id and self._resolve_engine_key is not None
+            else None
+        )
+        api_key = local_key if local_key is not None else engine.get("api_key")
         self._replica.bind(
             replica_id=str(frame["replica_id"]),
             incarnation=int(frame["incarnation"]),
