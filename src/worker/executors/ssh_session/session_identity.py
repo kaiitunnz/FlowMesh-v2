@@ -27,7 +27,7 @@ from . import acl
 logger = logging.getLogger(__name__)
 
 ACCOUNT_PREFIX = "fmssn"
-ACCOUNT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+ACCOUNT_NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,30}")
 PRIVSEP_DIR = Path("/run/sshd")
 # Debian's on-demand global range: above the uids distributions hand out to
 # accounts, so a session never shares a uid with a principal of a shared volume,
@@ -97,7 +97,7 @@ def account_name_for(session_id: str) -> str:
     """Return a valid Linux account name derived from ``session_id``."""
     tail = re.sub(r"[^a-z0-9]", "", session_id.lower())[-16:]
     name = f"{ACCOUNT_PREFIX}{tail or secrets.token_hex(4)}"[:31]
-    if not ACCOUNT_NAME_RE.match(name):
+    if not ACCOUNT_NAME_RE.fullmatch(name):
         raise ExecutionError(f"Cannot derive a valid account name from {session_id!r}")
     return name
 

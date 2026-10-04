@@ -37,7 +37,7 @@ from shared.utils.ids import new_state_bundle_manifest_id
 
 _PRIVATE_MODE = 0o700
 _EPOCH_FILE = ".attachment"
-_OPAQUE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_OPAQUE_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ class PrivateStateHolder:
 
     def _lineage_root(self, binding: PrivateStateBinding) -> Path:
         reference_id = binding.reference.reference_id
-        if not _OPAQUE_ID.match(reference_id):
+        if not _OPAQUE_ID.fullmatch(reference_id):
             raise PrivateStateUnavailable(
                 PrivateStateUnavailableReason.CONTAINMENT_VIOLATION,
                 "a state reference is an opaque identifier",

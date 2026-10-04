@@ -686,7 +686,7 @@ class DockerWorkerAdapter(WorkerAdapter):
 
 class DockerWorkerFactory(WorkerFactory):
     _CONTAINER_NAME_MAX_LEN = 128
-    _CONTAINER_NAME_ALLOWED_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    _CONTAINER_NAME_ALLOWED_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
     def __init__(self, system_principal: PrincipalContext) -> None:
         super().__init__(system_principal)
@@ -784,7 +784,7 @@ class DockerWorkerFactory(WorkerFactory):
         if not raw:
             return self._get_next_worker_alias(config.worker_type)
         sanitized = sanitize_container_name(raw, self._CONTAINER_NAME_MAX_LEN)
-        if not sanitized or not self._CONTAINER_NAME_ALLOWED_RE.match(sanitized):
+        if not sanitized or not self._CONTAINER_NAME_ALLOWED_RE.fullmatch(sanitized):
             return self._get_next_worker_alias(config.worker_type)
         return sanitized
 

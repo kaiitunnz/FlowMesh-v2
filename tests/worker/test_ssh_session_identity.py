@@ -42,7 +42,7 @@ def test_an_account_name_is_derived_from_its_session() -> None:
     )
 
     assert name == "fmssn0123456789abcdef"
-    assert session_identity.ACCOUNT_NAME_RE.match(name)
+    assert session_identity.ACCOUNT_NAME_RE.fullmatch(name)
 
 
 def _run_ok(argv: list[str], what: str) -> "subprocess.CompletedProcess[bytes]":
