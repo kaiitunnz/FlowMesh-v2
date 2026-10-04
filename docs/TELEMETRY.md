@@ -134,7 +134,7 @@ Both receivers require `TELEMETRY_OTLP_TOKEN` as every export's bearer token, an
 Collector requires it to start. Where the stack has server gRPC TLS material
 (`SERVER_GRPC_TLS_CERT_FILE` and `SERVER_GRPC_TLS_KEY_FILE`), both receivers serve that
 certificate over TLS at the default endpoint, `https://localhost:4317`; a stack without it
-exports to `http://localhost:4317`. `flowmesh stack` mounts the Collector only that
+sets `SERVER_METRICS_OTLP_ENDPOINT=http://localhost:4317`. `flowmesh stack` mounts the Collector only that
 certificate and key and runs it as the key's owner. A producer verifies the Collector with the deployment
 CA, `SERVER_METRICS_OTLP_CA_FILE`, which defaults to the server gRPC CA and reaches each
 worker its supervisor launches. A process that sends its token over plaintext to a host
