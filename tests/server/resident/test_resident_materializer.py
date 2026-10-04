@@ -22,7 +22,7 @@ from server.hooks import PERMISSION_CHECKERS, RESOURCE_REGISTRARS
 from server.resident import ReplicaIncarnation, ServiceFamily
 from server.resident.materializer import materialize_resident_replica
 from server.task.parser import parse_workflow
-from shared.inference.engine_profile import engine_profile
+from shared.inference import engine_profile
 
 _LOGGER = logging.getLogger("test.resident_materializer")
 _SYSTEM = PrincipalContext(

@@ -66,7 +66,7 @@ def engine_env_vars(value: Any) -> dict[str, str]:
     return value
 
 
-def _validate_serve_dispatchable(spec: "ServeSpecStrict | ServeSpecTemplate") -> None:
+def _validate_serve_dispatchable(spec: ServeSpecStrict | ServeSpecTemplate) -> None:
     """Refuse a serve spec setting an engine option its executor owns, or without a GPU.
 
     A serve task launches a persistent vLLM GPU server its executor configures; without

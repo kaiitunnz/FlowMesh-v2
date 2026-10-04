@@ -10,13 +10,13 @@ import json
 from typing import Any
 
 from shared.inference import (
+    ENGINE_PROFILE_KEYS,
     CanonicalInferenceContract,
     CanonicalProjectionError,
     canonical_contract,
     declares_multiple_prompts,
     unforwarded_inference_keys,
 )
-from shared.inference.engine_profile import ENGINE_PROFILE_KEYS
 from shared.tasks.credentials import credential_pointer
 from shared.tasks.placeholders import contains_placeholder
 from shared.tasks.specs import (

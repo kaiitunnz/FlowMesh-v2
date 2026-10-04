@@ -16,6 +16,14 @@ from .codec import (
     resolve_contract,
     unforwarded_inference_keys,
 )
+from .engine_profile import (
+    EMBEDDING_PROFILE_KEYS,
+    ENGINE_LOCAL_KEYS,
+    ENGINE_PROFILE_KEYS,
+    engine_profile,
+    engine_profile_key,
+    hf_overrides,
+)
 from .input_store import (
     RESOLVED_INPUT_MEDIA_TYPE,
     ResolvedInputMaterialization,
@@ -35,6 +43,12 @@ from .source import (
 )
 
 __all__ = [
+    "EMBEDDING_PROFILE_KEYS",
+    "ENGINE_LOCAL_KEYS",
+    "ENGINE_PROFILE_KEYS",
+    "engine_profile",
+    "engine_profile_key",
+    "hf_overrides",
     "INPUT_RESOLVER_VERSION",
     "RESOLVED_INPUT_MEDIA_TYPE",
     "LIST_PROMPT_FIELDS",

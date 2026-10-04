@@ -37,7 +37,7 @@ def _run(
     monkeypatch.setattr(
         sft_executor, "_started_device_count", lambda: len(devices.split(","))
     )
-    monkeypatch.delenv(sft_executor._SFT_LAUNCHER_FLAG, raising=False)
+    monkeypatch.delenv(sft_executor.SFT_LAUNCHER_FLAG, raising=False)
     monkeypatch.setattr(
         lora_sft_executor.AutoTokenizer, "from_pretrained", _train_in_process
     )

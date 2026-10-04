@@ -69,7 +69,7 @@ except Exception:
         _HAS_VLLM = False
         StructuredOutputsParams = None  # type: ignore
 
-from shared.inference import SAMPLING_DEFAULTS
+from shared.inference import SAMPLING_DEFAULTS, hf_overrides
 from shared.schemas.governance import SpanType
 from shared.schemas.result import (
     BaseExecutorResult,
@@ -416,13 +416,10 @@ Summary:"""
                 kwargs_base[arg] = arg_type(vllm_cfg.pop(arg))
         if revision:
             kwargs_base["revision"] = revision
-        hf_overrides: dict[str, Any] = {}
-        if "rope_scaling" in vllm_cfg:
-            hf_overrides["rope_scaling"] = vllm_cfg.pop("rope_scaling")
-        if "rope_theta" in vllm_cfg:
-            hf_overrides["rope_theta"] = float(vllm_cfg.pop("rope_theta"))
-        if hf_overrides:
-            kwargs_base["hf_overrides"] = hf_overrides
+        if overrides := hf_overrides(
+            vllm_cfg.pop("rope_scaling", None), vllm_cfg.pop("rope_theta", None)
+        ):
+            kwargs_base["hf_overrides"] = overrides
         if "env_vars" in vllm_cfg:
             env_vars = vllm_cfg.pop("env_vars")
             assert isinstance(env_vars, dict)

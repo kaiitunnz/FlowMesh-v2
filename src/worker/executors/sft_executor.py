@@ -44,7 +44,7 @@ from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 logger = logging.getLogger("worker.sft")
 
 
-_SFT_LAUNCHER_FLAG = "KV_SFT_DISTRIBUTED"
+SFT_LAUNCHER_FLAG = "KV_SFT_DISTRIBUTED"
 # The devices this process was started on, before a run narrows them.
 _STARTED_ON = os.environ.get("CUDA_VISIBLE_DEVICES")
 
@@ -98,7 +98,7 @@ class SFTExecutor(TrainingMixin, Executor):
         # Internal distributed launcher: run training as torchrun ranks
         try:
             allow_multi_cfg = training_cfg.get("allow_multi_gpu")
-            already_spawned = os.environ.get(_SFT_LAUNCHER_FLAG) == "1"
+            already_spawned = os.environ.get(SFT_LAUNCHER_FLAG) == "1"
             available_gpus = self._visible_gpu_count(training_cfg)
 
             if requested_gpu_count and requested_gpu_count > 1:
@@ -158,7 +158,7 @@ class SFTExecutor(TrainingMixin, Executor):
                         module="worker.executors.sft_dist_entry",
                         out_dir=out_dir,
                         task=task,
-                        launcher_env_flag=_SFT_LAUNCHER_FLAG,
+                        launcher_env_flag=SFT_LAUNCHER_FLAG,
                         result_type=SFTResult,
                     )
                 finally:
@@ -239,7 +239,7 @@ class SFTExecutor(TrainingMixin, Executor):
             # going. Hugging Face will still initialize DeepSpeed on the current rank
             # (often rank 0 only).
             if deepspeed_cfg and not dist_initialized:
-                if os.environ.get(_SFT_LAUNCHER_FLAG) == "1":
+                if os.environ.get(SFT_LAUNCHER_FLAG) == "1":
                     logger.info(
                         "DeepSpeed runtime will initialize torch.distributed "
                         "(local_rank=%s)",
@@ -743,6 +743,20 @@ class SFTExecutor(TrainingMixin, Executor):
         return 0
 
     @staticmethod
+    def deepspeed_ranks(training_cfg: dict[str, Any], max_ranks: int) -> int:
+        """Return how many torchrun ranks a DeepSpeed run launches here, or 0.
+
+        A run launches one rank per visible GPU, up to ``max_ranks``; a run already
+        inside a launched rank, or with no GPU, trains in-process.
+        """
+        return SFTExecutor._launch_ranks(
+            min(SFTExecutor._visible_gpu_count(training_cfg), max_ranks),
+            allow_multi=False,
+            deepspeed_intent=True,
+            already_spawned=os.environ.get(SFT_LAUNCHER_FLAG) == "1",
+        )
+
+    @staticmethod
     def _configure_devices(training_cfg: dict[str, Any]) -> None:
         """Narrow CUDA_VISIBLE_DEVICES to the run's training devices.
 
@@ -750,7 +764,7 @@ class SFTExecutor(TrainingMixin, Executor):
         starts from the devices the process was started on, and a launched rank keeps
         the devices its launch already chose.
         """
-        if os.environ.get(_SFT_LAUNCHER_FLAG) == "1":
+        if os.environ.get(SFT_LAUNCHER_FLAG) == "1":
             return
         if _STARTED_ON is None:
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)

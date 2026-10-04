@@ -27,7 +27,7 @@ from shared.tasks.task_type import TaskType
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
-from .sft_executor import _SFT_LAUNCHER_FLAG, SFTExecutor
+from .sft_executor import SFT_LAUNCHER_FLAG, SFTExecutor
 from .utils.checkpoints import (
     archive_model_dir,
     determine_resume_path,
@@ -101,12 +101,7 @@ class LoRASFTExecutor(TrainingMixin, Executor):
             logger.info(
                 "DeepSpeed configuration detected for LoRA run; forwarding to trainer"
             )
-            if ranks := SFTExecutor._launch_ranks(
-                min(SFTExecutor._visible_gpu_count(training_cfg), 1),
-                False,
-                True,
-                os.environ.get(_SFT_LAUNCHER_FLAG) == "1",
-            ):
+            if ranks := SFTExecutor.deepspeed_ranks(training_cfg, max_ranks=1):
                 return self._run_ranks(task, out_dir, ranks)
         lora_cfg = spec.lora or {}
 
@@ -354,7 +349,7 @@ class LoRASFTExecutor(TrainingMixin, Executor):
             module="worker.executors.lora_sft_dist_entry",
             out_dir=out_dir,
             task=task,
-            launcher_env_flag=_SFT_LAUNCHER_FLAG,
+            launcher_env_flag=SFT_LAUNCHER_FLAG,
             result_type=LoRAResult,
         )
 

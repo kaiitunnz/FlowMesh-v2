@@ -1,3 +1,5 @@
+from typing import Self
+
 from pydantic import BaseModel, Field
 
 from ..resident.state import (
@@ -26,7 +28,7 @@ class ResidentFamilyInfo(BaseModel):
     created_at: str = Field(description="Family registration timestamp.")
 
     @classmethod
-    def project(cls, family: ServiceFamily) -> "ResidentFamilyInfo":
+    def project(cls, family: ServiceFamily) -> Self:
         return cls(
             family=family.family,
             engine_batch_key=family.engine_batch_key,
@@ -62,9 +64,7 @@ class ResidentReplicaInfo(BaseModel):
     last_active_at: str = Field(description="Last admission-activity timestamp.")
 
     @classmethod
-    def project(
-        cls, replica: ReplicaIncarnation, worker_id: str | None
-    ) -> "ResidentReplicaInfo":
+    def project(cls, replica: ReplicaIncarnation, worker_id: str | None) -> Self:
         return cls(
             replica_id=replica.replica_id,
             family=replica.family,
@@ -95,7 +95,7 @@ class ResidentClaimInfo(BaseModel):
     )
 
     @classmethod
-    def project(cls, claim: ServiceClaim) -> "ResidentClaimInfo":
+    def project(cls, claim: ServiceClaim) -> Self:
         return cls(
             claim_id=claim.claim_id,
             invocation_id=claim.invocation_id,

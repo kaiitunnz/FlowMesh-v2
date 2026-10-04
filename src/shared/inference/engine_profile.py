@@ -88,6 +88,16 @@ def engine_profile(
     return json.dumps(profile, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def hf_overrides(rope_scaling: Any, rope_theta: Any) -> dict[str, Any]:
+    """The config overrides a vLLM engine takes a leaf's RoPE settings as."""
+    overrides: dict[str, Any] = {}
+    if rope_scaling is not None:
+        overrides["rope_scaling"] = rope_scaling
+    if rope_theta is not None:
+        overrides["rope_theta"] = float(rope_theta)
+    return overrides
+
+
 def engine_profile_key(profile: str) -> str:
     """The short identity a profile adds to a service family."""
     return hashlib.sha256(profile.encode()).hexdigest()[:16]

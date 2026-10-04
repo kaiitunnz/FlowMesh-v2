@@ -194,9 +194,10 @@ class ReplicaIncarnation(BaseModel):
 
     ``incarnation`` is the monotonic fence: a lost or recreated replica invalidates
     outstanding routes and admission decisions bound to an older incarnation. The
-    backing serve task and worker locate the generically hosted allocation. ``listener``
-    is the non-secret resident-facing route advertisement, fenced by ``incarnation`` and
-    ``listener_generation``; it never names the raw engine listener or credential.
+    backing serve task locates the generically hosted allocation, on the worker running
+    it. ``listener`` is the non-secret resident-facing route advertisement, fenced by
+    ``incarnation`` and ``listener_generation``; it never names the raw engine listener
+    or credential.
     """
 
     replica_id: str

@@ -4,7 +4,7 @@ import ast
 import json
 from pathlib import Path
 
-from shared.inference.engine_profile import (
+from shared.inference import (
     EMBEDDING_PROFILE_KEYS,
     ENGINE_LOCAL_KEYS,
     ENGINE_PROFILE_KEYS,

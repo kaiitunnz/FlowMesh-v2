@@ -5,8 +5,8 @@ from shared.inference import (
     CanonicalInferenceInputSource,
     InferenceSourceKind,
     canonical_source,
+    engine_profile,
 )
-from shared.inference.engine_profile import engine_profile
 from shared.sandbox import SandboxEgressMode
 from shared.tasks import TaskType
 from shared.tasks.credentials import credential_pointer

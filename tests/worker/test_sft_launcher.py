@@ -41,7 +41,7 @@ def _launch(
     """Run SFT on a worker bound to ``devices``, capturing its torchrun launch."""
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", devices)
     monkeypatch.setattr(sft_executor, "_STARTED_ON", devices)
-    monkeypatch.delenv(sft_executor._SFT_LAUNCHER_FLAG, raising=False)
+    monkeypatch.delenv(sft_executor.SFT_LAUNCHER_FLAG, raising=False)
     monkeypatch.setattr(sft_executor.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(
         sft_executor.torch.cuda, "device_count", lambda: len(devices.split(","))
@@ -162,13 +162,13 @@ def test_a_launched_rank_keeps_the_devices_its_launch_chose(
     monkeypatch.setattr(sft_executor.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(sft_executor.torch.cuda, "device_count", lambda: 2)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-b,GPU-c")
-    monkeypatch.delenv(sft_executor._SFT_LAUNCHER_FLAG, raising=False)
+    monkeypatch.delenv(sft_executor.SFT_LAUNCHER_FLAG, raising=False)
     SFTExecutor._configure_devices({"visible_devices": [1, 0]})
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-c,GPU-b"
 
     # The rank, started on the parent's narrowed devices, applies the same config.
     monkeypatch.setattr(sft_executor, "_STARTED_ON", "GPU-c,GPU-b")
-    monkeypatch.setenv(sft_executor._SFT_LAUNCHER_FLAG, "1")
+    monkeypatch.setenv(sft_executor.SFT_LAUNCHER_FLAG, "1")
     SFTExecutor._configure_devices({"visible_devices": [1, 0]})
 
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-c,GPU-b"
@@ -184,7 +184,7 @@ def test_an_in_process_run_narrows_its_devices_before_cuda_starts(
     monkeypatch.setattr(sft_executor.torch.cuda, "device_count", cuda_started)
     monkeypatch.setattr(sft_executor, "_STARTED_ON", "GPU-b,GPU-c")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-b,GPU-c")
-    monkeypatch.delenv(sft_executor._SFT_LAUNCHER_FLAG, raising=False)
+    monkeypatch.delenv(sft_executor.SFT_LAUNCHER_FLAG, raising=False)
 
     SFTExecutor._configure_devices({"allow_multi_gpu": False, "primary_gpu": 1})
 

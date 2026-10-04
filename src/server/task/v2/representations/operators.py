@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import BoundaryEventKind
-from shared.inference.engine_profile import engine_profile_key
+from shared.inference import engine_profile_key
 from shared.sandbox import SandboxEgressMode, SandboxRuntimeProfile
 from shared.tasks import TaskType
 from shared.tasks.specs import InferenceEmbodimentKind, ModelBindingMode
