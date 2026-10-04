@@ -62,8 +62,10 @@ class ExecutionError(RuntimeError):
 
     ``retryable`` marks failures that may succeed on another worker (transient network
     or I/O errors). Deterministic failures (invalid spec, unsupported config) leave it
-    ``False`` so they fail without retry. ``failure_kind`` types a failure whose kind
-    decides how control handles it, and ``unavailable_inputs`` names the references an
+    ``False`` so they fail without retry. ``ambiguous`` marks a failure after the
+    task's external effect may already have happened, which control settles by the
+    effect's replay contract. ``failure_kind`` types a failure whose kind decides how
+    control handles it, and ``unavailable_inputs`` names the references an
     ``input_unavailable`` failure could not read.
     """
 
@@ -71,13 +73,45 @@ class ExecutionError(RuntimeError):
         self,
         *args: object,
         retryable: bool = False,
+        ambiguous: bool = False,
         failure_kind: TaskFailureKind | None = None,
         unavailable_inputs: tuple[ContentReference, ...] = (),
     ) -> None:
         super().__init__(*args)
         self.retryable = retryable
+        self.ambiguous = ambiguous
         self.failure_kind = failure_kind
         self.unavailable_inputs = unavailable_inputs
+
+    def wire_fields(self) -> dict[str, Any]:
+        """Return the error's typed fields in a JSON-safe form, to carry it across a
+        process boundary."""
+        return {
+            "retryable": self.retryable,
+            "ambiguous": self.ambiguous,
+            "failure_kind": self.failure_kind,
+            "unavailable_inputs": [
+                reference.model_dump(mode="json")
+                for reference in self.unavailable_inputs
+            ],
+        }
+
+    @classmethod
+    def from_wire(cls, message: str, fields: Any) -> "ExecutionError":
+        """Rebuild an error from its message and :meth:`wire_fields`."""
+        if not isinstance(fields, dict):
+            fields = {}
+        kind = fields.get("failure_kind")
+        return cls(
+            message,
+            retryable=fields.get("retryable") is True,
+            ambiguous=fields.get("ambiguous") is True,
+            failure_kind=TaskFailureKind(kind) if kind else None,
+            unavailable_inputs=tuple(
+                ContentReference.model_validate(reference)
+                for reference in fields.get("unavailable_inputs") or ()
+            ),
+        )
 
 
 class TaskCancelledError(RuntimeError):

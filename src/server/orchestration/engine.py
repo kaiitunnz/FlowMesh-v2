@@ -175,6 +175,14 @@ _AMBIGUITY_TERMINAL_REASON = "ambiguity-terminal effect"
 _DECLARED_FAILURE_REASON = "declared-failure obligation"
 
 
+def _ambiguity_terminal_reason(error: str | None) -> str:
+    """Why a work item that cannot run again failed: its executor's own message, when
+    it reported one, beside the reason."""
+    if error is None:
+        return _AMBIGUITY_TERMINAL_REASON
+    return f"{error} ({_AMBIGUITY_TERMINAL_REASON})"
+
+
 def dependency_failed(task_id: str) -> str:
     """The reason a task fails for when a failure it depends on cascades into it."""
     return f"Dependency {task_id} failed"
@@ -918,8 +926,13 @@ class OrchestrationEngine:
         return True
 
     @_ds_drive(ControlPlaneWindow.POST_START)
-    def on_uncertain(self, task_id: str) -> Advance:
-        """Resolve a lost acknowledgement or route loss for an in-flight work item."""
+    def on_uncertain(self, task_id: str, error: str | None = None) -> Advance:
+        """Resolve a lost acknowledgement, route loss, or failure that may follow the
+        work item's external effect.
+
+        ``error`` is the executor's message for a reported failure; the attempt keeps
+        it, and a work item that cannot run again fails with it beside the reason.
+        """
         wi = self._work_item_for_task(task_id)
         resolution = self._resolve_loss(wi)
         if wi is None or resolution is _LossResolution.NOTHING:
@@ -945,7 +958,7 @@ class OrchestrationEngine:
                 invocation_id=wi.invocation_id,
             )
             self._emitter.emit_boundary(self._invocations[wi.invocation_id])
-            wi.failure_reason = _AMBIGUITY_TERMINAL_REASON
+            wi.failure_reason = _ambiguity_terminal_reason(error)
             return self._settle_failed_wi(wi)
         invocation = self._invocations[wi.invocation_id]
         invocation.state = next_on_uncertain(
@@ -957,6 +970,8 @@ class OrchestrationEngine:
         if attempt := self._latest_attempt(wi):
             attempt.status = AttemptStatus.LOST
             attempt.finished_at = now_iso()
+            if error is not None:
+                attempt.error = error
             self._emitter.emit_attempt(attempt)
         if resolution is _LossResolution.RUN_AGAIN:
             wi.status = WorkItemStatus.READY
@@ -975,7 +990,7 @@ class OrchestrationEngine:
             work_item_id=wi.work_item_id,
             invocation_id=wi.invocation_id,
         )
-        wi.failure_reason = _AMBIGUITY_TERMINAL_REASON
+        wi.failure_reason = _ambiguity_terminal_reason(error)
         return self._settle_failed_wi(wi)
 
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:

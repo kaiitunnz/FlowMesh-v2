@@ -50,6 +50,14 @@ _MAX_RETRIES = 10
 # Failures before the request left the worker, so sending it again cannot repeat its
 # effect.
 _UNSENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+# Failures after the request may have reached the server, which may have acted on it.
+_MAYBE_SENT_ERRORS = (
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+)
 
 
 def _is_routing_header(name: str) -> bool:
@@ -342,7 +350,9 @@ class APIExecutor(Executor):
             )
         except httpx.RequestError as exc:
             raise ExecutionError(
-                redact_urls(f"API request failed: {exc}", str(url)), retryable=True
+                redact_urls(f"API request failed: {exc}", str(url)),
+                retryable=True,
+                ambiguous=isinstance(exc, _MAYBE_SENT_ERRORS),
             ) from exc
 
         body_bytes = resp.content

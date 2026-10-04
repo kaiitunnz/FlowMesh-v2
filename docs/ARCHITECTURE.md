@@ -89,7 +89,8 @@ settles `CANCELLED` however its dispatch ends. A task its worker gives up
 without a requested cancel, as a draining worker does, returns without spending
 an attempt, and a task whose worker crashes or goes silent spends one. A v2 task
 that cannot safely re-run, such as an `ssh` or `api` task, fails instead, as
-on its worker's loss.
+on its worker's loss. An executor failure after the task's external effect may
+already have happened settles the same way, failing with the executor's message.
 
 ## Directory map
 

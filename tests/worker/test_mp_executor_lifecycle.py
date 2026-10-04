@@ -11,6 +11,8 @@ from pathlib import Path
 import psutil
 import pytest
 
+from shared.content import ContentReference
+from shared.schemas.event import TaskFailureKind
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks import TaskType
 from shared.tasks.specs import EchoSpecStrict
@@ -125,6 +127,29 @@ class _RetryableErrorExecutor(Executor):
 
     def run(self, task, out_dir: Path) -> _SimpleMPResult:
         raise ExecutionError("transient", retryable=True)
+
+    def cleanup_after_run(self) -> None:
+        return None
+
+
+_UNREAD_INPUT = ContentReference(
+    authorization_scope="org-1", content_digest="ab" * 32, size_bytes=3
+)
+
+
+class _TypedErrorExecutor(Executor):
+    """Raises a controlled ``ExecutionError`` carrying every typed field."""
+
+    name = "typed_error"
+
+    def run(self, task, out_dir: Path) -> _SimpleMPResult:
+        raise ExecutionError(
+            "typed",
+            retryable=True,
+            ambiguous=True,
+            failure_kind=TaskFailureKind.INPUT_UNAVAILABLE,
+            unavailable_inputs=(_UNREAD_INPUT,),
+        )
 
     def cleanup_after_run(self) -> None:
         return None
@@ -302,6 +327,27 @@ def test_mp_executor_propagates_retryable_flag(tmp_path: Path) -> None:
 
     # The inner executor's retryable flag survives the subprocess boundary.
     assert exc_info.value.retryable is True
+
+    mp.cleanup_after_run()
+
+
+def test_every_execution_error_field_crosses_the_subprocess(tmp_path: Path) -> None:
+    mp = MPExecutor(
+        _TypedErrorExecutor,
+        config=make_live_worker_config(tmp_path),
+        hardware=make_worker_hardware(),
+    )
+
+    with tempfile.TemporaryDirectory() as out_dir:
+        with pytest.raises(ExecutionError) as exc_info:
+            mp.run(_simple_task_message(), Path(out_dir))
+
+    error = exc_info.value
+    assert str(error) == "typed"
+    assert error.retryable is True
+    assert error.ambiguous is True
+    assert error.failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
+    assert error.unavailable_inputs == (_UNREAD_INPUT,)
 
     mp.cleanup_after_run()
 

@@ -339,6 +339,7 @@ class SupervisorClient:
         retryable: bool = True,
         failure_kind: TaskFailureKind | None = None,
         unavailable_inputs: tuple[ContentReference, ...] = (),
+        ambiguous: bool = False,
     ) -> None:
         event = TaskEvent(
             type="TASK_FAILED",
@@ -347,6 +348,7 @@ class SupervisorClient:
             dispatch_id=self.dispatch_id(task_id),
             error=error,
             retryable=retryable,
+            ambiguous=ambiguous,
             failure_kind=failure_kind,
             unavailable_inputs=list(unavailable_inputs) or None,
             payload=metadata or {},

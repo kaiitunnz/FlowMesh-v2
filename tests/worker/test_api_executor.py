@@ -834,3 +834,27 @@ def test_a_body_nested_past_the_parser_fails_as_invalid_json() -> None:
     with pytest.raises(ExecutionError, match="not a valid JSON") as raised:
         _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, _SequenceTransport([deep]))
     assert raised.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    ("error", "ambiguous"),
+    [
+        (httpx.ConnectError, False),
+        (httpx.ConnectTimeout, False),
+        (httpx.PoolTimeout, False),
+        (httpx.TooManyRedirects, False),
+        (httpx.ReadTimeout, True),
+        (httpx.WriteTimeout, True),
+        (httpx.ReadError, True),
+        (httpx.WriteError, True),
+        (httpx.RemoteProtocolError, True),
+    ],
+)
+def test_a_failure_after_the_request_may_have_left_is_ambiguous(
+    error: type[httpx.RequestError], ambiguous: bool
+) -> None:
+    task = _task_message(url="https://api.example/v1")
+    with pytest.raises(ExecutionError) as raised:
+        _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, _RaisingTransport(error))
+    assert raised.value.retryable is True
+    assert raised.value.ambiguous is ambiguous

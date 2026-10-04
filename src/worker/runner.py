@@ -1403,6 +1403,7 @@ class Runner:
                         scrub(str(e)),
                         metadata=metadata,
                         retryable=controlled is None or controlled.retryable,
+                        ambiguous=controlled is not None and controlled.ambiguous,
                         failure_kind=controlled.failure_kind if controlled else None,
                         unavailable_inputs=(
                             controlled.unavailable_inputs if controlled else ()

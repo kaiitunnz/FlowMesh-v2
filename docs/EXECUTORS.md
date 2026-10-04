@@ -417,6 +417,15 @@ teardown only when a retain window or serve TTL is configured (not the default) 
 than serving without the reclaim. One tradeoff is known: every chat resident replica enables
 runtime LoRA, so a base model incompatible with `--enable-lora` would fail to serve.
 
+## API executor failures
+
+A request that never left the worker — a connection error, a connect or pool timeout —
+and a 5xx, 408 or 429 response are transient: `spec.api.retries` re-sends them in place,
+and the task is retryable. A failure after the request may have reached the server — a
+read or write timeout or error, or a broken response — is ambiguous: the executor never
+re-sends it, and a v2 task settles it by its effect's replay contract, as on its worker's
+loss.
+
 ## SSH executor access modes
 
 A `direct` session is reached at its worker's address: the worker's `ssh.direct_host`
