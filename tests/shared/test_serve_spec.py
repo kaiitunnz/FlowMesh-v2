@@ -116,3 +116,19 @@ def test_engine_options_the_executor_leaves_to_the_spec_are_dispatchable(
         },
         resources=_GPU,
     ).validate_dispatchable()
+
+
+@pytest.mark.parametrize("env_vars", [["A=1"], {"A": 1}, {"A": None}])
+@pytest.mark.parametrize("build", [_strict, _template])
+def test_engine_variables_that_are_not_strings_are_not_dispatchable(
+    env_vars: Any, build: Any
+) -> None:
+    spec = build(
+        model={
+            "source": {"identifier": "Qwen/Qwen3-7B"},
+            "vllm": {"env_vars": env_vars},
+        },
+        resources=_GPU,
+    )
+    with pytest.raises(ValueError, match="env_vars must map variable names to strings"):
+        spec.validate_dispatchable()

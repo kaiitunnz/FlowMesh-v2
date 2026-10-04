@@ -22,7 +22,7 @@ import httpx
 
 from shared.resident.contracts import LOCAL_ENGINE_ORIGIN
 from shared.schemas.result import ServeResult
-from shared.tasks.specs.serve import ServeSpecStrict
+from shared.tasks.specs.serve import ServeSpecStrict, engine_env_vars
 from shared.tasks.task_type import TaskType
 from worker.config import WorkerConfig
 from worker.hw import cuda_device_env
@@ -41,17 +41,6 @@ _POLL_INTERVAL_SEC = 5.0
 _STOP_TIMEOUT_SEC = 15.0
 _TAIL_MAX_LINES = 200
 _TAIL_SNIPPET_BYTES = 4096
-
-
-def _engine_env_vars(value: Any) -> dict[str, str]:
-    """The environment ``model.vllm.env_vars`` sets for the engine."""
-    if value is None:
-        return {}
-    if not isinstance(value, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
-    ):
-        raise ExecutionError("model.vllm.env_vars must map variable names to strings")
-    return value
 
 
 def _drain_to_log(
@@ -155,7 +144,10 @@ class VLLMServeExecutor(Executor):
 
         cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
         vllm_kwargs = dict(spec.model.vllm or {}) if spec.model is not None else {}
-        env_vars = _engine_env_vars(vllm_kwargs.pop("env_vars", None))
+        try:
+            env_vars = engine_env_vars(vllm_kwargs.pop("env_vars", None))
+        except ValueError as exc:
+            raise ExecutionError(str(exc)) from exc
         rendered_flags: set[str] = set()
         for k, v in vllm_kwargs.items():
             flag = f"--{k.replace('_', '-')}"

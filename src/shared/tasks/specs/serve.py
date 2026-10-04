@@ -1,5 +1,5 @@
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
@@ -55,6 +55,17 @@ def _refused_engine_option(key: str) -> bool:
     )
 
 
+def engine_env_vars(value: Any) -> dict[str, str]:
+    """The environment a serve spec's ``model.vllm.env_vars`` sets for its engine."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+    ):
+        raise ValueError("model.vllm.env_vars must map variable names to strings")
+    return value
+
+
 def _validate_serve_dispatchable(spec: "ServeSpecStrict | ServeSpecTemplate") -> None:
     """Refuse a serve spec setting an engine option its executor owns, or without a GPU.
 
@@ -64,6 +75,7 @@ def _validate_serve_dispatchable(spec: "ServeSpecStrict | ServeSpecTemplate") ->
     vllm = spec.model.vllm if spec.model is not None else None
     if refused := sorted(key for key in vllm or {} if _refused_engine_option(key)):
         raise ValueError(f"model.vllm.{refused[0]} is not supported for a serve task")
+    engine_env_vars((vllm or {}).get("env_vars"))
     gpu = spec.gpu_requirements()
     if gpu and gpu.count is not None and gpu.count >= 1:
         return
