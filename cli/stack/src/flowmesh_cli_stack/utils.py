@@ -130,6 +130,10 @@ def _server_tls_host_file(key: str) -> Path | None:
 
 def apply_plugin_data_env(base_dir: Path) -> None:
     raw = os.environ.get("FLOWMESH_PLUGIN_DATA_DIR", "").strip()
+    # The env file loads once per process, so a second compose call sees this
+    # function's own output: the alias, with the volume already recorded.
+    if raw == _PLUGIN_DATA_ALIAS and os.environ.get(_PLUGIN_DATA_VOLUME_ENV):
+        return
     if not raw or raw.startswith(_PLUGIN_DATA_PATH_PREFIXES):
         resolved = resolve_path(raw, default=_PLUGIN_DATA_DEFAULT, base_dir=base_dir)
         os.environ["FLOWMESH_PLUGIN_DATA_DIR"] = resolved.as_posix()
