@@ -147,6 +147,7 @@ def build_resident_capacity(
         on_route_observation=resident_control.on_route_observation,
     )
     runtime.set_resident_task_end_hook(resident_control.on_serve_task_end)
+    runtime.set_resident_task_update_hook(resident_control.on_serve_task_update)
     runtime.set_resident_yield_hook(resident_control.on_yield_requested)
     return resident_control
 
@@ -198,6 +199,10 @@ def wire_worker_delivery(
         record = runtime.get_record(task_id)
         return record.assigned_worker if record else None
 
+    def _worker_cordoned(worker_id: str) -> bool:
+        worker = worker_registry.get_worker(worker_id)
+        return worker is not None and worker_registry.is_cordoned(worker)
+
     def _serve_worker_of(replica: ReplicaIncarnation) -> str | None:
         if replica.serve_task_id is None:
             return None
@@ -217,5 +222,6 @@ def wire_worker_delivery(
             forward_api_key=resident_cfg.forward_api_key,
             root_node_id=root_node_id,
             edge_id=edge_id,
+            worker_cordoned=_worker_cordoned,
         )
     )

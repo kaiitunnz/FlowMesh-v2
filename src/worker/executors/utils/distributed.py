@@ -1,14 +1,13 @@
 """Distributed launcher helpers used by the training executors.
 
-Exposes :func:`run_torchrun` and :func:`run_deepspeed`, which invoke
-``torch.distributed.run.main`` and ``deepspeed.launcher.runner.main`` directly
-— the same entry points the ``torchrun`` and ``deepspeed`` console scripts
-call. Worker ranks are spawned by torch's elastic agent / DeepSpeed's
-launcher; this module just shapes the argv and scopes the launcher env.
+Exposes :func:`run_torchrun`, which invokes ``torch.distributed.run.main``
+directly — the same entry point the ``torchrun`` console script calls. Worker ranks
+are spawned by torch's elastic agent and inherit ``CUDA_VISIBLE_DEVICES``; this
+module just shapes the argv and scopes the launcher env.
 
 :func:`deepspeed_available` reports whether the DeepSpeed package can be
-imported in the current environment, so callers can fall back to torchrun
-when DeepSpeed is absent (CPU worker image) or unusable (no CUDA toolchain).
+imported in the current environment, as it is absent from the CPU worker image and
+unusable without a CUDA toolchain.
 
 :func:`launcher_task_file` writes the task the ranks read for the span of a launch.
 """
@@ -110,47 +109,15 @@ def run_torchrun(
 
 
 def deepspeed_available() -> bool:
-    """Return whether ``deepspeed.launcher.runner`` is importable here.
+    """Return whether ``deepspeed`` is importable here.
 
-    Use this to guard :func:`run_deepspeed` calls — DeepSpeed is a
-    ``training-gpu`` extra and is absent from the CPU worker image. Any
+    DeepSpeed is a ``training-gpu`` extra and is absent from the CPU worker image. Any
     exception raised while resolving the spec is treated as "not available";
     DeepSpeed's package init eagerly probes CUDA op builders and raises
     ``MissingCUDAException`` on a CUDA-less host, which is indistinguishable
     from "not usable here".
     """
     try:
-        return importlib.util.find_spec("deepspeed.launcher.runner") is not None
+        return importlib.util.find_spec("deepspeed") is not None
     except Exception:
         return False
-
-
-def run_deepspeed(
-    *,
-    num_gpus: int,
-    module: str,
-    module_args: list[str],
-    launcher_env_flag: str,
-) -> None:
-    """Run ``deepspeed --num_gpus N --module <module> <args>`` in-process.
-
-    The launcher prepends the source root to ``PYTHONPATH`` so spawned ranks
-    can import ``worker.executors.*``, and sets ``launcher_env_flag`` to
-    ``"1"`` so the entry module can detect it is running inside the launched
-    ranks. Both env mutations are scoped to the launch call — the caller's
-    environment is restored on return and on exception. The DeepSpeed
-    launcher is imported lazily so the CPU worker image (which omits the
-    DeepSpeed dependency) is unaffected.
-    """
-    from deepspeed.launcher.runner import main as _deepspeed_main
-
-    with _scoped_env(_launch_env(launcher_env_flag)):
-        _deepspeed_main(
-            [
-                "--num_gpus",
-                str(num_gpus),
-                "--module",
-                module,
-                *module_args,
-            ]
-        )

@@ -170,7 +170,9 @@ class ServiceFamily(BaseModel):
 
     Registration alone materializes no capacity and carries no credit. It records the
     engine/batch, isolation, resource, and protocol requirements a later eligible claim
-    is admitted against, and the per-family replica-selection strategy.
+    is admitted against, and the per-family replica-selection strategy. A ``standing``
+    family is a public serve task's own: its one replica is the serve task's, and
+    demand never materializes another.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -182,6 +184,7 @@ class ServiceFamily(BaseModel):
     isolation: str | None = None
     selection_strategy: str = "batch-aware-best-fit"
     warmth: Warmth = None
+    standing: bool = False
     created_at: str = Field(default_factory=now_iso)
 
 

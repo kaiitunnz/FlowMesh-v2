@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Distributed worker used to execute SFT tasks launched via torchrun or DeepSpeed.
+"""Distributed worker used to execute SFT tasks launched via torchrun.
 
 The ``SFTExecutor`` persists task state to disk, and this module rehydrates the
-task inside each distributed rank. DeepSpeed injects ``--local_rank`` flags when
-spawning processes, so this entrypoint accepts and ignores that flag while
-forwarding the remaining positional arguments to ``SFTExecutor``.
+task inside each distributed rank. It accepts and ignores a ``--local_rank``
+flag while forwarding the remaining positional arguments to ``SFTExecutor``.
 """
 
 import argparse
@@ -31,7 +30,7 @@ def main(argv: list[str]) -> int:
         "--local_rank",
         type=int,
         default=None,
-        help="Rank injected by torchrun/DeepSpeed",
+        help="Rank injected by torchrun",
     )
     args = parser.parse_args(argv[1:])
 

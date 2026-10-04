@@ -21,17 +21,15 @@ import httpx
 from shared.schemas.result import DevModelResult
 from shared.tasks.specs.dev_model import DevModelSpecStrict
 from shared.tasks.task_type import TaskType
-from shared.utils.parsing import parse_float_env
 from shared.utils.redact import redact_url
 from worker.config import WorkerConfig
 
 from .base_executor import Executor, ExecutorTask, RunSignals
 from .utils.net import resolve_bind_port
+from .utils.serve_ttl import serve_deadline
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TTL_SEC = 3600.0
-_MAX_TTL_SEC = 86400.0
 _POLL_INTERVAL_SEC = 5.0
 _FORWARD_TIMEOUT_SEC = 120.0
 _MAX_BODY_BYTES = 10 * 1024 * 1024
@@ -370,11 +368,15 @@ class DevModelExecutor(Executor):
         spec = self.require_spec(task, DevModelSpecStrict)
 
         model_id = spec.model_name or "dev-model"
-        ttl_sec = min(
-            spec.ttlSeconds
-            or parse_float_env("SERVE_DEFAULT_TTL_SEC", _DEFAULT_TTL_SEC),
-            parse_float_env("SERVE_MAX_TTL_SEC", _MAX_TTL_SEC),
+        deadline = serve_deadline(
+            spec.ttlSeconds,
+            task.serve_elapsed_sec,
+            self._config.serve_default_ttl_sec,
+            self._config.serve_max_ttl_sec,
         )
+        if deadline <= time.time():
+            logger.info("dev_model task %s TTL elapsed; not starting", task.task_id)
+            return DevModelResult(model=model_id, port=spec.port or 0)
         vllm = (spec.model.vllm if spec.model is not None else None) or {}
         raw_max_loras = vllm.get("max_loras")
         max_loras = raw_max_loras if isinstance(raw_max_loras, int) else None
@@ -414,7 +416,7 @@ class DevModelExecutor(Executor):
             model_id,
             port,
             task.task_id,
-            ttl_sec,
+            deadline - time.time(),
             redact_url(forward_url) if forward_url else "canned",
         )
 
@@ -435,7 +437,7 @@ class DevModelExecutor(Executor):
                     }
                 },
             )
-            self._wait_for_serve(ttl_sec)
+            self._wait_for_serve(deadline)
         finally:
             self._server = None
             server.shutdown()
@@ -446,8 +448,7 @@ class DevModelExecutor(Executor):
 
         return DevModelResult(model=model_id, port=port)
 
-    def _wait_for_serve(self, ttl_sec: float) -> None:
-        deadline = time.time() + ttl_sec
+    def _wait_for_serve(self, deadline: float) -> None:
         while time.time() < deadline:
             if self._signals.raise_if_cancelled():
                 logger.info("dev_model task stop requested; terminating server")

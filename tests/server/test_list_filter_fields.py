@@ -36,6 +36,7 @@ _ROUTES = [
     (tasks.router, "/tasks", tasks.TASK_FILTER_FIELDS),
     (workflows.router, "/workflows", workflows.WORKFLOW_FILTER_FIELDS),
     (workers.router, "/workers", workers.WORKER_FILTER_FIELDS),
+    (workers.router, "/workers/cordons", workers.CORDON_FILTER_FIELDS),
     (nodes.router, "/nodes", nodes.NODE_FILTER_FIELDS),
     (nodes.router, "/nodes/workers", nodes.NODE_WORKER_FILTER_FIELDS),
     (nodes.router, "/nodes/{node_id}/workers", nodes.NODE_WORKER_FILTER_FIELDS),
@@ -130,6 +131,18 @@ def test_every_task_filter_reads_under_the_runtime_lock() -> None:
         "pending_dependencies",
         "dependents",
     } <= set(TaskRecord.model_fields)
+
+
+@pytest.mark.parametrize(
+    "fields, key",
+    [
+        (workers.WORKER_FILTER_FIELDS, "capabilities.gpu_binding_task_types"),
+        (nodes.NODE_WORKER_FILTER_FIELDS, "held_gpus"),
+        (stack.STACK_WORKER_FILTER_FIELDS, "held_gpus"),
+    ],
+)
+def test_worker_gpu_fields_are_filters(fields: frozenset[str], key: str) -> None:
+    assert QueryFilter.parse(QueryParams({key: "1"}), fields) is not None
 
 
 @pytest.mark.parametrize(

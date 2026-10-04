@@ -18,7 +18,7 @@ the same invocation identity rather than falling through to a wrong terminal.
 
 import asyncio
 import logging
-from collections.abc import Callable, Coroutine, Set
+from collections.abc import Callable, Collection, Coroutine, Set
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -182,6 +182,8 @@ NodeOfWorker = Callable[[str | None], str | None]
 OriginWorkerOfTask = Callable[[str], str | None]
 # Resolves the worker serving a replica incarnation, or None when it is gone.
 ServeWorkerOf = Callable[[ReplicaIncarnation], str | None]
+# Whether a worker is cordoned out of new work.
+WorkerCordoned = Callable[[str], bool]
 
 
 @dataclass
@@ -210,6 +212,7 @@ class ResidentWorkerDelivery:
     # task-addressed invocation needs no caller-worker origin driver.
     root_node_id: Callable[[], str | None] | None = None
     edge_id: str = ""
+    worker_cordoned: WorkerCordoned | None = None
 
 
 class ServeDelivery(Protocol):
@@ -371,6 +374,8 @@ class ResidentCapacityControl:
         self._stores = stores
         self._admission = admission
         self._lifecycle = lifecycle
+        # A replica drained while a claim held credit stops once its last one releases.
+        admission.set_release_hook(lifecycle.stop_if_drained)
         self._limits = limits
         self._resolve_dependency = dependency_resolver
         self._resolve_input_resolution = input_resolution_resolver
@@ -590,11 +595,6 @@ class ResidentCapacityControl:
             {"invocation_id": attempt.invocation_id},
         )
         self._reclaim_adapter_slot(attempt)
-        # A standing serve replica drained by its task's stop is left DRAINING while an
-        # in-flight claim held credit; its last release settles here, so stop it now
-        # rather than leave it lingering in the directory (the idle sweep is off by
-        # default). A live standing replica is untouched — only a DRAINING one stops.
-        self._lifecycle.stop_if_drained_standing(attempt.replica_id)
         if self._loop is not None:
             self._loop.create_task(self._delivery.sessions.delete(attempt.session_id))
 
@@ -694,7 +694,9 @@ class ResidentCapacityControl:
         # A standing allocation is pinned to its serve task for the task's lifetime,
         # so its family records the warm preference its residency node declares.
         self._stores.families.register(
-            self._family_definition(dependency, family, ResidencyWarmth.WARM)
+            self._family_definition(
+                dependency, family, ResidencyWarmth.WARM, standing=True
+            )
         )
         definition = self._stores.families.get(family)
         if definition is None:
@@ -788,6 +790,53 @@ class ResidentCapacityControl:
                 self._lifecycle.yield_serve_task, serve_task_id
             )
 
+    def on_serve_task_update(self, serve_task_id: str) -> None:
+        """Promote, on the control loop, the cold start a serve task backs once it
+        reports its endpoint.
+
+        Safe to call under the runtime's lock; a report before the loop is bound is
+        dropped.
+        """
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._promote_serve_task, serve_task_id)
+
+    def on_workers_cordoned(self, worker_ids: Collection[str]) -> None:
+        """Drain, on the control loop, the demand replicas the cordoned workers serve.
+
+        A standing replica keeps serving until its serve task ends.
+        """
+        cordoned = frozenset(worker_ids)
+        self.call_on_loop(lambda: self._drain_on_workers(cordoned))
+
+    def _drain_on_workers(self, worker_ids: frozenset[str]) -> None:
+        for replica in self._stores.directory.all():
+            if replica.standing or self._serve_worker(replica) not in worker_ids:
+                continue
+            self._retire_on_cordon(replica)
+
+    def _retire_on_cordon(self, replica: ReplicaIncarnation) -> None:
+        """Retire a demand replica on a cordoned worker: a cold start never served, so
+        it is invalidated; a servable one drains and stops once its credit releases."""
+        if replica.state is ReplicaState.MATERIALIZING:
+            self._lifecycle.on_preempt(replica.replica_id)
+        elif replica.state in SERVABLE_REPLICA_STATES:
+            self._lifecycle.drain(replica.replica_id)
+            self._lifecycle.stop(replica.replica_id)
+
+    def _serve_worker(self, replica: ReplicaIncarnation) -> str | None:
+        if self._delivery is None:
+            return None
+        return self._delivery.serve_worker_of(replica)
+
+    def _on_cordoned_worker(self, replica: ReplicaIncarnation) -> bool:
+        if (worker_id := self._serve_worker(replica)) is None:
+            return False
+        assert self._delivery is not None
+        return (
+            self._delivery.worker_cordoned is not None
+            and self._delivery.worker_cordoned(worker_id)
+        )
+
     def _retire_serve_task(self, serve_task_id: str) -> None:
         self._lifecycle.on_serve_task_end(
             serve_task_id, live=self._serve_task_live(serve_task_id)
@@ -800,21 +849,31 @@ class ResidentCapacityControl:
         serve tasks. Reports are not snapshotted and endpoint credentials are not
         persisted, so each servable replica is re-probed: a serve task holding the
         dispatch that reported its endpoint re-attaches it and re-reports capacity, and
-        any other invalidates the incarnation to re-materialize. A resident serve task
-        that no active replica backs is reaped.
+        any other invalidates the incarnation to re-materialize. A draining replica
+        re-attaches only to finish the claims holding credit on it, and stops with
+        none. A resident serve task that no active replica backs is reaped.
         """
         try:
             for replica in self._stores.directory.all():
-                if (
-                    replica.state not in SERVABLE_REPLICA_STATES
-                    or replica.serve_task_id is None
-                ):
+                if replica.serve_task_id is None:
+                    continue
+                if replica.state is ReplicaState.DRAINING:
+                    if self._stores.credit_ledger.held(replica.replica_id) == 0:
+                        self._lifecycle.stop(replica.replica_id)
+                    elif (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
+                        self._lifecycle.on_preempt(replica.replica_id)
+                    else:
+                        replica.endpoint = fresh
+                    continue
+                if replica.state not in SERVABLE_REPLICA_STATES:
                     continue
                 if (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
                     self._lifecycle.on_preempt(replica.replica_id)
                     continue
                 replica.endpoint = fresh
                 self._lifecycle.refresh_report(replica.replica_id)
+                if not replica.standing and self._on_cordoned_worker(replica):
+                    self._retire_on_cordon(replica)
             self._lifecycle.reconcile_serve_tasks(live_serve_tasks)
         finally:
             self._replicas_attached.set()
@@ -1636,7 +1695,11 @@ class ResidentCapacityControl:
         return f"{split_host_port(endpoint.url)[0]}:{port}"
 
     def _family_definition(
-        self, dependency: ServiceDependency, family: str, warmth: ResidencyWarmth | None
+        self,
+        dependency: ServiceDependency,
+        family: str,
+        warmth: ResidencyWarmth | None,
+        standing: bool = False,
     ) -> ServiceFamily:
         """The family definition a dependency admits against, under one warmth.
 
@@ -1651,6 +1714,7 @@ class ResidentCapacityControl:
             isolation=dependency.isolation,
             selection_strategy=self._limits.selection_strategy,
             warmth=warmth,
+            standing=standing,
         )
 
     def _ensure_family(
@@ -1737,14 +1801,26 @@ class ResidentCapacityControl:
         invalidate one whose serve task ended, so a dead cold start never holds the
         family's materialization."""
         for replica in self._stores.directory.by_family(family):
-            if (
-                replica.state is not ReplicaState.MATERIALIZING
-                or replica.serve_task_id is None
-            ):
-                continue
-            if not self._serve_task_live(replica.serve_task_id):
-                self._lifecycle.on_preempt(replica.replica_id)
-            elif (endpoint := self._probe_endpoint(replica.serve_task_id)) is not None:
+            self._promote_replica(replica)
+
+    def _promote_serve_task(self, serve_task_id: str) -> None:
+        for replica in self._stores.directory.by_serve_task(serve_task_id):
+            self._promote_replica(replica)
+
+    def _promote_replica(self, replica: ReplicaIncarnation) -> None:
+        """Promote a cold start once its serve task reports its endpoint, unless its
+        worker is cordoned, which retires it instead."""
+        if (
+            replica.state is not ReplicaState.MATERIALIZING
+            or replica.serve_task_id is None
+        ):
+            return
+        if not self._serve_task_live(replica.serve_task_id):
+            self._lifecycle.on_preempt(replica.replica_id)
+        elif (endpoint := self._probe_endpoint(replica.serve_task_id)) is not None:
+            if self._on_cordoned_worker(replica):
+                self._retire_on_cordon(replica)
+            else:
                 self._lifecycle.on_replica_ready(replica.replica_id, endpoint)
 
     def _fail(

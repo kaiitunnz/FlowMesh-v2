@@ -38,7 +38,7 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.credentials import credential_merge_key
 from ..task.metadata import extract_model_dataset_names
-from ..task.models import DispatchEnd, TaskRecord, TaskStatus
+from ..task.models import SERVE_TASK_TYPES, DispatchEnd, TaskRecord, TaskStatus
 from ..task.results import ResultUnavailable
 from ..task.runtime import TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
@@ -489,7 +489,12 @@ class Dispatcher:
             task_age = max(0.0, time.time() - record.last_queue_ts)
 
         # 1. Get idle worker pool
-        pool = self._worker_registry.idle_satisfying_pool(placement_task, relays_only)
+        owner = self._runtime.private_state_owner(task_id)
+        pool = self._worker_registry.idle_satisfying_pool(
+            placement_task,
+            relays_only,
+            bound_worker_id=owner.worker_id if owner is not None else None,
+        )
 
         # 2. Filter by selected_worker hint if present
         if record.selected_worker:
@@ -500,7 +505,7 @@ class Dispatcher:
         # resuming against a fresh or foreign one. Waiting holds no worker. This
         # governs a holder lost with no external effect in flight; an ambiguous
         # in-flight effect settles terminally in the ledger before placement is asked.
-        if (owner := self._runtime.private_state_owner(task_id)) is not None:
+        if owner is not None:
             if (loss := self._private_state_owner_loss(owner)) is not None:
                 self._end_owner_wait(task_id)
                 return self._fail_private_state_unavailable(
@@ -575,8 +580,9 @@ class Dispatcher:
         record.no_eligible_since = None
 
         # 4b. A long-lived allocation keeps off a worker holding an unsettled
-        # activation's private state while another is idle: that activation can resume
-        # only there.
+        # activation's private state, since only that worker can resume the
+        # activation. A resident replica falls back onto a holder, as it yields the
+        # worker to a waiting owner; a serve task cannot yield, so it waits.
         if self._runtime.long_lived_allocation(task_id):
             holders = self._runtime.private_state_holders()
             free = [
@@ -584,6 +590,12 @@ class Dispatcher:
                 for c in pool
                 if OwnerFence(worker_id=c.id, incarnation=c.incarnation) not in holders
             ]
+            if not free and not record.resident:
+                self._logger.debug(
+                    "Only private-state holders are idle for %s; requeueing", task_id
+                )
+                self.requeue_task(task_id, reason="no_idle_worker", count_retry=False)
+                return False
             pool = free or pool
 
         # 5. Worker selection (best-fit scoring by default)
@@ -809,6 +821,7 @@ class Dispatcher:
             input_preparation=preparing,
             recorded_input=self._runtime.recorded_input_reference(task_id),
             traceparent=self._runtime.dispatch_traceparent(task_id),
+            serve_elapsed_sec=_serve_elapsed_sec(record),
         )
 
         # 8. Give the task what it reads and writes its content under, then publish it
@@ -1280,6 +1293,8 @@ class Dispatcher:
         try:
             if self._worker_registry.is_worker_stale(worker_id):
                 return False
+            if self._worker_registry.is_cordoned(worker):
+                return False
         except Exception:
             return False
         if worker.status is WorkerStatus.IDLE:
@@ -1592,3 +1607,11 @@ class Dispatcher:
                 payload={"error": str(exc)},
             )
             return True
+
+
+def _serve_elapsed_sec(record: TaskRecord) -> float | None:
+    """Return the seconds since a serve task's first start, which its TTL counts
+    across re-runs; None for any other task or one that never started."""
+    if record.task_type not in SERVE_TASK_TYPES or record.first_started_ts is None:
+        return None
+    return max(0.0, time.time() - record.first_started_ts)

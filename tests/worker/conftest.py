@@ -15,6 +15,7 @@ import pytest
 from opentelemetry import trace
 from opentelemetry.util._once import Once
 
+from worker.hw import visible_gpus
 from worker.telemetry import otel
 
 
@@ -34,3 +35,11 @@ def _restore_worker_tracer_globals() -> Iterator[None]:
         # Without restoring the guard as well, a later ``set_tracer_provider`` is
         # logged and ignored, so the next test silently keeps this one's provider.
         trace._TRACER_PROVIDER_SET_ONCE = set_once if provider is not None else Once()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_visible_gpus() -> Iterator[None]:
+    """Resolve each test's visible GPUs afresh, as each worker process does."""
+    visible_gpus.cache_clear()
+    yield
+    visible_gpus.cache_clear()

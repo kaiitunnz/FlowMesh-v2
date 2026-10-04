@@ -54,6 +54,7 @@ NODE_WORKER_FILTER_FIELDS = frozenset(
         "provider",
         "version",
         "status",
+        "held_gpus",
         "hardware.cpu.model",
         "hardware.cpu.arch",
         "hardware.cpu.name",

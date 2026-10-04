@@ -100,7 +100,19 @@ class TestDecide:
 
 
 class TestNvmlDeviceProbe:
-    def _fake_nvml(self, devices: dict[int, tuple[str, str, int, int]]) -> Any:
+    @pytest.fixture(autouse=True)
+    def _every_gpu_visible(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def _install(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        devices: dict[int, tuple[str, str, int, int]],
+        mig: dict[tuple[int, int], tuple[str, int, int]] | None = None,
+    ) -> None:
+        """Fake NVML with the given devices and MIG slices (by (index, slot))."""
+        slices = mig or {}
+
         class FakeNvml:
             NVMLError = RuntimeError
 
@@ -121,26 +133,38 @@ class TestNvmlDeviceProbe:
                 return devices[handle][0]
 
             @staticmethod
-            def nvmlDeviceGetUUID(handle: int) -> str:
+            def nvmlDeviceGetUUID(handle: int | tuple[int, int]) -> str:
+                if isinstance(handle, tuple):
+                    return slices[handle][0]
                 return devices[handle][1]
 
             @staticmethod
-            def nvmlDeviceGetMemoryInfo(handle: int) -> Any:
-                _, _, used, free = devices[handle]
+            def nvmlDeviceGetMaxMigDeviceCount(handle: int) -> int:
+                return max((slot + 1 for i, slot in slices if i == handle), default=0)
+
+            @staticmethod
+            def nvmlDeviceGetMigDeviceHandleByIndex(
+                handle: int, slot: int
+            ) -> tuple[int, int]:
+                if (handle, slot) not in slices:
+                    raise RuntimeError("empty slot")
+                return (handle, slot)
+
+            @staticmethod
+            def nvmlDeviceGetMemoryInfo(handle: int | tuple[int, int]) -> Any:
+                if isinstance(handle, tuple):
+                    _, used, free = slices[handle]
+                else:
+                    _, _, used, free = devices[handle]
                 return SimpleNamespace(used=used, free=free)
 
-        return FakeNvml
-
-    def _install(self, monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
-        monkeypatch.setattr("worker.gpu_availability.pynvml", fake)
-        monkeypatch.setattr(nvml, "pynvml", fake)
+        monkeypatch.setattr("worker.gpu_availability.pynvml", FakeNvml)
+        monkeypatch.setattr("worker.hw.pynvml", FakeNvml)
+        monkeypatch.setattr(nvml, "pynvml", FakeNvml)
 
     def test_keys_by_uuid_not_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Index is only meaningful relative to CUDA_VISIBLE_DEVICES.
-        self._install(
-            monkeypatch,
-            self._fake_nvml({0: ("dedicated", GPU_A, 40_000 * MIB, 8 * MIB)}),
-        )
+        self._install(monkeypatch, {0: ("dedicated", GPU_A, 40_000 * MIB, 8 * MIB)})
         assert NvmlDeviceProbe()() == {GPU_A: _reading(40_000.0, free_bytes=8 * MIB)}
 
     def test_unified_devices_are_omitted(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -148,15 +172,52 @@ class TestNvmlDeviceProbe:
         # so they report nothing rather than reporting free.
         self._install(
             monkeypatch,
-            self._fake_nvml(
-                {
-                    0: ("unified", GPU_A, 40_000 * MIB, 0),
-                    1: ("dedicated", GPU_B, 0, 48 * 1024 * MIB),
-                }
-            ),
+            {
+                0: ("unified", GPU_A, 40_000 * MIB, 0),
+                1: ("dedicated", GPU_B, 0, 48 * 1024 * MIB),
+            },
         )
         readings = NvmlDeviceProbe(lambda index, _name: index == 0)()
         assert set(readings) == {GPU_B}
+
+    def test_reads_only_the_workers_own_devices(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # NVML also lists GPUs CUDA_VISIBLE_DEVICES hides from the worker; those
+        # belong to someone else and are not the worker's to report.
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", GPU_B)
+        self._install(
+            monkeypatch,
+            {
+                0: ("dedicated", GPU_A, 40_000 * MIB, 8 * MIB),
+                1: ("dedicated", GPU_B, 0, 48 * 1024 * MIB),
+            },
+        )
+        seen: list[int] = []
+
+        def is_unified(ordinal: int, _name: str) -> bool:
+            seen.append(ordinal)
+            return False
+
+        readings = NvmlDeviceProbe(is_unified)()
+        assert set(readings) == {GPU_B}
+        # The unified-memory check takes the CUDA ordinal, not the NVML index.
+        assert seen == [0]
+
+    def test_a_mig_slice_is_read_on_its_own(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A sibling slice's tenant fills the GPU; the worker's own slice is idle.
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "MIG-own")
+        self._install(
+            monkeypatch,
+            {0: ("dedicated", GPU_A, 40_000 * MIB, 0)},
+            mig={
+                (0, 0): ("MIG-sibling", 40_000 * MIB, 0),
+                (0, 1): ("MIG-own", 5 * MIB, 10 * 1024 * MIB),
+            },
+        )
+        assert NvmlDeviceProbe()() == {GPU_A: _reading(5.0, free_bytes=10 * 1024 * MIB)}
 
     def test_nvml_failure_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class Broken:
@@ -166,7 +227,7 @@ class TestNvmlDeviceProbe:
             def nvmlInit() -> None:
                 raise RuntimeError("driver wedged")
 
-        self._install(monkeypatch, Broken)
+        monkeypatch.setattr("worker.gpu_availability.pynvml", Broken)
         assert NvmlDeviceProbe()() == {}
 
 
@@ -290,7 +351,7 @@ def _lifecycle(
         gpu_monitor=monitor,
     )
     lc._status = WorkerStatus.IDLE  # as after start()
-    lc.set_gpu_executor_probe(lambda: False)
+    lc.set_gpu_executor_probe(lambda: frozenset())
     return lc, monitor, client
 
 
@@ -308,7 +369,7 @@ class TestLifecycleIntegration:
     def test_a_warm_gpu_executor_suppresses_the_reading(self, tmp_path: Path) -> None:
         # Reading the worker's own resident model as foreign must stay impossible.
         lc, monitor, _ = _lifecycle(tmp_path, [{GPU_A: _reading(44_000)}])
-        lc.set_gpu_executor_probe(lambda: True)
+        lc.set_gpu_executor_probe(lambda: None)
         lc._observe_gpu()
         assert monitor.snapshot() == {}
         assert monitor.live_snapshot() == {}
@@ -350,14 +411,14 @@ class TestLifecycleIntegration:
         lc, _, _ = _lifecycle(tmp_path, [{GPU_A: _reading(44_000)}])
         lc._observe_gpu()
         assert lc.live_gpu_availability()[GPU_A].available is False
-        lc.set_gpu_executor_probe(lambda: True)
+        lc.set_gpu_executor_probe(lambda: None)
         lc._observe_gpu()
         assert lc.live_gpu_availability() == {}
         assert lc._metrics()["gpu_availability"][GPU_A]["available"] is False
 
 
 class TestWarmExecutorGpuFlag:
-    """The flag behind ``has_active_gpu_executor``.
+    """The flag behind ``gpu_devices_in_use``.
 
     Reading GPU-ness off the executor class does not work: the default config
     wraps most executors in ``MPExecutor``, whose class carries no such
@@ -384,19 +445,19 @@ class TestWarmExecutorGpuFlag:
     def test_no_executor_means_no_gpu_held(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
         runner._note_gpu_usage(self._spec(gpu=True))
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     def test_a_gpu_task_marks_the_warm_executor(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
         runner._active_executor = MagicMock()
         runner._note_gpu_usage(self._spec(gpu=True))
-        assert runner.has_active_gpu_executor() is True
+        assert runner.gpu_devices_in_use() is None
 
     def test_a_cpu_task_alone_does_not(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
         runner._active_executor = MagicMock()
         runner._note_gpu_usage(self._spec(gpu=False))
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     def test_a_later_cpu_task_does_not_clear_an_earlier_gpu_task(
         self, tmp_path: Path
@@ -407,7 +468,7 @@ class TestWarmExecutorGpuFlag:
         runner._active_executor = MagicMock()
         runner._note_gpu_usage(self._spec(gpu=True))
         runner._note_gpu_usage(self._spec(gpu=False))
-        assert runner.has_active_gpu_executor() is True
+        assert runner.gpu_devices_in_use() is None
 
     def test_teardown_clears_the_flag(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
@@ -415,7 +476,7 @@ class TestWarmExecutorGpuFlag:
         runner._note_gpu_usage(self._spec(gpu=True))
         runner._cleanup_active_executor()
         assert runner._active_executor_used_gpu is False
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     def test_a_declared_gpu_alone_does_not_mark_the_executor(
         self, tmp_path: Path
@@ -435,7 +496,7 @@ class TestWarmExecutorGpuFlag:
                 )
             )
         )
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     def test_an_ssh_session_does_not_mark_the_executor(self, tmp_path: Path) -> None:
         # The session holds its devices only while it lives; the warm SSH executor
@@ -452,7 +513,7 @@ class TestWarmExecutorGpuFlag:
                 )
             )
         )
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
     @pytest.mark.parametrize(
         "relay",
@@ -469,7 +530,7 @@ class TestWarmExecutorGpuFlag:
         runner = self._runner(tmp_path)
         runner._active_executor = MagicMock()
         runner._note_gpu_usage(self._spec(gpu=True, **relay))
-        assert runner.has_active_gpu_executor() is False
+        assert runner.gpu_devices_in_use() == frozenset()
 
 
 class TestAdmission:
@@ -608,7 +669,9 @@ class _Recording(Executor):
     def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
         self.ran.append(task.task_id)
         if self.runner is not None:
-            self.saw_gpu_executor.append(self.runner.has_active_gpu_executor())
+            self.saw_gpu_executor.append(
+                self.runner.gpu_devices_in_use() != frozenset()
+            )
         return BaseExecutorResult()
 
     def cancel(self, task_id: str) -> None:
@@ -681,6 +744,8 @@ class TestRefusalInTheTaskLoop:
         lifecycle.set_idle.assert_called_once_with("tsk-1")
         # Refused on what the worker can see now, before it pays to read any input.
         hydrator.hydrate.assert_not_called()
+        # Its start is reported as one that never ran, so it starts no serve TTL.
+        assert lifecycle.notify_task_started.call_args.kwargs["executing"] is False
 
     def test_a_resident_service_episode_on_a_held_card_runs(
         self, tmp_path: Path

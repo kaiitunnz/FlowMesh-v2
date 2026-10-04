@@ -149,7 +149,8 @@ and a replica pinned for the task's lifetime. The model is validated under
 `RESIDENT_ALLOWED_MODELS`; a disallowed model is not adopted. A caller names only the task
 ID — the model, worker, endpoint, credential, and routing are fixed by the binding — and
 each request is admitted as its own claim. On task stop, cancellation, TTL, or failure the
-binding drains before it stops.
+binding drains before it stops. A serve task's `ttlSeconds` counts from its first start,
+across re-runs.
 
 A serve task pins one gated exposure mode. `proxy`, the default, terminates at the
 root-local ingress and is reached at `/api/v1/serve/tasks/{task_id}/{upstream_path}` on
@@ -191,20 +192,30 @@ plan node carries is retained for twice the base, and every other family keeps t
 standing `serve` allocation is pinned to its task and exempt. Warmth is a retention
 preference only — it reserves nothing and changes no claim, admission, route, or credit.
 
-A replica serves only on the endpoint its serve task's current dispatch reported. A warm
-demand replica lives only while its serve task holds that dispatch: when the serve task
-leaves it — its worker lost or drained, the task settled or cancelled — the replica is
-invalidated and the task is reaped; the next demand materializes the family again. A
-cold start whose dispatch ends retries the same serve task on an untried worker, under
-the task's own retry history, and is invalidated only once the task settles or is
-cancelled. A draining replica's task is reaped while the replica finishes draining. An
-admitted claim keeps its credit until its own fenced terminal.
+A cold start goes warm once its serve task reports its endpoint. A replica serves only
+on the endpoint its serve task's current dispatch reported. A warm demand replica lives
+only while its serve task holds that dispatch: when the serve task leaves it — its
+worker lost or drained, the task settled or cancelled — the replica is invalidated and
+the task is reaped; the next demand materializes the family again. A cold start whose
+dispatch ends retries the same serve task on an untried worker, under the task's own
+retry history, and is invalidated only once the task settles or is cancelled. A draining
+replica's task is reaped while the replica finishes draining. An admitted claim keeps
+its credit until its own fenced terminal. A standing replica whose serve task returns to
+the queue stops once its admitted work releases, and the task re-runs and is adopted
+afresh where it lands.
 
-A serve task prefers a worker holding no agent's private state when one is idle. When an
-agent waits to resume on the worker a demand replica occupies, the replica is retired
-once no claim holds it and no claim of its family is pending, freeing the worker: a
-serving replica through the idle-teardown path, a cold start by invalidation. The next demand materializes the family
-again. A standing replica never yields its worker.
+A resident replica's serve task prefers a worker holding no agent's private state when
+one is idle, and a public `serve` task waits for one. When an agent waits to resume on
+the worker a demand replica occupies, the replica is retired once no claim holds it and
+no claim of its family is pending, freeing the worker: a serving replica through the
+idle-teardown path, a cold start by invalidation. The next demand materializes the
+family again. A standing replica never yields its worker.
+
+A cordon drains the demand replicas on its worker: each stops admitting claims and stops
+once its admitted work releases, and a cold start there is invalidated. A draining demand
+replica does not count toward its family's replica limit, so a new one starts elsewhere
+meanwhile. The drain holds across a root restart. A standing replica keeps serving until
+its serve task ends, and its family never starts another.
 
 On a root restart, in-flight claims go `UNCERTAIN`, and each restored replica whose serve
 task holds the dispatch that reported its endpoint re-attaches and is reused; any other

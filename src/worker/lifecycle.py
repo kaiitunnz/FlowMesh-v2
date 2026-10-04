@@ -80,7 +80,7 @@ class Lifecycle:
         self._last_task_end = 0.0
         self._gpu_monitor = gpu_monitor
         self._abandon_running: Callable[[str | None], None] | None = None
-        self._gpu_executor_probe: Callable[[], bool] | None = None
+        self._gpu_executor_probe: Callable[[], frozenset[str] | None] | None = None
         if gpu_monitor is not None:
             cfg = gpu_monitor.config
             logger.info(
@@ -120,9 +120,12 @@ class Lifecycle:
         if (plane := self.content_plane) is not None:
             plane.rebind(self.client.worker_id, self.client.incarnation)
 
-    def set_gpu_executor_probe(self, probe: Callable[[], bool]) -> None:
-        """Register a probe reporting whether a GPU-using executor is loaded; a
-        reading taken while one is warm includes the worker's own model."""
+    def set_gpu_executor_probe(
+        self, probe: Callable[[], frozenset[str] | None]
+    ) -> None:
+        """Register a probe naming the devices a loaded GPU-using executor may hold,
+        or None for all of them; a reading of those devices includes the worker's own
+        model."""
         self._gpu_executor_probe = probe
 
     def gpu_availability(self) -> dict[str, DeviceAvailability]:
@@ -235,8 +238,9 @@ class Lifecycle:
         """Feed the availability monitor one observation.
 
         A reading is trusted only when nothing of the worker's own can be in it: no
-        task running, no GPU-using executor still warm, and past the grace window in
-        which a finished task's subprocess may still be releasing memory. Before the
+        task running, past the grace window in which a finished task's subprocess may
+        still be releasing memory, and only on the devices no warm GPU-using executor
+        holds. Before the
         runner registers its probe nothing is measured. A task starting during the one
         NVML read can contribute to it, but ``consecutive`` readings must agree before
         a device flips, so one such reading cannot move its state.
@@ -248,7 +252,10 @@ class Lifecycle:
         with self._status_lock:
             idle = self._status is WorkerStatus.IDLE and not self._draining.is_set()
             past_grace = time.time() - self._last_task_end >= monitor.config.grace_sec
-        monitor.observe(idle and past_grace and probe is not None and not probe())
+        own = probe() if probe is not None else None
+        monitor.observe(
+            idle and past_grace and own is not None, skip=own or frozenset()
+        )
 
     def set_busy(self, task_id: str) -> None:
         self._report(WorkerStatus.BUSY, self.client.dispatch_id(task_id), task_id, {})
@@ -358,13 +365,17 @@ class Lifecycle:
         task_type: str | None,
         dispatched_at: str | None,
         started_at: str,
+        executing: bool = True,
     ) -> None:
+        """Report a task's start; ``executing`` is False for the start a task reports
+        only to end before it ran."""
         try:
             self.client.task_started(
                 task_id,
                 task_type=task_type,
                 dispatched_at=dispatched_at,
                 started_at=started_at,
+                executing=executing,
             )
         except Exception:
             pass

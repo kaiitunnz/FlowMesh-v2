@@ -90,6 +90,8 @@ The outcome-finalization index: the binding from a fabric idempotency key to the
 |--------|------|-------------|
 | GET | `/api/v1/workers` | List workers. |
 | GET | `/api/v1/workers/{id}` | Worker details + hardware. |
+| POST | `/api/v1/workers/{cordon,uncordon}` | Stop / resume offering new tasks to a worker. |
+| GET | `/api/v1/workers/cordons` | List cordoned workers. |
 | GET | `/api/v1/nodes` | List nodes (supervisors). |
 | POST | `/api/v1/nodes/register` | Register a node; `409 Conflict` while another live node holds the same alias, with the held lease's `lease_remaining_ms`. |
 | GET | `/api/v1/nodes/{id}/workers` | List workers under a node. |

@@ -26,6 +26,7 @@ def _worker(*, started: bool) -> MagicMock:
     worker.token = "gpu_0.token"
     worker.status = WorkerStatus.STOPPED
     worker.holds_worker.return_value = False
+    worker.runs_held_worker = AsyncMock(return_value=False)
     worker.closed = False
     worker.start = AsyncMock(return_value=started)
     return worker

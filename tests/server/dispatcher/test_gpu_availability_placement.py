@@ -77,9 +77,12 @@ class _SpyRegistry(WorkerRegistry):
         self.offered: list[list[str]] = []
 
     def idle_satisfying_pool(
-        self, task: TaskEnvelope, relays_only: bool
+        self,
+        task: TaskEnvelope,
+        relays_only: bool,
+        bound_worker_id: str | None = None,
     ) -> list[Worker]:
-        pool = super().idle_satisfying_pool(task, relays_only)
+        pool = super().idle_satisfying_pool(task, relays_only, bound_worker_id)
         self.offered.append([worker.id for worker in pool])
         return pool
 

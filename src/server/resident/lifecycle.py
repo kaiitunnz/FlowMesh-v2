@@ -95,7 +95,8 @@ class LifecycleScaleManager:
         or held-adapter claim joins a warm replica, while a new distinct adapter joins
         only where a free adapter slot remains. When no servable replica can take the
         adapter and policy cannot materialize another, the demand is denied promptly and
-        correctly rather than waiting out the cold-start deadline.
+        correctly rather than waiting out the cold-start deadline. A standing family
+        never materializes, so a claim finding its replica unservable is denied.
         """
         active = self._active_replicas(family)
         servable = [r for r in active if r.state in SERVABLE_REPLICA_STATES]
@@ -104,10 +105,27 @@ class LifecycleScaleManager:
             return CapacityPlan(action="join", replica_id=joinable.replica_id)
         if any(r.state is ReplicaState.MATERIALIZING for r in active):
             return CapacityPlan(action="materialize")
+        if (definition := self._stores.families.get(family)) and definition.standing:
+            return CapacityPlan(
+                action="deny",
+                denial=(
+                    ProvisioningDecision.deny(
+                        ProvisioningDenialReason.ADAPTER_SLOT_CAP,
+                        "no free adapter slot on the serve task's replica",
+                    )
+                    if servable
+                    else ProvisioningDecision.deny(
+                        ProvisioningDenialReason.QUOTA_EXCEEDED,
+                        "serve task has no live standing allocation",
+                    )
+                ),
+            )
         decision = decide_materialization(
             model_ref=model_ref,
             limits=self._limits,
-            active_replicas=len(active),
+            active_replicas=sum(
+                1 for r in active if r.state is not ReplicaState.DRAINING
+            ),
             materializing_replicas=sum(
                 1 for r in active if r.state is ReplicaState.MATERIALIZING
             ),
@@ -300,7 +318,12 @@ class LifecycleScaleManager:
         self._persist()
 
     def stop(self, replica_id: str) -> None:
-        """Complete an idle teardown once a drained replica holds no admitted work."""
+        """Stop a drained replica once it holds no admitted work.
+
+        A demand replica's serve task is reaped with it. A standing replica's serve task
+        owns the replica and is left to its own lifecycle, so a task drained on its way
+        back to the queue re-runs.
+        """
         replica = self._stores.directory.get(replica_id)
         if replica is None:
             return
@@ -311,25 +334,22 @@ class LifecycleScaleManager:
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.STOPPED)
         self._persist()
-        self._reap_serve_task(replica.serve_task_id)
+        if not replica.standing:
+            self._reap_serve_task(replica.serve_task_id)
 
-    def stop_if_drained_standing(self, replica_id: str | None) -> None:
-        """Stop a drained standing replica once its last admitted work has released.
+    def stop_if_drained(self, replica_id: str | None) -> None:
+        """Stop a drained replica once its last admitted work has released.
 
-        A standing serve replica drained by its task's stop is left DRAINING while an
-        in-flight claim still holds credit; when that credit releases on the settle/reap
-        path this stops it, so it does not linger in the directory in a deployment whose
-        idle sweep is disabled (the default). A live (non-draining) standing replica, or
-        a replica still holding credit, is left untouched.
+        A replica drained while an in-flight claim still holds credit is left DRAINING;
+        when that credit releases on the settle/reap path this stops it, so it does not
+        linger in the directory in a deployment whose idle sweep is disabled (the
+        default). A live (non-draining) replica, or one still holding credit, is left
+        untouched.
         """
         if replica_id is None:
             return
         replica = self._stores.directory.get(replica_id)
-        if (
-            replica is None
-            or not replica.standing
-            or replica.state is not ReplicaState.DRAINING
-        ):
+        if replica is None or replica.state is not ReplicaState.DRAINING:
             return
         if self._stores.credit_ledger.held(replica_id) == 0:
             self.stop(replica_id)
@@ -382,9 +402,9 @@ class LifecycleScaleManager:
         Reaps the invalidated incarnation's backing serve task so a replica the family
         will re-materialize from zero does not leave an orphaned serve workflow running.
         A standing serve allocation is exempt: it is the user's long-running task,
-        drained
-        only by its own lifecycle (stop/cancel/TTL/failure), and preempt-and-recreate
-        cannot recover it — so a per-request failure never invalidates or reaps it.
+        drained only by its own lifecycle (stop/cancel/TTL/failure), and
+        preempt-and-recreate cannot recover it — so a per-request failure never
+        invalidates or reaps it.
         """
         replica = self._stores.directory.get(replica_id)
         if replica is None or replica.standing:

@@ -757,6 +757,7 @@ class TaskRuntime:
         # transition reports. Set when resident-capacity control is enabled.
         self._resident_originate: Callable[[ToolInvocationEnvelope], bool] | None = None
         self._resident_task_ended: Callable[[str], None] | None = None
+        self._resident_task_updated: Callable[[str], None] | None = None
         self._resident_yield_requested: Callable[[str], None] | None = None
         # The dispatch each resident task was last committed DISPATCHED under, so a
         # commit moving it elsewhere, or under another dispatch, reports that the
@@ -1549,7 +1550,8 @@ class TaskRuntime:
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
     ) -> None:
-        """Apply one workflow state delta, then report each resident task it ended."""
+        """Apply one workflow state delta, then report each resident task it ended or
+        that reported an update under its current dispatch."""
         self._workflow_registry.commit_transition(
             workflow_id,
             records=records,
@@ -1575,6 +1577,12 @@ class TaskRuntime:
             ended = ended or record.status in SETTLING_TASK_STATUSES
         if ended and self._resident_task_ended is not None:
             self._resident_task_ended(task_id)
+        elif (
+            record.status == TaskStatus.DISPATCHED
+            and record.latest_update_dispatch_id == record.dispatch_id
+            and self._resident_task_updated is not None
+        ):
+            self._resident_task_updated(task_id)
 
     def _persist_locked(self, *task_ids: str) -> None:
         """Commit task records (no membership change) atomically, per workflow."""
@@ -2942,6 +2950,15 @@ class TaskRuntime:
         off and never call back in.
         """
         self._resident_task_ended = hook
+
+    def set_resident_task_update_hook(self, hook: Callable[[str], None]) -> None:
+        """Install the consumer told when a dispatched resident serve task reports an
+        update under its current dispatch, such as its engine endpoint.
+
+        It runs under the runtime's lock, so it must hand the work off and never call
+        back in.
+        """
+        self._resident_task_updated = hook
 
     def set_resident_yield_hook(self, hook: Callable[[str], None]) -> None:
         """Install the consumer asked to free a worker a resident serve task occupies.
@@ -5277,6 +5294,8 @@ class TaskRuntime:
                     return EventEffect.SETTLED
                 record.status = TaskStatus.DISPATCHED
                 record.started_ts = started_ts
+                if record.first_started_ts is None and payload.get("executing", True):
+                    record.first_started_ts = time.time()
                 self._commit_transition_locked(
                     record.workflow_id,
                     records=self._records_locked(task_id),

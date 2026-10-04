@@ -215,6 +215,11 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
         hardware = self.resources.hardware if self.resources is not None else None
         return hardware.gpu if hardware is not None else None
 
+    def pins_cuda_devices(self) -> bool:
+        """Whether the spec names the CUDA devices its executor runs on, so its
+        worker leaves the choice to it."""
+        return False
+
     def merge_key(self, **context: Any) -> str | None:
         """The key a task merges with its siblings under within ``context``, or None if
         it never merges."""
@@ -276,6 +281,11 @@ class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
         hardware = self.resources.hardware if self.resources is not None else None
         return hardware.gpu if hardware is not None else None
 
+    def pins_cuda_devices(self) -> bool:
+        """Whether the spec names the CUDA devices its executor runs on, so its
+        worker leaves the choice to it."""
+        return False
+
     def merge_key(self, **context: Any) -> str | None:
         """The key a task merges with its siblings under within ``context``, or None if
         it never merges."""
@@ -301,6 +311,21 @@ def _model_uses_gpu(
     if not config:
         return True
     return config.get("device_map") != "cpu"
+
+
+def _model_pins_cuda_devices(model: ModelConfig | ModelConfigTemplate | None) -> bool:
+    env_vars = (model.vllm or {}).get("env_vars") if model is not None else None
+    if not env_vars:
+        return False
+    if not isinstance(env_vars, dict):
+        # An unrendered placeholder may render to either, so it pins until it does.
+        return True
+    # A worker renders a binding under PCI bus order, so only another order re-points
+    # the ordinals it binds.
+    return (
+        "CUDA_VISIBLE_DEVICES" in env_vars
+        or env_vars.get("CUDA_DEVICE_ORDER", "PCI_BUS_ID") != "PCI_BUS_ID"
+    )
 
 
 class ModelSpecStrict(TaskSpecStrictBase):
@@ -334,6 +359,9 @@ class ModelSpecStrict(TaskSpecStrictBase):
         field of the specs that have one, so such a caller passes it in."""
         return _model_uses_gpu(self.model, enforce_cpu)
 
+    def pins_cuda_devices(self) -> bool:
+        return _model_pins_cuda_devices(self.model)
+
 
 class ModelSpecTemplate(TaskSpecTemplateBase):
     credential_fields: ClassVar[tuple[str, ...]] = (
@@ -365,6 +393,9 @@ class ModelSpecTemplate(TaskSpecTemplateBase):
         """Whether this spec's model would be loaded onto a GPU; ``enforce_cpu`` is a
         field of the specs that have one, so such a caller passes it in."""
         return _model_uses_gpu(self.model, enforce_cpu)
+
+    def pins_cuda_devices(self) -> bool:
+        return _model_pins_cuda_devices(self.model)
 
 
 class ModelInferSpecStrict(ModelSpecStrict):
