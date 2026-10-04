@@ -156,12 +156,22 @@ class TestServeExecutorCmdBuilding:
         return make_serve_executor()
 
     def _run_capture_cmd(self, spec: ServeSpecStrict, tmp_path: Path) -> list[str]:
+        return self._run_capture(spec, tmp_path)[0]
+
+    def _run_capture(
+        self,
+        spec: ServeSpecStrict,
+        tmp_path: Path,
+        devices: tuple[str, ...] | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
         task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
         ex = self._make_executor()
-        captured: list[list[str]] = []
+        if devices is not None:
+            ex.bind_devices(devices)
+        captured: list[tuple[list[str], dict[str, str]]] = []
 
-        def fake_popen(cmd: list[str], **_: object) -> MagicMock:
-            captured.append(list(cmd))
+        def fake_popen(cmd: list[str], env: dict[str, str], **_: object) -> MagicMock:
+            captured.append((list(cmd), env))
             m = MagicMock()
             m.stdout = io.StringIO("")
             m.poll.return_value = 0
@@ -247,6 +257,68 @@ class TestServeExecutorCmdBuilding:
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "2"
         assert "--gpu-memory-utilization" in cmd
         assert cmd[cmd.index("--gpu-memory-utilization") + 1] == "0.9"
+
+    def test_env_vars_reach_the_engine_environment_not_its_flags(
+        self, tmp_path: Path
+    ) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(
+                source=ModelSource(identifier="m"),
+                vllm={
+                    "env_vars": {"VLLM_USE_V1": "1"},
+                    "limit_mm_per_prompt": {"image": 2},
+                },
+            ),
+        )
+        cmd, env = self._run_capture(spec, tmp_path)
+        assert env["VLLM_USE_V1"] == "1"
+        assert "--env-vars" not in cmd
+        assert cmd[cmd.index("--limit-mm-per-prompt") + 1] == '{"image": 2}'
+
+    def test_a_binding_applies_beside_unrelated_env_vars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            hw,
+            "visible_gpus",
+            lambda: (
+                hw.VisibleGpu(ordinal=0, nvml_index=0, uuid="GPU-a", name="H100"),
+                hw.VisibleGpu(ordinal=1, nvml_index=1, uuid="GPU-b", name="H100"),
+            ),
+        )
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(
+                source=ModelSource(identifier="m"),
+                vllm={"env_vars": {"VLLM_USE_V1": "1"}},
+            ),
+        )
+        _, env = self._run_capture(spec, tmp_path, devices=("GPU-b",))
+        assert env["CUDA_VISIBLE_DEVICES"] == "1"
+        assert env["VLLM_USE_V1"] == "1"
+
+    def test_a_spec_pinning_its_devices_keeps_its_own(self, tmp_path: Path) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(
+                source=ModelSource(identifier="m"),
+                vllm={"env_vars": {"CUDA_VISIBLE_DEVICES": "3"}},
+            ),
+        )
+        assert spec.pins_cuda_devices()
+        _, env = self._run_capture(spec, tmp_path)
+        assert env["CUDA_VISIBLE_DEVICES"] == "3"
+
+    def test_env_vars_that_are_not_strings_fail_the_task(self, tmp_path: Path) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(
+                source=ModelSource(identifier="m"), vllm={"env_vars": {"X": 1}}
+            ),
+        )
+        with pytest.raises(ExecutionError, match="env_vars"):
+            self._run_capture(spec, tmp_path)
 
     def test_trust_remote_code_from_vllm_dict(self, tmp_path: Path) -> None:
         """trust_remote_code: true in model.vllm renders as a bare flag."""

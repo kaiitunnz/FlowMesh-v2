@@ -6,6 +6,7 @@ arrives.
 """
 
 import collections
+import json
 import logging
 import os
 import secrets
@@ -39,6 +40,17 @@ _POLL_INTERVAL_SEC = 5.0
 _STOP_TIMEOUT_SEC = 15.0
 _TAIL_MAX_LINES = 200
 _TAIL_SNIPPET_BYTES = 4096
+
+
+def _engine_env_vars(value: Any) -> dict[str, str]:
+    """The environment ``model.vllm.env_vars`` sets for the engine."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+    ):
+        raise ExecutionError("model.vllm.env_vars must map variable names to strings")
+    return value
 
 
 def _drain_to_log(
@@ -137,22 +149,26 @@ class VLLMServeExecutor(Executor):
         if revision := spec.model_revision:
             cmd.extend(["--revision", revision])
 
-        vllm_kwargs = spec.model.vllm if spec.model is not None else None
+        vllm_kwargs = dict(spec.model.vllm or {}) if spec.model is not None else {}
+        env_vars = _engine_env_vars(vllm_kwargs.pop("env_vars", None))
         rendered_flags: set[str] = set()
-        for k, v in (vllm_kwargs or {}).items():
+        for k, v in vllm_kwargs.items():
             flag = f"--{k.replace('_', '-')}"
             if isinstance(v, bool):
                 if v:
                     cmd.append(flag)
                     rendered_flags.add(flag)
             else:
-                cmd.extend([flag, str(v)])
+                value = json.dumps(v) if isinstance(v, dict | list) else str(v)
+                cmd.extend([flag, value])
                 rendered_flags.add(flag)
 
         if spec.model_trust_remote_code and "--trust-remote-code" not in rendered_flags:
             cmd.append("--trust-remote-code")
 
         env = dict(os.environ)
+        # A spec setting its own CUDA variables runs unbound, so they outrank a binding.
+        env.update(env_vars)
         if self._devices is not None:
             env.update(cuda_device_env(self._devices))
         # The key rides the engine's environment: argv is readable by every local user.
@@ -214,9 +230,7 @@ class VLLMServeExecutor(Executor):
             # discloses the raw loopback listener); the resident endpoint probe reads
             # them to bind the claim-gated sidecar in front of the engine.
             interface = (
-                "embedding"
-                if (vllm_kwargs or {}).get("runner") == "pooling"
-                else "chat"
+                "embedding" if vllm_kwargs.get("runner") == "pooling" else "chat"
             )
             update_payload: dict[str, Any] = {
                 "serve": {
