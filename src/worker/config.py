@@ -274,7 +274,7 @@ class WorkerConfig:
             os.getenv("SERVER_METRICS_OTLP_CA_B64") or ""
         ).strip() or supervisor_grpc_tls_ca_b64
         telemetry = TelemetryConfig.from_env(
-            base64.b64decode(otlp_ca_b64) if otlp_ca_b64 else None
+            lambda: base64.b64decode(otlp_ca_b64) if otlp_ca_b64 else None
         )
 
         return WorkerConfig(

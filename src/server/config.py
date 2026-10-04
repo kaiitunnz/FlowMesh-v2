@@ -366,9 +366,6 @@ def _otlp_collector_ca(server_ca_file: str) -> bytes | None:
 
     ``SERVER_METRICS_OTLP_CA_FILE`` names it, defaulting to the server gRPC CA.
     """
-    endpoint = (os.getenv("SERVER_METRICS_OTLP_ENDPOINT") or "").strip()
-    if not endpoint.startswith("https://"):
-        return None
     path = _env_or_none("SERVER_METRICS_OTLP_CA_FILE") or server_ca_file
     if not path:
         return None
@@ -801,7 +798,7 @@ class ServerConfig:
             watchdog=WatchdogConfig.from_env(),
             metrics=MetricsConfig.from_env(results_dir),
             telemetry=TelemetryConfig.from_env(
-                _otlp_collector_ca(grpc_config.tls_ca_file)
+                lambda: _otlp_collector_ca(grpc_config.tls_ca_file)
             ),
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),

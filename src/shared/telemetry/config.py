@@ -3,7 +3,8 @@
 import ipaddress
 import logging
 import os
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from urllib.parse import urlsplit
 
@@ -55,14 +56,23 @@ class TelemetryConfig:
         """
         return _LEVEL_ORDER[self.level] >= _LEVEL_ORDER[minimum]
 
+    @property
+    def exports(self) -> bool:
+        """Whether this process exports any span or metric."""
+        return self.level is not TelemetryLevel.OFF and (
+            self.traces_enabled or self.metrics_enabled
+        )
+
     @staticmethod
-    def from_env(otlp_ca_pem: bytes | None = None) -> "TelemetryConfig":
+    def from_env(
+        read_otlp_ca: Callable[[], bytes | None] | None = None,
+    ) -> "TelemetryConfig":
         """Parse the ``SERVER_METRICS_*`` telemetry vars, shared by every process.
 
         Root, supervisor and worker all read this one parser so they agree on the
         level: two independent copies of the level default and validation is how they
-        would end up disagreeing. ``otlp_ca_pem`` is the CA that verifies an
-        ``https://`` collector.
+        would end up disagreeing. ``read_otlp_ca`` reads the CA that verifies an
+        ``https://`` collector, called only when this process exports to one.
         """
         level_raw = (
             (os.getenv("SERVER_METRICS_TELEMETRY_LEVEL") or TelemetryLevel.OFF.value)
@@ -85,7 +95,7 @@ class TelemetryConfig:
                 "endpoint",
                 urlsplit(endpoint).hostname,
             )
-        return TelemetryConfig(
+        config = TelemetryConfig(
             level=level,
             traces_enabled=parse_bool_env("SERVER_METRICS_TRACES_ENABLED", True),
             metrics_enabled=parse_bool_env("SERVER_METRICS_METRICS_ENABLED", True),
@@ -98,8 +108,15 @@ class TelemetryConfig:
                 1, parse_int_env("SERVER_METRICS_RESOURCE_SAMPLE_SEC", 15)
             ),
             otlp_token=token,
-            otlp_ca_pem=otlp_ca_pem,
         )
+        if (
+            read_otlp_ca is not None
+            and config.exports
+            and endpoint
+            and endpoint.startswith("https://")
+        ):
+            config = replace(config, otlp_ca_pem=read_otlp_ca())
+        return config
 
 
 DISABLED_TELEMETRY_CONFIG = TelemetryConfig(

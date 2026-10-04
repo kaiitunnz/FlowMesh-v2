@@ -54,8 +54,9 @@ def test_an_https_collector_is_verified_with_the_given_ca(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SERVER_METRICS_OTLP_ENDPOINT", "https://root:4317")
+    monkeypatch.setenv("SERVER_METRICS_TELEMETRY_LEVEL", "coarse")
 
-    kwargs = otlp_exporter_kwargs(TelemetryConfig.from_env(b"-----CA-----"))
+    kwargs = otlp_exporter_kwargs(TelemetryConfig.from_env(lambda: b"-----CA-----"))
 
     assert isinstance(kwargs["credentials"], grpc.ChannelCredentials)
 
