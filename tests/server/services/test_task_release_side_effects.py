@@ -41,6 +41,23 @@ spec:
 """
 
 
+DEV_MODEL_THEN_ECHO = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: dev-serve}
+spec:
+  graph:
+    nodes:
+      - name: serve
+        spec:
+          taskType: dev_model
+          model: {source: {type: huggingface, identifier: org/served}}
+      - name: after
+        dependsOn: [serve]
+        spec: {taskType: echo, data: {type: list, items: [y]}}
+"""
+
+
 class _Harness:
     def __init__(self, runtime: TaskRuntime) -> None:
         self.runtime = runtime
@@ -102,7 +119,7 @@ def _given_up(task_id: str) -> TaskEvent:
 _LEFT = WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=True)
 
 
-def _v1_serve_return(harness: _Harness, task_id: str, path: str) -> None:
+def _serve_return(harness: _Harness, task_id: str, path: str) -> None:
     match path:
         case "given_up":
             harness.deliver(_given_up(task_id), _LEFT)
@@ -131,12 +148,31 @@ async def test_a_returned_serve_task_drains_its_binding(path: str) -> None:
     _, ids = await _dispatched(harness, SERVE_V1, "serve")
     task_id = ids["serve"]
 
-    _v1_serve_return(harness, task_id, path)
+    _serve_return(harness, task_id, path)
 
     record = harness.runtime.get_record(task_id)
     assert record is not None and record.status == TaskStatus.PENDING
     harness.serve.drain.assert_called_with(task_id)
     assert harness.released(task_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", ["given_up", "left_first", "lost"])
+async def test_a_v2_dev_model_serve_task_runs_again_on_its_workers_loss(
+    path: str,
+) -> None:
+    harness = _Harness(_runtime(FakeRegistry()))
+    _, ids = await _dispatched(harness, DEV_MODEL_THEN_ECHO, "serve")
+    task_id = ids["serve"]
+
+    _serve_return(harness, task_id, path)
+
+    record = harness.runtime.get_record(task_id)
+    assert record is not None and record.status == TaskStatus.PENDING
+    after = harness.runtime.get_record(ids["after"])
+    assert after is not None and after.status == TaskStatus.PENDING
+    harness.serve.drain.assert_called_with(task_id)
+    assert pop_ready(harness.runtime) == task_id
 
 
 @pytest.mark.anyio

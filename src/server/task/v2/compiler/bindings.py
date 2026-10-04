@@ -93,6 +93,10 @@ def leaf_profile(task_type: TaskType) -> LeafProfile:
             )
         case TaskType.DATA_RETRIEVAL:
             provenance = InputProvenanceKind.LIVE_INPUT
+        case TaskType.DEV_MODEL:
+            # An ordinary serving leaf rather than resident capacity: like a v1 serve
+            # allocation, it runs again on its worker's loss.
+            pass
         case TaskType.API | TaskType.SSH | TaskType.SERVE:
             effect, provenance = (
                 EffectClass.EXTERNAL_EFFECT,

@@ -88,8 +88,8 @@ an event applies only while its dispatch holds the task. A cancelling task
 settles `CANCELLED` however its dispatch ends. A task its worker gives up
 without a requested cancel, as a draining worker does, returns without spending
 an attempt, and a task whose worker crashes or goes silent spends one. A v2 task
-that cannot safely re-run, such as an `ssh`, `serve`, `api` or training task,
-fails instead, as on its worker's loss.
+that cannot safely re-run, such as an `ssh` or `api` task, fails instead, as
+on its worker's loss.
 
 ## Directory map
 
