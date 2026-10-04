@@ -979,6 +979,7 @@ class OrchestrationEngine:
                 "invocation_uncertain_retry",
                 work_item_id=wi.work_item_id,
                 invocation_id=wi.invocation_id,
+                error=error,
             )
             return Advance(retry=[wi.legacy_task_id])
         self._emit(
@@ -989,6 +990,7 @@ class OrchestrationEngine:
             ),
             work_item_id=wi.work_item_id,
             invocation_id=wi.invocation_id,
+            error=error,
         )
         wi.failure_reason = _ambiguity_terminal_reason(error)
         return self._settle_failed_wi(wi)

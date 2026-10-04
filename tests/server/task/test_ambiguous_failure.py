@@ -101,9 +101,12 @@ async def test_an_ambiguous_api_failure_fails_once_with_its_dependents() -> None
     assert engine is not None
     (attempt,) = engine.to_snapshot().attempts[:1]
     assert attempt.status is AttemptStatus.LOST and attempt.error == _ERROR
-    assert ("invocation_ambiguity_terminal", "") in {
-        (kind, "") for kind, _subject in engine.contract_trace()
-    }
+    (terminal,) = [
+        event
+        for event in engine.to_snapshot().trace
+        if event.kind == "invocation_ambiguity_terminal"
+    ]
+    assert terminal.detail == {"error": _ERROR}
 
 
 @pytest.mark.anyio
