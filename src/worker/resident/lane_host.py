@@ -232,14 +232,17 @@ class ResidentLaneHost:
             )
 
     def release_engine(self, engine: LocalEngine) -> None:
-        """Drop the connections held to a local engine that stopped."""
-        if (
-            isinstance(self._engine_open, HttpEngineDelivery)
-            and self._loop.is_running()
-        ):
+        """Drop the bindings and connections held to a local engine that stopped."""
+        if self._loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self._engine_open.evict(engine.socket_path), self._loop
+                self._release_engine(engine.socket_path), self._loop
             )
+
+    async def _release_engine(self, socket_path: str) -> None:
+        if self._replica is not None:
+            self._replica.unbind_engine(socket_path)
+        if isinstance(self._engine_open, HttpEngineDelivery):
+            await self._engine_open.evict(socket_path)
 
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one resident control frame onto the lane loop; return handled."""

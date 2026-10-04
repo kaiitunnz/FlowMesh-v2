@@ -170,6 +170,12 @@ class ResidentReplicaSidecar:
         """Drop a replica's binding; in-flight sessions run to their own terminal."""
         self._bindings.pop(replica_id, None)
 
+    def unbind_engine(self, socket_path: str) -> None:
+        """Drop every binding to an engine that stopped; a later claim re-drives."""
+        for replica_id, binding in list(self._bindings.items()):
+            if binding.endpoint.socket_path == socket_path:
+                del self._bindings[replica_id]
+
     def unbind_all(self) -> None:
         """Drop every replica's binding, so no claim reaches an abandoned replica."""
         self._bindings.clear()

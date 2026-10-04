@@ -848,3 +848,41 @@ def test_reap_invocation_tears_down_the_inflight_serve() -> None:
         await sidecar.aclose()
 
     asyncio.run(run())
+
+
+def test_a_claim_on_a_withdrawn_engine_re_drives_as_an_unreachable_engine_does() -> (
+    None
+):
+    # An engine withdrawn and unbound answers a later claim with the same transient
+    # loss an unreachable engine leaves: never a definite failure, so the origin holds
+    # the credit and control re-drives.
+    async def run() -> dict[str, Any] | None:
+        origin, sidecar = _harness()
+        sidecar.bind(
+            replica_id="rpl-1",
+            incarnation=1,
+            listener_generation=1,
+            endpoint=ReplicaEndpoint(
+                base_url="http://localhost/v1", model="m", socket_path="/run/a.sock"
+            ),
+        )
+        sidecar.bind(
+            replica_id="rpl-2",
+            incarnation=1,
+            listener_generation=1,
+            endpoint=ReplicaEndpoint(
+                base_url="http://localhost/v1", model="m", socket_path="/run/b.sock"
+            ),
+        )
+        sidecar.unbind_engine("/run/a.sock")
+        assert set(sidecar._bindings) == {"rpl-2"}
+        await origin.send_wire("bootstrap", handoff=_handoff(), request='{"p":"hi"}')
+        reply = await origin.recv_wire(timeout=5.0)
+        await sidecar.aclose()
+        return reply
+
+    withdrawn = asyncio.run(run())
+    assert withdrawn is not None and withdrawn["kind"] == KIND_FAILED
+    assert withdrawn["definite"] is False
+    unreachable = asyncio.run(_stream_outcome(_http_engine(_unreachable), "hi"))
+    assert unreachable is None or unreachable.get("definite") is False

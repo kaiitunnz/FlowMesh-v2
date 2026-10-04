@@ -152,6 +152,13 @@ def test_a_withdrawn_engine_releases_the_lane_hosts_client() -> None:
                 host._loop,
             ).result(5)
         held = delivery._clients[engine.socket_path]
+        unbound: list[str] = []
+
+        class _Replica:
+            def unbind_engine(self, socket_path: str) -> None:
+                unbound.append(socket_path)
+
+        host._replica = _Replica()  # type: ignore[assignment]
         engines.add_withdraw_listener(host.release_engine)
         engines.withdraw("tsk-a")
         engines.withdraw("tsk-a")
@@ -160,7 +167,9 @@ def test_a_withdrawn_engine_releases_the_lane_hosts_client() -> None:
             time.sleep(0.01)
         assert set(delivery._clients) == {other.socket_path}
         assert held.is_closed
+        assert unbound == [engine.socket_path]
     finally:
+        host._replica = None
         host.stop(5)
 
 
