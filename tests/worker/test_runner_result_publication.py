@@ -45,7 +45,7 @@ class _FailingStore(SharedFilesystemObjectStore):
 class _Returning(Executor):
     name = "echo"
 
-    def __init__(self, result: BaseExecutorResult) -> None:  # noqa: D107
+    def __init__(self, result: BaseExecutorResult) -> None:
         self.result = result
 
     def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:

@@ -391,7 +391,7 @@ async def test_live_spawn_fans_out_children_to_real_dispatch() -> None:
     indices: list[int] = []
     for child in children:
         assert child.startswith("act-")
-        record = runtime._tasks[child]  # noqa: SLF001 - inspects the synthesized record
+        record = runtime._tasks[child]
         assert record.status is TaskStatus.PENDING
         assert child in registry.dynamic_task_ids[workflow_id]  # persisted durably
         # The record names its element rather than carrying it.

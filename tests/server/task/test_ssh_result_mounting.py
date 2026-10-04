@@ -254,7 +254,7 @@ def test_build_stage_context_includes_only_transitive_dependencies() -> None:
         logger=logging.getLogger("test-stage-context"),
     )
 
-    context = dispatcher._build_stage_context(current)  # noqa: SLF001
+    context = dispatcher._build_stage_context(current)
 
     assert set(context) == {"preprocess", "transform"}
 
@@ -324,7 +324,7 @@ def test_upstream_bindings_exclude_unrelated_completed_stages(
         logger=logging.getLogger("test-stage-results"),
     )
 
-    context = dispatcher._build_stage_context(current)  # noqa: SLF001
+    context = dispatcher._build_stage_context(current)
     upstream_results = dispatcher._upstream_bindings(context, current.task_id)
 
     assert set(upstream_results) == {"preprocess"}
@@ -384,10 +384,10 @@ def test_stage_reference_uses_payload_root_for_local_and_http_results(
         logger=logging.getLogger("test-stage-reference-root"),
     )
 
-    local_value = dispatcher._resolve_reference(  # noqa: SLF001
+    local_value = dispatcher._resolve_reference(
         "local.final_lora_archive", {"local": local_record}
     )
-    http_value = dispatcher._resolve_reference(  # noqa: SLF001
+    http_value = dispatcher._resolve_reference(
         "http.final_lora_archive", {"http": http_record}
     )
 

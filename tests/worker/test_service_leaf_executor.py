@@ -76,7 +76,7 @@ def test_the_declared_sampling_is_carried_to_the_replica() -> None:
             {"prompt": "hello there"},
             {"max_tokens": 10, "temperature": 0.0, "stop": ["\n"]},
         ),
-        Path("/tmp"),  # noqa: S108
+        Path("/tmp"),
     )
 
     body = _body(store)
@@ -138,7 +138,7 @@ def test_inputs_and_executor_settings_are_not_sent_as_engine_params() -> None:
     ex, store = _executor()
     ex.run(
         _inference_msg({"prompt": "hi"}, {"max_tokens": 4, "batch_size": 8}),
-        Path("/tmp"),  # noqa: S108
+        Path("/tmp"),
     )
 
     body = _body(store)
