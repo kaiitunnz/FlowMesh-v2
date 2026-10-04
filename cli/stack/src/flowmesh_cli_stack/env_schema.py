@@ -157,22 +157,39 @@ def _require_collector_scheme(
         )
 
 
+def _exports_telemetry(env: Mapping[str, str]) -> bool:
+    level = (env.get("SERVER_METRICS_TELEMETRY_LEVEL", "") or "off").strip().lower()
+    return level != "off" and any(
+        parse_bool(env.get(key, "") or "") is not False
+        for key in ("SERVER_METRICS_TRACES_ENABLED", "SERVER_METRICS_METRICS_ENABLED")
+    )
+
+
 def _warn_collector_ca_unset(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
-    """Warn when an ``https://`` collector has no configured CA to verify it."""
+    """Warn when an ``https://`` collector has no CA configured that can verify it."""
     endpoint = (env.get("SERVER_METRICS_OTLP_ENDPOINT", "") or "").strip()
-    if not endpoint.startswith("https://"):
+    if not (_exports_telemetry(env) and endpoint.startswith("https://")):
         return
-    if not any(
-        (env.get(key, "") or "").strip()
-        for key in ("SERVER_METRICS_OTLP_CA_FILE", "SERVER_GRPC_TLS_CA_FILE")
-    ):
+    otlp_ca = (env.get("SERVER_METRICS_OTLP_CA_FILE", "") or "").strip()
+    if not otlp_ca and not (env.get("SERVER_GRPC_TLS_CA_FILE", "") or "").strip():
         warnings.append(
             "SERVER_METRICS_OTLP_ENDPOINT is https:// with neither "
             "SERVER_METRICS_OTLP_CA_FILE nor SERVER_GRPC_TLS_CA_FILE set, so the "
             "collector is verified against the system CAs; see cross-node export in "
             "docs/TELEMETRY.md"
+        )
+    elif (
+        not otlp_ca
+        and (env.get("NODE_ROLE", "") or "").strip().lower() == "worker"
+        and not _is_loopback(urlsplit(endpoint).hostname or "")
+    ):
+        warnings.append(
+            "SERVER_METRICS_OTLP_ENDPOINT names another node's collector, which this "
+            "node verifies with its own SERVER_GRPC_TLS_CA_FILE while "
+            "SERVER_METRICS_OTLP_CA_FILE is unset; point it at a copy of the root's "
+            "server CA, as cross-node export in docs/TELEMETRY.md describes"
         )
 
 

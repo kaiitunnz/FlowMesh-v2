@@ -70,14 +70,71 @@ def test_the_scheme_rule_waits_for_the_telemetry_profile() -> None:
     assert errors == []
 
 
+_EXPORTING = {"SERVER_METRICS_TELEMETRY_LEVEL": "coarse"}
+
+
 def test_an_https_collector_without_a_ca_warns() -> None:
-    _, warnings = _problems({"SERVER_METRICS_OTLP_ENDPOINT": "https://root:4317"})
+    _, warnings = _problems(
+        {**_EXPORTING, "SERVER_METRICS_OTLP_ENDPOINT": "https://root:4317"}
+    )
     assert warnings and "docs/TELEMETRY.md" in warnings[0]
     for ca_key in ("SERVER_GRPC_TLS_CA_FILE", "SERVER_METRICS_OTLP_CA_FILE"):
         _, warnings = _problems(
             {
+                **_EXPORTING,
                 "SERVER_METRICS_OTLP_ENDPOINT": "https://root:4317",
                 ca_key: "/etc/ssl/server/root-ca.pem",
+            }
+        )
+        assert warnings == []
+
+
+@pytest.mark.parametrize(
+    "telemetry",
+    [
+        {"SERVER_METRICS_TELEMETRY_LEVEL": "off"},
+        {
+            "SERVER_METRICS_TELEMETRY_LEVEL": "fine",
+            "SERVER_METRICS_TRACES_ENABLED": "false",
+            "SERVER_METRICS_METRICS_ENABLED": "false",
+        },
+    ],
+)
+def test_a_node_exporting_nothing_gets_no_collector_ca_warning(
+    telemetry: dict[str, str],
+) -> None:
+    for node in ({}, {"NODE_ROLE": "worker"}):
+        _, warnings = _problems(
+            {
+                **telemetry,
+                **node,
+                "SERVER_METRICS_OTLP_ENDPOINT": "https://10.0.0.5:4317",
+            }
+        )
+        assert warnings == []
+
+
+def test_a_worker_node_verifying_the_root_s_collector_with_its_own_ca_warns() -> None:
+    worker = {
+        **_EXPORTING,
+        "NODE_ROLE": "worker",
+        "SERVER_GRPC_TLS_CA_FILE": "/etc/ssl/server/server-ca.pem",
+    }
+    _, warnings = _problems(
+        {**worker, "SERVER_METRICS_OTLP_ENDPOINT": "https://10.0.0.5:4317"}
+    )
+    assert len(warnings) == 1 and "root's server CA" in warnings[0]
+
+    for settled in (
+        {"SERVER_METRICS_OTLP_CA_FILE": "/etc/ssl/server/root-ca.pem"},
+        {"SERVER_METRICS_OTLP_ENDPOINT": "https://localhost:4317"},
+        {"NODE_ROLE": "root"},
+    ):
+        _, warnings = _problems(
+            {
+                **worker,
+                "SERVER_METRICS_OTLP_ENDPOINT": "https://10.0.0.5:4317",
+                **settled,
             }
         )
         assert warnings == []
