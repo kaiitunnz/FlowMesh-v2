@@ -141,8 +141,8 @@ capacity is disabled.
 | GET | `/api/v1/resident/replicas` | List replica incarnations. |
 | GET | `/api/v1/resident/claims` | List credit-bearing admission claims and per-replica held credit. |
 
-Endpoint responses carry host and port only — never an `api_key`. Read a replica's serving
-logs via its `serve_task_id` through `GET /api/v1/tasks/{id}/logs`.
+Read a replica's serving logs via its `serve_task_id` through
+`GET /api/v1/tasks/{id}/logs`.
 
 ## Network
 

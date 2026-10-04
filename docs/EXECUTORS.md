@@ -383,8 +383,9 @@ the configuration that changes what the engine returns, which the replica serves
 `model.source.revision` and the `model.vllm` keys `max_model_len`, `tokenizer_revision`,
 `dtype`, `quantization`, `kv_cache_dtype`, `rope_scaling`, `rope_theta`,
 `limit_mm_per_prompt`, `enable_mm_embeds`, `trust_remote_code`, and `env_vars`, plus
-`convert` for an embedding leaf. Every other `model.vllm` key stays local to each engine. A leaf served by a
-model other than its own lends that model no profile.
+`convert` for an embedding leaf. A key set to null is unset. Every other `model.vllm` key
+is local to each engine. A leaf served by a model other than its own lends that model no
+profile.
 
 An adapter does not fork a family: it co-batches on the base replica through its own
 slot — the resident consumer loads its adapter into a replica slot and selects it as the
@@ -392,11 +393,12 @@ request model. Adapter serving is supported only on the chat interface; a reside
 embedding leaf that declares an adapter is rejected at compile. An adapter-bound leaf
 declares a single adapter with a loadable `path`, `url`, or `task_id`.
 
-A menu offers a resident candidate only for a leaf a replica runs as declared: its
-engine configuration renders nothing from upstream, carries no credential, runs on one
-GPU, and loads no checkpoint. A pinned resident leaf runs on the replica's terms: a
-credential in its engine configuration stays with the local engine, and a value that
-renders from upstream stays out of its profile. A leaf whose model or adapter source
+A menu offers a resident candidate only for a leaf a replica runs as declared: no
+profile setting, tensor parallel size, or revision renders from upstream, its engine
+configuration carries no credential, it runs on one GPU, and it loads no checkpoint. A
+pinned resident leaf runs on the replica's terms: the replica loads with the
+deployment's own access and never receives the leaf's credential, and a value that
+renders from upstream is left out of its profile. A leaf whose model or adapter source
 carries a credential has no resident embodiment, and a resident binding on one, or on a
 leaf that loads a checkpoint, is refused at submission.
 
@@ -446,13 +448,14 @@ runs as one torchrun rank per device, on any number of devices, and a LoRA SFT t
 one runs as a single rank; the task reports rank 0's result, or the first failing rank's
 error. A Docker GPU worker runs with an 8 GiB `/dev/shm` ceiling, which vLLM's multi-GPU
 engines need. Engines and training ranks keep their internal collective traffic on
-loopback, through `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME` and `VLLM_HOST_IP`, which
-a vLLM spec's `model.vllm.env_vars` overrides. A vLLM inference, LoRA or embedding task that sets `CUDA_VISIBLE_DEVICES`,
-or a `CUDA_DEVICE_ORDER` other than `PCI_BUS_ID`, in `model.vllm.env_vars` picks its own
-devices, so its executor sees every device and the task waits while any is held, as does
-an omni task, whose executor sees every device. A worker on a MIG slice, or one whose
-`CUDA_VISIBLE_DEVICES` lists some of a host's mixed GPU models by position without
-`CUDA_DEVICE_ORDER=PCI_BUS_ID`, runs every executor on all its GPUs.
+loopback, through `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME` and `VLLM_HOST_IP`, which a
+vLLM spec's `model.vllm.env_vars` overrides. A vLLM inference, LoRA or embedding task
+that sets `CUDA_VISIBLE_DEVICES`, or a `CUDA_DEVICE_ORDER` other than `PCI_BUS_ID`, in
+`model.vllm.env_vars` picks its own devices, so its executor sees every device and the
+task waits while any is held, as does an omni task, whose executor sees every device. A
+worker on a MIG slice, or one whose `CUDA_VISIBLE_DEVICES` lists some of a host's mixed
+GPU models by position without `CUDA_DEVICE_ORDER=PCI_BUS_ID`, runs every executor on
+all its GPUs.
 
 ## SSH executor GPUs
 
