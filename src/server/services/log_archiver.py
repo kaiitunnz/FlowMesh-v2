@@ -192,9 +192,9 @@ class TaskLogArchiver:
         return result_file_path(self._results_dir, task_id).parent
 
     def _archived(self, task_id: str) -> bool | None:
-        """Whether a finished task's logs need no archiving: with no stream checkpoint
-        held, something stands at its log path or where a directory holding it
-        belongs. None when its log path could not be checked."""
+        """Return whether a finished task's logs are archived: no stream checkpoint is
+        held and something stands at its log path or where a directory holding it
+        belongs. None when the path could not be checked."""
         if self._load_checkpoint(task_id):
             return False
         try:

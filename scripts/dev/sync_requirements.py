@@ -74,11 +74,10 @@ FLASHINFER_EXTRAS: tuple[str, ...] = ("flashinfer-jit-cache",)
 SERVER_CONSTRAINT_EXCLUDES = re.compile(r"setuptools")
 
 # uv.lock resolves torch from PyPI with its CUDA 13 libraries, while the worker
-# images take torch from the PyTorch index UV_TORCH_BACKEND selects (cpu, cu129) and
-# flashinfer from FLASHINFER_INDEX. The CUDA libraries that backend brings, and
-# torchcodec, which the cu129 index publishes at its own version, are left for the
-# image to resolve, as is setuptools (above): torch pulls it into the CPU image, which
-# installs no vLLM.
+# images take torch from the PyTorch index UV_TORCH_BACKEND selects (cpu, cu129). The
+# CUDA libraries that backend brings, and torchcodec, which the cu129 index publishes
+# at its own version, are left for the image to resolve, as is setuptools (above):
+# torch pulls it into the CPU image, which installs no vLLM.
 WORKER_CONSTRAINT_EXCLUDES = re.compile(
     r"setuptools|cuda-.+|torchcodec|nvidia-(?:cublas|cuda-.+|cudnn-cu\d+|cufft|cufile"
     r"|curand|cusolver|cusparse|cusparselt-cu\d+|nccl-cu\d+|nvjitlink|nvshmem-cu\d+"

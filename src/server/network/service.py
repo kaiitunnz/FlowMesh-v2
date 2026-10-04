@@ -131,7 +131,7 @@ class NetworkPlane:
         The origin node is the one whose deputy will execute the route, so it is what
         every candidate — the peer transports included — is graded against. ``trust``
         overrides the deployment policy for a caller that probes reachability, or for
-        an origin that dials no peer.
+        an origin restricted to ``control_relay``.
 
         Returns ``None`` when the origin advertises no network endpoint.
         """

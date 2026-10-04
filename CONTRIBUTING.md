@@ -131,7 +131,7 @@ Runtime dependency versions live in two places with different styles:
 
 - **`pyproject.toml` dependency groups** — `>=X.Y.Z` lower bounds. Expresses a compatibility floor; lets uv resolve the current acceptable version.
 - **`src/server/requirements.txt` and `src/worker/requirements/requirements{,.gpu}.txt`** — the images' direct dependencies, pinned `==X.Y.Z`.
-- **`src/server/constraints.txt` and `src/worker/requirements/constraints.txt`** — every package `uv.lock` resolves for the images, which each image install takes as `--constraint`, so an image installs the versions CI tests. The CUDA libraries the torch backend brings, and setuptools, which the lock caps for vLLM alone, are left for each image to resolve.
+- **`src/server/constraints.txt` and `src/worker/requirements/constraints.txt`** — every package `uv.lock` resolves for the images, passed to each image install as `--constraint`, so an image installs the versions CI tests. The torch backend's CUDA libraries, torchcodec and setuptools resolve per image.
 
 These files are **auto-generated** from runtime dependency groups
 in `pyproject.toml` + `uv.lock` by `scripts/dev/sync_requirements.py`. Do not

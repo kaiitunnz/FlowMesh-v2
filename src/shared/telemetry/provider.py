@@ -199,9 +199,9 @@ def build_tracer(
 
 
 def otlp_exporter_kwargs(config: TelemetryConfig) -> dict[str, Any]:
-    """The OTLP exporter arguments for ``config``'s collector: its endpoint, timeout,
-    bearer token when one is set, and the CA an ``https://`` collector is verified
-    against."""
+    """Return the OTLP exporter arguments for ``config``: its endpoint, timeout,
+    bearer token when one is set, and the CA that verifies an ``https://``
+    collector."""
     assert config.otlp_endpoint is not None
     kwargs: dict[str, Any] = {
         "endpoint": config.otlp_endpoint,
