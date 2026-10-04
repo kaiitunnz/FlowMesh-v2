@@ -1,5 +1,3 @@
-from urllib.parse import urlparse
-
 from pydantic import BaseModel, Field
 
 from ..resident.state import (
@@ -40,16 +38,6 @@ class ResidentFamilyInfo(BaseModel):
         )
 
 
-class ResidentReplicaEndpointInfo(BaseModel):
-    host: str | None = Field(default=None, description="Replica endpoint host.")
-    port: int | None = Field(default=None, description="Replica endpoint port.")
-
-    @classmethod
-    def parse(cls, base_url: str) -> "ResidentReplicaEndpointInfo":
-        parsed = urlparse(base_url)
-        return cls(host=parsed.hostname, port=parsed.port)
-
-
 class ResidentReplicaInfo(BaseModel):
     replica_id: str = Field(description="Replica incarnation identifier.")
     family: str = Field(description="Owning service-family identifier.")
@@ -69,9 +57,6 @@ class ResidentReplicaInfo(BaseModel):
     lease_id: str | None = Field(
         default=None, description="Allocation lease identifier."
     )
-    endpoint: ResidentReplicaEndpointInfo | None = Field(
-        default=None, description="Reachable endpoint host and port, when known."
-    )
     created_at: str = Field(description="Replica creation timestamp.")
     updated_at: str = Field(description="Last state-change timestamp.")
     last_active_at: str = Field(description="Last admission-activity timestamp.")
@@ -80,11 +65,6 @@ class ResidentReplicaInfo(BaseModel):
     def project(
         cls, replica: ReplicaIncarnation, worker_id: str | None
     ) -> "ResidentReplicaInfo":
-        endpoint = (
-            ResidentReplicaEndpointInfo.parse(replica.endpoint.base_url)
-            if replica.endpoint is not None
-            else None
-        )
         return cls(
             replica_id=replica.replica_id,
             family=replica.family,
@@ -95,7 +75,6 @@ class ResidentReplicaInfo(BaseModel):
             worker_id=worker_id,
             standing=replica.standing,
             lease_id=replica.lease_id,
-            endpoint=endpoint,
             created_at=replica.created_at,
             updated_at=replica.updated_at,
             last_active_at=replica.last_active_at,
