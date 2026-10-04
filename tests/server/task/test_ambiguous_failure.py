@@ -63,7 +63,9 @@ async def _dispatched(runtime: TaskRuntime, payload: str) -> tuple[str, dict[str
     return workflow_id, ids
 
 
-def _fail(runtime: TaskRuntime, task_id: str, *, ambiguous: bool) -> DispatchEnd:
+def _fail(
+    runtime: TaskRuntime, task_id: str, *, ambiguous: bool, retryable: bool = True
+) -> DispatchEnd:
     return runtime.fail_dispatch(
         task_id,
         "wkr-1",
@@ -71,7 +73,7 @@ def _fail(runtime: TaskRuntime, task_id: str, *, ambiguous: bool) -> DispatchEnd
         "2026-06-01T00:00:00Z",
         "dsp-1",
         error=_ERROR,
-        retryable=True,
+        retryable=retryable,
         ambiguous=ambiguous,
     ).end
 
@@ -147,6 +149,21 @@ async def test_an_api_leaf_its_author_marks_pure_runs_again() -> None:
     assert record is not None and record.status == TaskStatus.PENDING
     assert record.attempts == 1
     assert _next(runtime) == ids["call"]
+
+
+@pytest.mark.anyio
+async def test_a_non_retryable_failure_fails_however_ambiguous() -> None:
+    runtime = _runtime(FakeRegistry())
+    _, ids = await _dispatched(runtime, _api_then_echo(v2="v2: {effect: pure}"))
+
+    assert (
+        _fail(runtime, ids["call"], ambiguous=True, retryable=False)
+        is DispatchEnd.FAILED
+    )
+
+    record = runtime.get_record(ids["call"])
+    assert record is not None and record.status == TaskStatus.FAILED
+    assert record.error == _ERROR
 
 
 @pytest.mark.anyio

@@ -5658,12 +5658,12 @@ class TaskRuntime:
         run its tasks alone. A task whose inputs were in a store its worker could not
         reach returns without spending an attempt and is held until control has read
         them itself; a report naming no input the task consumes is an ordinary failure.
-        An ``ambiguous`` v2 failure, after the task's external effect may have
-        happened, settles as its worker's loss would. Otherwise the failure is charged
-        to the worker and the task either returns to the head of the queue for another
-        attempt or settles: FAILED, or CANCELLED when a cancel is already under way. A
-        report on a settled task persists its settlement again, and one from any other
-        dispatch is dropped.
+        An ``ambiguous`` retryable v2 failure, after the task's external effect may
+        have happened, settles as its worker's loss would. Otherwise the failure is
+        charged to the worker and the task either returns to the head of the queue for
+        another attempt or settles: FAILED, or CANCELLED when a cancel is already under
+        way. A report on a settled task persists its settlement again, and one from any
+        other dispatch is dropped.
         """
         # Control's verdict on a held task's input is a report of its own, so it never
         # replays the worker report of the same dispatch.
@@ -5770,6 +5770,7 @@ class TaskRuntime:
                 record.failed_workers.append(worker_id)
             if (
                 ambiguous
+                and retryable is not False
                 and record.status == TaskStatus.DISPATCHED
                 and record.workflow_id in self._engines
             ):
