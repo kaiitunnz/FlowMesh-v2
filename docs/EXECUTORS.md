@@ -419,12 +419,12 @@ runtime LoRA, so a base model incompatible with `--enable-lora` would fail to se
 
 ## API executor failures
 
-A request that never left the worker — a connection error, a connect or pool timeout —
-and a 5xx, 408 or 429 response are transient: `spec.api.retries` re-sends them in place,
-and the task is retryable. A failure after the request may have reached the server — a
-read or write timeout or error, or a broken response — is ambiguous: the executor never
-re-sends it, and a v2 task settles it by its effect's replay contract, as on its worker's
-loss.
+A connection error or a connect or pool timeout on the task's own request, which never
+left the worker, and a 5xx, 408 or 429 response are transient: `spec.api.retries`
+re-sends them in place, and the task is retryable. Any other request failure, including
+one on a redirect hop or while reading a response, may follow the server acting on the
+request and is ambiguous: the executor never re-sends it, and a v2 task settles it by its
+effect's replay contract, as on its worker's loss.
 
 ## SSH executor access modes
 

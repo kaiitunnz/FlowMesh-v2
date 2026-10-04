@@ -796,6 +796,8 @@ def test_a_request_that_never_left_is_retried(
         httpx.WriteTimeout,
         httpx.ReadError,
         httpx.RemoteProtocolError,
+        httpx.LocalProtocolError,
+        httpx.DecodingError,
         httpx.TooManyRedirects,
         httpx.UnsupportedProtocol,
     ],
@@ -842,7 +844,10 @@ def test_a_body_nested_past_the_parser_fails_as_invalid_json() -> None:
         (httpx.ConnectError, False),
         (httpx.ConnectTimeout, False),
         (httpx.PoolTimeout, False),
-        (httpx.TooManyRedirects, False),
+        (httpx.UnsupportedProtocol, False),
+        (httpx.TooManyRedirects, True),
+        (httpx.DecodingError, True),
+        (httpx.LocalProtocolError, True),
         (httpx.ReadTimeout, True),
         (httpx.WriteTimeout, True),
         (httpx.ReadError, True),
@@ -858,3 +863,95 @@ def test_a_failure_after_the_request_may_have_left_is_ambiguous(
         _run(APIExecutor(DEFAULT_WORKER_CONFIG), task, _RaisingTransport(error))
     assert raised.value.retryable is True
     assert raised.value.ambiguous is ambiguous
+
+
+class _RedirectingHandler(BaseHTTPRequestHandler):
+    """Record each request, and answer by path: redirect away, loop, or misencode."""
+
+    def _serve(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        server = cast(_RedirectingServer, self.server)
+        server.requests.append((self.command, self.path))
+        if self.path == "/unreachable":
+            self._redirect(303, "http://127.0.0.1:1/gone")
+        elif self.path == "/ftp":
+            self._redirect(303, "ftp://127.0.0.1/file")
+        elif self.path == "/loop":
+            self._redirect(307, "/loop")
+        elif self.path == "/moved":
+            self._redirect(303, "/done")
+        elif self.path == "/gzip":
+            self._reply(b"not gzip", {"Content-Encoding": "gzip"})
+        else:
+            self._reply(json.dumps(_ok_response().json()).encode(), {})
+
+    do_GET = do_POST = _serve
+
+    def _redirect(self, status: int, location: str) -> None:
+        self.send_response(status)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _reply(self, body: bytes, headers: dict[str, str]) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return None
+
+
+class _RedirectingServer(ThreadingHTTPServer):
+    requests: list[tuple[str, str]]
+
+
+@pytest.fixture
+def redirecting_server() -> Any:
+    server = _RedirectingServer(("127.0.0.1", 0), _RedirectingHandler)
+    server.requests = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server
+    APIExecutor.close_all_clients()
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("path", "posts"),
+    # A 307 loop re-posts on every hop until the client gives up, once.
+    [("/unreachable", 1), ("/ftp", 1), ("/loop", 21), ("/gzip", 1)],
+)
+def test_a_failure_after_the_server_received_the_request_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+    redirecting_server: _RedirectingServer,
+    path: str,
+    posts: int,
+) -> None:
+    monkeypatch.setattr("worker.executors.api_executor._RETRY_BACKOFF_SEC", 0.0)
+    url = f"http://127.0.0.1:{redirecting_server.server_address[1]}{path}"
+    with pytest.raises(ExecutionError) as raised:
+        APIExecutor(DEFAULT_WORKER_CONFIG).run(
+            _task_message(url=url, retries=3), Path(tempfile.gettempdir())
+        )
+    assert raised.value.ambiguous is True
+    assert raised.value.retryable is True
+    assert redirecting_server.requests == [("POST", path)] * posts
+
+
+def test_a_redirect_is_still_followed_to_its_answer(
+    redirecting_server: _RedirectingServer,
+) -> None:
+    url = f"http://127.0.0.1:{redirecting_server.server_address[1]}/moved"
+    result = APIExecutor(DEFAULT_WORKER_CONFIG).run(
+        _task_message(url=url), Path(tempfile.gettempdir())
+    )
+    assert result.text == "hello"
+    assert result.url.endswith("/done")
+    assert redirecting_server.requests == [("POST", "/moved"), ("GET", "/done")]

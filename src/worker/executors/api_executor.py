@@ -47,22 +47,24 @@ _RETRY_BACKOFF_SEC = 1.0
 _RETRY_BACKOFF_MAX_SEC = 60.0
 # Upper bound on spec.api.retries.
 _MAX_RETRIES = 10
-# Failures before the request left the worker, so sending it again cannot repeat its
-# effect.
+# Transient failures that, raised for the task's own request rather than a redirect hop,
+# mean it never left the worker, so sending it again cannot repeat its effect.
 _UNSENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
-# Failures after the request may have reached the server, which may have acted on it.
-_MAYBE_SENT_ERRORS = (
-    httpx.ReadTimeout,
-    httpx.WriteTimeout,
-    httpx.ReadError,
-    httpx.WriteError,
-    httpx.RemoteProtocolError,
-)
 
 
 def _is_routing_header(name: str) -> bool:
     lowered = name.strip().lower()
     return lowered in _ROUTING_HEADERS or lowered.startswith(_ROUTING_HEADER_PREFIX)
+
+
+def _never_sent(exc: httpx.RequestError, request: httpx.Request) -> bool:
+    """Whether ``exc`` failed ``request`` itself before any of it reached a server."""
+    if not isinstance(exc, (*_UNSENT_ERRORS, httpx.UnsupportedProtocol)):
+        return False
+    try:
+        return exc.request is request
+    except RuntimeError:
+        return False
 
 
 def _is_retryable_status(status_code: int) -> bool:
@@ -153,36 +155,39 @@ class APIExecutor(Executor):
     ) -> httpx.Response:
         """Issue the request, retrying transient failures up to ``retries`` times.
 
-        A retryable failure is a connection error, where the request never left, or a
-        transient HTTP status (5xx, 408, 429). Any other failure and a cancelled task
-        stop the loop immediately. The final attempt's failure propagates to the
-        caller.
+        A retryable failure is a connection error on the task's own request, which
+        never left the worker, or a transient HTTP status (5xx, 408, 429). Any other
+        failure and a cancelled task stop the loop immediately. A request failure
+        raises an ``ExecutionError`` that is ambiguous unless the request never left;
+        the final attempt's error status returns to the caller.
         """
         attempt = 0
         while True:
             self._signals.raise_if_cancelled()
+            request = client.build_request(
+                method, url, headers=headers, params=params, **request_kwargs
+            )
             try:
-                resp = client.request(
-                    method,
-                    url,
-                    headers=headers,
-                    params=params,
-                    **request_kwargs,
-                )
-            except _UNSENT_ERRORS as exc:
-                if attempt >= retries:
-                    raise
-                attempt += 1
-                delay = self._backoff_delay(attempt)
-                logger.warning(
-                    "API request failed (attempt %d/%d): %s; retrying in %.1fs",
-                    attempt,
-                    retries,
-                    redact_urls(str(exc), url),
-                    delay,
-                )
-                self._wait_for_backoff(delay)
-                continue
+                resp = client.send(request)
+            except httpx.RequestError as exc:
+                unsent = _never_sent(exc, request)
+                if unsent and isinstance(exc, _UNSENT_ERRORS) and attempt < retries:
+                    attempt += 1
+                    delay = self._backoff_delay(attempt)
+                    logger.warning(
+                        "API request failed (attempt %d/%d): %s; retrying in %.1fs",
+                        attempt,
+                        retries,
+                        redact_urls(str(exc), url),
+                        delay,
+                    )
+                    self._wait_for_backoff(delay)
+                    continue
+                raise ExecutionError(
+                    redact_urls(f"API request failed: {exc}", url),
+                    retryable=True,
+                    ambiguous=not unsent,
+                ) from exc
             if resp.is_error and _is_retryable_status(resp.status_code):
                 if attempt >= retries:
                     return resp
@@ -336,24 +341,11 @@ class APIExecutor(Executor):
         if retries > _MAX_RETRIES:
             raise ExecutionError(f"spec.api.retries must be at most {_MAX_RETRIES}")
 
-        try:
-            base = self._base_url(str(url))
-            client = self._get_client(base, timeout, verify_tls, follow_redirects)
-            resp = self._request_with_retries(
-                client,
-                method,
-                str(url),
-                headers,
-                params,
-                request_kwargs,
-                retries,
-            )
-        except httpx.RequestError as exc:
-            raise ExecutionError(
-                redact_urls(f"API request failed: {exc}", str(url)),
-                retryable=True,
-                ambiguous=isinstance(exc, _MAYBE_SENT_ERRORS),
-            ) from exc
+        base = self._base_url(str(url))
+        client = self._get_client(base, timeout, verify_tls, follow_redirects)
+        resp = self._request_with_retries(
+            client, method, str(url), headers, params, request_kwargs, retries
+        )
 
         body_bytes = resp.content
         truncated = False
