@@ -576,8 +576,14 @@ def down(
     logging.success("FlowMesh stack stopped.")
 
 
-STACK_SERVICES = ("server", "redis_control", "redis_telemetry", "otel_collector")
-"""Compose services that can be restarted individually."""
+STACK_SERVICES = {
+    "server": None,
+    "redis_control": "root",
+    "redis_telemetry": "root",
+    "otel_collector": "telemetry",
+}
+"""Compose services that can be restarted individually, each with the compose profile
+it runs under."""
 
 WORKER_MANAGING_SERVICES = ("server",)
 """Services whose restart tears down the supervisor; drain workers first."""
@@ -638,11 +644,23 @@ def restart(
         )
         raise typer.Exit(code=1)
 
+    profile = "root" if _node_role(env_file) == NodeRole.ROOT else None
+    active = _profiles(env_file, profile)
+    if inactive := [
+        f"{svc} (profile {needed})"
+        for svc in requested
+        if (needed := STACK_SERVICES[svc]) is not None and needed not in active
+    ]:
+        logging.error(
+            f"This node does not run {', '.join(inactive)}; "
+            f"its active profiles are: {', '.join(active) or 'none'}."
+        )
+        raise typer.Exit(code=1)
+
     if any(svc in WORKER_MANAGING_SERVICES for svc in requested):
         logging.info("Draining workers...")
         _drain_workers(env_file)
 
-    profile = "root" if _node_role(env_file) == NodeRole.ROOT else None
     up_args = ["up", "-d", "--no-deps", "--force-recreate", "--wait"]
     if pull:
         up_args += ["--pull", "always"]

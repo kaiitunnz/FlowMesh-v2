@@ -19,7 +19,9 @@ flowmesh stack restart redis_control server  # recreate several services in one 
 flowmesh stack restart                       # whole-stack drain + down + up
 ```
 
-For each invocation it:
+A service runs only on a node whose Compose profiles include it, so a node refuses to
+restart one it does not run: the Redis services on a worker node, or `otel_collector`
+without the `telemetry` profile. For each invocation it:
 
 1. Drains the node's managed workers **once** if any named service manages
    workers (the `server` / supervisor), so their in-flight tasks are released

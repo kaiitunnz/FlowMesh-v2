@@ -1,12 +1,21 @@
 """Service-scoped `flowmesh stack restart [SERVICE]...` behavior."""
 
+from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import typer
 from flowmesh.models.nodes import NodeRole
 from flowmesh_cli_stack import stack as stack_module
+
+
+@pytest.fixture(autouse=True)
+def _active_profiles() -> Iterator[MagicMock]:
+    with patch.object(
+        stack_module, "_profiles", return_value=["root", "telemetry"]
+    ) as profiles:
+        yield profiles
 
 
 def _restart(
@@ -125,6 +134,30 @@ def test_restart_unknown_in_a_set_exits_without_acting() -> None:
     ):
         with pytest.raises(typer.Exit):
             _restart(services=["server", "bogus"])
+
+    drain.assert_not_called()
+    compose.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("role", "active", "service"),
+    [
+        (NodeRole.ROOT, ["root"], "otel_collector"),
+        (NodeRole.WORKER, ["telemetry"], "redis_control"),
+        (NodeRole.WORKER, [], "otel_collector"),
+    ],
+)
+def test_restart_refuses_a_service_this_node_does_not_run(
+    _active_profiles: MagicMock, role: NodeRole, active: list[str], service: str
+) -> None:
+    _active_profiles.return_value = active
+    with (
+        patch.object(stack_module, "_drain_workers") as drain,
+        patch.object(stack_module, "_compose") as compose,
+        patch.object(stack_module, "_node_role", return_value=role),
+    ):
+        with pytest.raises(typer.Exit):
+            _restart(services=["server", service])
 
     drain.assert_not_called()
     compose.assert_not_called()
