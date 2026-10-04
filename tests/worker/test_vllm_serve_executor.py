@@ -538,6 +538,33 @@ class TestServeLoopbackEndpoint:
         assert first_mode == second_mode == 0o700
         assert not first.exists() and not second.exists()
 
+    def test_a_failing_withdraw_listener_still_stops_the_engine(
+        self, tmp_path: Path
+    ) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(source=ModelSource(identifier="m")),
+        )
+        task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
+        ex = self._make_executor()
+
+        def broken(_engine: LocalEngine) -> None:
+            raise RuntimeError("listener bug")
+
+        ex._local_engines().add_withdraw_listener(broken)
+        proc = MagicMock()
+        proc.stdout = io.StringIO("")
+        proc.poll.return_value = 0
+        with (
+            patch("subprocess.Popen", return_value=proc),
+            patch.object(ex, "_poll_health"),
+            patch.object(ex, "_wait_for_serve"),
+            patch.object(ex, "emit_update"),
+            patch.object(ex, "_terminate_process_group") as terminate,
+        ):
+            ex.run(task, tmp_path)
+        terminate.assert_called_once_with(proc)
+
     def test_a_socket_path_past_the_unix_limit_fails_the_task_clearly(
         self, tmp_path: Path
     ) -> None:

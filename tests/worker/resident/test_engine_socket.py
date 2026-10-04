@@ -13,6 +13,9 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
+import httpx
+import pytest
+
 from shared.resident.contracts import LOCAL_ENGINE_BASE_URL, ReplicaEndpoint
 from shared.resident.envelope import ServeRequestEnvelope
 from worker.resident.engine import (
@@ -159,3 +162,36 @@ def test_a_withdrawn_engine_releases_the_lane_hosts_client() -> None:
         assert held.is_closed
     finally:
         host.stop(5)
+
+
+def test_a_call_to_a_stopped_engine_creates_no_client() -> None:
+    endpoint = ReplicaEndpoint(
+        base_url=LOCAL_ENGINE_BASE_URL, model="m", socket_path="/run/engine-a.sock"
+    )
+
+    async def run() -> HttpEngineDelivery:
+        delivery = HttpEngineDelivery()
+        await delivery._shared_client(endpoint)
+        await delivery.evict("/run/engine-a.sock")
+        with pytest.raises(httpx.ConnectError, match="has stopped"):
+            await delivery(endpoint, '{"prompt": "hi"}')
+        return delivery
+
+    delivery = asyncio.run(run())
+    assert delivery._clients == {}
+
+
+def test_a_failing_withdraw_listener_does_not_stop_the_others() -> None:
+    engines = LocalEngineRegistry()
+    engine = LocalEngine("/run/engine-a.sock")
+    engines.publish("tsk-a", engine)
+    released: list[LocalEngine] = []
+
+    def broken(_engine: LocalEngine) -> None:
+        raise RuntimeError("listener bug")
+
+    engines.add_withdraw_listener(broken)
+    engines.add_withdraw_listener(released.append)
+    engines.withdraw("tsk-a")
+    assert released == [engine]
+    assert engines.lookup("tsk-a") is None

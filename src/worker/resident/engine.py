@@ -147,6 +147,9 @@ class HttpEngineDelivery:
         self._timeout = timeout_sec
         self._chunk_chars = max(1, chunk_chars)
         self._clients: dict[str | None, httpx.AsyncClient] = {}
+        # Each engine run gets a fresh socket path, so a stopped engine's path is
+        # never served again.
+        self._stopped: set[str] = set()
         self._client_lock = asyncio.Lock()
 
     async def _shared_client(self, endpoint: ReplicaEndpoint) -> httpx.AsyncClient:
@@ -158,6 +161,8 @@ class HttpEngineDelivery:
         so the conversations of a batch share it.
         """
         key = endpoint.socket_path
+        if key in self._stopped:
+            raise httpx.ConnectError(f"the engine on {key} has stopped")
         if (client := self._clients.get(key)) is None:
             async with self._client_lock:
                 if (client := self._clients.get(key)) is None:
@@ -165,7 +170,8 @@ class HttpEngineDelivery:
         return client
 
     async def evict(self, socket_path: str) -> None:
-        """Close the client of an engine that stopped."""
+        """Close the client of an engine that stopped, and refuse it from then on."""
+        self._stopped.add(socket_path)
         if (client := self._clients.pop(socket_path, None)) is not None:
             await client.aclose()
 

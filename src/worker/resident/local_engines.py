@@ -1,6 +1,7 @@
 """The serve engines this worker launched, reached only from inside the worker."""
 
 import contextlib
+import logging
 import os
 import shutil
 import tempfile
@@ -8,6 +9,8 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _SOCKET_NAME = "engine.sock"
 _DIR_PREFIX = "flowmesh-engine-"
@@ -77,7 +80,12 @@ class LocalEngineRegistry:
             listeners = list(self._withdraw_listeners)
         if engine is not None:
             for listener in listeners:
-                listener(engine)
+                # A withdraw runs in an executor's teardown, which must go on to stop
+                # the engine whatever a listener does.
+                try:
+                    listener(engine)
+                except Exception:
+                    logger.exception("A withdraw listener failed for %s", serve_task_id)
 
     def add_withdraw_listener(self, listener: Callable[[LocalEngine], None]) -> None:
         """Call ``listener`` with each engine as it is withdrawn."""
