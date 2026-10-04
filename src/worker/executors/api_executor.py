@@ -364,8 +364,18 @@ class APIExecutor(Executor):
             encoding = resp.encoding or "utf-8"
             body_text = body_bytes.decode(encoding, errors="replace")
 
+        if raise_for_status and resp.is_error:
+            message = f"API request returned status {resp.status_code}"
+            if body_text:
+                message = f"{message}: {body_text[:200]}"
+            retryable = _is_retryable_status(resp.status_code)
+            raise ExecutionError(message, retryable=retryable)
+
         if parse_json:
-            result.response_json = resp.json()
+            try:
+                result.response_json = resp.json()
+            except ValueError as exc:
+                raise ExecutionError("Response is not a valid JSON mapping") from exc
             if not isinstance(result.response_json, dict):
                 raise ExecutionError("Response is not a valid JSON mapping")
             usage = result.response_json.get("usage")
@@ -384,12 +394,5 @@ class APIExecutor(Executor):
                 ) from exc
         elif return_body:
             result.text = body_text
-
-        if raise_for_status and resp.is_error:
-            message = f"API request returned status {resp.status_code}"
-            if body_text:
-                message = f"{message}: {body_text[:200]}"
-            retryable = _is_retryable_status(resp.status_code)
-            raise ExecutionError(message, retryable=retryable)
 
         return result

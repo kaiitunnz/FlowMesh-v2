@@ -723,3 +723,37 @@ class TestRetries:
         assert len(warnings) == 2
         assert "attempt 1/2" in warnings[0].getMessage()
         assert "attempt 2/2" in warnings[1].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("response", "retryable"),
+    [
+        (httpx.Response(401, text="Unauthorized"), False),
+        (httpx.Response(400, json={"error": "bad model"}), False),
+        (httpx.Response(502, text="<html>Bad Gateway</html>"), True),
+    ],
+)
+def test_an_error_status_fails_as_its_status_whatever_its_body(
+    response: httpx.Response, retryable: bool
+) -> None:
+    task = _task_message(url="https://api.example/v1/chat/completions")
+    with pytest.raises(
+        ExecutionError, match=f"status {response.status_code}"
+    ) as raised:
+        _run(
+            APIExecutor(DEFAULT_WORKER_CONFIG),
+            task,
+            _SequenceTransport([response]),
+        )
+    assert raised.value.retryable is retryable
+
+
+def test_a_body_that_is_not_json_fails_without_a_retry() -> None:
+    task = _task_message(url="https://api.example/v1/chat/completions")
+    with pytest.raises(ExecutionError, match="not a valid JSON") as raised:
+        _run(
+            APIExecutor(DEFAULT_WORKER_CONFIG),
+            task,
+            _SequenceTransport([httpx.Response(200, text="plain text")]),
+        )
+    assert raised.value.retryable is False
