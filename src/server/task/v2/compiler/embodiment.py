@@ -158,14 +158,17 @@ def replica_unfit_reason(
     configuration depends on any of these runs as declared only self-contained.
     """
     vllm = (spec.model.vllm if spec.model is not None else None) or {}
+    tensor_parallel_size = vllm.get("tensor_parallel_size")
     profiled = [vllm.get(key) for key in ENGINE_PROFILE_KEYS]
-    if contains_placeholder(profiled) or contains_placeholder(spec.model_revision):
+    if contains_placeholder([*profiled, tensor_parallel_size]) or contains_placeholder(
+        spec.model_revision
+    ):
         return "its engine configuration renders from upstream at dispatch"
     if _engine_credential(task, vllm):
         return "its engine configuration carries a credential"
     gpu = spec.gpu_requirements()
-    if (gpu is not None and (gpu.count or 0) > 1) or _int(
-        vllm.get("tensor_parallel_size")
+    if (gpu is not None and (gpu.count or 0) > 1) or _tensor_parallel_size(
+        tensor_parallel_size
     ) > 1:
         return "it runs on more than one GPU"
     if _checkpoint_load(spec) is not None:
@@ -310,8 +313,12 @@ def _checkpoint_load(spec: InferenceSpecStrict | InferenceSpecTemplate) -> Any:
     return spec.checkpoint.get("load") if isinstance(spec.checkpoint, dict) else None
 
 
-def _int(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+def _tensor_parallel_size(value: Any) -> int:
+    # Read as the local vLLM executor reads it.
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _declared_gpu_count(
