@@ -88,7 +88,9 @@ from .embodiment import (
     embodiment_menu,
     reject_credentialed_source,
     reject_resident_batch,
+    reject_resident_checkpoint,
     reject_unproven,
+    replica_unfit_reason,
     unproven_reason,
 )
 
@@ -195,13 +197,15 @@ def _leaf_operator(
 def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
     """Pin an inference/embedding leaf's embodiment disposition from its source.
 
-    An inference leaf admits both embodiments whenever they provably run one contract,
-    whether or not it declares a binding. A leaf the proof does not clear, and a leaf
-    kind for which only one embodiment is proven, keeps the embodiment its source names:
-    resident when it declares a binding, self-contained when it declares none, and so
-    does a leaf whose model or adapter source carries a credential. A leaf that asks for
-    both explicitly is failed rather than quietly narrowed, and so is a resident-served
-    leaf whose model or adapter source carries a credential.
+    An inference leaf admits both embodiments whenever they provably run one contract
+    and a replica can run it as declared, whether or not it declares a binding. A leaf
+    the proof does not clear, and a leaf kind for which only one embodiment is proven,
+    keeps the embodiment its source names: resident when it declares a binding,
+    self-contained when it declares none, and so does a leaf whose model or adapter
+    source carries a credential. A leaf that asks for both explicitly is failed rather
+    than quietly narrowed, and so is a resident-served leaf whose model or adapter
+    source carries a credential or that loads a checkpoint. A pinned resident leaf
+    otherwise runs on the replica's terms.
     """
     spec = task.task.spec
     if not isinstance(spec, _SERVICE_BACKED_SPECS):
@@ -215,6 +219,7 @@ def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
     if binding is not None and binding.mode is ServiceBindingMode.RESIDENT:
         reject_resident_batch(task, spec, named)
         reject_credentialed_source(task, spec, named)
+        reject_resident_checkpoint(task, spec)
         return InferenceEmbodimentBinding(eligibility=named)
     if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
         reject_credentialed_source(task, spec, named)
@@ -225,7 +230,9 @@ def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
             task, spec, InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
         )
     elif (
-        unproven_reason(spec) is not None or credentialed_source(task, spec) is not None
+        unproven_reason(spec) is not None
+        or replica_unfit_reason(task, spec) is not None
+        or credentialed_source(task, spec) is not None
     ):
         reject_resident_batch(task, spec, named)
         reject_credentialed_source(task, spec, named)
@@ -258,7 +265,8 @@ def _leaf_service_dependency(
     ):
         return None
     binding = spec.service
-    service_ref = (binding.service_model_ref if binding else None) or spec.model_name
+    own_model = spec.model_name
+    service_ref = (binding.service_model_ref if binding else None) or own_model
     if not service_ref:
         source_kind, source_id = _task_source(task)
         raise compile_error(
@@ -289,8 +297,15 @@ def _leaf_service_dependency(
         adapter=adapter,
         adapter_source=_leaf_adapter_source(spec),
         isolation=binding.isolation if binding else None,
-        engine_profile=engine_profile(
-            spec.model.vllm if spec.model is not None else None, spec.model_revision
+        # The leaf's engine configuration describes its own model, so it shapes the
+        # replica only when that is the model the leaf is served by.
+        engine_profile=(
+            engine_profile(
+                spec.model.vllm if spec.model is not None else None,
+                spec.model_revision,
+            )
+            if service_ref.strip() == (own_model or "").strip()
+            else None
         ),
         batch_size=_declared_batch_size(spec),
         max_batch_size=_declared_max_batch_size(spec),

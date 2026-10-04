@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from ..tasks.placeholders import contains_placeholder
 from ..utils.redact import is_credential_key
 
 ENGINE_PROFILE_KEYS = frozenset(
@@ -55,18 +56,27 @@ def engine_profile(vllm: Mapping[str, Any] | None, revision: str | None) -> str 
     """The canonical profile a leaf's engine configuration declares, or None.
 
     A credential-named engine variable is access rather than outcome, so no profile
-    carries one.
+    carries one. A value that renders from upstream at dispatch is unknown when a
+    replica is chosen, so no profile carries one either.
     """
     profile: dict[str, Any] = {}
     for key, value in (vllm or {}).items():
-        if key not in ENGINE_PROFILE_KEYS or (key in _DEFAULT_OFF and value is False):
+        if (
+            key not in ENGINE_PROFILE_KEYS
+            or (key in _DEFAULT_OFF and value is False)
+            or contains_placeholder(value)
+        ):
             continue
         if key == "env_vars" and isinstance(value, Mapping):
             value = {k: v for k, v in value.items() if not is_credential_key(str(k))}
             if not value:
                 continue
         profile[key] = value
-    if revision and revision != _DEFAULT_REVISION:
+    if (
+        revision
+        and revision != _DEFAULT_REVISION
+        and not contains_placeholder(revision)
+    ):
         profile["revision"] = revision
     if not profile:
         return None

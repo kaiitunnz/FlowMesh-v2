@@ -379,17 +379,26 @@ A service dependency's family folds the service interface, base model, isolation
 and engine profile. A shared base model and interface reuse a warm replica; a differing
 interface, base model, isolation domain, or engine profile resolves to a distinct family
 and cannot share a batch or route on a matching model name alone. The engine profile is
-the `model.vllm` configuration that changes what the engine returns — the context window,
-model and tokenizer revision, dtype, quantization, KV-cache dtype, RoPE settings,
-multimodal limits, remote code, the pooling conversion, and engine environment variables —
-and the replica serves it; throughput, placement, seed, and access settings stay local to
-each engine. An adapter does not fork a family: it co-batches on the
-base replica through its own slot — the resident consumer loads its adapter into a replica
-slot and selects it as the request model. Adapter serving is supported only on the chat
-interface; a resident embedding leaf that declares an adapter is rejected at compile. An
-adapter-bound leaf declares a single adapter with a loadable `path`, `url`, or `task_id`.
-A leaf whose model or adapter source or engine environment carries a credential has no
-resident embodiment; a resident binding on one is refused at submission.
+the configuration that changes what the engine returns, which the replica serves:
+`model.source.revision` and the `model.vllm` keys `max_model_len`, `tokenizer_revision`,
+`dtype`, `quantization`, `kv_cache_dtype`, `rope_scaling`, `rope_theta`,
+`limit_mm_per_prompt`, `enable_mm_embeds`, `trust_remote_code`, `convert`, and
+`env_vars`. Every other `model.vllm` key stays local to each engine. A leaf served by a
+model other than its own lends that model no profile.
+
+An adapter does not fork a family: it co-batches on the base replica through its own
+slot — the resident consumer loads its adapter into a replica slot and selects it as the
+request model. Adapter serving is supported only on the chat interface; a resident
+embedding leaf that declares an adapter is rejected at compile. An adapter-bound leaf
+declares a single adapter with a loadable `path`, `url`, or `task_id`.
+
+A menu offers a resident candidate only for a leaf a replica runs as declared: its
+engine configuration renders nothing from upstream, carries no credential, runs on one
+GPU, and loads no checkpoint. A pinned resident leaf runs on the replica's terms: a
+credential in its engine configuration stays with the local engine, and a value that
+renders from upstream stays out of its profile. A leaf whose model or adapter source
+carries a credential has no resident embodiment, and a resident binding on one, or on a
+leaf that loads a checkpoint, is refused at submission.
 
 `RESIDENT_ADAPTER_SLOTS` bounds the distinct adapters a replica holds concurrently. A claim
 for a base model or an already-resident adapter admits without consuming a new slot, and a

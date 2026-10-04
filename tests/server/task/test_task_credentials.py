@@ -686,9 +686,15 @@ def test_a_leaf_whose_engine_environment_carries_a_credential_gets_no_menu():
     assert node.service_family_requirement is None
 
 
-@pytest.mark.parametrize("service", ["{mode: resident}", "{mode: local_eligible}"])
-def test_resident_serving_of_a_credentialed_engine_environment_is_refused(service):
-    payload = _engine_env_leaf(service)
+def test_a_menu_over_a_credentialed_engine_environment_is_refused():
+    with pytest.raises(CompileError, match="carries a credential"):
+        _register(_runtime(), _engine_env_leaf("{mode: local_eligible}"))
 
-    with pytest.raises(CompileError, match="engine environment"):
-        _register(_runtime(), payload)
+
+def test_a_pinned_resident_leaf_keeps_its_engine_credential_out_of_the_plan():
+    registry = FakeRegistry()
+    workflow_id, _ = _register(_runtime(registry), _engine_env_leaf("{mode: resident}"))
+
+    [node] = _plan_nodes(registry, workflow_id)
+    assert node.service_family_requirement is not None
+    assert _HF not in registry.v2_blobs[workflow_id]

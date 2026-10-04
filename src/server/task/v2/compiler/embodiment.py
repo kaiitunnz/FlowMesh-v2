@@ -7,6 +7,7 @@ this module does not check keeps the single embodiment its binding names.
 """
 
 import json
+from typing import Any
 
 from shared.inference import (
     CanonicalInferenceContract,
@@ -15,7 +16,9 @@ from shared.inference import (
     declares_multiple_prompts,
     unforwarded_inference_keys,
 )
+from shared.inference.engine_profile import ENGINE_PROFILE_KEYS
 from shared.tasks.credentials import credential_pointer
+from shared.tasks.placeholders import contains_placeholder
 from shared.tasks.specs import (
     InferenceBackend,
     InferenceEmbodimentKind,
@@ -24,6 +27,7 @@ from shared.tasks.specs import (
     TaskSpecBase,
 )
 from shared.tasks.specs.common import ModelSpecStrict, ModelSpecTemplate
+from shared.utils.redact import is_credential_key
 
 from ...parser import ParsedTask
 from ..representations.operators import (
@@ -144,12 +148,57 @@ def unproven_reason(
     return None
 
 
+def replica_unfit_reason(
+    task: ParsedTask, spec: InferenceSpecStrict | InferenceSpecTemplate
+) -> str | None:
+    """Why a resident replica cannot run a leaf as it declares itself, or ``None``.
+
+    A replica runs on one GPU with the deployment's own model access, serves the base
+    model, and is chosen before any upstream value is known, so a leaf whose engine
+    configuration depends on any of these runs as declared only self-contained.
+    """
+    vllm = (spec.model.vllm if spec.model is not None else None) or {}
+    profiled = [vllm.get(key) for key in ENGINE_PROFILE_KEYS]
+    if contains_placeholder(profiled) or contains_placeholder(spec.model_revision):
+        return "its engine configuration renders from upstream at dispatch"
+    if _engine_credential(task, vllm):
+        return "its engine configuration carries a credential"
+    gpu = spec.gpu_requirements()
+    if (gpu is not None and (gpu.count or 0) > 1) or _int(
+        vllm.get("tensor_parallel_size")
+    ) > 1:
+        return "it runs on more than one GPU"
+    if _checkpoint_load(spec) is not None:
+        return "it loads a checkpoint in place of its model"
+    return None
+
+
 def reject_unproven(
     task: ParsedTask, spec: InferenceSpecStrict | InferenceSpecTemplate
 ) -> None:
     """Fail a leaf that explicitly asked for a menu this module cannot prove."""
-    if (reason := unproven_reason(spec)) is not None:
+    if (
+        reason := unproven_reason(spec) or replica_unfit_reason(task, spec)
+    ) is not None:
         raise _unproven(task, reason)
+
+
+def reject_resident_checkpoint(task: ParsedTask, spec: TaskSpecBase) -> None:
+    """Fail a resident-served leaf that loads a checkpoint in place of its model.
+
+    A replica serves the base model it materializes, so it would answer the leaf with
+    another model than the one the checkpoint holds.
+    """
+    if (
+        isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate))
+        and _checkpoint_load(spec) is not None
+    ):
+        raise _reject(
+            task,
+            "embodiment.resident-checkpoint",
+            "a resident replica serves the base model, not a checkpoint the leaf "
+            "loads; serve the leaf self-contained",
+        )
 
 
 def reject_resident_batch(
@@ -189,9 +238,8 @@ def reject_resident_batch(
 def credentialed_source(task: ParsedTask, spec: TaskSpecBase) -> str | None:
     """The source a resident replica would load that names a vaulted credential.
 
-    A replica loads the model and its adapter from the sources the plan carries and runs
-    the engine environment the leaf declares, and a vaulted value reaches the plan
-    masked, so such a leaf has no resident embodiment.
+    A replica loads the model and its adapter from the sources the plan carries, and a
+    vaulted source reaches the plan masked, so such a leaf has no resident embodiment.
     """
     if not isinstance(spec, (ModelSpecStrict, ModelSpecTemplate)):
         return None
@@ -200,35 +248,30 @@ def credentialed_source(task: ParsedTask, spec: TaskSpecBase) -> str | None:
         adapter = spec.adapters[0]
         if field := "path" if adapter.path else "url" if adapter.url else None:
             sources[credential_pointer(("model", "adapters", 0, field))] = "adapter"
-    if source := next(
+    return next(
         (
             name
             for pointer, name in sources.items()
             if pointer in task.masked_credentials
         ),
         None,
-    ):
-        return source
-    environment = credential_pointer(("model", "vllm", "env_vars")) + "/"
-    if any(pointer.startswith(environment) for pointer in task.masked_credentials):
-        return "engine environment"
-    return None
+    )
 
 
 def reject_credentialed_source(
     task: ParsedTask, spec: TaskSpecBase, eligibility: InferenceEmbodimentEligibility
 ) -> None:
-    """Fail a leaf that admits resident serving of a model, adapter, or engine
-    environment that carries a credential."""
+    """Fail a leaf that admits resident serving of a model or adapter whose source
+    carries a credential."""
     if eligibility is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED:
         return
     if (source := credentialed_source(task, spec)) is not None:
         raise _reject(
             task,
             "embodiment.resident-source-credential",
-            f"a resident replica cannot receive the credential the leaf's {source} "
-            f"carries; serve the leaf self-contained, or declare the {source} without "
-            f"one",
+            f"a resident replica loads the leaf's {source} from a source that "
+            f"cannot carry a credential; serve the leaf self-contained, or load the "
+            f"{source} from a source without one",
         )
 
 
@@ -248,6 +291,27 @@ def _reject(task: ParsedTask, code: str, message: str) -> Exception:
         else ("stage", task.local_name) if task.local_name else ("legacy", task.task_id)
     )
     return compile_error(code, message, source_id or task.task_id, source_kind)
+
+
+def _engine_credential(task: ParsedTask, vllm: dict[str, Any]) -> bool:
+    engine = credential_pointer(("model", "vllm")) + "/"
+    environment = vllm.get("env_vars")
+    return (
+        bool(vllm.get("hf_token"))
+        or any(pointer.startswith(engine) for pointer in task.masked_credentials)
+        or (
+            isinstance(environment, dict)
+            and any(is_credential_key(str(name)) for name in environment)
+        )
+    )
+
+
+def _checkpoint_load(spec: InferenceSpecStrict | InferenceSpecTemplate) -> Any:
+    return spec.checkpoint.get("load") if isinstance(spec.checkpoint, dict) else None
+
+
+def _int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _declared_gpu_count(
