@@ -13,17 +13,25 @@ from flowmesh_stack.env import load_env
 from flowmesh_stack.node_client import NodeClient
 from flowmesh_stack.paths import ensure_dir, ensure_file, resolve_path
 
-from .env_schema import collector_serves_tls
+from .env_schema import STACK_ENV_SCHEMA, collector_serves_tls
 
 DEFAULT_ENV_FILE = Path(".env")
+_SCHEMA_DEFAULTS = {
+    var.key: var.default
+    for section in STACK_ENV_SCHEMA.sections
+    for var in section.vars
+}
 # Compose resolves a relative bind source against the packaged compose file, so the CLI
 # anchors each of the stack's mount sources to the working directory.
 STACK_PATH_DEFAULTS = {
-    "REDIS_TLS_DIR": "./secrets/tls/redis",
-    "SERVER_TLS_DIR": "./secrets/tls/server",
-    "NETWORK_PLANE_PEER_TLS_DIR": "./secrets/tls/peer",
-    "SERVER_WORKER_CONFIG": "./configs/worker_config.yaml",
-    "FLOWMESH_PLUGIN_DIR": "./plugins",
+    key: _SCHEMA_DEFAULTS[key]
+    for key in (
+        "REDIS_TLS_DIR",
+        "SERVER_TLS_DIR",
+        "NETWORK_PLANE_PEER_TLS_DIR",
+        "SERVER_WORKER_CONFIG",
+        "FLOWMESH_PLUGIN_DIR",
+    )
 }
 STACK_PATH_KEYS = set(STACK_PATH_DEFAULTS)
 _STACK_FILE_KEYS = {"SERVER_WORKER_CONFIG"}
@@ -66,7 +74,7 @@ def apply_stack_resource_env() -> None:
 
 _PLUGIN_DATA_PATH_PREFIXES = ("/", "./", "../", "~")
 _PLUGIN_DATA_ALIAS = "flowmesh_plugin_data"
-_PLUGIN_DATA_DEFAULT = "./plugin-data"
+_PLUGIN_DATA_DEFAULT = _SCHEMA_DEFAULTS["FLOWMESH_PLUGIN_DATA_DIR"]
 _PLUGIN_DATA_VOLUME_ENV = "FLOWMESH_PLUGIN_DATA_VOLUME"
 
 
