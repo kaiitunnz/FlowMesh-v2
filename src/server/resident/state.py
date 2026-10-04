@@ -170,9 +170,9 @@ class ServiceFamily(BaseModel):
 
     Registration alone materializes no capacity and carries no credit. It records the
     engine/batch, isolation, resource, and protocol requirements a later eligible claim
-    is admitted against, and the per-family replica-selection strategy. A ``standing``
-    family is a public serve task's own: its one replica is the serve task's, and
-    demand never materializes another.
+    is admitted against, and the per-family replica-selection strategy. Its replicas
+    serve its ``engine_profile``. A ``standing`` family is a public serve task's own:
+    its one replica is the serve task's, and demand never materializes another.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -182,6 +182,7 @@ class ServiceFamily(BaseModel):
     model_ref: str
     interface: str = "chat"
     isolation: str | None = None
+    engine_profile: str | None = None
     selection_strategy: str = "batch-aware-best-fit"
     warmth: Warmth = None
     standing: bool = False
@@ -193,9 +194,10 @@ class ReplicaIncarnation(BaseModel):
 
     ``incarnation`` is the monotonic fence: a lost or recreated replica invalidates
     outstanding routes and admission decisions bound to an older incarnation. The
-    backing serve task and worker locate the generically hosted allocation. ``listener``
-    is the non-secret resident-facing route advertisement, fenced by ``incarnation`` and
-    ``listener_generation``; it never names the raw engine listener or credential.
+    backing serve task locates the generically hosted allocation, on the worker running
+    it. ``listener`` is the non-secret resident-facing route advertisement, fenced by
+    ``incarnation`` and ``listener_generation``; it never names the raw engine listener
+    or credential.
     """
 
     replica_id: str
@@ -209,7 +211,6 @@ class ReplicaIncarnation(BaseModel):
     serve_task_id: str | None = None
     binding_generation: int | None = None
     standing: bool = False
-    worker_id: str | None = None
     lease_id: str | None = None
     report_epoch: int = 0
     created_at: str = Field(default_factory=now_iso)

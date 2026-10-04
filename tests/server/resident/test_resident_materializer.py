@@ -21,6 +21,8 @@ from server.config import ResidentCapacityConfig
 from server.hooks import PERMISSION_CHECKERS, RESOURCE_REGISTRARS
 from server.resident import ReplicaIncarnation, ServiceFamily
 from server.resident.materializer import materialize_resident_replica
+from server.task.parser import parse_workflow
+from shared.inference import engine_profile
 
 _LOGGER = logging.getLogger("test.resident_materializer")
 _SYSTEM = PrincipalContext(
@@ -90,13 +92,18 @@ class _RecordingRegistrar:
     async def reconcile(self, *args: Any, **kwargs: Any) -> None: ...
 
 
-def _materialize(config: ResidentCapacityConfig, runtime: Any, *registrars: Any) -> str:
+def _materialize(
+    config: ResidentCapacityConfig,
+    runtime: Any,
+    *registrars: Any,
+    family: ServiceFamily = _FAMILY,
+) -> str:
     RESOURCE_REGISTRARS.clear()
     RESOURCE_REGISTRARS.extend(registrars)
     try:
         return asyncio.run(
             materialize_resident_replica(
-                runtime, _SYSTEM, config, _FAMILY, _REPLICA, _LOGGER
+                runtime, _SYSTEM, config, family, _REPLICA, _LOGGER
             )
         )
     finally:
@@ -342,3 +349,59 @@ def test_foreign_tenant_is_denied_the_resident_task_logs() -> None:
     with pytest.raises(HTTPException) as excinfo:
         _read_logs(_FOREIGN, task_id)
     assert excinfo.value.status_code == 403
+
+
+@pytest.mark.parametrize("substrate", ["serve", "dev_model"])
+def test_a_replica_serves_its_family_engine_profile(substrate: str) -> None:
+    runtime = _FakeRuntime()
+    profile = engine_profile(
+        {
+            "max_model_len": 1024,
+            "rope_theta": 1000000.0,
+            "trust_remote_code": True,
+            "env_vars": {"VLLM_LOGGING_LEVEL": "INFO"},
+        },
+        "v2",
+    )
+    family = _FAMILY.model_copy(update={"engine_profile": profile})
+
+    _materialize(
+        ResidentCapacityConfig(substrate=substrate),
+        runtime,
+        _RecordingRegistrar(),
+        family=family,
+    )
+
+    assert runtime.register_call is not None
+    payload = runtime.register_call[2]
+    model = json.loads(payload)["spec"]["model"]
+    assert model["source"]["revision"] == "v2"
+    assert {
+        key: model["vllm"][key]
+        for key in ("max_model_len", "hf_overrides", "trust_remote_code", "env_vars")
+    } == {
+        "max_model_len": 1024,
+        "hf_overrides": {"rope_theta": 1000000.0},
+        "trust_remote_code": True,
+        "env_vars": {"VLLM_LOGGING_LEVEL": "INFO"},
+    }
+    parse_workflow(payload, "native")
+
+
+def test_a_family_stored_without_a_profile_serves_the_default_engine() -> None:
+    stored = ServiceFamily.model_validate(
+        {"family": "m", "engine_batch_key": "m", "model_ref": "m"}
+    )
+    runtime = _FakeRuntime()
+
+    _materialize(
+        ResidentCapacityConfig(substrate="serve"),
+        runtime,
+        _RecordingRegistrar(),
+        family=stored,
+    )
+
+    assert runtime.register_call is not None
+    model = json.loads(runtime.register_call[2])["spec"]["model"]
+    assert model["source"]["revision"] == "main"
+    assert set(model["vllm"]) == {"enable_lora", "max_loras"}

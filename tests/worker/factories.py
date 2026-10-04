@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Final
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from lumid_hooks import PrincipalContext
 
@@ -23,8 +23,11 @@ from shared.tasks.worker_message import (
 )
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from worker.config import ObjectStoreConfig, WorkerConfig
+from worker.executors.dev_model_executor import DevModelExecutor
 from worker.executors.ssh_executor import SSHExecutor
 from worker.executors.ssh_session import DockerSessionBackend
+from worker.executors.vllm_serve_executor import VLLMServeExecutor
+from worker.resident import LocalEngineRegistry
 
 DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     owner_principal=PrincipalContext(
@@ -114,6 +117,28 @@ def make_ssh_executor(config: WorkerConfig, **kwargs: Any) -> SSHExecutor:
     daemon is reachable from the test."""
     with patch.object(DockerSessionBackend, "is_available", return_value=True):
         return SSHExecutor(config, **kwargs)
+
+
+def make_serve_executor(
+    config: WorkerConfig | None = None,
+    hardware: WorkerHardware | None = None,
+    engine_parent: Path | None = None,
+) -> VLLMServeExecutor:
+    """Build a vLLM serve executor on a lifecycle holding a real engine registry."""
+    lifecycle = MagicMock()
+    lifecycle.local_engines = LocalEngineRegistry(engine_parent)
+    return VLLMServeExecutor(
+        config or make_worker_config(), hardware or make_worker_hardware(), lifecycle
+    )
+
+
+def make_dev_model_executor(engine_parent: Path | None = None) -> DevModelExecutor:
+    """Build a dev_model executor on a lifecycle holding a real engine registry."""
+    lifecycle = MagicMock()
+    lifecycle.local_engines = LocalEngineRegistry(engine_parent)
+    return DevModelExecutor(
+        make_worker_config(enable_dev_model=True), make_worker_hardware(), lifecycle
+    )
 
 
 def make_worker_task_message(

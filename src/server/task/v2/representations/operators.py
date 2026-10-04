@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import BoundaryEventKind
+from shared.inference import engine_profile_key
 from shared.sandbox import SandboxEgressMode, SandboxRuntimeProfile
 from shared.tasks import TaskType
 from shared.tasks.specs import InferenceEmbodimentKind, ModelBindingMode
@@ -164,7 +165,9 @@ class ServiceDependency(BaseModel):
     a service across a differing interface, base model, or isolation domain. An adapter
     co-batches within a compatible base engine through its own slot: it loads into the
     base replica and the request selects it, so it rides ``adapter`` (with its loadable
-    ``adapter_source``) rather than the family key.
+    ``adapter_source``) rather than the family key. ``engine_profile`` is the engine
+    configuration that changes what a replica returns; it keys both and the replica
+    serves it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -174,6 +177,7 @@ class ServiceDependency(BaseModel):
     adapter: str | None = None
     adapter_source: str | None = None
     isolation: str | None = None
+    engine_profile: str | None = None
     # How many conversations one invocation of this leaf carries, when its source names
     # them outright. A leaf resolving its prompts from upstream knows this only once
     # that value is in hand, and carries None until then.
@@ -190,12 +194,19 @@ class ServiceDependency(BaseModel):
         parts = [self.service_ref.strip(), self.interface.value]
         if self.isolation:
             parts.append(f"iso={self.isolation}")
-        return "|".join(parts)
+        return "|".join(parts + self._profile_parts())
 
     @property
     def engine_batch_key(self) -> str:
         """The compatible model-runner and config key an admitted batch shares."""
-        return "|".join([self.service_ref.strip(), self.interface.value])
+        return "|".join(
+            [self.service_ref.strip(), self.interface.value, *self._profile_parts()]
+        )
+
+    def _profile_parts(self) -> list[str]:
+        if self.engine_profile is None:
+            return []
+        return [f"profile={engine_profile_key(self.engine_profile)}"]
 
 
 class InferenceEmbodimentEligibility(StrEnum):

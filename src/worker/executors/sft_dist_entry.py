@@ -12,10 +12,10 @@ import sys
 from pathlib import Path
 
 from shared.tasks.worker_message import WorkerTaskMessage
-from shared.utils.manifest import scratch_dir
 from worker.config import WorkerConfig
 
 from .sft_executor import SFTExecutor
+from .utils.distributed import run_rank
 
 
 def main(argv: list[str]) -> int:
@@ -40,14 +40,7 @@ def main(argv: list[str]) -> int:
         task = WorkerTaskMessage.model_validate(json.load(fh))
     ex = SFTExecutor(WorkerConfig.from_env())
     try:
-        result = ex.run(task, out_dir)
-        # Hand the subprocess's result to the parent via a scratch IPC file.
-        try:
-            (scratch_dir(out_dir) / "distributed_result.json").write_text(
-                json.dumps(result, ensure_ascii=False, indent=2)
-            )
-        except Exception:
-            pass
+        run_rank(out_dir, lambda: ex.run(task, out_dir))
     finally:
         try:
             ex.cleanup_after_run()

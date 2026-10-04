@@ -10,9 +10,10 @@ canned responses when no upstream is configured.
 import contextlib
 import json
 import logging
+import socketserver
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -23,9 +24,9 @@ from shared.tasks.specs.dev_model import DevModelSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils.redact import redact_url
 from worker.config import WorkerConfig
+from worker.resident.local_engines import EngineSocketPathTooLong, LocalEngine
 
-from .base_executor import Executor, ExecutorTask, RunSignals
-from .utils.net import resolve_bind_port
+from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 from .utils.serve_ttl import serve_deadline
 
 logger = logging.getLogger(__name__)
@@ -112,12 +113,12 @@ def _canned_response(path: str, model: str) -> dict[str, Any]:
     }
 
 
-class _DevModelHTTPServer(ThreadingHTTPServer):
+class _DevModelHTTPServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
     def __init__(
         self,
-        address: tuple[str, int],
+        address: str,
         handler: type[BaseHTTPRequestHandler],
         forward_url: str | None,
         model_name: str,
@@ -376,25 +377,46 @@ class DevModelExecutor(Executor):
         )
         if deadline <= time.time():
             logger.info("dev_model task %s TTL elapsed; not starting", task.task_id)
-            return DevModelResult(model=model_id, port=spec.port or 0)
+            return DevModelResult(model=model_id)
         vllm = (spec.model.vllm if spec.model is not None else None) or {}
         raw_max_loras = vllm.get("max_loras")
         max_loras = raw_max_loras if isinstance(raw_max_loras, int) else None
-        # Loopback only: the endpoint is reached solely by its co-located claim-gated
-        # sidecar and, externally, only through the gated task-ID serve route.
-        bind_host = "127.0.0.1"
-        port = resolve_bind_port(spec.port, bind_host)
+        try:
+            with self._local_engines().socket_path() as socket_path:
+                return self._serve_on(
+                    task, model_id, vllm, max_loras, deadline, socket_path, out_dir
+                )
+        except EngineSocketPathTooLong as exc:
+            # The worker's temp directory decides the path, so another worker may fit.
+            raise ExecutionError(str(exc), retryable=True) from exc
+
+    def _serve_on(
+        self,
+        task: ExecutorTask,
+        model_id: str,
+        vllm: dict[str, Any],
+        max_loras: int | None,
+        deadline: float,
+        socket_path: Path,
+        out_dir: Path,
+    ) -> DevModelResult:
+        """Serve on ``socket_path`` until the TTL elapses or the task is stopped.
+
+        The worker-private socket is reached solely by the co-located claim-gated
+        sidecar and, externally, only through the gated task-ID serve route.
+        """
         forward_url = self._config.dev_model_forward_url
+        local_engines = self._local_engines()
 
         out_dir.mkdir(parents=True, exist_ok=True)
         if self._signals.raise_if_cancelled():
             logger.info("dev_model task %s stopped before launch", task.task_id)
-            return DevModelResult(model=model_id, port=port)
+            return DevModelResult(model=model_id)
 
         client = httpx.Client() if forward_url is not None else None
         try:
             server = _DevModelHTTPServer(
-                (bind_host, port),
+                socket_path.as_posix(),
                 _DevModelHandler,
                 forward_url,
                 model_id,
@@ -411,10 +433,8 @@ class DevModelExecutor(Executor):
         serve_thread.start()
 
         logger.info(
-            "dev_model server ready for model %s on port %d "
-            "(task=%s ttl=%.0fs forward=%s)",
+            "dev_model server ready for model %s (task=%s ttl=%.0fs forward=%s)",
             model_id,
-            port,
             task.task_id,
             deadline - time.time(),
             redact_url(forward_url) if forward_url else "canned",
@@ -422,23 +442,23 @@ class DevModelExecutor(Executor):
 
         try:
             # Worker-private endpoint facts ("_"-prefixed so task metadata never
-            # discloses the raw loopback listener); the resident endpoint probe reads
-            # them to bind the claim-gated sidecar in front of the endpoint.
+            # discloses them); the resident endpoint probe reads them to bind the
+            # claim-gated sidecar in front of the endpoint.
             interface = "embedding" if vllm.get("runner") == "pooling" else "chat"
+            local_engines.publish(task.task_id, LocalEngine(socket_path.as_posix()))
             self.emit_update(
                 task.task_id,
                 {
                     "serve": {
                         "model": model_id,
                         "interface": interface,
-                        "_host": "127.0.0.1",
-                        "_port": port,
-                        "_api_key": None,
+                        "_socket": socket_path.as_posix(),
                     }
                 },
             )
             self._wait_for_serve(deadline)
         finally:
+            local_engines.withdraw(task.task_id)
             self._server = None
             server.shutdown()
             server.server_close()
@@ -446,7 +466,7 @@ class DevModelExecutor(Executor):
                 client.close()
             serve_thread.join(timeout=5.0)
 
-        return DevModelResult(model=model_id, port=port)
+        return DevModelResult(model=model_id)
 
     def _wait_for_serve(self, deadline: float) -> None:
         while time.time() < deadline:

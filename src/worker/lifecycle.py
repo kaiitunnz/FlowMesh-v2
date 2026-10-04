@@ -22,7 +22,7 @@ from shared.utils.time import now_iso
 from .egress import PendingEgressRequestStore
 from .gpu_availability import DeviceAvailability, GpuAvailabilityMonitor
 from .power import PowerMonitor
-from .resident import ResidentRequestStore
+from .resident import LocalEngineRegistry, ResidentRequestStore
 from .ssh_relay import SshEndpointRegistry, SshRelayLane
 from .supervisor_client import SupervisorClient
 
@@ -56,6 +56,7 @@ class Lifecycle:
         self.power_monitor = power_monitor or PowerMonitor()
         self.pending_egress_requests = PendingEgressRequestStore()
         self.resident_requests = ResidentRequestStore()
+        self.local_engines = LocalEngineRegistry()
         # The worker-local Responses facade held Codex episodes run their model turns
         # through, built by the runner once the worker id is known and read by the
         # agent-episode executor to bind a codex adapter.

@@ -1,7 +1,9 @@
 """Tests for DevModelExecutor."""
 
 import json
+import shutil
 import socket
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -18,8 +20,8 @@ from shared.tasks.components.model import ModelConfig, ModelSource
 from shared.tasks.specs.dev_model import DevModelSpecStrict
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import (
+    make_dev_model_executor,
     make_worker_config,
-    make_worker_hardware,
     make_worker_task_message,
 )
 from worker.executors import dev_model_executor as mod
@@ -30,6 +32,7 @@ from worker.executors.dev_model_executor import (
     _DevModelHandler,
     _DevModelHTTPServer,
 )
+from worker.resident import LocalEngine
 
 
 @contextmanager
@@ -38,9 +41,12 @@ def _running_server(
     model_name: str = "test-model",
     client: httpx.Client | None = None,
     max_loras: int | None = None,
-) -> Iterator[str]:
+) -> Iterator[httpx.Client]:
+    """Serve the stand-in on a socket; yield a client that reaches it there."""
+    directory = Path(tempfile.mkdtemp())
+    path = (directory / "engine.sock").as_posix()
     server = _DevModelHTTPServer(
-        ("127.0.0.1", 0),
+        path,
         _DevModelHandler,
         forward_url,
         model_name,
@@ -50,11 +56,19 @@ def _running_server(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_address[1]}"
+        with _socket_client(path) as reach:
+            yield reach
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5.0)
+        shutil.rmtree(directory)
+
+
+def _socket_client(path: str) -> httpx.Client:
+    return httpx.Client(
+        base_url="http://localhost", transport=httpx.HTTPTransport(uds=path)
+    )
 
 
 class TestDevModelExecutorInit:
@@ -116,13 +130,13 @@ class TestDevModelSpec:
 class TestCannedResponses:
     def test_chat_completions_is_deterministic(self) -> None:
         with _running_server() as base:
-            first = httpx.post(
-                f"{base}/v1/chat/completions",
+            first = base.post(
+                "/v1/chat/completions",
                 json={"model": "m", "messages": []},
                 timeout=5.0,
             ).json()
-            second = httpx.post(
-                f"{base}/v1/chat/completions",
+            second = base.post(
+                "/v1/chat/completions",
                 json={"model": "m", "messages": []},
                 timeout=5.0,
             ).json()
@@ -133,8 +147,8 @@ class TestCannedResponses:
 
     def test_responses_is_deterministic(self) -> None:
         with _running_server() as base:
-            payload = httpx.post(
-                f"{base}/v1/responses",
+            payload = base.post(
+                "/v1/responses",
                 json={"model": "m", "input": "hi"},
                 timeout=5.0,
             ).json()
@@ -145,15 +159,15 @@ class TestCannedResponses:
 
     def test_model_falls_back_when_absent(self) -> None:
         with _running_server(model_name="fallback-model") as base:
-            payload = httpx.post(
-                f"{base}/v1/chat/completions", json={"messages": []}, timeout=5.0
+            payload = base.post(
+                "/v1/chat/completions", json={"messages": []}, timeout=5.0
             ).json()
         assert payload["model"] == "fallback-model"
 
     def test_embeddings_returns_one_vector_per_input(self) -> None:
         with _running_server() as base:
-            payload = httpx.post(
-                f"{base}/v1/embeddings",
+            payload = base.post(
+                "/v1/embeddings",
                 json={"model": "m", "input": ["a", "b", "c"]},
                 timeout=5.0,
             ).json()
@@ -164,13 +178,13 @@ class TestCannedResponses:
 
     def test_unknown_route_returns_404(self) -> None:
         with _running_server() as base:
-            resp = httpx.post(f"{base}/v1/unknown", json={}, timeout=5.0)
+            resp = base.post("/v1/unknown", json={}, timeout=5.0)
         assert resp.status_code == 404
 
     def test_load_lora_adapter_records_and_succeeds(self) -> None:
         with _running_server() as base:
-            resp = httpx.post(
-                f"{base}/v1/load_lora_adapter",
+            resp = base.post(
+                "/v1/load_lora_adapter",
                 json={"lora_name": "my-lora", "lora_path": "hf/my-lora"},
                 timeout=5.0,
             )
@@ -179,13 +193,13 @@ class TestCannedResponses:
 
     def test_loaded_adapter_is_selectable_after_load(self) -> None:
         with _running_server() as base:
-            httpx.post(
-                f"{base}/v1/load_lora_adapter",
+            base.post(
+                "/v1/load_lora_adapter",
                 json={"lora_name": "my-lora", "lora_path": "hf/my-lora"},
                 timeout=5.0,
             )
-            resp = httpx.post(
-                f"{base}/v1/chat/completions",
+            resp = base.post(
+                "/v1/chat/completions",
                 json={"model": "my-lora", "messages": []},
                 timeout=5.0,
             )
@@ -194,13 +208,13 @@ class TestCannedResponses:
 
     def test_selecting_an_unloaded_adapter_after_a_load_is_404(self) -> None:
         with _running_server() as base:
-            httpx.post(
-                f"{base}/v1/load_lora_adapter",
+            base.post(
+                "/v1/load_lora_adapter",
                 json={"lora_name": "my-lora", "lora_path": "hf/my-lora"},
                 timeout=5.0,
             )
-            resp = httpx.post(
-                f"{base}/v1/chat/completions",
+            resp = base.post(
+                "/v1/chat/completions",
                 json={"model": "other-lora", "messages": []},
                 timeout=5.0,
             )
@@ -208,13 +222,13 @@ class TestCannedResponses:
 
     def test_a_full_adapter_registry_refuses_a_new_distinct_load(self) -> None:
         with _running_server(max_loras=1) as base:
-            first = httpx.post(
-                f"{base}/v1/load_lora_adapter",
+            first = base.post(
+                "/v1/load_lora_adapter",
                 json={"lora_name": "lora-a", "lora_path": "hf/lora-a"},
                 timeout=5.0,
             )
-            second = httpx.post(
-                f"{base}/v1/load_lora_adapter",
+            second = base.post(
+                "/v1/load_lora_adapter",
                 json={"lora_name": "lora-b", "lora_path": "hf/lora-b"},
                 timeout=5.0,
             )
@@ -223,18 +237,18 @@ class TestCannedResponses:
 
     def test_unload_frees_a_slot_for_a_later_distinct_load(self) -> None:
         with _running_server(max_loras=1) as base:
-            httpx.post(
-                f"{base}/v1/load_lora_adapter",
+            base.post(
+                "/v1/load_lora_adapter",
                 json={"lora_name": "lora-a", "lora_path": "hf/lora-a"},
                 timeout=5.0,
             )
-            unloaded = httpx.post(
-                f"{base}/v1/unload_lora_adapter",
+            unloaded = base.post(
+                "/v1/unload_lora_adapter",
                 json={"lora_name": "lora-a"},
                 timeout=5.0,
             )
-            reused = httpx.post(
-                f"{base}/v1/load_lora_adapter",
+            reused = base.post(
+                "/v1/load_lora_adapter",
                 json={"lora_name": "lora-b", "lora_path": "hf/lora-b"},
                 timeout=5.0,
             )
@@ -243,8 +257,8 @@ class TestCannedResponses:
 
     def test_unload_of_an_absent_adapter_is_idempotent(self) -> None:
         with _running_server(max_loras=1) as base:
-            resp = httpx.post(
-                f"{base}/v1/unload_lora_adapter",
+            resp = base.post(
+                "/v1/unload_lora_adapter",
                 json={"lora_name": "never-loaded"},
                 timeout=5.0,
             )
@@ -307,8 +321,8 @@ class TestForwardMode:
     def test_forwards_request_to_upstream(self) -> None:
         with _upstream_server() as upstream, httpx.Client() as client:
             with _running_server(forward_url=upstream, client=client) as base:
-                resp = httpx.post(
-                    f"{base}/v1/chat/completions",
+                resp = base.post(
+                    "/v1/chat/completions",
                     json={"model": "up-model", "messages": []},
                     timeout=5.0,
                 )
@@ -323,9 +337,9 @@ class TestForwardMode:
             httpx.Client() as client,
         ):
             with _running_server(forward_url=upstream, client=client) as base:
-                without = httpx.post(f"{base}/v1/responses", json={}, timeout=5.0)
-                withauth = httpx.post(
-                    f"{base}/v1/responses",
+                without = base.post("/v1/responses", json={}, timeout=5.0)
+                withauth = base.post(
+                    "/v1/responses",
                     json={},
                     headers={"Authorization": "Bearer sk-test"},
                     timeout=5.0,
@@ -338,18 +352,18 @@ class TestForwardMode:
         with httpx.Client() as client:
             unreachable = "http://127.0.0.1:1"
             with _running_server(forward_url=unreachable, client=client) as base:
-                resp = httpx.post(
-                    f"{base}/v1/responses", json={"input": "x"}, timeout=5.0
-                )
+                resp = base.post("/v1/responses", json={"input": "x"}, timeout=5.0)
         assert resp.status_code == 502
 
 
 class TestMalformedRequests:
-    def _raw_post(self, base: str, headers: str) -> int:
-        host, port = base.removeprefix("http://").split(":")
-        with socket.create_connection((host, int(port)), timeout=5.0) as sock:
+    def _raw_post(self, base: httpx.Client, headers: str) -> int:
+        path = base._transport._pool._uds  # type: ignore[attr-defined]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5.0)
+            sock.connect(path)
             sock.sendall(
-                f"POST /v1/chat/completions HTTP/1.1\r\nHost: {host}\r\n"
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n"
                 f"{headers}\r\n\r\n".encode()
             )
             status_line = sock.recv(256).decode("latin-1").splitlines()[0]
@@ -366,9 +380,7 @@ class TestMalformedRequests:
 
 class TestRunLifecycle:
     def _make_executor(self) -> DevModelExecutor:
-        return DevModelExecutor(
-            make_worker_config(enable_dev_model=True), make_worker_hardware()
-        )
+        return make_dev_model_executor()
 
     def test_run_emits_endpoint_and_returns_result(self, tmp_path: Path) -> None:
         spec = DevModelSpecStrict(
@@ -385,15 +397,34 @@ class TestRunLifecycle:
             result = ex.run(task, tmp_path)
 
         serve = emit.call_args.args[1]["serve"]
-        assert serve["_host"] == "127.0.0.1"
         assert serve["model"] == "dev/model"
-        # Only worker-private ("_"-prefixed) endpoint facts plus the model name and
-        # served interface; no raw routable host, public listener, or credential.
-        assert set(serve) == {"model", "interface", "_host", "_port", "_api_key"}
+        # Only the worker-private ("_"-prefixed) socket plus the model name and served
+        # interface; no listener or credential.
+        assert set(serve) == {"model", "interface", "_socket"}
         assert serve["interface"] == "chat"
         assert isinstance(result, DevModelResult)
         assert result.model == "dev/model"
-        assert result.port == serve["_port"]
+        assert result.port is None
+
+    def test_a_socket_path_past_the_unix_limit_fails_the_task_clearly(
+        self, tmp_path: Path
+    ) -> None:
+        parent = tmp_path / ("d" * 100)
+        parent.mkdir()
+        spec = DevModelSpecStrict(
+            taskType=TaskType.DEV_MODEL,
+            model=ModelConfig(source=ModelSource(identifier="dev/model")),
+        )
+        task = make_worker_task_message(spec=spec, task_type=TaskType.DEV_MODEL)
+        ex = make_dev_model_executor(engine_parent=parent)
+        with (
+            patch.object(ex, "emit_update"),
+            patch.object(ex, "_wait_for_serve"),
+            pytest.raises(ExecutionError, match="107-byte Unix socket limit") as raised,
+        ):
+            ex.run(task, tmp_path / "out")
+        assert raised.value.retryable
+        assert list(parent.iterdir()) == []
 
     def test_pooling_runner_serves_the_embedding_interface(
         self, tmp_path: Path
@@ -416,25 +447,28 @@ class TestRunLifecycle:
             ex.run(task, tmp_path)
         assert emit.call_args.args[1]["serve"]["interface"] == "embedding"
 
-    def test_binds_loopback_only(self, tmp_path: Path) -> None:
-        spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL)
+    def test_listens_only_on_its_published_socket(self, tmp_path: Path) -> None:
+        spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL, port=8123)
         task = make_worker_task_message(spec=spec, task_type=TaskType.DEV_MODEL)
         ex = self._make_executor()
         emit = MagicMock()
-        bind: dict[str, object] = {}
+        seen: dict[str, object] = {}
 
-        def capture_bind(_deadline: float) -> None:
-            bind["host"] = ex._server.server_address[0]  # type: ignore[union-attr]
+        def capture(_deadline: float) -> None:
+            seen["address"] = ex._server.server_address  # type: ignore[union-attr]
+            seen["engine"] = ex._local_engines().lookup(task.task_id)
 
         with (
             patch.object(ex, "emit_update", emit),
-            patch.object(ex, "_wait_for_serve", side_effect=capture_bind),
+            patch.object(ex, "_wait_for_serve", side_effect=capture),
         ):
             ex.run(task, tmp_path)
 
         serve = emit.call_args.args[1]["serve"]
-        assert bind["host"] == "127.0.0.1"
-        assert serve["_host"] == "127.0.0.1"
+        assert seen["address"] == serve["_socket"]
+        assert seen["engine"] == LocalEngine(serve["_socket"])
+        assert ex._local_engines().lookup(task.task_id) is None
+        assert not Path(serve["_socket"]).parent.exists()
 
     def test_run_serves_canned_endpoint_while_alive(self, tmp_path: Path) -> None:
         spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL)
@@ -443,12 +477,13 @@ class TestRunLifecycle:
         reached: dict[str, object] = {}
 
         def hit_then_stop(_deadline: float) -> None:
-            port = ex._server.server_address[1]  # type: ignore[union-attr]
-            reached["payload"] = httpx.post(
-                f"http://127.0.0.1:{port}/v1/chat/completions",
-                json={"model": "m", "messages": []},
-                timeout=5.0,
-            ).json()
+            path = ex._server.server_address  # type: ignore[union-attr]
+            with _socket_client(str(path)) as reach:
+                reached["payload"] = reach.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": []},
+                    timeout=5.0,
+                ).json()
 
         with patch.object(ex, "_wait_for_serve", side_effect=hit_then_stop):
             ex.run(task, tmp_path)
@@ -460,9 +495,7 @@ class TestRunLifecycle:
 
 class TestCancelStop:
     def _make_executor(self) -> DevModelExecutor:
-        return DevModelExecutor(
-            make_worker_config(enable_dev_model=True), make_worker_hardware()
-        )
+        return make_dev_model_executor()
 
     def test_cancel_signals_the_running_task_and_shuts_down_server(self) -> None:
         ex = self._make_executor()
@@ -524,9 +557,7 @@ class TestServeTtlAcrossReruns:
         task = make_worker_task_message(
             spec=spec, task_type=TaskType.DEV_MODEL, serve_elapsed_sec=elapsed
         )
-        ex = DevModelExecutor(
-            make_worker_config(enable_dev_model=True), make_worker_hardware()
-        )
+        ex = make_dev_model_executor()
         emit = MagicMock()
         deadlines: list[float] = []
         with (
@@ -543,11 +574,5 @@ class TestServeTtlAcrossReruns:
 
     def test_an_elapsed_ttl_starts_no_server(self, tmp_path: Path) -> None:
         emit, deadlines = self._run(tmp_path, ttl=180.0, elapsed=200.0)
-        emit.assert_not_called()
-        assert deadlines == []
-
-    def test_an_elapsed_ttl_ends_without_binding_its_port(self, tmp_path: Path) -> None:
-        with patch.object(mod, "resolve_bind_port", side_effect=ExecutionError("busy")):
-            emit, deadlines = self._run(tmp_path, ttl=180.0, elapsed=200.0)
         emit.assert_not_called()
         assert deadlines == []

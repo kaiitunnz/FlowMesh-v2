@@ -36,6 +36,10 @@ _STOP_TIMEOUT = 30  # seconds
 _REMOVAL_IN_PROGRESS_TIMEOUT = 60  # seconds
 _REMOVAL_IN_PROGRESS_POLL = 1.0  # seconds
 _PROVIDER_NAME = "docker"
+# vLLM's multi-GPU engines exchange messages through /dev/shm and refuse to start when
+# Docker's 64 MiB default cannot hold their ring buffers. tmpfs takes memory only as it
+# fills, so the size is a ceiling.
+_GPU_WORKER_SHM_SIZE = "8g"
 _SSH_OWNER_LABEL = "flowmesh.ssh.worker_id"
 _SSH_MANAGED_LABEL = "flowmesh.ssh.managed"
 _ssh_network_suffix = sanitize_container_name(env.NODE_ALIAS, maxlen=32)
@@ -310,6 +314,8 @@ class DockerWorkerAdapter(WorkerAdapter):
             }
             if runtime is not None:
                 run_kwargs["runtime"] = runtime
+            if self.config.worker_type is WorkerType.GPU:
+                run_kwargs["shm_size"] = _GPU_WORKER_SHM_SIZE
             if docker_gid:
                 run_kwargs["group_add"] = [docker_gid]
             self._docker.containers.run(**run_kwargs)

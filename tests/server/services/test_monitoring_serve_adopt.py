@@ -54,7 +54,7 @@ def _record(
     port: int | None = 8123,
     access_mode: str | None = None,
 ):
-    serve = {"model": "m", "_host": "127.0.0.1", "_port": port} if port else {}
+    serve = {"model": "m", "_socket": f"/run/engine-{port}.sock"} if port else {}
     return SimpleNamespace(
         task_type=task_type,
         resident=resident,
@@ -164,7 +164,7 @@ def _advertise(
     monitor = _monitor(runtime, _GatedForAdvertise(proxy, exposure))
     monitor._server_base_url = "http://root.example:8000"
     return monitor._handle_serve_task_update(
-        "tsk-1", "wrk-1", {"serve": {"model": "m", "_host": "h", "_port": 8123}}
+        "tsk-1", "wrk-1", {"serve": {"model": "m", "_socket": "/run/engine.sock"}}
     )["serve"]
 
 

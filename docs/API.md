@@ -55,7 +55,7 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 | GET | `/api/v1/tasks/{id}` | Task details. |
 | GET | `/api/v1/tasks/{id}/logs` | Query task logs. |
 | GET | `/api/v1/tasks/{id}/logs/stream` | SSE task log stream. |
-| POST | `/api/v1/tasks/{id}/stop` | Stop a running SSH or `serve` task; the task ends `DONE`. |
+| POST | `/api/v1/tasks/{id}/stop` | Stop a running SSH, `serve` or `dev_model` task; the task ends `DONE`. |
 
 ## Results
 
@@ -138,11 +138,11 @@ capacity is disabled.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/resident/families` | List registered service families. |
-| GET | `/api/v1/resident/replicas` | List replica incarnations (state, health, `serve_task_id`, endpoint host/port). |
+| GET | `/api/v1/resident/replicas` | List replica incarnations. |
 | GET | `/api/v1/resident/claims` | List credit-bearing admission claims and per-replica held credit. |
 
-Endpoint responses carry host and port only — never an `api_key`. Read a replica's serving
-logs via its `serve_task_id` through `GET /api/v1/tasks/{id}/logs`.
+Read a replica's serving logs via its `serve_task_id` through
+`GET /api/v1/tasks/{id}/logs`.
 
 ## Network
 

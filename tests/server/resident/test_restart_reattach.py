@@ -43,7 +43,7 @@ def test_a_restart_reattaches_a_warm_replica_and_keeps_its_serve_task() -> None:
     replica = node.replica(warm.replica_id)
     assert replica.state is ReplicaState.WARM
     assert replica.incarnation == warm.incarnation
-    assert replica.endpoint is not None and replica.endpoint.api_key == ENGINE_KEY
+    assert replica.endpoint is not None and replica.endpoint.api_key is None
     assert node.status(warm.serve_task_id) == TaskStatus.DISPATCHED
     record = node.runtime.get_record(warm.serve_task_id)
     assert record is not None and record.dispatch_id is not None
@@ -170,7 +170,7 @@ def test_a_restart_stops_a_draining_replica_holding_no_credit() -> None:
     assert node.status(warm.serve_task_id) == TaskStatus.CANCELLING
 
 
-def test_a_restart_reattaches_a_standing_replica_with_its_engine_key() -> None:
+def test_a_restart_reattaches_a_standing_replica() -> None:
     node = Node()
     serve_task_id = asyncio.run(node.submit_serve_async())
     node.serve(serve_task_id)
@@ -181,7 +181,21 @@ def test_a_restart_reattaches_a_standing_replica_with_its_engine_key() -> None:
 
     replica = node.replica(standing.replica_id)
     assert replica.state is ReplicaState.WARM
-    assert replica.endpoint is not None and replica.endpoint.api_key == ENGINE_KEY
+    assert replica.endpoint is not None and replica.endpoint.api_key is None
+
+
+def test_control_never_reads_an_engine_key_an_earlier_worker_reported() -> None:
+    node = Node()
+    serve_task_id = asyncio.run(node.submit_serve_async())
+    node.serve(serve_task_id, reported_key=ENGINE_KEY)
+    standing = node.adopt_standing(serve_task_id)
+    assert standing.endpoint is not None and standing.endpoint.api_key is None
+    node.persist()
+
+    node.restart()
+
+    replica = node.replica(standing.replica_id)
+    assert replica.endpoint is not None and replica.endpoint.api_key is None
 
 
 def test_a_restart_never_reattaches_an_endpoint_an_earlier_dispatch_reported() -> None:
@@ -295,7 +309,7 @@ def test_a_boundary_redriven_by_the_restart_resumes_on_the_reattached_replica() 
         assert relays_at_reattach == [[]]
         assert handoff_replicas(node) == [(replica.replica_id, replica.incarnation)]
         binds = [p for _w, k, p in node.delivery.relays if k == "resident_sidecar_bind"]
-        assert binds and all(b["engine"]["api_key"] == ENGINE_KEY for b in binds)
+        assert binds and all(b["engine"]["api_key"] is None for b in binds)
         assert len(node.control.stores.directory.all()) == 1
 
     asyncio.run(run())

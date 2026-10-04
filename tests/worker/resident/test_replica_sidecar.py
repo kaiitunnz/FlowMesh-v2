@@ -112,7 +112,7 @@ def _http_engine(
     reply: Callable[[httpx.Request], httpx.Response],
 ) -> HttpEngineDelivery:
     delivery = HttpEngineDelivery()
-    delivery._client = httpx.AsyncClient(transport=httpx.MockTransport(reply))
+    delivery._clients[None] = httpx.AsyncClient(transport=httpx.MockTransport(reply))
     return delivery
 
 
@@ -296,6 +296,89 @@ def test_a_request_the_replica_cannot_build_fails_definite() -> None:
     outcome = asyncio.run(_stream_outcome(_http_engine(reply), malformed_batch))
     assert outcome is not None and outcome["kind"] == KIND_FAILED
     assert outcome["definite"] is True
+
+
+_OVER_WINDOW = (
+    "This model's maximum context length is 1024 tokens. However, you requested "
+    "1000 output tokens and your prompt contains 30 input tokens, for a total of "
+    "1030 tokens. Please reduce the length of the input prompt or the number of "
+    "requested output tokens."
+)
+
+
+def _engine_error(
+    status: int, message: str, kind: str, param: Any
+) -> Callable[[httpx.Request], httpx.Response]:
+    return _answer(
+        status,
+        json={"error": {"message": message, "type": kind, "param": param, "code": 400}},
+    )
+
+
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [
+        (
+            _engine_error(400, _OVER_WINDOW, "BadRequestError", "input_tokens"),
+            f"engine 400: {_OVER_WINDOW}",
+        ),
+        (
+            _engine_error(
+                400,
+                "1 validation error:\n  {'type': 'string_type', 'loc': ('body', "
+                "'messages'), 'input': 'the tenant prompt'}",
+                "BadRequestError",
+                "messages",
+            ),
+            "engine 400 BadRequestError",
+        ),
+        (
+            _engine_error(400, "the tenant prompt", "Bad Request\nInjected", None),
+            "engine 400",
+        ),
+        (_answer(400, text="<html>bad request</html>"), "engine 400"),
+        (
+            _engine_error(500, "the tenant prompt", "InternalServerError", None),
+            "engine 500 InternalServerError",
+        ),
+        (
+            _engine_error(400, "the tenant prompt", "BadRequestError", ["messages"]),
+            "engine 400 BadRequestError",
+        ),
+        (
+            _engine_error(400, "the tenant prompt", "BadRequestError", {"a": 1}),
+            "engine 400 BadRequestError",
+        ),
+        (_answer(400, json=["the tenant prompt"]), "engine 400"),
+    ],
+    ids=[
+        "over-window",
+        "echoing-validation",
+        "unsafe-type",
+        "non-json",
+        "server",
+        "list-param",
+        "dict-param",
+        "list-body",
+    ],
+)
+def test_an_engine_refusal_names_only_what_the_engine_may_disclose(
+    reply: Callable[[httpx.Request], httpx.Response], reason: str
+) -> None:
+    outcome = asyncio.run(_stream_outcome(_http_engine(reply), request="hi"))
+    assert outcome is not None and outcome["kind"] == KIND_FAILED
+    assert outcome["reason"] == reason
+
+
+def test_an_engine_refusal_message_is_bounded_to_one_line() -> None:
+    message = _OVER_WINDOW + "\n\x1b[31m" + "x" * 1000
+    reply = _engine_error(400, message, "BadRequestError", "input_tokens")
+    outcome = asyncio.run(_stream_outcome(_http_engine(reply), request="hi"))
+    assert outcome is not None
+    reason = outcome["reason"]
+    assert reason.startswith(f"engine 400: {_OVER_WINDOW}")
+    assert len(reason) <= len("engine 400: ") + 300
+    assert reason.isprintable()
 
 
 def _batch(*prompts: str) -> str:
@@ -765,3 +848,41 @@ def test_reap_invocation_tears_down_the_inflight_serve() -> None:
         await sidecar.aclose()
 
     asyncio.run(run())
+
+
+def test_a_claim_on_a_withdrawn_engine_re_drives_as_an_unreachable_engine_does() -> (
+    None
+):
+    # An engine withdrawn and unbound answers a later claim with the same transient
+    # loss an unreachable engine leaves: never a definite failure, so the origin holds
+    # the credit and control re-drives.
+    async def run() -> dict[str, Any] | None:
+        origin, sidecar = _harness()
+        sidecar.bind(
+            replica_id="rpl-1",
+            incarnation=1,
+            listener_generation=1,
+            endpoint=ReplicaEndpoint(
+                base_url="http://localhost/v1", model="m", socket_path="/run/a.sock"
+            ),
+        )
+        sidecar.bind(
+            replica_id="rpl-2",
+            incarnation=1,
+            listener_generation=1,
+            endpoint=ReplicaEndpoint(
+                base_url="http://localhost/v1", model="m", socket_path="/run/b.sock"
+            ),
+        )
+        sidecar.unbind_engine("/run/a.sock")
+        assert set(sidecar._bindings) == {"rpl-2"}
+        await origin.send_wire("bootstrap", handoff=_handoff(), request='{"p":"hi"}')
+        reply = await origin.recv_wire(timeout=5.0)
+        await sidecar.aclose()
+        return reply
+
+    withdrawn = asyncio.run(run())
+    assert withdrawn is not None and withdrawn["kind"] == KIND_FAILED
+    assert withdrawn["definite"] is False
+    unreachable = asyncio.run(_stream_outcome(_http_engine(_unreachable), "hi"))
+    assert unreachable is None or unreachable.get("definite") is False

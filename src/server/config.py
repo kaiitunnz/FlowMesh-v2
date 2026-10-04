@@ -447,9 +447,8 @@ class ResidentCapacityConfig:
     permits any plan-derived model; a non-empty list enforces an explicit catalog.
     ``admission_slots`` is the conservative safe-slot count reported per replica, and
     ``adapter_slots`` the number of distinct adapters a replica may hold concurrently.
-    ``forward_api_key`` is the credential control relays to a replica's sidecar when the
-    replica reports none, so the ``dev_model`` stand-in can forward it to a keyed
-    upstream.
+    ``forward_api_key`` is the credential control relays to a ``dev_model`` replica's
+    sidecar, which forwards it to a keyed upstream.
     """
 
     enabled: bool = False

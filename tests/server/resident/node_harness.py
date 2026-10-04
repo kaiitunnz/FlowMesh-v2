@@ -82,8 +82,15 @@ class _Workers(_WorkerStub):
 class Node:
     """One root's durable state, shared across its restarts."""
 
-    def __init__(self, cold_start_deadline_sec: float = 60.0) -> None:
+    def __init__(
+        self,
+        cold_start_deadline_sec: float = 60.0,
+        substrate: str = "dev_model",
+        forward_api_key: str | None = None,
+    ) -> None:
         self.cold_start_deadline_sec = cold_start_deadline_sec
+        self.substrate = substrate
+        self.forward_api_key = forward_api_key
         self.tasks = _YieldingRegistry()
         self.resident = _SnapshotRegistry()
         self.runtime, self.control = self._boot()
@@ -102,9 +109,10 @@ class Node:
             orchestration=OrchestrationConfig(
                 resident=ResidentCapacityConfig(
                     enabled=True,
-                    substrate="dev_model",
+                    substrate=self.substrate,
                     poll_interval_sec=0.01,
                     cold_start_deadline_sec=self.cold_start_deadline_sec,
+                    forward_api_key=self.forward_api_key,
                 )
             ),
             system_principal=lambda: SYSTEM,
@@ -142,24 +150,25 @@ class Node:
         worker_id: str = "wkr-1",
         dispatch_id: str | None = None,
         port: int = 8001,
+        reported_key: str | None = None,
     ) -> None:
-        """Dispatch the serve task and have it report its engine endpoint."""
+        """Dispatch the serve task and have it report its engine endpoint.
+
+        ``reported_key`` is an engine key the update carries, as an earlier worker
+        build reported one.
+        """
         dispatch_id = dispatch_id or new_dispatch_id()
         self.dispatch(serve_task_id, worker_id, dispatch_id)
         self.runtime.mark_started(serve_task_id, worker_id, {}, TS, dispatch_id)
+        serve: dict[str, Any] = {
+            "_socket": f"/run/engine-{port}.sock",
+            "model": "m",
+            "interface": "chat",
+        }
+        if reported_key is not None:
+            serve["_api_key"] = reported_key
         self.runtime.mark_updated(
-            serve_task_id,
-            worker_id,
-            {
-                "serve": {
-                    "_host": "10.0.0.5",
-                    "_port": port,
-                    "_api_key": ENGINE_KEY,
-                    "model": "m",
-                    "interface": "chat",
-                }
-            },
-            dispatch_id,
+            serve_task_id, worker_id, {"serve": serve}, dispatch_id
         )
 
     def dispatch(

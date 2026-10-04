@@ -144,9 +144,11 @@ class OmniText2SpeechExecutor(OmniExecutorBase):
             if qwen3_tts.is_qwen3_tts(model_name)
             else None
         )
+        self._omni_generating = True
         outputs = self._omni.generate(
             prompt, sampling_params_list=sampling_params, use_tqdm=False
         )
+        self._omni_generating = False
         audio = _extract_first_audio(outputs)
         if audio is None:
             raise ExecutionError(

@@ -14,6 +14,8 @@ from typing import Any
 from flowmesh_hook import ResourceKind
 from lumid_hooks import PrincipalContext
 
+from shared.inference import hf_overrides
+
 from ..auth import register_resource
 from ..config import ResidentCapacityConfig
 from ..task.runtime import TaskRuntime
@@ -47,22 +49,24 @@ async def materialize_resident_replica(
             }
         },
     }
+    vllm = _rendered_profile(family.engine_profile)
+    if revision := vllm.pop("revision", None):
+        spec["model"]["source"]["revision"] = revision
     if spec_type == "serve":
         # A real vLLM embedding replica runs the pooling runner; a chat replica enables
         # LoRA so a resident consumer can load its adapter into a slot on demand.
         if family.interface == "embedding":
-            spec["model"]["vllm"] = {"runner": "pooling"}
+            vllm["runner"] = "pooling"
         else:
-            spec["model"]["vllm"] = {
-                "enable_lora": True,
-                "max_loras": config.adapter_slots,
-            }
+            vllm.update(enable_lora=True, max_loras=config.adapter_slots)
     elif family.interface != "embedding":
         # The GPU-free dev_model stand-in forwards by path and needs no serving-mode
         # flag, but it models a finite adapter registry of the same size so the slot
         # reclaim is exercised end to end: a lifetime-distinct load beyond the budget
         # fails until an unloaded slot frees.
-        spec["model"]["vllm"] = {"max_loras": config.adapter_slots}
+        vllm["max_loras"] = config.adapter_slots
+    if vllm:
+        spec["model"]["vllm"] = vllm
     if config.serve_ttl_sec:
         spec["ttlSeconds"] = config.serve_ttl_sec
     payload = {
@@ -100,3 +104,17 @@ async def materialize_resident_replica(
         runtime.cancel_workflow(workflow_id, reason="resident cold start failed")
         raise
     return entries[0].task_id
+
+
+def _rendered_profile(profile: str | None) -> dict[str, Any]:
+    """Render a family's engine profile as the serve task's engine configuration.
+
+    The engine takes RoPE settings as config overrides, as the local executor passes
+    them.
+    """
+    rendered: dict[str, Any] = json.loads(profile) if profile else {}
+    if overrides := hf_overrides(
+        rendered.pop("rope_scaling", None), rendered.pop("rope_theta", None)
+    ):
+        rendered["hf_overrides"] = overrides
+    return rendered

@@ -69,7 +69,7 @@ except Exception:
         _HAS_VLLM = False
         StructuredOutputsParams = None  # type: ignore
 
-from shared.inference import SAMPLING_DEFAULTS
+from shared.inference import SAMPLING_DEFAULTS, hf_overrides
 from shared.schemas.governance import SpanType
 from shared.schemas.result import (
     BaseExecutorResult,
@@ -85,6 +85,7 @@ from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry, produced_items
 from .utils.checkpoints import resolve_checkpoint_load
+from .utils.collective import loopback_collective_env
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,24 @@ def _ensure_destroy_torch_process_group() -> None:
 
 
 atexit.register(_ensure_destroy_torch_process_group)
+
+
+# ``shared.inference.engine_profile`` classifies every key read from ``model.vllm``.
+_ACCEPTED_ENGINE_ARGS: dict[str, type] = {
+    "max_model_len": int,
+    "dtype": str,
+    "download_dir": str,
+    "max_num_batched_tokens": int,
+    "max_cudagraph_capture_size": int,
+    "enable_mm_embeds": bool,
+    "limit_mm_per_prompt": dict,
+    "quantization": str,
+    "kv_cache_dtype": str,
+    "enforce_eager": bool,
+    "hf_token": str,
+    "tokenizer_revision": str,
+    "cpu_offload_gb": float,
+}
 
 
 class VLLMExecutor(InferenceMixin, Executor):
@@ -387,41 +406,22 @@ Summary:"""
 
         requested_util = float(vllm_cfg.pop("gpu_memory_utilization", 0.9))
 
-        accepted_engine_args = {
-            "max_model_len": int,
-            "dtype": str,
-            "download_dir": str,
-            "max_num_batched_tokens": int,
-            "max_cudagraph_capture_size": int,
-            "enable_mm_embeds": bool,
-            "limit_mm_per_prompt": dict,
-            "quantization": str,
-            "kv_cache_dtype": str,
-            "enforce_eager": bool,
-            "hf_token": str,
-            "tokenizer_revision": str,
-            "cpu_offload_gb": float,
-            "swap_space": float,
-        }
-
         kwargs_base: dict[str, Any] = dict(
             model=str(local_checkpoint_dir or ident),
             trust_remote_code=bool(vllm_cfg.pop("trust_remote_code", False)),
             seed=vllm_cfg.pop("seed", 42),
         )
         kwargs_base.update(extra_llm_kwargs)
-        for arg, arg_type in accepted_engine_args.items():
-            if arg in vllm_cfg:
-                kwargs_base[arg] = arg_type(vllm_cfg.pop(arg))
+        for arg, arg_type in _ACCEPTED_ENGINE_ARGS.items():
+            if (value := vllm_cfg.pop(arg, None)) is not None:
+                kwargs_base[arg] = arg_type(value)
         if revision:
             kwargs_base["revision"] = revision
-        hf_overrides: dict[str, Any] = {}
-        if "rope_scaling" in vllm_cfg:
-            hf_overrides["rope_scaling"] = vllm_cfg.pop("rope_scaling")
-        if "rope_theta" in vllm_cfg:
-            hf_overrides["rope_theta"] = float(vllm_cfg.pop("rope_theta"))
-        if hf_overrides:
-            kwargs_base["hf_overrides"] = hf_overrides
+        if overrides := hf_overrides(
+            vllm_cfg.pop("rope_scaling", None), vllm_cfg.pop("rope_theta", None)
+        ):
+            kwargs_base["hf_overrides"] = overrides
+        os.environ.update(loopback_collective_env())
         if "env_vars" in vllm_cfg:
             env_vars = vllm_cfg.pop("env_vars")
             assert isinstance(env_vars, dict)

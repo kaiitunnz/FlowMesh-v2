@@ -7,10 +7,10 @@ import sys
 from pathlib import Path
 
 from shared.tasks.worker_message import WorkerTaskMessage
-from shared.utils.manifest import scratch_dir
 from worker.config import WorkerConfig
 
 from .dpo_executor import DPOExecutor
+from .utils.distributed import run_rank
 
 
 def main(argv: list[str]) -> int:
@@ -30,14 +30,7 @@ def main(argv: list[str]) -> int:
         task = WorkerTaskMessage.model_validate(json.load(fh))
     executor = DPOExecutor(WorkerConfig.from_env())
     try:
-        result = executor.run(task, args.out_dir)
-        if args.local_rank in (None, 0):
-            try:
-                (scratch_dir(args.out_dir) / "distributed_result.json").write_text(
-                    json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-            except Exception:
-                pass
+        run_rank(args.out_dir, lambda: executor.run(task, args.out_dir))
     finally:
         try:
             executor.cleanup_after_run()

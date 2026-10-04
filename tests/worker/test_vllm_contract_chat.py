@@ -17,6 +17,7 @@ pytest.importorskip("torch", reason="torch not installed (needs --extra inferenc
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers.params import TokenizeParams
 
 from shared.inference import CanonicalInferenceRequest
@@ -177,7 +178,7 @@ def test_a_local_bound_admits_what_the_server_admits(prompt_tokens: int) -> None
             params.apply_post_tokenization(
                 None, {"prompt_token_ids": [0] * prompt_tokens}
             )
-        except ValueError:
+        except VLLMValidationError:
             return False
         return True
 

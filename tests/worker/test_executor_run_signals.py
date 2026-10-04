@@ -15,20 +15,17 @@ from shared.tasks.specs import DevModelSpecStrict
 from shared.tasks.specs.serve import ServeSpecStrict
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import (
-    make_worker_config,
-    make_worker_hardware,
+    make_dev_model_executor,
+    make_serve_executor,
     make_worker_task_message,
 )
 from worker.executors import dev_model_executor
 from worker.executors.base_executor import RunSignals, TaskCancelledError
 from worker.executors.dev_model_executor import DevModelExecutor
-from worker.executors.vllm_serve_executor import VLLMServeExecutor
 
 
 def _dev_model() -> DevModelExecutor:
-    return DevModelExecutor(
-        make_worker_config(enable_dev_model=True), make_worker_hardware()
-    )
+    return make_dev_model_executor()
 
 
 def _dev_model_task(task_id: str, ttl: float = 60.0) -> Any:
@@ -75,7 +72,7 @@ def test_a_dev_model_stopped_before_launch_succeeds(tmp_path: Path) -> None:
 def test_a_serve_stopped_before_launch_succeeds_without_starting_vllm(
     tmp_path: Path,
 ) -> None:
-    ex = VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+    ex = make_serve_executor()
     ex.stop("tsk-1")
     with (
         patch("subprocess.Popen") as popen,
@@ -91,7 +88,7 @@ def test_a_serve_stopped_before_launch_succeeds_without_starting_vllm(
 
 
 def test_a_serve_stopped_before_it_is_ready_succeeds(tmp_path: Path) -> None:
-    ex = VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+    ex = make_serve_executor()
     proc = MagicMock()
     proc.stdout = io.StringIO("")
     proc.poll.return_value = None
@@ -123,7 +120,7 @@ def test_a_late_request_for_an_ended_task_keeps_the_running_tasks_request() -> N
 
 
 def test_a_serve_cancelled_before_launch_never_starts_vllm(tmp_path: Path) -> None:
-    ex = VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+    ex = make_serve_executor()
     ex.cancel("tsk-1")
     with (
         patch("subprocess.Popen") as popen,

@@ -112,8 +112,11 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
         ]
         sampling_params = _build_sampling_params(cfg)
 
+        # vllm_omni closes the engine once a py_generator generation finishes.
+        self._omni_closed_by_generation = py_generator
         audio_results: list[dict[str, Any]] = []
         text_results: dict[str, str] = {}
+        stage_errors: list[str] = []
         with self._span(
             "generation",
             span_type=SpanType.COMPUTE,
@@ -121,6 +124,7 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
         ):
             generator: Iterable[OmniRequestOutput]
             try:
+                self._omni_generating = True
                 if py_generator:
                     generator = self._omni.generate(
                         prompts, sampling_params, py_generator=True
@@ -129,6 +133,7 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
                     generator = self._omni.generate(
                         prompts, sampling_params, py_generator=False
                     )
+                self._omni_generating = False
             except Exception as exc:
                 raise ExecutionError(
                     f"omni_text2general generation failed to start: {exc}",
@@ -136,14 +141,14 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
                 ) from exc
 
             for stage_output in generator:
-                final_type = stage_output.final_output_type
-                request_output = stage_output.request_output
-                if not request_output:
+                if stage_output.error:
+                    stage_errors.append(stage_output.error)
                     continue
+                final_type = stage_output.final_output_type
                 if final_type == "text":
-                    text_out = _extract_text_output(request_output)
+                    text_out = _extract_text_output(stage_output)
                     if text_out is not None:
-                        text_results[request_output.request_id] = text_out
+                        text_results[stage_output.request_id] = text_out
                     continue
                 if final_type == "audio":
                     audio_obj = extract_audio_from_mm(
@@ -152,14 +157,17 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
                     if audio_obj is not None:
                         audio_results.append(
                             {
-                                "request_id": request_output.request_id,
+                                "request_id": stage_output.request_id,
                                 "audio": audio_obj,
                             }
                         )
 
         if not audio_results:
+            detail = (
+                f" Engine reported: {'; '.join(stage_errors)}" if stage_errors else ""
+            )
             raise ExecutionError(
-                "omni_text2general completed but returned no audio output."
+                f"omni_text2general completed but returned no audio output.{detail}"
             )
 
         artifacts_dir = out_dir / "artifacts"
@@ -187,7 +195,7 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
                     OmniGeneralItem(
                         index=idx,
                         request_id=rid,
-                        prompt=texts[idx] if idx < len(texts) else None,
+                        prompt=_prompt_for_request_id(rid, texts),
                         audio=ArtifactRef(
                             path=self.relative_to(save_path, artifacts_dir)
                         ),
@@ -247,6 +255,23 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
 
 def _narration_cfg(spec_dict: dict[str, Any]) -> dict[str, Any]:
     return OmniExecutorBase.omni_cfg(spec_dict, "omni:narration", "omni_text2general")
+
+
+def _prompt_index_from_request_id(request_id: str) -> int | None:
+    """Parse the prompt index from a vllm_omni ``{index}_{uuid}`` request id."""
+    head = request_id.split("_", 1)[0]
+    return int(head) if head.isdecimal() else None
+
+
+def _prompt_for_request_id(request_id: str, texts: list[str]) -> str:
+    """Return the input prompt named by ``request_id``'s leading index."""
+    idx = _prompt_index_from_request_id(request_id)
+    if idx is None or idx >= len(texts):
+        raise ExecutionError(
+            f"omni_text2general cannot correlate audio output to a prompt: "
+            f"request id {request_id!r} has no valid prompt index."
+        )
+    return texts[idx]
 
 
 def _parse_modalities(value: Any) -> list[str]:

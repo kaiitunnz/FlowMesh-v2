@@ -30,6 +30,8 @@ def captured_env():
         captured["argv"] = argv  # type: ignore[assignment]
         captured["PYTHONPATH"] = os.environ.get("PYTHONPATH")
         captured["FLAG"] = os.environ.get(_TEST_LAUNCHER_FLAG)
+        for name in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "VLLM_HOST_IP"):
+            captured[name] = os.environ.get(name)
 
     with patch.object(distributed, "_torchrun_main", side_effect=_fake_main):
         yield captured
@@ -67,6 +69,22 @@ def test_run_torchrun_sets_launcher_flag(captured_env: dict[str, str | None]) ->
     )
 
     assert captured_env["FLAG"] == "1"
+
+
+def test_the_ranks_keep_their_collective_traffic_on_loopback(
+    captured_env: dict[str, str | None],
+) -> None:
+    with patch.dict(os.environ, {"NCCL_SOCKET_IFNAME": "eth0"}):
+        distributed.run_torchrun(
+            nproc_per_node=2,
+            module="some.module",
+            module_args=[],
+            launcher_env_flag=_TEST_LAUNCHER_FLAG,
+        )
+        assert os.environ["NCCL_SOCKET_IFNAME"] == "eth0"
+    assert captured_env["NCCL_SOCKET_IFNAME"] == "lo"
+    assert captured_env["GLOO_SOCKET_IFNAME"] == "lo"
+    assert captured_env["VLLM_HOST_IP"] == "127.0.0.1"
 
 
 def test_run_torchrun_prepends_repo_root_to_pythonpath(

@@ -14,15 +14,20 @@ from typing import Any
 from lumid_hooks import PrincipalContext
 
 from server.telemetry.tracing import ControlPlaneTracer
-from shared.resident.contracts import ReplicaEndpoint
+from shared.resident.contracts import LOCAL_ENGINE_BASE_URL, ReplicaEndpoint
 from shared.schemas.command import MediatedOpMessage
+from shared.tasks.task_type import TaskType
 
 from ..config import OrchestrationConfig, ResidentCapacityConfig
 from ..network.reverse_relay import RelaySessionStore
 from ..network.service import NetworkPlane
 from ..registries import WorkerRegistry
 from ..registries.resident import ResidentRegistry
-from ..task.models import SETTLING_TASK_STATUSES, TaskStatus
+from ..task.models import (
+    SETTLING_TASK_STATUSES,
+    TaskStatus,
+    serve_engine_reported,
+)
 from ..task.runtime import TaskRuntime
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
@@ -98,18 +103,18 @@ def build_resident_capacity(
         ):
             return None
         serve = record.latest_update.get("serve")
-        if not isinstance(serve, dict):
+        if not isinstance(serve, dict) or not serve_engine_reported(serve):
             return None
-        # The raw listener host/port and engine key are worker-private ("_"-prefixed) so
-        # task metadata never discloses them; only the co-located sidecar reaches the
-        # loopback engine, and only the gated task-ID route reaches the sidecar.
-        host, port = serve.get("_host"), serve.get("_port")
-        if not host or not port:
-            return None
+        # Only the co-located sidecar reaches the engine, over the worker-private
+        # socket its worker resolves, and only the gated task-ID route reaches the
+        # sidecar. Only the keyless dev_model stand-in carries the forward key, which
+        # it presents to its keyed upstream.
         return ReplicaEndpoint(
-            base_url=f"http://{host}:{port}/v1",
+            base_url=LOCAL_ENGINE_BASE_URL,
             model=str(serve.get("model") or ""),
-            api_key=serve.get("_api_key"),
+            api_key=(
+                cfg.forward_api_key if record.task_type == TaskType.DEV_MODEL else None
+            ),
             interface=str(serve.get("interface") or "chat"),
         )
 
@@ -150,6 +155,10 @@ def build_resident_capacity(
     runtime.set_resident_task_update_hook(resident_control.on_serve_task_update)
     runtime.set_resident_yield_hook(resident_control.on_yield_requested)
     return resident_control
+
+
+# The statuses in which a task is held by the worker it was assigned to.
+_ON_A_WORKER = frozenset({TaskStatus.DISPATCHED, TaskStatus.CANCELLING})
 
 
 def wire_worker_delivery(
@@ -207,7 +216,10 @@ def wire_worker_delivery(
         if replica.serve_task_id is None:
             return None
         record = runtime.get_record(replica.serve_task_id)
-        return record.assigned_worker if record else None
+        # A settled or requeued serve task keeps the worker it last ran on.
+        if record is None or record.status not in _ON_A_WORKER:
+            return None
+        return record.assigned_worker
 
     resident_control.set_worker_delivery(
         ResidentWorkerDelivery(
@@ -219,7 +231,6 @@ def wire_worker_delivery(
             sessions=sessions,
             directly_routable=resident_cfg.sidecar_directly_routable,
             resident_listener_port_of=_resident_listener_port_of,
-            forward_api_key=resident_cfg.forward_api_key,
             root_node_id=root_node_id,
             edge_id=edge_id,
             worker_cordoned=_worker_cordoned,

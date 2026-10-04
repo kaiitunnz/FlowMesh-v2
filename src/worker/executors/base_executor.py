@@ -46,10 +46,10 @@ from worker.config import WorkerConfig
 if TYPE_CHECKING:
     # worker.egress, worker.resident and worker.lifecycle all reach this module
     # through worker.executors, so importing any of them here at runtime closes a
-    # cycle. All three are only ever annotations.
+    # cycle. They are only ever annotations.
     from worker.egress import PendingEgressRequestStore
     from worker.lifecycle import Lifecycle
-    from worker.resident import ResidentRequestStore
+    from worker.resident import LocalEngineRegistry, ResidentRequestStore
 
 type ExecutorTask = WorkerTaskMessage
 type TaskReference = WorkerTaskMessage | MergedChildTaskStrict
@@ -206,21 +206,27 @@ class Executor(ABC):
         if self._lifecycle is not None:
             self._lifecycle.ssh_endpoints.withdraw(endpoint_id)
 
-    def _pending_egress_requests(self) -> "PendingEgressRequestStore":
-        """The worker-private store for captured, not-yet-executed egress requests.
+    def _require_lifecycle(self) -> "Lifecycle":
+        """Return the injected worker lifecycle.
 
-        Raises if no lifecycle was injected, so a misconfigured worker fails cleanly
-        rather than raising ``AttributeError`` deep in an executor.
+        Raises if none was injected, so a misconfigured worker fails cleanly rather than
+        raising ``AttributeError`` deep in an executor.
         """
         if self._lifecycle is None:
             raise ExecutionError("executor has no worker lifecycle")
-        return self._lifecycle.pending_egress_requests
+        return self._lifecycle
+
+    def _pending_egress_requests(self) -> "PendingEgressRequestStore":
+        """The worker-private store for captured, not-yet-executed egress requests."""
+        return self._require_lifecycle().pending_egress_requests
 
     def _resident_requests(self) -> "ResidentRequestStore":
         """The worker-private store for a captured resident boundary's raw request."""
-        if self._lifecycle is None:
-            raise ExecutionError("executor has no worker lifecycle")
-        return self._lifecycle.resident_requests
+        return self._require_lifecycle().resident_requests
+
+    def _local_engines(self) -> "LocalEngineRegistry":
+        """Return the serve engines this worker launched, reached only inside it."""
+        return self._require_lifecycle().local_engines
 
     def prepare(self) -> None:
         """Optional: called once before the first `run`.

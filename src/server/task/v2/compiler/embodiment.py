@@ -7,8 +7,10 @@ this module does not check keeps the single embodiment its binding names.
 """
 
 import json
+from typing import Any
 
 from shared.inference import (
+    ENGINE_PROFILE_KEYS,
     CanonicalInferenceContract,
     CanonicalProjectionError,
     canonical_contract,
@@ -16,6 +18,7 @@ from shared.inference import (
     unforwarded_inference_keys,
 )
 from shared.tasks.credentials import credential_pointer
+from shared.tasks.placeholders import contains_placeholder
 from shared.tasks.specs import (
     InferenceBackend,
     InferenceEmbodimentKind,
@@ -24,6 +27,7 @@ from shared.tasks.specs import (
     TaskSpecBase,
 )
 from shared.tasks.specs.common import ModelSpecStrict, ModelSpecTemplate
+from shared.utils.redact import is_credential_key
 
 from ...parser import ParsedTask
 from ..representations.operators import (
@@ -144,12 +148,60 @@ def unproven_reason(
     return None
 
 
+def replica_unfit_reason(
+    task: ParsedTask, spec: InferenceSpecStrict | InferenceSpecTemplate
+) -> str | None:
+    """Return why a resident replica cannot run a leaf as declared, or ``None``.
+
+    A replica runs on one GPU with the deployment's own model access, serves the base
+    model, and is chosen before any upstream value is known, so a leaf whose engine
+    configuration depends on any of these runs as declared only self-contained.
+    """
+    vllm = (spec.model.vllm if spec.model is not None else None) or {}
+    tensor_parallel_size = vllm.get("tensor_parallel_size")
+    profiled = [vllm.get(key) for key in ENGINE_PROFILE_KEYS]
+    if contains_placeholder([*profiled, tensor_parallel_size]) or contains_placeholder(
+        spec.model_revision
+    ):
+        return "its engine configuration renders from upstream at dispatch"
+    if _engine_credential(task, vllm):
+        return "its engine configuration carries a credential"
+    gpu = spec.gpu_requirements()
+    if (gpu is not None and (gpu.count or 0) > 1) or _tensor_parallel_size(
+        tensor_parallel_size
+    ) > 1:
+        return "it runs on more than one GPU"
+    if _checkpoint_load(spec) is not None:
+        return "it loads a checkpoint in place of its model"
+    return None
+
+
 def reject_unproven(
     task: ParsedTask, spec: InferenceSpecStrict | InferenceSpecTemplate
 ) -> None:
     """Fail a leaf that explicitly asked for a menu this module cannot prove."""
-    if (reason := unproven_reason(spec)) is not None:
+    if (
+        reason := unproven_reason(spec) or replica_unfit_reason(task, spec)
+    ) is not None:
         raise _unproven(task, reason)
+
+
+def reject_resident_checkpoint(task: ParsedTask, spec: TaskSpecBase) -> None:
+    """Fail a resident-served leaf that loads a checkpoint in place of its model.
+
+    A replica serves the base model it materializes, so it would answer the leaf with
+    another model than the one the checkpoint holds.
+    """
+    if (
+        isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate))
+        and _checkpoint_load(spec) is not None
+    ):
+        raise _reject(
+            task,
+            "embodiment.resident-checkpoint",
+            "a resident replica serves the base model, not a checkpoint the leaf "
+            "loads; serve the leaf self-contained",
+        )
 
 
 def reject_resident_batch(
@@ -242,6 +294,31 @@ def _reject(task: ParsedTask, code: str, message: str) -> Exception:
         else ("stage", task.local_name) if task.local_name else ("legacy", task.task_id)
     )
     return compile_error(code, message, source_id or task.task_id, source_kind)
+
+
+def _engine_credential(task: ParsedTask, vllm: dict[str, Any]) -> bool:
+    engine = credential_pointer(("model", "vllm")) + "/"
+    environment = vllm.get("env_vars")
+    return (
+        bool(vllm.get("hf_token"))
+        or any(pointer.startswith(engine) for pointer in task.masked_credentials)
+        or (
+            isinstance(environment, dict)
+            and any(is_credential_key(str(name)) for name in environment)
+        )
+    )
+
+
+def _checkpoint_load(spec: InferenceSpecStrict | InferenceSpecTemplate) -> Any:
+    return spec.checkpoint.get("load") if isinstance(spec.checkpoint, dict) else None
+
+
+def _tensor_parallel_size(value: Any) -> int:
+    # Read as the local vLLM executor reads it.
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _declared_gpu_count(

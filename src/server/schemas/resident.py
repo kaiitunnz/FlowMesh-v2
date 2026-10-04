@@ -1,4 +1,4 @@
-from urllib.parse import urlparse
+from typing import Self
 
 from pydantic import BaseModel, Field
 
@@ -28,7 +28,7 @@ class ResidentFamilyInfo(BaseModel):
     created_at: str = Field(description="Family registration timestamp.")
 
     @classmethod
-    def project(cls, family: ServiceFamily) -> "ResidentFamilyInfo":
+    def project(cls, family: ServiceFamily) -> Self:
         return cls(
             family=family.family,
             engine_batch_key=family.engine_batch_key,
@@ -38,16 +38,6 @@ class ResidentFamilyInfo(BaseModel):
             warmth=family.warmth,
             created_at=family.created_at,
         )
-
-
-class ResidentReplicaEndpointInfo(BaseModel):
-    host: str | None = Field(default=None, description="Replica endpoint host.")
-    port: int | None = Field(default=None, description="Replica endpoint port.")
-
-    @classmethod
-    def parse(cls, base_url: str) -> "ResidentReplicaEndpointInfo":
-        parsed = urlparse(base_url)
-        return cls(host=parsed.hostname, port=parsed.port)
 
 
 class ResidentReplicaInfo(BaseModel):
@@ -62,23 +52,19 @@ class ResidentReplicaInfo(BaseModel):
     worker_id: str | None = Field(
         default=None, description="Worker hosting the replica."
     )
+    standing: bool = Field(
+        default=False,
+        description="Whether the replica is a public serve task's own.",
+    )
     lease_id: str | None = Field(
         default=None, description="Allocation lease identifier."
-    )
-    endpoint: ResidentReplicaEndpointInfo | None = Field(
-        default=None, description="Reachable endpoint host and port, when known."
     )
     created_at: str = Field(description="Replica creation timestamp.")
     updated_at: str = Field(description="Last state-change timestamp.")
     last_active_at: str = Field(description="Last admission-activity timestamp.")
 
     @classmethod
-    def project(cls, replica: ReplicaIncarnation) -> "ResidentReplicaInfo":
-        endpoint = (
-            ResidentReplicaEndpointInfo.parse(replica.endpoint.base_url)
-            if replica.endpoint is not None
-            else None
-        )
+    def project(cls, replica: ReplicaIncarnation, worker_id: str | None) -> Self:
         return cls(
             replica_id=replica.replica_id,
             family=replica.family,
@@ -86,9 +72,9 @@ class ResidentReplicaInfo(BaseModel):
             state=replica.state.value,
             healthy=replica.healthy,
             serve_task_id=replica.serve_task_id,
-            worker_id=replica.worker_id,
+            worker_id=worker_id,
+            standing=replica.standing,
             lease_id=replica.lease_id,
-            endpoint=endpoint,
             created_at=replica.created_at,
             updated_at=replica.updated_at,
             last_active_at=replica.last_active_at,
@@ -109,7 +95,7 @@ class ResidentClaimInfo(BaseModel):
     )
 
     @classmethod
-    def project(cls, claim: ServiceClaim) -> "ResidentClaimInfo":
+    def project(cls, claim: ServiceClaim) -> Self:
         return cls(
             claim_id=claim.claim_id,
             invocation_id=claim.invocation_id,

@@ -140,8 +140,14 @@ Every public user-declared `serve` task is a resident-gated standing allocation 
 only by its task ID, over one FlowMesh-authenticated, claim-gated endpoint:
 `/api/v1/serve/tasks/{task_id}/{upstream_path}`. The request relays to the task's standing
 replica unchanged and the engine's own response comes back unchanged, so an
-OpenAI-compatible client can drive any endpoint the engine serves. The engine binds to
-loopback and is reached only through its claim-gated sidecar.
+OpenAI-compatible client can drive any endpoint the engine serves. The engine listens on
+a Unix socket private to its worker, so only that worker's claim-gated sidecar reaches it,
+and a serve task's `port` has no effect.
+
+A serve task's `model.vllm` keys become the engine's flags and `model.vllm.env_vars` its
+environment. The executor sets the model, listener, and engine key itself, so a spec
+naming any of them, abbreviating one, or naming a config file is refused. A source
+revision outranks `model.vllm.revision`.
 
 At serve-task start the task is adopted as its own standing allocation: a per-task
 `ServiceFamily`, a `ServeTaskResidencyBinding` from the task ID to that allocation group,
@@ -250,11 +256,8 @@ is disabled.
 | Method | Path | Returns |
 | --- | --- | --- |
 | GET | `/api/v1/resident/families` | Registered service families (family, engine/batch key, model ref, isolation, selection strategy, warmth). |
-| GET | `/api/v1/resident/replicas` | Replica incarnations — live and inert — with state, health, backing `serve_task_id`, worker, lease, and endpoint host and port. Filterable by `family`. |
+| GET | `/api/v1/resident/replicas` | Replica incarnations, live and inert. Filterable by `family`. |
 | GET | `/api/v1/resident/claims` | Credit-bearing admission claims and per-replica held credit, recomputed on read from the authoritative claims. |
-
-A replica's endpoint is projected to host and port only; no `api_key` or serving credential
-is ever returned.
 
 To read a replica's serving logs, list replicas, take a replica's `serve_task_id`, and read
 that task through the normal task-log path, `GET /api/v1/tasks/{serve_task_id}/logs` — resident

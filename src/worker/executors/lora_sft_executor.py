@@ -3,6 +3,7 @@
 
 import gc
 import logging
+import os
 import time
 from pathlib import Path
 from types import MethodType
@@ -26,13 +27,14 @@ from shared.tasks.task_type import TaskType
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
-from .sft_executor import SFTExecutor
+from .sft_executor import SFT_LAUNCHER_FLAG, SFTExecutor
 from .utils.checkpoints import (
     archive_model_dir,
     determine_resume_path,
     maybe_upload_artifacts,
     write_executor_result,
 )
+from .utils.distributed import launch_ranks
 from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 
 try:
@@ -99,6 +101,8 @@ class LoRASFTExecutor(TrainingMixin, Executor):
             logger.info(
                 "DeepSpeed configuration detected for LoRA run; forwarding to trainer"
             )
+            if ranks := SFTExecutor.deepspeed_ranks(training_cfg, max_ranks=1):
+                return self._run_ranks(task, out_dir, ranks)
         lora_cfg = spec.lora or {}
 
         artifacts_dir = out_dir / "artifacts"
@@ -333,6 +337,21 @@ class LoRASFTExecutor(TrainingMixin, Executor):
         write_executor_result(out_dir / "results.json", task.task_id, task.spec, result)
         message = error_msg or "LoRA SFT training failed"
         raise ExecutionError(message)
+
+    def _run_ranks(self, task: ExecutorTask, out_dir: Path, ranks: int) -> LoRAResult:
+        logger.info(
+            "Launching torchrun for LoRA SFT (nproc=%d, CUDA_VISIBLE_DEVICES=%s)",
+            ranks,
+            os.environ.get("CUDA_VISIBLE_DEVICES"),
+        )
+        return launch_ranks(
+            nproc_per_node=ranks,
+            module="worker.executors.lora_sft_dist_entry",
+            out_dir=out_dir,
+            task=task,
+            launcher_env_flag=SFT_LAUNCHER_FLAG,
+            result_type=LoRAResult,
+        )
 
     def cleanup_after_run(self) -> None:
         self._current_trainer = None

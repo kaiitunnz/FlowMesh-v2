@@ -12,6 +12,7 @@ from shared.network.session import FramedRelaySession, RelaySessionRole
 from .capture import capture_resident_request
 from .engine import EngineOpen, EngineResponse, HttpEngineDelivery
 from .lane_host import ResidentLaneHost
+from .local_engines import LocalEngine, LocalEngineRegistry
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
 from .request_store import ResidentRequestStore
@@ -20,6 +21,8 @@ __all__ = [
     "EngineOpen",
     "EngineResponse",
     "HttpEngineDelivery",
+    "LocalEngine",
+    "LocalEngineRegistry",
     "capture_resident_request",
     "FrameSink",
     "ResidentLaneHost",

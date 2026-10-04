@@ -288,7 +288,7 @@ def test_a_retryable_cold_start_failure_retries_the_same_task_elsewhere() -> Non
 
         assert cold.state is ReplicaState.WARM
         assert cold.endpoint is not None
-        assert cold.endpoint.base_url == "http://10.0.0.5:8002/v1"
+        assert record.latest_update_dispatch_id == "dsp-b"
 
     asyncio.run(run())
 
@@ -579,7 +579,7 @@ def test_a_root_rewrite_never_relabels_a_newer_worker_update() -> None:
         record = node.runtime.get_record(serve_task_id)
         assert record is not None and record.latest_update is not None
         read = record.latest_update
-        newer = {"serve": {**read["serve"], "_port": 2}}
+        newer = {"serve": {**read["serve"], "_socket": "/run/newer.sock"}}
         node.runtime.mark_updated(serve_task_id, "wkr-1", newer, "dsp-a")
 
         assert not node.runtime.rewrite_update(serve_task_id, read, dict(read))

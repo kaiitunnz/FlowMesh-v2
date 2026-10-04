@@ -635,7 +635,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "RESIDENT_FORWARD_API_KEY",
                     "",
-                    description="Credential control relays to a keyless replica.",
+                    description="Credential control relays to a dev_model replica.",
                 ),
                 EnvVar(
                     "RESIDENT_SELECTION_STRATEGY",

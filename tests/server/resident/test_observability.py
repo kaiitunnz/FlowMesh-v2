@@ -54,7 +54,6 @@ def _seeded_stores() -> ResidentStores:
             state=ReplicaState.WARM,
             healthy=True,
             serve_task_id="tsk-serve-1",
-            worker_id="wkr-1",
             lease_id="lse-1",
             endpoint=ReplicaEndpoint(
                 base_url="http://10.0.0.5:8001/v1", model="m", api_key="SECRET-KEY"
@@ -145,7 +144,7 @@ async def test_families_endpoint_lists_registered_family() -> None:
 
 
 @pytest.mark.anyio
-async def test_replicas_endpoint_projects_host_port_without_secret() -> None:
+async def test_replicas_endpoint_projects_no_address_or_secret() -> None:
     async with _client(_app(_control(_seeded_stores()))) as client:
         resp = await client.get(f"{PREFIX}/resident/replicas")
     assert resp.status_code == status.HTTP_200_OK
@@ -154,8 +153,8 @@ async def test_replicas_endpoint_projects_host_port_without_secret() -> None:
     assert set(by_id) == {"rpl-warm", "rpl-preempted"}
     warm = by_id["rpl-warm"]
     assert warm["serve_task_id"] == "tsk-serve-1"
-    assert warm["endpoint"] == {"host": "10.0.0.5", "port": 8001}
-    assert by_id["rpl-preempted"]["endpoint"] is None
+    assert "endpoint" not in warm and "endpoint" not in by_id["rpl-preempted"]
+    assert "10.0.0.5" not in resp.text
     assert "SECRET-KEY" not in resp.text
     assert "api_key" not in resp.text
     assert "base_url" not in resp.text

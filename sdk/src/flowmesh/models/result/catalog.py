@@ -61,13 +61,13 @@ class DiffusionResult(StrictExecutorResult):
 class ServeResult(StrictExecutorResult):
     task_type: Literal[TaskType.SERVE] = TaskType.SERVE
     model: str
-    port: int
+    port: int | None = None
 
 
 class DevModelResult(StrictExecutorResult):
     task_type: Literal[TaskType.DEV_MODEL] = TaskType.DEV_MODEL
     model: str
-    port: int
+    port: int | None = None
 
 
 class _TrainingResult(StrictExecutorResult):

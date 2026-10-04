@@ -103,6 +103,16 @@ RawEngineOpen = Callable[
 EngineUnload = Callable[[ReplicaEndpoint, str], Awaitable[None]]
 
 
+def engine_client(endpoint: ReplicaEndpoint, timeout: float) -> httpx.AsyncClient:
+    """Build a client reaching the endpoint's engine, over its socket if it has one."""
+    transport = (
+        httpx.AsyncHTTPTransport(uds=endpoint.socket_path)
+        if endpoint.socket_path is not None
+        else None
+    )
+    return httpx.AsyncClient(timeout=timeout, transport=transport)
+
+
 async def unload_adapter(
     endpoint: ReplicaEndpoint, name: str, *, timeout_sec: float = 30.0
 ) -> None:
@@ -116,7 +126,7 @@ async def unload_adapter(
     if endpoint.api_key:
         headers["Authorization"] = f"Bearer {endpoint.api_key}"
     base = endpoint.base_url.rstrip("/")
-    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+    async with engine_client(endpoint, timeout_sec) as client:
         response = await client.post(
             f"{base}/unload_lora_adapter",
             json={"lora_name": name},
@@ -133,30 +143,51 @@ async def unload_adapter(
 class HttpEngineDelivery:
     """Delivers a completion from the co-located OpenAI-compatible engine."""
 
-    def __init__(self, *, timeout_sec: float = 300.0, chunk_chars: int = 8192) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_sec: float = 300.0,
+        chunk_chars: int = 8192,
+        engine_live: Callable[[str], bool] | None = None,
+    ) -> None:
         self._timeout = timeout_sec
         self._chunk_chars = max(1, chunk_chars)
-        self._client: httpx.AsyncClient | None = None
+        self._engine_live = engine_live
+        self._clients: dict[str | None, httpx.AsyncClient] = {}
         self._client_lock = asyncio.Lock()
 
-    async def _shared_client(self) -> httpx.AsyncClient:
-        """The client every invocation shares, so its connections stay warm.
+    async def _shared_client(self, endpoint: ReplicaEndpoint) -> httpx.AsyncClient:
+        """The client every invocation of one engine shares, keeping it warm.
 
-        A replica is called repeatedly over loopback for the life of the lane, and a
-        client per call would hand each invocation a cold pool. One client keeps the
+        A replica is called repeatedly for the life of the lane, and a client per call
+        would hand each invocation a cold pool. One client per engine socket keeps the
         engine connections alive across invocations, and is safe to drive concurrently,
         so the conversations of a batch share it.
         """
-        if self._client is None:
+        key = endpoint.socket_path
+        if (client := self._clients.get(key)) is None:
             async with self._client_lock:
-                if self._client is None:
-                    self._client = httpx.AsyncClient(timeout=self._timeout)
-        return self._client
+                if (client := self._clients.get(key)) is None:
+                    # An engine withdrawn before this point never gets a client; one
+                    # withdrawn after it has its client closed by ``evict``.
+                    if (
+                        key is not None
+                        and self._engine_live is not None
+                        and not self._engine_live(key)
+                    ):
+                        raise httpx.ConnectError(f"no engine listens on {key}")
+                    client = self._clients[key] = engine_client(endpoint, self._timeout)
+        return client
+
+    async def evict(self, socket_path: str) -> None:
+        """Close the client of an engine that stopped."""
+        if (client := self._clients.pop(socket_path, None)) is not None:
+            await client.aclose()
 
     async def aclose(self) -> None:
-        """Release the shared client's connections when the lane is reaped."""
-        client, self._client = self._client, None
-        if client is not None:
+        """Release the shared clients' connections when the lane is reaped."""
+        clients, self._clients = self._clients, {}
+        for client in clients.values():
             await client.aclose()
 
     async def __call__(
@@ -179,7 +210,7 @@ class HttpEngineDelivery:
         if endpoint.api_key:
             headers["Authorization"] = f"Bearer {endpoint.api_key}"
         base = endpoint.base_url.rstrip("/")
-        client = await self._shared_client()
+        client = await self._shared_client(endpoint)
         if adapter_name is not None and adapter_source is not None:
             await self._ensure_adapter(
                 client, base, headers, adapter_name, adapter_source
@@ -302,7 +333,7 @@ class RawHttpEngineDelivery:
         headers = list(envelope.headers)
         if endpoint.api_key:
             headers.append(("Authorization", f"Bearer {endpoint.api_key}"))
-        client = httpx.AsyncClient(timeout=self._timeout)
+        client = engine_client(endpoint, self._timeout)
         try:
             request = client.build_request(
                 envelope.method,

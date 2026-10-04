@@ -8,15 +8,21 @@ and the replica reaches its co-located engine.
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# The origin a replica's engine is addressed at over its worker-private socket; the
+# socket, not the host, selects the engine.
+LOCAL_ENGINE_ORIGIN = "http://localhost"
+LOCAL_ENGINE_BASE_URL = f"{LOCAL_ENGINE_ORIGIN}/v1"
+
 
 class ReplicaEndpoint(BaseModel):
     """The reachable address of a materialized replica.
 
-    ``api_key`` never reaches a workflow; it is held out of the durable snapshot
-    (``exclude=True``) so no credential is persisted in cleartext, and is re-attached
-    from a live probe on rehydrate. ``base_url`` is OpenAI-compatible for the inference
-    family. ``interface`` selects the engine route the replica serves (``chat`` or
-    ``embedding``).
+    ``api_key`` is the key the replica sidecar presents: the engine's own, resolved on
+    its worker, or the deployment forward key for a keyless stand-in. ``socket_path`` is
+    the worker-private Unix socket the engine listens on, which only its worker sets.
+    Both are held out of the durable snapshot (``exclude=True``). ``base_url`` is
+    OpenAI-compatible for the inference family. ``interface`` selects the engine route
+    the replica serves (``chat`` or ``embedding``).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -24,6 +30,7 @@ class ReplicaEndpoint(BaseModel):
     base_url: str
     model: str
     api_key: str | None = Field(default=None, exclude=True)
+    socket_path: str | None = Field(default=None, exclude=True)
     protocol: str = "openai"
     interface: str = "chat"
 

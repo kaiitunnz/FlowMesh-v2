@@ -129,7 +129,9 @@ class OmniText2ImageExecutor(OmniExecutorBase):
             raise ExecutionError("Omni model not initialized.")
         if len(prompts) == 1:
             return [self._generate_single(prompts[0])]
+        self._omni_generating = True
         outputs = self._omni.generate(prompts, use_tqdm=False)
+        self._omni_generating = False
         images = _extract_images(outputs)
         if len(images) != len(prompts):
             raise ExecutionError(
@@ -141,7 +143,9 @@ class OmniText2ImageExecutor(OmniExecutorBase):
     def _generate_single(self, prompt: str) -> Image.Image:
         if self._omni is None:
             raise ExecutionError("Omni model not initialized.")
+        self._omni_generating = True
         outputs = self._omni.generate(prompt, use_tqdm=False)
+        self._omni_generating = False
         images = _extract_images(outputs)
         if not images:
             raise ExecutionError("Omni image generation returned no image.")

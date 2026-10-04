@@ -12,6 +12,7 @@ gate.
 import asyncio
 import contextlib
 import logging
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -63,6 +64,40 @@ from .engine import (
 
 # Claim-tagged load evidence one admitted operation emits for control-plane accounting.
 LoadSink = Callable[[LoadEvidence], None]
+
+# An engine refusal's own message reaches the reason only for these request parameters
+# or a context-window message, whose text names counts; any other message may echo the
+# worker-private request, so only its status and error type cross to control.
+_COUNTED_PARAMS = frozenset(
+    {"input_tokens", "input_text", "max_tokens", "max_completion_tokens"}
+)
+_CONTEXT_WINDOW = re.compile(r"maximum (context|model) length", re.IGNORECASE)
+_REASON_MAX_CHARS = 300
+_ERROR_TYPE = re.compile(r"[A-Za-z][\w.-]{0,63}")
+
+
+def _engine_refusal(exc: httpx.HTTPStatusError) -> str:
+    """Name an engine error response's failure, bounded to what the engine may say."""
+    status = exc.response.status_code
+    try:
+        body = exc.response.json()
+    except (ValueError, httpx.ResponseNotRead):
+        return f"engine {status}"
+    if not isinstance(body, dict):
+        return f"engine {status}"
+    error = body.get("error")
+    if not isinstance(error, dict):
+        error = body
+    message, kind, param = error.get("message"), error.get("type"), error.get("param")
+    if isinstance(message, str) and (
+        (isinstance(param, str) and param in _COUNTED_PARAMS)
+        or _CONTEXT_WINDOW.search(message)
+    ):
+        text = " ".join("".join(c if c.isprintable() else " " for c in message).split())
+        return f"engine {status}: {text[:_REASON_MAX_CHARS]}"
+    if isinstance(kind, str) and _ERROR_TYPE.fullmatch(kind):
+        return f"engine {status} {kind}"
+    return f"engine {status}"
 
 
 @dataclass
@@ -134,6 +169,12 @@ class ResidentReplicaSidecar:
     def unbind(self, replica_id: str) -> None:
         """Drop a replica's binding; in-flight sessions run to their own terminal."""
         self._bindings.pop(replica_id, None)
+
+    def unbind_engine(self, socket_path: str) -> None:
+        """Drop every binding to an engine that stopped; a later claim re-drives."""
+        for replica_id, binding in list(self._bindings.items()):
+            if binding.endpoint.socket_path == socket_path:
+                del self._bindings[replica_id]
 
     def unbind_all(self) -> None:
         """Drop every replica's binding, so no claim reaches an abandoned replica."""
@@ -379,7 +420,7 @@ class ResidentReplicaSidecar:
             # re-drives.
             definite = 400 <= status < 500 and status != 429
             await session.send_wire(
-                KIND_FAILED, definite=definite, reason=f"engine {status}"
+                KIND_FAILED, definite=definite, reason=_engine_refusal(exc)
             )
             return
         except (KeyError, TypeError, ValueError) as exc:

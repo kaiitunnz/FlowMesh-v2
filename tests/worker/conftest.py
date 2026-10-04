@@ -1,4 +1,4 @@
-"""Worker-wide test isolation for the process-global tracer state.
+"""Worker-wide test isolation for process-global state.
 
 The worker's telemetry config and tracer provider are module globals written once per
 process: ``otel.configure`` sets the config, and ``_ensure_tracer_provider`` builds the
@@ -9,12 +9,14 @@ a test that merely builds a Runner leaks its level -- which is enough to make an
 nothing at off" assertion pass or fail on what ran before it.
 """
 
+import os
 from collections.abc import Iterator
 
 import pytest
 from opentelemetry import trace
 from opentelemetry.util._once import Once
 
+from worker.executors.utils.collective import loopback_collective_env
 from worker.hw import visible_gpus
 from worker.telemetry import otel
 
@@ -43,3 +45,17 @@ def _fresh_visible_gpus() -> Iterator[None]:
     visible_gpus.cache_clear()
     yield
     visible_gpus.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_collective_env() -> Iterator[None]:
+    """Undo the collective-transport variables a local engine sets in the process."""
+    saved = {name: os.environ.get(name) for name in loopback_collective_env()}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value

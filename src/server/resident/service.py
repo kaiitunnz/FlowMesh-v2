@@ -193,8 +193,7 @@ class ResidentWorkerDelivery:
     Present only when the network plane is enabled; resident-capacity control requires
     it. The resolvers map an agent task to its origin worker, a replica to its serving
     worker, and a worker to its node — in a single-node deployment every node is the
-    root node. ``forward_api_key`` lets a keyless sidecar stand-in reach a keyed
-    upstream.
+    root node.
     """
 
     relay: WorkerRelay
@@ -205,7 +204,6 @@ class ResidentWorkerDelivery:
     sessions: ResidentSessionWriter
     directly_routable: bool = False
     resident_listener_port_of: ResidentListenerPortOf | None = None
-    forward_api_key: str | None = None
     # The gated serve edge is the transport-only origin: it resolves its fence from the
     # root node's registered endpoint (read lazily — the node id is known only after the
     # supervisor handshake) and rides its own dedicated relay stream id, so a
@@ -810,7 +808,7 @@ class ResidentCapacityControl:
 
     def _drain_on_workers(self, worker_ids: frozenset[str]) -> None:
         for replica in self._stores.directory.all():
-            if replica.standing or self._serve_worker(replica) not in worker_ids:
+            if replica.standing or self.serve_worker(replica) not in worker_ids:
                 continue
             self._retire_on_cordon(replica)
 
@@ -823,13 +821,14 @@ class ResidentCapacityControl:
             self._lifecycle.drain(replica.replica_id)
             self._lifecycle.stop(replica.replica_id)
 
-    def _serve_worker(self, replica: ReplicaIncarnation) -> str | None:
+    def serve_worker(self, replica: ReplicaIncarnation) -> str | None:
+        """Return the worker running a replica's serve task, while one runs it."""
         if self._delivery is None:
             return None
         return self._delivery.serve_worker_of(replica)
 
     def _on_cordoned_worker(self, replica: ReplicaIncarnation) -> bool:
-        if (worker_id := self._serve_worker(replica)) is None:
+        if (worker_id := self.serve_worker(replica)) is None:
             return False
         assert self._delivery is not None
         return (
@@ -1633,12 +1632,7 @@ class ResidentCapacityControl:
         ):
             return replica.listener
         generation = replica.listener_generation + 1
-        # The sidecar reaches its co-located engine with the endpoint's own key, or the
-        # deployment forward key so a keyless stand-in can still forward to a keyed
-        # upstream.
         engine = replica.endpoint
-        if engine.api_key is None and deps.forward_api_key is not None:
-            engine = engine.model_copy(update={"api_key": deps.forward_api_key})
         family = self._stores.families.get(replica.family)
         interface = family.interface if family is not None else engine.interface
         delivered = deps.relay(
@@ -1712,6 +1706,7 @@ class ResidentCapacityControl:
             model_ref=dependency.service_ref,
             interface=dependency.interface.value,
             isolation=dependency.isolation,
+            engine_profile=dependency.engine_profile,
             selection_strategy=self._limits.selection_strategy,
             warmth=warmth,
             standing=standing,
