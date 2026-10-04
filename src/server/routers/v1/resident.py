@@ -73,7 +73,7 @@ async def list_resident_replicas(
     if control is None:
         return []
     replicas = [
-        ResidentReplicaInfo.project(replica, control.replica_worker(replica))
+        ResidentReplicaInfo.project(replica, control.serve_worker(replica))
         for replica in control.list_replica_incarnations()
     ]
     return query.filter(replicas)

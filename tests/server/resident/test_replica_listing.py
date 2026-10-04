@@ -1,14 +1,17 @@
 """The replica listing names the worker running each replica and whether it stands."""
 
 import logging
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from server.config import ResidentCapacityConfig
 from server.resident.state import ReplicaIncarnation
+from server.resident.wiring import wire_worker_delivery
 from server.routers.v1 import resident as resident_router
-from tests.server.resident.node_harness import Node
+from tests.server.resident.node_harness import TS, Node
 
 
 async def _replicas(node: Node, **params: str) -> dict[str, dict]:
@@ -50,3 +53,23 @@ def test_a_replica_stored_with_a_worker_field_still_loads() -> None:
         "worker_id": None,
     }
     assert ReplicaIncarnation.model_validate(stored).replica_id == "rpl-1"
+
+
+@pytest.mark.anyio
+async def test_a_replica_whose_serve_task_settled_names_no_worker() -> None:
+    node = Node()
+    warm = await node.warm_async()
+    assert warm.serve_task_id is not None
+    wire_worker_delivery(
+        node.control,
+        network=MagicMock(),
+        worker_registry=MagicMock(),
+        runtime=node.runtime,
+        sessions=MagicMock(),
+        resident_cfg=ResidentCapacityConfig(enabled=True),
+    )
+    assert (await _replicas(node))[warm.replica_id]["worker_id"] == "wkr-1"
+
+    node.runtime.mark_failed(warm.serve_task_id, "wkr-1", {}, TS, error="exited")
+
+    assert (await _replicas(node))[warm.replica_id]["worker_id"] is None

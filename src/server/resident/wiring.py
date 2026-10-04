@@ -157,6 +157,10 @@ def build_resident_capacity(
     return resident_control
 
 
+# The statuses in which a task is held by the worker it was assigned to.
+_ON_A_WORKER = frozenset({TaskStatus.DISPATCHED, TaskStatus.CANCELLING})
+
+
 def wire_worker_delivery(
     resident_control: ResidentCapacityControl,
     *,
@@ -212,7 +216,10 @@ def wire_worker_delivery(
         if replica.serve_task_id is None:
             return None
         record = runtime.get_record(replica.serve_task_id)
-        return record.assigned_worker if record else None
+        # A settled or requeued serve task keeps the worker it last ran on.
+        if record is None or record.status not in _ON_A_WORKER:
+            return None
+        return record.assigned_worker
 
     resident_control.set_worker_delivery(
         ResidentWorkerDelivery(

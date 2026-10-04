@@ -729,10 +729,6 @@ class ResidentCapacityControl:
         """Every replica incarnation in the directory, inert ones included."""
         return self._stores.directory.all()
 
-    def replica_worker(self, replica: ReplicaIncarnation) -> str | None:
-        """The worker running a replica's serve task, while one is."""
-        return self._serve_worker(replica)
-
     def list_credit_bearing_claims(self) -> tuple[list[ServiceClaim], dict[str, int]]:
         """The credit-bearing claims and the per-replica held credit derived on read.
 
@@ -812,7 +808,7 @@ class ResidentCapacityControl:
 
     def _drain_on_workers(self, worker_ids: frozenset[str]) -> None:
         for replica in self._stores.directory.all():
-            if replica.standing or self._serve_worker(replica) not in worker_ids:
+            if replica.standing or self.serve_worker(replica) not in worker_ids:
                 continue
             self._retire_on_cordon(replica)
 
@@ -825,13 +821,14 @@ class ResidentCapacityControl:
             self._lifecycle.drain(replica.replica_id)
             self._lifecycle.stop(replica.replica_id)
 
-    def _serve_worker(self, replica: ReplicaIncarnation) -> str | None:
+    def serve_worker(self, replica: ReplicaIncarnation) -> str | None:
+        """The worker running a replica's serve task, while one is."""
         if self._delivery is None:
             return None
         return self._delivery.serve_worker_of(replica)
 
     def _on_cordoned_worker(self, replica: ReplicaIncarnation) -> bool:
-        if (worker_id := self._serve_worker(replica)) is None:
+        if (worker_id := self.serve_worker(replica)) is None:
             return False
         assert self._delivery is not None
         return (
