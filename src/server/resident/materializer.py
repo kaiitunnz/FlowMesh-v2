@@ -47,13 +47,17 @@ async def materialize_resident_replica(
             }
         },
     }
+    profile = _rendered_profile(family.engine_profile)
+    if revision := profile.pop("revision", None):
+        spec["model"]["source"]["revision"] = revision
     if spec_type == "serve":
         # A real vLLM embedding replica runs the pooling runner; a chat replica enables
         # LoRA so a resident consumer can load its adapter into a slot on demand.
         if family.interface == "embedding":
-            spec["model"]["vllm"] = {"runner": "pooling"}
+            spec["model"]["vllm"] = {**profile, "runner": "pooling"}
         else:
             spec["model"]["vllm"] = {
+                **profile,
                 "enable_lora": True,
                 "max_loras": config.adapter_slots,
             }
@@ -62,7 +66,9 @@ async def materialize_resident_replica(
         # flag, but it models a finite adapter registry of the same size so the slot
         # reclaim is exercised end to end: a lifetime-distinct load beyond the budget
         # fails until an unloaded slot frees.
-        spec["model"]["vllm"] = {"max_loras": config.adapter_slots}
+        spec["model"]["vllm"] = {**profile, "max_loras": config.adapter_slots}
+    elif profile:
+        spec["model"]["vllm"] = profile
     if config.serve_ttl_sec:
         spec["ttlSeconds"] = config.serve_ttl_sec
     payload = {
@@ -100,3 +106,20 @@ async def materialize_resident_replica(
         runtime.cancel_workflow(workflow_id, reason="resident cold start failed")
         raise
     return entries[0].task_id
+
+
+def _rendered_profile(profile: str | None) -> dict[str, Any]:
+    """A family's engine profile as the serve task's own engine configuration.
+
+    The engine takes RoPE settings as config overrides, as the local executor passes
+    them.
+    """
+    rendered: dict[str, Any] = json.loads(profile) if profile else {}
+    overrides = {
+        key: rendered.pop(key)
+        for key in ("rope_scaling", "rope_theta")
+        if key in rendered
+    }
+    if overrides:
+        rendered["hf_overrides"] = overrides
+    return rendered

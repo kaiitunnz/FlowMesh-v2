@@ -128,6 +128,24 @@ def _ensure_destroy_torch_process_group() -> None:
 atexit.register(_ensure_destroy_torch_process_group)
 
 
+# ``shared.inference.engine_profile`` classifies every key read from ``model.vllm``.
+_ACCEPTED_ENGINE_ARGS: dict[str, type] = {
+    "max_model_len": int,
+    "dtype": str,
+    "download_dir": str,
+    "max_num_batched_tokens": int,
+    "max_cudagraph_capture_size": int,
+    "enable_mm_embeds": bool,
+    "limit_mm_per_prompt": dict,
+    "quantization": str,
+    "kv_cache_dtype": str,
+    "enforce_eager": bool,
+    "hf_token": str,
+    "tokenizer_revision": str,
+    "cpu_offload_gb": float,
+}
+
+
 class VLLMExecutor(InferenceMixin, Executor):
     """Executor that runs text generation using vLLM based on a YAML spec."""
 
@@ -387,29 +405,13 @@ Summary:"""
 
         requested_util = float(vllm_cfg.pop("gpu_memory_utilization", 0.9))
 
-        accepted_engine_args = {
-            "max_model_len": int,
-            "dtype": str,
-            "download_dir": str,
-            "max_num_batched_tokens": int,
-            "max_cudagraph_capture_size": int,
-            "enable_mm_embeds": bool,
-            "limit_mm_per_prompt": dict,
-            "quantization": str,
-            "kv_cache_dtype": str,
-            "enforce_eager": bool,
-            "hf_token": str,
-            "tokenizer_revision": str,
-            "cpu_offload_gb": float,
-        }
-
         kwargs_base: dict[str, Any] = dict(
             model=str(local_checkpoint_dir or ident),
             trust_remote_code=bool(vllm_cfg.pop("trust_remote_code", False)),
             seed=vllm_cfg.pop("seed", 42),
         )
         kwargs_base.update(extra_llm_kwargs)
-        for arg, arg_type in accepted_engine_args.items():
+        for arg, arg_type in _ACCEPTED_ENGINE_ARGS.items():
             if arg in vllm_cfg:
                 kwargs_base[arg] = arg_type(vllm_cfg.pop(arg))
         if revision:

@@ -170,9 +170,9 @@ class ServiceFamily(BaseModel):
 
     Registration alone materializes no capacity and carries no credit. It records the
     engine/batch, isolation, resource, and protocol requirements a later eligible claim
-    is admitted against, and the per-family replica-selection strategy. A ``standing``
-    family is a public serve task's own: its one replica is the serve task's, and
-    demand never materializes another.
+    is admitted against, and the per-family replica-selection strategy. Its replicas
+    serve its ``engine_profile``. A ``standing`` family is a public serve task's own:
+    its one replica is the serve task's, and demand never materializes another.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -182,6 +182,7 @@ class ServiceFamily(BaseModel):
     model_ref: str
     interface: str = "chat"
     isolation: str | None = None
+    engine_profile: str | None = None
     selection_strategy: str = "batch-aware-best-fit"
     warmth: Warmth = None
     standing: bool = False

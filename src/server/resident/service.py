@@ -1716,6 +1716,7 @@ class ResidentCapacityControl:
             model_ref=dependency.service_ref,
             interface=dependency.interface.value,
             isolation=dependency.isolation,
+            engine_profile=dependency.engine_profile,
             selection_strategy=self._limits.selection_strategy,
             warmth=warmth,
             standing=standing,

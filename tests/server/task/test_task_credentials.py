@@ -654,3 +654,41 @@ def test_resident_serving_of_a_credentialed_model_source_is_refused(service):
         _register(_runtime(), payload)
     with pytest.raises(CompileError, match="model"):
         _runtime().inspect_v2(payload)
+
+
+def _engine_env_leaf(service: str = "") -> str:
+    service_line = f"\n          service: {service}" if service else ""
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: engine-env}}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: inference
+          model:
+            source: {{identifier: Qwen/Qwen3-4B}}
+            vllm: {{env_vars: {{HF_TOKEN: "{_HF}", VLLM_LOGGING_LEVEL: INFO}}}}
+          resources: {{hardware: {{gpu: {{count: 1}}}}}}
+          data: {{type: list, items: [hi]}}{service_line}
+"""
+
+
+def test_a_leaf_whose_engine_environment_carries_a_credential_gets_no_menu():
+    registry = FakeRegistry()
+    workflow_id, _ = _register(_runtime(registry), _engine_env_leaf())
+
+    [node] = _plan_nodes(registry, workflow_id)
+    assert node.embodiment_menu is None
+    assert node.service_family_requirement is None
+
+
+@pytest.mark.parametrize("service", ["{mode: resident}", "{mode: local_eligible}"])
+def test_resident_serving_of_a_credentialed_engine_environment_is_refused(service):
+    payload = _engine_env_leaf(service)
+
+    with pytest.raises(CompileError, match="engine environment"):
+        _register(_runtime(), payload)

@@ -6,6 +6,7 @@ from shared.inference import (
     InferenceSourceKind,
     canonical_source,
 )
+from shared.inference.engine_profile import engine_profile
 from shared.sandbox import SandboxEgressMode
 from shared.tasks import TaskType
 from shared.tasks.credentials import credential_pointer
@@ -288,6 +289,9 @@ def _leaf_service_dependency(
         adapter=adapter,
         adapter_source=_leaf_adapter_source(spec),
         isolation=binding.isolation if binding else None,
+        engine_profile=engine_profile(
+            spec.model.vllm if spec.model is not None else None, spec.model_revision
+        ),
         batch_size=_declared_batch_size(spec),
         max_batch_size=_declared_max_batch_size(spec),
     )
