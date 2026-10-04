@@ -44,7 +44,7 @@ def main(argv: list[str]) -> int:
         # Hand the subprocess's result to the parent via a scratch IPC file.
         try:
             (scratch_dir(out_dir) / "distributed_result.json").write_text(
-                json.dumps(result, ensure_ascii=False, indent=2)
+                result.model_dump_json(indent=2)
             )
         except Exception:
             pass
