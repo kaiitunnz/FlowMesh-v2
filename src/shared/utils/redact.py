@@ -4,7 +4,15 @@ import json
 import re
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
-from urllib.parse import SplitResult, unquote, unquote_plus, urlsplit, urlunsplit
+from urllib.parse import (
+    SplitResult,
+    quote,
+    quote_plus,
+    unquote,
+    unquote_plus,
+    urlsplit,
+    urlunsplit,
+)
 
 REDACTED = "[REDACTED]"
 
@@ -287,8 +295,9 @@ def _credential_parts(text: str) -> Iterator[str]:
 def credential_scrubber(values: Iterable[Any]) -> Callable[[str], str]:
     """A function masking every occurrence of ``values`` in a text.
 
-    Each string is matched as written and in its JSON- and ``repr``-escaped forms, so a
-    multi-line key quoted in an error is masked too; a URL's credential parts and an
+    Each string is matched as written and in its JSON- and ``repr``-escaped and
+    percent-encoded forms, so a multi-line key quoted in an error, or a key an HTTP
+    client logs inside a request URL, is masked too; a URL's credential parts and an
     ``Authorization`` value's token are matched on their own, so a text quoting only
     part of one is masked too. A structured value is also matched whole, as JSON and as
     a Python ``repr``.
@@ -300,7 +309,16 @@ def credential_scrubber(values: Iterable[Any]) -> Callable[[str], str]:
             minimum = _MIN_SCRUBBED_LENGTH if named else _MIN_SCRUBBED_MEMBER_LENGTH
             for part in _credential_parts(text):
                 if len(part) >= minimum:
-                    needles.update((part, json.dumps(part)[1:-1], repr(part)[1:-1]))
+                    needles.update(
+                        (
+                            part,
+                            json.dumps(part)[1:-1],
+                            repr(part)[1:-1],
+                            quote(part, safe=""),
+                            quote(part),
+                            quote_plus(part),
+                        )
+                    )
         if structured:
             needles.update((json.dumps(value), repr(value)))
     ordered = sorted(needles, key=len, reverse=True)
