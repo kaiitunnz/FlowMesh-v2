@@ -244,6 +244,26 @@ class TestServeExecutorCmdBuilding:
         assert "--revision" in cmd
         assert cmd[cmd.index("--revision") + 1] == "main"
 
+    def test_the_executors_own_options_win_over_the_specs(self, tmp_path: Path) -> None:
+        spec = ServeSpecStrict(
+            taskType=TaskType.SERVE,
+            model=ModelConfig(
+                source=ModelSource(identifier="Qwen/Qwen3-0.6B", revision="v2"),
+                vllm={
+                    "served_model_name": "alias",
+                    "revision": "v1",
+                    "model": "evil/model",
+                    "host": "0.0.0.0",
+                },
+            ),
+        )
+        cmd = self._run_capture_cmd(spec, tmp_path)
+        last = {flag: cmd[i + 1] for i, flag in enumerate(cmd) if flag.startswith("--")}
+        assert last["--served-model-name"] == "alias"
+        assert last["--model"] == "Qwen/Qwen3-0.6B"
+        assert last["--host"] == "127.0.0.1"
+        assert last["--revision"] == "v2"
+
     def test_vllm_dict_keys_become_flags(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
             taskType=TaskType.SERVE,

@@ -135,20 +135,7 @@ class VLLMServeExecutor(Executor):
         bind_host = "127.0.0.1"
         port = resolve_bind_port(spec.port, bind_host)
 
-        cmd = [
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.api_server",
-            "--model",
-            model_id,
-            "--host",
-            bind_host,
-            "--port",
-            str(port),
-        ]
-        if revision := spec.model_revision:
-            cmd.extend(["--revision", revision])
-
+        cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
         vllm_kwargs = dict(spec.model.vllm or {}) if spec.model is not None else {}
         env_vars = _engine_env_vars(vllm_kwargs.pop("env_vars", None))
         rendered_flags: set[str] = set()
@@ -165,6 +152,11 @@ class VLLMServeExecutor(Executor):
 
         if spec.model_trust_remote_code and "--trust-remote-code" not in rendered_flags:
             cmd.append("--trust-remote-code")
+        # The executor's own options come last: vLLM keeps the last value of a repeated
+        # option.
+        cmd.extend(["--model", model_id, "--host", bind_host, "--port", str(port)])
+        if revision := spec.model_revision:
+            cmd.extend(["--revision", revision])
 
         env = dict(os.environ)
         # A spec setting its own CUDA variables runs unbound, so they outrank a binding.

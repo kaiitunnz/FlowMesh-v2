@@ -1,5 +1,6 @@
 """Tests for the serve spec dispatch validation."""
 
+import re
 from typing import Any
 
 import pytest
@@ -54,17 +55,30 @@ _GPU = {"hardware": {"gpu": {"count": 1}}}
 
 @pytest.mark.parametrize(
     "key",
-    ["api_key", "api-key", "host", "port", "model", "revision", "served_model_name"],
+    [
+        "api_key",
+        "api-key",
+        "host",
+        "port",
+        "model",
+        "hos",
+        "api-ke",
+        "mod",
+        "model=evil/model",
+        "compilation_config.level",
+        "Host",
+        "config",
+    ],
 )
 @pytest.mark.parametrize("build", [_strict, _template])
-def test_an_engine_setting_the_executor_owns_is_not_dispatchable(
+def test_an_engine_option_the_executor_owns_is_not_dispatchable(
     key: str, build: Any
 ) -> None:
     spec = build(
         model={"source": {"identifier": "Qwen/Qwen3-7B"}, "vllm": {key: "x"}},
         resources=_GPU,
     )
-    with pytest.raises(ValueError, match=f"model.vllm.{key} is not supported"):
+    with pytest.raises(ValueError, match=re.escape(f"model.vllm.{key} is not")):
         spec.validate_dispatchable()
 
 
@@ -84,11 +98,20 @@ spec:
         parse_workflow(workflow, "native")
 
 
-def test_engine_settings_the_executor_leaves_to_the_spec_stay_dispatchable() -> None:
-    _strict(
+@pytest.mark.parametrize("build", [_strict, _template])
+def test_engine_options_the_executor_leaves_to_the_spec_are_dispatchable(
+    build: Any,
+) -> None:
+    build(
         model={
             "source": {"identifier": "Qwen/Qwen3-7B"},
-            "vllm": {"max_model_len": 1024, "env_vars": {"A": "1"}},
+            "vllm": {
+                "max_model_len": 1024,
+                "env_vars": {"A": "1"},
+                "served_model_name": "alias",
+                "revision": "main",
+                "model_impl": "vllm",
+            },
         },
         resources=_GPU,
     ).validate_dispatchable()

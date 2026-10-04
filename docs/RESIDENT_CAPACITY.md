@@ -144,8 +144,9 @@ OpenAI-compatible client can drive any endpoint the engine serves. The engine bi
 loopback and is reached only through its claim-gated sidecar.
 
 A serve task's `model.vllm` keys become the engine's flags and `model.vllm.env_vars` its
-environment. The executor sets the model, served model name, revision, listener, and
-engine key itself, so a spec naming any of them is refused.
+environment. The executor sets the model, listener, and engine key itself, so a spec
+naming any of them, abbreviating one, or naming a config file is refused. A source
+revision outranks `model.vllm.revision`.
 
 At serve-task start the task is adopted as its own standing allocation: a per-task
 `ServiceFamily`, a `ServeTaskResidencyBinding` from the task ID to that allocation group,
