@@ -81,6 +81,8 @@ class OmniExecutorBase(InferenceMixin, Executor):
         self._deploy_config_tmp: Path | None = None
         # Set by a run whose generation closed the engine on its own completion.
         self._omni_closed_by_generation = False
+        # Set while a generate() call runs; vllm_omni closes its engine when one fails.
+        self._omni_generating = False
 
     @classmethod
     def is_available(cls, config: WorkerConfig) -> bool:
@@ -91,6 +93,7 @@ class OmniExecutorBase(InferenceMixin, Executor):
         spec_dict = spec.model_dump(by_alias=True)
         out_dir = Path(out_dir).resolve()
         self._omni_closed_by_generation = False
+        self._omni_generating = False
         os.environ.update(loopback_collective_env())
         try:
             with self._task_span(
@@ -98,9 +101,10 @@ class OmniExecutorBase(InferenceMixin, Executor):
             ):
                 result = self._run_inner(task, spec, spec_dict, out_dir)
         except BaseException:
-            # vllm_omni closes its engine inside generate() when a generation fails,
-            # so a failed run leaves no engine a later task could reuse.
-            self._close_omni()
+            # A failure outside generation leaves a healthy engine warm for the next
+            # task.
+            if self._omni_generating or self._omni_closed_by_generation:
+                self._close_omni()
             raise
         if self._omni_closed_by_generation:
             self._close_omni()

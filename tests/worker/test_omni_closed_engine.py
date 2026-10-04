@@ -124,3 +124,47 @@ def test_the_engine_starts_with_its_collective_traffic_on_loopback(
         "GLOO_SOCKET_IFNAME": "lo",
         "VLLM_HOST_IP": "127.0.0.1",
     }
+
+
+def test_a_failure_before_generation_keeps_the_engine_warm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omni = _Omni(fail=False)
+    executor = _executor(monkeypatch, omni)
+    _run(executor, tmp_path)
+    with pytest.raises(ExecutionError, match="output_format='wav' only"):
+        _run(executor, tmp_path, output_format="mp3")
+    assert executor._omni is omni and not omni.closed
+
+
+def test_a_failure_after_generation_keeps_the_engine_warm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omni = _Omni(fail=False)
+    executor = _executor(monkeypatch, omni)
+
+    def disk_full(*_: Any, **__: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(
+        "worker.executors.omni_text2general_executor.save_audio", disk_full
+    )
+    with pytest.raises(OSError, match="No space left"):
+        _run(executor, tmp_path)
+    assert executor._omni is omni and not omni.closed
+
+
+def test_a_py_generator_run_failing_mid_stream_drops_the_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omni = _Omni(fail=False)
+    executor = _executor(monkeypatch, omni)
+
+    def stream(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("stage died")
+        yield
+
+    monkeypatch.setattr(omni, "generate", stream)
+    with pytest.raises(RuntimeError, match="stage died"):
+        _run(executor, tmp_path, py_generator=True)
+    assert executor._omni is None

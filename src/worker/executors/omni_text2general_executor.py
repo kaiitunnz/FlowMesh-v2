@@ -124,6 +124,7 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
         ):
             generator: Iterable[OmniRequestOutput]
             try:
+                self._omni_generating = True
                 if py_generator:
                     generator = self._omni.generate(
                         prompts, sampling_params, py_generator=True
@@ -132,6 +133,7 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
                     generator = self._omni.generate(
                         prompts, sampling_params, py_generator=False
                     )
+                self._omni_generating = False
             except Exception as exc:
                 raise ExecutionError(
                     f"omni_text2general generation failed to start: {exc}",
