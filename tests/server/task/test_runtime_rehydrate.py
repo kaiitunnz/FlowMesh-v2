@@ -1,7 +1,6 @@
 """Durable persistence and restart rehydration of TaskRuntime."""
 
 import logging
-import threading
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, cast
@@ -281,7 +280,6 @@ async def test_rehydrate_restores_completed_and_ready_state() -> None:
 
     # b's only dependency completed, so it is the sole ready task.
     assert restored.ready_queue_length() == 1
-    threading.Event()
     assert pop_ready(restored) == b
     assert restored.ready_queue_length() == 0
 
@@ -321,7 +319,6 @@ async def test_rehydrate_restores_epoch_frontier() -> None:
     await restored.rehydrate()
 
     assert restored._workflow_epoch_frontier[workflow_id] == 1
-    threading.Event()
     assert pop_ready(restored) == ids["c"]
 
 
@@ -341,7 +338,6 @@ async def test_mark_succeeded_is_idempotent_under_replay() -> None:
 
     # b is enqueued exactly once despite the replay.
     assert runtime.ready_queue_length() == 1
-    threading.Event()
     assert pop_ready(runtime) == b
     assert runtime.ready_queue_length() == 0
 

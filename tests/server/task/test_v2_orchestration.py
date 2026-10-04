@@ -283,7 +283,6 @@ _TS = "2026-06-01T00:00:00Z"
 
 def _drain(runtime: TaskRuntime, worker_id: str = "wkr-1") -> list[str]:
     """Dispatch and complete every ready task until the queue drains; returns order."""
-    threading.Event()
     order: list[str] = []
     while runtime.ready_queue_length() > 0:
         task_id = pop_ready(runtime)
@@ -298,7 +297,6 @@ def _drain(runtime: TaskRuntime, worker_id: str = "wkr-1") -> list[str]:
 
 def _pop_ready(runtime: TaskRuntime) -> list[str]:
     """Pop every currently-ready task id without completing them."""
-    threading.Event()
     ready: list[str] = []
     while runtime.ready_queue_length() > 0:
         task_id = pop_ready(runtime)
@@ -772,7 +770,6 @@ async def test_conditional_skip_publishes_explicit_empty() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b = ids["a"], ids["b"]
-    threading.Event()
 
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
@@ -791,7 +788,6 @@ async def test_diamond_dag_joins_on_both_predecessors() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, DIAMOND)
 
-    threading.Event()
     # a is the only root.
     assert pop_ready(runtime) == ids["a"]
     record_dispatch(runtime, ids["a"], cast(Any, _worker()))
@@ -819,7 +815,6 @@ async def test_scheduler_placement_does_not_change_readiness() -> None:
     registry = FakeRegistry()
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
-    threading.Event()
 
     assert pop_ready(runtime) == ids["a"]
     # Placing a on any worker never readies b; only a's settlement does.
@@ -842,7 +837,6 @@ async def test_retry_creates_new_attempt_same_work_item_and_invocation() -> None
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a = ids["a"]
-    threading.Event()
 
     assert pop_ready(runtime) == a
     record_dispatch(runtime, a, cast(Any, _worker()))
@@ -877,7 +871,6 @@ async def test_declared_output_one_publication_across_retries() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a = ids["a"]
-    threading.Event()
 
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
@@ -905,7 +898,6 @@ async def test_terminal_failure_cascades_to_dependents() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b, c = ids["a"], ids["b"], ids["c"]
-    threading.Event()
 
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
@@ -933,7 +925,6 @@ async def test_lost_ack_replayable_retried_through_stable_invocation() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a = ids["a"]
-    threading.Event()
 
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
@@ -956,7 +947,6 @@ async def test_worker_loss_recovery_routes_through_uncertainty_fsm() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a = ids["a"]
-    threading.Event()
 
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker("wkr-dead")))
@@ -985,7 +975,6 @@ async def test_rehydration_heals_when_ledger_snapshot_lags_terminal_records() ->
     a, b, c = ids["a"], ids["b"], ids["c"]
     # Snapshot the ledger as it stood at submission, before any settlement.
     stale_ledger = registry.ledger_blobs[workflow_id]
-    threading.Event()
 
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
@@ -1049,7 +1038,6 @@ async def test_rehydration_replays_a_cancel_left_mid_flight() -> None:
     solo = ids["solo"]
     # Snapshot the ledger as it stood before the cancel.
     stale_ledger = registry.ledger_blobs[workflow_id]
-    threading.Event()
 
     pop_ready(runtime)
     record_dispatch(runtime, solo, cast(Any, _worker()))
@@ -1080,7 +1068,6 @@ async def test_rehydration_readmits_task_orphaned_by_a_mid_retry_crash() -> None
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b = ids["a"], ids["b"]
-    threading.Event()
 
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
@@ -1112,7 +1099,6 @@ async def test_rehydration_preserves_publications_without_duplication() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b, c = ids["a"], ids["b"], ids["c"]
-    threading.Event()
 
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
@@ -1183,7 +1169,6 @@ async def test_cancel_after_partial_completion_preserves_settled_output() -> Non
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b, c = ids["a"], ids["b"], ids["c"]
-    threading.Event()
 
     # a completes; b and c are still pending behind it, then the workflow is cancelled.
     assert pop_ready(runtime) == a

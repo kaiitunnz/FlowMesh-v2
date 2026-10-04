@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import threading
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -121,7 +120,6 @@ spec:
           taskType: echo
 """
     workflow_id, node_ids = _register(runtime, payload)
-    threading.Event()
 
     assert runtime._workflow_epoch_frontier[workflow_id] == 0
 
@@ -174,7 +172,6 @@ spec:
           taskType: echo
 """
     workflow_id, node_ids = _register(runtime, payload)
-    threading.Event()
 
     assert runtime._workflow_epoch_frontier[workflow_id] == 0
     assert workflow_id not in runtime._workflow_in_epoch_order
@@ -217,7 +214,6 @@ spec:
           taskType: echo
 """
     _, node_ids = _register(runtime, payload)
-    threading.Event()
     ready = pop_ready(runtime)
     assert ready == node_ids["a"]
 
