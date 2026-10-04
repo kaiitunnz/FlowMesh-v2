@@ -425,6 +425,7 @@ class Runner:
         if facade is not None:
             facade.stop(min(5.0, self._stop_time_left()))
         if host is not None:
+            self.lifecycle.local_engines.remove_withdraw_listener(host.release_engine)
             host.stop(min(15.0, self._stop_time_left()))
 
     def _stop_time_left(self) -> float:
@@ -549,6 +550,7 @@ class Runner:
             logger=self.logger,
         )
         host.start()
+        self.lifecycle.local_engines.add_withdraw_listener(host.release_engine)
         self._resident_host = host
         return host
 

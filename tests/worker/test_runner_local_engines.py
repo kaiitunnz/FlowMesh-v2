@@ -34,6 +34,7 @@ def test_the_resident_lane_resolves_engines_from_the_worker_registry(
     try:
         assert host._lookup_local_engine is not None
         assert host._lookup_local_engine("tsk-serve") == engine
+        assert lifecycle.local_engines._withdraw_listeners == [host.release_engine]
         lifecycle.local_engines.withdraw("tsk-serve")
         assert host._lookup_local_engine("tsk-serve") is None
     finally:

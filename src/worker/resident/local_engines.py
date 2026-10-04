@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,12 +37,14 @@ class LocalEngineRegistry:
     Each engine listens on a Unix socket in its own ``0700`` directory, created under
     ``parent`` (the temp directory by default), so only the worker's replica sidecar
     reaches it. A serve executor publishes its engine once it is ready and withdraws it
-    when it stops, and the sidecar resolves the engine by serve task id when it binds.
+    when it stops, and the sidecar resolves the engine by serve task id when it binds
+    and releases what it holds for the engine once it is withdrawn.
     """
 
     def __init__(self, parent: Path | None = None) -> None:
         self._parent = parent
         self._engines: dict[str, LocalEngine] = {}
+        self._withdraw_listeners: list[Callable[[LocalEngine], None]] = []
         self._lock = threading.Lock()
 
     @contextlib.contextmanager
@@ -71,7 +73,21 @@ class LocalEngineRegistry:
 
     def withdraw(self, serve_task_id: str) -> None:
         with self._lock:
-            self._engines.pop(serve_task_id, None)
+            engine = self._engines.pop(serve_task_id, None)
+            listeners = list(self._withdraw_listeners)
+        if engine is not None:
+            for listener in listeners:
+                listener(engine)
+
+    def add_withdraw_listener(self, listener: Callable[[LocalEngine], None]) -> None:
+        """Call ``listener`` with each engine as it is withdrawn."""
+        with self._lock:
+            self._withdraw_listeners.append(listener)
+
+    def remove_withdraw_listener(self, listener: Callable[[LocalEngine], None]) -> None:
+        with self._lock:
+            if listener in self._withdraw_listeners:
+                self._withdraw_listeners.remove(listener)
 
     def lookup(self, serve_task_id: str) -> LocalEngine | None:
         """Return the live engine this worker launched for a serve task, if any."""

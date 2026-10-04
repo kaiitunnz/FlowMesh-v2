@@ -6,6 +6,7 @@ import shutil
 import socketserver
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
@@ -19,6 +20,8 @@ from worker.resident.engine import (
     RawHttpEngineDelivery,
     unload_adapter,
 )
+from worker.resident.lane_host import ResidentLaneHost
+from worker.resident.local_engines import LocalEngine, LocalEngineRegistry
 
 
 class _Engine(BaseHTTPRequestHandler):
@@ -113,3 +116,46 @@ def test_a_task_addressed_request_streams_from_the_engine_socket() -> None:
     with _engine_on_socket() as endpoint:
         assert asyncio.run(run(endpoint)) == b"data: 1\n\ndata: [DONE]\n\n"
     assert _Engine.seen == [("GET", "/v1/stream", "Bearer engine-key")]
+
+
+def test_a_withdrawn_engine_releases_the_lane_hosts_client() -> None:
+    engines = LocalEngineRegistry()
+    engine = LocalEngine("/run/engine-a.sock", "key-a")
+    other = LocalEngine("/run/engine-b.sock", "key-b")
+    engines.publish("tsk-a", engine)
+    engines.publish("tsk-b", other)
+    delivery = HttpEngineDelivery()
+    host = ResidentLaneHost(
+        push_frame=lambda _f: None,
+        report_ack=lambda _a: None,
+        report_outcome=lambda _o: None,
+        content_store_for=lambda _t: None,
+        peek_request=lambda _t, _c: None,
+        delete_request=lambda _t, _c: None,
+        engine_open=delivery,
+        lookup_local_engine=engines.lookup,
+    )
+    host._thread.start()
+    try:
+        for local in (engine, other):
+            asyncio.run_coroutine_threadsafe(
+                delivery._shared_client(
+                    ReplicaEndpoint(
+                        base_url=LOCAL_ENGINE_BASE_URL,
+                        model="m",
+                        socket_path=local.socket_path,
+                    )
+                ),
+                host._loop,
+            ).result(5)
+        held = delivery._clients[engine.socket_path]
+        engines.add_withdraw_listener(host.release_engine)
+        engines.withdraw("tsk-a")
+        engines.withdraw("tsk-a")
+        deadline = time.monotonic() + 5
+        while engine.socket_path in delivery._clients and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert set(delivery._clients) == {other.socket_path}
+        assert held.is_closed
+    finally:
+        host.stop(5)

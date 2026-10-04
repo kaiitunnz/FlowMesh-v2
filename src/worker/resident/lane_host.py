@@ -230,6 +230,16 @@ class ResidentLaneHost:
                 "The resident lane did not unbind its replicas in time"
             )
 
+    def release_engine(self, engine: LocalEngine) -> None:
+        """Drop the connections held to a local engine that stopped."""
+        if (
+            isinstance(self._engine_open, HttpEngineDelivery)
+            and self._loop.is_running()
+        ):
+            asyncio.run_coroutine_threadsafe(
+                self._engine_open.evict(engine.socket_path), self._loop
+            )
+
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one resident control frame onto the lane loop; return handled."""
         if frame_kind == "resident_handoff":

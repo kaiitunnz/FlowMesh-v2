@@ -164,6 +164,11 @@ class HttpEngineDelivery:
                     client = self._clients[key] = engine_client(endpoint, self._timeout)
         return client
 
+    async def evict(self, socket_path: str) -> None:
+        """Close the client of an engine that stopped."""
+        if (client := self._clients.pop(socket_path, None)) is not None:
+            await client.aclose()
+
     async def aclose(self) -> None:
         """Release the shared clients' connections when the lane is reaped."""
         clients, self._clients = self._clients, {}
