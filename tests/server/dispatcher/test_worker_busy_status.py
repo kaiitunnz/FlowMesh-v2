@@ -18,7 +18,7 @@ from tests.server.task.test_v2_orchestration import FakeRegistry
 from tests.support.waiting import pop_ready
 
 _WORKFLOW = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: busy-status

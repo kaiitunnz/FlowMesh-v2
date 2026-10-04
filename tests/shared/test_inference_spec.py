@@ -263,14 +263,18 @@ class TestMergeKey:
     @pytest.mark.parametrize("task_type", ["echo", "rag", "diffusion"])
     def test_a_template_of_another_task_type_never_merges(self, task_type: str) -> None:
         task = TaskEnvelopeTemplate.model_validate(
-            {"apiVersion": "mloc/v1", "kind": "Task", "spec": {"taskType": task_type}}
+            {
+                "apiVersion": "flowmesh/v1",
+                "kind": "Task",
+                "spec": {"taskType": task_type},
+            }
         )
         assert task.spec.merge_key(scope="org") is None
 
     def test_a_template_keys_like_its_strict_spec(self) -> None:
         fields = {"taskType": "inference", "model": self._MODEL}
         task = TaskEnvelopeTemplate.model_validate(
-            {"apiVersion": "mloc/v1", "kind": "Task", "spec": fields}
+            {"apiVersion": "flowmesh/v1", "kind": "Task", "spec": fields}
         )
         assert task.spec.merge_key(scope="org") == _spec(**fields).merge_key(
             scope="org"

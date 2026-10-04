@@ -39,7 +39,7 @@ def _worker() -> Worker:
 
 
 _WORKFLOW = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: ssh-mounts

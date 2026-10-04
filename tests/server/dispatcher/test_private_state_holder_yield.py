@@ -23,7 +23,7 @@ from tests.support.waiting import pop_ready
 _HOLDER = OwnerFence(worker_id="wkr-holder", incarnation=1)
 
 _ECHO_WORKFLOW = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: holder-yield

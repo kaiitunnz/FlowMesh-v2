@@ -96,7 +96,7 @@ def test_runtime_epoch_mode_enforces_frontier_order() -> None:
     """
     runtime = _runtime()
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -151,7 +151,7 @@ def test_runtime_unordered_in_epoch_allows_any_order() -> None:
     """
     runtime = _runtime()
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -193,7 +193,7 @@ def test_runtime_epoch_mode_fails_later_epochs_when_frontier_task_fails() -> Non
     """
     runtime = _runtime()
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -246,7 +246,7 @@ def test_cancel_workflow_marks_dispatched_task_cancelling_and_publishes_interrup
     worker_registry = _WorkerRegistryStub()
     runtime = _runtime(worker_registry)
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: cancel
@@ -277,7 +277,7 @@ def test_cancel_workflow_cancels_each_task_of_a_merged_batch() -> None:
     worker_registry = _WorkerRegistryStub()
     runtime = _runtime(worker_registry)
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: merge-cancel

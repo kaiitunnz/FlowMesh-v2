@@ -193,7 +193,7 @@ async def _register(runtime: TaskRuntime, payload: str) -> tuple[str, dict[str, 
 
 
 GRAPH = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -210,7 +210,7 @@ spec:
 """
 
 EPOCH_GRAPH = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -668,7 +668,7 @@ async def test_a_cascaded_dependent_reads_failed_before_and_after_a_restart() ->
 
 
 _CHAIN = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata: {name: chain}
 spec:
@@ -748,7 +748,7 @@ async def test_a_restart_keeps_live_vaults_and_drops_settled_and_unregistered_on
 
 
 SERVE = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: serve

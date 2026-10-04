@@ -19,7 +19,7 @@ from tests.server.task.test_v2_orchestration import FakeRegistry
 
 def _workflow(task_type: str) -> str:
     return f"""
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: serve-ttl

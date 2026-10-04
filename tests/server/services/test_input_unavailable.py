@@ -43,7 +43,7 @@ from tests.server.task.test_v2_orchestration import (
 )
 
 _CHAIN = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata: {name: unavailable}
 spec:

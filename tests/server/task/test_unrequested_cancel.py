@@ -48,7 +48,7 @@ _USAGE = {
 }
 
 V1_CHAIN = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: v1-chain
