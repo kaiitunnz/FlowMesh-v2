@@ -130,8 +130,8 @@ class TrustedPeerPolicy(BaseModel):
     """The deployment's eligibility rule for the direct origin-to-target transports.
 
     Disabled by default: a deployment that has not declared a trusted class carries
-    every resident invocation over ``control_relay``. ``protocol`` is the transport
-    capability both the origin and the target must advertise.
+    every resident invocation over ``control_relay``. ``protocol`` is the transport an
+    origin must be able to dial and a ``worker_direct`` listener must serve.
 
     ``probe`` marks the rule a reachability diagnostic resolves under. A probe is
     answered by the peer listener it dials and carries no invocation payload, so it is

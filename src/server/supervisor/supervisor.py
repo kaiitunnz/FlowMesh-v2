@@ -316,11 +316,11 @@ def _endpoint_advertisement_provider(
 
     url = network_cfg.endpoint_url or ""
     peer = network_cfg.peer
-    # A node advertises its peer listener only when it actually serves one, so an
-    # unconfigured node stays reachable over the relay alone rather than over an
-    # address no listener answers.
+    # The peer protocol says the node's workers can dial a peer; the peer listener is
+    # advertised only when the node serves one, so a node without it is never offered
+    # as a node_relay hop no listener answers.
     peer_url = peer.node_listener_url if peer.enabled else ""
-    protocols = network_cfg.protocols + ((PEER_PROTOCOL,) if peer_url else ())
+    protocols = (PEER_PROTOCOL,) if peer.enabled else ()
     try:
         reachability_class = ReachabilityClass(network_cfg.reachability_class)
     except ValueError:

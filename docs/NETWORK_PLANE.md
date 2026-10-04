@@ -91,8 +91,10 @@ substitutes a peer.
 
 Eligibility is a property of the pair, not of topology. The resolver offers a peer
 transport only when the deployment enables it, both ends sit in the configured trust
-domain, the target is exposed at an admitted reachability class, both advertise the peer
-transport capability, and directional evidence has not demoted the path.
+domain, the target is exposed at an admitted reachability class, the origin's node has
+the peer plane enabled, the target serves the transport — its listener for
+`worker_direct`, its node's peer listener for `node_relay` — and directional evidence has
+not demoted the path.
 
 Mutual TLS is on by default, enabled with `NETWORK_PLANE_PEER_ENABLED=true` over the
 identities `scripts/dev/generate_peer_tls_certs.sh` issues. The deployment CA issues each

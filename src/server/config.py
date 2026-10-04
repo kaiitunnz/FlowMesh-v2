@@ -636,7 +636,6 @@ class NetworkPlaneConfig:
     endpoint_url: str | None = None
     trust_domain: str = "flowmesh"
     reachability_class: str = "routable"
-    protocols: tuple[str, ...] = ()
     positive_ttl_sec: float = 30.0
     negative_ttl_sec: float = 15.0
     backoff_base_sec: float = 1.0
@@ -648,19 +647,12 @@ class NetworkPlaneConfig:
     @classmethod
     def from_env(cls) -> "NetworkPlaneConfig":
         prefix = "NETWORK_PLANE_"
-        raw_protocols = _env_or_none(f"{prefix}PROTOCOLS")
-        protocols = (
-            tuple(p.strip() for p in raw_protocols.split(",") if p.strip())
-            if raw_protocols
-            else ()
-        )
         return cls(
             enabled=parse_bool_env(f"{prefix}ENABLED", True),
             endpoint_url=_env_or_none(f"{prefix}ENDPOINT_URL"),
             trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh",
             reachability_class=_env_or_none(f"{prefix}REACHABILITY_CLASS")
             or "routable",
-            protocols=protocols,
             positive_ttl_sec=parse_float_env(f"{prefix}POSITIVE_TTL_SEC", 30.0),
             negative_ttl_sec=parse_float_env(f"{prefix}NEGATIVE_TTL_SEC", 15.0),
             backoff_base_sec=parse_float_env(f"{prefix}BACKOFF_BASE_SEC", 1.0),

@@ -13,6 +13,8 @@ from server.network.state import (
     Transport,
 )
 from server.registries.node import Node
+from server.supervisor.supervisor import _endpoint_advertisement_provider
+from shared.schemas.network import PEER_PROTOCOL
 
 
 class _FakeNodeRegistry:
@@ -217,3 +219,38 @@ def test_endpoints_are_stamped_with_node_id() -> None:
     plane = _plane(registry)
     endpoints = asyncio.run(plane.endpoints())
     assert endpoints[0].node_id == "nde-1"
+
+
+def test_a_peer_node_without_a_listener_dials_a_trusted_worker_directly() -> None:
+    peer = TrustedPeerConfig(enabled=True, trust_domain="fm", classes=("routable",))
+    origin_ad = _endpoint_advertisement_provider(
+        NetworkPlaneConfig(enabled=True, trust_domain="fm", peer=peer)
+    )()
+    assert origin_ad is not None
+    registry = _FakeNodeRegistry()
+    registry.set(
+        Node(
+            id="nde-1",
+            namespace="ns",
+            cluster="cl",
+            alias="nde-1",
+            network_endpoint=origin_ad,
+        )
+    )
+    registry.set(_node("nde-2", generation=1))
+    plane = NetworkPlane(
+        NetworkPlaneConfig(enabled=True, trust_domain="fm", peer=peer),
+        registry,  # type: ignore[arg-type]
+        logging.getLogger("test-network"),
+    )
+    listener = _listener().model_copy(update={"protocols": (PEER_PROTOCOL,)})
+
+    result = asyncio.run(plane.resolve("nde-1", listener))
+
+    assert result is not None
+    _origin, route = result
+    assert [c.transport.value for c in route.candidates] == [
+        "worker_direct",
+        "node_relay",
+        "control_relay",
+    ]

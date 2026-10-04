@@ -838,12 +838,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     choices=["same_node", "same_cluster", "routable"],
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_PROTOCOLS",
-                    "",
-                    description="Extra transport protocols the node advertises.",
-                    var_type=EnvVarType.CSV,
-                ),
-                EnvVar(
                     "NETWORK_PLANE_POSITIVE_TTL_SEC",
                     "30",
                     description="Verified reachability TTL (seconds).",
