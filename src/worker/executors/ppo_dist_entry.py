@@ -34,7 +34,10 @@ def main(argv: list[str]) -> int:
         if args.local_rank in (None, 0):
             try:
                 (scratch_dir(args.out_dir) / "distributed_result.json").write_text(
-                    result.model_dump_json(indent=2), encoding="utf-8"
+                    result.model_copy(
+                        update={"spawned_torchrun": True}
+                    ).model_dump_json(indent=2),
+                    encoding="utf-8",
                 )
             except Exception:
                 pass

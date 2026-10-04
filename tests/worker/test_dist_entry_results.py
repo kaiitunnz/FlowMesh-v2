@@ -1,4 +1,4 @@
-"""A torchrun rank hands its training result back to the launching executor."""
+"""A torchrun rank hands its training result, marked as launched, to its executor."""
 
 from pathlib import Path
 from types import ModuleType
@@ -72,4 +72,9 @@ def test_a_rank_writes_its_result_for_the_launcher(
     entry.main(["entry", _task_file(tmp_path).as_posix(), out_dir.as_posix()])
 
     written = (scratch_dir(out_dir) / "distributed_result.json").read_text()
-    assert type(result).model_validate_json(written) == result
+    expected = (
+        result.model_copy(update={"spawned_torchrun": True})
+        if "spawned_torchrun" in type(result).model_fields
+        else result
+    )
+    assert type(result).model_validate_json(written) == expected
