@@ -277,6 +277,7 @@ def _leaf_service_dependency(
             source_id,
             source_kind,
         )
+    service_ref = service_ref.strip()
     interface = (
         ServiceInterface.EMBEDDING
         if task_type is TaskType.EMBEDDING
@@ -294,10 +295,10 @@ def _leaf_service_dependency(
         )
     # The leaf's engine configuration and hardware describe its own model, so they
     # shape the replica only when that is the model the leaf is served by.
-    own_service = service_ref.strip() == (own_model or "").strip()
+    own_service = service_ref == (own_model or "").strip()
     vllm = spec.model.vllm if spec.model is not None else None
     return ServiceDependency(
-        service_ref=service_ref.strip(),
+        service_ref=service_ref,
         interface=interface,
         adapter=adapter,
         adapter_source=_leaf_adapter_source(spec),

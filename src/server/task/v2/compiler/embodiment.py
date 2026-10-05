@@ -157,11 +157,10 @@ def replica_unfit_reason(
     depends on any of these runs as declared only self-contained.
     """
     vllm = (spec.model.vllm if spec.model is not None else None) or {}
-    tensor_parallel_size = vllm.get("tensor_parallel_size")
     profiled = [vllm.get(key) for key in ENGINE_PROFILE_KEYS]
-    if contains_placeholder([*profiled, tensor_parallel_size]) or contains_placeholder(
-        spec.model_revision
-    ):
+    if contains_placeholder(
+        [*profiled, vllm.get("tensor_parallel_size")]
+    ) or contains_placeholder(spec.model_revision):
         return "its engine configuration renders from upstream at dispatch"
     if _engine_credential(task, vllm):
         return "its engine configuration carries a credential"

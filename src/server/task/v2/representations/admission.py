@@ -28,17 +28,9 @@ class ResidentAdmissionBinding(BaseModel):
         return self.intent.warmth if self.intent is not None else None
 
     def compatible(self) -> bool:
-        """Whether the physical requirement matches the logical dependency.
+        """Whether the physical requirement is the one the logical dependency names.
 
-        A requirement that names another family, engine-batch key, isolation domain,
-        or serving size describes a different node; its residency preference is not this
-        dependency's to read.
+        A requirement describing another node's family carries a residency preference
+        that is not this dependency's to read.
         """
-        if (requirement := self.requirement) is None:
-            return False
-        return (
-            requirement.family == self.dependency.service_family
-            and requirement.engine_batch_key == self.dependency.engine_batch_key
-            and requirement.isolation == self.dependency.isolation
-            and requirement.serving_size == self.dependency.serving_size
-        )
+        return self.requirement == self.dependency.family_requirement()
