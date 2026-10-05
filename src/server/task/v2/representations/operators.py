@@ -170,7 +170,8 @@ class ServiceDependency(BaseModel):
     base replica and the request selects it, so it rides ``adapter`` (with its loadable
     ``adapter_source``) rather than the family key. ``engine_profile`` is the engine
     configuration that changes what a replica returns; it keys both and the replica
-    serves it.
+    serves it. ``serving_size`` is the hardware a replica runs at; a non-default size
+    keys both.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -194,7 +195,8 @@ class ServiceDependency(BaseModel):
 
     @property
     def service_family(self) -> str:
-        """The reuse-domain identity: one base model, interface, isolation domain."""
+        """The reuse-domain identity: one base model, interface, isolation domain,
+        engine profile, and serving size."""
         parts = [self.service_ref.strip(), self.interface.value]
         if self.isolation:
             parts.append(f"iso={self.isolation}")
@@ -208,7 +210,7 @@ class ServiceDependency(BaseModel):
         )
 
     def family_requirement(self) -> ServiceFamilyRequirement:
-        """The plan requirement naming this dependency's family."""
+        """Return the plan requirement naming this dependency's family."""
         return ServiceFamilyRequirement(
             family=self.service_family,
             engine_batch_key=self.engine_batch_key,
@@ -217,8 +219,8 @@ class ServiceDependency(BaseModel):
         )
 
     def _engine_parts(self) -> list[str]:
-        # A default part adds nothing, so a dependency keeps the identity it had before
-        # it declared one.
+        # The default size adds no part, so a dependency restored without a size
+        # resolves to the family it was stored under.
         parts = []
         if self.engine_profile is not None:
             parts.append(f"profile={engine_profile_key(self.engine_profile)}")

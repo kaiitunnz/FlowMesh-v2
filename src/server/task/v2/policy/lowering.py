@@ -4,7 +4,7 @@ A policy refines choices the compiler has already found legal: it may keep a fus
 operator out of its predecessor's episode, steer a service dependency to a compatible
 family, and express residency preference. The compiler screens every answer, so a policy
 only narrows: fusion is bounded to the pure, deterministic, local set, and a family
-refinement holds the dependency's engine-batch key and isolation.
+refinement holds the dependency's engine-batch key, isolation, and serving size.
 
 There is one policy per hook, so a deployment composes the facets it wants
 independently. Each hook's default reproduces the compiler's own choice, so a surface

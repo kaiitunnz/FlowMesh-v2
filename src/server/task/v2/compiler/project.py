@@ -650,10 +650,11 @@ def _service_family_annotations(
 
     Detection only: it pins the finite dependency a resident invocation needs, with no
     allocation, claim, or replica. The family and engine-batch key fold interface, base
-    model, and isolation so incompatible dependencies pin distinct families rather than
-    collapsing on a shared model name. A policy chooses among the families compatible
-    with that key and expresses residency preference; the refinement it returns is
-    screened, so the dependency stays pinned to what the template declared.
+    model, isolation, engine profile, and serving size so incompatible dependencies pin
+    distinct families rather than collapsing on a shared model name. A policy chooses
+    among the families compatible with that key and expresses residency preference; the
+    refinement it returns is screened, so the dependency stays pinned to what the
+    template declared.
     """
     if dependency is None:
         return None, None

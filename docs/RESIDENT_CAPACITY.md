@@ -183,18 +183,6 @@ WARM / BUSY → DRAINING → STOPPED
 WARM / BUSY → PREEMPTED / FAILED → reconcile and recreate
 ```
 
-A demand-managed replica runs at its family's serving size: the CPU, memory, GPU type,
-count, and per-device memory under the consuming leaf's `resources.hardware`, and the
-tensor-parallel size under its `model.vllm`. An omitted CPU, memory, or GPU type is `2`,
-`4Gi`, or any; a GPU count and a tensor-parallel size each default to the other, or to
-one, and a tensor-parallel size above the count is capped to it. Leaves share a family
-only at an equal size, and a registered family keeps its size. A replica places on one
-worker with all its devices free and its engine shards over them; while none can host
-it, its claims stay pending, holding no credit, until the cold-start budget denies them.
-Replica quotas and cold-start limits count replicas of any size. A leaf served by another
-model's replica and an agent's model binding take the default size; a standing `serve`
-task runs at the hardware it declares.
-
 The first eligible `PENDING` claim for an approved family with no capacity triggers a
 bounded zero-to-one materialization. Before creating an allocation, policy checks the allowed
 model catalog, the per-family replica quota, and the concurrent cold-start limit; a refusal
@@ -207,6 +195,18 @@ again. The window is per family: a family whose definition records the warm pref
 plan node carries is retained for twice the base, and every other family keeps the base. A
 standing `serve` allocation is pinned to its task and exempt. Warmth is a retention
 preference only — it reserves nothing and changes no claim, admission, route, or credit.
+
+A demand-managed replica runs at its family's serving size: the CPU, memory, GPU type,
+count, and per-device memory under the consuming leaf's `resources.hardware`, and the
+tensor-parallel size under its `model.vllm`. An omitted CPU, memory, or GPU type is `2`,
+`4Gi`, or any; a GPU count and a tensor-parallel size each default to the other, or to
+one, and a tensor-parallel size above the count is capped to it. Leaves share a family
+only at an equal size. A replica places on one worker with all its devices free, and its
+engine shards over its tensor-parallel size of them. While no worker can host it, its
+claims wait in `PENDING` until the cold-start budget denies them, naming the size no
+worker could host. Replica quotas and cold-start limits count replicas of any size. A
+leaf served by another model's replica and an agent's model binding take the default
+size; a standing `serve` task runs at the hardware it declares.
 
 A cold start goes warm once its serve task reports its endpoint. A replica serves only
 on the endpoint its serve task's current dispatch reported. A warm demand replica lives

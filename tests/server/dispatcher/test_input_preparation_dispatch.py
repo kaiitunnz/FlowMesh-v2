@@ -145,7 +145,7 @@ async def test_a_declared_bound_still_screens_before_any_value_exists() -> None:
 
 
 @pytest.mark.anyio
-async def test_a_preparation_needs_no_accelerator_of_its_own() -> None:
+async def test_a_preparation_needs_none_of_its_leafs_hardware() -> None:
     # It reads an upstream value and runs no model, so it places like a relay does.
     _dispatcher, runtime, task_id = await _setup()
     record = runtime.get_record(task_id)

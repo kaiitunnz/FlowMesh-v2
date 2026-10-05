@@ -30,10 +30,7 @@ async def materialize_resident_replica(
     replica: ReplicaIncarnation,
     logger: logging.Logger,
 ) -> str:
-    """Submit the family's serve substrate as a task owned by `owner`; return its id.
-
-    The task runs at the family's serving size, which the leaves it serves declare.
-    """
+    """Submit the family's serve substrate as a task owned by `owner`; return its id."""
     spec_type = "dev_model" if config.substrate == "dev_model" else "serve"
     size = family.serving_size
     spec: dict[str, Any] = {

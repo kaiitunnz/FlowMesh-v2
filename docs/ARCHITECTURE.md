@@ -187,8 +187,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   preemption preference. The hooks are selected independently, so a deployment composes
   the facets it wants. The compiler screens every answer, so fusion stays bounded to the
   pure, deterministic, local set, an episode only ever cuts more often, and a refinement
-  holds the dependency's engine-batch key and isolation as well as its pinned family and
-  requiredness. Choosing a worker, reserving capacity, minting a claim or attachment,
+  holds the dependency's engine-batch key, isolation, and serving size as well as its
+  pinned family and requiredness. Choosing a worker, reserving capacity, minting a claim or attachment,
   and replacing a pinned resident binding belong to the fabric. A policy is
   deployment-global — a workflow submission selects none — and every hook defaults to a
   conservative policy that lowers identically to the compiler alone, so a workflow's
@@ -357,8 +357,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   physical capacity rather than an external endpoint. Two control-plane actors — an
   Admission controller and a Lifecycle & scale manager — over durable control-state
   stores admit an invocation to a compatible model-serving replica, materializing one
-  from zero on demand under policy at the hardware and tensor-parallel size its consuming
-  leaf declares, on one worker. `ServiceClaim` facts are the sole credit authority;
+  from zero on demand under policy, sized to the hardware and tensor-parallel size its
+  consuming leaf declares. `ServiceClaim` facts are the sole credit authority;
   a credit releases only from a fenced ledger terminal consumed by `invocation_id`. The
   invocation runs in the workers over the network plane (required), so control never
   constructs, parses, or carries engine traffic: the consuming episode's own worker — an

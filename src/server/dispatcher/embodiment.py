@@ -22,8 +22,8 @@ from ..task.v2.representations.plan import (
 def relay_placement_task(task: TaskEnvelope) -> TaskEnvelope:
     """The task as a worker that only carries its invocation must satisfy it.
 
-    A resident-served embodiment runs its model on a replica sized by the leaf's
-    declared hardware, so the worker that relays its invocation carries no part of it.
+    A resident-served embodiment runs its model on a replica, so the worker relaying its
+    invocation needs none of the leaf's declared hardware.
     """
     if task.spec.resources is None or task.spec.resources.hardware is None:
         return task

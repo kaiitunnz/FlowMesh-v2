@@ -15,7 +15,9 @@ class ResidentServingSizeInfo(BaseModel):
     cpu: int = Field(description="CPU cores a replica requests.")
     memory_bytes: int = Field(description="Memory a replica requests, in bytes.")
     gpu_type: str = Field(description="GPU type a replica's devices match, or `any`.")
-    gpu_count: int = Field(description="GPUs a replica runs on, all on one worker.")
+    gpu_count: int = Field(
+        description="GPUs the family's replicas are sized for, all on one worker."
+    )
     gpu_memory_bytes: int | None = Field(
         default=None, description="Memory each GPU needs at least, in bytes, if any."
     )
