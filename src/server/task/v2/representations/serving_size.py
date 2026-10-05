@@ -1,10 +1,3 @@
-"""The hardware and tensor-parallel size a resident replica of one leaf serves at.
-
-A leaf declares its hardware under ``resources.hardware`` and its tensor-parallel size
-under ``model.vllm``. Both read here into one canonical size, so two spellings of the
-same requirement share a replica and two different requirements never do.
-"""
-
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict
@@ -14,22 +7,22 @@ from shared.tasks.placeholders import contains_placeholder
 from shared.utils.hardware import normalize_gpu_type, parse_gpu_memory_bytes
 from shared.utils.parsing import parse_mem_to_bytes
 
-ANY_GPU_TYPE = "any"
+_ANY_GPU_TYPE = "any"
 _BINARY_UNITS = (("Ti", 1024**4), ("Gi", 1024**3), ("Mi", 1024**2), ("Ki", 1024))
 
 
 class ServingSize(BaseModel):
-    """The canonical hardware one resident replica runs on.
+    """The canonical hardware a resident replica runs on, read from its leaf.
 
-    The engine shards over ``tensor_parallel_size`` of its ``gpu_count`` devices, all on
-    one worker.
+    Equal requirements read as one size however they are spelled. The engine shards over
+    ``tensor_parallel_size`` of its ``gpu_count`` devices, all on one worker.
     """
 
     model_config = ConfigDict(frozen=True)
 
     cpu: int = 2
     memory_bytes: int = 4 * 1024**3
-    gpu_type: str = ANY_GPU_TYPE
+    gpu_type: str = _ANY_GPU_TYPE
     gpu_count: int = 1
     # The memory each device needs at least; None takes any device.
     gpu_memory_bytes: int | None = None
@@ -60,9 +53,9 @@ class ServingSize(BaseModel):
     def hardware(self, gpu: bool = True) -> dict[str, Any]:
         """Render the size as a task's ``resources.hardware``, optionally GPU-free.
 
-        A GPU-free rendering asks for no device of any kind, so any worker places it.
+        A GPU-free rendering asks for no device of any kind.
         """
-        devices: dict[str, Any] = {"type": ANY_GPU_TYPE, "count": 0}
+        devices: dict[str, Any] = {"type": _ANY_GPU_TYPE, "count": 0}
         if gpu:
             devices = {"type": self.gpu_type, "count": self.gpu_count}
             if self.gpu_memory_bytes is not None:
@@ -83,21 +76,23 @@ class ServingSize(BaseModel):
         """
         default = DEFAULT_SERVING_SIZE
         gpu = hardware.gpu if hardware is not None else None
-        count = _positive(gpu.count if gpu is not None else None)
-        tp = _positive(tensor_parallel_size)
+        count = _positive(_declared(gpu.count if gpu is not None else None))
+        tp = _positive(_declared(tensor_parallel_size))
         if count is None:
             count = tp or default.gpu_count
         tp = min(tp, count) if tp is not None else count
-        cpu = _positive(hardware.cpu if hardware is not None else None)
-        memory = hardware.memory if hardware is not None else None
+        memory = _declared(hardware.memory if hardware is not None else None)
+        gpu_type = _declared(gpu.type if gpu is not None else None)
         return cls(
-            cpu=cpu or default.cpu,
-            memory_bytes=_positive(parse_mem_to_bytes(str(memory)))
+            cpu=_positive(_declared(hardware.cpu if hardware is not None else None))
+            or default.cpu,
+            memory_bytes=_positive(parse_mem_to_bytes(str(memory)) if memory else None)
             or default.memory_bytes,
-            gpu_type=normalize_gpu_type(gpu.type if gpu is not None else None)
-            or ANY_GPU_TYPE,
+            gpu_type=normalize_gpu_type(gpu_type) or _ANY_GPU_TYPE,
             gpu_count=count,
-            gpu_memory_bytes=_gpu_memory_bytes(gpu.memory if gpu is not None else None),
+            gpu_memory_bytes=_gpu_memory_bytes(
+                _declared(gpu.memory if gpu is not None else None)
+            ),
             tensor_parallel_size=tp,
         )
 
@@ -105,8 +100,13 @@ class ServingSize(BaseModel):
 DEFAULT_SERVING_SIZE = ServingSize()
 
 
+def _declared(value: Any) -> Any:
+    """The value as declared, or None when it renders from upstream."""
+    return None if value is None or contains_placeholder(value) else value
+
+
 def _positive(value: Any) -> int | None:
-    if value is None or isinstance(value, bool) or contains_placeholder(value):
+    if value is None:
         return None
     try:
         number = int(value)

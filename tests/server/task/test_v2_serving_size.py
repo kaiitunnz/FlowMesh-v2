@@ -141,3 +141,22 @@ def test_gpu_memory_placement_cannot_read_is_undeclared(memory: Any) -> None:
 def test_a_non_positive_cpu_is_undeclared() -> None:
     assert _size(cpu=0) == DEFAULT_SERVING_SIZE
     assert _size(cpu=-2) == DEFAULT_SERVING_SIZE
+
+
+@pytest.mark.parametrize(
+    "hardware",
+    [
+        {"gpu": {"type": "${u.output}"}},
+        {"memory": "${u.output}"},
+        {"gpu": {"memory": "${u.output}"}},
+    ],
+)
+def test_a_value_that_renders_from_upstream_is_undeclared(
+    hardware: dict[str, Any],
+) -> None:
+    assert _size(**hardware) == DEFAULT_SERVING_SIZE
+
+
+def test_a_boolean_reads_as_the_number_placement_and_vllm_read() -> None:
+    # The local executor reads int(True) as one, and so does placement.
+    assert _size(True, gpu={"count": 2}).tensor_parallel_size == 1
