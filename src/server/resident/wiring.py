@@ -122,6 +122,10 @@ def build_resident_capacity(
         record = runtime.get_record(serve_task_id)
         return record is not None and record.status not in SETTLING_TASK_STATUSES
 
+    def serve_task_unhosted(serve_task_id: str) -> bool:
+        record = runtime.get_record(serve_task_id)
+        return record is not None and record.no_eligible_since is not None
+
     sweep_interval = cfg.idle_sweep_interval_sec if cfg.idle_retain_sec > 0 else 0.0
     resident_control = ResidentCapacityControl(
         stores=stores,
@@ -137,6 +141,7 @@ def build_resident_capacity(
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
         serve_task_live=serve_task_live,
+        serve_task_unhosted=serve_task_unhosted,
         logger=logger,
         poll_interval_sec=cfg.poll_interval_sec,
         idle_sweep_interval_sec=sweep_interval,

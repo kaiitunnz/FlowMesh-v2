@@ -68,6 +68,7 @@ from ..orchestration.tool_dispatch import ToolInvocationEnvelope
 from ..task.v2.representations.admission import ResidentAdmissionBinding
 from ..task.v2.representations.operators import ServiceDependency
 from ..task.v2.representations.plan import ResidencyWarmth
+from ..utils.time import now_iso
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .policy import ResidentPolicyLimits
@@ -102,6 +103,8 @@ RedispatchCallback = Callable[[str, str], bool]
 EndpointProbe = Callable[[str], ReplicaEndpoint | None]
 # Whether a serve task is live: neither settled nor being cancelled.
 ServeTaskLiveness = Callable[[str], bool]
+# Whether the dispatcher found no worker able to host a serve task.
+ServeTaskUnhosted = Callable[[str], bool]
 # Persists the authoritative CS snapshot.
 PersistCallback = Callable[[], None]
 
@@ -359,6 +362,7 @@ class ResidentCapacityControl:
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
         serve_task_live: ServeTaskLiveness = lambda _task_id: True,
+        serve_task_unhosted: ServeTaskUnhosted = lambda _task_id: False,
         delivery: ResidentWorkerDelivery | None = None,
         persist: PersistCallback | None = None,
         logger: logging.Logger | None = None,
@@ -383,6 +387,7 @@ class ResidentCapacityControl:
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
         self._serve_task_live = serve_task_live
+        self._serve_task_unhosted = serve_task_unhosted
         self._delivery = delivery
         self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("resident-capacity")
@@ -1765,6 +1770,7 @@ class ResidentCapacityControl:
     ) -> AdmissionHandoff | None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._limits.cold_start_deadline_sec
+        waiting_since = now_iso()
         while True:
             async with self._admit_lock:
                 if claim.state is ClaimState.TERMINAL:
@@ -1799,10 +1805,30 @@ class ResidentCapacityControl:
                 self._fail(
                     orig,
                     ProvisioningDenialReason.COLD_START_BUDGET,
-                    "resident cold start did not become ready in time",
+                    self._cold_start_timeout_detail(family, waiting_since),
                 )
                 return None
             await asyncio.sleep(self._poll_interval)
+
+    def _cold_start_timeout_detail(self, family: str, waiting_since: str) -> str:
+        """Why a claim's cold start never became ready, naming an unhostable size."""
+        detail = "resident cold start did not become ready in time"
+        definition = self._stores.families.get(family)
+        unhosted = any(
+            replica.serve_task_id is not None
+            and (
+                replica.state is ReplicaState.MATERIALIZING
+                or replica.created_at >= waiting_since
+            )
+            and self._serve_task_unhosted(replica.serve_task_id)
+            for replica in self._stores.directory.by_family(family)
+        )
+        if definition is None or not unhosted:
+            return detail
+        return (
+            f"{detail}: no worker can host a replica of size "
+            f"{definition.serving_size.key()}"
+        )
 
     def _has_materializing(self, family: str) -> bool:
         return any(

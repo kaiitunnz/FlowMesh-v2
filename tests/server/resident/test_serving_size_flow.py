@@ -2,11 +2,14 @@
 
 import asyncio
 import json
+import time
+from typing import Any
 
 import pytest
 
 from server.registries.worker import Worker, gpu_available_for, hw_satisfies
 from server.resident import ResidentSnapshot, ResidentStores, ServiceFamily
+from server.resident.state import ClaimState
 from server.schemas.resident import ResidentFamilyInfo
 from server.task.v2.representations.serving_size import (
     DEFAULT_SERVING_SIZE,
@@ -16,7 +19,12 @@ from shared.schemas.worker import WorkerCapabilities
 from shared.tasks import TaskType
 from tests.server.registries.test_worker_registry import _worker
 from tests.server.resident.node_harness import Node
+from tests.server.task.test_resident_origin_loss import (
+    _RESIDENT_WF,
+    _capture_resident_boundary,
+)
 from tests.server.task.test_v2_orchestration import _register
+from tests.support.waiting import until
 
 _SIZED_LEAF = """
 apiVersion: flowmesh/v2
@@ -156,3 +164,41 @@ def test_the_family_listing_reports_a_demand_family_size_only() -> None:
     assert info.serving_size is not None
     assert info.serving_size.model_dump() == _SIZE.model_dump()
     assert ResidentFamilyInfo.project(standing).serving_size is None
+
+
+def test_a_cold_start_no_worker_can_host_is_denied_naming_its_size() -> None:
+    async def run() -> None:
+        node = Node(cold_start_deadline_sec=0.3)
+        node.control.bind_loop(asyncio.get_running_loop())
+        errors: list[str | None] = []
+        settle = node.control._settle
+
+        def recording_settle(*args: Any, error: str | None = None) -> bool:
+            errors.append(error)
+            return settle(*args, error=error)
+
+        node.control._settle = recording_settle
+        _, ids = await _register(node.runtime, _RESIDENT_WF)
+        _capture_resident_boundary(node.runtime, ids["writer"])
+        directory = node.control.stores.directory
+        await until(lambda: any(r.serve_task_id for r in directory.all()))
+        (cold,) = directory.all()
+        assert cold.serve_task_id is not None
+        record = node.runtime.get_record(cold.serve_task_id)
+        assert record is not None
+        # The dispatcher marks a task no worker's hardware satisfies.
+        record.no_eligible_since = time.time()
+
+        (claim,) = node.control.stores.claims.all()
+        await until(lambda: claim.state is ClaimState.TERMINAL, timeout=5.0)
+
+        assert not claim.holds_credit
+        assert any(
+            error is not None
+            and "cold_start_budget" in error
+            and f"no worker can host a replica of size {DEFAULT_SERVING_SIZE.key()}"
+            in error
+            for error in errors
+        ), errors
+
+    asyncio.run(run())
