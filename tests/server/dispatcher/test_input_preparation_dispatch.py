@@ -155,8 +155,7 @@ async def test_a_preparation_needs_no_accelerator_of_its_own() -> None:
     assert resources.hardware.gpu is not None
 
     placed = relay_placement_task(record.task).spec.resources
-    assert placed is not None and placed.hardware is not None
-    assert placed.hardware.gpu is None
+    assert placed is not None and placed.hardware is None
 
 
 def test_an_unknown_batch_is_screened_against_nothing() -> None:
