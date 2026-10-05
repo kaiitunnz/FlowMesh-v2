@@ -400,10 +400,10 @@ size.
 
 A menu offers a resident candidate only for a leaf a replica runs as declared: no
 profile setting, tensor parallel size, or revision renders from upstream, its engine
-configuration carries no credential, and it loads no checkpoint. A
-pinned resident leaf runs on the replica's terms: the replica loads with the
-deployment's own access and never receives the leaf's credential, and a value that
-renders from upstream is left out of its profile. A leaf whose model or adapter source
+configuration carries no credential, and it loads no checkpoint. A pinned resident leaf
+runs on the replica's terms: the replica loads with the deployment's own access and
+never receives the leaf's credential, and a value that renders from upstream is left out
+of its profile. A leaf whose model or adapter source
 carries a credential has no resident embodiment, and a resident binding on one, or on a
 leaf that loads a checkpoint, is refused at submission.
 
