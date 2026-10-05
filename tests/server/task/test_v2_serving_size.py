@@ -100,6 +100,9 @@ def test_every_distinct_requirement_is_a_distinct_size(
 ) -> None:
     assert _size(**hardware) != DEFAULT_SERVING_SIZE
     assert _size(**hardware).key() != DEFAULT_SERVING_SIZE.key()
+
+
+def test_a_tensor_parallel_size_distinguishes_one_count() -> None:
     assert _size(1, gpu={"count": 2}) != _size(2, gpu={"count": 2})
 
 

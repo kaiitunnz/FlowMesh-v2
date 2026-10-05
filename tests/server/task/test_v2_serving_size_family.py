@@ -74,7 +74,7 @@ def _family(leaf: str) -> tuple[str, str | None]:
     return requirement.family, requirement.engine_batch_key
 
 
-_DEFAULT = ("Qwen/Qwen3-4B|chat|profile=", "Qwen/Qwen3-4B|chat|profile=")
+_DEFAULT_PREFIX = "Qwen/Qwen3-4B|chat|profile="
 
 
 @pytest.mark.parametrize(
@@ -89,7 +89,7 @@ def test_a_default_size_leaf_keeps_the_family_it_had_before_sizes(
     hardware: str,
 ) -> None:
     family, batch_key = _family(_chat(hardware))
-    assert family.startswith(_DEFAULT[0]) and "size=" not in family
+    assert family.startswith(_DEFAULT_PREFIX) and "size=" not in family
     assert batch_key is not None and "size=" not in batch_key
     assert family == _family(_chat("{gpu: {count: 1}}"))[0]
 

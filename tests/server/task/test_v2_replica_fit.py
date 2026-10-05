@@ -6,6 +6,7 @@ terms, unless the replica would serve another model than the leaf's.
 """
 
 import json
+from typing import Any
 
 import pytest
 
@@ -84,29 +85,30 @@ def test_an_explicit_menu_a_replica_cannot_run_is_refused(
         _leaf(service="{mode: local_eligible}", **case)  # type: ignore[arg-type]
 
 
-_MULTI_GPU = {
+_MULTI_GPU: dict[str, dict[str, Any]] = {
     "two_gpus": {"gpus": 2},
-    # A vLLM inference leaf declares its count, which caps the size it shards over.
-    "tensor_parallel": {"vllm": "{tensor_parallel_size: 2}", "gpus": 2},
-    "tensor_parallel_string": {"vllm": "{tensor_parallel_size: '2'}", "gpus": 2},
-    "tensor_parallel_float": {"vllm": "{tensor_parallel_size: 2.0}", "gpus": 2},
+    # `_leaf` declares one GPU by default, which would cap the tensor-parallel size to
+    # one; four devices leave the declared size its own.
+    "tensor_parallel": {"vllm": "{tensor_parallel_size: 2}", "gpus": 4},
+    "tensor_parallel_string": {"vllm": "{tensor_parallel_size: '2'}", "gpus": 4},
+    "tensor_parallel_float": {"vllm": "{tensor_parallel_size: 2.0}", "gpus": 4},
 }
 
 
-@pytest.mark.parametrize("case", _MULTI_GPU.values(), ids=_MULTI_GPU.keys())
-def test_a_multi_gpu_leaf_gets_a_resident_candidate_of_its_size(
-    case: dict[str, object],
-) -> None:
-    node = _leaf(**case)  # type: ignore[arg-type]
+@pytest.mark.parametrize("name", _MULTI_GPU)
+def test_a_multi_gpu_leaf_gets_a_resident_candidate_of_its_size(name: str) -> None:
+    case = _MULTI_GPU[name]
+    node = _leaf(**case)
     assert node.embodiment_menu is not None
     [requirement] = [
         candidate.service_family_requirement
         for candidate in node.embodiment_menu.candidates
         if candidate.service_family_requirement is not None
     ]
-    assert requirement.serving_size.gpu_count == 2
-    assert requirement.serving_size.tensor_parallel_size == 2
-    assert requirement.family.endswith("|size=cpu2,mem4Gi,tp2,gpu2xany")
+    count = case["gpus"]
+    size = requirement.serving_size
+    assert (size.gpu_count, size.tensor_parallel_size) == (count, 2)
+    assert requirement.family.endswith(f"|size=cpu2,mem4Gi,tp2,gpu{count}xany")
 
 
 _PINNED = {k: v for k, v in (_UNFIT | _MULTI_GPU).items() if k != "checkpoint"}

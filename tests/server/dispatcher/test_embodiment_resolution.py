@@ -245,6 +245,8 @@ async def test_a_resident_dispatch_of_a_large_leaf_places_on_a_small_relay() -> 
     )
     task = _gpu_task(runtime, ids["gen"])
     relay = small_worker()
+    hardware = task.spec.resources.hardware if task.spec.resources else None
+    assert hardware is not None and hardware.cpu == 32
 
     assert not hw_satisfies(relay, task)
     assert hw_satisfies(relay, relay_placement_task(task))

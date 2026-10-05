@@ -17,6 +17,7 @@ from server.task.v2.representations.serving_size import (
 )
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks import TaskType
+from shared.tasks.specs.common import ModelSpecStrict, ModelSpecTemplate
 from tests.server.registries.test_worker_registry import _worker
 from tests.server.resident.node_harness import Node
 from tests.server.task.test_resident_origin_loss import (
@@ -84,7 +85,8 @@ def test_a_pinned_leaf_size_reaches_its_family_and_replica(
         assert hardware is not None and hardware.gpu is not None
         assert (hardware.cpu, hardware.memory) == (4, "8Gi")
         assert hardware.gpu.count == gpu_count
-        model = spec.model  # type: ignore[union-attr]
+        assert isinstance(spec, (ModelSpecStrict, ModelSpecTemplate))
+        model = spec.model
         assert model is not None and model.vllm is not None
         assert model.vllm["tensor_parallel_size"] == 2
         assert model.vllm["max_model_len"] == 1024
