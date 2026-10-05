@@ -92,10 +92,12 @@ widen the skip list silently.
 
 CI runs `pip-audit` against the locked set each image installs — the
 generated `src/server/constraints.txt` and
-`src/worker/requirements/constraints.txt` — and against a resolution of
-`src/worker/requirements/requirements.gpu.txt`, which covers the packages
-the CUDA image resolves for itself. The job lives in
-`.github/workflows/security.yml`.
+`src/worker/requirements/constraints.txt` — and against the packages those
+constraints leave for the server and CPU worker images to resolve, at the
+versions a build resolves them to (`scripts/dev/sync_requirements.py
+--excluded` picks them out of each image's compiled set). A resolution of
+`src/worker/requirements/requirements.gpu.txt` covers the packages the CUDA
+image resolves for itself. The job lives in `.github/workflows/security.yml`.
 
 When pip-audit reports a new CVE, the only real fix is to bump the
 offending dep in `pyproject.toml`, then `uv lock` and `uv run
