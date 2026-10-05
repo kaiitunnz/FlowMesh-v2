@@ -30,7 +30,7 @@ from tests.server.task.test_v2_orchestration import FakeRegistry
 _ORG = "org-acme"
 
 _ECHO_WORKFLOW = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: content-scope

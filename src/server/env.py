@@ -3,9 +3,16 @@ import os
 import tempfile
 from pathlib import Path
 
+from pydantic import SecretStr
+
 from shared.schemas.worker import SSHBackendName
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
-from shared.utils import parse_bool_env, parse_float_env, parse_int_env
+from shared.utils import (
+    parse_bool_env,
+    parse_float_env,
+    parse_int_env,
+    parse_secret_env,
+)
 
 
 def _read_file_b64(path: str, what: str) -> str:
@@ -213,6 +220,20 @@ SERVER_METRICS_TRACE_SAMPLE_RATIO: float = parse_float_env(
 SERVER_METRICS_OTLP_ENDPOINT: str = (
     os.getenv("SERVER_METRICS_OTLP_ENDPOINT") or ""
 ).strip()
+SERVER_METRICS_OTLP_TOKEN: SecretStr | None = parse_secret_env(
+    "SERVER_METRICS_OTLP_TOKEN"
+)
+SERVER_METRICS_OTLP_CA_FILE: str = (
+    os.getenv("SERVER_METRICS_OTLP_CA_FILE") or ""
+).strip()
+SERVER_METRICS_OTLP_CA_B64: str = (
+    _read_file_b64(SERVER_METRICS_OTLP_CA_FILE, "OTLP collector CA file")
+    if SERVER_METRICS_OTLP_CA_FILE
+    and SERVER_METRICS_OTLP_ENDPOINT.startswith("https://")
+    and SERVER_METRICS_TELEMETRY_LEVEL != "off"
+    and (SERVER_METRICS_TRACES_ENABLED or SERVER_METRICS_METRICS_ENABLED)
+    else ""
+)
 SERVER_METRICS_OTLP_TIMEOUT_SEC: int = parse_int_env(
     "SERVER_METRICS_OTLP_TIMEOUT_SEC", 10
 )

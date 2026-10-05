@@ -292,12 +292,11 @@ def test_a_listener_without_the_transport_capability_gets_no_worker_direct() -> 
     assert "worker_direct" not in _transports(route)
 
 
-def test_a_node_without_the_transport_capability_gets_no_node_relay() -> None:
-    endpoint = _endpoint(ReachabilityClass.ROUTABLE).model_copy(
-        update={"protocols": ()}
-    )
+def test_a_node_without_a_peer_listener_gets_no_node_relay() -> None:
+    # Its workers can dial peers, but no listener answers a node_relay hop to it.
+    endpoint = _endpoint(ReachabilityClass.ROUTABLE).model_copy(update={"peer_url": ""})
     route = _resolve(TRUSTED, endpoint=endpoint)
-    assert "node_relay" not in _transports(route)
+    assert _transports(route) == ["worker_direct", "control_relay"]
 
 
 def test_a_trusted_pair_is_offered_both_peers_ahead_of_the_relay() -> None:

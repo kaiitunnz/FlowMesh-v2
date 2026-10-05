@@ -10,14 +10,14 @@ Ladder rules:
 - ``worker_direct`` is the ``RouteOrigin``'s own dial to the target listener, so a
   workflow origin's payload never enters the root. It is offered only to a
   deployment-declared trusted pair — the trust policy, both ends' trust domain, the
-  target's reachability class, the transport capability both advertise, and directional
-  evidence must all admit it — and additionally needs the listener explicitly directly
-  routable and the origin's network class able to reach the target endpoint's class.
-  Shared-node placement alone is not sufficient.
+  target's reachability class, the origin's capability to dial a peer, the listener's
+  peer capability, and directional evidence must all admit it — and additionally needs
+  the listener explicitly directly routable and the origin's network class able to reach
+  the target endpoint's class. Shared-node placement alone is not sufficient.
 - ``node_relay`` is the same origin-dialed bypass through the target node's announced
-  endpoint and its node-local uplink, under the same trusted-pair conditions as
-  ``worker_direct``. It is the initial same-node path as well as the normal cross-node
-  path.
+  endpoint and its node-local uplink, offered when the target node serves a peer
+  listener and under the same trusted-pair conditions as ``worker_direct``. It is the
+  initial same-node path as well as the normal cross-node path.
 - ``control_relay`` is the universal reverse-rendezvous base: the root bridges between
   the origin and target reverse-relay attachments to the target's node-local sidecar
   delivery. Its feasibility is that both ends have a registered outbound attachment, not
@@ -78,8 +78,9 @@ def _peer_admitted(
 
     Trust is a property of the pair, never of topology: sharing a node or advertising an
     address proves nothing. Both ends must sit in the configured trust domain, the
-    target must be exposed at an admitted class, and both must advertise the transport
-    capability the peer transport is carried over.
+    target must be exposed at an admitted class, the origin must be able to dial the
+    peer protocol, and the target must serve it: a ``worker_direct`` listener by
+    advertising the protocol, a ``node_relay`` node by serving a peer listener.
     """
     if not trust.enabled:
         return False
@@ -96,7 +97,7 @@ def _peer_admitted(
     if trust.protocol not in origin.protocols:
         return False
     if transport is Transport.NODE_RELAY:
-        return trust.protocol in node_endpoint.protocols
+        return bool(node_endpoint.peer_url)
     return trust.protocol in listener.protocols
 
 

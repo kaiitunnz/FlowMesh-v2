@@ -9,7 +9,7 @@ class _Reports:
     def __init__(self) -> None:
         self.calls: list[list[tuple[str, str]]] = []
 
-    def __call__(self, held) -> None:  # noqa: ANN001 - test sink
+    def __call__(self, held) -> None:
         self.calls.append(list(held))
 
     @property

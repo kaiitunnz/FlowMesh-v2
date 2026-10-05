@@ -9,7 +9,6 @@ from flowmesh.exceptions import FlowMeshError
 from flowmesh_cli.core import logging
 from flowmesh_cli.core.typer import get_typer
 from flowmesh_stack.docker import DockerError, image_env_overrides
-from flowmesh_stack.env import load_env
 from flowmesh_stack.images import get_image_ref
 from flowmesh_stack.workers import (
     create_workers,
@@ -20,8 +19,8 @@ from flowmesh_stack.workers import (
 
 from .utils import (
     DEFAULT_ENV_FILE,
-    STACK_PATH_KEYS,
     STACK_SLUG_ENV,
+    load_stack_env,
     stack_node_client,
     stack_resource_env_overrides,
 )
@@ -225,7 +224,7 @@ def worker_pull(
     ),
 ) -> None:
     """Pull worker or builder Docker images from the registry."""
-    load_env(env_file, base_dir=Path.cwd(), path_keys=STACK_PATH_KEYS)
+    load_stack_env(env_file)
     registry = os.getenv("FLOWMESH_REGISTRY", "ghcr.io/mlsys-io")
     version = image_env_overrides(image_tag).get(
         "FLOWMESH_VERSION", os.getenv("FLOWMESH_VERSION", "dev")

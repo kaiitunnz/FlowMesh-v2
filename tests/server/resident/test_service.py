@@ -22,6 +22,7 @@ from server.network.state import (
     RouteObservationOutcome,
     RouteOrigin,
     Transport,
+    TrustedPeerPolicy,
 )
 from server.orchestration.tool_dispatch import ToolInvocationEnvelope
 from server.resident import (
@@ -97,7 +98,11 @@ def _env(invocation_id: str = "inv-1") -> ToolInvocationEnvelope:
 
 class _FakeNetwork:
     async def resolve(
-        self, origin_node_id: str, listener: ReplicaListenerAdvertisement
+        self,
+        origin_node_id: str,
+        listener: ReplicaListenerAdvertisement,
+        *,
+        trust: TrustedPeerPolicy | None = None,
     ) -> tuple[RouteOrigin, ResolvedRoute]:
         origin = RouteOrigin(
             origin_id="rog-1",

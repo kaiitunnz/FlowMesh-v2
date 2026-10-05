@@ -55,6 +55,13 @@ class TaskEvent(BaseEvent):
             "decision to the server."
         ),
     )
+    ambiguous: bool = Field(
+        default=False,
+        description=(
+            "Whether the failure came after the task's external effect may already "
+            "have happened."
+        ),
+    )
     failure_kind: TaskFailureKind | None = Field(
         default=None, description="Why a failed dispatch failed, when that is typed."
     )

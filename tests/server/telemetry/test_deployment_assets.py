@@ -146,3 +146,51 @@ def test_clickhouse_ddl_uses_trace_id_leading_replacing_merge_tree() -> None:
     text = _CLICKHOUSE_INIT_PATH.read_text()
     assert re.search(r"ENGINE\s*=\s*ReplacingMergeTree", text)
     assert re.search(r"ORDER BY\s*\(TraceId,\s*Timestamp,\s*SpanId\)", text)
+
+
+def test_both_otlp_receivers_require_the_bearer_token() -> None:
+    config = yaml.safe_load(_COLLECTOR_CONFIG_PATH.read_text())
+    assert "bearertokenauth/otlp" in config["service"]["extensions"]
+    assert config["extensions"]["bearertokenauth/otlp"]["token"] == (
+        "${env:TELEMETRY_OTLP_TOKEN}"
+    )
+    for protocol in ("grpc", "http"):
+        receiver = config["receivers"]["otlp"]["protocols"][protocol]
+        assert receiver["auth"]["authenticator"] == "bearertokenauth/otlp"
+
+
+def test_the_collector_gets_its_token_and_the_tls_overlay() -> None:
+    collector = _load_compose()["services"]["otel_collector"]
+    assert collector["environment"]["TELEMETRY_OTLP_TOKEN"] == (
+        "${TELEMETRY_OTLP_TOKEN:-}"
+    )
+    assert (
+        "${FLOWMESH_COLLECTOR_TLS_CONFIG_ARG?set by flowmesh stack}"
+        in collector["command"]
+    )
+    tls = yaml.safe_load(
+        asset_path("flowmesh_cli_stack.assets", "otel-collector-tls.yaml").read_text()
+    )
+    for protocol in ("grpc", "http"):
+        assert tls["receivers"]["otlp"]["protocols"][protocol]["tls"] == {
+            "cert_file": "/etc/otelcol-contrib/tls/server.pem",
+            "key_file": "/etc/otelcol-contrib/tls/server.key",
+        }
+
+
+def test_the_collector_mounts_only_the_server_cert_and_key() -> None:
+    collector = _load_compose()["services"]["otel_collector"]
+    assert collector["volumes"] == [
+        "${FLOWMESH_COLLECTOR_TLS_CERT:?set by flowmesh stack}"
+        ":/etc/otelcol-contrib/tls/server.pem:ro",
+        "${FLOWMESH_COLLECTOR_TLS_KEY:?set by flowmesh stack}"
+        ":/etc/otelcol-contrib/tls/server.key:ro",
+    ]
+
+
+def test_the_collector_runs_unprivileged() -> None:
+    collector = _load_compose()["services"]["otel_collector"]
+    assert collector["user"] == "${FLOWMESH_COLLECTOR_USER:?set by flowmesh stack}"
+    assert collector["read_only"] is True
+    assert collector["cap_drop"] == ["ALL"]
+    assert collector["security_opt"] == ["no-new-privileges:true"]

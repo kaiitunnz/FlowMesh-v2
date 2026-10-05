@@ -1,6 +1,9 @@
+import email.utils
 import logging
+import math
 import os
 import threading
+from datetime import UTC, datetime
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 from typing import Any, ClassVar
@@ -13,7 +16,13 @@ from shared.tasks.task_type import TaskType
 from shared.utils.redact import is_credential_key, redact_url
 
 from ..utils.redaction import redact_urls
-from .base_executor import ExecutionError, Executor, ExecutorTask
+from .base_executor import (
+    ExecutionError,
+    Executor,
+    ExecutorTask,
+    RunSignals,
+    TaskCancelledError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +41,35 @@ _ROUTING_HEADERS = frozenset(
 )
 _ROUTING_HEADER_PREFIX = "x-forwarded-"
 
+# Base delay between retry attempts, doubled each retry.
+_RETRY_BACKOFF_SEC = 1.0
+# Upper bound on any single retry wait.
+_RETRY_BACKOFF_MAX_SEC = 60.0
+# Upper bound on spec.api.retries.
+_MAX_RETRIES = 10
+# Transient failures that, raised for the task's own request rather than a redirect hop,
+# mean it never left the worker, so sending it again cannot repeat its effect.
+_UNSENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
 
 def _is_routing_header(name: str) -> bool:
     lowered = name.strip().lower()
     return lowered in _ROUTING_HEADERS or lowered.startswith(_ROUTING_HEADER_PREFIX)
+
+
+def _never_sent(exc: httpx.RequestError, request: httpx.Request) -> bool:
+    """Whether ``exc`` failed ``request`` itself before any of it reached a server."""
+    if not isinstance(exc, (*_UNSENT_ERRORS, httpx.UnsupportedProtocol)):
+        return False
+    try:
+        return exc.request is request
+    except RuntimeError:
+        return False
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    """Whether an HTTP status is transient and worth retrying."""
+    return status_code >= 500 or status_code in (408, 429)
 
 
 class APIExecutor(Executor):
@@ -55,6 +89,14 @@ class APIExecutor(Executor):
     # ---- Class-level connection pool (shared across all instances) ----
     _clients: ClassVar[dict[_ClientKey, httpx.Client]] = {}
     _clients_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._signals = RunSignals()
+
+    def cancel(self, task_id: str) -> None:
+        """Signal the executor to abort the current request and any retries."""
+        self._signals.cancel(task_id)
 
     @classmethod
     def _base_url(cls, url: str) -> str:
@@ -101,6 +143,101 @@ class APIExecutor(Executor):
             )
             return client
 
+    def _request_with_retries(
+        self,
+        client: httpx.Client,
+        method: str,
+        url: str,
+        headers: dict[str, Any],
+        params: dict[str, Any] | None,
+        request_kwargs: dict[str, Any],
+        retries: int,
+    ) -> httpx.Response:
+        """Issue the request, retrying transient failures up to ``retries`` times.
+
+        A retryable failure is a connection error on the task's own request, which
+        never left the worker, or a transient HTTP status (5xx, 408, 429). Any other
+        failure and a cancelled task stop the loop immediately. A request failure
+        raises an ``ExecutionError`` that is ambiguous unless the request never left;
+        the final attempt's error status returns to the caller.
+        """
+        attempt = 0
+        while True:
+            self._signals.raise_if_cancelled()
+            request = client.build_request(
+                method, url, headers=headers, params=params, **request_kwargs
+            )
+            try:
+                resp = client.send(request)
+            except httpx.RequestError as exc:
+                unsent = _never_sent(exc, request)
+                if unsent and isinstance(exc, _UNSENT_ERRORS) and attempt < retries:
+                    attempt += 1
+                    delay = self._backoff_delay(attempt)
+                    logger.warning(
+                        "API request failed (attempt %d/%d): %s; retrying in %.1fs",
+                        attempt,
+                        retries,
+                        redact_urls(str(exc), url),
+                        delay,
+                    )
+                    self._wait_for_backoff(delay)
+                    continue
+                raise ExecutionError(
+                    redact_urls(f"API request failed: {exc}", url),
+                    retryable=True,
+                    ambiguous=not unsent,
+                ) from exc
+            if resp.is_error and _is_retryable_status(resp.status_code):
+                if attempt >= retries:
+                    return resp
+                attempt += 1
+                delay = self._backoff_delay(attempt, resp)
+                logger.warning(
+                    "API request returned %s (attempt %d/%d); retrying in %.1fs",
+                    resp.status_code,
+                    attempt,
+                    retries,
+                    delay,
+                )
+                self._wait_for_backoff(delay)
+                continue
+            return resp
+
+    def _backoff_delay(self, attempt: int, resp: httpx.Response | None = None) -> float:
+        """Return the wait before the next attempt, honouring Retry-After."""
+        if resp is not None:
+            retry_after = self._retry_after_seconds(resp)
+            if retry_after is not None:
+                return min(retry_after, _RETRY_BACKOFF_MAX_SEC)
+        return min(_RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), _RETRY_BACKOFF_MAX_SEC)
+
+    @staticmethod
+    def _retry_after_seconds(resp: httpx.Response) -> float | None:
+        """Parse the Retry-After header as seconds or an HTTP date."""
+        value = resp.headers.get("Retry-After")
+        if value is None:
+            return None
+        try:
+            seconds = float(value)
+        except ValueError:
+            pass
+        else:
+            if math.isfinite(seconds) and seconds >= 0:
+                return seconds
+        try:
+            retry_at = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
+
+    def _wait_for_backoff(self, delay: float) -> None:
+        """Wait out the retry backoff, aborting early if the task is cancelled."""
+        if self._signals.wait_cancelled(delay):
+            raise TaskCancelledError("API request cancelled")
+
     @classmethod
     def close_all_clients(cls) -> None:
         """Close and discard all cached HTTP clients."""
@@ -118,6 +255,10 @@ class APIExecutor(Executor):
         self.close_all_clients()
 
     def run(self, task: ExecutorTask, out_dir: Path) -> APIResult:
+        with self._signals.running(task.task_id):
+            return self._run(task, out_dir)
+
+    def _run(self, task: ExecutorTask, out_dir: Path) -> APIResult:
         spec = self.require_spec(task, ApiSpecStrict)
         api_cfg = spec.api or {}
         if not isinstance(api_cfg, dict):
@@ -194,20 +335,17 @@ class APIExecutor(Executor):
         raise_for_status = bool(response_cfg.get("raise_for_status", True))
         max_body_bytes = int(response_cfg.get("max_body_bytes", 200000))
 
-        try:
-            base = self._base_url(str(url))
-            client = self._get_client(base, timeout, verify_tls, follow_redirects)
-            resp = client.request(
-                method,
-                str(url),
-                headers=headers,
-                params=params,
-                **request_kwargs,
-            )
-        except httpx.RequestError as exc:
-            raise ExecutionError(
-                redact_urls(f"API request failed: {exc}", str(url)), retryable=True
-            ) from exc
+        retries = api_cfg.get("retries", 0)
+        if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
+            raise ExecutionError("spec.api.retries must be a non-negative integer")
+        if retries > _MAX_RETRIES:
+            raise ExecutionError(f"spec.api.retries must be at most {_MAX_RETRIES}")
+
+        base = self._base_url(str(url))
+        client = self._get_client(base, timeout, verify_tls, follow_redirects)
+        resp = self._request_with_retries(
+            client, method, str(url), headers, params, request_kwargs, retries
+        )
 
         body_bytes = resp.content
         truncated = False
@@ -232,8 +370,18 @@ class APIExecutor(Executor):
             encoding = resp.encoding or "utf-8"
             body_text = body_bytes.decode(encoding, errors="replace")
 
+        if raise_for_status and resp.is_error:
+            message = f"API request returned status {resp.status_code}"
+            if body_text:
+                message = f"{message}: {body_text[:200]}"
+            retryable = _is_retryable_status(resp.status_code)
+            raise ExecutionError(message, retryable=retryable)
+
         if parse_json:
-            result.response_json = resp.json()
+            try:
+                result.response_json = resp.json()
+            except (ValueError, RecursionError) as exc:
+                raise ExecutionError("Response is not a valid JSON mapping") from exc
             if not isinstance(result.response_json, dict):
                 raise ExecutionError("Response is not a valid JSON mapping")
             usage = result.response_json.get("usage")
@@ -252,12 +400,5 @@ class APIExecutor(Executor):
                 ) from exc
         elif return_body:
             result.text = body_text
-
-        if raise_for_status and resp.is_error:
-            message = f"API request returned status {resp.status_code}"
-            if body_text:
-                message = f"{message}: {body_text[:200]}"
-            retryable = resp.status_code >= 500 or resp.status_code in (408, 429)
-            raise ExecutionError(message, retryable=retryable)
 
         return result

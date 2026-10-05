@@ -52,7 +52,7 @@ class _ShippedLikeExecutor(GovernanceMixin, Executor):
 
     name = "echo"
 
-    def __init__(self) -> None:  # noqa: D107
+    def __init__(self) -> None:
         # Deliberately skips Executor.__init__ (it requires a WorkerConfig this
         # test has no use for); _task_span sets every attribute it needs itself.
         self._task_id: str | None = None
@@ -83,7 +83,7 @@ class _SpanCapturingExecutor(Executor):
     name = "echo"
     captured: dict[str, Any]
 
-    def __init__(self) -> None:  # noqa: D107
+    def __init__(self) -> None:
         self.captured = {}
 
     def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:

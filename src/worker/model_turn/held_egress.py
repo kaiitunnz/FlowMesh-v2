@@ -105,7 +105,7 @@ class HeldModelEgress:
                         request_digest=digest,
                     )
                 )
-            except Exception as exc:  # noqa: BLE001 - a propose fault fails the turn
+            except Exception as exc:  # a propose fault fails the turn
                 self._log.warning("held model propose failed: %s", exc)
                 self._pending.discard(task_id, call_correlation, request)
                 return HeldEgressReject(reason="could not propose the model turn")

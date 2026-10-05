@@ -329,6 +329,7 @@ class Lifecycle:
         retryable: bool = True,
         failure_kind: TaskFailureKind | None = None,
         unavailable_inputs: tuple[ContentReference, ...] = (),
+        ambiguous: bool = False,
     ):
         try:
             self.client.task_failed(
@@ -336,6 +337,7 @@ class Lifecycle:
                 error=error,
                 metadata=metadata,
                 retryable=retryable,
+                ambiguous=ambiguous,
                 failure_kind=failure_kind,
                 unavailable_inputs=unavailable_inputs,
             )

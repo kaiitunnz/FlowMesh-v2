@@ -29,7 +29,7 @@ def _task(**spec: Any) -> WorkerTaskMessage:
             "dispatched_at": "2026-03-22T00:00:00Z",
             "upstream_task_ids": {"up": "tsk-up"},
             "task": {
-                "apiVersion": "mloc/v1",
+                "apiVersion": "flowmesh/v1",
                 "kind": "Task",
                 "metadata": {"name": "wf:s"},
                 "spec": {

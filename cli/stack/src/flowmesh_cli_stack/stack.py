@@ -19,7 +19,7 @@ from flowmesh_stack.docker import (
     profile_args,
 )
 from flowmesh_stack.doctor import DoctorFinding, run_doctor_checks
-from flowmesh_stack.env import ensure_env_file, load_env, parse_env_file
+from flowmesh_stack.env import ensure_env_file
 from flowmesh_stack.env_schema import render_env_example
 from flowmesh_stack.images import (
     BUILD_GROUPS,
@@ -31,17 +31,21 @@ from flowmesh_stack.images import (
 
 from .env_schema import (
     STACK_ENV_SCHEMA,
+    collector_token_error,
     credential_overrides,
     deploy_overrides,
     role_overrides,
 )
 from .utils import (
     DEFAULT_ENV_FILE,
-    STACK_PATH_KEYS,
+    apply_collector_tls_env,
     apply_plugin_data_env,
+    apply_stack_path_env,
     apply_stack_resource_env,
     ensure_deploy_paths,
+    load_stack_env,
     parse_node_role,
+    read_stack_env,
     resolve_package_version,
     stack_bake_file,
     stack_compose_file,
@@ -53,16 +57,23 @@ from .worker import worker_pull
 app = get_typer(help="Build, manage, and run the FlowMesh stack.")
 
 
-def _stack() -> DockerComposeStack:
+def _stack(start_collector: bool = False) -> DockerComposeStack:
+    """The stack, resolving the collector's TLS files only when ``start_collector``
+    says the command may start or recreate it."""
+
     def _load(env_file: Path) -> None:
         ensure_env_file(env_file, stack_env_example())
-        load_env(env_file, base_dir=Path.cwd(), path_keys=STACK_PATH_KEYS)
+        load_stack_env(env_file)
         try:
             apply_stack_resource_env()
+            apply_stack_path_env(Path.cwd())
+            apply_plugin_data_env(Path.cwd())
+            apply_collector_tls_env(resolve=start_collector)
+            if start_collector and (message := collector_token_error(os.environ)):
+                raise ValueError(message)
         except ValueError as exc:
             logging.error(str(exc))
             raise typer.Exit(code=1)
-        apply_plugin_data_env(Path.cwd())
 
     return DockerComposeStack(
         compose_file=stack_compose_file(),
@@ -98,7 +109,7 @@ def _profiles(env_file: Path, profile: str | None) -> list[str]:
     passed explicitly here, de-duplicated and order-preserving.
     """
     selected = [profile] if profile else []
-    env = parse_env_file(env_file)
+    env = read_stack_env(env_file)
     raw = env.get("COMPOSE_PROFILES", "")
     selected.extend(name for part in raw.split(",") if (name := part.strip()))
     if _colocates_content_store(env):
@@ -115,17 +126,20 @@ def _compose(
     env: dict[str, str] | None,
     to_deploy: bool = False,
     profile: str | None = None,
+    start_collector: bool = False,
 ) -> None:
     ensure_env_file(env_file, stack_env_example())
     full_args = profile_args(_profiles(env_file, profile)) + args
-    result = _stack().run(full_args, env_file=env_file, env=env, to_deploy=to_deploy)
+    result = _stack(start_collector).run(
+        full_args, env_file=env_file, env=env, to_deploy=to_deploy
+    )
     if result.returncode != 0:
         raise typer.Exit(code=result.returncode)
 
 
 def _node_role(env_file: Path) -> NodeRole:
     """Return the configured NODE_ROLE (root | worker), defaulting to root if unset."""
-    raw = parse_env_file(env_file).get("NODE_ROLE", "").strip()
+    raw = read_stack_env(env_file).get("NODE_ROLE", "").strip()
     try:
         return NodeRole(raw.lower()) if raw else NodeRole.ROOT
     except ValueError:
@@ -283,7 +297,7 @@ def _run_bake(
     build_ref: str | None = None,
 ) -> None:
     ensure_env_file(env_file, stack_env_example())
-    load_env(env_file, base_dir=Path.cwd(), path_keys=STACK_PATH_KEYS)
+    load_stack_env(env_file)
 
     try:
         ensure_docker_available()
@@ -536,6 +550,7 @@ def up(
         env=image_env_overrides(image_tag),
         to_deploy=True,
         profile=profile,
+        start_collector=True,
     )
     logging.success("FlowMesh stack is up.")
 
@@ -571,8 +586,14 @@ def down(
     logging.success("FlowMesh stack stopped.")
 
 
-STACK_SERVICES = ("server", "redis_control", "redis_telemetry")
-"""Compose services that can be restarted individually."""
+STACK_SERVICES = {
+    "server": None,
+    "redis_control": "root",
+    "redis_telemetry": "root",
+    "otel_collector": "telemetry",
+}
+"""Compose services that can be restarted individually, each with the compose profile
+it runs under."""
 
 WORKER_MANAGING_SERVICES = ("server",)
 """Services whose restart tears down the supervisor; drain workers first."""
@@ -620,6 +641,7 @@ def restart(
             env=image_env_overrides(image_tag),
             to_deploy=True,
             profile=profile,
+            start_collector=True,
         )
         logging.success("FlowMesh stack is up.")
         return
@@ -633,11 +655,23 @@ def restart(
         )
         raise typer.Exit(code=1)
 
+    profile = "root" if _node_role(env_file) == NodeRole.ROOT else None
+    active = _profiles(env_file, profile)
+    if inactive := [
+        f"{svc} (profile {needed})"
+        for svc in requested
+        if (needed := STACK_SERVICES[svc]) is not None and needed not in active
+    ]:
+        logging.error(
+            f"This node does not run {', '.join(inactive)}; "
+            f"its active profiles are: {', '.join(active) or 'none'}."
+        )
+        raise typer.Exit(code=1)
+
     if any(svc in WORKER_MANAGING_SERVICES for svc in requested):
         logging.info("Draining workers...")
         _drain_workers(env_file)
 
-    profile = "root" if _node_role(env_file) == NodeRole.ROOT else None
     up_args = ["up", "-d", "--no-deps", "--force-recreate", "--wait"]
     if pull:
         up_args += ["--pull", "always"]
@@ -650,6 +684,7 @@ def restart(
         env=image_env_overrides(image_tag),
         to_deploy=True,
         profile=profile,
+        start_collector="otel_collector" in requested,
     )
     logging.success(f"Service(s) restarted: {joined}.")
 

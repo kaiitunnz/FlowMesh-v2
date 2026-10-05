@@ -83,18 +83,37 @@ jobs:
         with:
           version: "0.11.26"
       - name: Run pip-audit (server)
-        # Drop ``@ git+`` deps before auditing — not on PyPI, no CVE feed.
+        # The constraints pin the packages the server image takes from uv.lock.
         run: |
-          grep -v '@ git+' src/server/requirements.txt > /tmp/requirements-server-audit.txt
-          uvx pip-audit==2.10.1 --strict \
-            -r /tmp/requirements-server-audit.txt
-      - name: Run pip-audit (worker CPU)
-        # Drop ``@ git+`` deps before auditing — not on PyPI, no CVE feed.
+          uvx pip-audit==2.10.1 --strict --disable-pip --no-deps \
+            -r src/server/constraints.txt
+      - name: Run pip-audit (worker)
+        # The constraints pin the packages the worker images take from uv.lock; the GPU
+        # delta run covers those the CUDA image resolves for itself.
         run: |
-          grep -v '@ git+' src/worker/requirements/requirements.txt > /tmp/requirements-worker-cpu-audit.txt
-          uvx pip-audit==2.10.1 --strict \
+          uvx pip-audit==2.10.1 --strict --disable-pip --no-deps \
+            --ignore-vuln PYSEC-2026-3740 \
             --ignore-vuln PYSEC-2026-3804 \
-            -r /tmp/requirements-worker-cpu-audit.txt
+            -r src/worker/requirements/constraints.txt
+      - name: Run pip-audit (image-resolved packages)
+        # The packages the constraints leave for each image to resolve, at the
+        # versions its build resolves them to.
+        run: |
+          audit_resolved() {  # audit_resolved <image> <requirements dir> [compile args]
+            local image="$1" dir="$2"
+            shift 2
+            uv pip compile "$dir/requirements.txt" -c "$dir/constraints.txt" "$@" \
+              --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
+              --no-header --no-annotate -q -o "$RUNNER_TEMP/$image-resolved.txt"
+            uv run --no-project python scripts/dev/sync_requirements.py \
+              --excluded "$image" "$RUNNER_TEMP/$image-resolved.txt" \
+              > "$RUNNER_TEMP/$image-excluded.txt"
+            echo "$image resolves: $(paste -sd' ' "$RUNNER_TEMP/$image-excluded.txt")"
+            uvx pip-audit==2.10.1 --strict --disable-pip --no-deps \
+              -r "$RUNNER_TEMP/$image-excluded.txt"
+          }
+          audit_resolved server src/server
+          audit_resolved worker src/worker/requirements --torch-backend cpu
       - name: Run pip-audit (worker GPU delta)  # no --strict: flashinfer-jit-cache and the vllm +cu129 wheel are unauditable on PyPI
         run: |
           uvx pip-audit==2.10.1 \

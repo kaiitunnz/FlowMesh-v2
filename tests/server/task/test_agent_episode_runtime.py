@@ -8,7 +8,6 @@ ledger and re-readies or suspends the lane.
 """
 
 import asyncio
-import threading
 from typing import Any
 
 import pytest
@@ -39,6 +38,7 @@ from shared.schemas.event import WorkerEvent
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_task_merge import _monitor, _Registry
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
+from tests.support.waiting import pop_ready
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
@@ -796,9 +796,12 @@ def test_normal_and_group_settles_are_unchanged_by_the_guard() -> None:
 
     eng = _search_engine()
     eng.route_facade_turn_group("A", _search_group(2))
-    assert eng.work_item("A").status is WorkItemStatus.BLOCKED
+    assert (item := eng.work_item("A")) is not None
+    assert item.status is WorkItemStatus.BLOCKED
     first = eng.settle_boundary_outcome("A", "A:0:0", value="r0")
-    assert not first.ready and eng.work_item("A").status is WorkItemStatus.BLOCKED
+    assert not first.ready
+    assert (item := eng.work_item("A")) is not None
+    assert item.status is WorkItemStatus.BLOCKED
     last = eng.settle_boundary_outcome("A", "A:0:1", value="r1")
     assert last.ready == ["A"]
 
@@ -1009,7 +1012,7 @@ def test_a_boundary_whose_settle_a_crash_cut_short_is_issued_again() -> None:
         assert restored.settle_episode_invocation(
             writer, env.call_correlation, "model:draft"
         )
-        assert restored.next_ready(threading.Event(), timeout=0.01) == writer
+        assert pop_ready(restored) == writer
         dispatch = restored.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
         assert [o.value for o in dispatch.delivered_outcomes] == ["model:draft"]
@@ -1040,7 +1043,7 @@ def test_an_agent_suspended_on_a_boundary_outlives_its_worker(how: str) -> None:
         assert runtime.settle_episode_invocation(
             writer, env.call_correlation, "model:draft"
         )
-        assert runtime.next_ready(threading.Event(), timeout=0.01) == writer
+        assert pop_ready(runtime) == writer
         dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
         assert [o.value for o in dispatch.delivered_outcomes] == ["model:draft"]

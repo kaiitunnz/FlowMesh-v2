@@ -41,7 +41,7 @@ _BATCH_OUTPUTS = ("Mars", "Pacific", "Nile")
 class _FixedExecutor(Executor):
     name = "fixed"
 
-    def __init__(self, result: BaseExecutorResult) -> None:  # noqa: D107
+    def __init__(self, result: BaseExecutorResult) -> None:
         self._result = result
 
     def run(self, task, out_dir):  # type: ignore[no-untyped-def]

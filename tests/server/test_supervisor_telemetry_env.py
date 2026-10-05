@@ -6,6 +6,7 @@ adapter's override of it) or worker-side telemetry silently never turns on.
 """
 
 import pytest
+from pydantic import SecretStr
 
 from server import env
 from server.hooks import PrincipalContext
@@ -51,6 +52,8 @@ def _set_telemetry_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(env, "SERVER_METRICS_METRICS_ENABLED", False)
     monkeypatch.setattr(env, "SERVER_METRICS_TRACE_SAMPLE_RATIO", 0.5)
     monkeypatch.setattr(env, "SERVER_METRICS_OTLP_ENDPOINT", "http://collector:4317")
+    monkeypatch.setattr(env, "SERVER_METRICS_OTLP_TOKEN", SecretStr("otlp-token"))
+    monkeypatch.setattr(env, "SERVER_METRICS_OTLP_CA_B64", "cm9vdC1jYQ==")
     monkeypatch.setattr(env, "SERVER_METRICS_OTLP_TIMEOUT_SEC", 20)
     monkeypatch.setattr(env, "SERVER_METRICS_RESOURCE_SAMPLE_SEC", 30)
 
@@ -61,6 +64,8 @@ def _assert_telemetry_env(environment: dict[str, str]) -> None:
     assert environment["SERVER_METRICS_METRICS_ENABLED"] == "0"
     assert environment["SERVER_METRICS_TRACE_SAMPLE_RATIO"] == "0.5"
     assert environment["SERVER_METRICS_OTLP_ENDPOINT"] == "http://collector:4317"
+    assert environment["SERVER_METRICS_OTLP_TOKEN"] == "otlp-token"
+    assert environment["SERVER_METRICS_OTLP_CA_B64"] == "cm9vdC1jYQ=="
     assert environment["SERVER_METRICS_OTLP_TIMEOUT_SEC"] == "20"
     assert environment["SERVER_METRICS_RESOURCE_SAMPLE_SEC"] == "30"
 

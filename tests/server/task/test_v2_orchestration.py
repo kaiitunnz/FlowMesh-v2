@@ -42,6 +42,7 @@ from shared.tasks import PERSISTED_LOAD_CONTEXT
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
+from tests.support.waiting import pop_ready
 
 # --------------------------------------------------------------------------- #
 # Durable store double
@@ -282,10 +283,9 @@ _TS = "2026-06-01T00:00:00Z"
 
 def _drain(runtime: TaskRuntime, worker_id: str = "wkr-1") -> list[str]:
     """Dispatch and complete every ready task until the queue drains; returns order."""
-    stop = threading.Event()
     order: list[str] = []
     while runtime.ready_queue_length() > 0:
-        task_id = runtime.next_ready(stop, timeout=0.01)
+        task_id = pop_ready(runtime)
         if task_id is None:
             break
         order.append(task_id)
@@ -297,10 +297,9 @@ def _drain(runtime: TaskRuntime, worker_id: str = "wkr-1") -> list[str]:
 
 def _pop_ready(runtime: TaskRuntime) -> list[str]:
     """Pop every currently-ready task id without completing them."""
-    stop = threading.Event()
     ready: list[str] = []
     while runtime.ready_queue_length() > 0:
-        task_id = runtime.next_ready(stop, timeout=0.01)
+        task_id = pop_ready(runtime)
         if task_id is None:
             break
         ready.append(task_id)
@@ -390,7 +389,7 @@ async def test_live_spawn_fans_out_children_to_real_dispatch() -> None:
     indices: list[int] = []
     for child in children:
         assert child.startswith("act-")
-        record = runtime._tasks[child]  # noqa: SLF001 - inspects the synthesized record
+        record = runtime._tasks[child]
         assert record.status is TaskStatus.PENDING
         assert child in registry.dynamic_task_ids[workflow_id]  # persisted durably
         # The record names its element rather than carrying it.
@@ -771,9 +770,8 @@ async def test_conditional_skip_publishes_explicit_empty() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b = ids["a"], ids["b"]
-    stop = threading.Event()
 
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
     # A conditional skip settles the declared output as explicit-empty, yet still
     # releases the successor (matching the v1 skip-as-success behavior).
@@ -781,7 +779,7 @@ async def test_conditional_skip_publishes_explicit_empty() -> None:
     pub = runtime.resolve_v2_legacy_result(workflow_id, a)
     assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
     assert pub.value_ref is not None and pub.value_ref.kind == "empty"
-    assert runtime.next_ready(stop, timeout=0.01) == b
+    assert pop_ready(runtime) == b
 
 
 @pytest.mark.anyio
@@ -790,17 +788,16 @@ async def test_diamond_dag_joins_on_both_predecessors() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, DIAMOND)
 
-    stop = threading.Event()
     # a is the only root.
-    assert runtime.next_ready(stop, timeout=0.01) == ids["a"]
+    assert pop_ready(runtime) == ids["a"]
     record_dispatch(runtime, ids["a"], cast(Any, _worker()))
     runtime.mark_succeeded(ids["a"], "wkr-1", {}, "2026-06-01T00:00:00Z")
 
     # a frees b and c, but not d.
     assert runtime.ready_queue_length() == 2
     freed = {
-        runtime.next_ready(stop, timeout=0.01),
-        runtime.next_ready(stop, timeout=0.01),
+        pop_ready(runtime),
+        pop_ready(runtime),
     }
     assert freed == {ids["b"], ids["c"]}
     for name in ("b", "c"):
@@ -810,7 +807,7 @@ async def test_diamond_dag_joins_on_both_predecessors() -> None:
     assert runtime.ready_queue_length() == 0
     runtime.mark_succeeded(ids["c"], "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert runtime.ready_queue_length() == 1
-    assert runtime.next_ready(stop, timeout=0.01) == ids["d"]
+    assert pop_ready(runtime) == ids["d"]
 
 
 @pytest.mark.anyio
@@ -818,16 +815,15 @@ async def test_scheduler_placement_does_not_change_readiness() -> None:
     registry = FakeRegistry()
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
-    stop = threading.Event()
 
-    assert runtime.next_ready(stop, timeout=0.01) == ids["a"]
+    assert pop_ready(runtime) == ids["a"]
     # Placing a on any worker never readies b; only a's settlement does.
     record_dispatch(runtime, ids["a"], cast(Any, _worker("wkr-A")))
     assert runtime.ready_queue_length() == 0
     runtime.mark_started(ids["a"], "wkr-A", {}, "2026-06-01T00:00:00Z")
     assert runtime.ready_queue_length() == 0
     runtime.mark_succeeded(ids["a"], "wkr-A", {}, "2026-06-01T00:00:00Z")
-    assert runtime.next_ready(stop, timeout=0.01) == ids["b"]
+    assert pop_ready(runtime) == ids["b"]
 
 
 # --------------------------------------------------------------------------- #
@@ -841,9 +837,8 @@ async def test_retry_creates_new_attempt_same_work_item_and_invocation() -> None
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a = ids["a"]
-    stop = threading.Event()
 
-    assert runtime.next_ready(stop, timeout=0.01) == a
+    assert pop_ready(runtime) == a
     record_dispatch(runtime, a, cast(Any, _worker()))
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
@@ -856,7 +851,7 @@ async def test_retry_creates_new_attempt_same_work_item_and_invocation() -> None
     runtime.fail_dispatch(
         a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom", retryable=True
     )
-    assert runtime.next_ready(stop, timeout=0.01) == a
+    assert pop_ready(runtime) == a
     record_dispatch(runtime, a, cast(Any, _worker("wkr-2")))
     runtime.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
 
@@ -876,14 +871,13 @@ async def test_declared_output_one_publication_across_retries() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a = ids["a"]
-    stop = threading.Event()
 
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.fail_dispatch(
         a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom", retryable=True
     )
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker("wkr-2")))
     runtime.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
 
@@ -904,9 +898,8 @@ async def test_terminal_failure_cascades_to_dependents() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b, c = ids["a"], ids["b"], ids["c"]
-    stop = threading.Event()
 
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
     impacted, _ = runtime.mark_failed(
         a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom"
@@ -932,9 +925,8 @@ async def test_lost_ack_replayable_retried_through_stable_invocation() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a = ids["a"]
-    stop = threading.Event()
 
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
     engine = runtime.orchestration_engine(workflow_id)
     invocation_id = engine.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
@@ -944,7 +936,7 @@ async def test_lost_ack_replayable_retried_through_stable_invocation() -> None:
     advance = runtime.mark_v2_uncertain(a)
     assert advance.retry == [a]
     assert runtime.resolve_v2_legacy_result(workflow_id, a) is None  # not published
-    assert runtime.next_ready(stop, timeout=0.01) == a
+    assert pop_ready(runtime) == a
     record_dispatch(runtime, a, cast(Any, _worker("wkr-2")))
     assert engine.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
 
@@ -955,9 +947,8 @@ async def test_worker_loss_recovery_routes_through_uncertainty_fsm() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a = ids["a"]
-    stop = threading.Event()
 
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker("wkr-dead")))
     engine = runtime.orchestration_engine(workflow_id)
     invocation_id = engine.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
@@ -966,7 +957,7 @@ async def test_worker_loss_recovery_routes_through_uncertainty_fsm() -> None:
     # uncertainty FSM itself, so it is not returned for a synthetic failure.
     assert runtime.recover_tasks_for_worker("wkr-dead", spend_attempt=True).lost == []
     assert runtime.get_record(a).status == TaskStatus.PENDING  # type: ignore[union-attr]
-    assert runtime.next_ready(stop, timeout=0.01) == a
+    assert pop_ready(runtime) == a
     record_dispatch(runtime, a, cast(Any, _worker("wkr-2")))
     assert engine.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
 
@@ -984,9 +975,8 @@ async def test_rehydration_heals_when_ledger_snapshot_lags_terminal_records() ->
     a, b, c = ids["a"], ids["b"], ids["c"]
     # Snapshot the ledger as it stood at submission, before any settlement.
     stale_ledger = registry.ledger_blobs[workflow_id]
-    stop = threading.Event()
 
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom")
     # Simulate a crash after the terminal task records committed but before the ledger
@@ -1048,9 +1038,8 @@ async def test_rehydration_replays_a_cancel_left_mid_flight() -> None:
     solo = ids["solo"]
     # Snapshot the ledger as it stood before the cancel.
     stale_ledger = registry.ledger_blobs[workflow_id]
-    stop = threading.Event()
 
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, solo, cast(Any, _worker()))
     runtime.cancel_workflow(workflow_id)
     assert runtime.get_record(solo).status == TaskStatus.CANCELLING  # type: ignore[union-attr]
@@ -1079,9 +1068,8 @@ async def test_rehydration_readmits_task_orphaned_by_a_mid_retry_crash() -> None
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b = ids["a"], ids["b"]
-    stop = threading.Event()
 
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
     # Snapshot the ledger while a's work item is in flight (DISPATCHED).
     dispatched_ledger = registry.ledger_blobs[workflow_id]
@@ -1098,11 +1086,11 @@ async def test_rehydration_readmits_task_orphaned_by_a_mid_retry_crash() -> None
     # Rehydration re-derives readiness and re-admits a rather than orphaning it.
     assert restored.get_record(a).status == TaskStatus.PENDING  # type: ignore[union-attr]
     assert restored.ready_queue_length() == 1
-    assert restored.next_ready(stop, timeout=0.01) == a
+    assert pop_ready(restored) == a
     # The workflow makes progress from there.
     record_dispatch(restored, a, cast(Any, _worker("wkr-2")))
     restored.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
-    assert restored.next_ready(stop, timeout=0.01) == b
+    assert pop_ready(restored) == b
 
 
 @pytest.mark.anyio
@@ -1111,9 +1099,8 @@ async def test_rehydration_preserves_publications_without_duplication() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b, c = ids["a"], ids["b"], ids["c"]
-    stop = threading.Event()
 
-    runtime.next_ready(stop, timeout=0.01)
+    pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
 
@@ -1133,7 +1120,7 @@ async def test_rehydration_preserves_publications_without_duplication() -> None:
     )
     # b (a's dependent) is re-admitted as the sole ready work item; c stays blocked.
     assert restored.ready_queue_length() == 1
-    assert restored.next_ready(stop, timeout=0.01) == b
+    assert pop_ready(restored) == b
     assert restored.ready_queue_length() == 0
     assert restored.get_record(c).status == TaskStatus.PENDING  # type: ignore[union-attr]
 
@@ -1182,10 +1169,9 @@ async def test_cancel_after_partial_completion_preserves_settled_output() -> Non
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b, c = ids["a"], ids["b"], ids["c"]
-    stop = threading.Event()
 
     # a completes; b and c are still pending behind it, then the workflow is cancelled.
-    assert runtime.next_ready(stop, timeout=0.01) == a
+    assert pop_ready(runtime) == a
     record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     runtime.cancel_workflow(workflow_id, reason="user cancelled")

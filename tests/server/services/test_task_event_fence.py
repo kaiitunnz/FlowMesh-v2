@@ -32,7 +32,7 @@ from tests.server.task.test_v2_orchestration import _TS, AUTORESEARCH, _planned
 from worker.executors.harness.scripted import ScriptedHarnessAdapter
 
 _ECHO = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata: {name: fence}
 spec:

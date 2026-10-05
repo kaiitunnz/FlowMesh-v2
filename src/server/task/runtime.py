@@ -3957,13 +3957,16 @@ class TaskRuntime:
         finally:
             self._release_pending_terminations()
 
-    def _resolve_uncertain_locked(self, task_id: str) -> Advance:
+    def _resolve_uncertain_locked(
+        self, task_id: str, error: str | None = None
+    ) -> Advance:
         """Resolve an in-flight work item's uncertainty; a failure terminalizes the
-        boundary invocations it held, whose credits release once the ledger is saved."""
+        boundary invocations it held, whose credits release once the ledger is saved.
+        ``error`` is the executor's message for a reported failure."""
         record = self._tasks.get(task_id)
         if record is None or (engine := self._engines.get(record.workflow_id)) is None:
             return Advance()
-        advance = engine.on_uncertain(task_id)
+        advance = engine.on_uncertain(task_id, error)
         if advance.retry:
             self._release_dispatch_locked(record, [task_id], front=True)
         elif advance.failed:
@@ -5647,6 +5650,7 @@ class TaskRuntime:
         retryable: bool | None = None,
         failure_kind: TaskFailureKind | None = None,
         unavailable_inputs: Sequence[ContentReference] | None = None,
+        ambiguous: bool = False,
     ) -> FailureOutcome:
         """Apply a worker's report that its dispatch of a task failed.
 
@@ -5654,10 +5658,12 @@ class TaskRuntime:
         run its tasks alone. A task whose inputs were in a store its worker could not
         reach returns without spending an attempt and is held until control has read
         them itself; a report naming no input the task consumes is an ordinary failure.
-        Otherwise the failure is charged to the worker and the task either returns to
-        the head of the queue for another attempt or settles: FAILED, or CANCELLED when
-        a cancel is already under way. A report on a settled task persists its
-        settlement again, and one from any other dispatch is dropped.
+        An ``ambiguous`` retryable v2 failure, after the task's external effect may
+        have happened, settles as its worker's loss would. Otherwise the failure is
+        charged to the worker and the task either returns to the head of the queue for
+        another attempt or settles: FAILED, or CANCELLED when a cancel is already under
+        way. A report on a settled task persists its settlement again, and one from any
+        other dispatch is dropped.
         """
         # Control's verdict on a held task's input is a report of its own, so it never
         # replays the worker report of the same dispatch.
@@ -5682,6 +5688,7 @@ class TaskRuntime:
                     retryable,
                     failure_kind,
                     unavailable_inputs,
+                    ambiguous,
                 ),
             )
         finally:
@@ -5699,6 +5706,7 @@ class TaskRuntime:
         retryable: bool | None,
         failure_kind: TaskFailureKind | None,
         unavailable_inputs: Sequence[ContentReference] | None,
+        ambiguous: bool,
     ) -> FailureOutcome:
         with self._cv:
             record = self._tasks.get(task_id)
@@ -5760,6 +5768,13 @@ class TaskRuntime:
                 )
             if worker_id not in record.failed_workers:
                 record.failed_workers.append(worker_id)
+            if (
+                ambiguous
+                and retryable is not False
+                and record.status == TaskStatus.DISPATCHED
+                and record.workflow_id in self._engines
+            ):
+                return self._settle_ambiguous_failure_locked(record, payload, error)
             if _failed_task_can_retry(record, retryable):
                 end = self._return_dispatch_locked(
                     record, increment_retry=True, front=True
@@ -5775,6 +5790,27 @@ class TaskRuntime:
                 else DispatchEnd.FAILED
             )
             return FailureOutcome(end, record.attempts, impacted, usages)
+
+    def _settle_ambiguous_failure_locked(
+        self,
+        record: TaskRecord,
+        payload: dict[str, Any],
+        error: str | None,
+    ) -> FailureOutcome:
+        """Settle a v2 failure reported after the task's external effect may have
+        happened, as its worker's loss settles it: the task runs again only when its
+        effect is safe to replay."""
+        loss = self._resolve_lost_locked(
+            record, spend_attempt=True, error=error or "task failed"
+        )
+        usages: list[tuple[str, TaskUsage]] = []
+        if loss.end is DispatchEnd.FAILED and (
+            usage := TaskUsage.from_payload(payload, TaskStatus.FAILED)
+        ):
+            record.usages.append(usage)
+            usages.append((record.task_id, usage))
+            self._commit_locked(record.task_id)
+        return FailureOutcome(loss.end, record.attempts, list(loss.impacted), usages)
 
     def _consumed_inputs_locked(
         self, record: TaskRecord, references: Sequence[ContentReference]
@@ -6563,14 +6599,16 @@ class TaskRuntime:
         return _settle_outcome(EventEffect.RETURNED, record, [], [])
 
     def _resolve_lost_locked(
-        self, record: TaskRecord, *, spend_attempt: bool
+        self, record: TaskRecord, *, spend_attempt: bool, error: str | None = None
     ) -> LossOutcome:
-        """Resolve a v2 task whose worker is lost or gave it up.
+        """Resolve a v2 task whose worker is lost or gave it up, or whose executor
+        failed after its external effect may have happened.
 
         It returns to the queue when it can safely run again, spending an attempt when
         ``spend_attempt`` is set, and fails once its attempts run out; a task that
-        cannot safely run again fails. ``impacted`` names each dependent that fails
-        with it. A task nothing resolves ends STALE.
+        cannot safely run again fails. ``error`` is the executor's message for a
+        reported failure, which the task fails with. ``impacted`` names each
+        dependent that fails with it. A task nothing resolves ends STALE.
         """
         self._rehydrated_dispatched.pop(record.task_id, None)
         engine = self._engines.get(record.workflow_id)
@@ -6584,8 +6622,8 @@ class TaskRuntime:
             record.attempts += 1
             if 0 <= record.max_attempts <= record.attempts:
                 record.attempts = record.max_attempts
-                return self._fail_lost_on_last_attempt_locked(record, engine)
-        advance = self._resolve_uncertain_locked(record.task_id)
+                return self._fail_lost_on_last_attempt_locked(record, engine, error)
+        advance = self._resolve_uncertain_locked(record.task_id, error)
         if advance.retry:
             return LossOutcome(record.task_id, DispatchEnd.RETURNED, (), spent)
         if not advance.failed:
@@ -6607,16 +6645,21 @@ class TaskRuntime:
         return LossOutcome(record.task_id, DispatchEnd.FAILED, impacted)
 
     def _fail_lost_on_last_attempt_locked(
-        self, record: TaskRecord, engine: OrchestrationEngine
+        self,
+        record: TaskRecord,
+        engine: OrchestrationEngine,
+        error: str | None = None,
     ) -> LossOutcome:
-        """Fail a v2 task whose worker was lost on its last attempt, with the boundary
-        work it held, as a failed task."""
+        """Fail a v2 task lost on its last attempt, with the boundary work it held, as
+        a failed task: for its executor's ``error`` when it reported one, else for its
+        worker's loss."""
         failed, _ = self._mark_failed(
             record.task_id,
             None,
             {},
             now_iso(),
-            error=(
+            error=error
+            or (
                 f"Worker {record.assigned_worker} was lost on the last of "
                 f"{record.max_attempts} attempts"
             ),

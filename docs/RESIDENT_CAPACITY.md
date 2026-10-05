@@ -173,9 +173,7 @@ may request a specific port within the range, else one is
 auto-allocated. On root restart each persisted live exposure rebinds its same port under a
 fresh listener generation before it serves; a failed rebind stays unavailable rather than
 publishing a new port. A forward binding with no live exposure fails closed. Access is the
-task's ordinary `TASK` read permission. Both modes carry traffic over `control_relay`;
-trusted `worker_direct`/`node_relay` target legs resolve behind the shared claim-gated
-carriage seam.
+task's ordinary `TASK` read permission. Both modes carry traffic over `control_relay`.
 
 ## Replica lifecycle and policy
 

@@ -39,7 +39,7 @@ repos:
         name: sync requirements
         entry: uv run scripts/dev/sync_requirements.py
         language: system
-        files: ^(pyproject\.toml|uv\.lock|src/server/requirements\.txt|src/worker/requirements/|scripts/dev/sync_requirements\.py)
+        files: ^(pyproject\.toml|uv\.lock|src/server/(requirements|constraints)\.txt|src/worker/requirements/|scripts/dev/sync_requirements\.py)
         pass_filenames: false
 
       - id: auto-signoff

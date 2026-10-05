@@ -8,10 +8,9 @@ the same frames as the relay, so the handoff, route authorization, fences, windo
 cancellation are unchanged, and the target-side claim gate remains the only authority
 over the traffic.
 
-The origin is whichever participant control resolved as the route's source. For a
-workflow boundary that is the invocation's own worker, so its payload reaches the target
-without entering the root or the rendezvous at all. For a gated serve request the root
-is itself the origin, and dials on its own behalf.
+The origin is the worker of a workflow boundary, so its payload reaches the target
+without entering the root or the rendezvous at all. A gated serve request has the root
+as its origin and rides ``control_relay``.
 
 A dial that fails before any frame reaches the target records a classified path
 observation and falls through to the relay base under the same claim, request identity,

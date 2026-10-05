@@ -4,7 +4,6 @@ it still queued at the worker's supervisor never runs."""
 import asyncio
 import json
 import logging
-import threading
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -28,6 +27,7 @@ from tests.server.redis_helpers import recording_redis_client
 from tests.server.task.test_v2_orchestration import LINEAR, FakeRegistry
 from tests.server.task.test_v2_orchestration import _register as _register_v2
 from tests.server.task.test_v2_orchestration import _runtime as _runtime_v2
+from tests.support.waiting import pop_ready
 from tests.worker.factories import make_worker_task_message
 
 _LOGGER = logging.getLogger("test.dispatch_revocation")
@@ -54,7 +54,7 @@ def _runtime(registry: _Registry) -> tuple[TaskRuntime, str]:
     runtime = _runtime_v2(FakeRegistry())
     runtime._worker_registry = registry
     _, ids = asyncio.run(_register_v2(runtime, LINEAR))
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == ids["a"]
+    assert pop_ready(runtime) == ids["a"]
     return runtime, ids["a"]
 
 
@@ -98,7 +98,7 @@ async def test_a_disowned_dispatch_queued_while_the_stream_was_down_never_runs()
     outcome = runtime.resolve_disowned_dispatch(task_id, "dsp-1", _WORKER, 0)
     assert outcome is not None
     # The task is bound to the same worker again.
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id
     record_dispatch(runtime, task_id, _WORKER, "dsp-2")
     listener._handle_message(_frame(task_id, "dsp-2"))
     await asyncio.sleep(0)

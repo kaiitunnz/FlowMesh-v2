@@ -62,8 +62,10 @@ class ExecutionError(RuntimeError):
 
     ``retryable`` marks failures that may succeed on another worker (transient network
     or I/O errors). Deterministic failures (invalid spec, unsupported config) leave it
-    ``False`` so they fail without retry. ``failure_kind`` types a failure whose kind
-    decides how control handles it, and ``unavailable_inputs`` names the references an
+    ``False`` so they fail without retry. ``ambiguous`` marks a failure after the
+    task's external effect may already have happened, which control settles by the
+    effect's replay contract. ``failure_kind`` types a failure whose kind decides how
+    control handles it, and ``unavailable_inputs`` names the references an
     ``input_unavailable`` failure could not read.
     """
 
@@ -71,13 +73,45 @@ class ExecutionError(RuntimeError):
         self,
         *args: object,
         retryable: bool = False,
+        ambiguous: bool = False,
         failure_kind: TaskFailureKind | None = None,
         unavailable_inputs: tuple[ContentReference, ...] = (),
     ) -> None:
         super().__init__(*args)
         self.retryable = retryable
+        self.ambiguous = ambiguous
         self.failure_kind = failure_kind
         self.unavailable_inputs = unavailable_inputs
+
+    def wire_fields(self) -> dict[str, Any]:
+        """Return the error's typed fields in a JSON-safe form, to carry it across a
+        process boundary."""
+        return {
+            "retryable": self.retryable,
+            "ambiguous": self.ambiguous,
+            "failure_kind": self.failure_kind,
+            "unavailable_inputs": [
+                reference.model_dump(mode="json")
+                for reference in self.unavailable_inputs
+            ],
+        }
+
+    @classmethod
+    def from_wire(cls, message: str, fields: Any) -> "ExecutionError":
+        """Rebuild an error from its message and :meth:`wire_fields`."""
+        if not isinstance(fields, dict):
+            fields = {}
+        kind = fields.get("failure_kind")
+        return cls(
+            message,
+            retryable=fields.get("retryable") is True,
+            ambiguous=fields.get("ambiguous") is True,
+            failure_kind=TaskFailureKind(kind) if kind else None,
+            unavailable_inputs=tuple(
+                ContentReference.model_validate(reference)
+                for reference in fields.get("unavailable_inputs") or ()
+            ),
+        )
 
 
 class TaskCancelledError(RuntimeError):
@@ -93,6 +127,7 @@ class RunSignals:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
         self._running: str | None = None
         self._cancels: set[str] = set()
         self._stops: set[str] = set()
@@ -113,6 +148,7 @@ class RunSignals:
         """Request a cancel; returns whether the task is running."""
         with self._lock:
             self._cancels.add(task_id)
+            self._changed.notify_all()
             return task_id == self._running
 
     def stop(self, task_id: str) -> bool:
@@ -124,7 +160,16 @@ class RunSignals:
     @property
     def cancelled(self) -> bool:
         with self._lock:
-            return self._running is not None and self._running in self._cancels
+            return self._cancelled_locked()
+
+    def wait_cancelled(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the running task's cancel; return
+        whether it is cancelled."""
+        with self._changed:
+            return self._changed.wait_for(self._cancelled_locked, timeout)
+
+    def _cancelled_locked(self) -> bool:
+        return self._running is not None and self._running in self._cancels
 
     @property
     def stopped(self) -> bool:

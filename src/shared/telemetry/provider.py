@@ -8,7 +8,9 @@ global provider.
 
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import Any
 
+import grpc
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -189,13 +191,31 @@ def build_tracer(
         provider.add_span_processor(
             BatchSpanProcessor(
                 PayloadFreeSpanExporter(
-                    OTLPSpanExporter(
-                        endpoint=config.otlp_endpoint, timeout=config.otlp_timeout_sec
-                    )
+                    OTLPSpanExporter(**otlp_exporter_kwargs(config))
                 )
             )
         )
     return provider.get_tracer(_TRACER_NAME)
+
+
+def otlp_exporter_kwargs(config: TelemetryConfig) -> dict[str, Any]:
+    """Return the OTLP exporter arguments for ``config``: its endpoint, timeout,
+    bearer token when one is set, and the CA that verifies an ``https://``
+    collector."""
+    assert config.otlp_endpoint is not None
+    kwargs: dict[str, Any] = {
+        "endpoint": config.otlp_endpoint,
+        "timeout": config.otlp_timeout_sec,
+    }
+    if config.otlp_token is not None:
+        kwargs["headers"] = (
+            ("authorization", f"Bearer {config.otlp_token.get_secret_value()}"),
+        )
+    if config.otlp_endpoint.startswith("https://") and config.otlp_ca_pem:
+        kwargs["credentials"] = grpc.ssl_channel_credentials(
+            root_certificates=config.otlp_ca_pem
+        )
+    return kwargs
 
 
 def build_meter(
@@ -213,9 +233,7 @@ def build_meter(
     if config.otlp_endpoint:
         readers.append(
             PeriodicExportingMetricReader(
-                OTLPMetricExporter(
-                    endpoint=config.otlp_endpoint, timeout=config.otlp_timeout_sec
-                )
+                OTLPMetricExporter(**otlp_exporter_kwargs(config))
             )
         )
     provider = MeterProvider(

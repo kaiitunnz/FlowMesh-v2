@@ -2,6 +2,8 @@ import os
 import re
 from typing import Any, overload
 
+from pydantic import SecretStr
+
 
 @overload
 def to_int(value: Any, default: int) -> int: ...
@@ -190,6 +192,11 @@ def parse_bool_env(name: str, default: bool | None = None) -> bool | None: ...
 
 def parse_bool_env(name: str, default: bool | None = None) -> bool | None:
     return to_bool(os.getenv(name), default=default)
+
+
+def parse_secret_env(name: str) -> SecretStr | None:
+    value = (os.getenv(name) or "").strip()
+    return SecretStr(value) if value else None
 
 
 def parse_mem_to_bytes(mem: str) -> int | None:

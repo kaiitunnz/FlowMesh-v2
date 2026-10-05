@@ -35,7 +35,7 @@ def _session(
         owner_id="admin",
         raw_yaml="",
         task=TaskEnvelopeTemplate.model_validate(
-            {"apiVersion": "mloc/v1", "kind": "Task", "spec": {"taskType": "ssh"}}
+            {"apiVersion": "flowmesh/v1", "kind": "Task", "spec": {"taskType": "ssh"}}
         ),
         status=status,
         assigned_worker="wkr-1",

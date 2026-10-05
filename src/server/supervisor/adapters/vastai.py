@@ -7,6 +7,7 @@ from pydantic import Field, PrivateAttr, SecretStr, field_validator
 from vastai import VastAI  # type: ignore
 
 from shared.schemas.worker import SSHBackendName
+from shared.utils import parse_secret_env
 
 from ... import env
 from ...hooks import PrincipalContext
@@ -21,7 +22,7 @@ from .base import (
     WorkerTokenType,
 )
 from .ssh import SSHConfig
-from .utils import env_to_secret_str, get_worker_image_name, to_env_str
+from .utils import get_worker_image_name, to_env_str
 
 _PROVIDER_NAME = "vastai"
 _GPULESS_NAMES = frozenset({"", "n/a", "none"})
@@ -74,7 +75,7 @@ class VastAIWorkerConfig(WorkerConfig):
             )
         return v
 
-    vast_api_key: SecretStr | None = env_to_secret_str("VAST_API_KEY")
+    vast_api_key: SecretStr | None = parse_secret_env("VAST_API_KEY")
     """VastAI API key"""
     docker_registry: str = env.FLOWMESH_REGISTRY
     """Docker registry to pull worker images from"""

@@ -29,10 +29,11 @@ ENV PATH=/opt/py312/bin:$PATH
 WORKDIR /app
 
 # Copy only dependency files first (leverage Docker layer caching)
-COPY src/server/requirements.txt ./src/server/requirements.txt
+COPY src/server/requirements.txt src/server/constraints.txt ./src/server/
 
 # Install dependencies before copying source code
-RUN uv pip install --python /opt/py312/bin/python --system -r src/server/requirements.txt
+RUN uv pip install --python /opt/py312/bin/python --system -r src/server/requirements.txt \
+      -c src/server/constraints.txt
 
 COPY src/server ./src/server
 COPY src/shared ./src/shared

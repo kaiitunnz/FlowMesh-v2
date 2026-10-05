@@ -97,7 +97,7 @@ def _codex_available() -> bool:
 
     try:
         return _resolve_codex_bin(CodexConfig()).exists()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 

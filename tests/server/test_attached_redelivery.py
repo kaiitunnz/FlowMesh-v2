@@ -3,7 +3,6 @@ lost: its pending mediated operations, re-minted, and the interrupts of the task
 cancelling, keyed to their dispatches."""
 
 import asyncio
-import threading
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -30,6 +29,7 @@ from tests.server.task.test_worker_originated_boundary import (
     _register,
     _runtime,
 )
+from tests.support.waiting import pop_ready
 
 
 def test_an_attached_worker_gets_its_pending_operation_re_minted() -> None:
@@ -99,7 +99,7 @@ def test_an_attached_worker_is_interrupted_again_for_its_cancelling_task() -> No
     runtime._worker_registry = registry
     workflow_id, ids = asyncio.run(_register_v2(runtime, LINEAR))
     task_id = ids["a"]
-    assert runtime.next_ready(threading.Event(), timeout=0.01) == task_id
+    assert pop_ready(runtime) == task_id
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     runtime.cancel_workflow(workflow_id)
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLING

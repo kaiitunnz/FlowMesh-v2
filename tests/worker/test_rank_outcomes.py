@@ -9,6 +9,8 @@ from torch.distributed.elastic.multiprocessing.errors import (
     ProcessFailure,
 )
 
+from shared.content import ContentReference
+from shared.schemas.event import TaskFailureKind
 from shared.schemas.result import SFTResult
 from shared.tasks import TaskType
 from shared.tasks.components.model import ModelConfig, ModelSource
@@ -101,6 +103,29 @@ def test_a_failed_launch_reports_the_first_ranks_own_failure(
     with pytest.raises(ExecutionError, match="^CUDA out of memory$") as raised:
         _launch(tmp_path)
     assert raised.value.retryable
+
+
+def test_a_rank_failure_keeps_every_field_of_its_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    missing = ContentReference(
+        authorization_scope="org-1", content_digest="ab" * 32, size_bytes=3
+    )
+    error = ExecutionError(
+        "input unreadable",
+        retryable=True,
+        ambiguous=True,
+        failure_kind=TaskFailureKind.INPUT_UNAVAILABLE,
+        unavailable_inputs=(missing,),
+    )
+    _ranks(monkeypatch, ("0", error))
+    with pytest.raises(ExecutionError, match="^input unreadable$") as raised:
+        _launch(tmp_path)
+    reported = raised.value
+    assert (reported.retryable, reported.ambiguous) == (True, True)
+    assert type(reported.failure_kind) is TaskFailureKind
+    assert reported.failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
+    assert reported.unavailable_inputs == (missing,)
 
 
 def test_a_rank_failure_that_is_not_an_execution_error_is_not_retryable(

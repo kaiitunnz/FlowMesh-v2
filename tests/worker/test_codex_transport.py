@@ -89,7 +89,7 @@ def test_a_close_during_the_spawn_reaps_the_app_server_it_started(
     def open_thread() -> None:
         try:
             transport.thread_start()
-        except BaseException as exc:  # noqa: BLE001 - recorded for the assertion
+        except BaseException as exc:
             errors.append(exc)
 
     opener = threading.Thread(target=open_thread, daemon=True)

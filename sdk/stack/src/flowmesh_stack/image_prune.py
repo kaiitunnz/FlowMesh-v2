@@ -12,13 +12,13 @@ from datetime import datetime, timedelta
 
 from .docker import ManagedImage
 
-_DURATION = re.compile(r"^(\d+)([smhdw])$")
+_DURATION = re.compile(r"(\d+)([smhdw])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
 def parse_duration(text: str) -> timedelta:
     """Parse a ``<int><unit>`` duration (units ``s``/``m``/``h``/``d``/``w``)."""
-    match = _DURATION.match(text.strip())
+    match = _DURATION.fullmatch(text.strip())
     if not match:
         raise ValueError(
             f"invalid duration {text!r}; expected an integer followed by one of "

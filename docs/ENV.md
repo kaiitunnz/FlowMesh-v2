@@ -6,7 +6,8 @@ The canonical declared set lives in
 `uv run scripts/dev/check_env_examples.py --write` after schema edits.
 
 The tables below curate the knobs you actually tune. Anything not
-listed here is in `.env.example`.
+listed here is in `.env.example`. A relative host path resolves against the
+directory `flowmesh stack` runs in.
 
 ## Server
 
@@ -102,7 +103,6 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node inbound address (`host:port`) |
 | `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
 | `NETWORK_PLANE_REACHABILITY_CLASS` | `routable` | Endpoint reachability class |
-| `NETWORK_PLANE_PROTOCOLS` | – | Extra transport protocols the node advertises |
 | `NETWORK_PLANE_POSITIVE_TTL_SEC` | `30` | Verified reachability TTL (seconds) |
 | `NETWORK_PLANE_NEGATIVE_TTL_SEC` | `15` | Demoted reachability TTL (seconds) |
 | `NETWORK_PLANE_BACKOFF_BASE_SEC` | `1` | Demotion retry backoff base (seconds) |
@@ -124,6 +124,10 @@ listed here is in `.env.example`.
 | `ENABLE_WORKER_REAPER` | `true` | Dead worker record deletion |
 | `WORKER_REAP_GRACE_SEC` | `900` | Grace period after death before deleting the record |
 | `FLOWMESH_PLUGINS` | – | Comma-separated plugin module names |
+| `FLOWMESH_PLUGIN_DIR` | `./plugins` | Host directory mounted at `/app/plugins` |
+| `REDIS_TLS_DIR` | `./secrets/tls/redis` | Host directory mounted at `/etc/ssl/redis` |
+| `SERVER_TLS_DIR` | `./secrets/tls/server` | Host directory mounted at `/etc/ssl/server` |
+| `SERVER_WORKER_CONFIG` | `./configs/worker_config.yaml` | Host file mounted at `/etc/flowmesh/worker_config.yaml` |
 | `FLOWMESH_PLUGIN_DATA_DIR` | `./plugin-data` | Writable mount at `/app/plugin-data` for plugin state. A path -> host bind-mount (auto-created); a bare name -> external Docker volume of that name. |
 | `SERVER_CUDA_PROBE_IMAGE` | `nvidia/cuda:12.9.1-base-ubuntu24.04` | CUDA image the server runs briefly to query local GPU names/indices |
 | `DOCKER_GPU_RUNTIME` | nvidia | Optional Docker runtime name for GPU probe/worker containers; leave empty unless the host requires a named runtime such as `nvidia` |
@@ -139,7 +143,9 @@ listed here is in `.env.example`.
 | `SERVER_METRICS_TRACES_ENABLED` | `true` | Whether to emit OTel traces |
 | `SERVER_METRICS_METRICS_ENABLED` | `true` | Whether to emit OTel metrics |
 | `SERVER_METRICS_TRACE_SAMPLE_RATIO` | `1.0` | Per-workflow trace sampling ratio |
-| `SERVER_METRICS_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint; unset disables export |
+| `SERVER_METRICS_OTLP_ENDPOINT` | `https://localhost:4317` | OTLP collector endpoint; unset disables export |
+| `SERVER_METRICS_OTLP_TOKEN` | `<replace-with-strong-token>` | Bearer token sent with every OTLP export |
+| `SERVER_METRICS_OTLP_CA_FILE` | – | CA that verifies an https:// collector; defaults to `SERVER_GRPC_TLS_CA_FILE` |
 | `SERVER_METRICS_OTLP_TIMEOUT_SEC` | `10` | OTLP export request timeout (seconds) |
 | `SERVER_METRICS_RESOURCE_SAMPLE_SEC` | `15` | Worker GPU/resource sampling interval (seconds) |
 | `SERVER_METRICS_CLICKHOUSE_URL` | – | ClickHouse HTTP URL for the store read port (e.g. `http://localhost:8123`); unset disables queries |
@@ -155,6 +161,7 @@ listed here is in `.env.example`.
 | `TELEMETRY_CLICKHOUSE_NATIVE_PORT` | `9000` | Host port for the ClickHouse native interface |
 | `TELEMETRY_OTLP_GRPC_PORT` | `4317` | Host port for the collector's OTLP gRPC receiver |
 | `TELEMETRY_OTLP_HTTP_PORT` | `4318` | Host port for the collector's OTLP HTTP receiver |
+| `TELEMETRY_OTLP_TOKEN` | `<replace-with-strong-token>` | Bearer token the collector's OTLP receivers require |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**
@@ -204,8 +211,9 @@ supervisor passes the workers it launches: a `WORKER_TOKEN` of the form
 `SUPERVISOR_GRPC_TARGET` with `SUPERVISOR_GRPC_TLS_CA_B64`, and the deployment's
 network-plane peer (`NETWORK_PLANE_PEER_*`), content cache and store
 (`WORKER_CONTENT_DIR`, `CONTENT_*`), `WORKER_PRIVATE_STATE_DIR`, and telemetry
-(`SERVER_METRICS_*`) settings. An external worker on a host other than its node's
-carries resident traffic over `control_relay`.
+(`SERVER_METRICS_*`, with the OTLP token and `SERVER_METRICS_OTLP_CA_B64`) settings.
+An external worker on a host other than its node's carries resident traffic over
+`control_relay`.
 
 ## Supervisor
 

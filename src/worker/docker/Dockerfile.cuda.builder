@@ -44,9 +44,10 @@ ENV PATH=/opt/py312/bin:$PATH
 WORKDIR /opt
 
 # Install GPU-specific dependencies (Heavy, rarely changes)
-COPY src/worker/requirements/requirements.gpu.txt /tmp/requirements.gpu.txt
+COPY src/worker/requirements/requirements.gpu.txt src/worker/requirements/constraints.txt /tmp/
 RUN uv pip install --python /opt/py312/bin/python --system --requirement /tmp/requirements.gpu.txt \
- && rm -f /tmp/requirements.gpu.txt \
+      --constraint /tmp/constraints.txt \
+ && rm -f /tmp/requirements.gpu.txt /tmp/constraints.txt \
  && rm -rf /root/.cache/uv /root/.cache/pip /root/.cache/ccache
 
 ARG BUILD_VERSION=dev

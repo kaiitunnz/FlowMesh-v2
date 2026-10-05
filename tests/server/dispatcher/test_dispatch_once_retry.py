@@ -16,7 +16,7 @@ from tests.server.dispatcher.helpers import (
 from tests.server.result_store import make_result_reader
 
 _ECHO_WORKFLOW = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: retry-branches

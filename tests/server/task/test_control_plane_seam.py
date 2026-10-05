@@ -40,7 +40,7 @@ spec:
 """
 
 _ECHO_V1 = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: seam-v1

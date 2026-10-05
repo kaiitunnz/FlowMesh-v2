@@ -1,7 +1,6 @@
 """Durable persistence and restart rehydration of TaskRuntime."""
 
 import logging
-import threading
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,6 +15,7 @@ from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.support.waiting import pop_ready
 
 
 class FakeWorkflowRegistry:
@@ -192,7 +192,7 @@ async def _register(runtime: TaskRuntime, payload: str) -> tuple[str, dict[str, 
 
 
 GRAPH = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -209,7 +209,7 @@ spec:
 """
 
 EPOCH_GRAPH = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -280,8 +280,7 @@ async def test_rehydrate_restores_completed_and_ready_state() -> None:
 
     # b's only dependency completed, so it is the sole ready task.
     assert restored.ready_queue_length() == 1
-    stop = threading.Event()
-    assert restored.next_ready(stop, timeout=0.01) == b
+    assert pop_ready(restored) == b
     assert restored.ready_queue_length() == 0
 
 
@@ -320,8 +319,7 @@ async def test_rehydrate_restores_epoch_frontier() -> None:
     await restored.rehydrate()
 
     assert restored._workflow_epoch_frontier[workflow_id] == 1
-    stop = threading.Event()
-    assert restored.next_ready(stop, timeout=0.01) == ids["c"]
+    assert pop_ready(restored) == ids["c"]
 
 
 @pytest.mark.anyio
@@ -340,8 +338,7 @@ async def test_mark_succeeded_is_idempotent_under_replay() -> None:
 
     # b is enqueued exactly once despite the replay.
     assert runtime.ready_queue_length() == 1
-    stop = threading.Event()
-    assert runtime.next_ready(stop, timeout=0.01) == b
+    assert pop_ready(runtime) == b
     assert runtime.ready_queue_length() == 0
 
 
@@ -667,7 +664,7 @@ async def test_a_cascaded_dependent_reads_failed_before_and_after_a_restart() ->
 
 
 _CHAIN = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata: {name: chain}
 spec:
@@ -747,7 +744,7 @@ async def test_a_restart_keeps_live_vaults_and_drops_settled_and_unregistered_on
 
 
 SERVE = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: serve

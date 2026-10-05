@@ -16,7 +16,7 @@ from tests.server.result_store import make_result_reader
 _OWNER = OwnerFence(worker_id="wkr-owner", incarnation=7)
 
 _ECHO_WORKFLOW = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: private-state-affinity

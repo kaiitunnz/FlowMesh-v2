@@ -44,7 +44,7 @@ def _message(task_id: str, dispatch_id: str | None) -> WorkerTaskMessage:
             "dispatched_at": "2026-09-23T00:00:00Z",
             "dispatch_id": dispatch_id,
             "task": {
-                "apiVersion": "mloc/v1",
+                "apiVersion": "flowmesh/v1",
                 "kind": "Task",
                 "metadata": {"name": "wf:a"},
                 "spec": {"taskType": "echo"},

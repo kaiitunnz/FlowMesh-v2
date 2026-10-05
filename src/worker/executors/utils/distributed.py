@@ -214,7 +214,9 @@ def run_rank(out_dir: Path, run: Callable[[], BaseModel]) -> None:
                         if isinstance(exc, Exception)
                         else f"{type(exc).__name__}: {exc}"
                     ),
-                    "retryable": isinstance(exc, ExecutionError) and exc.retryable,
+                    "fields": (
+                        exc.wire_fields() if isinstance(exc, ExecutionError) else {}
+                    ),
                 }
             ),
         )
@@ -257,4 +259,4 @@ def _read_rank_failure(path: Path) -> ExecutionError | None:
         return None
     if not isinstance(record, dict) or not isinstance(record.get("message"), str):
         return None
-    return ExecutionError(record["message"], retryable=record.get("retryable") is True)
+    return ExecutionError.from_wire(record["message"], record.get("fields"))

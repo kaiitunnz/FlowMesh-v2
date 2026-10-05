@@ -317,7 +317,7 @@ class _LateCaptureAdapter(_FakeAdapter):
         def turn() -> None:
             try:
                 self._facade.handle_turn(activation_id, token, {"input": "find it"})
-            except Exception as exc:  # noqa: BLE001 - recorded for the assertion
+            except Exception as exc:
                 self.turn_errors.append(exc)
 
         self.turn = threading.Thread(target=turn, daemon=True)

@@ -225,7 +225,7 @@ def _close_client(client: CodexClient) -> None:
     # Teardown is best-effort; a lost app-server process is already gone.
     try:
         client.close()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
 
@@ -311,7 +311,7 @@ class RealCodexAppServerTransport:
         def _run() -> None:
             try:
                 box["event"] = self._drain_turn(turn_id)
-            except BaseException as exc:  # noqa: BLE001 - relayed to the caller below
+            except BaseException as exc:  # relayed to the caller below
                 box["error"] = exc
 
         worker = threading.Thread(target=_run, daemon=True)

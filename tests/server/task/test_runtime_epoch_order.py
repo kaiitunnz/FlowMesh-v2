@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import threading
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -13,6 +12,7 @@ from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.support.waiting import pop_ready
 
 
 class _WorkflowRegistryStub:
@@ -95,7 +95,7 @@ def test_runtime_epoch_mode_enforces_frontier_order() -> None:
     """
     runtime = _runtime()
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -120,12 +120,11 @@ spec:
           taskType: echo
 """
     workflow_id, node_ids = _register(runtime, payload)
-    stop_event = threading.Event()
 
     assert runtime._workflow_epoch_frontier[workflow_id] == 0
 
-    first = runtime.next_ready(stop_event, timeout=0.01)
-    second = runtime.next_ready(stop_event, timeout=0.01)
+    first = pop_ready(runtime)
+    second = pop_ready(runtime)
     assert first == node_ids["a"]
     assert second == node_ids["b"]
 
@@ -135,7 +134,7 @@ spec:
     runtime.mark_succeeded(node_ids["b"], None, {}, "2026-02-19T00:00:01Z")
     assert runtime._workflow_epoch_frontier[workflow_id] == 1
 
-    third = runtime.next_ready(stop_event, timeout=0.01)
+    third = pop_ready(runtime)
     assert third == node_ids["c"]
 
     runtime.mark_succeeded(node_ids["c"], None, {}, "2026-02-19T00:00:02Z")
@@ -150,7 +149,7 @@ def test_runtime_unordered_in_epoch_allows_any_order() -> None:
     """
     runtime = _runtime()
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -173,14 +172,13 @@ spec:
           taskType: echo
 """
     workflow_id, node_ids = _register(runtime, payload)
-    stop_event = threading.Event()
 
     assert runtime._workflow_epoch_frontier[workflow_id] == 0
     assert workflow_id not in runtime._workflow_in_epoch_order
 
-    first = runtime.next_ready(stop_event, timeout=0.01)
-    second = runtime.next_ready(stop_event, timeout=0.01)
-    third = runtime.next_ready(stop_event, timeout=0.01)
+    first = pop_ready(runtime)
+    second = pop_ready(runtime)
+    third = pop_ready(runtime)
     assert {first, second, third} == {node_ids["a"], node_ids["b"], node_ids["c"]}
 
 
@@ -192,7 +190,7 @@ def test_runtime_epoch_mode_fails_later_epochs_when_frontier_task_fails() -> Non
     """
     runtime = _runtime()
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: graph
@@ -216,8 +214,7 @@ spec:
           taskType: echo
 """
     _, node_ids = _register(runtime, payload)
-    stop_event = threading.Event()
-    ready = runtime.next_ready(stop_event, timeout=0.01)
+    ready = pop_ready(runtime)
     assert ready == node_ids["a"]
 
     impacted, _ = runtime.mark_failed(
@@ -245,7 +242,7 @@ def test_cancel_workflow_marks_dispatched_task_cancelling_and_publishes_interrup
     worker_registry = _WorkerRegistryStub()
     runtime = _runtime(worker_registry)
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: cancel
@@ -276,7 +273,7 @@ def test_cancel_workflow_cancels_each_task_of_a_merged_batch() -> None:
     worker_registry = _WorkerRegistryStub()
     runtime = _runtime(worker_registry)
     payload = """
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: Workflow
 metadata:
   name: merge-cancel

@@ -74,9 +74,11 @@ jobs:
           -e TELEMETRY_CLICKHOUSE_DATABASE=flowmesh
           -e TELEMETRY_CLICKHOUSE_USERNAME=default
           -e TELEMETRY_CLICKHOUSE_PASSWORD=flowmesh
+          -e TELEMETRY_OTLP_TOKEN=ci-token
           -v "$GITHUB_WORKSPACE/cli/stack/src/flowmesh_cli_stack/assets/otel-collector-config.yaml:/cfg.yaml:ro"
+          -v "$GITHUB_WORKSPACE/cli/stack/src/flowmesh_cli_stack/assets/otel-collector-tls.yaml:/tls.yaml:ro"
           otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1
-          validate --config=/cfg.yaml
+          validate --config=/cfg.yaml --config=/tls.yaml
 
       - name: Run unit tests
         # Skip the multiprocessing GPU-cleanup test — it's too costly to

@@ -210,9 +210,12 @@ def test_an_attachment_for_another_lineage_is_refused(tmp_path: Path) -> None:
     assert raised.value.reason is PrivateStateUnavailableReason.STALE_EPOCH
 
 
-def test_a_non_opaque_reference_never_reaches_the_filesystem(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reference_id", ["../escape", "aps-lineage\n"])
+def test_a_non_opaque_reference_never_reaches_the_filesystem(
+    tmp_path: Path, reference_id: str
+) -> None:
     holder = PrivateStateHolder(tmp_path)
-    binding = _binding("../escape")
+    binding = _binding(reference_id)
 
     with pytest.raises(PrivateStateUnavailable) as raised:
         holder.open(binding, _attachment(binding))

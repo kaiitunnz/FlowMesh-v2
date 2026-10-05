@@ -18,11 +18,10 @@ from flowmesh_stack.docker import (
     list_managed_images,
     remove_images,
 )
-from flowmesh_stack.env import load_env
 from flowmesh_stack.image_prune import PrunePlan, parse_duration, select_prune_targets
 from flowmesh_stack.images import BUILD_TARGETS, get_image_ref
 
-from .utils import DEFAULT_ENV_FILE, STACK_PATH_KEYS
+from .utils import DEFAULT_ENV_FILE, load_stack_env
 
 app = get_typer(help="Manage FlowMesh Docker images on the local daemon.")
 
@@ -37,7 +36,7 @@ def _prepare(env_file: Path) -> str:
     except DockerError as exc:
         logging.error(str(exc))
         raise typer.Exit(code=1)
-    load_env(env_file, base_dir=Path.cwd(), path_keys=STACK_PATH_KEYS)
+    load_stack_env(env_file)
     return os.getenv("FLOWMESH_REGISTRY", _DEFAULT_REGISTRY)
 
 

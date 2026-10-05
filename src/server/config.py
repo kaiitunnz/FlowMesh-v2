@@ -361,6 +361,20 @@ def _env_or_none(name: str) -> str | None:
     return (os.getenv(name) or "").strip() or None
 
 
+def _otlp_collector_ca(server_ca_file: str) -> bytes | None:
+    """Read the CA that verifies an ``https://`` collector.
+
+    ``SERVER_METRICS_OTLP_CA_FILE`` names it, defaulting to the server gRPC CA.
+    """
+    path = _env_or_none("SERVER_METRICS_OTLP_CA_FILE") or server_ca_file
+    if not path:
+        return None
+    try:
+        return Path(path).read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"Failed to read the OTLP collector CA: {exc}") from exc
+
+
 @dataclass
 class AgentModelGatewayConfig:
     """The agent-model gateway's control-plane settle configuration.
@@ -636,7 +650,6 @@ class NetworkPlaneConfig:
     endpoint_url: str | None = None
     trust_domain: str = "flowmesh"
     reachability_class: str = "routable"
-    protocols: tuple[str, ...] = ()
     positive_ttl_sec: float = 30.0
     negative_ttl_sec: float = 15.0
     backoff_base_sec: float = 1.0
@@ -648,19 +661,12 @@ class NetworkPlaneConfig:
     @classmethod
     def from_env(cls) -> "NetworkPlaneConfig":
         prefix = "NETWORK_PLANE_"
-        raw_protocols = _env_or_none(f"{prefix}PROTOCOLS")
-        protocols = (
-            tuple(p.strip() for p in raw_protocols.split(",") if p.strip())
-            if raw_protocols
-            else ()
-        )
         return cls(
             enabled=parse_bool_env(f"{prefix}ENABLED", True),
             endpoint_url=_env_or_none(f"{prefix}ENDPOINT_URL"),
             trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh",
             reachability_class=_env_or_none(f"{prefix}REACHABILITY_CLASS")
             or "routable",
-            protocols=protocols,
             positive_ttl_sec=parse_float_env(f"{prefix}POSITIVE_TTL_SEC", 30.0),
             negative_ttl_sec=parse_float_env(f"{prefix}NEGATIVE_TTL_SEC", 15.0),
             backoff_base_sec=parse_float_env(f"{prefix}BACKOFF_BASE_SEC", 1.0),
@@ -780,17 +786,20 @@ class ServerConfig:
             for raw in os.getenv("FLOWMESH_PLUGINS", "").split(",")
             if (p := raw.strip())
         ]
+        grpc_config = GrpcConfig.from_env()
         return cls(
             logging=LoggingConfig.from_env(),
             redis=RedisConfig.from_env(),
             http=HttpConfig.from_env(),
-            grpc=GrpcConfig.from_env(),
+            grpc=grpc_config,
             port_forward=PortForwardConfig.from_env(),
             identity=IdentityConfig.from_env(),
             dispatch=DispatchConfig.from_env(),
             watchdog=WatchdogConfig.from_env(),
             metrics=MetricsConfig.from_env(results_dir),
-            telemetry=TelemetryConfig.from_env(),
+            telemetry=TelemetryConfig.from_env(
+                lambda: _otlp_collector_ca(grpc_config.tls_ca_file)
+            ),
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),
             orchestration=OrchestrationConfig.from_env(),

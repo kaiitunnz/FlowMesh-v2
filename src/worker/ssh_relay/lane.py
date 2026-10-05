@@ -70,6 +70,8 @@ class SshRelayLane:
         self._connections: dict[str, _Connection] = {}
         self._ended: RecentSet[str] = RecentSet(_ENDED_MEMORY)
         self._loop = asyncio.new_event_loop()
+        self._stopping = False
+        self._stopping_lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._run, name="flowmesh-ssh-relay", daemon=True
         )
@@ -80,6 +82,8 @@ class SshRelayLane:
 
     def stop(self, timeout: float = 10.0) -> None:
         """End every connection, then the lane, within ``timeout`` seconds."""
+        with self._stopping_lock:
+            self._stopping = True
         if not self._thread.is_alive():
             return
         deadline = time.monotonic() + timeout
@@ -93,7 +97,13 @@ class SshRelayLane:
         """Marshal one relay frame onto the lane loop; return whether it is ours."""
         if frame_kind != SSH_FRAME_KIND:
             return False
-        asyncio.run_coroutine_threadsafe(self._on_frame(frame), self._loop)
+        handling = self._on_frame(frame)
+        with self._stopping_lock:
+            if not self._stopping:
+                asyncio.run_coroutine_threadsafe(handling, self._loop)
+                return True
+        # A frame that lands once the lane is stopping has no connection to reach.
+        handling.close()
         return True
 
     async def _on_frame(self, wire: dict[str, Any]) -> None:

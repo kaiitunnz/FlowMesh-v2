@@ -5,6 +5,7 @@ This module encapsulates all environment-derived configuration so the rest of th
 code can depend on a structured config object.
 """
 
+import base64
 import json
 import os
 import tempfile
@@ -269,7 +270,12 @@ class WorkerConfig:
             "SSH_STOP_TIMEOUT_SEC", WorkerConfig.ssh_stop_timeout_sec
         )
 
-        telemetry = TelemetryConfig.from_env()
+        otlp_ca_b64 = (
+            os.getenv("SERVER_METRICS_OTLP_CA_B64") or ""
+        ).strip() or supervisor_grpc_tls_ca_b64
+        telemetry = TelemetryConfig.from_env(
+            lambda: base64.b64decode(otlp_ca_b64) if otlp_ca_b64 else None
+        )
 
         return WorkerConfig(
             worker_token=worker_token,

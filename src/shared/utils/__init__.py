@@ -24,7 +24,13 @@ from .json import (
     to_json_serializable,
     validate_keys,
 )
-from .parsing import parse_bool_env, parse_float_env, parse_int_env, parse_mem_to_bytes
+from .parsing import (
+    parse_bool_env,
+    parse_float_env,
+    parse_int_env,
+    parse_mem_to_bytes,
+    parse_secret_env,
+)
 from .time import now_iso
 
 __all__ = [
@@ -51,6 +57,7 @@ __all__ = [
     "parse_float_env",
     "parse_int_env",
     "parse_mem_to_bytes",
+    "parse_secret_env",
     "restore_json",
     "safe_get",
     "to_json_serializable",
