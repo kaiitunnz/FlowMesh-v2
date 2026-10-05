@@ -13,7 +13,8 @@ class EnvFileError(ValueError):
 
 
 def parse_env_file(env_file: Path) -> dict[str, str]:
-    """Parse a .env file into key/value pairs, as Docker Compose reads it."""
+    """Parse a .env file into key/value pairs, following Docker Compose's dotenv
+    quoting, escape and interpolation rules."""
     if not env_file.exists():
         return {}
     return _parse_file(env_file, os.environ)
@@ -112,7 +113,8 @@ def load_env(
     base_dir: Path | None = None,
     path_keys: set[str] | None = None,
 ) -> None:
-    """Load env vars from a file into ``os.environ``, as Docker Compose reads it.
+    """Load env vars from a file into ``os.environ``, following Docker Compose's
+    dotenv quoting, escape and interpolation rules.
 
     Raises ``EnvFileError`` for a file Docker Compose would refuse to read.
     """
@@ -151,15 +153,16 @@ _EXPORT = re.compile(r"^export\s+")
 
 
 def parse_env_text(text: str, environ: Mapping[str, str]) -> dict[str, str]:
-    """Parse .env text the way Docker Compose's ``env_file`` and ``--env-file`` do.
+    """Parse .env text following Docker Compose's dotenv quoting, escape and
+    interpolation rules.
 
     A double-quoted value takes ``\\n``, ``\\r``, ``\\t``, ``\\\\``, ``\\"`` and
     ``\\$`` escapes and may span lines; a single-quoted value is literal but for
     ``\\'``; an unquoted value ends at a `` #`` comment. Unquoted and double-quoted
     values interpolate ``$NAME`` and ``${NAME}`` with the ``:-``, ``-``, ``:+``, ``+``,
     ``:?`` and ``?`` modifiers, reading the file's earlier keys, then ``environ``, then
-    its later keys, which the stack's commands export before Compose reads the file;
-    ``$$`` is a literal ``$``. Raises ``EnvFileError`` where Compose fails.
+    its later keys; ``$$`` is a literal ``$``. Raises ``EnvFileError`` where Compose
+    fails.
     """
     entries = list(_entries(text))
     ahead = _interpolate(entries, environ, {}, strict=False)

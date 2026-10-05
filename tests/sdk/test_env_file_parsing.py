@@ -1,4 +1,5 @@
-"""Stack env files parse as Docker Compose reads them.
+"""Stack env files follow Docker Compose's dotenv quoting, escape and interpolation
+rules.
 
 The expectations are what ``docker compose config`` (v5.1.0) resolves for the same
 lines, so a value the CLI exports for interpolation matches the value a container's
