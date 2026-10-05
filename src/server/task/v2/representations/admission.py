@@ -30,8 +30,8 @@ class ResidentAdmissionBinding(BaseModel):
     def compatible(self) -> bool:
         """Whether the physical requirement matches the logical dependency.
 
-        A requirement that names another family, engine-batch key, or isolation
-        domain describes a different node; its residency preference is not this
+        A requirement that names another family, engine-batch key, isolation domain,
+        or serving size describes a different node; its residency preference is not this
         dependency's to read.
         """
         if (requirement := self.requirement) is None:
@@ -40,4 +40,5 @@ class ResidentAdmissionBinding(BaseModel):
             requirement.family == self.dependency.service_family
             and requirement.engine_batch_key == self.dependency.engine_batch_key
             and requirement.isolation == self.dependency.isolation
+            and requirement.serving_size == self.dependency.serving_size
         )

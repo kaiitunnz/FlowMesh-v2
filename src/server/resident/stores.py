@@ -40,9 +40,9 @@ class ServiceFamilyRegistry:
         """Record a family definition, refining only an existing one's warmth.
 
         A family's compatibility identity is immutable, so an incoming definition
-        describing a different engine, model, interface, or isolation domain leaves
-        the live one untouched. Warmth refines one way: a preference upgrades an
-        unset one, and no later definition demotes it.
+        describing a different engine, model, interface, isolation domain, or serving
+        size leaves the live one untouched. Warmth refines one way: a preference
+        upgrades an unset one, and no later definition demotes it.
         """
         if (existing := self._families.get(family.family)) is None:
             self._families[family.family] = family
@@ -54,6 +54,7 @@ class ServiceFamilyRegistry:
             or existing.model_ref != family.model_ref
             or existing.interface != family.interface
             or existing.isolation != family.isolation
+            or existing.serving_size != family.serving_size
         ):
             return
         self._families[family.family] = existing.model_copy(

@@ -22,6 +22,7 @@ from server.hooks import PERMISSION_CHECKERS, RESOURCE_REGISTRARS
 from server.resident import ReplicaIncarnation, ServiceFamily
 from server.resident.materializer import materialize_resident_replica
 from server.task.parser import parse_workflow
+from server.task.v2.representations.serving_size import ServingSize
 from shared.inference import engine_profile
 
 _LOGGER = logging.getLogger("test.resident_materializer")
@@ -174,7 +175,7 @@ def test_embedding_serve_substrate_requests_a_pooling_replica() -> None:
 
     assert runtime.register_call is not None
     spec = json.loads(runtime.register_call[2])["spec"]
-    assert spec["model"]["vllm"] == {"runner": "pooling"}
+    assert spec["model"]["vllm"] == {"runner": "pooling", "tensor_parallel_size": 1}
 
 
 def test_chat_serve_substrate_enables_lora() -> None:
@@ -193,7 +194,11 @@ def test_chat_serve_substrate_enables_lora() -> None:
 
     assert runtime.register_call is not None
     spec = json.loads(runtime.register_call[2])["spec"]
-    assert spec["model"]["vllm"] == {"enable_lora": True, "max_loras": 3}
+    assert spec["model"]["vllm"] == {
+        "enable_lora": True,
+        "max_loras": 3,
+        "tensor_parallel_size": 1,
+    }
 
 
 def test_embedding_dev_model_substrate_needs_no_serving_flag() -> None:
@@ -218,7 +223,7 @@ def test_embedding_dev_model_substrate_needs_no_serving_flag() -> None:
 
     assert runtime.register_call is not None
     spec = json.loads(runtime.register_call[2])["spec"]
-    assert "vllm" not in spec["model"]
+    assert spec["model"]["vllm"] == {"tensor_parallel_size": 1}
 
 
 def test_chat_dev_model_substrate_models_a_finite_adapter_registry() -> None:
@@ -238,7 +243,7 @@ def test_chat_dev_model_substrate_models_a_finite_adapter_registry() -> None:
     assert runtime.register_call is not None
     spec = json.loads(runtime.register_call[2])["spec"]
     assert spec["taskType"] == "dev_model"
-    assert spec["model"]["vllm"] == {"max_loras": 2}
+    assert spec["model"]["vllm"] == {"max_loras": 2, "tensor_parallel_size": 1}
 
 
 def test_materialization_survives_without_registered_registrars() -> None:
@@ -404,4 +409,51 @@ def test_a_family_stored_without_a_profile_serves_the_default_engine() -> None:
     assert runtime.register_call is not None
     model = json.loads(runtime.register_call[2])["spec"]["model"]
     assert model["source"]["revision"] == "main"
-    assert set(model["vllm"]) == {"enable_lora", "max_loras"}
+    assert set(model["vllm"]) == {"enable_lora", "max_loras", "tensor_parallel_size"}
+    assert json.loads(runtime.register_call[2])["spec"]["resources"] == {
+        "hardware": {"cpu": 2, "memory": "4Gi", "gpu": {"type": "any", "count": 1}}
+    }
+
+
+_SIZED = ServingSize(
+    cpu=8,
+    memory_bytes=32 * 1024**3,
+    gpu_type="h100",
+    gpu_count=2,
+    gpu_memory_bytes=80 * 1024**3,
+    tensor_parallel_size=2,
+)
+
+
+@pytest.mark.parametrize(
+    ("substrate", "gpu"),
+    [
+        ("serve", {"type": "h100", "count": 2, "memory": "80Gi"}),
+        # The GPU-free stand-in carries the size it stands in for, on no device.
+        ("dev_model", {"type": "any", "count": 0}),
+    ],
+)
+def test_a_replica_runs_at_its_family_serving_size(
+    substrate: str, gpu: dict[str, Any]
+) -> None:
+    runtime = _FakeRuntime()
+    profile = engine_profile({"max_model_len": 1024}, "v2")
+    family = _FAMILY.model_copy(
+        update={"engine_profile": profile, "serving_size": _SIZED}
+    )
+
+    _materialize(
+        ResidentCapacityConfig(substrate=substrate),
+        runtime,
+        _RecordingRegistrar(),
+        family=family,
+    )
+
+    assert runtime.register_call is not None
+    payload = runtime.register_call[2]
+    spec = json.loads(payload)["spec"]
+    assert spec["resources"] == {"hardware": {"cpu": 8, "memory": "32Gi", "gpu": gpu}}
+    assert spec["model"]["vllm"]["tensor_parallel_size"] == 2
+    assert spec["model"]["vllm"]["max_model_len"] == 1024
+    assert spec["model"]["source"]["revision"] == "v2"
+    parse_workflow(payload, "native")

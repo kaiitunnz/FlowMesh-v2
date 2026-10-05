@@ -85,13 +85,14 @@ def screen_service_family(
 ) -> "ServiceFamilyRequirement":
     """The refined requirement when it is compatible with the derived one.
 
-    Engine-batch key and isolation are the dependency's compatibility key: a refinement
-    that moves either would serve the invocation from an incompatible family, so only
-    the family name is a policy's to choose.
+    Engine-batch key, isolation, and serving size are the dependency's compatibility
+    key: a refinement that moves any of them would serve the invocation from an
+    incompatible family, so only the family name is a policy's to choose.
     """
     if (
         refined.engine_batch_key != derived.engine_batch_key
         or refined.isolation != derived.isolation
+        or refined.serving_size != derived.serving_size
     ):
         return derived
     return refined

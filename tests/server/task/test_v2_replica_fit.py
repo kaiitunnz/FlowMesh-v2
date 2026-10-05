@@ -1,7 +1,7 @@
 """A menu offers resident serving only when a replica can run the leaf as declared.
 
-A replica runs on one GPU with the deployment's model access, serves its base model, and
-is chosen before upstream values render. A pinned resident leaf runs on the replica's
+A replica runs with the deployment's model access, serves its base model, and is
+chosen before upstream values render. A pinned resident leaf runs on the replica's
 terms, unless the replica would serve another model than the leaf's.
 """
 
@@ -58,10 +58,6 @@ _UNFIT = {
     "credential_env": {
         "vllm": "{env_vars: {HF_TOKEN: hf_x, VLLM_LOGGING_LEVEL: INFO}}"
     },
-    "two_gpus": {"gpus": 2},
-    "tensor_parallel": {"vllm": "{tensor_parallel_size: 2}"},
-    "tensor_parallel_string": {"vllm": "{tensor_parallel_size: '2'}"},
-    "tensor_parallel_float": {"vllm": "{tensor_parallel_size: 2.0}"},
     "templated_tensor_parallel": {"vllm": "{tensor_parallel_size: '${u.output}'}"},
     "templated_profile_key": {"vllm": "{max_model_len: '${u.output}'}"},
     "templated_revision": {"revision": "${u.output}"},
@@ -86,7 +82,32 @@ def test_an_explicit_menu_a_replica_cannot_run_is_refused(
         _leaf(service="{mode: local_eligible}", **case)  # type: ignore[arg-type]
 
 
-_PINNED = {k: v for k, v in _UNFIT.items() if k != "checkpoint"}
+_MULTI_GPU = {
+    "two_gpus": {"gpus": 2},
+    # A vLLM inference leaf declares its count, which caps the size it shards over.
+    "tensor_parallel": {"vllm": "{tensor_parallel_size: 2}", "gpus": 2},
+    "tensor_parallel_string": {"vllm": "{tensor_parallel_size: '2'}", "gpus": 2},
+    "tensor_parallel_float": {"vllm": "{tensor_parallel_size: 2.0}", "gpus": 2},
+}
+
+
+@pytest.mark.parametrize("case", _MULTI_GPU.values(), ids=_MULTI_GPU.keys())
+def test_a_multi_gpu_leaf_gets_a_resident_candidate_of_its_size(
+    case: dict[str, object],
+) -> None:
+    node = _leaf(**case)  # type: ignore[arg-type]
+    assert node.embodiment_menu is not None
+    [requirement] = [
+        candidate.service_family_requirement
+        for candidate in node.embodiment_menu.candidates
+        if candidate.service_family_requirement is not None
+    ]
+    assert requirement.serving_size.gpu_count == 2
+    assert requirement.serving_size.tensor_parallel_size == 2
+    assert requirement.family.endswith("|size=cpu2,mem4Gi,tp2,gpu2xany")
+
+
+_PINNED = {k: v for k, v in (_UNFIT | _MULTI_GPU).items() if k != "checkpoint"}
 
 
 @pytest.mark.parametrize("case", _PINNED.values(), ids=_PINNED.keys())
@@ -115,13 +136,15 @@ def test_a_pinned_resident_leaf_loading_a_checkpoint_is_refused() -> None:
         _leaf(service="{mode: resident}", **_UNFIT["checkpoint"])  # type: ignore[arg-type]
 
 
-def test_a_leaf_served_by_another_model_lends_it_no_profile() -> None:
+def test_a_leaf_served_by_another_model_lends_it_no_profile_or_size() -> None:
     node = _leaf(
-        vllm="{max_model_len: 1024}",
+        vllm="{max_model_len: 1024, tensor_parallel_size: 2}",
         revision="refs/pr/7",
+        gpus=2,
         service="{mode: resident, service_model_ref: meta-llama/Llama-3.1-8B}",
     )
     requirement = node.service_family_requirement
     assert requirement is not None
+    assert requirement.serving_size.is_default
     assert requirement.family == "meta-llama/Llama-3.1-8B|chat"
     assert requirement.engine_batch_key == "meta-llama/Llama-3.1-8B|chat"

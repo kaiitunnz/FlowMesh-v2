@@ -183,6 +183,18 @@ WARM / BUSY → DRAINING → STOPPED
 WARM / BUSY → PREEMPTED / FAILED → reconcile and recreate
 ```
 
+A demand-managed replica runs at its family's serving size: the CPU, memory, GPU type,
+count, and per-device memory under the consuming leaf's `resources.hardware`, and the
+tensor-parallel size under its `model.vllm`. An omitted CPU, memory, or GPU type is `2`,
+`4Gi`, or any; a GPU count and a tensor-parallel size each default to the other, or to
+one, and a tensor-parallel size above the count is capped to it. Leaves share a family
+only at an equal size, so a smaller leaf never joins a larger replica, and a registered
+family keeps its size. A replica places on one worker with all its devices free and its
+engine shards over them; while none can host it, its claims stay pending, holding no
+credit, until the cold-start budget denies them. Replica quotas and cold-start limits
+count replicas of any size. A leaf served by another model's replica and an agent's model
+binding take the default size; a standing `serve` task runs at the hardware it declares.
+
 The first eligible `PENDING` claim for an approved family with no capacity triggers a
 bounded zero-to-one materialization. Before creating an allocation, policy checks the allowed
 model catalog, the per-family replica quota, and the concurrent cold-start limit; a refusal
@@ -253,7 +265,7 @@ is disabled.
 
 | Method | Path | Returns |
 | --- | --- | --- |
-| GET | `/api/v1/resident/families` | Registered service families (family, engine/batch key, model ref, isolation, selection strategy, warmth). |
+| GET | `/api/v1/resident/families` | Registered service families (family, engine/batch key, model ref, isolation, selection strategy, warmth, serving size). |
 | GET | `/api/v1/resident/replicas` | Replica incarnations, live and inert. Filterable by `family`. |
 | GET | `/api/v1/resident/claims` | Credit-bearing admission claims and per-replica held credit, recomputed on read from the authoritative claims. |
 

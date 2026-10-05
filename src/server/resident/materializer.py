@@ -30,17 +30,16 @@ async def materialize_resident_replica(
     replica: ReplicaIncarnation,
     logger: logging.Logger,
 ) -> str:
-    """Submit the family's serve substrate as a task owned by `owner`; return its id."""
+    """Submit the family's serve substrate as a task owned by `owner`; return its id.
+
+    The task runs at the family's serving size, which the leaves it serves declare.
+    """
     spec_type = "dev_model" if config.substrate == "dev_model" else "serve"
+    size = family.serving_size
     spec: dict[str, Any] = {
         "taskType": spec_type,
-        "resources": {
-            "hardware": {
-                "cpu": 2,
-                "memory": "4Gi",
-                "gpu": {"type": "any", "count": 0 if spec_type == "dev_model" else 1},
-            }
-        },
+        # The GPU-free stand-in carries the size it stands in for, on no GPU.
+        "resources": {"hardware": size.hardware(gpu=spec_type == "serve")},
         "model": {
             "source": {
                 "type": "huggingface",
@@ -50,6 +49,7 @@ async def materialize_resident_replica(
         },
     }
     vllm = _rendered_profile(family.engine_profile)
+    vllm["tensor_parallel_size"] = size.tensor_parallel_size
     if revision := vllm.pop("revision", None):
         spec["model"]["source"]["revision"] = revision
     if spec_type == "serve":
@@ -65,8 +65,7 @@ async def materialize_resident_replica(
         # reclaim is exercised end to end: a lifetime-distinct load beyond the budget
         # fails until an unloaded slot frees.
         vllm["max_loras"] = config.adapter_slots
-    if vllm:
-        spec["model"]["vllm"] = vllm
+    spec["model"]["vllm"] = vllm
     if config.serve_ttl_sec:
         spec["ttlSeconds"] = config.serve_ttl_sec
     payload = {

@@ -385,7 +385,7 @@ the configuration that changes what the engine returns, which the replica serves
 `limit_mm_per_prompt`, `enable_mm_embeds`, `trust_remote_code`, and `env_vars`, plus
 `convert` for an embedding leaf. A key set to null is unset. Every other `model.vllm` key
 is local to each engine. A leaf served by a model other than its own lends that model no
-profile.
+profile and no serving size.
 
 An adapter does not fork a family: it co-batches on the base replica through its own
 slot — the resident consumer loads its adapter into a replica slot and selects it as the
@@ -393,9 +393,14 @@ request model. Adapter serving is supported only on the chat interface; a reside
 embedding leaf that declares an adapter is rejected at compile. An adapter-bound leaf
 declares a single adapter with a loadable `path`, `url`, or `task_id`.
 
+A replica runs at the serving size its leaf declares: its `resources.hardware` and its
+`model.vllm.tensor_parallel_size`, on one worker (see
+[`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md)). Leaves share a replica only at an equal
+size.
+
 A menu offers a resident candidate only for a leaf a replica runs as declared: no
 profile setting, tensor parallel size, or revision renders from upstream, its engine
-configuration carries no credential, it runs on one GPU, and it loads no checkpoint. A
+configuration carries no credential, and it loads no checkpoint. A
 pinned resident leaf runs on the replica's terms: the replica loads with the
 deployment's own access and never receives the leaf's credential, and a value that
 renders from upstream is left out of its profile. A leaf whose model or adapter source

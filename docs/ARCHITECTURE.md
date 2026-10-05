@@ -357,7 +357,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   physical capacity rather than an external endpoint. Two control-plane actors — an
   Admission controller and a Lifecycle & scale manager — over durable control-state
   stores admit an invocation to a compatible model-serving replica, materializing one
-  from zero on demand under policy. `ServiceClaim` facts are the sole credit authority;
+  from zero on demand under policy at the hardware and tensor-parallel size its consuming
+  leaf declares, on one worker. `ServiceClaim` facts are the sole credit authority;
   a credit releases only from a fenced ledger terminal consumed by `invocation_id`. The
   invocation runs in the workers over the network plane (required), so control never
   constructs, parses, or carries engine traffic: the consuming episode's own worker — an

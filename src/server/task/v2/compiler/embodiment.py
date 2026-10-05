@@ -42,7 +42,6 @@ from ..representations.plan import (
     InferenceEmbodimentMenu,
     LocalExecutionEnvelope,
     ResidencyIntent,
-    ServiceFamilyRequirement,
 )
 from ..representations.versioning import content_digest
 from .diagnostics import compile_error
@@ -74,11 +73,7 @@ def embodiment_menu(
         episode=EpisodeSpec(
             boundary=EpisodeBoundaryKind.SERVICE_ISSUE, resource_class=resource_class
         ),
-        service_family_requirement=ServiceFamilyRequirement(
-            family=dependency.service_family,
-            engine_batch_key=dependency.engine_batch_key,
-            isolation=dependency.isolation,
-        ),
+        service_family_requirement=dependency.family_requirement(),
         residency_intent=ResidencyIntent(
             service_family=dependency.service_family, conditional=True
         ),
@@ -153,9 +148,9 @@ def replica_unfit_reason(
 ) -> str | None:
     """Return why a resident replica cannot run a leaf as declared, or ``None``.
 
-    A replica runs on one GPU with the deployment's own model access, serves the base
-    model, and is chosen before any upstream value is known, so a leaf whose engine
-    configuration depends on any of these runs as declared only self-contained.
+    A replica runs with the deployment's own model access, serves the base model, and
+    is chosen before any upstream value is known, so a leaf whose engine configuration
+    depends on any of these runs as declared only self-contained.
     """
     vllm = (spec.model.vllm if spec.model is not None else None) or {}
     tensor_parallel_size = vllm.get("tensor_parallel_size")
@@ -166,11 +161,6 @@ def replica_unfit_reason(
         return "its engine configuration renders from upstream at dispatch"
     if _engine_credential(task, vllm):
         return "its engine configuration carries a credential"
-    gpu = spec.gpu_requirements()
-    if (gpu is not None and (gpu.count or 0) > 1) or _tensor_parallel_size(
-        tensor_parallel_size
-    ) > 1:
-        return "it runs on more than one GPU"
     if _checkpoint_load(spec) is not None:
         return "it loads a checkpoint in place of its model"
     return None
@@ -311,14 +301,6 @@ def _engine_credential(task: ParsedTask, vllm: dict[str, Any]) -> bool:
 
 def _checkpoint_load(spec: InferenceSpecStrict | InferenceSpecTemplate) -> Any:
     return spec.checkpoint.get("load") if isinstance(spec.checkpoint, dict) else None
-
-
-def _tensor_parallel_size(value: Any) -> int:
-    # Read as the local vLLM executor reads it.
-    try:
-        return int(value) if value is not None else 0
-    except (TypeError, ValueError):
-        return 0
 
 
 def _declared_gpu_count(
