@@ -166,3 +166,9 @@ def test_a_templated_gpu_type_sizes_a_placeable_replica(service: str) -> None:
     assert requirement.serving_size.gpu_type == "any"
     assert "${" not in requirement.family
     assert requirement.serving_size.hardware()["gpu"]["type"] == "any"
+
+
+def test_an_enforce_cpu_rendered_from_upstream_gets_no_menu() -> None:
+    node = _leaf(extra="\n          enforce_cpu: '${u.output}'")
+    assert node.embodiment_menu is None
+    assert node.service_family_requirement is None
