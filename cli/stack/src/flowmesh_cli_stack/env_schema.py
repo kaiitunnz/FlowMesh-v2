@@ -81,7 +81,7 @@ def _require_peer_trust(
             "NETWORK_PLANE_PEER_ENABLED requires NETWORK_PLANE_ENABLED: a peer "
             "transport substitutes for a network-plane transport"
         )
-    if not (env.get("NETWORK_PLANE_PEER_TRUST_DOMAIN", "") or "").strip():
+    if not (env.get("NETWORK_PLANE_PEER_TRUST_DOMAIN") or "").strip():
         errors.append(
             "NETWORK_PLANE_PEER_ENABLED requires "
             "NETWORK_PLANE_PEER_TRUST_DOMAIN: a peer transport is admitted only "
@@ -98,7 +98,7 @@ def _require_peer_trust(
             "operator-attested trusted network and its dialer proves no identity"
         )
         return
-    missing = [name for name in material if not (env.get(name, "") or "").strip()]
+    missing = [name for name in material if not (env.get(name) or "").strip()]
     if missing:
         errors.append(
             "NETWORK_PLANE_PEER_ENABLED requires "
@@ -111,14 +111,14 @@ def collector_serves_tls(env: Mapping[str, str]) -> bool:
     """Return whether the bundled collector serves TLS: the stack has server TLS
     material for it."""
     return all(
-        (env.get(key, "") or "").strip()
+        (env.get(key) or "").strip()
         for key in ("SERVER_GRPC_TLS_CERT_FILE", "SERVER_GRPC_TLS_KEY_FILE")
     )
 
 
 def telemetry_profile_on(env: Mapping[str, str]) -> bool:
     """Return whether the node runs the telemetry profile's collector and store."""
-    profiles = (env.get("COMPOSE_PROFILES", "") or "").split(",")
+    profiles = (env.get("COMPOSE_PROFILES") or "").split(",")
     return "telemetry" in {profile.strip() for profile in profiles}
 
 
@@ -128,7 +128,7 @@ def _require_collector_token(
     """Require ``TELEMETRY_OTLP_TOKEN`` while the telemetry profile is on."""
     if (
         telemetry_profile_on(env)
-        and not (env.get("TELEMETRY_OTLP_TOKEN", "") or "").strip()
+        and not (env.get("TELEMETRY_OTLP_TOKEN") or "").strip()
     ):
         errors.append(
             "COMPOSE_PROFILES includes telemetry, which requires TELEMETRY_OTLP_TOKEN: "
@@ -140,7 +140,7 @@ def _require_collector_scheme(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
     """Require the OTLP endpoint's scheme to match the bundled collector's TLS."""
-    endpoint = (env.get("SERVER_METRICS_OTLP_ENDPOINT", "") or "").strip()
+    endpoint = (env.get("SERVER_METRICS_OTLP_ENDPOINT") or "").strip()
     if not (telemetry_profile_on(env) and endpoint):
         return
     parts = urlsplit(endpoint)
@@ -159,9 +159,9 @@ def _require_collector_scheme(
 
 
 def _exports_telemetry(env: Mapping[str, str]) -> bool:
-    level = (env.get("SERVER_METRICS_TELEMETRY_LEVEL", "") or "off").strip().lower()
+    level = (env.get("SERVER_METRICS_TELEMETRY_LEVEL") or "off").strip().lower()
     return level != "off" and any(
-        parse_bool(env.get(key, "") or "") is not False
+        parse_bool(env.get(key) or "") is not False
         for key in ("SERVER_METRICS_TRACES_ENABLED", "SERVER_METRICS_METRICS_ENABLED")
     )
 
@@ -170,11 +170,11 @@ def _warn_collector_ca_unset(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
     """Warn when an ``https://`` collector has no CA configured that can verify it."""
-    endpoint = (env.get("SERVER_METRICS_OTLP_ENDPOINT", "") or "").strip()
+    endpoint = (env.get("SERVER_METRICS_OTLP_ENDPOINT") or "").strip()
     if not (_exports_telemetry(env) and endpoint.startswith("https://")):
         return
-    otlp_ca = (env.get("SERVER_METRICS_OTLP_CA_FILE", "") or "").strip()
-    if not otlp_ca and not (env.get("SERVER_GRPC_TLS_CA_FILE", "") or "").strip():
+    otlp_ca = (env.get("SERVER_METRICS_OTLP_CA_FILE") or "").strip()
+    if not otlp_ca and not (env.get("SERVER_GRPC_TLS_CA_FILE") or "").strip():
         warnings.append(
             "SERVER_METRICS_OTLP_ENDPOINT is https:// with neither "
             "SERVER_METRICS_OTLP_CA_FILE nor SERVER_GRPC_TLS_CA_FILE set, so the "
@@ -183,7 +183,7 @@ def _warn_collector_ca_unset(
         )
     elif (
         not otlp_ca
-        and (env.get("NODE_ROLE", "") or "").strip().lower() == "worker"
+        and (env.get("NODE_ROLE") or "").strip().lower() == "worker"
         and not _is_loopback(urlsplit(endpoint).hostname or "")
     ):
         warnings.append(
