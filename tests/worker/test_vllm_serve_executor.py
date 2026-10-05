@@ -1165,5 +1165,58 @@ def test_teardown_reaches_an_engine_child_its_dead_leader_left_behind() -> None:
         if leader.poll() is None:
             leader.kill()
             leader.wait(timeout=10)
+        if leader.stdout is not None:
+            leader.stdout.close()
+        if child > 1 and _alive(child):
+            os.kill(child, signal.SIGKILL)
+
+
+def test_teardown_gives_an_engine_child_its_grace_before_killing_it(
+    tmp_path: Path,
+) -> None:
+    # The child stands in for an engine core that cleans up on SIGTERM before it exits.
+    marker = tmp_path / "shut-down"
+    child_script = (
+        "import pathlib, signal, sys, time\n"
+        "def stop(*_):\n"
+        "    time.sleep(0.5)\n"
+        f"    pathlib.Path({marker.as_posix()!r}).write_text('clean')\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(120)\n"
+    )
+    leader = subprocess.Popen(  # nosec B603 - argv list, no shell=True, sys.executable
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time\n"
+            f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}], "
+            "stdout=subprocess.PIPE, text=True)\n"
+            "child.stdout.readline()\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(120)\n",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    child = 0
+    try:
+        assert leader.stdout is not None
+        child = int(leader.stdout.readline())
+        leader.kill()
+        leader.wait(timeout=10)
+
+        make_serve_executor()._terminate_process_group(leader)
+
+        assert marker.read_text() == "clean"
+        assert not _alive(child)
+    finally:
+        if leader.poll() is None:
+            leader.kill()
+            leader.wait(timeout=10)
+        if leader.stdout is not None:
+            leader.stdout.close()
         if child > 1 and _alive(child):
             os.kill(child, signal.SIGKILL)

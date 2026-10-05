@@ -6,6 +6,7 @@ arrives.
 """
 
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ _HEALTH_POLL_INTERVAL_SEC = 2.0
 _DEFAULT_READINESS_TIMEOUT_SEC = 600.0
 _POLL_INTERVAL_SEC = 5.0
 _STOP_TIMEOUT_SEC = 15.0
+_GROUP_POLL_INTERVAL_SEC = 0.1
 _TAIL_MAX_LINES = 200
 _TAIL_SNIPPET_BYTES = 4096
 
@@ -65,6 +67,17 @@ def _raise_with_tail(message: str, tail: collections.deque[str]) -> NoReturn:
     raise ExecutionError(
         message + (f"\n--- last vLLM output ---\n{snippet}" if snippet else "")
     )
+
+
+def _group_alive(pgid: int) -> bool:
+    """Whether any process of the engine's group remains, never probing our own."""
+    if pgid <= 1 or pgid == os.getpgrp():
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except OSError:
+        return False
+    return True
 
 
 class VLLMServeExecutor(Executor):
@@ -348,23 +361,20 @@ class VLLMServeExecutor(Executor):
     def _terminate_process_group(self, proc: subprocess.Popen[str]) -> None:
         # The engine leads its own session, so its pid names the group even once the
         # leader has exited and been reaped while its engine core and workers live on.
+        # Every member gets the stop timeout to shut down before the group is killed.
         pgid = proc.pid
-        try:
+        with contextlib.suppress(OSError):
             signal_process_group(pgid, signal.SIGTERM)
-        except (ProcessLookupError, ChildProcessError, OSError):
-            pass
-        try:
-            proc.wait(timeout=_STOP_TIMEOUT_SEC)
-        except subprocess.TimeoutExpired:
-            pass
-        try:
+        deadline = time.monotonic() + _STOP_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            proc.poll()
+            if not _group_alive(pgid):
+                break
+            time.sleep(_GROUP_POLL_INTERVAL_SEC)
+        with contextlib.suppress(OSError):
             signal_process_group(pgid, signal.SIGKILL)
-        except (ProcessLookupError, ChildProcessError, OSError):
-            pass
-        try:
+        with contextlib.suppress(Exception):
             proc.wait(timeout=5.0)
-        except Exception:
-            pass
 
     def cancel(self, task_id: str) -> None:
         if not self._signals.cancel(task_id):
