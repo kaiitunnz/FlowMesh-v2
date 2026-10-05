@@ -158,35 +158,92 @@ def parse_env_text(text: str, environ: Mapping[str, str]) -> dict[str, str]:
 
     A double-quoted value takes ``\\n``, ``\\r``, ``\\t``, ``\\\\``, ``\\"`` and
     ``\\$`` escapes and may span lines; a single-quoted value is literal but for
-    ``\\'``; an unquoted value ends at a `` #`` comment. Unquoted and double-quoted
-    values interpolate ``$NAME`` and ``${NAME}`` with the ``:-``, ``-``, ``:+``, ``+``,
-    ``:?`` and ``?`` modifiers, reading the file's earlier keys, then ``environ``, then
-    its later keys; ``$$`` is a literal ``$``. Raises ``EnvFileError`` where Compose
-    fails.
+    ``\\'``; an unquoted value ends at a `` #`` comment. A key defined twice takes its
+    last definition. Unquoted and double-quoted values interpolate ``$NAME`` and
+    ``${NAME}`` with the ``:-``, ``-``, ``:+``, ``+``, ``:?`` and ``?`` modifiers;
+    ``$$`` is a literal ``$``. A reference to another key of the file resolves to that
+    key's final value, wherever in the file it is defined, as Compose sees it when the
+    stack exports the file first; any other name, and a key's reference to itself,
+    reads ``environ``. Raises ``EnvFileError`` where Compose fails, and for keys that
+    reference each other in a cycle.
     """
-    entries = list(_entries(text))
-    ahead = _interpolate(entries, environ, {}, strict=False)
-    return _interpolate(entries, environ, ahead, strict=True)
-
-
-def _interpolate(
-    entries: list[tuple[str, str, str]],
-    environ: Mapping[str, str],
-    ahead: Mapping[str, str],
-    strict: bool,
-) -> dict[str, str]:
-    values: dict[str, str] = {}
-    later = dict(ahead)
-    lookup = ChainMap(values, dict(environ), later)
-    for key, body, quote in entries:
-        later.pop(key, None)
+    templates: dict[str, tuple[str, bool]] = {}
+    for key, body, quote in _entries(text):
         if quote == "'":
-            values[key] = body
-        elif quote == '"':
-            values[key] = _expand(_unescape(body), lookup, key, strict)
+            templates[key] = (body, False)
         else:
-            values[key] = _expand(body, lookup, key, strict)
-    return values
+            templates[key] = (_unescape(body) if quote == '"' else body, True)
+    references = {
+        key: (
+            [
+                name
+                for name in dict.fromkeys(_references(template))
+                if name != key and name in templates
+            ]
+            if interpolated
+            else []
+        )
+        for key, (template, interpolated) in templates.items()
+    }
+    values: dict[str, str] = {}
+    lookup = ChainMap(values, dict(environ))
+    # The keys on the walk from the current root, in order, with constant-time lookup.
+    visiting: dict[str, None] = {}
+    for root in templates:
+        if root in values:
+            continue
+        pending = [(root, iter(references[root]))]
+        visiting[root] = None
+        while pending:
+            key, unresolved = pending[-1]
+            for name in unresolved:
+                if name in values:
+                    continue
+                if name in visiting:
+                    walk = list(visiting)
+                    cycle = [*walk[walk.index(name) :], name]
+                    raise EnvFileError(
+                        f"{' -> '.join(cycle)}: these keys reference each other in a "
+                        "cycle"
+                    )
+                pending.append((name, iter(references[name])))
+                visiting[name] = None
+                break
+            else:
+                pending.pop()
+                visiting.popitem()
+                template, interpolated = templates[key]
+                values[key] = (
+                    _expand(template, lookup, key) if interpolated else template
+                )
+    return {key: values[key] for key in templates}
+
+
+def _references(template: str) -> Iterator[str]:
+    """Yield each name ``template`` interpolates, including those in a modifier's
+    word."""
+    remaining = [template]
+    while remaining:
+        value = remaining.pop()
+        position = 0
+        while position < len(value):
+            if value[position] != "$":
+                position += 1
+                continue
+            following = value[position + 1 : position + 2]
+            if following == "$":
+                position += 2
+            elif following == "{" and (end := _closing_brace(value, position + 1)):
+                if match := _BRACED.fullmatch(value[position + 1 : end + 1]):
+                    yield match.group(1)
+                    if match.group(3) is not None:
+                        remaining.append(match.group(3))
+                position = end + 1
+            elif name := _NAME.match(value, position + 1):
+                yield name.group()
+                position = name.end()
+            else:
+                position += 1
 
 
 def _entries(text: str) -> Iterator[tuple[str, str, str]]:
@@ -247,7 +304,7 @@ def _strip_comment(raw: str) -> str:
     return (raw if comment < 0 else raw[:comment]).rstrip()
 
 
-def _expand(value: str, lookup: Mapping[str, str], key: str, strict: bool) -> str:
+def _expand(value: str, lookup: Mapping[str, str], key: str) -> str:
     out: list[str] = []
     position = 0
     while position < len(value):
@@ -265,7 +322,7 @@ def _expand(value: str, lookup: Mapping[str, str], key: str, strict: bool) -> st
             out.append("$")
             position += 2
         elif following == "{" and (end := _closing_brace(value, position + 1)):
-            out.append(_substitute(value[position + 1 : end + 1], lookup, key, strict))
+            out.append(_substitute(value[position + 1 : end + 1], lookup, key))
             position = end + 1
         elif name := _NAME.match(value, position + 1):
             out.append(lookup.get(name.group(), ""))
@@ -288,7 +345,7 @@ def _closing_brace(value: str, start: int) -> int | None:
     return None
 
 
-def _substitute(braced: str, lookup: Mapping[str, str], key: str, strict: bool) -> str:
+def _substitute(braced: str, lookup: Mapping[str, str], key: str) -> str:
     match = _BRACED.fullmatch(braced)
     if match is None:
         return "$" + braced
@@ -299,10 +356,10 @@ def _substitute(braced: str, lookup: Mapping[str, str], key: str, strict: bool) 
     if current is not None and not current and modifier.startswith(":"):
         current = None
     if modifier.endswith("-"):
-        return current if current is not None else _expand(word, lookup, key, strict)
+        return current if current is not None else _expand(word, lookup, key)
     if modifier.endswith("+"):
-        return _expand(word, lookup, key, strict) if current is not None else ""
-    if current is None and strict:
-        message = _expand(word, lookup, key, strict) or "is required"
+        return _expand(word, lookup, key) if current is not None else ""
+    if current is None:
+        message = _expand(word, lookup, key) or "is required"
         raise EnvFileError(f"{key}: {name} {message}")
-    return current or ""
+    return current

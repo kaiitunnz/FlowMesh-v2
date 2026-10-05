@@ -7,6 +7,7 @@ lines, so a value the CLI exports for interpolation matches the value a containe
 """
 
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -135,9 +136,48 @@ def test_values_parse_as_compose_reads_them() -> None:
     assert parse_env_text(_MORE_CASES, {}) == _MORE_EXPECTED
 
 
-def test_a_reference_to_a_later_key_reads_the_value_the_cli_exports() -> None:
-    text = "A=${B}-a\nR=${C:?C is required}\nB=b\nC=c\n"
-    assert parse_env_text(text, {}) == {"A": "b-a", "R": "c", "B": "b", "C": "c"}
+# Each case resolves as `docker compose config` (v5.1.0) does once the stack has
+# exported the file's values into its environment.
+@pytest.mark.parametrize(
+    ("text", "environ", "expected"),
+    [
+        ("A=${B}\nB=${C}\nC=c\n", {}, {"A": "c", "B": "c", "C": "c"}),
+        (
+            "A=x${B}\nB=y${C}\nC=z${D}\nD=d\n",
+            {},
+            {"A": "xyzd", "B": "yzd", "C": "zd", "D": "d"},
+        ),
+        ("A=${B}\nB=file\n", {"B": "shell"}, {"A": "file", "B": "file"}),
+        ("K=1\nA=${K}\nK=2\n", {}, {"K": "2", "A": "2"}),
+        ("P=${P:-x}\n", {}, {"P": "x"}),
+        ("A=${B:?need B}\nB=b\n", {}, {"A": "b", "B": "b"}),
+        ("A=${X:-${B}}\nB=b\n", {}, {"A": "b", "B": "b"}),
+    ],
+)
+def test_a_reference_to_another_key_reads_its_final_value(
+    text: str, environ: dict[str, str], expected: dict[str, str]
+) -> None:
+    assert parse_env_text(text, environ) == expected
+
+
+def test_a_required_reference_to_an_empty_later_key_is_an_error() -> None:
+    with pytest.raises(EnvFileError, match="A: B need B"):
+        parse_env_text("A=${B:?need B}\nB=\n", {})
+
+
+def test_keys_that_reference_each_other_in_a_cycle_are_an_error() -> None:
+    with pytest.raises(EnvFileError, match="A -> B -> C -> A"):
+        parse_env_text("A=${B}\nB=x${C}\nC=${A}\nD=d\n", {})
+
+
+def test_a_long_reference_chain_resolves_in_linear_time() -> None:
+    count = 5000
+    text = "".join(f"K{i}=${{K{i + 1}}}\n" for i in range(count)) + f"K{count}=end\n"
+    start = time.perf_counter()
+    values = parse_env_text(text, {})
+    elapsed = time.perf_counter() - start
+    assert values["K0"] == "end" and len(values) == count + 1
+    assert elapsed < 1.0
 
 
 def test_a_key_reads_its_own_name_from_the_environment() -> None:
