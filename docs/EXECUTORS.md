@@ -421,9 +421,10 @@ runtime LoRA, so a base model incompatible with `--enable-lora` would fail to se
 
 A connection error or a connect or pool timeout on the task's own request, which never
 left the worker, and a 5xx, 408 or 429 response are transient: `spec.api.retries`
-re-sends them in place, and the task is retryable. Any other request failure, including
-one on a redirect hop or while reading a response, may follow the server acting on the
-request and is ambiguous: the executor never re-sends it, and a v2 task settles it by its
+re-sends them in place, and the task is retryable. A URL scheme with no transport fails
+the task's own request before it leaves and is not ambiguous. Any other request failure,
+including one on a redirect hop or while reading a response, may follow the server
+acting on the request and is ambiguous: the executor never re-sends it, and a v2 task settles it by its
 effect's replay contract, as on its worker's loss.
 
 ## SSH executor access modes
