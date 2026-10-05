@@ -3,9 +3,13 @@
 import collections
 import io
 import logging
+import os
 import shutil
+import signal
 import socketserver
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -1114,3 +1118,52 @@ class TestServeTtlAcrossReruns:
         popen, deadlines = self._run(tmp_path, ttl=180.0, elapsed=180.0)
         popen.assert_not_called()
         assert deadlines == []
+
+
+def _alive(pid: int) -> bool:
+    """Whether ``pid`` runs; a zombie awaiting its reaper does not."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError, IndexError):
+        return False
+    return state != "Z"
+
+
+def test_teardown_reaches_an_engine_child_its_dead_leader_left_behind() -> None:
+    # The leader stands in for the engine's server and its child for the engine core:
+    # a crashed server, already reaped, leaves its core in the session it led.
+    leader = subprocess.Popen(  # nosec B603 - argv list, no shell=True, sys.executable
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(120)'])\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(120)\n",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    child = 0
+    try:
+        assert leader.stdout is not None
+        child = int(leader.stdout.readline())
+        leader.kill()
+        leader.wait(timeout=10)
+        assert leader.poll() is not None
+        assert _alive(child)
+
+        make_serve_executor()._terminate_process_group(leader)
+
+        deadline = time.monotonic() + 10
+        while _alive(child) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _alive(child)
+    finally:
+        if leader.poll() is None:
+            leader.kill()
+            leader.wait(timeout=10)
+        if child > 1 and _alive(child):
+            os.kill(child, signal.SIGKILL)

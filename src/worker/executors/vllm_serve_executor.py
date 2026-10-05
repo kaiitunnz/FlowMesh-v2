@@ -346,26 +346,21 @@ class VLLMServeExecutor(Executor):
         logger.info("Serve task TTL reached; terminating vLLM server")
 
     def _terminate_process_group(self, proc: subprocess.Popen[str]) -> None:
+        # The engine leads its own session, so its pid names the group even once the
+        # leader has exited and been reaped while its engine core and workers live on.
+        pgid = proc.pid
         try:
-            pgid = os.getpgid(proc.pid)
-        except OSError:
-            pgid = None
-        if pgid is not None:
-            try:
-                signal_process_group(pgid, signal.SIGTERM)
-            except (ProcessLookupError, ChildProcessError, OSError):
-                pass
-            try:
-                proc.wait(timeout=_STOP_TIMEOUT_SEC)
-            except subprocess.TimeoutExpired:
-                try:
-                    signal_process_group(pgid, signal.SIGKILL)
-                except (ProcessLookupError, ChildProcessError, OSError):
-                    pass
-                try:
-                    proc.wait(timeout=5.0)
-                except Exception:
-                    pass
+            signal_process_group(pgid, signal.SIGTERM)
+        except (ProcessLookupError, ChildProcessError, OSError):
+            pass
+        try:
+            proc.wait(timeout=_STOP_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            signal_process_group(pgid, signal.SIGKILL)
+        except (ProcessLookupError, ChildProcessError, OSError):
+            pass
         try:
             proc.wait(timeout=5.0)
         except Exception:
