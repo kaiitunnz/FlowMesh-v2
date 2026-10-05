@@ -92,16 +92,22 @@ _COLLECTOR_TLS_CONFIG_ARG = "--config=/etc/otelcol-contrib/tls.yaml"
 _SERVER_TLS_MOUNT = PurePosixPath("/etc/ssl/server")
 
 
-def apply_collector_tls_env() -> None:
+def apply_collector_tls_env(resolve: bool) -> None:
     """Hand the collector the server's TLS certificate and key alone, and run it as
     the key's owner, who alone can read it.
 
-    A node without the telemetry profile, or a stack without that material, runs the
-    collector in plaintext as the invoking user, with the null device bound in place of
-    the files. Raises ``ValueError`` naming a configured file the collector cannot be
+    A node without the telemetry profile, a stack without that material, or a command
+    that starts no collector (``resolve`` unset) gets the plaintext values: the
+    invoking user, with the null device bound in place of the files. Those satisfy
+    Compose without reading the files, so stopping or inspecting a stack never depends
+    on them. Raises ``ValueError`` naming a configured file the collector cannot be
     handed.
     """
-    if not (telemetry_profile_on(os.environ) and collector_serves_tls(os.environ)):
+    if not (
+        resolve
+        and telemetry_profile_on(os.environ)
+        and collector_serves_tls(os.environ)
+    ):
         os.environ.update(
             {
                 COLLECTOR_TLS_CONFIG_ARG_ENV: "",

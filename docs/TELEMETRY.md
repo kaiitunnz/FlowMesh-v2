@@ -135,8 +135,9 @@ Collector requires it to start. Where the stack has server gRPC TLS material
 (`SERVER_GRPC_TLS_CERT_FILE` and `SERVER_GRPC_TLS_KEY_FILE`), both receivers serve that
 certificate over TLS at the default endpoint, `https://localhost:4317`; a stack without it
 sets `SERVER_METRICS_OTLP_ENDPOINT=http://localhost:4317`. `flowmesh stack` mounts the Collector only that
-certificate and key from `SERVER_TLS_DIR`, runs it as the key's owner, and stops with an
-error naming either file it cannot read. A producer verifies the Collector with the deployment
+certificate and key from `SERVER_TLS_DIR`, runs it as the key's owner. A command that starts
+or recreates the Collector stops with an error naming either file it cannot read; one
+that stops or inspects the stack does not read them. A producer verifies the Collector with the deployment
 CA, `SERVER_METRICS_OTLP_CA_FILE`, which defaults to the server gRPC CA and reaches each
 worker its supervisor launches. A process that sends its token over plaintext to a host
 other than its own warns at startup. While set, the token replaces any

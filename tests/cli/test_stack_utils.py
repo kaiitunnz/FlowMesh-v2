@@ -152,7 +152,7 @@ def test_the_collector_gets_the_server_cert_and_key_alone(tmp_path: Path) -> Non
         "SERVER_GRPC_TLS_KEY_FILE": "/etc/ssl/server/server.key",
     }
     with patch.dict(os.environ, env, clear=True):
-        apply_collector_tls_env()
+        apply_collector_tls_env(resolve=True)
         assert os.environ[COLLECTOR_TLS_CONFIG_ARG_ENV] == (
             "--config=/etc/otelcol-contrib/tls.yaml"
         )
@@ -183,7 +183,7 @@ def test_without_server_material_the_collector_binds_nothing_from_disk(
         "SERVER_GRPC_TLS_KEY_FILE": key,
     }
     with patch.dict(os.environ, env, clear=True):
-        apply_collector_tls_env()
+        apply_collector_tls_env(resolve=True)
         _assert_plaintext_collector()
 
 
@@ -201,7 +201,7 @@ def test_a_node_without_the_telemetry_profile_reads_no_tls_file(
         patch.object(Path, "is_file", side_effect=PermissionError("denied")),
         patch.object(Path, "stat", side_effect=PermissionError("denied")),
     ):
-        apply_collector_tls_env()
+        apply_collector_tls_env(resolve=True)
         _assert_plaintext_collector()
 
 
@@ -223,7 +223,7 @@ def test_a_tls_file_the_collector_cannot_be_handed_is_an_error(
     }
     with patch.dict(os.environ, env, clear=True):
         with pytest.raises(ValueError, match=named):
-            apply_collector_tls_env()
+            apply_collector_tls_env(resolve=True)
 
 
 def test_an_unreadable_tls_directory_is_an_error_naming_it(tmp_path: Path) -> None:
@@ -238,4 +238,20 @@ def test_an_unreadable_tls_directory_is_an_error_naming_it(tmp_path: Path) -> No
         patch.object(Path, "is_file", side_effect=PermissionError("denied")),
     ):
         with pytest.raises(ValueError, match="server.pem"):
-            apply_collector_tls_env()
+            apply_collector_tls_env(resolve=True)
+
+
+def test_a_command_that_starts_no_collector_reads_no_tls_file(tmp_path: Path) -> None:
+    env = {
+        **_TELEMETRY,
+        "SERVER_TLS_DIR": (tmp_path / "gone").as_posix(),
+        "SERVER_GRPC_TLS_CERT_FILE": "/etc/ssl/server/server.pem",
+        "SERVER_GRPC_TLS_KEY_FILE": "/etc/ssl/server/server.key",
+    }
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch.object(Path, "is_file", side_effect=PermissionError("denied")),
+        patch.object(Path, "stat", side_effect=PermissionError("denied")),
+    ):
+        apply_collector_tls_env(resolve=False)
+        _assert_plaintext_collector()

@@ -56,7 +56,10 @@ from .worker import worker_pull
 app = get_typer(help="Build, manage, and run the FlowMesh stack.")
 
 
-def _stack() -> DockerComposeStack:
+def _stack(start_collector: bool = False) -> DockerComposeStack:
+    """The stack, resolving the collector's TLS files only when ``start_collector``
+    says the command may start or recreate it."""
+
     def _load(env_file: Path) -> None:
         ensure_env_file(env_file, stack_env_example())
         load_stack_env(env_file)
@@ -64,7 +67,7 @@ def _stack() -> DockerComposeStack:
             apply_stack_resource_env()
             apply_stack_path_env(Path.cwd())
             apply_plugin_data_env(Path.cwd())
-            apply_collector_tls_env()
+            apply_collector_tls_env(resolve=start_collector)
         except ValueError as exc:
             logging.error(str(exc))
             raise typer.Exit(code=1)
@@ -120,10 +123,13 @@ def _compose(
     env: dict[str, str] | None,
     to_deploy: bool = False,
     profile: str | None = None,
+    start_collector: bool = False,
 ) -> None:
     ensure_env_file(env_file, stack_env_example())
     full_args = profile_args(_profiles(env_file, profile)) + args
-    result = _stack().run(full_args, env_file=env_file, env=env, to_deploy=to_deploy)
+    result = _stack(start_collector).run(
+        full_args, env_file=env_file, env=env, to_deploy=to_deploy
+    )
     if result.returncode != 0:
         raise typer.Exit(code=result.returncode)
 
@@ -541,6 +547,7 @@ def up(
         env=image_env_overrides(image_tag),
         to_deploy=True,
         profile=profile,
+        start_collector=True,
     )
     logging.success("FlowMesh stack is up.")
 
@@ -631,6 +638,7 @@ def restart(
             env=image_env_overrides(image_tag),
             to_deploy=True,
             profile=profile,
+            start_collector=True,
         )
         logging.success("FlowMesh stack is up.")
         return
@@ -673,6 +681,7 @@ def restart(
         env=image_env_overrides(image_tag),
         to_deploy=True,
         profile=profile,
+        start_collector="otel_collector" in requested,
     )
     logging.success(f"Service(s) restarted: {joined}.")
 
