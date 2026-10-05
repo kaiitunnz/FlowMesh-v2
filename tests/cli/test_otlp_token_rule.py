@@ -25,6 +25,16 @@ def test_the_telemetry_profile_requires_the_collector_token() -> None:
     assert errors and "TELEMETRY_OTLP_TOKEN" in errors[0]
 
 
+def test_the_example_token_does_not_satisfy_the_telemetry_profile() -> None:
+    errors, _ = _problems(
+        {
+            "COMPOSE_PROFILES": "telemetry",
+            "TELEMETRY_OTLP_TOKEN": "<replace-with-strong-token>",
+        }
+    )
+    assert errors and "TELEMETRY_OTLP_TOKEN" in errors[0]
+
+
 def test_a_token_satisfies_the_telemetry_profile() -> None:
     errors, _ = _problems(_PROFILE)
     assert errors == []

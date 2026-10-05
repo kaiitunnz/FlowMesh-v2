@@ -144,7 +144,7 @@ directory `flowmesh stack` runs in.
 | `SERVER_METRICS_METRICS_ENABLED` | `true` | Whether to emit OTel metrics |
 | `SERVER_METRICS_TRACE_SAMPLE_RATIO` | `1.0` | Per-workflow trace sampling ratio |
 | `SERVER_METRICS_OTLP_ENDPOINT` | `https://localhost:4317` | OTLP collector endpoint; unset disables export |
-| `SERVER_METRICS_OTLP_TOKEN` | – | Bearer token sent with every OTLP export |
+| `SERVER_METRICS_OTLP_TOKEN` | `<replace-with-strong-token>` | Bearer token sent with every OTLP export |
 | `SERVER_METRICS_OTLP_CA_FILE` | – | CA that verifies an https:// collector; defaults to `SERVER_GRPC_TLS_CA_FILE` |
 | `SERVER_METRICS_OTLP_TIMEOUT_SEC` | `10` | OTLP export request timeout (seconds) |
 | `SERVER_METRICS_RESOURCE_SAMPLE_SEC` | `15` | Worker GPU/resource sampling interval (seconds) |
@@ -161,7 +161,7 @@ directory `flowmesh stack` runs in.
 | `TELEMETRY_CLICKHOUSE_NATIVE_PORT` | `9000` | Host port for the ClickHouse native interface |
 | `TELEMETRY_OTLP_GRPC_PORT` | `4317` | Host port for the collector's OTLP gRPC receiver |
 | `TELEMETRY_OTLP_HTTP_PORT` | `4318` | Host port for the collector's OTLP HTTP receiver |
-| `TELEMETRY_OTLP_TOKEN` | – | Bearer token the collector's OTLP receivers require |
+| `TELEMETRY_OTLP_TOKEN` | `<replace-with-strong-token>` | Bearer token the collector's OTLP receivers require |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**

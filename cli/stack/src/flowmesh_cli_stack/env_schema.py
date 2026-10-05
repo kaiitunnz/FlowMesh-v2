@@ -16,6 +16,8 @@ from flowmesh_stack.env_schema import (
     require_if_true,
 )
 
+OTLP_TOKEN_PLACEHOLDER = "<replace-with-strong-token>"
+
 
 def credential_overrides(role: NodeRole) -> dict[str, str]:
     """Fresh credentials for the services a root node runs itself.
@@ -122,18 +124,27 @@ def telemetry_profile_on(env: Mapping[str, str]) -> bool:
     return "telemetry" in {profile.strip() for profile in profiles}
 
 
+def collector_token_error(env: Mapping[str, str]) -> str | None:
+    """Return why the telemetry profile's collector has no usable token, or None.
+
+    The placeholder counts as unset, since a collector would otherwise accept the
+    token published in the example env.
+    """
+    token = (env.get("TELEMETRY_OTLP_TOKEN") or "").strip()
+    if not telemetry_profile_on(env) or token not in ("", OTLP_TOKEN_PLACEHOLDER):
+        return None
+    return (
+        "COMPOSE_PROFILES includes telemetry, which requires TELEMETRY_OTLP_TOKEN set "
+        "to a strong token: the collector refuses an unauthenticated export"
+    )
+
+
 def _require_collector_token(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
-    """Require ``TELEMETRY_OTLP_TOKEN`` while the telemetry profile is on."""
-    if (
-        telemetry_profile_on(env)
-        and not (env.get("TELEMETRY_OTLP_TOKEN") or "").strip()
-    ):
-        errors.append(
-            "COMPOSE_PROFILES includes telemetry, which requires TELEMETRY_OTLP_TOKEN: "
-            "the collector refuses an unauthenticated export"
-        )
+    """Require a real ``TELEMETRY_OTLP_TOKEN`` while the telemetry profile is on."""
+    if message := collector_token_error(env):
+        errors.append(message)
 
 
 def _require_collector_scheme(
@@ -1353,7 +1364,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "SERVER_METRICS_OTLP_TOKEN",
-                    "",
+                    OTLP_TOKEN_PLACEHOLDER,
                     description="Bearer token sent with every OTLP export.",
                 ),
                 EnvVar(
@@ -1459,7 +1470,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "TELEMETRY_OTLP_TOKEN",
-                    "",
+                    OTLP_TOKEN_PLACEHOLDER,
                     description="Bearer token the collector's OTLP receivers require.",
                 ),
             ],

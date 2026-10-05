@@ -8,6 +8,8 @@ from flowmesh_stack.env import parse_env_file
 
 _PASSWORD_PLACEHOLDER = "<replace-with-strong-password>"
 _ACCESS_KEY_PLACEHOLDER = "<replace-with-access-key>"
+_TOKEN_PLACEHOLDER = "<replace-with-strong-token>"
+_PLACEHOLDERS = (_PASSWORD_PLACEHOLDER, _ACCESS_KEY_PLACEHOLDER, _TOKEN_PLACEHOLDER)
 _CREDENTIALS = (
     "REDIS_PASSWORD",
     "CONTENT_STORE_ACCESS_KEY",
@@ -33,12 +35,12 @@ def test_a_root_init_replaces_every_placeholder_with_fresh_credentials(
 
     printed = capsys.readouterr()
     for key in _CREDENTIALS:
-        assert first[key] not in (_PASSWORD_PLACEHOLDER, _ACCESS_KEY_PLACEHOLDER)
+        assert first[key] not in _PLACEHOLDERS
         assert len(first[key]) >= 16
         assert first[key] != second[key]
         assert first[key] not in printed.out + printed.err
     text = (tmp_path / ".env").read_text()
-    assert _PASSWORD_PLACEHOLDER not in text and _ACCESS_KEY_PLACEHOLDER not in text
+    assert not any(placeholder in text for placeholder in _PLACEHOLDERS)
     assert (
         first["SERVER_METRICS_CLICKHOUSE_PASSWORD"]
         == first["TELEMETRY_CLICKHOUSE_PASSWORD"]
@@ -60,8 +62,8 @@ def test_a_worker_init_leaves_the_redis_password_placeholder(tmp_path):
     env = _init(tmp_path, "worker")
 
     assert env["REDIS_PASSWORD"] == _PASSWORD_PLACEHOLDER
-    assert env["SERVER_METRICS_OTLP_TOKEN"] == ""
-    assert env["TELEMETRY_OTLP_TOKEN"] == ""
+    assert env["SERVER_METRICS_OTLP_TOKEN"] == _TOKEN_PLACEHOLDER
+    assert env["TELEMETRY_OTLP_TOKEN"] == _TOKEN_PLACEHOLDER
 
 
 def test_the_content_store_console_listens_on_loopback():

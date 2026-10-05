@@ -31,6 +31,7 @@ from flowmesh_stack.images import (
 
 from .env_schema import (
     STACK_ENV_SCHEMA,
+    collector_token_error,
     credential_overrides,
     deploy_overrides,
     role_overrides,
@@ -68,6 +69,8 @@ def _stack(start_collector: bool = False) -> DockerComposeStack:
             apply_stack_path_env(Path.cwd())
             apply_plugin_data_env(Path.cwd())
             apply_collector_tls_env(resolve=start_collector)
+            if start_collector and (message := collector_token_error(os.environ)):
+                raise ValueError(message)
         except ValueError as exc:
             logging.error(str(exc))
             raise typer.Exit(code=1)

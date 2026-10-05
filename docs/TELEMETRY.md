@@ -128,7 +128,9 @@ discard a trace.
 
 `flowmesh stack init --role root` writes one random password into both
 `TELEMETRY_CLICKHOUSE_PASSWORD` and `SERVER_METRICS_CLICKHOUSE_PASSWORD`, and one random
-token into both `TELEMETRY_OTLP_TOKEN` and `SERVER_METRICS_OTLP_TOKEN`.
+token into both `TELEMETRY_OTLP_TOKEN` and `SERVER_METRICS_OTLP_TOKEN`. The example env
+holds `<replace-with-strong-token>` in both, which `flowmesh stack doctor` flags and a
+command that starts or recreates the Collector refuses.
 
 Both receivers require `TELEMETRY_OTLP_TOKEN` as every export's bearer token, and the
 Collector requires it to start. Where the stack has server gRPC TLS material

@@ -1,4 +1,5 @@
-"""Only a command that starts the collector needs its TLS files to be readable."""
+"""Only a command that starts the collector needs its TLS files to be readable and
+its token set."""
 
 import os
 import subprocess
@@ -63,3 +64,47 @@ def test_starting_the_stack_refuses_unreadable_tls_naming_it(
     assert raised.value.exit_code == 1
     compose.assert_not_called()
     assert "server.key" in error.call_args.args[0]
+
+
+def _telemetry_env(tmp_path: Path, token: str) -> Path:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"COMPOSE_PROFILES=telemetry\nTELEMETRY_OTLP_TOKEN={token}\n")
+    return env_file
+
+
+@pytest.fixture
+def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(load_env, "_loaded", None, raising=False)
+    with patch.dict(os.environ, {"PATH": os.environ.get("PATH", "")}, clear=True):
+        yield tmp_path
+
+
+@pytest.mark.parametrize("token", ["<replace-with-strong-token>", ""])
+def test_starting_the_collector_refuses_the_example_token(
+    scratch: Path, compose: MagicMock, token: str
+) -> None:
+    with (
+        patch.object(stack_module.logging, "error") as error,
+        pytest.raises(typer.Exit),
+    ):
+        stack_module.up(env_file=_telemetry_env(scratch, token), image_tag=None)
+    compose.assert_not_called()
+    assert "TELEMETRY_OTLP_TOKEN" in error.call_args.args[0]
+
+
+def test_starting_the_collector_takes_a_real_token(
+    scratch: Path, compose: MagicMock
+) -> None:
+    stack_module.up(env_file=_telemetry_env(scratch, "a-real-token"), image_tag=None)
+    compose.assert_called_once()
+
+
+def test_stopping_the_stack_ignores_the_example_token(
+    scratch: Path, compose: MagicMock
+) -> None:
+    stack_module.down(
+        env_file=_telemetry_env(scratch, "<replace-with-strong-token>"),
+        image_tag=None,
+    )
+    compose.assert_called_once()
