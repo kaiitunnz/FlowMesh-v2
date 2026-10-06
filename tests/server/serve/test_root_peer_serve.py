@@ -569,9 +569,10 @@ def test_a_loss_after_delivery_is_uncertain_and_never_replays_on_the_relay(
             ResidentStreamStatus.UNCERTAIN
         ]
         assert await h.relayed_frames() == 0
-        assert h.control.observations[-1].outcome != (
-            RouteObservationOutcome.VERIFIED.value
-        )
+        assert [o.outcome for o in h.control.observations] == [
+            RouteObservationOutcome.VERIFIED.value,
+            RouteObservationOutcome.ROUTE_FAILURE.value,
+        ]
 
     _run(
         body,
