@@ -1799,12 +1799,13 @@ class ResidentCapacityControl:
                             )
                             return None
             if loop.time() >= deadline:
+                # The claim expires and its invocation fails in one step, so nothing
+                # runs between them.
+                detail = await self._cold_start_timeout_detail(family)
+                if claim.state is ClaimState.TERMINAL:
+                    return None
                 self._admission.on_expired(claim)
-                self._fail(
-                    orig,
-                    ProvisioningDenialReason.COLD_START_BUDGET,
-                    await self._cold_start_timeout_detail(family),
-                )
+                self._fail(orig, ProvisioningDenialReason.COLD_START_BUDGET, detail)
                 return None
             await asyncio.sleep(self._poll_interval)
 
@@ -1823,8 +1824,19 @@ class ResidentCapacityControl:
             or newest is None
             or newest.serve_task_id is None
             or self._serve_task_hostable is None
-            or await self._serve_task_hostable(newest.serve_task_id)
         ):
+            return detail
+        try:
+            hostable = await self._serve_task_hostable(newest.serve_task_id)
+        except Exception:
+            # Diagnostic only: an unreadable fleet leaves the denial generic.
+            self._logger.warning(
+                "could not read whether a worker can host family %s",
+                family,
+                exc_info=True,
+            )
+            return detail
+        if hostable:
             return detail
         return (
             f"{detail}: no worker can host a replica of size "

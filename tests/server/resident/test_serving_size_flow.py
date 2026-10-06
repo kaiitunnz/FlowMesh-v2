@@ -186,6 +186,11 @@ class _FleetRegistry(_Registry):
         self._workers[worker.id] = worker
 
 
+class _UnreadableFleet(_FleetRegistry):
+    async def satisfying_workers_async(self, task: Any) -> list[Worker]:
+        raise ConnectionError("registry unreachable")
+
+
 def _fleet_worker(worker_id: str, cpu_cores: int) -> Worker:
     return _worker(
         id=worker_id,
@@ -198,12 +203,16 @@ def _fleet_worker(worker_id: str, cpu_cores: int) -> Worker:
 Steer = Callable[[Node, Dispatcher, _FleetRegistry, str], None]
 
 
-async def _deny_cold_start(fleet: list[Worker], steer: Steer) -> str:
+async def _deny_cold_start(
+    fleet: list[Worker],
+    steer: Steer,
+    registry_type: type[_FleetRegistry] = _FleetRegistry,
+) -> str:
     """Run a resident claim to its cold-start denial and return the denial.
 
     ``steer`` drives the claim's first cold start through the dispatcher's own paths.
     """
-    registry = _FleetRegistry(fleet)
+    registry = registry_type(fleet)
     node = Node(cold_start_deadline_sec=3.0, worker_registry=registry)
     node.control.bind_loop(asyncio.get_running_loop())
     errors: list[str] = []
@@ -295,5 +304,17 @@ def test_a_worker_joining_after_an_unhosted_cold_start_keeps_the_generic_denial(
 def test_a_size_whose_workers_all_failed_it_keeps_the_generic_denial() -> None:
     denial = asyncio.run(
         _deny_cold_start([_fleet_worker("wkr-big", 8)], _failed_on_every_worker)
+    )
+    assert denial.endswith(_GENERIC)
+
+
+def test_an_unreadable_fleet_leaves_the_cold_start_denial_generic() -> None:
+    def leave_pending(*_: Any) -> None:
+        return None
+
+    denial = asyncio.run(
+        _deny_cold_start(
+            [_fleet_worker("wkr-small", 1)], leave_pending, _UnreadableFleet
+        )
     )
     assert denial.endswith(_GENERIC)
