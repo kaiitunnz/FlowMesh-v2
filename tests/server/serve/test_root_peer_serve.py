@@ -217,8 +217,9 @@ class _Harness:
             ),
         )
         self.control.executor = self.executor
+        self.attachment = _Attachment()
         self.sidecar = ResidentReplicaSidecar(
-            sink=_NoAttachment(),
+            sink=self.attachment,
             engine_open=_unused_engine,
             engine_open_raw=engine,
         )
@@ -289,11 +290,14 @@ class _Harness:
         return self.open_connections
 
 
-class _NoAttachment:
+class _Attachment:
     """The replica worker's attachment: a dialed session never answers over it."""
 
+    def __init__(self) -> None:
+        self.frames: list[Any] = []
+
     async def send(self, frame: Any) -> None:
-        raise AssertionError("a dialed session answers over its own connection")
+        self.frames.append(frame)
 
 
 def _run(
@@ -475,6 +479,16 @@ def test_a_released_attempt_closes_its_socket(ca: _TestCa, release: str) -> None
         ]
         # A release settles nothing: only the fenced terminal does.
         assert h.control.outcomes == []
+        # The replica, as when the root dies mid-stream, finds its connection gone on
+        # its next write: it drops the session and its engine request, and reports
+        # nothing over its attachment.
+        pause.set()
+        for _ in range(100):
+            if not h.sidecar._sessions:
+                break
+            await asyncio.sleep(0.02)
+        assert h.sidecar._sessions == {}
+        assert h.attachment.frames == []
 
     _run(
         body,
