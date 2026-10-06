@@ -17,9 +17,10 @@ A probe opening a connection is echoed and closed, so a reachability check cover
 handshake, origin check and framing a session uses without reaching a handler.
 
 A dialer that opens a socket but never finishes the handshake holds one slot, so the
-handshake is deadlined; the connection cap bounds the sessions accepted past it. A
-legitimate connection then idles between frames for as long as its invocation runs, so
-reads carry no deadline.
+handshake is deadlined, and so is the opening of a session: its first frame, and after
+an accept the first relay frame, which every dialer sends at once. The connection cap
+bounds the sessions accepted past that. A legitimate connection then idles between
+frames for as long as its invocation runs, so later reads carry no deadline.
 
 An operator may run a deployment on a trusted network without mutual TLS. That posture
 is explicit, warns on every listener it starts, and carries no peer identity, so the
@@ -189,7 +190,9 @@ class MutualTlsFrameListener:
         self._connections.add(writer)
         handler: ConnectionHandler | None = None
         try:
-            first = await read_stream_frame(reader)
+            first = await asyncio.wait_for(
+                read_stream_frame(reader), HANDSHAKE_TIMEOUT_SEC
+            )
             if isinstance(first, ProbeFrame):
                 await write_probe(writer, first.payload)
                 writer.close()
@@ -198,7 +201,9 @@ class MutualTlsFrameListener:
                 if first.status is not AcceptStatus.REQUEST:
                     raise FrameStreamError("a dialer sent an accept answer")
                 await write_accept(writer, AcceptStatus.ACCEPTED)
-                first = await read_relay_frame(reader)
+                first = await asyncio.wait_for(
+                    read_relay_frame(reader), HANDSHAKE_TIMEOUT_SEC
+                )
             handler = self._handler(ConnectionFrameSink(writer))
             await handler.on_frame(first)
             while True:

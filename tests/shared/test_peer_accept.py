@@ -266,3 +266,33 @@ def test_a_target_that_never_answers_times_out_within_the_connect_budget() -> No
     exc = asyncio.run(run())
 
     assert classify_peer_error(exc) is RouteObservationOutcome.TIMEOUT
+
+
+@pytest.mark.parametrize("sends", ["nothing", "only an accept request"])
+def test_a_dialer_that_opens_no_session_frees_its_slot(
+    monkeypatch: pytest.MonkeyPatch, sends: str
+) -> None:
+    monkeypatch.setattr("shared.network.mtls_listener.HANDSHAKE_TIMEOUT_SEC", 0.2)
+    received: list[RelayFrame] = []
+
+    async def run() -> None:
+        async with _listener(None, received, max_connections=1) as ep:
+            _, silent = await open_peer_connection(ep, None, _BUDGET)
+            if sends == "only an accept request":
+                await write_accept(silent, AcceptStatus.REQUEST)
+            # The silent dialer holds the only slot until the listener gives up on it.
+            await asyncio.sleep(0.05)
+            exc = await _dial(ep, None)
+            assert isinstance(exc, PeerAcceptError) and exc.outcome is None
+            async with asyncio.timeout(_BUDGET):
+                while True:
+                    try:
+                        _, writer = await open_accepted_connection(ep, None, _BUDGET)
+                    except PeerAcceptError:
+                        await asyncio.sleep(0.05)
+                        continue
+                    writer.close()
+                    break
+            silent.close()
+
+    asyncio.run(run())
