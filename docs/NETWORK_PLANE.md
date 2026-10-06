@@ -85,14 +85,16 @@ Where a deployment declares an origin-to-target pair trusted, an admitted reside
 invocation leaves the relay for a socket the origin opens itself. The `RouteOrigin` is
 both the route's source identity and its dialer: for a workflow boundary that is the
 invocation's own worker, so the request and response bypass the root and the rendezvous
-entirely. A gated serve request has the root as its origin and rides `control_relay`.
+entirely. A gated serve request, `proxy` or `forward`, has the root as its origin, so
+the root dials the target with its own node's identity. The root's serve ingress is its
+own route origin with its own reachability evidence, apart from the workers on its node.
 Only the pair the resolver admitted is reachable — an origin never scans for or
 substitutes a peer.
 
 Eligibility is a property of the pair, not of topology. The resolver offers a peer
 transport only when the deployment enables it, both ends sit in the configured trust
-domain, the target is exposed at an admitted reachability class, the origin worker has
-the peer plane enabled, the target serves the transport — its listener for
+domain, the target is exposed at an admitted reachability class, the origin can dial a
+peer, the target serves the transport — its listener for
 `worker_direct`, its node's peer listener for `node_relay` — and directional evidence has
 not demoted the path.
 
@@ -106,7 +108,8 @@ back to the relay. The replica's claim gate then fences the session to the invoc
 control admitted. TLS material is configured as files under the peer TLS directory, which
 the stack mounts read-only at `/etc/ssl/peer` where the configured paths resolve, and is
 base64-encoded only when a worker attachment is handed its transient copy. Material a
-node cannot read is fatal at start-up rather than a fallback to plaintext. An operator
+node cannot read is fatal at start-up rather than a fallback to plaintext; the root's
+serve ingress then dials nothing and its requests ride `control_relay`. An operator
 may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest a trusted network, which
 warns on every listener and still requires the same trusted-pair policy.
 

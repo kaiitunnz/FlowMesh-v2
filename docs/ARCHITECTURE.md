@@ -387,7 +387,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   port, authenticates and admits the request over the same gate as `proxy`, and relays it
   to the task's standing replica; a mode with no live exposure fails closed. At start the
   task is adopted as its own standing replica, validated under `RESIDENT_ALLOWED_MODELS`.
-  Both modes carry traffic over `control_relay`. Available when
+  The root originates both modes' traffic over `control_relay` or, for a trusted pair, a
+  peer transport it dials. Available when
   `RESIDENT_CAPACITY_ENABLED=true` (which requires the network plane). See
   [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A control-resolved routing substrate turns trusted
@@ -405,9 +406,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   worker's claim-gated replica-sidecar listener, `node_relay` reaches the target node's
   purpose-scoped listener, which hands the session to its local sidecar uplink. The
   `RouteOrigin` is both the source identity and the dialer, so a workflow boundary's
-  payload bypasses the root and the rendezvous for the whole request and response. Both
-  carry the same frames, fences, windows, and cancellation as the relay, and the target sidecar's
-  claim gate is the only authority over the traffic. Mutual TLS between the pair is the
+  payload bypasses the root and the rendezvous for the whole request and response; the
+  root dials only as the origin of a gated serve request, with its own node's identity.
+  Both carry the same frames, fences, windows, and cancellation as the relay, and the
+  target sidecar's claim gate is the only authority over the traffic. Mutual TLS between the pair is the
   default. An untrusted, unreachable, or policy-ineligible pair is carried over
   `control_relay`, and a dial that fails before delivery falls back to it under the same
   held credit. Enable with `NETWORK_PLANE_PEER_ENABLED=true`. See
