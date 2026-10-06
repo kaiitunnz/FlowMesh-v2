@@ -108,9 +108,9 @@ control admitted. TLS material is configured as files under the peer TLS directo
 the stack mounts read-only at `/etc/ssl/peer` where the configured paths resolve, and is
 base64-encoded only when a worker attachment is handed its transient copy. Material a
 node cannot read is fatal at start-up rather than a fallback to plaintext. A root with
-unusable material carries its serve requests over `control_relay`. An operator may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest
-a trusted network, which warns on every listener and still requires the same trusted-pair
-policy.
+unusable material carries its serve requests over `control_relay`. An operator may
+instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest a trusted network, which warns on
+every listener and still requires the same trusted-pair policy.
 
 The target accepts a connection before the origin sends a session on it. A dial that
 fails, a refusal, a full listener, or a target that does not answer within the connect

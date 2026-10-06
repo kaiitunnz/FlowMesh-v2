@@ -410,8 +410,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   windows, and cancellation as the relay, and the target sidecar's claim gate is the only
   authority over the traffic. Mutual TLS between the pair is the default. An untrusted,
   unreachable, or policy-ineligible pair is carried over `control_relay`, and a dial that
-  fails before delivery falls back to it under the same held credit. Enable with `NETWORK_PLANE_PEER_ENABLED=true`. See
-  [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+  fails before delivery falls back to it under the same held credit. Enable with
+  `NETWORK_PLANE_PEER_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Worker-originated mediated boundaries.** A fabric-served external tool (`search/v1`)
   or a managed external model turn egresses only in the Agent's assigned worker, never in
   the root or a supervisor. The worker captures the boundary, keeps the raw request in
