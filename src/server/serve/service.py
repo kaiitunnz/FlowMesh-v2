@@ -87,9 +87,12 @@ class WrongIngress(Exception):
 class ServeTransport(Protocol):
     """How the root serve ingress's origin relay is opened, authorized, and reaped.
 
-    Both gated modes drive one shared root-internal rendezvous attachment in this
-    process, carrying the same frozen envelope under one fence over ``control_relay``.
+    Both gated modes drive one shared origin in this process, carrying the same frozen
+    envelope under one fence over the transport control's plan selects.
     """
+
+    @property
+    def dials_peers(self) -> bool: ...
 
     def open(
         self,
@@ -102,6 +105,7 @@ class ServeTransport(Protocol):
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
         plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None: ...
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None: ...
@@ -178,6 +182,10 @@ class _ServeStream:
     def invocation_id(self) -> str:
         return self._context.invocation_id
 
+    @property
+    def dials_peers(self) -> bool:
+        return self._context.transport.dials_peers
+
     def origination(self) -> ServeOrigination:
         """The origination one attempt drives; every attempt reuses the stable identity
         so admission resumes the in-flight claim rather than raising a successor."""
@@ -196,7 +204,11 @@ class _ServeStream:
         )
 
     def open(
-        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+        self,
+        session_id: str,
+        handoff: AdmissionHandoff,
+        plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None:
         self._context.transport.open(
             session_id=session_id,
@@ -207,6 +219,7 @@ class _ServeStream:
             handoff=handoff,
             envelope=self._context.envelope,
             plan=plan,
+            traceparent=traceparent,
         )
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:

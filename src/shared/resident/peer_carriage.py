@@ -9,8 +9,8 @@ cancellation are unchanged, and the target-side claim gate remains the only auth
 over the traffic.
 
 The origin is the worker of a workflow boundary, so its payload reaches the target
-without entering the root or the rendezvous at all. A gated serve request has the root
-as its origin and rides ``control_relay``.
+without entering the root or the rendezvous at all. For a gated serve request the root
+is the origin and dials the target itself.
 
 A dial that fails before any frame reaches the target records a classified path
 observation and falls through to the relay base under the same claim, request identity,
@@ -75,6 +75,11 @@ class _PeerSink(FrameSink):
         self._reader_task: asyncio.Task[None] | None = None
         self._on_base = False
         self._closing = False
+
+    @property
+    def transport(self) -> str:
+        """The transport this attempt rides: its peer, or the relay base it fell to."""
+        return CONTROL_RELAY if self._on_base else self._transport.value
 
     async def send(self, frame: RelayFrame) -> None:
         if self._on_base:
@@ -206,6 +211,10 @@ class PeerCarriage:
         )
         self._sinks[plan.session_id] = sink
         return sink
+
+    def transport_of(self, session_id: str) -> str:
+        sink = self._sinks.get(session_id)
+        return sink.transport if sink is not None else CONTROL_RELAY
 
     async def send_on_base(self, frame: RelayFrame) -> None:
         await self._base.send(frame)

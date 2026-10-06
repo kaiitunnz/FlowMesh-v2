@@ -15,6 +15,7 @@ from server.network.resolver import resolve_route
 from server.network.service import TrustedPeerPolicy
 from server.network.state import (
     NetworkEndpointAdvertisement,
+    PolicyClass,
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
@@ -44,6 +45,7 @@ class _TrustedPairNetwork:
         listener: ReplicaListenerAdvertisement,
         *,
         trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
     ) -> tuple[RouteOrigin, ResolvedRoute]:
         origin = RouteOrigin(
             origin_id="rog-1",

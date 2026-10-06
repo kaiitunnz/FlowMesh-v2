@@ -19,8 +19,7 @@ from pydantic import BaseModel, ConfigDict
 
 from shared.network.frame_stream import FrameSink
 
-# The base transport candidate every healthy attachment resolves, and the only one a
-# carriage realizes here.
+# The base transport candidate every healthy attachment resolves.
 CONTROL_RELAY = "control_relay"
 
 
@@ -52,6 +51,10 @@ class ClaimGatedServiceCarriage(Protocol):
 
     def select(self, plan: ResidentCarriagePlan) -> FrameSink: ...
 
+    def transport_of(self, session_id: str) -> str:
+        """The transport an open attempt's frames actually ride."""
+        ...
+
     def close(self, session_id: str) -> None:
         """Release whatever the attempt held, on its terminal or its reap."""
 
@@ -72,6 +75,9 @@ class ControlRelayCarriage:
         if plan.selected_transport != CONTROL_RELAY:
             raise CarriageUnavailable(plan.selected_transport)
         return self._base_sink
+
+    def transport_of(self, session_id: str) -> str:
+        return CONTROL_RELAY
 
     def close(self, session_id: str) -> None:
         """Nothing per attempt: every session shares the one long-lived base sink."""

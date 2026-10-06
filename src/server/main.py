@@ -53,6 +53,7 @@ from .content import (
 )
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
+from .network.peer_tls import root_peer_dialer
 from .network.rendezvous import RootRendezvousBridge
 from .network.reverse_relay import (
     CONTENT_RELAY_KEYSPACE,
@@ -345,6 +346,15 @@ if IS_ROOT_NODE:
             registry=RESIDENT_REGISTRY,
             relay_redis=_relay_redis,
             port_forward=config.port_forward,
+            peer=root_peer_dialer(config.orchestration.network, logger),
+            # The transport span parents on the invocation span, which only the
+            # fine level synthesizes.
+            tracer=(
+                SERVER_TRACER
+                if config.telemetry.traces_enabled
+                and config.telemetry.emits(TelemetryLevel.FINE)
+                else None
+            ),
             logger=logger,
         )
         GATED_SERVE = _serve_wiring.gated_serve

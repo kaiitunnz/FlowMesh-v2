@@ -9,17 +9,26 @@ join back up.
 """
 
 import asyncio
+import socket
 from collections.abc import Sequence
 
+import pytest
 from opentelemetry.sdk.trace import ReadableSpan
 
 from shared.network.relay_frame import RelayFrame
+from shared.resident.carriage import ResidentCarriagePlan
+from shared.resident.reports import ResidentStreamStatus
 from shared.schemas.network import Transport
 from shared.telemetry.config import TelemetryLevel
-from shared.telemetry.semconv import SPAN_ENGINE_REQUEST, transport_span_name
+from shared.telemetry.semconv import (
+    PHYSICAL_TRANSPORT,
+    SPAN_ENGINE_REQUEST,
+    transport_span_name,
+)
 from tests.worker.otel_support import recorded_worker_spans, worker_telemetry
+from worker.resident.origin_driver import ResidentOriginRequest
 
-from .test_origin_replica_loop import _Harness
+from .test_origin_replica_loop import _DialedHarness, _handoff, _Harness, _ToPeer
 
 _TRACE_ID = "0102030405060708090a0b0c0d0e0f10"
 _PARENT_SPAN_ID = "00f1e2d3c4b5a697"
@@ -63,3 +72,69 @@ def test_no_relay_frame_carries_trace_context_when_telemetry_is_off() -> None:
     assert not spans
     assert frames
     assert all(frame.tp is None for frame in frames)
+
+
+def test_a_relay_attempt_records_the_relay_as_its_transport() -> None:
+    spans, _ = _invoke(TelemetryLevel.FINE)
+    (transport,) = [
+        s for s in spans if s.name == transport_span_name(Transport.CONTROL_RELAY)
+    ]
+    assert transport.attributes is not None
+    assert transport.attributes[PHYSICAL_TRANSPORT] == Transport.CONTROL_RELAY.value
+
+
+@pytest.mark.parametrize(
+    ("reachable", "realized"),
+    [(True, Transport.WORKER_DIRECT), (False, Transport.CONTROL_RELAY)],
+)
+def test_a_dialed_attempt_records_the_transport_it_actually_used(
+    reachable: bool, realized: Transport
+) -> None:
+    # A dial refused before delivery rides the relay base, so the span named for the
+    # selected transport carries the one the frames took.
+    with recorded_worker_spans(worker_telemetry(TelemetryLevel.FINE)) as exporter:
+
+        async def scenario() -> None:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+            h = _DialedHarness(sock, port)
+            relay, answer = _ToPeer(), _ToPeer()
+            relay.on_peer = lambda frame: h.sidecar.on_frame(frame, answer)
+            answer.on_peer = h.origin.on_frame
+            h.carriage._base = relay
+            if reachable:
+                await h.listener.start()
+            else:
+                sock.close()
+            try:
+                h.origin.begin(
+                    ResidentOriginRequest(
+                        task_id="tsk-1",
+                        call_correlation="call-1",
+                        session_id="rly-1",
+                        handoff=_handoff(1),
+                        request_payload='{"prompt": "hi"}',
+                        carriage_plan=ResidentCarriagePlan(
+                            session_id="rly-1",
+                            selected_transport=Transport.WORKER_DIRECT.value,
+                            selected_endpoint=f"127.0.0.1:{port}",
+                        ),
+                        traceparent=_TRACEPARENT,
+                    )
+                )
+                await asyncio.wait_for(h.done.wait(), timeout=10.0)
+                assert h.outcomes[-1].status is ResidentStreamStatus.SUCCESS
+            finally:
+                if reachable:
+                    await asyncio.wait_for(h.listener.stop(), timeout=5.0)
+                await h.sidecar.aclose()
+
+        asyncio.run(scenario())
+        spans = exporter.get_finished_spans()
+    (transport,) = [
+        s for s in spans if s.name == transport_span_name(Transport.WORKER_DIRECT)
+    ]
+    assert transport.attributes is not None
+    assert transport.attributes[PHYSICAL_TRANSPORT] == realized.value

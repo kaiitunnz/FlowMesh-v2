@@ -1,11 +1,10 @@
 """The gated serve access modes and the root-local proxy ingress registration.
 
 A serve task's binding pins one gated HTTP exposure mode. ``proxy``, the default,
-terminates at the root-local proxy ingress: it holds a root-internal rendezvous
-attachment rather than a public listener, and because the root cannot dial a worker its
-frames always ride the universal ``control_relay``. ``forward`` terminates at a
-worker-hosted, per-task port exposure a deployment registers through the
-``ForwardIngressDirectory``; this registry holds only the root-local proxy.
+terminates at the root-local proxy ingress, reached at the server's own base url.
+``forward`` terminates at a per-task public port the root binds, registered through the
+``ForwardIngressDirectory``; this registry holds only the root-local proxy. The root is
+the route origin of both.
 
 The proxy ingress is a transport-only route origin over the binding and claim path, and
 is reachable only through central authentication and admission. A proxy request whose

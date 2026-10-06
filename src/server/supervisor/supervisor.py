@@ -12,11 +12,7 @@ from queue import Empty as QueueEmpty
 from queue import Full as QueueFull
 from threading import Lock, Thread
 
-from shared.network.mtls import (
-    MutualTlsMaterial,
-    MutualTlsMaterialError,
-    client_context,
-)
+from shared.network.mtls import client_context
 from shared.schemas.command import CommandMessage, CommandResponse
 from shared.schemas.network import (
     PEER_PROTOCOL,
@@ -31,10 +27,10 @@ from ..config import (
     LoggingConfig,
     NetworkPlaneConfig,
     RedisConfig,
-    TrustedPeerConfig,
     WorkerManagementConfig,
 )
 from ..hooks import PrincipalContext
+from ..network.peer_tls import load_peer_material
 from ..utils.concurrent import (
     MP_CTX,
     TaskReceiver,
@@ -248,33 +244,6 @@ class WorkerSupervisor:
 # ------------------------------------------------------------------ #
 # Child-process entry point
 # ------------------------------------------------------------------ #
-
-
-def _peer_material(
-    peer: TrustedPeerConfig, logger: logging.Logger
-) -> MutualTlsMaterial | None:
-    """This node's peer TLS material, read from the operator's configured files.
-
-    Mutual TLS is on unless the operator attests a trusted network, so material this
-    node cannot read is fatal whether it is missing or unusable: serving the advertised
-    listener in plaintext instead would carry resident payloads over a wire the
-    deployment asked to protect.
-    """
-    if peer.disable_mtls:
-        logger.warning(
-            "running peer connections without mutual TLS: the deployment is "
-            "configured for a trusted network, so no peer proves an identity"
-        )
-        return None
-    try:
-        return MutualTlsMaterial.from_files(
-            ca_file=peer.tls_ca_file,
-            cert_file=peer.tls_cert_file,
-            key_file=peer.tls_key_file,
-        )
-    except MutualTlsMaterialError:
-        logger.error("node peer TLS material is unusable")
-        raise
 
 
 def _enqueue_latest_node_id(
@@ -496,7 +465,7 @@ def _run_supervisor(
         None if node_relays is None else node_relays.bridge(RESIDENT_NAMESPACE)
     )
     peer_material = (
-        _peer_material(network_cfg.peer, logger)
+        load_peer_material(network_cfg.peer, logger)
         if network_cfg.enabled and network_cfg.peer.enabled
         else None
     )

@@ -3,10 +3,13 @@
 import asyncio
 import logging
 
+import pytest
+
 from server.config import NetworkPlaneConfig, TrustedPeerConfig
 from server.network.service import NetworkPlane
 from server.network.state import (
     NetworkEndpointAdvertisement,
+    PolicyClass,
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     RouteObservationOutcome,
@@ -254,3 +257,73 @@ def test_a_peer_node_without_a_listener_dials_a_trusted_worker_directly() -> Non
         "node_relay",
         "control_relay",
     ]
+
+
+def _trusted_plane(registry: _FakeNodeRegistry) -> NetworkPlane:
+    return NetworkPlane(
+        NetworkPlaneConfig(
+            enabled=True,
+            peer=TrustedPeerConfig(
+                enabled=True, trust_domain="fm", classes=("routable",)
+            ),
+        ),
+        registry,  # type: ignore[arg-type]
+        logging.getLogger("test-network"),
+    )
+
+
+def _peer_node(node_id: str) -> Node:
+    node = _node(node_id, generation=1)
+    assert node.network_endpoint is not None
+    return node.model_copy(
+        update={
+            "network_endpoint": node.network_endpoint.model_copy(
+                update={"protocols": (PEER_PROTOCOL,)}
+            )
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("demoted", "untouched"),
+    [
+        (PolicyClass.SERVE_INGRESS, PolicyClass.DEFAULT),
+        (PolicyClass.DEFAULT, PolicyClass.SERVE_INGRESS),
+    ],
+)
+def test_the_root_serve_ingress_and_the_nodes_workers_keep_separate_evidence(
+    demoted: PolicyClass, untouched: PolicyClass
+) -> None:
+    # The root serve ingress and a worker on the root node dial from one node endpoint,
+    # but a failure one of them observes never steers the other's route.
+    registry = _FakeNodeRegistry()
+    registry.set(_peer_node("nde-1"))
+    registry.set(_peer_node("nde-2"))
+    plane = _trusted_plane(registry)
+    listener = _listener().model_copy(update={"protocols": (PEER_PROTOCOL,)})
+
+    def head(policy_class: PolicyClass) -> tuple[str, str]:
+        result = asyncio.run(
+            plane.resolve("nde-1", listener, policy_class=policy_class)
+        )
+        assert result is not None
+        origin, route = result
+        return origin.origin_id, route.candidates[0].transport.value
+
+    demoted_id, demoted_head = head(demoted)
+    untouched_id, untouched_head = head(untouched)
+    assert demoted_id != untouched_id
+    assert demoted_head == untouched_head == "worker_direct"
+
+    origin, _route = asyncio.run(
+        plane.resolve("nde-1", listener, policy_class=demoted)
+    ) or (None, None)
+    assert origin is not None and origin.policy_class is demoted
+    plane.record_observations(
+        origin,
+        listener,
+        [(Transport.WORKER_DIRECT, RouteObservationOutcome.CONNECT_FAILURE)],
+    )
+
+    assert head(demoted)[1] != "worker_direct"
+    assert head(untouched) == (untouched_id, "worker_direct")

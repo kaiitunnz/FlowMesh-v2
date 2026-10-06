@@ -57,6 +57,7 @@ from shared.utils.ids import new_relay_session_id
 
 from ..network.state import (
     NetworkEndpointAdvertisement,
+    PolicyClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteObservationOutcome,
@@ -159,6 +160,7 @@ class RouteResolver(Protocol):
         listener: ReplicaListenerAdvertisement,
         *,
         trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
     ) -> tuple[RouteOrigin, ResolvedRoute] | None: ...
 
     async def endpoint_for(
@@ -232,8 +234,17 @@ class ServeDelivery(Protocol):
     opaque frames.
     """
 
+    @property
+    def dials_peers(self) -> bool:
+        """Whether the edge can carry an attempt over a peer socket it dials."""
+        ...
+
     def open(
-        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+        self,
+        session_id: str,
+        handoff: AdmissionHandoff,
+        plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None:
         """Open the origin relay to the sidecar and send the bootstrap."""
         ...
@@ -1187,14 +1198,16 @@ class ResidentCapacityControl:
         serve = orig.serve
         # The route fence resolves from the origin's registered endpoint, which is also
         # what dials an admitted peer session. A gated serve origination's origin is the
-        # root, which resolves from the root node over the edge stream, with the peer
-        # transports off: the root carries only control_relay. A worker-originated
-        # workflow boundary resolves from the origin worker's own node, so its payload
-        # never reaches the root at all, and rides a peer transport only when that
-        # worker can dial one.
+        # root, which resolves from the root node over the edge stream. A
+        # worker-originated workflow boundary resolves from the origin worker's own
+        # node, so its payload never reaches the root at all. Either origin is offered a
+        # peer transport only when it can dial one itself.
         trust: TrustedPeerPolicy | None = None
+        policy_class = PolicyClass.DEFAULT
         if serve is not None:
-            trust = TrustedPeerPolicy()
+            if not serve.dials_peers:
+                trust = TrustedPeerPolicy()
+            policy_class = PolicyClass.SERVE_INGRESS
             origin_worker = None
             resolve_node: str | None = (
                 deps.root_node_id() if deps.root_node_id is not None else None
@@ -1223,7 +1236,9 @@ class ResidentCapacityControl:
         if listener is None:
             await self._hold_and_redrive(orig, claim, "resident sidecar is unavailable")
             return
-        resolved = await deps.network.resolve(resolve_node, listener, trust=trust)
+        resolved = await deps.network.resolve(
+            resolve_node, listener, trust=trust, policy_class=policy_class
+        )
         if resolved is None:
             await self._hold_and_redrive(
                 orig, claim, "no origin route for the boundary"
@@ -1297,8 +1312,20 @@ class ResidentCapacityControl:
             # attempt to reap; reap the one just recorded rather than hand it off.
             self._reap_attempt(orig.invocation_id)
             return
+        # The carriage's transport span parents on the invocation span. A gated serve
+        # subject owns no workflow_id, so its trace is rooted here rather than borrowed
+        # from the workflow bijection: the origin cannot derive it independently, which
+        # is why it rides this stamp rather than being recomputed at the far end.
+        traceparent = (
+            format_traceparent(
+                _subject_trace_id(orig.subject, orig.task_id, orig.request_id),
+                derived_span_id(SpanIdKind.INVOCATION, orig.invocation_id),
+            )
+            if self._control.enabled
+            else None
+        )
         if serve is not None:
-            serve.open(session_id, handoff, plan)
+            serve.open(session_id, handoff, plan, traceparent)
             return
         assert origin_worker is not None
         handoff_payload: dict[str, Any] = {
@@ -1308,15 +1335,8 @@ class ResidentCapacityControl:
             "handoff": handoff.model_dump(mode="json"),
             "carriage_plan": plan.model_dump(mode="json"),
         }
-        if self._control.enabled:
-            # A gated serve subject owns no workflow_id, so its trace is rooted here
-            # rather than borrowed from the workflow bijection: the receiving
-            # worker cannot derive it independently, which is exactly why it rides
-            # this stamp rather than being recomputed at the far end.
-            handoff_payload["traceparent"] = format_traceparent(
-                _subject_trace_id(orig.subject, orig.task_id, orig.request_id),
-                derived_span_id(SpanIdKind.INVOCATION, orig.invocation_id),
-            )
+        if traceparent is not None:
+            handoff_payload["traceparent"] = traceparent
         delivered = deps.relay(origin_worker, "resident_handoff", handoff_payload)
         if not delivered:
             await self._hold_and_redrive(orig, claim, "origin worker relay failed")

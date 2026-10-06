@@ -46,9 +46,14 @@ __all__ = [
 
 
 class PolicyClass(StrEnum):
-    """The network/policy class scoping a route origin and its observations."""
+    """The network/policy class scoping a route origin and its observations.
+
+    The root's gated serve ingress dials from the root process rather than from a
+    worker on the root node, so it is its own origin with its own reachability evidence.
+    """
 
     DEFAULT = "default"
+    SERVE_INGRESS = "serve_ingress"
 
 
 class ReachabilityState(StrEnum):

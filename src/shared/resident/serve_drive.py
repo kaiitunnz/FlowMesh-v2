@@ -16,10 +16,22 @@ path serves the root-local proxy and the root forward ingress alike.
 
 import asyncio
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Protocol
+
+from opentelemetry.trace import Span, Tracer
 
 from shared.network.relay_frame import RelayFrame
 from shared.network.session import FramedRelaySession, RelaySessionRole
+from shared.schemas.network import Transport
+from shared.telemetry.propagation import extract_context
+from shared.telemetry.provider import payload_free_span
+from shared.telemetry.semconv import (
+    PHYSICAL_INVOCATION_ID,
+    PHYSICAL_TRANSPORT,
+    transport_span_name,
+)
 
 from .carriage import (
     CarriageUnavailable,
@@ -67,11 +79,15 @@ class _Drive:
         task_id: str,
         call_correlation: str,
         invocation_id: str,
+        selected_transport: str,
+        traceparent: str | None,
     ) -> None:
         self.session = session
         self.task_id = task_id
         self.call_correlation = call_correlation
         self.invocation_id = invocation_id
+        self.selected_transport = selected_transport
+        self.traceparent = traceparent
         self.authorization: asyncio.Future[RouteAuthorization] = (
             asyncio.get_event_loop().create_future()
         )
@@ -96,9 +112,11 @@ class ServeOriginDrive:
         window_bytes: int = 65536,
         stream_deadline_sec: float = 300.0,
         auth_deadline_sec: float = 60.0,
+        tracer: Tracer | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._carriage = carriage
+        self._tracer = tracer
         self._control = control
         self._window_bytes = window_bytes
         self._stream_deadline = stream_deadline_sec
@@ -123,6 +141,7 @@ class ServeOriginDrive:
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
         plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None:
         """Start one origin drive: send the bootstrap and stream the response."""
         try:
@@ -150,7 +169,14 @@ class ServeOriginDrive:
             sink=sink,
             window_bytes=self._window_bytes,
         )
-        drive = _Drive(session, task_id, call_correlation, invocation_id)
+        drive = _Drive(
+            session,
+            task_id,
+            call_correlation,
+            invocation_id,
+            plan.selected_transport,
+            traceparent,
+        )
         self._by_session[session_id] = drive
         drive.task = asyncio.ensure_future(self._drive(drive, handoff, envelope))
 
@@ -163,22 +189,61 @@ class ServeOriginDrive:
     def close(self, session_id: str) -> None:
         """Cancel and forget one drive, e.g. on a fenced terminal or reap."""
         drive = self._by_session.pop(session_id, None)
+        self._carriage.close(session_id)
         if drive is None:
             return
         task = drive.task
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
 
+    def close_all(self) -> None:
+        """Cancel every drive and release what its attempt held, on shutdown."""
+        for session_id in list(self._by_session):
+            self.close(session_id)
+
+    @contextmanager
+    def _transport_span(self, drive: _Drive) -> Iterator[Span | None]:
+        """Open ``flowmesh.transport.<selected>`` under the invocation's own span."""
+        context = extract_context(drive.traceparent)
+        if self._tracer is None or context is None:
+            yield None
+            return
+        with payload_free_span(
+            self._tracer,
+            transport_span_name(Transport(drive.selected_transport)),
+            context=context,
+            attributes={PHYSICAL_INVOCATION_ID: drive.invocation_id},
+        ) as span:
+            yield span
+
     async def _drive(
         self, drive: _Drive, handoff: AdmissionHandoff, envelope: ServeRequestEnvelope
     ) -> None:
+        with self._transport_span(drive) as span:
+            await self._drive_impl(drive, handoff, envelope, span)
+
+    async def _drive_impl(
+        self,
+        drive: _Drive,
+        handoff: AdmissionHandoff,
+        envelope: ServeRequestEnvelope,
+        span: Span | None,
+    ) -> None:
+        session_id = drive.session.session_id
         try:
-            await drive.session.send_body_wire(
-                KIND_BOOTSTRAP,
-                envelope.body,
-                handoff=handoff.model_dump(mode="json"),
-                request=envelope.header_fields(),
-            )
+            try:
+                await drive.session.send_body_wire(
+                    KIND_BOOTSTRAP,
+                    envelope.body,
+                    handoff=handoff.model_dump(mode="json"),
+                    request=envelope.header_fields(),
+                )
+            finally:
+                # The first frame settles whether a dialed attempt fell back.
+                if span is not None:
+                    span.set_attribute(
+                        PHYSICAL_TRANSPORT, self._carriage.transport_of(session_id)
+                    )
             ack = await drive.session.recv_body_wire(self._stream_deadline)
             if not self._handle_ack(drive, ack[0] if ack is not None else None):
                 return
@@ -203,7 +268,10 @@ class ServeOriginDrive:
                 self._uncertain(drive, f"serve relay error: {exc}")
             )
         finally:
-            self._by_session.pop(drive.session.session_id, None)
+            # A dialed attempt holds a socket and its reader for this session alone, so
+            # the target's connection ends only when the origin releases it here.
+            self._carriage.close(session_id)
+            self._by_session.pop(session_id, None)
 
     def _handle_ack(self, drive: _Drive, ack: dict[str, object] | None) -> bool:
         if ack is None:

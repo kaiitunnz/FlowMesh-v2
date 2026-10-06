@@ -51,7 +51,11 @@ from shared.schemas.network import Transport
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.propagation import extract_context
 from shared.telemetry.provider import payload_free_span
-from shared.telemetry.semconv import PHYSICAL_INVOCATION_ID, transport_span_name
+from shared.telemetry.semconv import (
+    PHYSICAL_INVOCATION_ID,
+    PHYSICAL_TRANSPORT,
+    transport_span_name,
+)
 
 from ..telemetry import otel
 
@@ -201,11 +205,15 @@ class ResidentOriginDriver:
     async def _drive(self, origin: _Origin) -> None:
         req = origin.request
         idm = req.handoff.idempotency_key
-        with self._transport_span(req):
-            await self._drive_impl(origin, req, idm)
+        with self._transport_span(req) as span:
+            await self._drive_impl(origin, req, idm, span)
 
     async def _drive_impl(
-        self, origin: _Origin, req: ResidentOriginRequest, idm: str | None
+        self,
+        origin: _Origin,
+        req: ResidentOriginRequest,
+        idm: str | None,
+        span: Span | None,
     ) -> None:
         try:
             if (prior := self._prior_manifest(req, idm)) is not None:
@@ -222,11 +230,18 @@ class ResidentOriginDriver:
                 # success.
                 self._report_outcome(self._uncertain(req, "request not captured here"))
                 return
-            await origin.session.send_wire(
-                KIND_BOOTSTRAP,
-                handoff=req.handoff.model_dump(mode="json"),
-                request=req.request_payload,
-            )
+            try:
+                await origin.session.send_wire(
+                    KIND_BOOTSTRAP,
+                    handoff=req.handoff.model_dump(mode="json"),
+                    request=req.request_payload,
+                )
+            finally:
+                # The first frame settles whether a dialed attempt fell back.
+                if span is not None:
+                    span.set_attribute(
+                        PHYSICAL_TRANSPORT, self._carriage.transport_of(req.session_id)
+                    )
             ack = await origin.session.recv_wire(self._stream_deadline)
             if not self._handle_ack(req, ack):
                 return

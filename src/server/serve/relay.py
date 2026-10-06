@@ -1,27 +1,39 @@
-"""The root-local proxy ingress's transport-only relay executor.
+"""The root's gated serve origin executor.
 
-The root-local gated serve ingress is a registered transport-only ``RouteOrigin`` for a
-task-addressed external invocation. This executor is its transport: it holds the
-root-internal rendezvous attachment that consumes the edge stream's down leg, publishes
-origin-produced frames onto its up leg, and runs the shared serve origin drive over that
-sink. Because the root cannot dial a worker, its frames always ride the universal
-``control_relay``.
+A gated serve ingress, ``proxy`` or root-hosted ``forward``, is the registered
+transport-only ``RouteOrigin`` for a task-addressed external invocation. This executor
+is its transport: it holds the root-internal rendezvous attachment that consumes the
+edge stream's down leg and publishes origin-produced frames onto its up leg, and runs
+the shared serve origin drive over the carriage control's plan selects. Where the root
+can dial a peer, an admitted pair's attempt rides a socket the root opens to the target,
+and every other attempt rides the universal ``control_relay`` over the attachment.
 
 The drive itself — the two-phase bootstrap, the opaque response relay, and the fenced
-terminal reported to control — is shared with the root forward ingress, so one
-credit-reporting path serves both gated modes.
+terminal reported to control — is shared by both modes, so one credit-reporting path
+serves them.
 """
 
 import asyncio
 import logging
 import os
+from typing import Protocol
+
+from opentelemetry.trace import Tracer
 
 from shared.network.relay_frame import RelayFrame
-from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
+from shared.resident.carriage import (
+    ClaimGatedServiceCarriage,
+    ControlRelayCarriage,
+    ResidentCarriagePlan,
+)
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
+from shared.resident.peer_carriage import PeerCarriage
+from shared.resident.reports import ResidentRouteObservation
 from shared.resident.serve_drive import ServeControl, ServeOriginDrive
+from shared.schemas.network import RouteObservationOutcome, Transport
 
+from ..network.peer_tls import PeerDialer
 from ..network.reverse_relay import (
     RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
@@ -36,7 +48,13 @@ from ..supervisor.services.reverse_relay_attachment import ReverseRelayAttachmen
 # both directions by the session record.
 SERVE_EDGE_STREAM_ID = "serve-edge"
 
-__all__ = ["SERVE_EDGE_STREAM_ID", "ServeControl", "ServeRelayExecutor"]
+__all__ = ["SERVE_EDGE_STREAM_ID", "ServeOriginControl", "ServeRelayExecutor"]
+
+
+class ServeOriginControl(ServeControl, Protocol):
+    """The control the root serve origin reports transitions and path evidence to."""
+
+    def on_route_observation(self, observation: ResidentRouteObservation) -> None: ...
 
 
 class ServeRelayExecutor:
@@ -47,14 +65,18 @@ class ServeRelayExecutor:
         *,
         relay_redis: BinaryRedis,
         edge_id: str,
-        control: ServeControl,
+        control: ServeOriginControl,
+        peer: PeerDialer | None = None,
         window_bytes: int = 65536,
         stream_deadline_sec: float = 300.0,
         auth_deadline_sec: float = 60.0,
+        tracer: Tracer | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._streams = RelayStreamStore(relay_redis, RESIDENT_RELAY_KEYSPACE)
         self._edge_id = edge_id
+        self._control = control
+        self._logger = logger or logging.getLogger("serve-relay")
         self._attachment = ReverseRelayAttachment(
             relay_redis,
             edge_id,
@@ -62,26 +84,60 @@ class ServeRelayExecutor:
             owner=f"serve-edge:{os.getpid()}",
             keyspace=RESIDENT_RELAY_KEYSPACE,
         )
-        # The root cannot dial a worker, so its frames always ride control_relay over
-        # the internal rendezvous attachment; the carriage realizes that one transport.
+        self._carriage = self._build_carriage(
+            EdgeStreamSink(self._streams, edge_id), peer
+        )
         self._drive = ServeOriginDrive(
-            carriage=ControlRelayCarriage(EdgeStreamSink(self._streams, edge_id)),
+            carriage=self._carriage,
             control=control,
             window_bytes=window_bytes,
             stream_deadline_sec=stream_deadline_sec,
             auth_deadline_sec=auth_deadline_sec,
+            tracer=tracer,
             logger=logger,
+        )
+
+    def _build_carriage(
+        self, base: EdgeStreamSink, peer: PeerDialer | None
+    ) -> ClaimGatedServiceCarriage:
+        if peer is None:
+            return ControlRelayCarriage(base)
+        return PeerCarriage(
+            base=base,
+            deliver=self.on_frame,
+            observe=self._observe,
+            ssl_context=peer.ssl_context,
+            connect_budget_sec=peer.connect_budget_sec,
+            logger=self._logger,
         )
 
     @property
     def edge_id(self) -> str:
         return self._edge_id
 
+    @property
+    def dials_peers(self) -> bool:
+        """Whether this root can carry an attempt over a peer socket it dials."""
+        return isinstance(self._carriage, PeerCarriage)
+
+    def _observe(
+        self, session_id: str, transport: Transport, outcome: RouteObservationOutcome
+    ) -> None:
+        self._control.on_route_observation(
+            ResidentRouteObservation(
+                session_id=session_id,
+                transport=transport.value,
+                outcome=outcome.value,
+            )
+        )
+
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         """Begin consuming the edge stream's down leg."""
         self._attachment.start(loop)
 
     async def stop(self) -> None:
+        """Stop the attachment and release every in-flight attempt's carriage."""
+        self._drive.close_all()
         await self._attachment.stop()
 
     async def on_frame(self, frame: RelayFrame) -> None:
@@ -99,6 +155,7 @@ class ServeRelayExecutor:
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
         plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None:
         """Start one origin drive: send the bootstrap and stream the response."""
         self._drive.open(
@@ -110,6 +167,7 @@ class ServeRelayExecutor:
             handoff=handoff,
             envelope=envelope,
             plan=plan,
+            traceparent=traceparent,
         )
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:

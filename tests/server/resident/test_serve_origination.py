@@ -16,6 +16,7 @@ from server.network.reachability import NetworkReachabilityView
 from server.network.resolver import resolve_route
 from server.network.state import (
     NetworkEndpointAdvertisement,
+    PolicyClass,
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
@@ -68,6 +69,7 @@ def _held(stores: ResidentStores, replica_id: str | None) -> int:
 class _FakeNetwork:
     def __init__(self, base_candidate: bool = True) -> None:
         self._base_candidate = base_candidate
+        self.policy_classes: list[PolicyClass] = []
 
     async def resolve(
         self,
@@ -75,6 +77,7 @@ class _FakeNetwork:
         listener: ReplicaListenerAdvertisement,
         *,
         trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
     ) -> tuple[RouteOrigin, ResolvedRoute]:
         origin = RouteOrigin(
             origin_id="rog-1",
@@ -120,7 +123,9 @@ class _TrustedPeerNetwork(_FakeNetwork):
         listener: ReplicaListenerAdvertisement,
         *,
         trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
     ) -> tuple[RouteOrigin, ResolvedRoute]:
+        self.policy_classes.append(policy_class)
         origin = RouteOrigin(
             origin_id="rog-1",
             endpoint_id="ep-root",
@@ -177,7 +182,8 @@ class _FakeSessions:
 class _ServeDelivery:
     """Records every seam call control routes a serve invocation's outcome through."""
 
-    def __init__(self) -> None:
+    def __init__(self, dials_peers: bool = False) -> None:
+        self.dials_peers = dials_peers
         self.opened: list[tuple[str, AdmissionHandoff]] = []
         self.plans: list[ResidentCarriagePlan] = []
         self.authorized: list[tuple[str, RouteAuthorization]] = []
@@ -190,7 +196,11 @@ class _ServeDelivery:
         self.redrives = 0
 
     def open(
-        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+        self,
+        session_id: str,
+        handoff: AdmissionHandoff,
+        plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None:
         self.opened.append((session_id, handoff))
         self.plans.append(plan)
@@ -226,8 +236,9 @@ class _Deps:
     ) -> None:
         self.relays: list[tuple[str, str, dict[str, Any]]] = []
         self.sessions = _FakeSessions()
-        self._base_candidate = base_candidate
-        self._trusted_peers = trusted_peers
+        self.network = (
+            _TrustedPeerNetwork() if trusted_peers else _FakeNetwork(base_candidate)
+        )
 
     def build(self) -> ResidentWorkerDelivery:
         return ResidentWorkerDelivery(
@@ -237,11 +248,7 @@ class _Deps:
                 "wkr-replica" if replica.serve_task_id is not None else None
             ),
             node_of_worker=lambda worker_id: "node-1" if worker_id else None,
-            network=(
-                _TrustedPeerNetwork()
-                if self._trusted_peers
-                else _FakeNetwork(self._base_candidate)
-            ),
+            network=self.network,
             sessions=self.sessions,
             root_node_id=lambda: "node-root",
             edge_id="serve-edge",
@@ -420,6 +427,21 @@ def test_a_root_origin_rides_the_relay_beside_a_trusted_peer_pair() -> None:
     assert delivery.plans[0].selected_transport == CONTROL_RELAY
     claim = stores.claims.by_invocation("inv-1")[0]
     assert claim.state is ClaimState.RESERVED
+
+
+def test_a_root_that_dials_peers_takes_the_trusted_pairs_peer_transport() -> None:
+    svc, stores, _settled, deps = _build(trusted_peers=True)
+    _adopt(svc)
+    delivery = _ServeDelivery(dials_peers=True)
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+
+    plan = delivery.plans[0]
+    assert plan.selected_transport == Transport.WORKER_DIRECT.value
+    assert plan.selected_endpoint == "10.0.0.2:9500"
+    # The root's serve ingress is its own route origin, apart from the root node's
+    # workers.
+    assert deps.network.policy_classes == [PolicyClass.SERVE_INGRESS]
+    assert stores.claims.by_invocation("inv-1")[0].state is ClaimState.RESERVED
 
 
 def test_no_control_relay_candidate_holds_the_credit_without_opening() -> None:
