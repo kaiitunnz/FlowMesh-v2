@@ -327,3 +327,10 @@ def test_the_root_serve_ingress_and_the_nodes_workers_keep_separate_evidence(
 
     assert head(demoted)[1] != "worker_direct"
     assert head(untouched) == (untouched_id, "worker_direct")
+    # The diagnostics name which origin each piece of evidence belongs to.
+    states = {
+        (entry["policy_class"], entry["transport"]): entry["state"]
+        for entry in plane.reachability_snapshot()
+    }
+    assert states[(demoted.value, "worker_direct")] == "demoted"
+    assert states[(untouched.value, "worker_direct")] != "demoted"

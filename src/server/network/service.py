@@ -224,6 +224,7 @@ class NetworkPlane:
             snapshot.append(
                 {
                     "origin_id": entry.origin_id,
+                    "policy_class": entry.policy_class.value,
                     "target_node_id": entry.target_node_id,
                     "incarnation": entry.incarnation,
                     "listener_generation": entry.listener_generation,

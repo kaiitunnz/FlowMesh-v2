@@ -176,6 +176,7 @@ async def list_network_reachability(
     return [
         NetworkReachabilityEntryInfo(
             origin_id=str(entry["origin_id"]),
+            policy_class=str(entry["policy_class"]),
             target_node_id=str(entry["target_node_id"]),
             incarnation=int(entry["incarnation"]),
             listener_generation=int(entry["listener_generation"]),
