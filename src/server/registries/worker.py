@@ -799,6 +799,23 @@ class WorkerRegistry:
                 available.append(worker)
         return self.sort_workers(available)
 
+    async def satisfying_workers_async(self, task: TaskEnvelope) -> list[Worker]:
+        """Non-stale, uncordoned workers whose hardware and capabilities satisfy
+        the task.
+        """
+        cordoned = await self._cordoned_members_async()
+        available: list[Worker] = []
+        for worker in await self.get_workers_async(
+            sorted(await self.get_worker_ids_async())
+        ):
+            if not worker or await self.is_worker_stale_async(worker.id):
+                continue
+            if _is_cordoned(worker, cordoned):
+                continue
+            if hw_satisfies(worker, task) and capability_satisfies(worker, task):
+                available.append(worker)
+        return self.sort_workers(available)
+
     def sort_workers(self, workers: list[Worker]) -> list[Worker]:
         decorated: list[tuple[Worker, int, int, int, int]] = []
         for worker in workers:

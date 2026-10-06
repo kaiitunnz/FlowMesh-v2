@@ -87,8 +87,10 @@ class Node:
         cold_start_deadline_sec: float = 60.0,
         substrate: str = "dev_model",
         forward_api_key: str | None = None,
+        worker_registry: Any = None,
     ) -> None:
         self.cold_start_deadline_sec = cold_start_deadline_sec
+        self.worker_registry = worker_registry
         self.substrate = substrate
         self.forward_api_key = forward_api_key
         self.tasks = _YieldingRegistry()
@@ -118,6 +120,7 @@ class Node:
             system_principal=lambda: SYSTEM,
             registry=cast(Any, self.resident),
             logger=logging.getLogger("restart-test"),
+            worker_registry=self.worker_registry,
         )
         self.delivery = _Delivery()
         control.set_worker_delivery(self.delivery.build())

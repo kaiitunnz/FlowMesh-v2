@@ -274,6 +274,7 @@ if IS_ROOT_NODE:
             logger=logger,
             control=CONTROL_TRACER,
             content_scope_authority=FINALIZATION_INDEX.assign_scope,
+            worker_registry=WORKER_REGISTRY,
         )
 
     _relay_redis: BinaryRedis | None = None

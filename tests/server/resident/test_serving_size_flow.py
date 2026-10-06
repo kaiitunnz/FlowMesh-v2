@@ -2,11 +2,14 @@
 
 import asyncio
 import json
+import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
+from server.dispatcher import Dispatcher
 from server.registries.worker import Worker, gpu_available_for, hw_satisfies
 from server.resident import ResidentSnapshot, ResidentStores, ServiceFamily
 from server.resident.state import ClaimState
@@ -18,14 +21,15 @@ from server.task.v2.representations.serving_size import (
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks import TaskType
 from shared.tasks.specs.common import ModelSpecStrict, ModelSpecTemplate
+from tests.server.registries.test_worker_cordon import _Registry
 from tests.server.registries.test_worker_registry import _worker
-from tests.server.resident.node_harness import Node
+from tests.server.resident.node_harness import TS, Node
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
 )
 from tests.server.task.test_v2_orchestration import _register
-from tests.support.waiting import until
+from tests.support.waiting import pop_ready, until
 
 _SIZED_LEAF = """
 apiVersion: flowmesh/v2
@@ -168,39 +172,128 @@ def test_the_family_listing_reports_a_demand_family_size_only() -> None:
     assert ResidentFamilyInfo.project(standing).serving_size is None
 
 
-def test_a_cold_start_no_worker_can_host_is_denied_naming_its_size() -> None:
-    async def run() -> None:
-        node = Node(cold_start_deadline_sec=0.3)
-        node.control.bind_loop(asyncio.get_running_loop())
-        errors: list[str | None] = []
-        settle = node.control._settle
+_DEV_MODEL_WORKER = WorkerCapabilities(
+    supported_task_types=frozenset({TaskType.DEV_MODEL})
+)
+_GENERIC = "resident cold start did not become ready in time"
+_UNHOSTABLE = f"no worker can host a replica of size {DEFAULT_SERVING_SIZE.key()}"
 
-        def recording_settle(*args: Any, error: str | None = None) -> bool:
+
+class _FleetRegistry(_Registry):
+    """A worker registry over in-memory workers that one can join mid-test."""
+
+    def add(self, worker: Worker) -> None:
+        self._workers[worker.id] = worker
+
+
+def _fleet_worker(worker_id: str, cpu_cores: int) -> Worker:
+    return _worker(
+        id=worker_id,
+        cpu_cores=cpu_cores,
+        sys_mem=64 * 1024**3,
+        capabilities=_DEV_MODEL_WORKER,
+    ).model_copy(update={"alias": worker_id, "node_alias": "node-a"})
+
+
+Steer = Callable[[Node, Dispatcher, _FleetRegistry, str], None]
+
+
+async def _deny_cold_start(fleet: list[Worker], steer: Steer) -> str:
+    """Run a resident claim to its cold-start denial and return the denial.
+
+    ``steer`` drives the claim's first cold start through the dispatcher's own paths.
+    """
+    registry = _FleetRegistry(fleet)
+    node = Node(cold_start_deadline_sec=3.0, worker_registry=registry)
+    node.control.bind_loop(asyncio.get_running_loop())
+    errors: list[str] = []
+    settle = node.control._settle
+
+    def recording_settle(*args: Any, error: str | None = None) -> bool:
+        if error is not None:
             errors.append(error)
-            return settle(*args, error=error)
+        return settle(*args, error=error)
 
-        node.control._settle = recording_settle
-        _, ids = await _register(node.runtime, _RESIDENT_WF)
-        _capture_resident_boundary(node.runtime, ids["writer"])
-        directory = node.control.stores.directory
-        await until(lambda: any(r.serve_task_id for r in directory.all()))
-        (cold,) = directory.all()
-        assert cold.serve_task_id is not None
-        record = node.runtime.get_record(cold.serve_task_id)
-        assert record is not None
-        # The dispatcher marks a task no worker's hardware satisfies.
-        record.no_eligible_since = time.time()
+    node.control._settle = recording_settle
+    dispatcher = Dispatcher(
+        runtime=node.runtime,
+        worker_registry=registry,
+        logger=logging.getLogger("serving-size-test"),
+        no_worker_grace_sec=0,
+    )
+    _, ids = await _register(node.runtime, _RESIDENT_WF)
+    _capture_resident_boundary(node.runtime, ids["writer"])
+    directory = node.control.stores.directory
+    await until(lambda: any(r.serve_task_id for r in directory.all()))
+    (first,) = directory.all()
+    assert first.serve_task_id is not None
+    await asyncio.to_thread(steer, node, dispatcher, registry, first.serve_task_id)
 
-        (claim,) = node.control.stores.claims.all()
-        await until(lambda: claim.state is ClaimState.TERMINAL, timeout=5.0)
+    (claim,) = node.control.stores.claims.all()
+    await until(lambda: claim.state is ClaimState.TERMINAL, timeout=15.0)
+    assert not claim.holds_credit
+    [denial] = [error for error in errors if "cold_start_budget" in error]
+    return denial
 
-        assert not claim.holds_credit
-        assert any(
-            error is not None
-            and "cold_start_budget" in error
-            and f"no worker can host a replica of size {DEFAULT_SERVING_SIZE.key()}"
-            in error
-            for error in errors
-        ), errors
 
-    asyncio.run(run())
+def _no_fitting_worker(
+    node: Node, dispatcher: Dispatcher, _fleet: _FleetRegistry, task: str
+) -> None:
+    assert pop_ready(node.runtime) == task
+    dispatcher.dispatch_once(task)
+
+
+def _joins_after_an_unhosted_cold_start(
+    node: Node, dispatcher: Dispatcher, fleet: _FleetRegistry, task: str
+) -> None:
+    _no_fitting_worker(node, dispatcher, fleet, task)
+    # A worker that fits joins, and the next cold start is placed and still loading.
+    fleet.add(_fleet_worker("wkr-big", cpu_cores=8))
+    directory = node.control.stores.directory
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if fresh := [
+            r.serve_task_id
+            for r in directory.all()
+            if r.serve_task_id is not None and r.serve_task_id != task
+        ]:
+            node.dispatch(fresh[0], "wkr-big")
+            return
+        time.sleep(0.05)
+    raise AssertionError("no second cold start")
+
+
+def _failed_on_every_worker(
+    node: Node, dispatcher: Dispatcher, _fleet: _FleetRegistry, task: str
+) -> None:
+    node.dispatch(task, "wkr-big", "dsp-a")
+    node.runtime.fail_dispatch(
+        task, "wkr-big", {}, TS, "dsp-a", error="engine socket too long", retryable=True
+    )
+    assert pop_ready(node.runtime) == task
+    dispatcher.dispatch_once(task)
+
+
+def test_a_size_no_registered_worker_can_host_is_denied_naming_it() -> None:
+    denial = asyncio.run(
+        _deny_cold_start([_fleet_worker("wkr-small", 1)], _no_fitting_worker)
+    )
+    assert denial.endswith(f"{_GENERIC}: {_UNHOSTABLE}")
+
+
+def test_a_worker_joining_after_an_unhosted_cold_start_keeps_the_generic_denial() -> (
+    None
+):
+    denial = asyncio.run(
+        _deny_cold_start(
+            [_fleet_worker("wkr-small", 1)], _joins_after_an_unhosted_cold_start
+        )
+    )
+    assert denial.endswith(_GENERIC)
+
+
+def test_a_size_whose_workers_all_failed_it_keeps_the_generic_denial() -> None:
+    denial = asyncio.run(
+        _deny_cold_start([_fleet_worker("wkr-big", 8)], _failed_on_every_worker)
+    )
+    assert denial.endswith(_GENERIC)
