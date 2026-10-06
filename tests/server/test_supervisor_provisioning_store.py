@@ -54,7 +54,9 @@ def test_identities_sharing_one_endpoint_keep_their_own_records() -> None:
         IdentityConfig(namespace="ns", cluster="c", alias="node"),
         IdentityConfig(namespace="ns", cluster="c", alias="other"),
         IdentityConfig(namespace="ns", cluster="d", alias="node"),
-        IdentityConfig(namespace="ns:c", cluster="", alias="node"),
+        # Joined without encoding, these two would share one key.
+        IdentityConfig(namespace="ns", cluster="c:x", alias="node"),
+        IdentityConfig(namespace="ns:c", cluster="x", alias="node"),
     ]
     stores = [WorkerProvisioningStore(client, identity) for identity in identities]
     for i, store in enumerate(stores):
