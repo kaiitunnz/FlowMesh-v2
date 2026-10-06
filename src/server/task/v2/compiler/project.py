@@ -62,6 +62,7 @@ from ..representations.results import (
     ResultDeclaration,
     Visibility,
 )
+from ..representations.serving_size import DEFAULT_SERVING_SIZE, ServingSize
 from ..representations.template import (
     ResourceDeclaration,
     SourceKind,
@@ -276,6 +277,7 @@ def _leaf_service_dependency(
             source_id,
             source_kind,
         )
+    service_ref = service_ref.strip()
     interface = (
         ServiceInterface.EMBEDDING
         if task_type is TaskType.EMBEDDING
@@ -291,22 +293,32 @@ def _leaf_service_dependency(
             source_id,
             source_kind,
         )
+    # The leaf's engine configuration and hardware describe its own model, so they
+    # shape the replica only when that is the model the leaf is served by.
+    own_service = service_ref == (own_model or "").strip()
+    vllm = spec.model.vllm if spec.model is not None else None
     return ServiceDependency(
-        service_ref=service_ref.strip(),
+        service_ref=service_ref,
         interface=interface,
         adapter=adapter,
         adapter_source=_leaf_adapter_source(spec),
         isolation=binding.isolation if binding else None,
-        # The leaf's engine configuration describes its own model, so it shapes the
-        # replica only when that is the model the leaf is served by.
         engine_profile=(
             engine_profile(
-                spec.model.vllm if spec.model is not None else None,
+                vllm,
                 spec.model_revision,
                 embedding=interface is ServiceInterface.EMBEDDING,
             )
-            if service_ref.strip() == (own_model or "").strip()
+            if own_service
             else None
+        ),
+        serving_size=(
+            ServingSize.of(
+                spec.resources.hardware if spec.resources is not None else None,
+                (vllm or {}).get("tensor_parallel_size"),
+            )
+            if own_service
+            else DEFAULT_SERVING_SIZE
         ),
         batch_size=_declared_batch_size(spec),
         max_batch_size=_declared_max_batch_size(spec),
@@ -638,18 +650,15 @@ def _service_family_annotations(
 
     Detection only: it pins the finite dependency a resident invocation needs, with no
     allocation, claim, or replica. The family and engine-batch key fold interface, base
-    model, and isolation so incompatible dependencies pin distinct families rather than
-    collapsing on a shared model name. A policy chooses among the families compatible
-    with that key and expresses residency preference; the refinement it returns is
-    screened, so the dependency stays pinned to what the template declared.
+    model, isolation, engine profile, and serving size so incompatible dependencies pin
+    distinct families rather than collapsing on a shared model name. A policy chooses
+    among the families compatible with that key and expresses residency preference; the
+    refinement it returns is screened, so the dependency stays pinned to what the
+    template declared.
     """
     if dependency is None:
         return None, None
-    requirement = ServiceFamilyRequirement(
-        family=dependency.service_family,
-        engine_batch_key=dependency.engine_batch_key,
-        isolation=dependency.isolation,
-    )
+    requirement = dependency.family_requirement()
     requirement = screen_service_family(
         requirement, surface.service_family.service_family(requirement)
     )

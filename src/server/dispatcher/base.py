@@ -415,7 +415,7 @@ class Dispatcher:
 
         An input preparation reads an upstream value, and a resident-served dispatch,
         menu-resolved or pinned, carries its invocation to a replica that runs the
-        model. Neither needs the accelerator its leaf declares, nor allocates GPU
+        model. Neither needs any of the hardware its leaf declares, nor allocates GPU
         memory on the worker that carries it.
         """
         return preparing or self._runtime.serves_from_replica(task_id)

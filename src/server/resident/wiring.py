@@ -51,6 +51,7 @@ def build_resident_capacity(
     logger: logging.Logger,
     control: ControlPlaneTracer | None = None,
     content_scope_authority: Callable[[str, str], None] | None = None,
+    worker_registry: WorkerRegistry | None = None,
 ) -> ResidentCapacityControl:
     """Wire resident-capacity control for the enabled resident config, install its
     runtime hooks, and return it."""
@@ -122,6 +123,12 @@ def build_resident_capacity(
         record = runtime.get_record(serve_task_id)
         return record is not None and record.status not in SETTLING_TASK_STATUSES
 
+    async def serve_task_hostable(serve_task_id: str) -> bool:
+        record = runtime.get_record(serve_task_id)
+        if record is None or worker_registry is None:
+            return True
+        return bool(await worker_registry.satisfying_workers_async(record.task))
+
     sweep_interval = cfg.idle_sweep_interval_sec if cfg.idle_retain_sec > 0 else 0.0
     resident_control = ResidentCapacityControl(
         stores=stores,
@@ -137,6 +144,7 @@ def build_resident_capacity(
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
         serve_task_live=serve_task_live,
+        serve_task_hostable=serve_task_hostable,
         logger=logger,
         poll_interval_sec=cfg.poll_interval_sec,
         idle_sweep_interval_sec=sweep_interval,

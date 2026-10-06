@@ -4,7 +4,7 @@ A policy refines choices the compiler has already found legal: it may keep a fus
 operator out of its predecessor's episode, steer a service dependency to a compatible
 family, and express residency preference. The compiler screens every answer, so a policy
 only narrows: fusion is bounded to the pure, deterministic, local set, and a family
-refinement holds the dependency's engine-batch key and isolation.
+refinement holds the dependency's engine-batch key, isolation, and serving size.
 
 There is one policy per hook, so a deployment composes the facets it wants
 independently. Each hook's default reproduces the compiler's own choice, so a surface
@@ -85,13 +85,14 @@ def screen_service_family(
 ) -> "ServiceFamilyRequirement":
     """The refined requirement when it is compatible with the derived one.
 
-    Engine-batch key and isolation are the dependency's compatibility key: a refinement
-    that moves either would serve the invocation from an incompatible family, so only
-    the family name is a policy's to choose.
+    Engine-batch key, isolation, and serving size are the dependency's compatibility
+    key: a refinement that moves any of them would serve the invocation from an
+    incompatible family, so only the family name is a policy's to choose.
     """
     if (
         refined.engine_batch_key != derived.engine_batch_key
         or refined.isolation != derived.isolation
+        or refined.serving_size != derived.serving_size
     ):
         return derived
     return refined

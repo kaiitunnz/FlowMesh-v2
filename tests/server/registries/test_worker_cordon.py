@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -97,6 +97,17 @@ class _Registry(WorkerRegistry):
     async def get_workers_async(self, worker_ids: Sequence[str]) -> list[Worker | None]:
         return [self._workers.get(worker_id) for worker_id in worker_ids]
 
+    def _read_workers(self, worker_ids: Iterable[str]) -> list[tuple[Worker, bool]]:
+        return [
+            (self._workers[worker_id], worker_id in self._stale)
+            for worker_id in sorted(worker_ids)
+        ]
+
+    async def _read_workers_async(
+        self, worker_ids: Iterable[str]
+    ) -> list[tuple[Worker, bool]]:
+        return self._read_workers(worker_ids)
+
     def is_worker_stale(self, worker_id: str) -> bool:
         return worker_id in self._stale
 
@@ -118,6 +129,21 @@ def test_cordoned_worker_is_not_offered_new_work() -> None:
 def test_cordoned_worker_is_excluded_from_the_eligibility_set() -> None:
     registry = _Registry([_worker("wkr-1", "alpha")], cordons=[_cordon("alpha")])
     assert registry.satisfying_workers(_task()) == []
+
+
+@pytest.mark.anyio
+async def test_both_eligibility_twins_leave_out_cordoned_and_stale_workers() -> None:
+    registry = _Registry(
+        [
+            _worker("wkr-1", "alpha"),
+            _worker("wkr-2", "beta"),
+            _worker("wkr-3", "gamma"),
+        ],
+        cordons=[_cordon("alpha")],
+        stale=frozenset({"wkr-3"}),
+    )
+    assert [w.id for w in registry.satisfying_workers(_task())] == ["wkr-2"]
+    assert [w.id for w in await registry.satisfying_workers_async(_task())] == ["wkr-2"]
 
 
 def test_same_alias_on_another_node_is_not_cordoned() -> None:

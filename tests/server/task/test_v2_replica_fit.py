@@ -1,11 +1,12 @@
 """A menu offers resident serving only when a replica can run the leaf as declared.
 
-A replica runs on one GPU with the deployment's model access, serves its base model, and
-is chosen before upstream values render. A pinned resident leaf runs on the replica's
+A replica runs with the deployment's model access, serves its base model, and is
+chosen before upstream values render. A pinned resident leaf runs on the replica's
 terms, unless the replica would serve another model than the leaf's.
 """
 
 import json
+from typing import Any
 
 import pytest
 
@@ -21,11 +22,14 @@ def _leaf(
     vllm: str = "{max_model_len: 1024}",
     service: str = "",
     gpus: int = 1,
+    gpu_type: str = "",
     revision: str = "",
     extra: str = "",
+    items: str = "[hi]",
 ) -> PhysicalNode:
     service_line = f"\n          service: {service}" if service else ""
     revision_line = f", revision: '{revision}'" if revision else ""
+    type_line = f", type: '{gpu_type}'" if gpu_type else ""
     text = f"""
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -43,8 +47,8 @@ spec:
           model:
             source: {{identifier: Qwen/Qwen3-4B{revision_line}}}
             vllm: {vllm}
-          resources: {{hardware: {{gpu: {{count: {gpus}}}}}}}
-          data: {{type: list, items: [hi]}}{service_line}{extra}
+          resources: {{hardware: {{gpu: {{count: {gpus}{type_line}}}}}}}
+          data: {{type: list, items: {items}}}{service_line}{extra}
 """
     parsed = parse_workflow(text, "native")
     source = FrontendWorkflowSource.capture(text, "native", name="wf")
@@ -58,10 +62,6 @@ _UNFIT = {
     "credential_env": {
         "vllm": "{env_vars: {HF_TOKEN: hf_x, VLLM_LOGGING_LEVEL: INFO}}"
     },
-    "two_gpus": {"gpus": 2},
-    "tensor_parallel": {"vllm": "{tensor_parallel_size: 2}"},
-    "tensor_parallel_string": {"vllm": "{tensor_parallel_size: '2'}"},
-    "tensor_parallel_float": {"vllm": "{tensor_parallel_size: 2.0}"},
     "templated_tensor_parallel": {"vllm": "{tensor_parallel_size: '${u.output}'}"},
     "templated_profile_key": {"vllm": "{max_model_len: '${u.output}'}"},
     "templated_revision": {"revision": "${u.output}"},
@@ -86,7 +86,33 @@ def test_an_explicit_menu_a_replica_cannot_run_is_refused(
         _leaf(service="{mode: local_eligible}", **case)  # type: ignore[arg-type]
 
 
-_PINNED = {k: v for k, v in _UNFIT.items() if k != "checkpoint"}
+_MULTI_GPU: dict[str, dict[str, Any]] = {
+    "two_gpus": {"gpus": 2},
+    # `_leaf` declares one GPU by default, which would cap the tensor-parallel size to
+    # one; four devices leave the declared size its own.
+    "tensor_parallel": {"vllm": "{tensor_parallel_size: 2}", "gpus": 4},
+    "tensor_parallel_string": {"vllm": "{tensor_parallel_size: '2'}", "gpus": 4},
+    "tensor_parallel_float": {"vllm": "{tensor_parallel_size: 2.0}", "gpus": 4},
+}
+
+
+@pytest.mark.parametrize("name", _MULTI_GPU)
+def test_a_multi_gpu_leaf_gets_a_resident_candidate_of_its_size(name: str) -> None:
+    case = _MULTI_GPU[name]
+    node = _leaf(**case)
+    assert node.embodiment_menu is not None
+    [requirement] = [
+        candidate.service_family_requirement
+        for candidate in node.embodiment_menu.candidates
+        if candidate.service_family_requirement is not None
+    ]
+    count = case["gpus"]
+    size = requirement.serving_size
+    assert (size.gpu_count, size.tensor_parallel_size) == (count, 2)
+    assert requirement.family.endswith(f"|size=cpu2,mem4Gi,tp2,gpu{count}xany")
+
+
+_PINNED = {k: v for k, v in (_UNFIT | _MULTI_GPU).items() if k != "checkpoint"}
 
 
 @pytest.mark.parametrize("case", _PINNED.values(), ids=_PINNED.keys())
@@ -115,13 +141,51 @@ def test_a_pinned_resident_leaf_loading_a_checkpoint_is_refused() -> None:
         _leaf(service="{mode: resident}", **_UNFIT["checkpoint"])  # type: ignore[arg-type]
 
 
-def test_a_leaf_served_by_another_model_lends_it_no_profile() -> None:
+def test_a_leaf_served_by_another_model_lends_it_no_profile_or_size() -> None:
     node = _leaf(
-        vllm="{max_model_len: 1024}",
+        vllm="{max_model_len: 1024, tensor_parallel_size: 2}",
         revision="refs/pr/7",
+        gpus=2,
         service="{mode: resident, service_model_ref: meta-llama/Llama-3.1-8B}",
     )
     requirement = node.service_family_requirement
     assert requirement is not None
+    assert requirement.serving_size.is_default
     assert requirement.family == "meta-llama/Llama-3.1-8B|chat"
     assert requirement.engine_batch_key == "meta-llama/Llama-3.1-8B|chat"
+
+
+@pytest.mark.parametrize("service", ["{mode: resident}", ""])
+def test_a_templated_gpu_type_sizes_a_placeable_replica(service: str) -> None:
+    node = _leaf(gpu_type="${u.output}", service=service)
+    requirement = node.service_family_requirement or next(
+        candidate.service_family_requirement
+        for candidate in (
+            node.embodiment_menu.candidates if node.embodiment_menu else ()
+        )
+        if candidate.service_family_requirement is not None
+    )
+    assert requirement is not None
+    assert requirement.serving_size.gpu_type == "any"
+    assert "${" not in requirement.family
+    gpu = requirement.serving_size.hardware().gpu
+    assert gpu is not None and gpu.type == "any"
+
+
+def test_an_enforce_cpu_rendered_from_upstream_keeps_both_embodiments() -> None:
+    # The rendered spec is validated again at dispatch, so a value that moves the leaf
+    # off vLLM fails either embodiment alike.
+    node = _leaf(
+        extra="\n          enforce_cpu: '${u.output}'",
+        service="{mode: local_eligible}",
+    )
+    assert node.embodiment_menu is not None
+
+
+def test_a_pinned_batch_with_an_enforce_cpu_rendered_from_upstream_is_served() -> None:
+    node = _leaf(
+        extra="\n          enforce_cpu: '${u.output}'",
+        service="{mode: resident}",
+        items="[hi, there]",
+    )
+    assert node.service_family_requirement is not None

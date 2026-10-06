@@ -22,17 +22,14 @@ from ..task.v2.representations.plan import (
 def relay_placement_task(task: TaskEnvelope) -> TaskEnvelope:
     """The task as a worker that only carries its invocation must satisfy it.
 
-    A resident-served embodiment runs its model on a replica, so the accelerator its
-    leaf declares for the self-contained embodiment is not a requirement on the worker
-    that relays. Every other declared resource still applies.
+    A resident-served embodiment runs its model on a replica, so the worker relaying its
+    invocation needs none of the leaf's declared hardware.
     """
-    hardware = task.spec.resources.hardware if task.spec.resources else None
-    if hardware is None or hardware.gpu is None:
+    if task.spec.resources is None or task.spec.resources.hardware is None:
         return task
     relayed = task.model_copy(deep=True)
-    resources = relayed.spec.resources
-    if resources is not None and resources.hardware is not None:
-        resources.hardware.gpu = None
+    if (resources := relayed.spec.resources) is not None:
+        resources.hardware = None
     return relayed
 
 
@@ -42,9 +39,9 @@ class EmbodimentSnapshot:
 
     ``local_capable_workers`` counts the workers that satisfy the task as declared,
     which the embodiment that loads the model needs. ``relay_capable_workers`` counts
-    those that satisfy it without its local accelerator, which is what a worker carrying
-    an invocation to a replica needs. ``resident_capacity_enabled`` is whether the
-    deployment serves resident capacity at all, and ``resident_admission_slots`` how
+    those that satisfy it without its declared hardware, which is what a worker
+    carrying an invocation to a replica needs. ``resident_capacity_enabled`` is whether
+    the deployment serves resident capacity at all, and ``resident_admission_slots`` how
     many concurrent sequences one replica admits, which bounds the batch a resident
     embodiment can ever carry. All are evidence about feasibility, never a reservation
     of it.

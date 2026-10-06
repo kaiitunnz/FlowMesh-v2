@@ -8,6 +8,26 @@ from ..resident.state import (
     ServiceFamily,
 )
 from ..task.v2.representations.plan import ResidencyWarmth
+from ..task.v2.representations.serving_size import ServingSize
+
+
+class ResidentServingSizeInfo(BaseModel):
+    cpu: int = Field(description="CPU cores a replica requests.")
+    memory_bytes: int = Field(description="Memory a replica requests, in bytes.")
+    gpu_type: str = Field(description="GPU type a replica's devices match, or `any`.")
+    gpu_count: int = Field(
+        description="GPUs the family's replicas are sized for, all on one worker."
+    )
+    gpu_memory_bytes: int | None = Field(
+        default=None, description="Memory each GPU needs at least, in bytes, if any."
+    )
+    tensor_parallel_size: int = Field(
+        description="Tensor-parallel size the replica's engine shards over."
+    )
+
+    @classmethod
+    def project(cls, size: ServingSize) -> Self:
+        return cls.model_validate(size.model_dump())
 
 
 class ResidentFamilyInfo(BaseModel):
@@ -25,6 +45,13 @@ class ResidentFamilyInfo(BaseModel):
     warmth: ResidencyWarmth | None = Field(
         default=None, description="Warmth policy, if any."
     )
+    serving_size: ResidentServingSizeInfo | None = Field(
+        default=None,
+        description=(
+            "Hardware each demand-managed replica runs on; null for a serve task's "
+            "own family, whose replica runs at the hardware that task declares."
+        ),
+    )
     created_at: str = Field(description="Family registration timestamp.")
 
     @classmethod
@@ -36,6 +63,11 @@ class ResidentFamilyInfo(BaseModel):
             isolation=family.isolation,
             selection_strategy=family.selection_strategy,
             warmth=family.warmth,
+            serving_size=(
+                None
+                if family.standing
+                else ResidentServingSizeInfo.project(family.serving_size)
+            ),
             created_at=family.created_at,
         )
 

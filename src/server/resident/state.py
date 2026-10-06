@@ -16,6 +16,7 @@ from shared.resident.contracts import ReplicaEndpoint
 
 from ..network.state import ReplicaListenerAdvertisement
 from ..task.v2.representations.plan import Warmth
+from ..task.v2.representations.serving_size import DEFAULT_SERVING_SIZE, ServingSize
 from ..utils.time import now_iso
 
 
@@ -171,8 +172,9 @@ class ServiceFamily(BaseModel):
     Registration alone materializes no capacity and carries no credit. It records the
     engine/batch, isolation, resource, and protocol requirements a later eligible claim
     is admitted against, and the per-family replica-selection strategy. Its replicas
-    serve its ``engine_profile``. A ``standing`` family is a public serve task's own:
-    its one replica is the serve task's, and demand never materializes another.
+    serve its ``engine_profile`` and run at its ``serving_size``. A ``standing`` family
+    is a public serve task's own: its one replica is the serve task's, runs at the
+    hardware that task declares, and demand never materializes another.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -183,6 +185,7 @@ class ServiceFamily(BaseModel):
     interface: str = "chat"
     isolation: str | None = None
     engine_profile: str | None = None
+    serving_size: ServingSize = DEFAULT_SERVING_SIZE
     selection_strategy: str = "batch-aware-best-fit"
     warmth: Warmth = None
     standing: bool = False

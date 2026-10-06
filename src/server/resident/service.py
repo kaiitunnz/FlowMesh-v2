@@ -18,7 +18,7 @@ the same invocation identity rather than falling through to a wrong terminal.
 
 import asyncio
 import logging
-from collections.abc import Callable, Collection, Coroutine, Set
+from collections.abc import Awaitable, Callable, Collection, Coroutine, Set
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -102,6 +102,8 @@ RedispatchCallback = Callable[[str, str], bool]
 EndpointProbe = Callable[[str], ReplicaEndpoint | None]
 # Whether a serve task is live: neither settled nor being cancelled.
 ServeTaskLiveness = Callable[[str], bool]
+# Whether any registered worker can host a serve task now.
+ServeTaskHostable = Callable[[str], Awaitable[bool]]
 # Persists the authoritative CS snapshot.
 PersistCallback = Callable[[], None]
 
@@ -359,6 +361,7 @@ class ResidentCapacityControl:
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
         serve_task_live: ServeTaskLiveness = lambda _task_id: True,
+        serve_task_hostable: ServeTaskHostable | None = None,
         delivery: ResidentWorkerDelivery | None = None,
         persist: PersistCallback | None = None,
         logger: logging.Logger | None = None,
@@ -383,6 +386,7 @@ class ResidentCapacityControl:
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
         self._serve_task_live = serve_task_live
+        self._serve_task_hostable = serve_task_hostable
         self._delivery = delivery
         self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("resident-capacity")
@@ -1725,6 +1729,7 @@ class ResidentCapacityControl:
             interface=dependency.interface.value,
             isolation=dependency.isolation,
             engine_profile=dependency.engine_profile,
+            serving_size=dependency.serving_size,
             selection_strategy=self._limits.selection_strategy,
             warmth=warmth,
             standing=standing,
@@ -1794,14 +1799,49 @@ class ResidentCapacityControl:
                             )
                             return None
             if loop.time() >= deadline:
+                # The claim expires and its invocation fails in one step, so nothing
+                # runs between them.
+                detail = await self._cold_start_timeout_detail(family)
+                if claim.state is ClaimState.TERMINAL:
+                    return None
                 self._admission.on_expired(claim)
-                self._fail(
-                    orig,
-                    ProvisioningDenialReason.COLD_START_BUDGET,
-                    "resident cold start did not become ready in time",
-                )
+                self._fail(orig, ProvisioningDenialReason.COLD_START_BUDGET, detail)
                 return None
             await asyncio.sleep(self._poll_interval)
+
+    async def _cold_start_timeout_detail(self, family: str) -> str:
+        """Why a claim's cold start never became ready, naming a size no registered
+        worker can host."""
+        detail = "resident cold start did not become ready in time"
+        definition = self._stores.families.get(family)
+        newest = max(
+            (r for r in self._stores.directory.by_family(family) if r.serve_task_id),
+            key=lambda r: r.created_at,
+            default=None,
+        )
+        if (
+            definition is None
+            or newest is None
+            or newest.serve_task_id is None
+            or self._serve_task_hostable is None
+        ):
+            return detail
+        try:
+            hostable = await self._serve_task_hostable(newest.serve_task_id)
+        except Exception:
+            # Diagnostic only: an unreadable fleet leaves the denial generic.
+            self._logger.warning(
+                "could not read whether a worker can host family %s",
+                family,
+                exc_info=True,
+            )
+            return detail
+        if hostable:
+            return detail
+        return (
+            f"{detail}: no worker can host a replica of size "
+            f"{definition.serving_size.key()}"
+        )
 
     def _has_materializing(self, family: str) -> bool:
         return any(

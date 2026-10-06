@@ -6,6 +6,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_valida
 from shared.tasks.specs import InferenceEmbodimentKind
 
 from ..mode import LoweringStrategy
+from .serving_size import DEFAULT_SERVING_SIZE, ServingSize
 from .versioning import VersionId
 
 
@@ -48,8 +49,9 @@ class EpisodeSpec(BaseModel):
 class ServiceFamilyRequirement(BaseModel):
     """A plan-time service-family requirement hook.
 
-    Names the service family a node needs. It encodes no admission, transport,
-    or allocation policy; resident-capacity control consumes it later.
+    Names the service family a node needs and the size its replicas run at. It encodes
+    no admission, transport, or allocation policy; resident-capacity control consumes
+    it later.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -57,6 +59,7 @@ class ServiceFamilyRequirement(BaseModel):
     family: str
     engine_batch_key: str | None = None
     isolation: str | None = None
+    serving_size: ServingSize = DEFAULT_SERVING_SIZE
 
 
 class ResidencyWarmth(StrEnum):

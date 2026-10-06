@@ -370,22 +370,24 @@ unplaceable past the no-worker grace.
 
 The choice is recorded durably before the task is published and on the attempt. The
 dispatcher then materializes the task it implies, so the worker runs an ordinary typed
-task: a resident-served dispatch carries only the invocation and is placed without the
-accelerator the other embodiment needs. A resident embodiment is pinned once its
-invocation exists, so a retry reconciles through that invocation instead of running the
-model locally.
+task: a resident-served dispatch carries only the invocation and is placed without any of
+the leaf's declared hardware. A resident embodiment is pinned once its invocation exists,
+so a retry reconciles through that invocation instead of running the model locally.
 
 A service dependency's family folds the service interface, base model, isolation domain,
-and engine profile. A shared base model and interface reuse a warm replica; a differing
-interface, base model, isolation domain, or engine profile resolves to a distinct family
-and cannot share a batch or route on a matching model name alone. The engine profile is
-the configuration that changes what the engine returns, which the replica serves:
-`model.source.revision` and the `model.vllm` keys `max_model_len`, `tokenizer_revision`,
-`dtype`, `quantization`, `kv_cache_dtype`, `rope_scaling`, `rope_theta`,
-`limit_mm_per_prompt`, `enable_mm_embeds`, `trust_remote_code`, and `env_vars`, plus
-`convert` for an embedding leaf. A key set to null is unset. Every other `model.vllm` key
-is local to each engine. A leaf served by a model other than its own lends that model no
-profile.
+engine profile, and serving size. A shared base model and interface reuse a warm replica;
+a differing interface, base model, isolation domain, engine profile, or serving size
+resolves to a distinct family and cannot share a batch or route on a matching model name
+alone. The engine profile is the configuration that changes what the engine returns,
+which the replica serves: `model.source.revision` and the `model.vllm` keys
+`max_model_len`, `tokenizer_revision`, `dtype`, `quantization`, `kv_cache_dtype`,
+`rope_scaling`, `rope_theta`, `limit_mm_per_prompt`, `enable_mm_embeds`,
+`trust_remote_code`, and `env_vars`, plus `convert` for an embedding leaf. A key set to
+null is unset. The serving size is the hardware the replica runs at: the leaf's
+`resources.hardware` and `model.vllm.tensor_parallel_size` (see
+[`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md)). Every other `model.vllm` key is local
+to each engine. A leaf served by a model other than its own lends that model no profile
+and no serving size.
 
 An adapter does not fork a family: it co-batches on the base replica through its own
 slot — the resident consumer loads its adapter into a replica slot and selects it as the
@@ -395,12 +397,12 @@ declares a single adapter with a loadable `path`, `url`, or `task_id`.
 
 A menu offers a resident candidate only for a leaf a replica runs as declared: no
 profile setting, tensor parallel size, or revision renders from upstream, its engine
-configuration carries no credential, it runs on one GPU, and it loads no checkpoint. A
-pinned resident leaf runs on the replica's terms: the replica loads with the
-deployment's own access and never receives the leaf's credential, and a value that
-renders from upstream is left out of its profile. A leaf whose model or adapter source
-carries a credential has no resident embodiment, and a resident binding on one, or on a
-leaf that loads a checkpoint, is refused at submission.
+configuration carries no credential, and it loads no checkpoint. A pinned resident leaf
+runs on the replica's terms: the replica loads with the deployment's own access and
+never receives the leaf's credential, and a value that renders from upstream is left out
+of its profile. A leaf whose model or adapter source carries a credential has no resident
+embodiment, and a resident binding on one, or on a leaf that loads a checkpoint, is
+refused at submission.
 
 `RESIDENT_ADAPTER_SLOTS` bounds the distinct adapters a replica holds concurrently. A claim
 for a base model or an already-resident adapter admits without consuming a new slot, and a

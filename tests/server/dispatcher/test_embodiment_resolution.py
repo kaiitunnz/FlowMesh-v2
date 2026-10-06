@@ -12,6 +12,7 @@ from server.dispatcher.embodiment import (
     EmbodimentSnapshot,
     relay_placement_task,
 )
+from server.registries.worker import hw_satisfies
 from server.task.runtime import TaskRuntime
 from server.task.v2.representations.plan import InferenceEmbodimentMenu
 from shared.tasks.specs import InferenceEmbodimentKind
@@ -20,6 +21,7 @@ from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
     make_capturing_dispatcher,
 )
+from tests.server.registries.test_worker_registry import _worker as small_worker
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_embodiment_fence import LOCAL_ELIGIBLE, _runtime
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _worker
@@ -216,22 +218,38 @@ def _declared_gpu(task: Any) -> Any:
     return hardware.gpu if hardware else None
 
 
-def _declared_cpu(task: Any) -> Any:
-    hardware = task.spec.resources.hardware if task.spec.resources else None
-    return hardware.cpu if hardware else None
-
-
 @pytest.mark.anyio
-async def test_a_relay_placement_view_drops_only_the_local_accelerator() -> None:
+async def test_a_relay_placement_view_carries_none_of_the_declared_hardware() -> None:
     _dispatcher, runtime, task_id = await _setup()
     task = _gpu_task(runtime, task_id)
     assert _declared_gpu(task) is not None
 
     relayed = relay_placement_task(task)
-    assert _declared_gpu(relayed) is None
-    # Every other declared resource still applies, and the original is untouched.
-    assert _declared_cpu(relayed) == _declared_cpu(task)
+    assert relayed.spec.resources is not None
+    assert relayed.spec.resources.hardware is None
+    # The original is untouched.
     assert _declared_gpu(task) is not None
+
+
+@pytest.mark.anyio
+async def test_a_resident_dispatch_of_a_large_leaf_places_on_a_small_relay() -> None:
+    # The replica runs at the leaf's 32 cores and 2 GPUs; the worker carrying the
+    # invocation is a 4-core CPU worker and must not need any of it.
+    runtime = _runtime(FakeRegistry())
+    _wfl, ids = await _register(
+        runtime,
+        LOCAL_ELIGIBLE.replace("PRIMARY", "resident_served").replace(
+            "resources: {hardware: {gpu: {count: 1}}}",
+            "resources: {hardware: {cpu: 32, memory: 64Gi, gpu: {count: 2}}}",
+        ),
+    )
+    task = _gpu_task(runtime, ids["gen"])
+    relay = small_worker()
+    hardware = task.spec.resources.hardware if task.spec.resources else None
+    assert hardware is not None and hardware.cpu == 32
+
+    assert not hw_satisfies(relay, task)
+    assert hw_satisfies(relay, relay_placement_task(task))
 
 
 @pytest.mark.anyio

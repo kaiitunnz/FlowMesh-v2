@@ -11,6 +11,9 @@ from shared.tasks import TaskType
 from shared.tasks.specs import InferenceEmbodimentKind, ModelBindingMode
 from shared.tools.facade import FacadeDescriptor as FacadeDescriptor
 
+from .plan import ServiceFamilyRequirement
+from .serving_size import DEFAULT_SERVING_SIZE, ServingSize
+
 
 class DeterminismClass(StrEnum):
     """How an operator's output relates to a repeated run over the same inputs."""
@@ -167,7 +170,8 @@ class ServiceDependency(BaseModel):
     base replica and the request selects it, so it rides ``adapter`` (with its loadable
     ``adapter_source``) rather than the family key. ``engine_profile`` is the engine
     configuration that changes what a replica returns; it keys both and the replica
-    serves it.
+    serves it. ``serving_size`` is the hardware a replica runs at; a non-default size
+    keys both.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -178,6 +182,7 @@ class ServiceDependency(BaseModel):
     adapter_source: str | None = None
     isolation: str | None = None
     engine_profile: str | None = None
+    serving_size: ServingSize = DEFAULT_SERVING_SIZE
     # How many conversations one invocation of this leaf carries, when its source names
     # them outright. A leaf resolving its prompts from upstream knows this only once
     # that value is in hand, and carries None until then.
@@ -190,23 +195,38 @@ class ServiceDependency(BaseModel):
 
     @property
     def service_family(self) -> str:
-        """The reuse-domain identity: one base model, interface, isolation domain."""
+        """The reuse-domain identity: one base model, interface, isolation domain,
+        engine profile, and serving size."""
         parts = [self.service_ref.strip(), self.interface.value]
         if self.isolation:
             parts.append(f"iso={self.isolation}")
-        return "|".join(parts + self._profile_parts())
+        return "|".join(parts + self._engine_parts())
 
     @property
     def engine_batch_key(self) -> str:
         """The compatible model-runner and config key an admitted batch shares."""
         return "|".join(
-            [self.service_ref.strip(), self.interface.value, *self._profile_parts()]
+            [self.service_ref.strip(), self.interface.value, *self._engine_parts()]
         )
 
-    def _profile_parts(self) -> list[str]:
-        if self.engine_profile is None:
-            return []
-        return [f"profile={engine_profile_key(self.engine_profile)}"]
+    def family_requirement(self) -> ServiceFamilyRequirement:
+        """Return the plan requirement naming this dependency's family."""
+        return ServiceFamilyRequirement(
+            family=self.service_family,
+            engine_batch_key=self.engine_batch_key,
+            isolation=self.isolation,
+            serving_size=self.serving_size,
+        )
+
+    def _engine_parts(self) -> list[str]:
+        # The default size adds no part, so a dependency restored without a size
+        # resolves to the family it was stored under.
+        parts = []
+        if self.engine_profile is not None:
+            parts.append(f"profile={engine_profile_key(self.engine_profile)}")
+        if not self.serving_size.is_default:
+            parts.append(f"size={self.serving_size.key()}")
+        return parts
 
 
 class InferenceEmbodimentEligibility(StrEnum):

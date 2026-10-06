@@ -6,6 +6,7 @@ arrives.
 """
 
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import subprocess  # nosec B404
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -40,6 +42,8 @@ _HEALTH_POLL_INTERVAL_SEC = 2.0
 _DEFAULT_READINESS_TIMEOUT_SEC = 600.0
 _POLL_INTERVAL_SEC = 5.0
 _STOP_TIMEOUT_SEC = 15.0
+_KILL_WAIT_SEC = 5.0
+_GROUP_POLL_INTERVAL_SEC = 0.1
 _TAIL_MAX_LINES = 200
 _TAIL_SNIPPET_BYTES = 4096
 
@@ -67,6 +71,17 @@ def _raise_with_tail(message: str, tail: collections.deque[str]) -> NoReturn:
     )
 
 
+def _group_alive(pgid: int) -> bool:
+    """Whether any process of the engine's group remains, never probing our own."""
+    if pgid <= 1 or pgid == os.getpgrp():
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except OSError:
+        return False
+    return True
+
+
 class VLLMServeExecutor(Executor):
     name = "vllm_serve"
     supported_task_types = frozenset({TaskType.SERVE})
@@ -77,6 +92,10 @@ class VLLMServeExecutor(Executor):
         self._signals = RunSignals()
         self._proc: subprocess.Popen[str] | None = None
         self._devices: tuple[str, ...] | None = None
+        self._teardown_lock = threading.Lock()
+        self._teardowns: weakref.WeakKeyDictionary[
+            subprocess.Popen[str], threading.Event
+        ] = weakref.WeakKeyDictionary()
 
     @property
     def binds_devices(self) -> bool:
@@ -346,30 +365,42 @@ class VLLMServeExecutor(Executor):
         logger.info("Serve task TTL reached; terminating vLLM server")
 
     def _terminate_process_group(self, proc: subprocess.Popen[str]) -> None:
+        # A stop or cancel and the run's own exit both tear the engine down. Only the
+        # first signals it: a second SIGTERM would kill an engine core that restored
+        # the default handler while it shuts down, so a later caller waits instead.
+        with self._teardown_lock:
+            done = self._teardowns.get(proc)
+            first = done is None
+            if done is None:
+                done = self._teardowns[proc] = threading.Event()
+        if not first:
+            done.wait(timeout=_STOP_TIMEOUT_SEC + _KILL_WAIT_SEC)
+            return
         try:
-            pgid = os.getpgid(proc.pid)
-        except OSError:
-            pgid = None
-        if pgid is not None:
-            try:
-                signal_process_group(pgid, signal.SIGTERM)
-            except (ProcessLookupError, ChildProcessError, OSError):
-                pass
-            try:
-                proc.wait(timeout=_STOP_TIMEOUT_SEC)
-            except subprocess.TimeoutExpired:
-                try:
-                    signal_process_group(pgid, signal.SIGKILL)
-                except (ProcessLookupError, ChildProcessError, OSError):
-                    pass
-                try:
-                    proc.wait(timeout=5.0)
-                except Exception:
-                    pass
-        try:
-            proc.wait(timeout=5.0)
-        except Exception:
-            pass
+            self._signal_group_down(proc)
+        finally:
+            done.set()
+
+    @staticmethod
+    def _signal_group_down(proc: subprocess.Popen[str]) -> None:
+        # The engine leads its own session, so its pid names the group even once the
+        # leader has exited and been reaped while its engine core and workers live on.
+        # Every member gets the stop timeout to shut down before the group is killed.
+        pgid = proc.pid
+        with contextlib.suppress(OSError):
+            signal_process_group(pgid, signal.SIGTERM)
+        deadline = time.monotonic() + _STOP_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            proc.poll()
+            if not _group_alive(pgid):
+                break
+            time.sleep(_GROUP_POLL_INTERVAL_SEC)
+        if proc.poll() is not None and not _group_alive(pgid):
+            return
+        with contextlib.suppress(OSError):
+            signal_process_group(pgid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=_KILL_WAIT_SEC)
 
     def cancel(self, task_id: str) -> None:
         if not self._signals.cancel(task_id):
