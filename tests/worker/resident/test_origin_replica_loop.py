@@ -294,7 +294,7 @@ class _DialedHarness:
         self.outcomes.append(outcome)
         self.done.set()
 
-    async def invoke(self, session_no: int) -> None:
+    async def invoke(self, session_no: int, traceparent: str | None = None) -> None:
         self.done.clear()
         self.origin.begin(
             ResidentOriginRequest(
@@ -308,6 +308,7 @@ class _DialedHarness:
                     selected_transport="worker_direct",
                     selected_endpoint=self._endpoint,
                 ),
+                traceparent=traceparent,
             )
         )
         await asyncio.wait_for(self.done.wait(), timeout=10.0)

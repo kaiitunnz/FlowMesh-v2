@@ -12,8 +12,9 @@ from dataclasses import dataclass
 
 from opentelemetry.trace import Tracer
 
+from shared.resident.peer_carriage import PeerDialer
+
 from ..config import PortForwardConfig
-from ..network.peer_tls import PeerDialer
 from ..network.reverse_relay import BinaryRedis
 from ..registries.resident import ResidentRegistry
 from ..resident.service import ResidentCapacityControl

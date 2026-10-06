@@ -16,7 +16,6 @@ import pytest
 from opentelemetry.sdk.trace import ReadableSpan
 
 from shared.network.relay_frame import RelayFrame
-from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.reports import ResidentStreamStatus
 from shared.schemas.network import Transport
 from shared.telemetry.config import TelemetryLevel
@@ -26,9 +25,8 @@ from shared.telemetry.semconv import (
     transport_span_name,
 )
 from tests.worker.otel_support import recorded_worker_spans, worker_telemetry
-from worker.resident.origin_driver import ResidentOriginRequest
 
-from .test_origin_replica_loop import _DialedHarness, _handoff, _Harness, _ToPeer
+from .test_origin_replica_loop import _DialedHarness, _Harness
 
 _TRACE_ID = "0102030405060708090a0b0c0d0e0f10"
 _PARENT_SPAN_ID = "00f1e2d3c4b5a697"
@@ -100,31 +98,12 @@ def test_a_dialed_attempt_records_the_transport_it_actually_used(
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
             h = _DialedHarness(sock, port)
-            relay, answer = _ToPeer(), _ToPeer()
-            relay.on_peer = lambda frame: h.sidecar.on_frame(frame, answer)
-            answer.on_peer = h.origin.on_frame
-            h.carriage._base = relay
             if reachable:
                 await h.listener.start()
             else:
                 sock.close()
             try:
-                h.origin.begin(
-                    ResidentOriginRequest(
-                        task_id="tsk-1",
-                        call_correlation="call-1",
-                        session_id="rly-1",
-                        handoff=_handoff(1),
-                        request_payload='{"prompt": "hi"}',
-                        carriage_plan=ResidentCarriagePlan(
-                            session_id="rly-1",
-                            selected_transport=Transport.WORKER_DIRECT.value,
-                            selected_endpoint=f"127.0.0.1:{port}",
-                        ),
-                        traceparent=_TRACEPARENT,
-                    )
-                )
-                await asyncio.wait_for(h.done.wait(), timeout=10.0)
+                await h.invoke(1, traceparent=_TRACEPARENT)
                 assert h.outcomes[-1].status is ResidentStreamStatus.SUCCESS
             finally:
                 if reachable:

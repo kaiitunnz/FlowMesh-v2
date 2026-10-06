@@ -21,11 +21,7 @@ from shared.network.frame_stream import FrameSink, WireFrameSink
 from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.relay_frame import RESIDENT_FRAME_KIND, RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
-from shared.resident.carriage import (
-    ClaimGatedServiceCarriage,
-    ControlRelayCarriage,
-    ResidentCarriagePlan,
-)
+from shared.resident.carriage import ClaimGatedServiceCarriage, ResidentCarriagePlan
 from shared.resident.contracts import (
     LOCAL_ENGINE_BASE_URL,
     AdmissionHandoff,
@@ -33,13 +29,12 @@ from shared.resident.contracts import (
     RouteAuthorization,
 )
 from shared.resident.gate import LoadEvidence
-from shared.resident.peer_carriage import PeerCarriage
+from shared.resident.peer_carriage import PeerDialer, origin_carriage
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.schemas.network import RouteObservationOutcome, Transport
 
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
 from .local_engines import LocalEngine
@@ -161,18 +156,23 @@ class ResidentLaneHost:
         attempt and this worker dials the target itself, so the payload of a workflow
         boundary never reaches the root.
         """
-        if not self._peer_enabled:
-            return ControlRelayCarriage(sink)
-        return PeerCarriage(
-            base=sink,
+        peer = (
+            PeerDialer(
+                ssl_context=(
+                    client_context(self._peer_material)
+                    if self._peer_material is not None
+                    else None
+                ),
+                connect_budget_sec=self._connect_budget_sec,
+            )
+            if self._peer_enabled
+            else None
+        )
+        return origin_carriage(
+            sink,
+            peer,
             deliver=self._deliver_inbound,
-            observe=self._observe,
-            ssl_context=(
-                client_context(self._peer_material)
-                if self._peer_material is not None
-                else None
-            ),
-            connect_budget_sec=self._connect_budget_sec,
+            report=self._report,
             logger=self._logger,
         )
 
@@ -181,22 +181,10 @@ class ResidentLaneHost:
         if self._origin is not None:
             await self._origin.on_frame(frame)
 
-    def _observe(
-        self,
-        session_id: str,
-        transport: Transport,
-        outcome: RouteObservationOutcome,
-    ) -> None:
+    def _report(self, observation: ResidentRouteObservation) -> None:
         """Report one attempt's classified path evidence for the reachability view."""
-        if self._report_observation is None:
-            return
-        self._report_observation(
-            ResidentRouteObservation(
-                session_id=session_id,
-                transport=transport.value,
-                outcome=outcome.value,
-            )
-        )
+        if self._report_observation is not None:
+            self._report_observation(observation)
 
     def _on_load(self, evidence: LoadEvidence) -> None:
         """Emit one admitted operation's claim-tagged load evidence for accounting."""

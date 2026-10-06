@@ -8,9 +8,10 @@ that carries the attempt's frames. Selecting the transport stays control's decis
 the carriage only realizes it, and never reinterprets one transport as another.
 
 ``ControlRelayCarriage`` realizes the universal reverse-rendezvous relay every
-deployment can reach. ``PeerCarriage`` realizes the trusted direct and
-node-relay transports the origin dials itself; both sit behind the same factory, so a
-drive takes its sink from a carriage without knowing which transport carried it.
+deployment can reach. ``PeerCarriage`` realizes the trusted direct and node-relay
+transports the origin dials itself, over that relay as its base; an origin builds
+whichever applies through ``origin_carriage``, so a drive takes its sink from a carriage
+without knowing which transport carries it.
 """
 
 from typing import Protocol
@@ -51,8 +52,8 @@ class ClaimGatedServiceCarriage(Protocol):
 
     def select(self, plan: ResidentCarriagePlan) -> FrameSink: ...
 
-    def transport_of(self, session_id: str) -> str:
-        """Return the transport an open attempt's frames actually ride."""
+    def transport_of(self, sink: FrameSink) -> str:
+        """Return the transport the frames of the attempt ``sink`` carries rode."""
         ...
 
     def close(self, session_id: str) -> None:
@@ -76,7 +77,7 @@ class ControlRelayCarriage:
             raise CarriageUnavailable(plan.selected_transport)
         return self._base_sink
 
-    def transport_of(self, session_id: str) -> str:
+    def transport_of(self, sink: FrameSink) -> str:
         return CONTROL_RELAY
 
     def close(self, session_id: str) -> None:

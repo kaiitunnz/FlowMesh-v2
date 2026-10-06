@@ -15,13 +15,13 @@ finds an already materialized outcome re-reports it rather than re-running the e
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from opentelemetry.trace import Span
 
+from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame
 from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.outcome import FabricContentStore, OutcomeManifest
@@ -38,6 +38,7 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
+from shared.resident.transport_span import record_realized_transport, transport_span
 from shared.resident.wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -47,15 +48,8 @@ from shared.resident.wire import (
     KIND_REJECT,
     KIND_STREAM,
 )
-from shared.schemas.network import Transport
 from shared.telemetry.config import TelemetryLevel
-from shared.telemetry.propagation import extract_context
-from shared.telemetry.provider import payload_free_span
-from shared.telemetry.semconv import (
-    PHYSICAL_INVOCATION_ID,
-    PHYSICAL_TRANSPORT,
-    transport_span_name,
-)
+from shared.telemetry.semconv import PHYSICAL_INVOCATION_ID
 
 from ..telemetry import otel
 
@@ -90,6 +84,7 @@ class ResidentOriginRequest:
 class _Origin:
     request: ResidentOriginRequest
     session: FramedRelaySession
+    sink: FrameSink
     authorization: "asyncio.Future[RouteAuthorization]"
     task: "asyncio.Task[None] | None" = None
 
@@ -146,6 +141,7 @@ class ResidentOriginDriver:
         origin = _Origin(
             request=request,
             session=session,
+            sink=sink,
             authorization=asyncio.get_running_loop().create_future(),
         )
         self._by_session[request.session_id] = origin
@@ -181,31 +177,20 @@ class ResidentOriginDriver:
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
 
-    @contextmanager
-    def _transport_span(self, req: ResidentOriginRequest) -> Iterator[Span | None]:
-        """Open ``flowmesh.transport.<transport>`` for one invocation's carriage.
-
-        The parent comes from the ``resident_handoff`` frame's own ``traceparent``
-        key, not ambient context — this coroutine runs on the resident lane
-        host's own event loop, off the task lane the boundary's episode is on.
-        """
-        if not otel.emits(TelemetryLevel.FINE):
-            yield None
-            return
-        parent_context = extract_context(req.traceparent)
-        attributes = otel.new_span_attributes(
-            {PHYSICAL_INVOCATION_ID: req.handoff.invocation_id}
-        )
-        span_name = transport_span_name(Transport(req.carriage_plan.selected_transport))
-        with payload_free_span(
-            otel.get_tracer(), span_name, context=parent_context, attributes=attributes
-        ) as span:
-            yield span
-
     async def _drive(self, origin: _Origin) -> None:
         req = origin.request
         idm = req.handoff.idempotency_key
-        with self._transport_span(req) as span:
+        tracer = otel.get_tracer() if otel.emits(TelemetryLevel.FINE) else None
+        attributes = (
+            otel.new_span_attributes(
+                {PHYSICAL_INVOCATION_ID: req.handoff.invocation_id}
+            )
+            if tracer is not None
+            else {}
+        )
+        with transport_span(
+            tracer, req.carriage_plan.selected_transport, req.traceparent, attributes
+        ) as span:
             await self._drive_impl(origin, req, idm, span)
 
     async def _drive_impl(
@@ -238,10 +223,9 @@ class ResidentOriginDriver:
                 )
             finally:
                 # The first frame settles whether a dialed attempt fell back.
-                if span is not None:
-                    span.set_attribute(
-                        PHYSICAL_TRANSPORT, self._carriage.transport_of(req.session_id)
-                    )
+                record_realized_transport(
+                    span, self._carriage.transport_of(origin.sink)
+                )
             ack = await origin.session.recv_wire(self._stream_deadline)
             if not self._handle_ack(req, ack):
                 return

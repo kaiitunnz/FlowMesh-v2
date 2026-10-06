@@ -21,7 +21,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 
-from server.network.peer_tls import PeerDialer
 from server.network.rendezvous import RootCursorStore, RootRendezvousBridge
 from server.network.reverse_relay import (
     RESIDENT_RELAY_KEYSPACE,
@@ -44,6 +43,7 @@ from shared.resident.contracts import (
     RouteAuthorization,
 )
 from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
+from shared.resident.peer_carriage import PeerCarriage, PeerDialer
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
@@ -546,7 +546,7 @@ def test_a_released_attempt_closes_its_socket(ca: _TestCa, release: str) -> None
             await h.executor.stop()
 
         assert await h.connections_drain() == 0
-        assert h.executor._carriage.transport_of("rly-1") == "control_relay"
+        assert cast(PeerCarriage, h.executor._carriage)._sinks == {}
         # Releasing a healthy attempt is not path evidence.
         assert [o.outcome for o in h.control.observations] == [
             RouteObservationOutcome.VERIFIED.value
@@ -600,3 +600,62 @@ def test_the_transport_span_records_the_transport_actually_used(
     assert span.attributes is not None
     assert span.attributes[PHYSICAL_TRANSPORT] == realized
     assert span.context is not None and span.context.trace_id == 0xABC
+
+
+def test_an_attempt_reaped_while_dialing_records_the_transport_it_was_dialing(
+    ca: _TestCa,
+) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    async def body(h: _Harness) -> None:
+        reached = asyncio.Event()
+
+        async def silent(reader, writer) -> None:
+            # Takes the connection and never accepts it, holding the dial open.
+            reached.set()
+            with contextlib.suppress(OSError, asyncio.IncompleteReadError):
+                await reader.read()
+            writer.close()
+
+        server = await asyncio.start_server(silent, "127.0.0.1", 0)
+        async with server:
+            h.open(
+                Transport.WORKER_DIRECT,
+                endpoint=f"127.0.0.1:{server.sockets[0].getsockname()[1]}",
+                traceparent=format_traceparent(0xABC, 0xDEF),
+            )
+            await asyncio.wait_for(reached.wait(), _DEADLINE)
+            h.executor.close("rly-1")
+            await _until(lambda: bool(exporter.get_finished_spans()))
+
+    _run(
+        body,
+        root=None,
+        target=None,
+        tracer_provider=provider,
+    )
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes is not None
+    # Nothing rode the relay: the attempt ended while its dial was still open.
+    assert span.attributes[PHYSICAL_TRANSPORT] == "worker_direct"
+
+
+def test_a_stopped_root_opens_no_attempt(ca: _TestCa) -> None:
+    async def body(h: _Harness) -> None:
+        await h.executor.stop()
+        # A re-drive that was waiting when the root shut down arrives afterwards.
+        h.open(Transport.WORKER_DIRECT)
+
+        # The open started no drive, so nothing can dial, relay or report later.
+        assert h.executor._drive._by_session == {}
+        assert h.dialed == [] and h.relayed_to_replica == []
+        assert cast(PeerCarriage, h.executor._carriage)._sinks == {}
+        assert h.control.outcomes == [] and h.control.observations == []
+
+    _run(
+        body,
+        root=ca.material("root-node"),
+        target=ca.material("worker-node", "127.0.0.1"),
+    )

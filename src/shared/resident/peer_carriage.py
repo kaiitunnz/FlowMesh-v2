@@ -29,6 +29,7 @@ import contextlib
 import logging
 import ssl
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from shared.network.frame_stream import (
     FrameSink,
@@ -46,7 +47,14 @@ from shared.network.peer_dial import (
 from shared.network.relay_frame import RelayFrame
 from shared.schemas.network import RouteObservationOutcome, Transport
 
-from .carriage import CONTROL_RELAY, CarriageUnavailable, ResidentCarriagePlan
+from .carriage import (
+    CONTROL_RELAY,
+    CarriageUnavailable,
+    ClaimGatedServiceCarriage,
+    ControlRelayCarriage,
+    ResidentCarriagePlan,
+)
+from .reports import ResidentRouteObservation
 
 # Delivers one frame the target returned into the origin's own session.
 InboundSink = Callable[[RelayFrame], Awaitable[None]]
@@ -229,9 +237,8 @@ class PeerCarriage:
         self._sinks[plan.session_id] = sink
         return sink
 
-    def transport_of(self, session_id: str) -> str:
-        sink = self._sinks.get(session_id)
-        return sink.transport if sink is not None else CONTROL_RELAY
+    def transport_of(self, sink: FrameSink) -> str:
+        return sink.transport if isinstance(sink, _PeerSink) else CONTROL_RELAY
 
     async def send_on_base(self, frame: RelayFrame) -> None:
         await self._base.send(frame)
@@ -242,14 +249,61 @@ class PeerCarriage:
         if sink is not None:
             sink.close()
 
-    def close_all(self) -> None:
-        for session_id in list(self._sinks):
-            self.close(session_id)
+
+@dataclass(frozen=True)
+class PeerDialer:
+    """What an origin dials a peer transport with.
+
+    ``ssl_context`` is ``None`` only under the operator's attested no-mTLS posture.
+    """
+
+    ssl_context: ssl.SSLContext | None
+    connect_budget_sec: float
+
+
+def origin_carriage(
+    base: FrameSink,
+    peer: PeerDialer | None,
+    *,
+    deliver: InboundSink,
+    report: Callable[[ResidentRouteObservation], None],
+    logger: logging.Logger | None = None,
+) -> ClaimGatedServiceCarriage:
+    """Return the carriage an origin's attempts ride.
+
+    An origin that cannot dial carries every attempt over ``base``. One that can dials
+    the transport control selects, reporting each attempt's path evidence to
+    ``report``, and falls back to ``base`` before delivery.
+    """
+    if peer is None:
+        return ControlRelayCarriage(base)
+
+    def observe(
+        session_id: str, transport: Transport, outcome: RouteObservationOutcome
+    ) -> None:
+        report(
+            ResidentRouteObservation(
+                session_id=session_id,
+                transport=transport.value,
+                outcome=outcome.value,
+            )
+        )
+
+    return PeerCarriage(
+        base=base,
+        deliver=deliver,
+        observe=observe,
+        ssl_context=peer.ssl_context,
+        connect_budget_sec=peer.connect_budget_sec,
+        logger=logger,
+    )
 
 
 __all__ = [
     "PeerCarriageLost",
     "PeerCarriage",
+    "PeerDialer",
     "InboundSink",
     "ObservationSink",
+    "origin_carriage",
 ]

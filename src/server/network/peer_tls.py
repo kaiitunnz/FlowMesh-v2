@@ -1,19 +1,14 @@
-"""A node's own peer TLS identity, and the root's capability to dial a peer transport.
-
-Every server-side party that takes part in a peer transport reads the same operator
-files: a node's supervisor to serve its peer listener and probe its peers, and the root
-to dial a target as the origin of its own gated serve requests.
-"""
+"""A node's own peer TLS identity, and the root's capability to dial with it."""
 
 import logging
 import ssl
-from dataclasses import dataclass
 
 from shared.network.mtls import (
     MutualTlsMaterial,
     MutualTlsMaterialError,
     client_context,
 )
+from shared.resident.peer_carriage import PeerDialer
 
 from ..config import NetworkPlaneConfig, TrustedPeerConfig
 
@@ -23,9 +18,8 @@ def load_peer_material(
 ) -> MutualTlsMaterial | None:
     """Read this node's peer TLS material from the operator's configured files.
 
-    Returns ``None`` under the operator's attested no-mTLS posture, and raises
-    ``MutualTlsMaterialError`` for material that is missing or unreadable rather than
-    falling back to plaintext.
+    Return ``None`` under the attested no-mTLS posture; raise ``MutualTlsMaterialError``
+    for missing or unreadable material.
     """
     if peer.disable_mtls:
         logger.warning(
@@ -40,17 +34,6 @@ def load_peer_material(
     )
 
 
-@dataclass(frozen=True)
-class PeerDialer:
-    """What an origin dials a peer transport with.
-
-    ``ssl_context`` is ``None`` only under the operator's explicit no-mTLS posture.
-    """
-
-    ssl_context: ssl.SSLContext | None
-    connect_budget_sec: float
-
-
 def root_peer_dialer(
     network: NetworkPlaneConfig, logger: logging.Logger
 ) -> PeerDialer | None:
@@ -58,8 +41,7 @@ def root_peer_dialer(
 
     The root dials with its own node's identity. Without the peer plane, or with
     material it cannot build a client context from, the root dials nothing and its
-    serve requests ride ``control_relay``: an unusable identity never becomes a
-    plaintext dial.
+    serve requests ride ``control_relay``.
     """
     if not (network.enabled and network.peer.enabled):
         return None
@@ -78,4 +60,4 @@ def root_peer_dialer(
     )
 
 
-__all__ = ["PeerDialer", "load_peer_material", "root_peer_dialer"]
+__all__ = ["load_peer_material", "root_peer_dialer"]
