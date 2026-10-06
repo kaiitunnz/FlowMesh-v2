@@ -15,6 +15,12 @@ from flowmesh_hook import ResourceKind
 from lumid_hooks import PrincipalContext
 
 from shared.inference import hf_overrides
+from shared.tasks import TaskEnvelopeStrict
+from shared.tasks.components.metadata import TaskMetadata
+from shared.tasks.components.model import ModelConfig, ModelSource
+from shared.tasks.components.resources import ResourcesSpec
+from shared.tasks.specs import DevModelSpecStrict, ServeSpecStrict
+from shared.tasks.task_type import TaskType
 
 from ..auth import register_resource
 from ..config import ResidentCapacityConfig
@@ -31,29 +37,16 @@ async def materialize_resident_replica(
     logger: logging.Logger,
 ) -> str:
     """Submit the family's serve substrate as a task owned by `owner`; return its id."""
-    spec_type = "dev_model" if config.substrate == "dev_model" else "serve"
+    serve = config.substrate != "dev_model"
     size = family.serving_size
-    spec: dict[str, Any] = {
-        "taskType": spec_type,
-        # The GPU-free stand-in carries the size it stands in for, on no GPU.
-        "resources": {
-            "hardware": size.hardware(gpu=spec_type == "serve").model_dump(
-                exclude_none=True
-            )
-        },
-        "model": {
-            "source": {
-                "type": "huggingface",
-                "identifier": family.model_ref,
-                "revision": "main",
-            }
-        },
-    }
     vllm = _rendered_profile(family.engine_profile)
     vllm["tensor_parallel_size"] = size.tensor_parallel_size
-    if revision := vllm.pop("revision", None):
-        spec["model"]["source"]["revision"] = revision
-    if spec_type == "serve":
+    source = ModelSource(
+        type="huggingface",
+        identifier=family.model_ref,
+        revision=vllm.pop("revision", None) or "main",
+    )
+    if serve:
         # A real vLLM embedding replica runs the pooling runner; a chat replica enables
         # LoRA so a resident consumer can load its adapter into a slot on demand.
         if family.interface == "embedding":
@@ -66,19 +59,32 @@ async def materialize_resident_replica(
         # reclaim is exercised end to end: a lifetime-distinct load beyond the budget
         # fails until an unloaded slot frees.
         vllm["max_loras"] = config.adapter_slots
-    spec["model"]["vllm"] = vllm
-    if config.serve_ttl_sec:
-        spec["ttlSeconds"] = config.serve_ttl_sec
-    payload = {
-        "apiVersion": "flowmesh/v1",
-        "kind": "ResidentServe",
-        "metadata": {"name": f"resident-{replica.replica_id}"},
-        "spec": spec,
-    }
+    # The GPU-free stand-in carries the size it stands in for, on no GPU.
+    resources = ResourcesSpec(hardware=size.hardware(gpu=serve))
+    model = ModelConfig(source=source, vllm=vllm)
+    ttl = config.serve_ttl_sec or None
+    spec: ServeSpecStrict | DevModelSpecStrict = (
+        ServeSpecStrict(
+            taskType=TaskType.SERVE, resources=resources, model=model, ttlSeconds=ttl
+        )
+        if serve
+        else DevModelSpecStrict(
+            taskType=TaskType.DEV_MODEL,
+            resources=resources,
+            model=model,
+            ttlSeconds=ttl,
+        )
+    )
+    envelope = TaskEnvelopeStrict(
+        apiVersion="flowmesh/v1",
+        kind="ResidentServe",
+        metadata=TaskMetadata(name=f"resident-{replica.replica_id}"),
+        spec=spec,
+    )
     workflow_id, entries = await runtime.register(
         owner.principal_id,
         owner.org_id,
-        json.dumps(payload),
+        envelope.model_dump_json(exclude_none=True, by_alias=True),
         format="native",
         resident=True,
     )
