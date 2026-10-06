@@ -168,7 +168,8 @@ def test_a_templated_gpu_type_sizes_a_placeable_replica(service: str) -> None:
     assert requirement is not None
     assert requirement.serving_size.gpu_type == "any"
     assert "${" not in requirement.family
-    assert requirement.serving_size.hardware()["gpu"]["type"] == "any"
+    gpu = requirement.serving_size.hardware().gpu
+    assert gpu is not None and gpu.type == "any"
 
 
 def test_an_enforce_cpu_rendered_from_upstream_keeps_both_embodiments() -> None:

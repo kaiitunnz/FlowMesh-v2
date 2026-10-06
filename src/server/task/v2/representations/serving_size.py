@@ -2,7 +2,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict
 
-from shared.tasks.components.resources import HardwareRequirements
+from shared.tasks.components.resources import GPURequirements, HardwareRequirements
 from shared.tasks.placeholders import contains_placeholder
 from shared.utils.hardware import normalize_gpu_type, parse_gpu_memory_bytes
 from shared.utils.parsing import parse_mem_to_bytes
@@ -50,17 +50,20 @@ class ServingSize(BaseModel):
             f"{gpu_memory}gpu{self.gpu_count}x{self.gpu_type}"
         )
 
-    def hardware(self, gpu: bool = True) -> dict[str, Any]:
+    def hardware(self, gpu: bool = True) -> HardwareRequirements:
         """Render the size as a task's ``resources.hardware``, optionally GPU-free.
 
         A GPU-free rendering asks for no device of any kind.
         """
-        devices: dict[str, Any] = {"type": _ANY_GPU_TYPE, "count": 0}
+        devices = GPURequirements(type=_ANY_GPU_TYPE, count=0)
         if gpu:
-            devices = {"type": self.gpu_type, "count": self.gpu_count}
-            if self.gpu_memory_bytes is not None:
-                devices["memory"] = _quantity(self.gpu_memory_bytes)
-        return {"cpu": self.cpu, "memory": self.memory, "gpu": devices}
+            memory = self.gpu_memory_bytes
+            devices = GPURequirements(
+                type=self.gpu_type,
+                count=self.gpu_count,
+                memory=_quantity(memory) if memory is not None else None,
+            )
+        return HardwareRequirements(cpu=self.cpu, memory=self.memory, gpu=devices)
 
     @classmethod
     def of(

@@ -36,7 +36,11 @@ async def materialize_resident_replica(
     spec: dict[str, Any] = {
         "taskType": spec_type,
         # The GPU-free stand-in carries the size it stands in for, on no GPU.
-        "resources": {"hardware": size.hardware(gpu=spec_type == "serve")},
+        "resources": {
+            "hardware": size.hardware(gpu=spec_type == "serve").model_dump(
+                exclude_none=True
+            )
+        },
         "model": {
             "source": {
                 "type": "huggingface",

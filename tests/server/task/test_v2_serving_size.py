@@ -8,7 +8,7 @@ from server.task.v2.representations.serving_size import (
     DEFAULT_SERVING_SIZE,
     ServingSize,
 )
-from shared.tasks.components.resources import HardwareRequirements
+from shared.tasks.components.resources import GPURequirements, HardwareRequirements
 
 
 def _size(tp: Any = None, **hardware: Any) -> ServingSize:
@@ -121,14 +121,14 @@ def test_the_rendered_hardware_reads_back_as_the_same_size() -> None:
     size = _size(
         2, cpu=8, memory="12Gi", gpu={"count": 2, "type": "h100", "memory": "40Gi"}
     )
-    assert size.hardware() == {
-        "cpu": 8,
-        "memory": "12Gi",
-        "gpu": {"type": "h100", "count": 2, "memory": "40Gi"},
-    }
-    assert _size(2, **size.hardware()) == size
-    assert size.hardware(gpu=False)["gpu"] == {"type": "any", "count": 0}
-    assert DEFAULT_SERVING_SIZE.hardware()["gpu"] == {"type": "any", "count": 1}
+    assert size.hardware() == HardwareRequirements(
+        cpu=8,
+        memory="12Gi",
+        gpu=GPURequirements(type="h100", count=2, memory="40Gi"),
+    )
+    assert ServingSize.of(size.hardware(), 2) == size
+    assert size.hardware(gpu=False).gpu == GPURequirements(type="any", count=0)
+    assert DEFAULT_SERVING_SIZE.hardware().gpu == GPURequirements(type="any", count=1)
 
 
 @pytest.mark.parametrize("memory", ["4.5Gi", "lots", "0", 0, -1, 1.5, 4.0 * 1024**3])
