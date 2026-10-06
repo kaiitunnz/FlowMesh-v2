@@ -146,6 +146,10 @@ class WindowState:
             self.acked = cumulative
 
 
+class WindowStalled(Exception):
+    """A send window stayed full past its deadline: the receiver stopped draining."""
+
+
 class DirectionWindow:
     """Sender-side flow control for one direction's data frames.
 
@@ -160,11 +164,15 @@ class DirectionWindow:
         self._state = WindowState(granted=granted)
         self._cond = asyncio.Condition()
 
-    async def reserve(self, size: int) -> None:
-        async with self._cond:
-            while not self._state.can_send(size):
-                await self._cond.wait()
-            self._state.used += size
+    async def reserve(self, size: int, timeout: float | None = None) -> None:
+        """Reserve ``size`` bytes, waiting up to ``timeout`` for the window to open."""
+        try:
+            async with asyncio.timeout(timeout), self._cond:
+                while not self._state.can_send(size):
+                    await self._cond.wait()
+                self._state.used += size
+        except TimeoutError as exc:
+            raise WindowStalled(f"no window for {size} bytes in {timeout}s") from exc
 
     async def grant(self, cumulative: int) -> None:
         async with self._cond:
@@ -184,5 +192,6 @@ __all__ = [
     "RelayDirection",
     "RelayFrame",
     "RelayFrameKind",
+    "WindowStalled",
     "WindowState",
 ]
