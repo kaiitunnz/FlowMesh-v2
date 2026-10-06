@@ -77,6 +77,9 @@ class _FakeControl:
     def adopt_serve_replica(self, **kwargs) -> None:
         self.adopt_calls.append(kwargs)
 
+    def serve_invocations_holding_credit(self) -> list[str]:
+        return []
+
     def drain_serve_replica(self, serve_task_id: str) -> None:
         self.drained.append(serve_task_id)
 

@@ -83,21 +83,22 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
     ]
 
 
-def test_root_startup_reconciles_serve_terminals_after_the_claim_store() -> None:
+def test_root_startup_settles_serve_requests_before_admission_opens() -> None:
     calls: list[str] = []
     runtime, control, registry = _Runtime(calls), _Control(calls), _Registry(calls)
     gated_serve = _GatedServe(calls)
     asyncio.run(
         rehydrate_root_state(runtime, control, registry, gated_serve)  # type: ignore[arg-type]
     )
-    # Serve terminals replay after the claim store loads (so an UNCERTAIN claim from a
-    # crash window settles) and before the runtime re-drives suspended boundaries.
+    # The serve requests the restart ended settle once the runtime has restored the
+    # serve tasks whose workers reap them, and before re-attaching replicas opens
+    # admission.
     assert calls == [
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
-        "serve.reconcile",
         "runtime.rehydrate",
+        "serve.reconcile",
         "control.reattach",
         "runtime.release",
         "control.reconcile",

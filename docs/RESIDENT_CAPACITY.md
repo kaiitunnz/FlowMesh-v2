@@ -80,7 +80,9 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
   transition directly. An invocation whose agent failed or was cancelled is terminal, and
   so is one whose origin worker was lost. On a root restart, a workflow claim whose
   invocation is terminal in the restored ledger releases from that terminal; one whose
-  invocation is still open keeps its credit.
+  invocation is still open keeps its credit. A gated serve request has the root as its
+  origin, so one in flight at a restart fails, its replica request is reaped, and its
+  credit releases.
 - **Loss and reissue.** A transient or ambiguous route loss moves a credit-bearing claim to
   `UNCERTAIN` and re-drives the boundary under the held credit — the runtime re-issues the
   same durable invocation, which resumes on the fenced replica — releasing nothing until a

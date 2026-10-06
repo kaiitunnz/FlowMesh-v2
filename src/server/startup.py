@@ -22,24 +22,24 @@ async def rehydrate_root_state(
     runtime rehydrates, because the runtime's rehydrate re-drives every suspended
     mediated boundary through the resident settler; were the control not running with
     its claims loaded first, an in-flight resident invocation would terminalize against
-    an empty store and strand (or re-admit a second) credit. External serve terminals
-    replay after the claim store loads so a claim left UNCERTAIN by a crash between its
-    terminal fact and its release settles, before the runtime rehydrate re-drives.
-    Workflow terminals replay once the runtime has restored each ledger, releasing a
-    claim whose credit a crash kept past its ledger terminal. Restored replicas
-    re-attach to their serve tasks once the runtime has restored those tasks' records,
-    and resident admission waits until they have. A worker reserved for a dispatch the
-    restored runtime does not hold is released.
+    an empty store and strand (or re-admit a second) credit. Gated serve requests the
+    restart ended settle once the runtime has restored the serve tasks, whose workers
+    reap the replicas' requests, and before admission opens. Workflow terminals replay
+    once the runtime has restored each ledger, releasing a claim whose credit a crash
+    kept past its ledger terminal. Restored replicas re-attach to their serve tasks once
+    the runtime has restored those tasks' records, and resident admission waits until
+    they have. A worker reserved for a dispatch the restored runtime does not hold is
+    released.
     """
     resident = resident_control if resident_registry is not None else None
     if resident is not None and resident_registry is not None:
         resident.bind_loop(asyncio.get_running_loop())
         resident.rehydrate(await resident_registry.load_snapshot_async())
-        if gated_serve is not None:
-            gated_serve.reconcile_terminals()
     if runtime is not None:
         await runtime.rehydrate()
     if resident is not None:
+        if gated_serve is not None:
+            gated_serve.reconcile_terminals()
         resident.reattach_replicas(
             runtime.live_resident_task_ids() if runtime is not None else frozenset()
         )

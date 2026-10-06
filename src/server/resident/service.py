@@ -589,6 +589,7 @@ class ResidentCapacityControl:
                     "resident_reap",
                     {"task_id": task_id, "call_correlation": call_correlation},
                 )
+            self._reap_replica_requests(invocation_id)
             return
         if attempt.serve is not None:
             attempt.serve.close_session(attempt.session_id)
@@ -609,6 +610,25 @@ class ResidentCapacityControl:
         self._reclaim_adapter_slot(attempt)
         if self._loop is not None:
             self._loop.create_task(self._delivery.sessions.delete(attempt.session_id))
+
+    def _reap_replica_requests(self, invocation_id: str) -> None:
+        """Reap an invocation's engine request on each replica its claims named.
+
+        Reaches the replica of an invocation no live attempt records, as after a
+        restart, through the worker running that replica's serve task.
+        """
+        assert self._delivery is not None
+        workers = {
+            worker
+            for claim in self._stores.claims.by_invocation(invocation_id)
+            if claim.replica_id is not None
+            and (replica := self._stores.directory.get(claim.replica_id)) is not None
+            and (worker := self._delivery.serve_worker_of(replica)) is not None
+        }
+        for worker in sorted(workers):
+            self._delivery.relay(
+                worker, "resident_sidecar_reap", {"invocation_id": invocation_id}
+            )
 
     def _reclaim_adapter_slot(self, attempt: _Attempt) -> None:
         """Unload the invocation's adapter iff its last credit-bearing claim released.
@@ -1148,6 +1168,24 @@ class ResidentCapacityControl:
             outcome = completed(workflow_id, claim.invocation_id)
             if outcome is not None:
                 self._settle_terminal_local(claim.invocation_id, failed=not outcome)
+
+    def serve_invocations_holding_credit(self) -> list[str]:
+        """Return each gated serve invocation whose claim still holds credit.
+
+        A gated serve request's origin is the root's serve edge, so on startup every
+        one of them lost its client and its data path in the restart.
+        """
+        invocations: list[str] = []
+        for claim in self._stores.claims.all():
+            request = self._stores.invocations.get(claim.invocation_id)
+            if (
+                claim.holds_credit
+                and request is not None
+                and _subject_workflow_id(request.subject) is None
+                and claim.invocation_id not in invocations
+            ):
+                invocations.append(claim.invocation_id)
+        return invocations
 
     def reconcile_serve_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason
