@@ -108,8 +108,9 @@ back to the relay. The replica's claim gate then fences the session to the invoc
 control admitted. TLS material is configured as files under the peer TLS directory, which
 the stack mounts read-only at `/etc/ssl/peer` where the configured paths resolve, and is
 base64-encoded only when a worker attachment is handed its transient copy. Material a
-node cannot read is fatal at start-up rather than a fallback to plaintext; the root's
-serve ingress then dials nothing and its requests ride `control_relay`. An operator
+node cannot read is fatal at start-up rather than a fallback to plaintext. The root's
+serve ingress dials nothing with material it cannot use, and its requests ride
+`control_relay`. An operator
 may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest a trusted network, which
 warns on every listener and still requires the same trusted-pair policy.
 

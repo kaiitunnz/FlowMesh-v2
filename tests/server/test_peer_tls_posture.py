@@ -150,7 +150,8 @@ def test_a_root_with_unusable_material_rides_the_relay_rather_than_plaintext(
         caplog.clear()
         with caplog.at_level(logging.ERROR):
             assert root_peer_dialer(_network(config), _LOGGER) is None
-        assert any("control_relay" in r.getMessage() for r in caplog.records)
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1 and "control_relay" in errors[0].getMessage()
 
 
 def test_a_root_attesting_a_trusted_network_dials_without_tls(caplog):

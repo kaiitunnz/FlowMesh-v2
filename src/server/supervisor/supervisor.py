@@ -12,7 +12,11 @@ from queue import Empty as QueueEmpty
 from queue import Full as QueueFull
 from threading import Lock, Thread
 
-from shared.network.mtls import client_context
+from shared.network.mtls import (
+    MutualTlsMaterial,
+    MutualTlsMaterialError,
+    client_context,
+)
 from shared.schemas.command import CommandMessage, CommandResponse
 from shared.schemas.network import (
     PEER_PROTOCOL,
@@ -464,11 +468,15 @@ def _run_supervisor(
     resident_bridge = (
         None if node_relays is None else node_relays.bridge(RESIDENT_NAMESPACE)
     )
-    peer_material = (
-        load_peer_material(network_cfg.peer, logger)
-        if network_cfg.enabled and network_cfg.peer.enabled
-        else None
-    )
+    peer_material: MutualTlsMaterial | None = None
+    if network_cfg.enabled and network_cfg.peer.enabled:
+        # Serving the advertised listener in plaintext would carry resident payloads
+        # over a wire the deployment asked to protect, so unusable material is fatal.
+        try:
+            peer_material = load_peer_material(network_cfg.peer, logger)
+        except MutualTlsMaterialError:
+            logger.error("node peer TLS material is unusable")
+            raise
     command_listener = CommandListener(
         redis=redis_client.sync,
         node_id=node_id,
