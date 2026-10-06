@@ -1,10 +1,11 @@
 """The root's gated serve origin dials a trusted target itself.
 
 The root drives the serve origin over a socket it opens to the replica worker's
-claim-gated listener, with its own node identity, so the request and response never
-enter the rendezvous. A dial that fails before any frame is delivered rides the relay
-base under the same session; a loss after delivery is uncertain and never replays on the
-relay. Each attempt's socket and reader end with the attempt.
+claim-gated listener or to its node's peer listener, with its own node identity, so the
+request and response never enter the rendezvous. A dial that fails before any frame is
+delivered completes on the relay under the same session; a loss after delivery is
+uncertain and never replays on the relay. Each attempt's socket and reader end with the
+attempt.
 """
 
 import asyncio
@@ -25,11 +26,12 @@ from server.network.rendezvous import RootCursorStore, RootRendezvousBridge
 from server.network.reverse_relay import (
     RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
-    EdgeStreamSink,
     RelaySessionStore,
     RelayStreamStore,
 )
+from server.network.worker_bridge import RelayWorkerBridge
 from server.serve.relay import SERVE_EDGE_STREAM_ID, ServeRelayExecutor
+from server.supervisor.services.peer_listener import NodePeerListener
 from server.supervisor.services.reverse_relay_attachment import (
     ReverseRelayAttachment,
 )
@@ -236,7 +238,7 @@ class _Harness:
             ),
         )
         self.control.executor = self.executor
-        self.attachment = _Attachment(self._relay.target_up)
+        self.attachment = _Attachment(self._relay.bridge)
         self.sidecar = ResidentReplicaSidecar(
             sink=self.attachment,
             engine_open=_unused_engine,
@@ -258,6 +260,11 @@ class _Harness:
             deliver=self._dialed_frame,
             max_connections=max_connections,
         )
+        self.node_listener = NodePeerListener(
+            endpoint="127.0.0.1:0",
+            material=target,
+            bridge=cast(Any, _DialedUplink(self._relay.bridge, self.dialed)),
+        )
 
     async def _dialed_frame(self, frame: RelayFrame, sink: Any) -> None:
         self.dialed.append(frame)
@@ -265,16 +272,19 @@ class _Harness:
 
     @property
     def open_connections(self) -> int:
-        return self.listener._listener._open
+        return self.listener._listener._open + self.node_listener._listener._open
 
     async def start(self) -> None:
         await self.listener.start()
+        await self.node_listener.start()
         self.executor.start(asyncio.get_running_loop())
         await self._relay.start(self.sidecar)
 
     async def aclose(self) -> None:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self.listener.stop(), timeout=5.0)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self.node_listener.stop(), timeout=5.0)
         await self._relay.stop()
         await self.sidecar.aclose()
         await self.redis.aclose()
@@ -291,6 +301,13 @@ class _Harness:
         traceparent: str | None = None,
     ) -> None:
         envelope = _envelope()
+        if endpoint is None:
+            port = (
+                self.node_listener.port
+                if transport is Transport.NODE_RELAY
+                else self.port
+            )
+            endpoint = f"127.0.0.1:{port}"
         self.executor.open(
             session_id="rly-1",
             invocation_id="inv-1",
@@ -302,9 +319,7 @@ class _Harness:
             plan=ResidentCarriagePlan(
                 session_id="rly-1",
                 selected_transport=transport.value,
-                selected_endpoint=(
-                    endpoint if endpoint is not None else f"127.0.0.1:{self.port}"
-                ),
+                selected_endpoint=endpoint,
             ),
             traceparent=traceparent,
         )
@@ -324,34 +339,57 @@ class _Harness:
 
 
 class _Attachment:
-    """The replica worker's attachment, answering a relayed session up its node's
-    stream; a dialed session never answers over it."""
+    """The replica worker's attachment: its frames reach the node's bridge, which
+    answers a dialed session over the origin's connection and publishes any other up
+    the node's stream."""
 
-    def __init__(self, up: EdgeStreamSink) -> None:
+    def __init__(self, bridge: RelayWorkerBridge) -> None:
         self.frames: list[Any] = []
-        self._up = up
+        self._bridge = bridge
 
     async def send(self, frame: Any) -> None:
         self.frames.append(frame)
-        await self._up.send(frame)
+        await self._bridge.publish_up(frame)
+
+
+class _DialedUplink:
+    """The node's bridge as its peer listener sees it, recording what a dialer sent."""
+
+    def __init__(self, bridge: RelayWorkerBridge, dialed: list[RelayFrame]) -> None:
+        self._bridge = bridge
+        self._dialed = dialed
+
+    def bind_peer(self, session_id: str, sink: Any) -> None:
+        self._bridge.bind_peer(session_id, sink)
+
+    def release_peer(self, session_id: str) -> None:
+        self._bridge.release_peer(session_id)
+
+    async def on_frame(self, frame: RelayFrame) -> None:
+        self._dialed.append(frame)
+        await self._bridge.on_frame(frame)
 
 
 class _RelayLeg:
     """The rendezvous between the root's serve edge and the replica's node.
 
-    The root bridge forwards each direction by the session record, and the node's
-    attachment hands what reaches it to the replica sidecar, as a supervisor does.
+    The root bridge forwards each direction by the session record; the node's attachment
+    hands what reaches it to the node's worker bridge, which enqueues it to the replica
+    worker, as a supervisor does.
     """
 
     _NODE = "nde-replica"
+    _WORKER = "wkr-replica"
 
     def __init__(self, redis: BinaryRedis) -> None:
         self._sessions = RelaySessionStore(redis, RESIDENT_RELAY_KEYSPACE)
         streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
-        self._bridge = RootRendezvousBridge(
+        self._root = RootRendezvousBridge(
             streams, self._sessions, RootCursorStore(redis, RESIDENT_RELAY_KEYSPACE)
         )
-        self.target_up = EdgeStreamSink(streams, self._NODE)
+        self.bridge = RelayWorkerBridge(
+            redis, self._NODE, self._enqueue, keyspace=RESIDENT_RELAY_KEYSPACE
+        )
         self.delivered: list[RelayFrame] = []
         self._sidecar: ResidentReplicaSidecar | None = None
         self._node = ReverseRelayAttachment(
@@ -360,20 +398,27 @@ class _RelayLeg:
         self._pump: asyncio.Task[None] | None = None
 
     async def on_frame(self, frame: RelayFrame) -> None:
-        assert self._sidecar is not None
         self.delivered.append(frame)
-        await self._sidecar.on_frame(frame)
+        await self.bridge.on_frame(frame)
+
+    async def _enqueue(self, worker_id: str, payload: dict[str, Any]) -> bool:
+        assert self._sidecar is not None and worker_id == self._WORKER
+        await self._sidecar.on_frame(RelayFrame.from_wire(payload["payload"]))
+        return True
 
     async def start(self, sidecar: ResidentReplicaSidecar) -> None:
         self._sidecar = sidecar
         await self._sessions.update(
-            "rly-1", origin_node=SERVE_EDGE_STREAM_ID, target_node=self._NODE
+            "rly-1",
+            origin_node=SERVE_EDGE_STREAM_ID,
+            target_node=self._NODE,
+            target_worker=self._WORKER,
         )
         self._node.start(asyncio.get_running_loop())
 
         async def pump() -> None:
             while True:
-                await self._bridge.pump_ready([SERVE_EDGE_STREAM_ID, self._NODE], 50)
+                await self._root.pump_ready([SERVE_EDGE_STREAM_ID, self._NODE], 50)
 
         self._pump = asyncio.ensure_future(pump())
 
@@ -432,6 +477,10 @@ def test_the_root_carries_a_serve_call_over_the_socket_it_dials(
         # Neither the request nor the response entered the rendezvous.
         assert await h.relayed_frames() == 0
         assert h.relayed_to_replica == [] and h.dialed
+        # The replica answers a node-relayed session through its node's bridge, which
+        # returns it over the connection the root dialed, and a direct one over that
+        # connection itself.
+        assert bool(h.attachment.frames) is (transport is Transport.NODE_RELAY)
         assert [(o.transport, o.outcome) for o in h.control.observations] == [
             (transport.value, RouteObservationOutcome.VERIFIED.value)
         ]
