@@ -416,6 +416,16 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.URL,
                     url_schemes={"redis", "rediss"},
                 ),
+                EnvVar(
+                    "REDIS_SUPERVISOR_STATE_URL",
+                    "",
+                    description=(
+                        "Redis endpoint for the supervisor's worker records; "
+                        "defaults to control."
+                    ),
+                    var_type=EnvVarType.URL,
+                    url_schemes={"redis", "rediss"},
+                ),
             ],
         ),
         EnvSection(

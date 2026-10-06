@@ -17,6 +17,7 @@ directory `flowmesh stack` runs in.
 | `REDIS_CONTROL_URL` | `redis://localhost:6379/0` | Redis control channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_TELEMETRY_URL` | `redis://localhost:6380/0` | Redis telemetry channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_RESIDENT_RELAY_URL` | (telemetry) | Redis endpoint for the resident relay; defaults to telemetry |
+| `REDIS_SUPERVISOR_STATE_URL` | (control) | Redis endpoint for the supervisor's worker records; defaults to control. A URL here connects with its own credentials and TLS |
 | `COMPOSE_PROFILES` | – | Extra compose profiles to deploy (e.g. `telemetry`); a root node adds the `content` profile unless an endpoint names another store |
 | `DATABASE_URL` | – | Postgres connection string |
 | `RESULTS_DIR` | `./results` | Server-side results directory |

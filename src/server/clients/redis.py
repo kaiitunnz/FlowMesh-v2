@@ -323,13 +323,37 @@ def resident_relay_sync_client(cfg: RedisConfig) -> redis.Redis:
     )
 
 
+def supervisor_state_client(cfg: RedisConfig) -> redis.Redis:
+    """A blocking client on the supervisor state store.
+
+    An endpoint the operator names connects with its own URL's credentials and TLS;
+    otherwise the store is the control Redis, reached as the control client reaches it.
+    """
+    if cfg.supervisor_state_url:
+        return redis.from_url(
+            cfg.supervisor_state_url, decode_responses=True, **_keepalive_kwargs()
+        )
+    url, ssl_kwargs = _deployment_connection(cfg.control_url, cfg, SyncSSLConnection)
+    return redis.from_url(
+        url, decode_responses=True, **_keepalive_kwargs(), **ssl_kwargs
+    )
+
+
 def _relay_connection(
     cfg: RedisConfig, connection_class: type[Any]
 ) -> tuple[str, dict[str, Any]]:
     """The relay Redis URL with its credentials, and the TLS arguments it connects
     with."""
+    return _deployment_connection(cfg.resident_relay_url, cfg, connection_class)
+
+
+def _deployment_connection(
+    url: str, cfg: RedisConfig, connection_class: type[Any]
+) -> tuple[str, dict[str, Any]]:
+    """``url`` with the deployment's Redis credentials, and the TLS arguments it
+    connects with."""
     url = _with_redis_auth(
-        cfg.resident_relay_url,
+        url,
         acl_enabled=cfg.acl_enabled,
         username=cfg.username,
         password=cfg.password,
