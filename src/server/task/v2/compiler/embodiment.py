@@ -120,11 +120,7 @@ def unproven_reason(
     postprocessing step changes what one embodiment produces relative to the other, and
     a request the two do not read identically is unprojectable.
     """
-    # An enforce_cpu that renders from upstream may yet move the leaf off vLLM.
-    if (
-        spec.enforce_cpu not in (None, False)
-        or spec.backend() is not InferenceBackend.VLLM
-    ):
+    if spec.enforce_cpu is True or spec.backend() is not InferenceBackend.VLLM:
         return (
             "it does not pin the vLLM engine a resident replica serves; declare "
             "model.vllm and no enforce_cpu"

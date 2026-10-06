@@ -25,6 +25,7 @@ def _leaf(
     gpu_type: str = "",
     revision: str = "",
     extra: str = "",
+    items: str = "[hi]",
 ) -> PhysicalNode:
     service_line = f"\n          service: {service}" if service else ""
     revision_line = f", revision: '{revision}'" if revision else ""
@@ -47,7 +48,7 @@ spec:
             source: {{identifier: Qwen/Qwen3-4B{revision_line}}}
             vllm: {vllm}
           resources: {{hardware: {{gpu: {{count: {gpus}{type_line}}}}}}}
-          data: {{type: list, items: [hi]}}{service_line}{extra}
+          data: {{type: list, items: {items}}}{service_line}{extra}
 """
     parsed = parse_workflow(text, "native")
     source = FrontendWorkflowSource.capture(text, "native", name="wf")
@@ -170,7 +171,20 @@ def test_a_templated_gpu_type_sizes_a_placeable_replica(service: str) -> None:
     assert requirement.serving_size.hardware()["gpu"]["type"] == "any"
 
 
-def test_an_enforce_cpu_rendered_from_upstream_gets_no_menu() -> None:
-    node = _leaf(extra="\n          enforce_cpu: '${u.output}'")
-    assert node.embodiment_menu is None
-    assert node.service_family_requirement is None
+def test_an_enforce_cpu_rendered_from_upstream_keeps_both_embodiments() -> None:
+    # The rendered spec is validated again at dispatch, so a value that moves the leaf
+    # off vLLM fails either embodiment alike.
+    node = _leaf(
+        extra="\n          enforce_cpu: '${u.output}'",
+        service="{mode: local_eligible}",
+    )
+    assert node.embodiment_menu is not None
+
+
+def test_a_pinned_batch_with_an_enforce_cpu_rendered_from_upstream_is_served() -> None:
+    node = _leaf(
+        extra="\n          enforce_cpu: '${u.output}'",
+        service="{mode: resident}",
+        items="[hi, there]",
+    )
+    assert node.service_family_requirement is not None
