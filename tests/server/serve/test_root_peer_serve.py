@@ -22,8 +22,18 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 
 from server.network.peer_tls import PeerDialer
-from server.network.reverse_relay import BinaryRedis
-from server.serve.relay import ServeRelayExecutor
+from server.network.rendezvous import RootCursorStore, RootRendezvousBridge
+from server.network.reverse_relay import (
+    RESIDENT_RELAY_KEYSPACE,
+    BinaryRedis,
+    EdgeStreamSink,
+    RelaySessionStore,
+    RelayStreamStore,
+)
+from server.serve.relay import SERVE_EDGE_STREAM_ID, ServeRelayExecutor
+from server.supervisor.services.reverse_relay_attachment import (
+    ReverseRelayAttachment,
+)
 from server.telemetry.tracing import format_traceparent
 from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.relay_frame import RelayFrame
@@ -174,6 +184,13 @@ class _Control:
         self.observations.append(observation)
 
 
+async def _until(predicate: Callable[[], bool]) -> None:
+    """Wait for a condition the attempt reaches asynchronously, within the deadline."""
+    async with asyncio.timeout(_DEADLINE):
+        while not predicate():
+            await asyncio.sleep(0.02)
+
+
 def _bound_socket() -> tuple[socket.socket, int]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -197,13 +214,15 @@ class _Harness:
         target: MutualTlsMaterial | None,
         engine: _RawEngine,
         tracer_provider: TracerProvider | None = None,
+        max_connections: int = 64,
     ) -> None:
         self.redis = fakeredis.aioredis.FakeRedis()
+        self._relay = _RelayLeg(cast(BinaryRedis, self.redis))
         self.control = _Control()
         self.engine = engine
         self.executor = ServeRelayExecutor(
             relay_redis=cast(BinaryRedis, self.redis),
-            edge_id="serve-edge",
+            edge_id=SERVE_EDGE_STREAM_ID,
             control=self.control,
             peer=PeerDialer(
                 ssl_context=client_context(root) if root is not None else None,
@@ -217,7 +236,7 @@ class _Harness:
             ),
         )
         self.control.executor = self.executor
-        self.attachment = _Attachment()
+        self.attachment = _Attachment(self._relay.target_up)
         self.sidecar = ResidentReplicaSidecar(
             sink=self.attachment,
             engine_open=_unused_engine,
@@ -232,9 +251,17 @@ class _Harness:
             binding_generation=0,
         )
         sock, self.port = _bound_socket()
+        self.dialed: list[RelayFrame] = []
         self.listener = ResidentPeerListener(
-            sock=sock, material=target, deliver=self.sidecar.on_frame
+            sock=sock,
+            material=target,
+            deliver=self._dialed_frame,
+            max_connections=max_connections,
         )
+
+    async def _dialed_frame(self, frame: RelayFrame, sink: Any) -> None:
+        self.dialed.append(frame)
+        await self.sidecar.on_frame(frame, sink)
 
     @property
     def open_connections(self) -> int:
@@ -242,12 +269,20 @@ class _Harness:
 
     async def start(self) -> None:
         await self.listener.start()
+        self.executor.start(asyncio.get_running_loop())
+        await self._relay.start(self.sidecar)
 
     async def aclose(self) -> None:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self.listener.stop(), timeout=5.0)
+        await self._relay.stop()
         await self.sidecar.aclose()
         await self.redis.aclose()
+
+    @property
+    def relayed_to_replica(self) -> list[RelayFrame]:
+        """The frames the rendezvous carried to the replica's node."""
+        return self._relay.delivered
 
     def open(
         self,
@@ -283,21 +318,71 @@ class _Harness:
         return total
 
     async def connections_drain(self) -> int:
-        for _ in range(100):
-            if self.open_connections == 0:
-                break
-            await asyncio.sleep(0.02)
+        with contextlib.suppress(TimeoutError):
+            await _until(lambda: self.open_connections == 0)
         return self.open_connections
 
 
 class _Attachment:
-    """The replica worker's attachment: a dialed session never answers over it."""
+    """The replica worker's attachment, answering a relayed session up its node's
+    stream; a dialed session never answers over it."""
 
-    def __init__(self) -> None:
+    def __init__(self, up: EdgeStreamSink) -> None:
         self.frames: list[Any] = []
+        self._up = up
 
     async def send(self, frame: Any) -> None:
         self.frames.append(frame)
+        await self._up.send(frame)
+
+
+class _RelayLeg:
+    """The rendezvous between the root's serve edge and the replica's node.
+
+    The root bridge forwards each direction by the session record, and the node's
+    attachment hands what reaches it to the replica sidecar, as a supervisor does.
+    """
+
+    _NODE = "nde-replica"
+
+    def __init__(self, redis: BinaryRedis) -> None:
+        self._sessions = RelaySessionStore(redis, RESIDENT_RELAY_KEYSPACE)
+        streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
+        self._bridge = RootRendezvousBridge(
+            streams, self._sessions, RootCursorStore(redis, RESIDENT_RELAY_KEYSPACE)
+        )
+        self.target_up = EdgeStreamSink(streams, self._NODE)
+        self.delivered: list[RelayFrame] = []
+        self._sidecar: ResidentReplicaSidecar | None = None
+        self._node = ReverseRelayAttachment(
+            redis, self._NODE, self, owner="node", keyspace=RESIDENT_RELAY_KEYSPACE
+        )
+        self._pump: asyncio.Task[None] | None = None
+
+    async def on_frame(self, frame: RelayFrame) -> None:
+        assert self._sidecar is not None
+        self.delivered.append(frame)
+        await self._sidecar.on_frame(frame)
+
+    async def start(self, sidecar: ResidentReplicaSidecar) -> None:
+        self._sidecar = sidecar
+        await self._sessions.update(
+            "rly-1", origin_node=SERVE_EDGE_STREAM_ID, target_node=self._NODE
+        )
+        self._node.start(asyncio.get_running_loop())
+
+        async def pump() -> None:
+            while True:
+                await self._bridge.pump_ready([SERVE_EDGE_STREAM_ID, self._NODE], 50)
+
+        self._pump = asyncio.ensure_future(pump())
+
+    async def stop(self) -> None:
+        if self._pump is not None:
+            self._pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._pump
+        await self._node.stop()
 
 
 def _run(
@@ -307,6 +392,7 @@ def _run(
     target: MutualTlsMaterial | None,
     engine: _RawEngine | None = None,
     tracer_provider: TracerProvider | None = None,
+    max_connections: int = 64,
 ) -> None:
     async def run() -> None:
         h = _Harness(
@@ -314,6 +400,7 @@ def _run(
             target=target,
             engine=engine or _RawEngine(),
             tracer_provider=tracer_provider,
+            max_connections=max_connections,
         )
         await h.start()
         try:
@@ -344,6 +431,7 @@ def test_the_root_carries_a_serve_call_over_the_socket_it_dials(
         assert h.engine.calls == 1
         # Neither the request nor the response entered the rendezvous.
         assert await h.relayed_frames() == 0
+        assert h.relayed_to_replica == [] and h.dialed
         assert [(o.transport, o.outcome) for o in h.control.observations] == [
             (transport.value, RouteObservationOutcome.VERIFIED.value)
         ]
@@ -356,77 +444,63 @@ def test_the_root_carries_a_serve_call_over_the_socket_it_dials(
     )
 
 
-def test_a_refused_dial_rides_the_relay_base_under_the_same_session(
-    ca: _TestCa,
+def _foreign_leaf(ca: _TestCa) -> MutualTlsMaterial:
+    """The deployment's CA bundle beside a leaf another CA issued."""
+    leaf = new_ca("another-ca").material("root-node")
+    return MutualTlsMaterial(
+        ca_pem=ca.material("x").ca_pem, cert_pem=leaf.cert_pem, key_pem=leaf.key_pem
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "observed"),
+    [
+        ("refused port", [RouteObservationOutcome.CONNECT_FAILURE]),
+        ("target certificate for another host", [RouteObservationOutcome.TLS_FAILURE]),
+        ("root leaf another CA issued", [RouteObservationOutcome.TLS_FAILURE]),
+        ("root naming no identity", [RouteObservationOutcome.TLS_FAILURE]),
+        # Load on a working path is not path evidence.
+        ("listener at its cap", []),
+    ],
+)
+def test_a_dial_that_fails_before_delivery_completes_on_the_relay(
+    ca: _TestCa, case: str, observed: list[RouteObservationOutcome]
 ) -> None:
+    root = ca.material("root-node")
+    target = ca.material("worker-node", "127.0.0.1")
+    if case == "target certificate for another host":
+        target = ca.material("worker-node", "10.9.9.9")
+    elif case == "root leaf another CA issued":
+        root = _foreign_leaf(ca)
+    elif case == "root naming no identity":
+        root = ca.anonymous_material()
+
     async def body(h: _Harness) -> None:
-        h.open(Transport.WORKER_DIRECT, endpoint=f"127.0.0.1:{_closed_port()}")
-        for _ in range(100):
-            if await h.relayed_frames():
-                break
-            await asyncio.sleep(0.02)
-
-        entries = []
-        for key in await h.redis.keys("*"):
-            if await h.redis.type(key) == b"stream":
-                entries.extend(await h.redis.xrange(key))
-        frames = [RelayFrame.from_fields(entry[1]) for entry in entries]
-        assert frames, "the bootstrap rides the relay base"
-        assert {(f.session_id, f.correlation_id, f.operation_id) for f in frames} == {
-            ("rly-1", "inv-1", "idm-1")
-        }
-        assert [o.outcome for o in h.control.observations] == [
-            RouteObservationOutcome.CONNECT_FAILURE.value
-        ]
-        # The attempt is still live on the relay base: nothing is uncertain.
-        assert h.control.outcomes == []
-        assert h.engine.calls == 0
-
-    _run(
-        body,
-        root=ca.material("root-node"),
-        target=ca.material("worker-node", "127.0.0.1"),
-    )
-
-
-def test_a_target_certificate_for_another_host_reaches_no_engine(ca: _TestCa) -> None:
-    async def body(h: _Harness) -> None:
-        h.open(Transport.WORKER_DIRECT)
-        for _ in range(100):
-            if h.control.observations:
-                break
-            await asyncio.sleep(0.02)
-
-        assert [o.outcome for o in h.control.observations] == [
-            RouteObservationOutcome.TLS_FAILURE.value
-        ]
-        assert await h.relayed_frames() > 0
-        assert h.engine.calls == 0
-
-    _run(
-        body,
-        root=ca.material("root-node"),
-        target=ca.material("worker-node", "10.9.9.9"),
-    )
-
-
-def test_a_root_the_deployment_ca_did_not_issue_reaches_no_engine(ca: _TestCa) -> None:
-    async def body(h: _Harness) -> None:
-        h.open(Transport.WORKER_DIRECT)
+        endpoint = f"127.0.0.1:{_closed_port()}" if case == "refused port" else None
+        h.open(Transport.WORKER_DIRECT, endpoint=endpoint)
         await asyncio.wait_for(h.control.done.wait(), _DEADLINE)
 
-        assert all(
-            o.status is not ResidentStreamStatus.SUCCESS for o in h.control.outcomes
-        )
-        assert h.control.acks == [] or all(
-            a.outcome is not ResidentBootstrapOutcome.ACKED for a in h.control.acks
-        )
-        assert h.engine.calls == 0
+        assert [o.status for o in h.control.outcomes] == [ResidentStreamStatus.SUCCESS]
+        assert b"".join(h.control.chunks) == b"".join(_PARTS)
+        assert [a.outcome for a in h.control.acks] == [ResidentBootstrapOutcome.ACKED]
+        assert h.engine.calls == 1
+        # Every frame of the attempt reached the replica over the rendezvous, under
+        # the session, invocation and idempotency key control admitted.
+        assert h.dialed == []
+        assert {
+            (f.session_id, f.correlation_id, f.operation_id)
+            for f in h.relayed_to_replica
+        } == {("rly-1", "inv-1", "idm-1")}
+        assert [o.outcome for o in h.control.observations] == [
+            o.value for o in observed
+        ]
+        assert await h.connections_drain() == 0
 
     _run(
         body,
-        root=new_ca().material("root-node"),
-        target=ca.material("worker-node", "127.0.0.1"),
+        root=root,
+        target=target,
+        max_connections=0 if case == "listener at its cap" else 64,
     )
 
 
@@ -483,11 +557,7 @@ def test_a_released_attempt_closes_its_socket(ca: _TestCa, release: str) -> None
         # its next write: it drops the session and its engine request, and reports
         # nothing over its attachment.
         pause.set()
-        for _ in range(100):
-            if not h.sidecar._sessions:
-                break
-            await asyncio.sleep(0.02)
-        assert h.sidecar._sessions == {}
+        await _until(lambda: not h.sidecar._sessions)
         assert h.attachment.frames == []
 
     _run(
@@ -516,18 +586,8 @@ def test_the_transport_span_records_the_transport_actually_used(
             endpoint=endpoint,
             traceparent=format_traceparent(0xABC, 0xDEF),
         )
-        if reachable:
-            await asyncio.wait_for(h.control.done.wait(), _DEADLINE)
-        else:
-            for _ in range(100):
-                if await h.relayed_frames():
-                    break
-                await asyncio.sleep(0.02)
-            h.executor.close("rly-1")
-        for _ in range(100):
-            if exporter.get_finished_spans():
-                break
-            await asyncio.sleep(0.02)
+        await asyncio.wait_for(h.control.done.wait(), _DEADLINE)
+        await _until(lambda: bool(exporter.get_finished_spans()))
 
     _run(
         body,

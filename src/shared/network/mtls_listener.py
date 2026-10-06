@@ -9,9 +9,12 @@ node's purpose-scoped listener — serve that shape and differ only in where a f
 which each supplies as a per-connection handler.
 
 The listener is transport only: it reads a frame's framing and hands the frame on whole.
-A probe opening a connection is the one frame it answers itself: it echoes the probe and
-closes, so a reachability check covers the handshake, admission and framing a session
-uses without reaching a handler.
+It answers two exchanges itself. The target accepts a dialer's connection before the
+dialer sends a session on it: a request is answered ``accepted``, while a connection
+over the cap or from an origin it does not admit is answered ``busy`` or ``refused``
+and closed, so the dialer learns of a refusal before it writes anything of the session.
+A probe opening a connection is echoed and closed, so a reachability check covers the
+handshake, origin check and framing a session uses without reaching a handler.
 
 A dialer that opens a socket but never finishes the handshake holds one slot, so the
 handshake is deadlined; the connection cap bounds the sessions accepted past it. A
@@ -32,12 +35,15 @@ from collections.abc import Callable
 from typing import Protocol
 
 from .frame_stream import (
+    AcceptFrame,
+    AcceptStatus,
     FrameSink,
     FrameStreamError,
     ProbeFrame,
     read_relay_frame,
     read_stream_frame,
     split_host_port,
+    write_accept,
     write_probe,
     write_relay_frame,
 )
@@ -169,7 +175,7 @@ class MutualTlsFrameListener:
     ) -> None:
         if self._open >= self._max_connections:
             self._logger.warning("refusing a peer connection over the cap")
-            await close_writer(writer)
+            await self._decline(writer, AcceptStatus.BUSY)
             return
         identities = self._peer_identities(writer)
         # Without mutual TLS a dialer presents no identity to check, so the trusted-pair
@@ -177,7 +183,7 @@ class MutualTlsFrameListener:
         # that posture is surfaced. With mutual TLS the identity must be a known origin.
         if self._material is not None and not self._admits(identities):
             self._logger.warning("refusing a peer dialer that is not a known origin")
-            await close_writer(writer)
+            await self._decline(writer, AcceptStatus.REFUSED)
             return
         self._open += 1
         self._connections.add(writer)
@@ -188,6 +194,11 @@ class MutualTlsFrameListener:
                 await write_probe(writer, first.payload)
                 writer.close()
                 return
+            if isinstance(first, AcceptFrame):
+                if first.status is not AcceptStatus.REQUEST:
+                    raise FrameStreamError("a dialer sent an accept answer")
+                await write_accept(writer, AcceptStatus.ACCEPTED)
+                first = await read_relay_frame(reader)
             handler = self._handler(ConnectionFrameSink(writer))
             await handler.on_frame(first)
             while True:
@@ -202,6 +213,14 @@ class MutualTlsFrameListener:
             if handler is not None:
                 handler.close()
             await close_writer(writer)
+
+    async def _decline(
+        self, writer: asyncio.StreamWriter, status: AcceptStatus
+    ) -> None:
+        """Answer a connection the listener will not serve, without reading from it."""
+        with contextlib.suppress(OSError, ssl.SSLError):
+            await write_accept(writer, status)
+        await close_writer(writer)
 
     def _peer_identities(self, writer: asyncio.StreamWriter) -> frozenset[str]:
         """The identities the verified peer presented, empty without mutual TLS.

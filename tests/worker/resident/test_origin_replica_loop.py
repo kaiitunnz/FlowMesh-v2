@@ -13,6 +13,10 @@ import socket
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from typing import Any
 
+import pytest
+
+from shared.network.mtls import MutualTlsMaterial, client_context
+from shared.network.mtls_listener import MAX_CONNECTIONS
 from shared.network.relay_frame import RelayFrame
 from shared.network.session import FramedRelaySession  # noqa: F401 - re-export check
 from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
@@ -28,7 +32,9 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
+from shared.schemas.network import RouteObservationOutcome
 from tests.shared.outcome_helpers import InMemoryContentStore
+from tests.support.certs import new_ca
 from worker.resident.engine import EngineResponse
 from worker.resident.origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from worker.resident.peer_listener import ResidentPeerListener
@@ -223,16 +229,29 @@ def test_post_manifest_redrive_reuses_the_reference() -> None:
 
 
 class _DialedHarness:
-    """The two lanes over a real dialed socket, as a trusted peer carries them."""
+    """The two lanes over a real dialed socket, as a trusted peer carries them, with
+    the relay between them as the base a dial that fails before delivery falls to."""
 
-    def __init__(self, sock, port: int) -> None:
+    def __init__(
+        self,
+        sock,
+        port: int,
+        *,
+        target: MutualTlsMaterial | None = None,
+        origin: MutualTlsMaterial | None = None,
+        max_connections: int = MAX_CONNECTIONS,
+    ) -> None:
         self.store = InMemoryContentStore()
         self.engine_calls: list[int] = []
         self.outcomes: list[ResidentOpOutcome] = []
+        self.observed: list[RouteObservationOutcome] = []
+        self.dialed: list[RelayFrame] = []
+        self.relayed: list[RelayFrame] = []
         self.done = asyncio.Event()
 
+        base, replica_attachment = _ToPeer(self.relayed.append), _ToPeer()
         self.sidecar = ResidentReplicaSidecar(
-            sink=_ToPeer(), engine_open=_engine(self.engine_calls)
+            sink=replica_attachment, engine_open=_engine(self.engine_calls)
         )
         self.sidecar.bind(
             replica_id="rpl-1",
@@ -241,13 +260,16 @@ class _DialedHarness:
             endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
         )
         self.listener = ResidentPeerListener(
-            sock=sock, material=None, deliver=self.sidecar.on_frame
+            sock=sock,
+            material=target,
+            deliver=self._dialed_frame,
+            max_connections=max_connections,
         )
         self.carriage = PeerCarriage(
-            base=_ToPeer(),
+            base=base,
             deliver=lambda frame: self.origin.on_frame(frame),
-            observe=lambda session, transport, outcome: None,
-            ssl_context=None,
+            observe=lambda session, transport, outcome: self.observed.append(outcome),
+            ssl_context=client_context(origin) if origin is not None else None,
             connect_budget_sec=2.0,
         )
         self.origin = ResidentOriginDriver(
@@ -256,7 +278,13 @@ class _DialedHarness:
             report_ack=self._on_ack,
             report_outcome=self._on_outcome,
         )
+        base.on_peer = self.sidecar.on_frame
+        replica_attachment.on_peer = self.origin.on_frame
         self._endpoint = f"127.0.0.1:{port}"
+
+    async def _dialed_frame(self, frame: RelayFrame, sink: Any) -> None:
+        self.dialed.append(frame)
+        await self.sidecar.on_frame(frame, sink)
 
     def _on_ack(self, ack: ResidentBootstrapAck) -> None:
         if ack.outcome is ResidentBootstrapOutcome.ACKED:
@@ -315,3 +343,60 @@ def test_repeated_peers_release_both_ends_of_the_dialed_socket() -> None:
             await h.sidecar.aclose()
 
     asyncio.run(run())
+
+
+def _foreign_leaf(ca) -> MutualTlsMaterial:
+    """The deployment's CA bundle beside a leaf another CA issued."""
+    leaf = new_ca("another-ca").material("worker-origin")
+    return MutualTlsMaterial(
+        ca_pem=ca.material("x").ca_pem, cert_pem=leaf.cert_pem, key_pem=leaf.key_pem
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "observed"),
+    [
+        ("origin leaf another CA issued", [RouteObservationOutcome.TLS_FAILURE]),
+        ("origin naming no identity", [RouteObservationOutcome.TLS_FAILURE]),
+        # Load on a working path is not path evidence.
+        ("listener at its cap", []),
+    ],
+)
+def test_a_target_refusing_the_dial_completes_the_invocation_on_the_relay(
+    case: str, observed: list[RouteObservationOutcome]
+) -> None:
+    ca = new_ca()
+    origin = ca.material("worker-origin")
+    if case == "origin leaf another CA issued":
+        origin = _foreign_leaf(ca)
+    elif case == "origin naming no identity":
+        origin = ca.anonymous_material()
+
+    async def run() -> _DialedHarness:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        h = _DialedHarness(
+            sock,
+            sock.getsockname()[1],
+            target=ca.material("worker-target", "127.0.0.1"),
+            origin=origin,
+            max_connections=0 if case == "listener at its cap" else MAX_CONNECTIONS,
+        )
+        await h.listener.start()
+        try:
+            await h.invoke(1)
+        finally:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(h.listener.stop(), timeout=5.0)
+            await h.sidecar.aclose()
+        return h
+
+    h = asyncio.run(run())
+
+    assert [o.status for o in h.outcomes] == [ResidentStreamStatus.SUCCESS]
+    assert h.engine_calls == [1]
+    assert h.dialed == []
+    assert {(f.session_id, f.correlation_id, f.operation_id) for f in h.relayed} == {
+        ("rly-1", "inv-1", "idm-1")
+    }
+    assert h.observed == observed

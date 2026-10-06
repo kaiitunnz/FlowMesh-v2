@@ -8,9 +8,9 @@ control plane can update reachability.
 A probe dials a candidate's first hop as a peer origin does, over the same mutual TLS
 and relay-frame stream, and the listener there answers it. A connection that fails, a
 handshake the dialer rejects, a probe left unanswered, or an answer that echoes other
-bytes is a path failure. A connection the listener closes after the handshake without
-answering is not evidence about the path: a listener that reads no probes and one that
-refuses the dialer's identity both close that way and cannot be told apart.
+bytes is a path failure, as is a listener refusing the dialer's identity. A listener at
+its connection cap answers busy, and one that closes after the handshake without
+answering reads no probes; neither is evidence about the path.
 """
 
 import asyncio
@@ -19,6 +19,8 @@ from dataclasses import dataclass
 
 from shared.network.frame_stream import (
     MAX_PROBE_BYTES,
+    AcceptFrame,
+    AcceptStatus,
     FrameStreamError,
     ProbeFrame,
     read_stream_frame,
@@ -116,6 +118,11 @@ async def _probe(
         # never sends; the probe is over either way.
         if writer is not None:
             writer.transport.abort()
+    if isinstance(answer, AcceptFrame):
+        if answer.status is AcceptStatus.BUSY:
+            return RouteObservationOutcome.APPLICATION_ERROR
+        if answer.status is AcceptStatus.REFUSED:
+            return RouteObservationOutcome.TLS_FAILURE
     if not isinstance(answer, ProbeFrame) or answer.payload != payload:
         return RouteObservationOutcome.ROUTE_FAILURE
     return RouteObservationOutcome.VERIFIED

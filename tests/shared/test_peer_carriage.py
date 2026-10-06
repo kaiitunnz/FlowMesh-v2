@@ -5,7 +5,14 @@ import contextlib
 
 import pytest
 
-from shared.network.frame_stream import read_relay_frame, write_relay_frame
+from shared.network.frame_stream import (
+    AcceptFrame,
+    AcceptStatus,
+    read_relay_frame,
+    read_stream_frame,
+    write_accept,
+    write_relay_frame,
+)
 from shared.network.mtls import MutualTlsMaterial, client_context, server_context
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.resident.carriage import CarriageUnavailable, ResidentCarriagePlan
@@ -52,6 +59,12 @@ def _plan(transport: str, endpoint: str) -> ResidentCarriagePlan:
     )
 
 
+async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Accept the dialer's connection, as a target listener does."""
+    assert await read_stream_frame(reader) == AcceptFrame(AcceptStatus.REQUEST)
+    await write_accept(writer, AcceptStatus.ACCEPTED)
+
+
 def _dial_over_mtls(target: MutualTlsMaterial, origin: MutualTlsMaterial):
     """Dial a live mutual-TLS target on loopback: (received, relayed, observed)."""
     base = _BaseSink()
@@ -69,6 +82,7 @@ def _dial_over_mtls(target: MutualTlsMaterial, origin: MutualTlsMaterial):
 
     async def drive() -> None:
         async def serve(reader, writer):
+            await _accept(reader, writer)
             received.append(await read_relay_frame(reader))
             writer.close()
 
@@ -129,6 +143,7 @@ def test_a_reachable_target_carries_the_frames_and_verifies_the_path() -> None:
 
     async def drive() -> None:
         async def serve(reader, writer):
+            await _accept(reader, writer)
             received.append(await read_relay_frame(reader))
             await write_relay_frame(writer, _frame(b"answer"))
             writer.close()
@@ -165,6 +180,7 @@ def test_a_loss_after_delivery_is_ambiguous_rather_than_relayed() -> None:
 
     async def drive() -> None:
         async def serve(reader, writer):
+            await _accept(reader, writer)
             await read_relay_frame(reader)
             writer.close()
 
@@ -193,6 +209,7 @@ def test_releasing_an_attempt_does_not_demote_a_healthy_transport() -> None:
 
     async def drive() -> None:
         async def serve(reader, writer):
+            await _accept(reader, writer)
             # Ends when the released client closes, rather than outliving the test.
             with contextlib.suppress(OSError, asyncio.IncompleteReadError):
                 await reader.read()

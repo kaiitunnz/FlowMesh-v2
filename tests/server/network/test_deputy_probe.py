@@ -227,6 +227,61 @@ def test_a_listener_refusing_the_deputy_identity_is_not_a_path_failure() -> None
     ]
 
 
+def test_a_listener_refusing_a_ca_issued_dialer_is_a_tls_failure() -> None:
+    ca = new_ca()
+
+    async def run() -> Any:
+        listener = await _node_listener(
+            ca.material("node-target", "127.0.0.1"), _Bridge()
+        )
+        try:
+            # The deployment CA issued the leaf, but it names no origin the target
+            # admits, so the target answers its refusal before closing.
+            return await run_probe(
+                _route((Transport.NODE_RELAY, f"127.0.0.1:{listener.port}")),
+                b"ping",
+                connect_budget_sec=2.0,
+                ssl_context=client_context(ca.anonymous_material()),
+            )
+        finally:
+            await listener.stop()
+
+    outcome = asyncio.run(run())
+
+    assert outcome.observations == [
+        (Transport.NODE_RELAY, RouteObservationOutcome.TLS_FAILURE)
+    ]
+
+
+def test_a_listener_at_its_connection_cap_is_not_a_path_failure() -> None:
+    async def run() -> Any:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        listener = ResidentPeerListener(
+            sock=sock, material=None, deliver=_unused_delivery, max_connections=0
+        )
+        await listener.start()
+        try:
+            return await run_probe(
+                _route((Transport.WORKER_DIRECT, f"127.0.0.1:{listener.port}")),
+                b"ping",
+                connect_budget_sec=2.0,
+                ssl_context=None,
+            )
+        finally:
+            await listener.stop()
+
+    outcome = asyncio.run(run())
+
+    assert outcome.observations == [
+        (Transport.WORKER_DIRECT, RouteObservationOutcome.APPLICATION_ERROR)
+    ]
+
+
+async def _unused_delivery(frame: RelayFrame, sink: Any) -> None:
+    raise AssertionError("a probe never reaches the sidecar")
+
+
 async def _serve_once(handler: Any) -> tuple[asyncio.Server, int]:
     server = await asyncio.start_server(handler, "127.0.0.1", 0)
     return server, server.sockets[0].getsockname()[1]

@@ -8,19 +8,20 @@ the same frames as the relay, so the handoff, route authorization, fences, windo
 cancellation are unchanged, and the target-side claim gate remains the only authority
 over the traffic.
 
-The origin is the worker of a workflow boundary, so its payload reaches the target
-without entering the root or the rendezvous at all. For a gated serve request the root
-is the origin and dials the target itself.
+The origin dials the target itself: a workflow boundary's worker, whose payload then
+bypasses the root and the rendezvous, or the root for a gated serve request.
 
-A dial that fails before any frame reaches the target records a classified path
-observation and falls through to the relay base under the same claim, request identity,
-and held credit. Once a frame has been written the attempt never switches transport: a
-loss from there leaves the outcome ambiguous, which the origin reports as uncertain with
-its credit held. Such a loss records the same observation, so the re-drive resolves the
-transport as demoted and carries the relay base — an attempt is never replayed across
-transports, and a path that keeps failing stops being selected. Only a transport loss
-observes; a fence, tenant, descriptor, application, or engine rejection arrives as a
-frame and settles the boundary without touching the path.
+The target accepts the connection before the origin writes anything of the session on
+it. A dial the target refuses or never accepts fails before any frame reaches the
+target, records a classified path observation, and falls through to the relay base under
+the same claim, request identity, and held credit. Once a frame has been written the
+attempt never switches transport: a loss from there leaves the outcome ambiguous, which
+the origin reports as uncertain with its credit held. Such a loss records the same
+observation, so the re-drive resolves the transport as demoted and carries the relay
+base — an attempt is never replayed across transports, and a path that keeps failing
+stops being selected. Only a transport loss observes; a fence, tenant, descriptor,
+application, or engine rejection arrives as a frame and settles the boundary without
+touching the path.
 """
 
 import asyncio
@@ -38,8 +39,9 @@ from shared.network.frame_stream import (
 )
 from shared.network.peer_dial import (
     PEER_DIAL_ERRORS,
+    PeerAcceptError,
     classify_peer_error,
-    open_peer_connection,
+    open_accepted_connection,
 )
 from shared.network.relay_frame import RelayFrame
 from shared.schemas.network import RouteObservationOutcome, Transport
@@ -97,17 +99,21 @@ class _PeerSink(FrameSink):
             raise PeerCarriageLost(f"carriage lost for {self._session_id}") from exc
 
     async def _dial(self) -> bool:
-        """Open the socket, or fall back to the relay and record the path evidence."""
+        """Open the socket, or fall back to the relay and record the path evidence.
+
+        A target at its connection cap records nothing: load is not path evidence.
+        """
         try:
-            reader, writer = await open_peer_connection(
+            reader, writer = await open_accepted_connection(
                 self._endpoint,
                 self._carriage.ssl_context,
                 self._carriage.connect_budget_sec,
             )
         except PEER_DIAL_ERRORS as exc:
-            self._carriage.observe(
-                self._session_id, self._transport, classify_peer_error(exc)
-            )
+            if not (isinstance(exc, PeerAcceptError) and exc.outcome is None):
+                self._carriage.observe(
+                    self._session_id, self._transport, classify_peer_error(exc)
+                )
             self._carriage.log.info(
                 "%s unavailable for %s, carrying the relay base: %s",
                 self._transport.value,
