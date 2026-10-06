@@ -120,6 +120,21 @@ def test_cordoned_worker_is_excluded_from_the_eligibility_set() -> None:
     assert registry.satisfying_workers(_task()) == []
 
 
+@pytest.mark.anyio
+async def test_both_eligibility_twins_leave_out_cordoned_and_stale_workers() -> None:
+    registry = _Registry(
+        [
+            _worker("wkr-1", "alpha"),
+            _worker("wkr-2", "beta"),
+            _worker("wkr-3", "gamma"),
+        ],
+        cordons=[_cordon("alpha")],
+        stale=frozenset({"wkr-3"}),
+    )
+    assert [w.id for w in registry.satisfying_workers(_task())] == ["wkr-2"]
+    assert [w.id for w in await registry.satisfying_workers_async(_task())] == ["wkr-2"]
+
+
 def test_same_alias_on_another_node_is_not_cordoned() -> None:
     registry = _Registry(
         [_worker("wkr-1", "alpha", "node-a"), _worker("wkr-2", "alpha", "node-b")],
