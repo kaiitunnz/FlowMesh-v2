@@ -76,15 +76,18 @@ class RelayWorkerBridge:
     def bind_peer(self, session_id: str, sink: FrameSink) -> None:
         """Answer one session's worker frames over the connection its origin dialed.
 
-        The binding is taken from whichever admitted dialer names the session first: the
-        forward direction is claim-gated at the replica, while this reverse direction
-        rests on the session id being unguessable and the dialer holding a deployment
-        identity. Naming the expected origin to a target would need control to carry it.
+        The binding is taken from whichever admitted dialer names the session first, and
+        a later connection naming it never takes it over: the forward direction is
+        claim-gated at the replica, while this reverse direction rests on the session id
+        being unguessable and the dialer holding a deployment identity. Naming the
+        expected origin to a target would need control to carry it.
         """
-        self._peers[session_id] = sink
+        self._peers.setdefault(session_id, sink)
 
-    def release_peer(self, session_id: str) -> None:
-        self._peers.pop(session_id, None)
+    def release_peer(self, session_id: str, sink: FrameSink) -> None:
+        """Drop a session's binding, if ``sink`` is the connection holding it."""
+        if self._peers.get(session_id) is sink:
+            del self._peers[session_id]
 
     async def publish_up(self, frame: RelayFrame) -> None:
         """Return a worker's produced frame to the origin that is waiting for it.

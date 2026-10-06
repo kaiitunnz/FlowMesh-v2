@@ -362,8 +362,8 @@ class _DialedUplink:
     def bind_peer(self, session_id: str, sink: Any) -> None:
         self._bridge.bind_peer(session_id, sink)
 
-    def release_peer(self, session_id: str) -> None:
-        self._bridge.release_peer(session_id)
+    def release_peer(self, session_id: str, sink: Any) -> None:
+        self._bridge.release_peer(session_id, sink)
 
     async def on_frame(self, frame: RelayFrame) -> None:
         self._dialed.append(frame)

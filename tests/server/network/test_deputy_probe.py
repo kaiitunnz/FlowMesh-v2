@@ -41,7 +41,7 @@ class _Bridge:
     def bind_peer(self, session_id: str, sink: Any) -> None:
         self.bound.append(session_id)
 
-    def release_peer(self, session_id: str) -> None:
+    def release_peer(self, session_id: str, sink: Any) -> None:
         pass
 
     async def on_frame(self, frame: RelayFrame) -> None:
