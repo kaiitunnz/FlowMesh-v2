@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+from dataclasses import replace
 
 import pytest
 
@@ -253,3 +254,35 @@ def test_a_ca_signed_target_that_is_not_the_dialed_host_falls_back() -> None:
     assert received == []
     assert [f.payload for f in relayed] == [b"request"]
     assert observed[0][2] is RouteObservationOutcome.TLS_FAILURE
+
+
+def test_a_target_cannot_deliver_into_another_session_of_the_origin() -> None:
+    # The origin holds every tenant's sessions beside the one this socket carries, and
+    # routes an inbound frame by the session it names.
+    delivered: list[RelayFrame] = []
+    carriage = _carriage(_BaseSink(), delivered, [])
+
+    async def drive() -> None:
+        async def serve(reader, writer):
+            await _accept(reader, writer)
+            await read_relay_frame(reader)
+            await write_relay_frame(
+                writer, replace(_frame(b"injected"), session_id="rly-other")
+            )
+            await write_relay_frame(writer, _frame(b"answer"))
+            writer.close()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server:
+            sink = carriage.select(_plan("worker_direct", f"127.0.0.1:{port}"))
+            await sink.send(_frame(b"request"))
+            for _ in range(50):
+                if delivered:
+                    break
+                await asyncio.sleep(0.02)
+            carriage.close("rly-1")
+
+    asyncio.run(drive())
+
+    assert [(f.session_id, f.payload) for f in delivered] == [("rly-1", b"answer")]

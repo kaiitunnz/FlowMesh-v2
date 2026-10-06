@@ -130,10 +130,21 @@ class _PeerSink(FrameSink):
         return True
 
     async def _pump(self, reader: asyncio.StreamReader) -> None:
-        """Deliver the target's frames into this attempt until the socket ends."""
+        """Deliver the target's frames into this attempt until the socket ends.
+
+        A frame naming another session is dropped: the socket carries this attempt
+        only, and the origin holds other tenants' sessions beside it.
+        """
         try:
             while True:
-                await self._carriage.deliver(await read_relay_frame(reader))
+                frame = await read_relay_frame(reader)
+                if frame.session_id != self._session_id:
+                    self._carriage.log.warning(
+                        "dropping a frame for another session on %s's socket",
+                        self._session_id,
+                    )
+                    continue
+                await self._carriage.deliver(frame)
         except (asyncio.IncompleteReadError, OSError, FrameStreamError) as exc:
             self._observe_loss(exc)
         except asyncio.CancelledError:
