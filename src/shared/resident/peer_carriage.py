@@ -85,6 +85,8 @@ class _PeerSink(FrameSink):
         self._reader_task: asyncio.Task[None] | None = None
         self._on_base = False
         self._closing = False
+        # The pump and a send can both see one loss; it is one piece of path evidence.
+        self._lost = False
 
     @property
     def transport(self) -> str:
@@ -169,8 +171,9 @@ class _PeerSink(FrameSink):
         demotion's negative TTL, and that attempt re-drives the way it would over the
         relay.
         """
-        if self._closing:
+        if self._closing or self._lost:
             return
+        self._lost = True
         self._carriage.observe(
             self._session_id, self._transport, classify_peer_error(exc)
         )

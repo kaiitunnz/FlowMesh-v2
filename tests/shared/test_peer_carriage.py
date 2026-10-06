@@ -132,7 +132,7 @@ def test_an_unreachable_target_falls_back_to_the_relay_under_one_credit() -> Non
 
     assert [f.payload for f in base.frames] == [b"hello"]
     assert observed and observed[0][1] is Transport.WORKER_DIRECT
-    assert observed[0][2] is not RouteObservationOutcome.VERIFIED
+    assert observed[0][2] is RouteObservationOutcome.CONNECT_FAILURE
 
 
 def test_a_reachable_target_carries_the_frames_and_verifies_the_path() -> None:
@@ -198,7 +198,10 @@ def test_a_loss_after_delivery_is_ambiguous_rather_than_relayed() -> None:
     asyncio.run(drive())
 
     assert base.frames == []
-    assert observed[-1][2] is not RouteObservationOutcome.VERIFIED
+    assert [o[2] for o in observed] == [
+        RouteObservationOutcome.VERIFIED,
+        RouteObservationOutcome.ROUTE_FAILURE,
+    ]
 
 
 def test_releasing_an_attempt_does_not_demote_a_healthy_transport() -> None:
