@@ -131,3 +131,29 @@ async def test_a_route_with_nothing_to_dial_sends_no_node_command() -> None:
     assert resp.json()["candidates"] == ["control_relay"]
     registry.exec_node_cmd.assert_not_awaited()
     plane.record_observations.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_reachability_entries_name_their_origin_class() -> None:
+    app, plane, _registry = _make_app(CommandResponse(command_id="c", success=True))
+    plane.reachability_snapshot = MagicMock(
+        return_value=[
+            {
+                "origin_id": "rog-1",
+                "policy_class": "serve_ingress",
+                "target_node_id": "nod-2",
+                "incarnation": 1,
+                "listener_generation": 0,
+                "transport": "worker_direct",
+                "state": "verified",
+                "retries": 0,
+            }
+        ]
+    )
+    with patch.object(network_router, "require_permission", AsyncMock()):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as ac:
+            resp = await ac.get(f"{PREFIX}/network/reachability")
+    assert resp.status_code == 200
+    assert resp.json()[0]["policy_class"] == "serve_ingress"

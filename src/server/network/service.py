@@ -125,13 +125,15 @@ class NetworkPlane:
         listener: ReplicaListenerAdvertisement,
         *,
         trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
     ) -> tuple[RouteOrigin, ResolvedRoute] | None:
         """Resolve an ordered candidate ladder from origin to the target listener.
 
         The origin node is the one whose deputy will execute the route, so it is what
         every candidate — the peer transports included — is graded against. ``trust``
         overrides the deployment policy for a caller that probes reachability, or for
-        an origin restricted to ``control_relay``.
+        an origin restricted to ``control_relay``. ``policy_class`` scopes the origin
+        and its evidence among the dialers sharing that node's endpoint.
 
         Returns ``None`` when the origin advertises no network endpoint.
         """
@@ -141,7 +143,7 @@ class NetworkPlane:
         target_endpoint = await self.endpoint_for(listener.node_id)
         self._invalidate_on_rotation(target_endpoint)
 
-        origin = self._route_origin(origin_endpoint, origin_node_id)
+        origin = self._route_origin(origin_endpoint, origin_node_id, policy_class)
         now = time.monotonic()
         self._route_epoch += 1
         route = resolve_route(
@@ -222,6 +224,7 @@ class NetworkPlane:
             snapshot.append(
                 {
                     "origin_id": entry.origin_id,
+                    "policy_class": entry.policy_class.value,
                     "target_node_id": entry.target_node_id,
                     "incarnation": entry.incarnation,
                     "listener_generation": entry.listener_generation,
@@ -249,11 +252,14 @@ class NetworkPlane:
         ]
 
     def _route_origin(
-        self, endpoint: NetworkEndpointAdvertisement, node_id: str
+        self,
+        endpoint: NetworkEndpointAdvertisement,
+        node_id: str,
+        policy_class: PolicyClass,
     ) -> RouteOrigin:
         # A fresh generation re-binds the origin to a new id, orphaning its prior route
         # memory; a stable endpoint keeps one id so reachability accumulates over calls.
-        key = (endpoint.endpoint_id, PolicyClass.DEFAULT, endpoint.generation)
+        key = (endpoint.endpoint_id, policy_class, endpoint.generation)
         origin_id = self._origin_ids.get(key)
         if origin_id is None:
             origin_id = new_route_origin_id()
@@ -263,7 +269,7 @@ class NetworkPlane:
             endpoint_id=endpoint.endpoint_id,
             node_id=node_id,
             reachability_class=endpoint.reachability_class,
-            policy_class=PolicyClass.DEFAULT,
+            policy_class=policy_class,
             trust_domain=endpoint.trust_domain,
             protocols=endpoint.protocols,
             relay_attachment_id=endpoint.relay_attachment_id,

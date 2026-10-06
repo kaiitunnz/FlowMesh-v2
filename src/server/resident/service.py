@@ -57,6 +57,7 @@ from shared.utils.ids import new_relay_session_id
 
 from ..network.state import (
     NetworkEndpointAdvertisement,
+    PolicyClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteObservationOutcome,
@@ -159,6 +160,7 @@ class RouteResolver(Protocol):
         listener: ReplicaListenerAdvertisement,
         *,
         trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
     ) -> tuple[RouteOrigin, ResolvedRoute] | None: ...
 
     async def endpoint_for(
@@ -232,8 +234,17 @@ class ServeDelivery(Protocol):
     opaque frames.
     """
 
+    @property
+    def dials_peers(self) -> bool:
+        """Whether the edge can carry an attempt over a peer socket it dials."""
+        ...
+
     def open(
-        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+        self,
+        session_id: str,
+        handoff: AdmissionHandoff,
+        plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None:
         """Open the origin relay to the sidecar and send the bootstrap."""
         ...
@@ -550,11 +561,11 @@ class ResidentCapacityControl:
 
     def _settle_terminal_local(self, invocation_id: str, failed: bool) -> None:
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
-        self._admission.settle_invocation_terminal(invocation_id, reason)
+        released = self._admission.settle_invocation_terminal(invocation_id, reason)
         self._transient_failures.pop(invocation_id, None)
-        self._reap_attempt(invocation_id)
+        self._reap_attempt(invocation_id, released)
 
-    def _reap_attempt(self, invocation_id: str) -> None:
+    def _reap_attempt(self, invocation_id: str, released: bool = False) -> None:
         """Reap both ends of a resident invocation on its fenced terminal.
 
         The origin reap cancels the origin driver's lane and drops the worker-private
@@ -562,7 +573,8 @@ class ResidentCapacityControl:
         session (a task-addressed serve invocation); the serve-worker reap tears down
         the replica's engine request; then the durable session record is deleted. Every
         step is best effort — a gone worker or an already-closed session simply has
-        nothing to reap.
+        nothing to reap. Without a live attempt, as after a restart, the replica's
+        request is reaped only when ``released`` reports this terminal released a claim.
         """
         attempt = self._attempts.pop(invocation_id, None)
         origination = self._originations.pop(invocation_id, None)
@@ -578,6 +590,8 @@ class ResidentCapacityControl:
                     "resident_reap",
                     {"task_id": task_id, "call_correlation": call_correlation},
                 )
+            if released:
+                self._reap_replica_requests(invocation_id)
             return
         if attempt.serve is not None:
             attempt.serve.close_session(attempt.session_id)
@@ -598,6 +612,25 @@ class ResidentCapacityControl:
         self._reclaim_adapter_slot(attempt)
         if self._loop is not None:
             self._loop.create_task(self._delivery.sessions.delete(attempt.session_id))
+
+    def _reap_replica_requests(self, invocation_id: str) -> None:
+        """Reap an invocation's engine request on each replica its claims named.
+
+        Reaches the replica of an invocation no live attempt records, as after a
+        restart, through the worker running that replica's serve task.
+        """
+        assert self._delivery is not None
+        workers = {
+            worker
+            for claim in self._stores.claims.by_invocation(invocation_id)
+            if claim.replica_id is not None
+            and (replica := self._stores.directory.get(claim.replica_id)) is not None
+            and (worker := self._delivery.serve_worker_of(replica)) is not None
+        }
+        for worker in sorted(workers):
+            self._delivery.relay(
+                worker, "resident_sidecar_reap", {"invocation_id": invocation_id}
+            )
 
     def _reclaim_adapter_slot(self, attempt: _Attempt) -> None:
         """Unload the invocation's adapter iff its last credit-bearing claim released.
@@ -1096,9 +1129,9 @@ class ResidentCapacityControl:
         tolerates an already-gone attempt, so a duplicate or late report is a no-op.
         """
         delivery.record_terminal(reason, detail)
-        self._admission.settle_invocation_terminal(invocation_id, reason)
+        released = self._admission.settle_invocation_terminal(invocation_id, reason)
         self._transient_failures.pop(invocation_id, None)
-        self._reap_attempt(invocation_id)
+        self._reap_attempt(invocation_id, released)
         if success:
             delivery.complete()
         else:
@@ -1138,6 +1171,20 @@ class ResidentCapacityControl:
             if outcome is not None:
                 self._settle_terminal_local(claim.invocation_id, failed=not outcome)
 
+    def serve_invocations_holding_credit(self) -> list[str]:
+        """Return each gated serve invocation whose claim holds credit."""
+        invocations: list[str] = []
+        for claim in self._stores.claims.all():
+            request = self._stores.invocations.get(claim.invocation_id)
+            if (
+                claim.holds_credit
+                and request is not None
+                and _subject_workflow_id(request.subject) is None
+                and claim.invocation_id not in invocations
+            ):
+                invocations.append(claim.invocation_id)
+        return invocations
+
     def reconcile_serve_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason
     ) -> None:
@@ -1146,8 +1193,8 @@ class ResidentCapacityControl:
         On startup a recorded external status fact replays through the same FSM so a
         claim rehydrated UNCERTAIN releases; there is no live client to finalize.
         """
-        self._admission.settle_invocation_terminal(invocation_id, reason)
-        self._reap_attempt(invocation_id)
+        released = self._admission.settle_invocation_terminal(invocation_id, reason)
+        self._reap_attempt(invocation_id, released)
 
     async def _relay_bootstrap(
         self,
@@ -1185,16 +1232,16 @@ class ResidentCapacityControl:
         deps = self._delivery
         assert deps is not None
         serve = orig.serve
-        # The route fence resolves from the origin's registered endpoint, which is also
-        # what dials an admitted peer session. A gated serve origination's origin is the
-        # root, which resolves from the root node over the edge stream, with the peer
-        # transports off: the root carries only control_relay. A worker-originated
-        # workflow boundary resolves from the origin worker's own node, so its payload
-        # never reaches the root at all, and rides a peer transport only when that
-        # worker can dial one.
+        # The route fence resolves from the origin's node: the root node for a gated
+        # serve request, the origin worker's node for a workflow boundary. The origin
+        # itself dials an admitted peer session, so it is offered a peer transport only
+        # when it can dial one.
         trust: TrustedPeerPolicy | None = None
+        policy_class = PolicyClass.DEFAULT
         if serve is not None:
-            trust = TrustedPeerPolicy()
+            if not serve.dials_peers:
+                trust = TrustedPeerPolicy()
+            policy_class = PolicyClass.SERVE_INGRESS
             origin_worker = None
             resolve_node: str | None = (
                 deps.root_node_id() if deps.root_node_id is not None else None
@@ -1223,7 +1270,9 @@ class ResidentCapacityControl:
         if listener is None:
             await self._hold_and_redrive(orig, claim, "resident sidecar is unavailable")
             return
-        resolved = await deps.network.resolve(resolve_node, listener, trust=trust)
+        resolved = await deps.network.resolve(
+            resolve_node, listener, trust=trust, policy_class=policy_class
+        )
         if resolved is None:
             await self._hold_and_redrive(
                 orig, claim, "no origin route for the boundary"
@@ -1297,8 +1346,18 @@ class ResidentCapacityControl:
             # attempt to reap; reap the one just recorded rather than hand it off.
             self._reap_attempt(orig.invocation_id)
             return
+        # The origin's transport span parents on the invocation span, in the trace its
+        # subject roots: a workflow's for a boundary, the request's for gated serve.
+        traceparent = (
+            format_traceparent(
+                _subject_trace_id(orig.subject, orig.task_id, orig.request_id),
+                derived_span_id(SpanIdKind.INVOCATION, orig.invocation_id),
+            )
+            if self._control.enabled
+            else None
+        )
         if serve is not None:
-            serve.open(session_id, handoff, plan)
+            serve.open(session_id, handoff, plan, traceparent)
             return
         assert origin_worker is not None
         handoff_payload: dict[str, Any] = {
@@ -1308,15 +1367,8 @@ class ResidentCapacityControl:
             "handoff": handoff.model_dump(mode="json"),
             "carriage_plan": plan.model_dump(mode="json"),
         }
-        if self._control.enabled:
-            # A gated serve subject owns no workflow_id, so its trace is rooted here
-            # rather than borrowed from the workflow bijection: the receiving
-            # worker cannot derive it independently, which is exactly why it rides
-            # this stamp rather than being recomputed at the far end.
-            handoff_payload["traceparent"] = format_traceparent(
-                _subject_trace_id(orig.subject, orig.task_id, orig.request_id),
-                derived_span_id(SpanIdKind.INVOCATION, orig.invocation_id),
-            )
+        if traceparent is not None:
+            handoff_payload["traceparent"] = traceparent
         delivered = deps.relay(origin_worker, "resident_handoff", handoff_payload)
         if not delivered:
             await self._hold_and_redrive(orig, claim, "origin worker relay failed")

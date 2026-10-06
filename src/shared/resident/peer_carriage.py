@@ -8,13 +8,15 @@ the same frames as the relay, so the handoff, route authorization, fences, windo
 cancellation are unchanged, and the target-side claim gate remains the only authority
 over the traffic.
 
-The origin is the worker of a workflow boundary, so its payload reaches the target
-without entering the root or the rendezvous at all. A gated serve request has the root
-as its origin and rides ``control_relay``.
+The origin is both the source identity and the dialer — a workflow boundary's worker, or
+the root for a gated serve request — so a workflow boundary's payload bypasses the root
+and the rendezvous for the whole request and response.
 
-A dial that fails before any frame reaches the target records a classified path
-observation and falls through to the relay base under the same claim, request identity,
-and held credit. Once a frame has been written the attempt never switches transport: a
+The target accepts the connection before the origin writes anything of the session on
+it. A dial that fails, or that the target refuses or never accepts, falls through to the
+relay base before any frame reaches the target, under the same claim, request identity,
+and held credit, and records a classified path observation unless the target was at its
+connection cap. Once a frame has been written the attempt never switches transport: a
 loss from there leaves the outcome ambiguous, which the origin reports as uncertain with
 its credit held. Such a loss records the same observation, so the re-drive resolves the
 transport as demoted and carries the relay base — an attempt is never replayed across
@@ -28,6 +30,7 @@ import contextlib
 import logging
 import ssl
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from shared.network.frame_stream import (
     FrameSink,
@@ -38,13 +41,21 @@ from shared.network.frame_stream import (
 )
 from shared.network.peer_dial import (
     PEER_DIAL_ERRORS,
+    PeerAcceptError,
     classify_peer_error,
-    open_peer_connection,
+    open_accepted_connection,
 )
 from shared.network.relay_frame import RelayFrame
 from shared.schemas.network import RouteObservationOutcome, Transport
 
-from .carriage import CONTROL_RELAY, CarriageUnavailable, ResidentCarriagePlan
+from .carriage import (
+    CONTROL_RELAY,
+    CarriageUnavailable,
+    ClaimGatedServiceCarriage,
+    ControlRelayCarriage,
+    ResidentCarriagePlan,
+)
+from .reports import ResidentRouteObservation
 
 # Delivers one frame the target returned into the origin's own session.
 InboundSink = Callable[[RelayFrame], Awaitable[None]]
@@ -75,6 +86,13 @@ class _PeerSink(FrameSink):
         self._reader_task: asyncio.Task[None] | None = None
         self._on_base = False
         self._closing = False
+        # The pump and a send can both see one loss; it is one piece of path evidence.
+        self._lost = False
+
+    @property
+    def transport(self) -> str:
+        """The transport this attempt rides: its peer, or the relay base it fell to."""
+        return CONTROL_RELAY if self._on_base else self._transport.value
 
     async def send(self, frame: RelayFrame) -> None:
         if self._on_base:
@@ -92,17 +110,21 @@ class _PeerSink(FrameSink):
             raise PeerCarriageLost(f"carriage lost for {self._session_id}") from exc
 
     async def _dial(self) -> bool:
-        """Open the socket, or fall back to the relay and record the path evidence."""
+        """Open the socket, or fall back to the relay and record the path evidence.
+
+        A target at its connection cap records nothing: load is not path evidence.
+        """
         try:
-            reader, writer = await open_peer_connection(
+            reader, writer = await open_accepted_connection(
                 self._endpoint,
                 self._carriage.ssl_context,
                 self._carriage.connect_budget_sec,
             )
         except PEER_DIAL_ERRORS as exc:
-            self._carriage.observe(
-                self._session_id, self._transport, classify_peer_error(exc)
-            )
+            if not (isinstance(exc, PeerAcceptError) and exc.outcome is None):
+                self._carriage.observe(
+                    self._session_id, self._transport, classify_peer_error(exc)
+                )
             self._carriage.log.info(
                 "%s unavailable for %s, carrying the relay base: %s",
                 self._transport.value,
@@ -119,10 +141,21 @@ class _PeerSink(FrameSink):
         return True
 
     async def _pump(self, reader: asyncio.StreamReader) -> None:
-        """Deliver the target's frames into this attempt until the socket ends."""
+        """Deliver the target's frames into this attempt until the socket ends.
+
+        A frame naming another session is dropped: the socket carries this attempt
+        only, and the origin holds other tenants' sessions beside it.
+        """
         try:
             while True:
-                await self._carriage.deliver(await read_relay_frame(reader))
+                frame = await read_relay_frame(reader)
+                if frame.session_id != self._session_id:
+                    self._carriage.log.warning(
+                        "dropping a frame for another session on %s's socket",
+                        self._session_id,
+                    )
+                    continue
+                await self._carriage.deliver(frame)
         except (asyncio.IncompleteReadError, OSError, FrameStreamError) as exc:
             self._observe_loss(exc)
         except asyncio.CancelledError:
@@ -139,8 +172,9 @@ class _PeerSink(FrameSink):
         demotion's negative TTL, and that attempt re-drives the way it would over the
         relay.
         """
-        if self._closing:
+        if self._closing or self._lost:
             return
+        self._lost = True
         self._carriage.observe(
             self._session_id, self._transport, classify_peer_error(exc)
         )
@@ -207,6 +241,9 @@ class PeerCarriage:
         self._sinks[plan.session_id] = sink
         return sink
 
+    def transport_of(self, sink: FrameSink) -> str:
+        return sink.transport if isinstance(sink, _PeerSink) else CONTROL_RELAY
+
     async def send_on_base(self, frame: RelayFrame) -> None:
         await self._base.send(frame)
 
@@ -216,14 +253,61 @@ class PeerCarriage:
         if sink is not None:
             sink.close()
 
-    def close_all(self) -> None:
-        for session_id in list(self._sinks):
-            self.close(session_id)
+
+@dataclass(frozen=True)
+class PeerDialer:
+    """What an origin dials a peer transport with.
+
+    ``ssl_context`` is ``None`` only under the operator's attested no-mTLS posture.
+    """
+
+    ssl_context: ssl.SSLContext | None
+    connect_budget_sec: float
+
+
+def origin_carriage(
+    base: FrameSink,
+    peer: PeerDialer | None,
+    *,
+    deliver: InboundSink,
+    report: Callable[[ResidentRouteObservation], None],
+    logger: logging.Logger | None = None,
+) -> ClaimGatedServiceCarriage:
+    """Return the carriage an origin's attempts ride.
+
+    Without ``peer``, every attempt rides ``base``. With one, the origin dials the
+    transport control selects, reports each attempt's path evidence to ``report``, and
+    falls back to ``base`` before delivery.
+    """
+    if peer is None:
+        return ControlRelayCarriage(base)
+
+    def observe(
+        session_id: str, transport: Transport, outcome: RouteObservationOutcome
+    ) -> None:
+        report(
+            ResidentRouteObservation(
+                session_id=session_id,
+                transport=transport.value,
+                outcome=outcome.value,
+            )
+        )
+
+    return PeerCarriage(
+        base=base,
+        deliver=deliver,
+        observe=observe,
+        ssl_context=peer.ssl_context,
+        connect_budget_sec=peer.connect_budget_sec,
+        logger=logger,
+    )
 
 
 __all__ = [
     "PeerCarriageLost",
     "PeerCarriage",
+    "PeerDialer",
     "InboundSink",
     "ObservationSink",
+    "origin_carriage",
 ]

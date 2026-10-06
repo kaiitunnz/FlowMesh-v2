@@ -3,10 +3,13 @@
 import asyncio
 import logging
 
+import pytest
+
 from server.config import NetworkPlaneConfig, TrustedPeerConfig
 from server.network.service import NetworkPlane
 from server.network.state import (
     NetworkEndpointAdvertisement,
+    PolicyClass,
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     RouteObservationOutcome,
@@ -31,7 +34,13 @@ class _FakeNodeRegistry:
         return list(self._nodes.values())
 
 
-def _node(node_id: str, *, generation: int, cls=ReachabilityClass.ROUTABLE) -> Node:
+def _node(
+    node_id: str,
+    *,
+    generation: int,
+    cls=ReachabilityClass.ROUTABLE,
+    protocols: tuple[str, ...] = (),
+) -> Node:
     return Node(
         id=node_id,
         namespace="ns",
@@ -45,6 +54,7 @@ def _node(node_id: str, *, generation: int, cls=ReachabilityClass.ROUTABLE) -> N
             trust_domain="fm",
             reachability_class=cls,
             relay_attachment_id=f"att-{node_id}",
+            protocols=protocols,
         ),
     )
 
@@ -79,9 +89,16 @@ def _listener(node_id="nde-2", generation=0) -> ReplicaListenerAdvertisement:
     )
 
 
-def _plane(registry: _FakeNodeRegistry, *, peer: bool = False) -> NetworkPlane:
+def _plane(
+    registry: _FakeNodeRegistry, *, peer: bool = False, trusted: bool = False
+) -> NetworkPlane:
+    posture = (
+        TrustedPeerConfig(enabled=True, trust_domain="fm", classes=("routable",))
+        if trusted
+        else TrustedPeerConfig(enabled=peer)
+    )
     return NetworkPlane(
-        NetworkPlaneConfig(enabled=True, peer=TrustedPeerConfig(enabled=peer)),
+        NetworkPlaneConfig(enabled=True, peer=posture),
         registry,  # type: ignore[arg-type]
         logging.getLogger("test-network"),
     )
@@ -254,3 +271,55 @@ def test_a_peer_node_without_a_listener_dials_a_trusted_worker_directly() -> Non
         "node_relay",
         "control_relay",
     ]
+
+
+@pytest.mark.parametrize(
+    ("demoted", "untouched"),
+    [
+        (PolicyClass.SERVE_INGRESS, PolicyClass.DEFAULT),
+        (PolicyClass.DEFAULT, PolicyClass.SERVE_INGRESS),
+    ],
+)
+def test_the_root_serve_ingress_and_the_nodes_workers_keep_separate_evidence(
+    demoted: PolicyClass, untouched: PolicyClass
+) -> None:
+    # The root serve ingress and a worker on the root node dial from one node endpoint,
+    # but a failure one of them observes never steers the other's route.
+    registry = _FakeNodeRegistry()
+    for node_id in ("nde-1", "nde-2"):
+        registry.set(_node(node_id, generation=1, protocols=(PEER_PROTOCOL,)))
+    plane = _plane(registry, trusted=True)
+    listener = _listener().model_copy(update={"protocols": (PEER_PROTOCOL,)})
+
+    def head(policy_class: PolicyClass) -> tuple[str, str]:
+        result = asyncio.run(
+            plane.resolve("nde-1", listener, policy_class=policy_class)
+        )
+        assert result is not None
+        origin, route = result
+        return origin.origin_id, route.candidates[0].transport.value
+
+    demoted_id, demoted_head = head(demoted)
+    untouched_id, untouched_head = head(untouched)
+    assert demoted_id != untouched_id
+    assert demoted_head == untouched_head == "worker_direct"
+
+    origin, _route = asyncio.run(
+        plane.resolve("nde-1", listener, policy_class=demoted)
+    ) or (None, None)
+    assert origin is not None and origin.policy_class is demoted
+    plane.record_observations(
+        origin,
+        listener,
+        [(Transport.WORKER_DIRECT, RouteObservationOutcome.CONNECT_FAILURE)],
+    )
+
+    assert head(demoted)[1] != "worker_direct"
+    assert head(untouched) == (untouched_id, "worker_direct")
+    # The diagnostics name which origin each piece of evidence belongs to.
+    states = {
+        (entry["policy_class"], entry["transport"]): entry["state"]
+        for entry in plane.reachability_snapshot()
+    }
+    assert states[(demoted.value, "worker_direct")] == "demoted"
+    assert states[(untouched.value, "worker_direct")] != "demoted"

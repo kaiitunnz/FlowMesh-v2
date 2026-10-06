@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from server.network.state import (
+    PolicyClass,
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
@@ -103,6 +104,7 @@ class _FakeNetwork:
         listener: ReplicaListenerAdvertisement,
         *,
         trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
     ) -> tuple[RouteOrigin, ResolvedRoute]:
         origin = RouteOrigin(
             origin_id="rog-1",

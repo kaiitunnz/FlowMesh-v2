@@ -8,10 +8,16 @@ carries the trace context it was sent under.
 
 import asyncio
 
+import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 
-from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
+from shared.network.relay_frame import (
+    RelayDirection,
+    RelayFrame,
+    RelayFrameKind,
+    WindowStalled,
+)
 from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.resident.wire import KIND_CHUNK, KIND_DONE, KIND_STREAM
 from shared.telemetry.propagation import extract_context
@@ -162,5 +168,30 @@ def test_every_frame_carries_the_context_it_was_sent_under() -> None:
             ).get_span_context()
             assert carried.span_id == expected.span_id, frame.kind
             assert carried.trace_id == expected.trace_id, frame.kind
+
+    asyncio.run(run())
+
+
+def test_a_send_the_peer_never_drains_stalls_at_its_deadline() -> None:
+    class _Dropped:
+        async def send(self, frame: RelayFrame) -> None:
+            return None
+
+    async def run() -> None:
+        session = FramedRelaySession(
+            session_id="s1",
+            role=RelaySessionRole.TARGET,
+            sink=_Dropped(),
+            window_bytes=8,
+            send_deadline_sec=0.1,
+        )
+        await session.send_wire(KIND_CHUNK, data="fills the window")
+        with pytest.raises(WindowStalled):
+            await session.send_wire(KIND_CHUNK, data="waits for a grant")
+        assert session.cancelled
+        # A stalled session refuses every later send at once.
+        async with asyncio.timeout(0.05):
+            with pytest.raises(WindowStalled):
+                await session.send_wire(KIND_DONE)
 
     asyncio.run(run())

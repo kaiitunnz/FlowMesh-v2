@@ -886,3 +886,71 @@ def test_a_claim_on_a_withdrawn_engine_re_drives_as_an_unreachable_engine_does()
     assert withdrawn["definite"] is False
     unreachable = asyncio.run(_stream_outcome(_http_engine(_unreachable), "hi"))
     assert unreachable is None or unreachable.get("definite") is False
+
+
+def test_a_session_whose_origin_stops_draining_ends_at_the_stream_deadline() -> None:
+    # An origin lost in a restart neither cancels nor drains its session: the replica
+    # ends it on its own and frees the engine request.
+    async def run() -> None:
+        aclosed = asyncio.Event()
+
+        async def endless_engine(
+            endpoint: ReplicaEndpoint, envelope: ServeRequestEnvelope
+        ) -> RawEngineResponse:
+            async def chunks() -> AsyncIterator[bytes]:
+                while True:
+                    yield b"x" * 512
+
+            async def aclose() -> None:
+                aclosed.set()
+
+            return RawEngineResponse(
+                status=200,
+                headers=(("content-type", "text/event-stream"),),
+                chunks=chunks(),
+                aclose=aclose,
+            )
+
+        origin_sink, replica_sink = _ToPeer(), _ToPeer()
+        sidecar = ResidentReplicaSidecar(
+            sink=replica_sink,
+            engine_open=_fake_engine,
+            engine_open_raw=endless_engine,
+            window_bytes=4096,
+            stream_deadline_sec=0.3,
+        )
+        sidecar.bind(
+            replica_id="rpl-1",
+            incarnation=1,
+            listener_generation=1,
+            endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
+            serve_task_id=_SERVE_TASK,
+            binding_generation=0,
+        )
+        origin = FramedRelaySession(
+            session_id="s1",
+            correlation_id="inv-1",
+            operation_id="idm-1",
+            role=RelaySessionRole.ORIGIN,
+            sink=origin_sink,
+        )
+        origin_sink.on_peer = sidecar.on_frame
+        replica_sink.on_peer = origin.on_frame
+        envelope = _serve_envelope()
+        await origin.send_body_wire(
+            "bootstrap",
+            envelope.body,
+            handoff=_serve_handoff(envelope),
+            request=envelope.header_fields(),
+        )
+        ack = await origin.recv_wire(timeout=5.0)
+        assert ack is not None and ack["kind"] == KIND_ACK
+        await origin.send_wire("stream", auth=_serve_auth())
+        # The origin reads nothing more, so it grants no further window.
+        await asyncio.wait_for(aclosed.wait(), timeout=5.0)
+        async with asyncio.timeout(5.0):
+            while sidecar._sessions or sidecar._inflight:
+                await asyncio.sleep(0.01)
+        await sidecar.aclose()
+
+    asyncio.run(run())

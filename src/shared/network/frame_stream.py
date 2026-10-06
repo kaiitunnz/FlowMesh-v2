@@ -8,15 +8,17 @@ bytes, so the payload crosses without a text encoding on the high-rate path.
 A reader that sees a malformed header, an oversized frame, or a truncated body raises,
 and the caller closes the connection: a stream whose framing is lost cannot resync.
 
-The same framing carries a reachability probe: the listener that reads one answers it
-itself, so a probe exercises a stream listener's TLS and framing without entering any
-relay session. A probe is not a relay frame kind, so no relay codec decodes one.
+The same framing carries two exchanges a stream listener answers itself, neither a relay
+frame kind, so no relay codec decodes either. A reachability probe exercises a
+listener's TLS and framing without entering any relay session. A connection accept lets
+a dialer learn that the target took its connection before it sends a session on it.
 """
 
 import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Protocol
 
 from .relay_frame import RelayDirection, RelayFrame, RelayFrameKind
@@ -27,6 +29,9 @@ MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAX_PROBE_BYTES = 1024
 _PROBE_KIND = "probe"
 _PROBE_META = json.dumps({"kind": _PROBE_KIND}, separators=(",", ":")).encode()
+_ACCEPT_KIND = "accept"
+_ACCEPT_META = json.dumps({"kind": _ACCEPT_KIND}, separators=(",", ":")).encode()
+_MAX_ACCEPT_BYTES = 16
 
 
 class FrameStreamError(Exception):
@@ -38,6 +43,22 @@ class ProbeFrame:
     """A reachability probe, answered by the stream listener that reads it."""
 
     payload: bytes
+
+
+class AcceptStatus(StrEnum):
+    """One step of a connection accept: the dialer's request or the target's answer."""
+
+    REQUEST = "request"
+    ACCEPTED = "accepted"
+    BUSY = "busy"
+    REFUSED = "refused"
+
+
+@dataclass(frozen=True)
+class AcceptFrame:
+    """A connection accept step; a stream listener answers the request it reads."""
+
+    status: AcceptStatus
 
 
 class FrameWriter(Protocol):
@@ -114,18 +135,23 @@ async def write_probe(writer: FrameWriter, payload: bytes) -> None:
     await _write_framed(writer, _PROBE_META, payload)
 
 
+async def write_accept(writer: FrameWriter, status: AcceptStatus) -> None:
+    """Write one connection accept step, then flush."""
+    await _write_framed(writer, _ACCEPT_META, status.value.encode())
+
+
 async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
-    """Read one relay frame, raising on a probe or on broken framing."""
+    """Read one relay frame, raising on a probe, an accept step, or broken framing."""
     frame = await read_stream_frame(reader)
-    if isinstance(frame, ProbeFrame):
-        raise FrameStreamError("a probe is not a relay frame")
+    if not isinstance(frame, RelayFrame):
+        raise FrameStreamError("expected a relay frame")
     return frame
 
 
 async def read_stream_frame(
     reader: asyncio.StreamReader,
-) -> RelayFrame | ProbeFrame:
-    """Read one frame or probe, raising on broken framing or an exceeded bound."""
+) -> RelayFrame | ProbeFrame | AcceptFrame:
+    """Read one frame, probe or accept step, raising on broken or oversized framing."""
     meta_len = int.from_bytes(await reader.readexactly(_LENGTH_BYTES), "big")
     if meta_len > MAX_META_BYTES:
         raise FrameStreamError(f"relay frame header too large: {meta_len}")
@@ -140,6 +166,15 @@ async def read_stream_frame(
         if payload_len > MAX_PROBE_BYTES:
             raise FrameStreamError(f"probe payload too large: {payload_len}")
         return ProbeFrame(await reader.readexactly(payload_len))
+    if kind == _ACCEPT_KIND:
+        if payload_len > _MAX_ACCEPT_BYTES:
+            raise FrameStreamError(f"accept step too large: {payload_len}")
+        try:
+            return AcceptFrame(
+                AcceptStatus((await reader.readexactly(payload_len)).decode())
+            )
+        except ValueError as exc:
+            raise FrameStreamError("undecodable accept step") from exc
     if payload_len > MAX_PAYLOAD_BYTES:
         raise FrameStreamError(f"relay frame payload too large: {payload_len}")
     payload = await reader.readexactly(payload_len) if payload_len else b""
@@ -160,6 +195,8 @@ async def read_stream_frame(
 
 
 __all__ = [
+    "AcceptFrame",
+    "AcceptStatus",
     "MAX_META_BYTES",
     "MAX_PAYLOAD_BYTES",
     "MAX_PROBE_BYTES",
@@ -171,6 +208,7 @@ __all__ = [
     "read_relay_frame",
     "read_stream_frame",
     "split_host_port",
+    "write_accept",
     "write_probe",
     "write_relay_frame",
 ]

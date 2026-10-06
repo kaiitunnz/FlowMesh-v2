@@ -16,6 +16,7 @@ from server.network.reachability import NetworkReachabilityView
 from server.network.resolver import resolve_route
 from server.network.state import (
     NetworkEndpointAdvertisement,
+    PolicyClass,
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
@@ -43,6 +44,7 @@ from server.resident.state import (
     InvocationSubjectKind,
 )
 from server.task.v2.representations.operators import ServiceDependency
+from server.telemetry.tracing import format_traceparent, serve_trace_id_int
 from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import freeze_request_envelope
@@ -55,6 +57,9 @@ from shared.resident.reports import (
     ResidentStreamStatus,
 )
 from shared.schemas.network import PEER_PROTOCOL
+from shared.telemetry.config import TelemetryLevel
+from shared.telemetry.ids import SpanIdKind, derived_span_id
+from tests.server.telemetry_helpers import recording_control_tracer
 
 _SERVE_TASK = "tsk-serve"
 _FAMILY = "serve/tsk-serve"
@@ -68,6 +73,7 @@ def _held(stores: ResidentStores, replica_id: str | None) -> int:
 class _FakeNetwork:
     def __init__(self, base_candidate: bool = True) -> None:
         self._base_candidate = base_candidate
+        self.policy_classes: list[PolicyClass] = []
 
     async def resolve(
         self,
@@ -75,7 +81,9 @@ class _FakeNetwork:
         listener: ReplicaListenerAdvertisement,
         *,
         trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
     ) -> tuple[RouteOrigin, ResolvedRoute]:
+        self.policy_classes.append(policy_class)
         origin = RouteOrigin(
             origin_id="rog-1",
             endpoint_id="ep-root",
@@ -120,7 +128,9 @@ class _TrustedPeerNetwork(_FakeNetwork):
         listener: ReplicaListenerAdvertisement,
         *,
         trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
     ) -> tuple[RouteOrigin, ResolvedRoute]:
+        self.policy_classes.append(policy_class)
         origin = RouteOrigin(
             origin_id="rog-1",
             endpoint_id="ep-root",
@@ -177,9 +187,11 @@ class _FakeSessions:
 class _ServeDelivery:
     """Records every seam call control routes a serve invocation's outcome through."""
 
-    def __init__(self) -> None:
+    def __init__(self, dials_peers: bool = False) -> None:
+        self.dials_peers = dials_peers
         self.opened: list[tuple[str, AdmissionHandoff]] = []
         self.plans: list[ResidentCarriagePlan] = []
+        self.traceparents: list[str | None] = []
         self.authorized: list[tuple[str, RouteAuthorization]] = []
         self.closed: list[str] = []
         self.heads: list[tuple[int, tuple[tuple[str, str], ...]]] = []
@@ -190,10 +202,15 @@ class _ServeDelivery:
         self.redrives = 0
 
     def open(
-        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+        self,
+        session_id: str,
+        handoff: AdmissionHandoff,
+        plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None:
         self.opened.append((session_id, handoff))
         self.plans.append(plan)
+        self.traceparents.append(traceparent)
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:
         self.authorized.append((session_id, auth))
@@ -226,8 +243,9 @@ class _Deps:
     ) -> None:
         self.relays: list[tuple[str, str, dict[str, Any]]] = []
         self.sessions = _FakeSessions()
-        self._base_candidate = base_candidate
-        self._trusted_peers = trusted_peers
+        self.network = (
+            _TrustedPeerNetwork() if trusted_peers else _FakeNetwork(base_candidate)
+        )
 
     def build(self) -> ResidentWorkerDelivery:
         return ResidentWorkerDelivery(
@@ -237,11 +255,7 @@ class _Deps:
                 "wkr-replica" if replica.serve_task_id is not None else None
             ),
             node_of_worker=lambda worker_id: "node-1" if worker_id else None,
-            network=(
-                _TrustedPeerNetwork()
-                if self._trusted_peers
-                else _FakeNetwork(self._base_candidate)
-            ),
+            network=self.network,
             sessions=self.sessions,
             root_node_id=lambda: "node-root",
             edge_id="serve-edge",
@@ -259,6 +273,7 @@ def _build(
     base_candidate: bool = True,
     stop_fn: Callable[[str], None] | None = None,
     trusted_peers: bool = False,
+    control: Any = None,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Deps]:
     stores = ResidentStores()
     limits = ResidentPolicyLimits()
@@ -298,6 +313,7 @@ def _build(
         delivery=deps.build(),
         poll_interval_sec=0.01,
         redrive_backoff_sec=0.0,
+        control=control,
     )
     return svc, stores, settled, deps
 
@@ -407,7 +423,7 @@ def test_originate_admits_against_the_family_and_opens_the_edge_relay() -> None:
     assert record["selected_transport"] == CONTROL_RELAY
 
 
-def test_a_root_origin_rides_the_relay_beside_a_trusted_peer_pair() -> None:
+def test_a_root_that_dials_no_peer_rides_the_relay_beside_a_trusted_pair() -> None:
     # The deployment trusts the pair and the replica is directly routable, but the root
     # dials no peer, so its call takes control_relay rather than a plan its carriage
     # refuses.
@@ -422,9 +438,46 @@ def test_a_root_origin_rides_the_relay_beside_a_trusted_peer_pair() -> None:
     assert claim.state is ClaimState.RESERVED
 
 
+def test_a_root_that_dials_peers_takes_the_trusted_pairs_peer_transport() -> None:
+    svc, stores, _settled, deps = _build(trusted_peers=True)
+    _adopt(svc)
+    delivery = _ServeDelivery(dials_peers=True)
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+
+    plan = delivery.plans[0]
+    assert plan.selected_transport == Transport.WORKER_DIRECT.value
+    assert plan.selected_endpoint == "10.0.0.2:9500"
+    # The root's serve ingress is its own route origin, apart from the root node's
+    # workers.
+    assert deps.network.policy_classes == [PolicyClass.SERVE_INGRESS]
+    assert stores.claims.by_invocation("inv-1")[0].state is ClaimState.RESERVED
+
+
+def test_the_serve_origin_opens_under_the_serve_requests_invocation_span() -> None:
+    control, _exporter = recording_control_tracer(TelemetryLevel.COARSE)
+    svc, _stores, _settled, _deps = _build(control=control)
+    _adopt(svc)
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+
+    (traceparent,) = delivery.traceparents
+    assert traceparent == format_traceparent(
+        serve_trace_id_int("inv-1", ""), derived_span_id(SpanIdKind.INVOCATION, "inv-1")
+    )
+
+
+def test_the_serve_origin_opens_with_no_traceparent_when_telemetry_is_off() -> None:
+    svc, _stores, _settled, _deps = _build()
+    _adopt(svc)
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+
+    assert delivery.traceparents == [None]
+
+
 def test_no_control_relay_candidate_holds_the_credit_without_opening() -> None:
-    # control_relay is the only carriage this PR realizes; a resolved route without it
-    # as a base candidate holds the credit rather than opening on no transport.
+    # control_relay is the base every attempt can fall back to; a resolved route
+    # without it holds the credit and opens nothing.
     svc, stores, _settled, deps = _build(base_candidate=False)
     _adopt(svc)
     delivery = _ServeDelivery()

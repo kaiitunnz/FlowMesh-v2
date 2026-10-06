@@ -1,25 +1,30 @@
 """The transport-only origin drive for one task-addressed serve invocation.
 
 A gated serve ingress is the registered transport-only ``RouteOrigin`` for an external
-serve request. This drive owns the origin side of that invocation's reverse-relay
-session: it carries the frozen envelope to the selected replica's claim-gated sidecar,
-relays the opaque response frames back, and reports the sidecar's attested
-acknowledgement and terminal to control, which validates every fence. The sidecar
-constructs and parses the engine request, owns its credential, and serves the response.
+serve request. This drive owns the origin side of that invocation's relay session, over
+the transport control selected: it carries the frozen envelope to the selected replica's
+claim-gated sidecar, relays the opaque response frames back, and reports the sidecar's
+attested acknowledgement and terminal to control, which validates every fence. The
+sidecar constructs and parses the engine request, owns its credential, and serves the
+response.
 
 The drive reads only relay frame kinds — never a body, cursor, or window — so an ingress
 running it applies no engine semantics and assembles nothing. Its success terminal
-carries no manifest: the live relay is the serve-data mode. Both gated ingresses run
-this same drive over their own frame sink, so one fenced-terminal and credit-reporting
-path serves the root-local proxy and the root forward ingress alike.
+carries no manifest: the live relay is the serve-data mode. Both gated access modes run
+this one drive, so one fenced-terminal and credit-reporting path serves ``proxy`` and
+``forward`` alike.
 """
 
 import asyncio
 import logging
 from typing import Protocol
 
+from opentelemetry.trace import Span, Tracer
+
+from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame
 from shared.network.session import FramedRelaySession, RelaySessionRole
+from shared.telemetry.semconv import PHYSICAL_INVOCATION_ID
 
 from .carriage import (
     CarriageUnavailable,
@@ -36,6 +41,7 @@ from .reports import (
     ResidentStreamHead,
     ResidentStreamStatus,
 )
+from .transport_span import record_realized_transport, transport_span
 from .wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -64,14 +70,20 @@ class _Drive:
     def __init__(
         self,
         session: FramedRelaySession,
+        sink: FrameSink,
         task_id: str,
         call_correlation: str,
         invocation_id: str,
+        selected_transport: str,
+        traceparent: str | None,
     ) -> None:
         self.session = session
+        self.sink = sink
         self.task_id = task_id
         self.call_correlation = call_correlation
         self.invocation_id = invocation_id
+        self.selected_transport = selected_transport
+        self.traceparent = traceparent
         self.authorization: asyncio.Future[RouteAuthorization] = (
             asyncio.get_event_loop().create_future()
         )
@@ -96,15 +108,18 @@ class ServeOriginDrive:
         window_bytes: int = 65536,
         stream_deadline_sec: float = 300.0,
         auth_deadline_sec: float = 60.0,
+        tracer: Tracer | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._carriage = carriage
+        self._tracer = tracer
         self._control = control
         self._window_bytes = window_bytes
         self._stream_deadline = stream_deadline_sec
         self._auth_deadline = auth_deadline_sec
         self._logger = logger or logging.getLogger("serve-relay")
         self._by_session: dict[str, _Drive] = {}
+        self._stopped = False
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one inbound relay frame to its session."""
@@ -123,8 +138,15 @@ class ServeOriginDrive:
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
         plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None:
-        """Start one origin drive: send the bootstrap and stream the response."""
+        """Start one origin drive: send the bootstrap and stream the response.
+
+        Once ``stop`` has run, return at once; the claim settles at the root's next
+        start.
+        """
+        if self._stopped:
+            return
         try:
             sink = self._carriage.select(plan)
         except CarriageUnavailable as exc:
@@ -150,7 +172,15 @@ class ServeOriginDrive:
             sink=sink,
             window_bytes=self._window_bytes,
         )
-        drive = _Drive(session, task_id, call_correlation, invocation_id)
+        drive = _Drive(
+            session,
+            sink,
+            task_id,
+            call_correlation,
+            invocation_id,
+            plan.selected_transport,
+            traceparent,
+        )
         self._by_session[session_id] = drive
         drive.task = asyncio.ensure_future(self._drive(drive, handoff, envelope))
 
@@ -161,24 +191,51 @@ class ServeOriginDrive:
             drive.authorization.set_result(auth)
 
     def close(self, session_id: str) -> None:
-        """Cancel and forget one drive, e.g. on a fenced terminal or reap."""
+        """Cancel one drive and release its carriage, on a terminal or reap."""
         drive = self._by_session.pop(session_id, None)
+        self._carriage.close(session_id)
         if drive is None:
             return
         task = drive.task
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
 
+    def stop(self) -> None:
+        """Cancel every drive, release what its attempt held, and open no more."""
+        self._stopped = True
+        for session_id in list(self._by_session):
+            self.close(session_id)
+
     async def _drive(
         self, drive: _Drive, handoff: AdmissionHandoff, envelope: ServeRequestEnvelope
     ) -> None:
+        with transport_span(
+            self._tracer if drive.traceparent is not None else None,
+            drive.selected_transport,
+            drive.traceparent,
+            {PHYSICAL_INVOCATION_ID: drive.invocation_id},
+        ) as span:
+            await self._drive_impl(drive, handoff, envelope, span)
+
+    async def _drive_impl(
+        self,
+        drive: _Drive,
+        handoff: AdmissionHandoff,
+        envelope: ServeRequestEnvelope,
+        span: Span | None,
+    ) -> None:
+        session_id = drive.session.session_id
         try:
-            await drive.session.send_body_wire(
-                KIND_BOOTSTRAP,
-                envelope.body,
-                handoff=handoff.model_dump(mode="json"),
-                request=envelope.header_fields(),
-            )
+            try:
+                await drive.session.send_body_wire(
+                    KIND_BOOTSTRAP,
+                    envelope.body,
+                    handoff=handoff.model_dump(mode="json"),
+                    request=envelope.header_fields(),
+                )
+            finally:
+                # The first frame settles whether a dialed attempt fell back.
+                record_realized_transport(span, self._carriage.transport_of(drive.sink))
             ack = await drive.session.recv_body_wire(self._stream_deadline)
             if not self._handle_ack(drive, ack[0] if ack is not None else None):
                 return
@@ -203,7 +260,10 @@ class ServeOriginDrive:
                 self._uncertain(drive, f"serve relay error: {exc}")
             )
         finally:
-            self._by_session.pop(drive.session.session_id, None)
+            # A dialed attempt holds a socket and its reader for this session alone, so
+            # the target's connection ends only when the origin releases it here.
+            self._carriage.close(session_id)
+            self._by_session.pop(session_id, None)
 
     def _handle_ack(self, drive: _Drive, ack: dict[str, object] | None) -> bool:
         if ack is None:

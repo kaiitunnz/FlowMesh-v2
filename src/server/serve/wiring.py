@@ -10,6 +10,10 @@ exists, so it stays out of here.
 import logging
 from dataclasses import dataclass
 
+from opentelemetry.trace import Tracer
+
+from shared.resident.peer_carriage import PeerDialer
+
 from ..config import PortForwardConfig
 from ..network.reverse_relay import BinaryRedis
 from ..registries.resident import ResidentRegistry
@@ -63,6 +67,8 @@ def build_gated_serve(
     registry: ResidentRegistry,
     relay_redis: BinaryRedis,
     port_forward: PortForwardConfig,
+    peer: PeerDialer | None,
+    tracer: Tracer | None,
     logger: logging.Logger,
 ) -> GatedServeWiring:
     """Wire and return the gated serve subsystem.
@@ -99,6 +105,8 @@ def build_gated_serve(
         relay_redis=relay_redis,
         edge_id=SERVE_EDGE_STREAM_ID,
         control=control,
+        peer=peer,
+        tracer=tracer,
         logger=logger,
     )
     gated_serve = GatedServe(

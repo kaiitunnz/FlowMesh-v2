@@ -2,10 +2,18 @@
 
 import asyncio
 import contextlib
+from dataclasses import replace
 
 import pytest
 
-from shared.network.frame_stream import read_relay_frame, write_relay_frame
+from shared.network.frame_stream import (
+    AcceptFrame,
+    AcceptStatus,
+    read_relay_frame,
+    read_stream_frame,
+    write_accept,
+    write_relay_frame,
+)
 from shared.network.mtls import MutualTlsMaterial, client_context, server_context
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.resident.carriage import CarriageUnavailable, ResidentCarriagePlan
@@ -52,6 +60,12 @@ def _plan(transport: str, endpoint: str) -> ResidentCarriagePlan:
     )
 
 
+async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Accept the dialer's connection, as a target listener does."""
+    assert await read_stream_frame(reader) == AcceptFrame(AcceptStatus.REQUEST)
+    await write_accept(writer, AcceptStatus.ACCEPTED)
+
+
 def _dial_over_mtls(target: MutualTlsMaterial, origin: MutualTlsMaterial):
     """Dial a live mutual-TLS target on loopback: (received, relayed, observed)."""
     base = _BaseSink()
@@ -69,6 +83,7 @@ def _dial_over_mtls(target: MutualTlsMaterial, origin: MutualTlsMaterial):
 
     async def drive() -> None:
         async def serve(reader, writer):
+            await _accept(reader, writer)
             received.append(await read_relay_frame(reader))
             writer.close()
 
@@ -117,7 +132,7 @@ def test_an_unreachable_target_falls_back_to_the_relay_under_one_credit() -> Non
 
     assert [f.payload for f in base.frames] == [b"hello"]
     assert observed and observed[0][1] is Transport.WORKER_DIRECT
-    assert observed[0][2] is not RouteObservationOutcome.VERIFIED
+    assert observed[0][2] is RouteObservationOutcome.CONNECT_FAILURE
 
 
 def test_a_reachable_target_carries_the_frames_and_verifies_the_path() -> None:
@@ -129,6 +144,7 @@ def test_a_reachable_target_carries_the_frames_and_verifies_the_path() -> None:
 
     async def drive() -> None:
         async def serve(reader, writer):
+            await _accept(reader, writer)
             received.append(await read_relay_frame(reader))
             await write_relay_frame(writer, _frame(b"answer"))
             writer.close()
@@ -165,6 +181,7 @@ def test_a_loss_after_delivery_is_ambiguous_rather_than_relayed() -> None:
 
     async def drive() -> None:
         async def serve(reader, writer):
+            await _accept(reader, writer)
             await read_relay_frame(reader)
             writer.close()
 
@@ -181,7 +198,10 @@ def test_a_loss_after_delivery_is_ambiguous_rather_than_relayed() -> None:
     asyncio.run(drive())
 
     assert base.frames == []
-    assert observed[-1][2] is not RouteObservationOutcome.VERIFIED
+    assert [o[2] for o in observed] == [
+        RouteObservationOutcome.VERIFIED,
+        RouteObservationOutcome.ROUTE_FAILURE,
+    ]
 
 
 def test_releasing_an_attempt_does_not_demote_a_healthy_transport() -> None:
@@ -193,6 +213,7 @@ def test_releasing_an_attempt_does_not_demote_a_healthy_transport() -> None:
 
     async def drive() -> None:
         async def serve(reader, writer):
+            await _accept(reader, writer)
             # Ends when the released client closes, rather than outliving the test.
             with contextlib.suppress(OSError, asyncio.IncompleteReadError):
                 await reader.read()
@@ -236,3 +257,35 @@ def test_a_ca_signed_target_that_is_not_the_dialed_host_falls_back() -> None:
     assert received == []
     assert [f.payload for f in relayed] == [b"request"]
     assert observed[0][2] is RouteObservationOutcome.TLS_FAILURE
+
+
+def test_a_target_cannot_deliver_into_another_session_of_the_origin() -> None:
+    # The origin holds every tenant's sessions beside the one this socket carries, and
+    # routes an inbound frame by the session it names.
+    delivered: list[RelayFrame] = []
+    carriage = _carriage(_BaseSink(), delivered, [])
+
+    async def drive() -> None:
+        async def serve(reader, writer):
+            await _accept(reader, writer)
+            await read_relay_frame(reader)
+            await write_relay_frame(
+                writer, replace(_frame(b"injected"), session_id="rly-other")
+            )
+            await write_relay_frame(writer, _frame(b"answer"))
+            writer.close()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server:
+            sink = carriage.select(_plan("worker_direct", f"127.0.0.1:{port}"))
+            await sink.send(_frame(b"request"))
+            for _ in range(50):
+                if delivered:
+                    break
+                await asyncio.sleep(0.02)
+            carriage.close("rly-1")
+
+    asyncio.run(drive())
+
+    assert [(f.session_id, f.payload) for f in delivered] == [("rly-1", b"answer")]

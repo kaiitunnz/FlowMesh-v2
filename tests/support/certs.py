@@ -32,29 +32,41 @@ class TestCa:
     issuer_cert: x509.Certificate
 
     def issue(self, identity: str, *sans: str) -> Issued:
+        return self._leaf(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, identity)]),
+            (identity, *sans),
+        )
+
+    def _leaf(self, subject: x509.Name, names: tuple[str, ...]) -> Issued:
         key = ed25519.Ed25519PrivateKey.generate()
         now = datetime.datetime.now(datetime.UTC)
-        cert = (
+        builder = (
             x509.CertificateBuilder()
-            .subject_name(
-                x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, identity)])
-            )
+            .subject_name(subject)
             .issuer_name(self.issuer_cert.subject)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - _DAY)
             .not_valid_after(now + _DAY)
-            .add_extension(
-                x509.SubjectAlternativeName([_san(name) for name in (identity, *sans)]),
+        )
+        if names:
+            builder = builder.add_extension(
+                x509.SubjectAlternativeName([_san(name) for name in names]),
                 critical=False,
             )
-            .sign(self.signer, None)
-        )
+        cert = builder.sign(self.signer, None)
         return Issued(_b64(_pem(cert)), _b64(_key_pem(key)))
 
     def material(self, identity: str, *sans: str) -> MutualTlsMaterial:
         """Issue an identity and return it as mutual-TLS material under this CA."""
         issued = self.issue(identity, *sans)
+        return MutualTlsMaterial.from_b64(
+            ca_b64=self.ca_b64, cert_b64=issued.cert_b64, key_b64=issued.key_b64
+        )
+
+    def anonymous_material(self) -> MutualTlsMaterial:
+        """Issue a leaf this CA signed that names no identity at all."""
+        issued = self._leaf(x509.Name([]), ())
         return MutualTlsMaterial.from_b64(
             ca_b64=self.ca_b64, cert_b64=issued.cert_b64, key_b64=issued.key_b64
         )

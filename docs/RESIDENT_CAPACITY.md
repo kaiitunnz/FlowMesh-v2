@@ -80,7 +80,9 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
   transition directly. An invocation whose agent failed or was cancelled is terminal, and
   so is one whose origin worker was lost. On a root restart, a workflow claim whose
   invocation is terminal in the restored ledger releases from that terminal; one whose
-  invocation is still open keeps its credit.
+  invocation is still open keeps its credit. A gated serve request has the root as its
+  origin, so one in flight at a restart fails and releases its credit; the replica ends
+  its engine request when reaped or, at the latest, at its stream deadline.
 - **Loss and reissue.** A transient or ambiguous route loss moves a credit-bearing claim to
   `UNCERTAIN` and re-drives the boundary under the held credit — the runtime re-issues the
   same durable invocation, which resumes on the fenced replica — releasing nothing until a
@@ -173,7 +175,8 @@ may request a specific port within the range, else one is
 auto-allocated. On root restart each persisted live exposure rebinds its same port under a
 fresh listener generation before it serves; a failed rebind stays unavailable rather than
 publishing a new port. A forward binding with no live exposure fails closed. Access is the
-task's ordinary `TASK` read permission. Both modes carry traffic over `control_relay`.
+task's ordinary `TASK` read permission. Both modes ride `control_relay` or, for a
+trusted pair, a peer transport the root dials (see [`NETWORK_PLANE.md`](NETWORK_PLANE.md)).
 
 ## Replica lifecycle and policy
 

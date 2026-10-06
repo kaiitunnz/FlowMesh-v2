@@ -23,7 +23,7 @@ from opentelemetry.trace import Span
 from pydantic import ValidationError
 
 from shared.network.frame_stream import FrameSink
-from shared.network.relay_frame import RelayFrame, RelayFrameKind
+from shared.network.relay_frame import RelayFrame, RelayFrameKind, WindowStalled
 from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.resident.contracts import (
     AdmissionHandoff,
@@ -254,6 +254,10 @@ class ResidentReplicaSidecar:
             role=RelaySessionRole.TARGET,
             sink=sink,
             window_bytes=self._window_bytes,
+            # An origin that stops draining for a whole stream deadline is gone, as
+            # one that stops sending is, so the session ends and frees its engine
+            # request.
+            send_deadline_sec=self._stream_deadline,
         )
         self._sessions[session_id] = session
         self._traceparents[session_id] = traceparent
@@ -342,6 +346,12 @@ class ResidentReplicaSidecar:
                         engine_task.cancel()
                         with contextlib.suppress(Exception, asyncio.CancelledError):
                             await engine_task
+        except WindowStalled:
+            self._logger.warning(
+                "ending session %s: its origin drained nothing for %ss",
+                session_id,
+                self._stream_deadline,
+            )
         except (ValidationError, KeyError, httpx.HTTPError, OSError):
             # A malformed follow frame, a dropped engine connection, or a transport
             # error before delivery closes the session without a terminal; the origin

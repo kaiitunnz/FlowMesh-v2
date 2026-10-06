@@ -87,9 +87,12 @@ class WrongIngress(Exception):
 class ServeTransport(Protocol):
     """How the root serve ingress's origin relay is opened, authorized, and reaped.
 
-    Both gated modes drive one shared root-internal rendezvous attachment in this
-    process, carrying the same frozen envelope under one fence over ``control_relay``.
+    Both gated modes drive one shared origin in this process, carrying the same frozen
+    envelope under one fence over the transport control selected.
     """
+
+    @property
+    def dials_peers(self) -> bool: ...
 
     def open(
         self,
@@ -102,6 +105,7 @@ class ServeTransport(Protocol):
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
         plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None: ...
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None: ...
@@ -178,6 +182,10 @@ class _ServeStream:
     def invocation_id(self) -> str:
         return self._context.invocation_id
 
+    @property
+    def dials_peers(self) -> bool:
+        return self._context.transport.dials_peers
+
     def origination(self) -> ServeOrigination:
         """The origination one attempt drives; every attempt reuses the stable identity
         so admission resumes the in-flight claim rather than raising a successor."""
@@ -196,7 +204,11 @@ class _ServeStream:
         )
 
     def open(
-        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+        self,
+        session_id: str,
+        handoff: AdmissionHandoff,
+        plan: ResidentCarriagePlan,
+        traceparent: str | None = None,
     ) -> None:
         self._context.transport.open(
             session_id=session_id,
@@ -207,6 +219,7 @@ class _ServeStream:
             handoff=handoff,
             envelope=self._context.envelope,
             plan=plan,
+            traceparent=traceparent,
         )
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:
@@ -353,7 +366,7 @@ class GatedServe:
         binding or a method the binding does not permit raises before any credit. The
         binding's ``interface`` selects the family it was adopted under; it constrains
         neither the path nor the body, which the engine resolves. Both modes carry the
-        response over the one shared root rendezvous attachment.
+        response over the root's one shared serve origin.
         """
         binding = self._bindings.live(serve_task_id)
         if binding is None:
@@ -613,13 +626,20 @@ class GatedServe:
             self._persist()
 
     def reconcile_terminals(self) -> None:
-        """Replay recorded external status terminals through the FSM on startup.
+        """Settle on startup every gated serve request the restart ended.
 
-        A crash between recording a terminal fact and releasing its claim leaves the
-        claim rehydrated UNCERTAIN with credit held. Replaying each recorded terminal
-        settles it, so the crash window never strands a credit. Idempotent on a terminal
-        claim.
+        A request in flight at a restart lost its client and its origin with the root,
+        so a ``FAILED`` terminal fact is first recorded for each one whose claim holds
+        credit. Every recorded fact then replays through the FSM, releasing its claim
+        and reaping the replica's request, so a crash between a fact and its release
+        also settles on the next start. Idempotent on a terminal claim.
         """
+        for invocation_id in self.control.serve_invocations_holding_credit():
+            self.record_terminal(
+                invocation_id,
+                ClaimTerminalReason.FAILED,
+                "serve request lost in a root restart",
+            )
         for terminal in self._terminals.all():
             self.control.reconcile_serve_terminal(
                 terminal.invocation_id, _STATUS_REASON[terminal.status]

@@ -22,6 +22,7 @@ from .relay_frame import (
     RelayDirection,
     RelayFrame,
     RelayFrameKind,
+    WindowStalled,
 )
 
 
@@ -43,7 +44,10 @@ class FramedRelaySession:
     ``correlation_id`` and ``operation_id`` are the identities the protocol above this
     session correlates its frames by; the session only stamps them. A
     ``strict_sequence`` session carries a byte stream that cannot survive a lost frame,
-    so a sequence gap ends it as a cancel does and sets ``broken``.
+    so a sequence gap ends it as a cancel does and sets ``broken``. With a
+    ``send_deadline_sec``, a send that waits that long for the peer to drain raises
+    ``WindowStalled`` and ends the session as a cancel does; every later send raises
+    it at once.
     """
 
     def __init__(
@@ -56,6 +60,7 @@ class FramedRelaySession:
         operation_id: str = "",
         window_bytes: int = 65536,
         strict_sequence: bool = False,
+        send_deadline_sec: float | None = None,
     ) -> None:
         self._session_id = session_id
         self._correlation_id = correlation_id
@@ -74,6 +79,8 @@ class FramedRelaySession:
         self._recv_consumed = 0
         self._strict_sequence = strict_sequence
         self._broken = False
+        self._send_deadline = send_deadline_sec
+        self._stalled = False
 
     @property
     def session_id(self) -> str:
@@ -100,7 +107,14 @@ class FramedRelaySession:
         await self._send_payload(encode_body_msg(kind, body, **fields))
 
     async def _send_payload(self, payload: bytes) -> None:
-        await self._window.reserve(len(payload))
+        if self._stalled:
+            raise WindowStalled("the peer stopped draining this session")
+        try:
+            await self._window.reserve(len(payload), self._send_deadline)
+        except WindowStalled:
+            self._stalled = True
+            self._cancelled.set()
+            raise
         self._send_seq += 1
         await self._sink.send(
             RelayFrame(

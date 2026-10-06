@@ -102,3 +102,32 @@ def test_unknown_session_is_dropped() -> None:
         assert sent == []
 
     asyncio.run(run())
+
+
+class _Sink:
+    def __init__(self) -> None:
+        self.frames: list[RelayFrame] = []
+
+    async def send(self, frame: RelayFrame) -> None:
+        self.frames.append(frame)
+
+
+def test_a_later_connection_naming_a_bound_session_does_not_take_its_frames() -> None:
+    async def run() -> tuple[_Sink, _Sink]:
+        async def enqueue(worker_id: str, payload: dict[str, Any]) -> bool:
+            return True
+
+        bridge = RelayWorkerBridge(
+            FakeBinaryRedis(), "nde-t", enqueue, keyspace=RESIDENT_RELAY_KEYSPACE
+        )
+        dialer, intruder = _Sink(), _Sink()
+        bridge.bind_peer("s1", dialer)
+        bridge.bind_peer("s1", intruder)
+        # The intruding connection closing releases nothing it does not hold.
+        bridge.release_peer("s1", intruder)
+        await bridge.publish_up(_frame(RelayDirection.TARGET_TO_ORIGIN))
+        return dialer, intruder
+
+    dialer, intruder = asyncio.run(run())
+
+    assert len(dialer.frames) == 1 and intruder.frames == []

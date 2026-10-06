@@ -49,6 +49,9 @@ class PolicyClass(StrEnum):
     """The network/policy class scoping a route origin and its observations."""
 
     DEFAULT = "default"
+    # The root's gated serve ingress, with reachability evidence separate from its
+    # node's workers.
+    SERVE_INGRESS = "serve_ingress"
 
 
 class ReachabilityState(StrEnum):
