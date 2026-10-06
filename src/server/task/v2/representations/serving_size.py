@@ -71,8 +71,9 @@ class ServingSize(BaseModel):
         An omitted field takes the default size's value. With neither a GPU count nor a
         tensor-parallel size, both are one; either alone sets the other. A
         tensor-parallel size above the count is capped to it, as a local vLLM engine
-        caps it. A value that renders from upstream, is not a quantity, or is below one
-        is undeclared, as placement reads it.
+        caps it. A value that is not a quantity or is below one is undeclared, as
+        placement reads it. A value that renders from upstream is undeclared too, since
+        the replica is sized before any upstream value exists.
         """
         default = DEFAULT_SERVING_SIZE
         gpu = hardware.gpu if hardware is not None else None

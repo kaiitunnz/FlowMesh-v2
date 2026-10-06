@@ -371,9 +371,8 @@ unplaceable past the no-worker grace.
 The choice is recorded durably before the task is published and on the attempt. The
 dispatcher then materializes the task it implies, so the worker runs an ordinary typed
 task: a resident-served dispatch carries only the invocation and is placed without any of
-the leaf's declared hardware. A resident embodiment is pinned once its
-invocation exists, so a retry reconciles through that invocation instead of running the
-model locally.
+the leaf's declared hardware. A resident embodiment is pinned once its invocation exists,
+so a retry reconciles through that invocation instead of running the model locally.
 
 A service dependency's family folds the service interface, base model, isolation domain,
 engine profile, and serving size. A shared base model and interface reuse a warm replica;

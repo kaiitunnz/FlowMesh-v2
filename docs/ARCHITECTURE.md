@@ -188,8 +188,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the facets it wants. The compiler screens every answer, so fusion stays bounded to the
   pure, deterministic, local set, an episode only ever cuts more often, and a refinement
   holds the dependency's engine-batch key, isolation, and serving size as well as its
-  pinned family and requiredness. Choosing a worker, reserving capacity, minting a claim or attachment,
-  and replacing a pinned resident binding belong to the fabric. A policy is
+  pinned family and requiredness. Choosing a worker, reserving capacity, minting a claim
+  or attachment, and replacing a pinned resident binding belong to the fabric. A policy is
   deployment-global — a workflow submission selects none — and every hook defaults to a
   conservative policy that lowers identically to the compiler alone, so a workflow's
   declared outputs, effects, and recovery are the same whichever policies run. The
