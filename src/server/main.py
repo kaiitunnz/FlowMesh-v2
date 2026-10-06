@@ -347,8 +347,8 @@ if IS_ROOT_NODE:
             relay_redis=_relay_redis,
             port_forward=config.port_forward,
             peer=root_peer_dialer(config.orchestration.network, logger),
-            # The transport span parents on the invocation span, which only the
-            # fine level synthesizes.
+            # The transport span parents on the invocation span, synthesized only at
+            # `fine` and above.
             tracer=(
                 SERVER_TRACER
                 if config.telemetry.traces_enabled

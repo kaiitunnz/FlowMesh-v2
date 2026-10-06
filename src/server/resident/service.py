@@ -1170,7 +1170,7 @@ class ResidentCapacityControl:
                 self._settle_terminal_local(claim.invocation_id, failed=not outcome)
 
     def serve_invocations_holding_credit(self) -> list[str]:
-        """Return each gated serve invocation whose claim still holds credit.
+        """Return each gated serve invocation whose claim holds credit.
 
         A gated serve request's origin is the root's serve edge, so on startup every
         one of them lost its client and its data path in the restart.
@@ -1234,12 +1234,10 @@ class ResidentCapacityControl:
         deps = self._delivery
         assert deps is not None
         serve = orig.serve
-        # The route fence resolves from the origin's registered endpoint, which is also
-        # what dials an admitted peer session. A gated serve origination's origin is the
-        # root, which resolves from the root node over the edge stream. A
-        # worker-originated workflow boundary resolves from the origin worker's own
-        # node, so its payload never reaches the root at all. Either origin is offered a
-        # peer transport only when it can dial one itself.
+        # The route fence resolves from the origin's registered endpoint, which also
+        # dials an admitted peer session: the root node's for a gated serve request, the
+        # origin worker's node's for a workflow boundary. An origin is offered a peer
+        # transport only when it can dial one.
         trust: TrustedPeerPolicy | None = None
         policy_class = PolicyClass.DEFAULT
         if serve is not None:
@@ -1350,10 +1348,8 @@ class ResidentCapacityControl:
             # attempt to reap; reap the one just recorded rather than hand it off.
             self._reap_attempt(orig.invocation_id)
             return
-        # The carriage's transport span parents on the invocation span. A gated serve
-        # subject owns no workflow_id, so its trace is rooted here rather than borrowed
-        # from the workflow bijection: the origin cannot derive it independently, which
-        # is why it rides this stamp rather than being recomputed at the far end.
+        # The origin's transport span parents on the invocation span, in the trace its
+        # subject roots: a workflow's for a boundary, the request's for gated serve.
         traceparent = (
             format_traceparent(
                 _subject_trace_id(orig.subject, orig.task_id, orig.request_id),

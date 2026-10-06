@@ -121,7 +121,7 @@ PHYSICAL_SERVICE_FAMILY = f"{PHYSICAL_ATTRIBUTE_PREFIX}service_family"
 PHYSICAL_STAGE = f"{PHYSICAL_ATTRIBUTE_PREFIX}stage"
 PHYSICAL_WINDOW = f"{PHYSICAL_ATTRIBUTE_PREFIX}window"
 PHYSICAL_ERROR_TYPE = f"{PHYSICAL_ATTRIBUTE_PREFIX}error_type"
-# The transport an attempt actually used, which differs from its span name on fallback.
+# The transport an attempt's frames took, which differs from its span name on fallback.
 PHYSICAL_TRANSPORT = f"{PHYSICAL_ATTRIBUTE_PREFIX}transport"
 
 GPU_ATTRIBUTE_PREFIX = "flowmesh.gpu."

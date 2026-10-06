@@ -85,9 +85,9 @@ Where a deployment declares an origin-to-target pair trusted, an admitted reside
 invocation leaves the relay for a socket the origin opens itself. The `RouteOrigin` is
 both the route's source identity and its dialer: for a workflow boundary that is the
 invocation's own worker, so the request and response bypass the root and the rendezvous
-entirely. A gated serve request, `proxy` or `forward`, has the root as its origin, so
-the root dials the target with its own node's identity. The root's serve ingress is its
-own route origin with its own reachability evidence, apart from the workers on its node.
+entirely. A gated serve request, `proxy` or `forward`, has the root as its origin, which
+dials with its node's identity. The root's serve ingress is a `RouteOrigin` under its own
+policy class, so it accumulates reachability evidence separately from its node's workers.
 Only the pair the resolver admitted is reachable — an origin never scans for or
 substitutes a peer.
 
@@ -107,14 +107,15 @@ back to the relay. The replica's claim gate then fences the session to the invoc
 control admitted. TLS material is configured as files under the peer TLS directory, which
 the stack mounts read-only at `/etc/ssl/peer` where the configured paths resolve, and is
 base64-encoded only when a worker attachment is handed its transient copy. Material a
-node cannot read is fatal at start-up rather than a fallback to plaintext. The root's
-serve ingress dials nothing with material it cannot use, and its requests ride
-`control_relay`. An operator may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest
+node cannot read is fatal at start-up rather than a fallback to plaintext. A root with
+unusable material carries its serve requests over `control_relay`. An operator may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest
 a trusted network, which warns on every listener and still requires the same trusted-pair
 policy.
 
-A dial that fails before any frame reaches the target records classified path evidence
-and falls through to the relay under the same claim, request identity, and held credit.
+The target accepts a connection before the origin sends a session on it. A dial that
+fails, a refusal, a full listener, or a target that does not answer within the connect
+budget carries the session over `control_relay` under the same claim, request identity,
+and held credit, and every one but the full listener records classified path evidence.
 Once a frame has been written the attempt never switches transport: the outcome is
 ambiguous, so it settles as uncertain with its credit held and the demoted path steers
 the next drive. Only transport failures demote — a fence, tenant, descriptor,
@@ -152,17 +153,17 @@ Redis endpoint, distinct from the event/log relay.
 A feature-gated, SYSTEM/ADMIN echo probes the forward-dial transports without any resident
 traffic. The control plane resolves a route to a target listener, delivers the plan to the
 origin node's deputy over the trusted node-command seam, and folds the deputy's classified
-observations back into the reachability view resident routing reads, so a failed probe
-demotes that path for resident traffic too. See the `Network` section of
+observations back into the reachability view, so a failed probe demotes that path for
+the resident traffic the origin node's workers carry. See the `Network` section of
 [`API.md`](API.md).
 
 The deputy dials each forward-dial candidate in order under the node's peer TLS identity
 and sends a probe that the peer listener answers itself, before any session, sidecar, or
 engine, so a `node_relay` probe verifies the origin-to-node hop resident traffic dials. A
 failed connect or handshake, an unanswered probe, or a mismatched answer demotes the
-transport. A listener that closes after the handshake without answering demotes nothing:
-a listener that reads no probes and one that refuses the dialer's identity close the same
-way, and cannot be told apart. The echo dials peer listeners, so it probes only with
+transport, as does a listener refusing the dialer's identity. A listener at its
+connection cap, or one that closes after the handshake without answering, demotes
+nothing. The echo dials peer listeners, so it probes only with
 `NETWORK_PLANE_PEER_ENABLED=true`.
 
 ## Reuse without resident contracts

@@ -76,11 +76,11 @@ The workflow span is emitted when the workflow's last task goes terminal. Its en
 last durable finish among the workflow's tasks, so a span re-emitted after a restart is
 identical to the first.
 
-A resident invocation's carriage is a `flowmesh.transport.<transport>` span named for
-the transport control selected, opened by its origin — the worker of a workflow
-boundary, the root for a gated `serve` request. `flowmesh.physical.transport` records
-the transport the attempt actually used, so a dial that fell back to `control_relay`
-reads as the two differing.
+At `fine` and above, a resident invocation's carriage is a
+`flowmesh.transport.<transport>` span named for the selected transport and opened by the
+invocation's origin: the worker of a workflow boundary, or the root for a gated `serve`
+request. `flowmesh.physical.transport` records the transport the frames took, which is
+`control_relay` after a dial falls back.
 
 Spans carry ids and digests only. A prompt, a completion, a tool argument or result, a
 credential, content bytes, a relay payload, or a header value never appears on a span or a

@@ -88,7 +88,7 @@ class ServeTransport(Protocol):
     """How the root serve ingress's origin relay is opened, authorized, and reaped.
 
     Both gated modes drive one shared origin in this process, carrying the same frozen
-    envelope under one fence over the transport control's plan selects.
+    envelope under one fence over the transport control selected.
     """
 
     @property
@@ -366,7 +366,7 @@ class GatedServe:
         binding or a method the binding does not permit raises before any credit. The
         binding's ``interface`` selects the family it was adopted under; it constrains
         neither the path nor the body, which the engine resolves. Both modes carry the
-        response over the one shared root rendezvous attachment.
+        response over the root's one shared serve origin.
         """
         binding = self._bindings.live(serve_task_id)
         if binding is None:
@@ -629,7 +629,7 @@ class GatedServe:
         """Settle on startup every gated serve request the restart ended.
 
         A request in flight at a restart lost its client and its origin with the root,
-        so each claim still holding credit records a ``FAILED`` terminal fact first.
+        so each claim holding credit records a ``FAILED`` terminal fact first.
         Every recorded fact then replays through the FSM, releasing its claim and
         reaping the replica's request, so a crash between a fact and its release also
         settles on the next start. Idempotent on a terminal claim.

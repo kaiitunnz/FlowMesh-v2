@@ -69,8 +69,7 @@ class NetworkEndpointInfo(BaseModel):
 class NetworkReachabilityEntryInfo(BaseModel):
     origin_id: str
     policy_class: str = Field(
-        description="The class scoping the origin: `default` for a node's workers, "
-        "`serve_ingress` for the root's gated serve ingress."
+        description="Origin policy class: `default` or `serve_ingress`."
     )
     target_node_id: str
     incarnation: int
