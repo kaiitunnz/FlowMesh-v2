@@ -559,13 +559,35 @@ class WorkerRegistry:
             for worker_id, raw in zip(worker_ids, raws)
         ]
 
+    def _read_workers(self, worker_ids: Iterable[str]) -> list[tuple[Worker, bool]]:
+        """Each registered worker among ``worker_ids`` with whether it is stale, in
+        id order, read in one round trip."""
+        ordered = sorted(worker_ids)
+        with self._rds.sync.control_pipeline() as pipe:
+            for worker_id in ordered:
+                pipe.hgetall(worker_key(worker_id))
+                pipe.ttl(worker_hb_key(worker_id))
+            replies: list[Any] = pipe.execute()
+        return _parse_worker_reads(ordered, replies)
+
+    async def _read_workers_async(
+        self, worker_ids: Iterable[str]
+    ) -> list[tuple[Worker, bool]]:
+        """Each registered worker among ``worker_ids`` with whether it is stale, in
+        id order, read in one round trip."""
+        ordered = sorted(worker_ids)
+        async with self._rds.asyncio.control_pipeline() as pipe:
+            for worker_id in ordered:
+                pipe.hgetall(worker_key(worker_id))
+                pipe.ttl(worker_hb_key(worker_id))
+            replies: list[Any] = await pipe.execute()
+        return _parse_worker_reads(ordered, replies)
+
     def is_worker_stale(self, worker_id: str) -> bool:
-        ttl = self._rds.sync.ttl(worker_hb_key(worker_id))
-        return ttl is None or ttl < 0
+        return _is_stale_ttl(self._rds.sync.ttl(worker_hb_key(worker_id)))
 
     async def is_worker_stale_async(self, worker_id: str) -> bool:
-        ttl = await self._rds.asyncio.ttl(worker_hb_key(worker_id))
-        return ttl is None or ttl < 0
+        return _is_stale_ttl(await self._rds.asyncio.ttl(worker_hb_key(worker_id)))
 
     def get_worker_heartbeat(self, worker_id: str) -> str | None:
         return self._rds.sync.get(worker_hb_key(worker_id))
@@ -765,56 +787,51 @@ class WorkerRegistry:
         A cordon does not exclude ``bound_worker_id``, the worker holding state only
         it can resume the task from, so a cordoned worker drains the work bound to it.
         """
-        available: list[Worker] = []
         cordoned = self._cordoned_members()
-        for worker_id in self.get_worker_ids():
-            worker = self.get_worker(worker_id)
-            if not worker or worker.status is not WorkerStatus.IDLE:
-                continue
-            if self.is_worker_stale(worker.id):
-                continue
-            if worker.id != bound_worker_id and _is_cordoned(worker, cordoned):
-                continue
-            if (
-                hw_satisfies(worker, task)
-                and capability_satisfies(worker, task)
-                and gpu_available_for(worker, task, relays_only)
-            ):
-                available.append(worker)
+        available = [
+            worker
+            for worker, stale in self._read_workers(self.get_worker_ids())
+            if worker.status is WorkerStatus.IDLE
+            and not stale
+            and (worker.id == bound_worker_id or not _is_cordoned(worker, cordoned))
+            and hw_satisfies(worker, task)
+            and capability_satisfies(worker, task)
+            and gpu_available_for(worker, task, relays_only)
+        ]
         return self.sort_workers(available)
 
     def satisfying_workers(self, task: TaskEnvelope) -> list[Worker]:
         """Non-stale, uncordoned workers whose hardware and capabilities satisfy
         the task.
         """
-        available: list[Worker] = []
         cordoned = self._cordoned_members()
-        for worker_id in self.get_worker_ids():
-            worker = self.get_worker(worker_id)
-            if not worker or self.is_worker_stale(worker.id):
-                continue
-            if _is_cordoned(worker, cordoned):
-                continue
-            if hw_satisfies(worker, task) and capability_satisfies(worker, task):
-                available.append(worker)
-        return self.sort_workers(available)
+        workers = self._read_workers(self.get_worker_ids())
+        return self._satisfying(task, workers, cordoned)
 
     async def satisfying_workers_async(self, task: TaskEnvelope) -> list[Worker]:
         """Non-stale, uncordoned workers whose hardware and capabilities satisfy
         the task.
         """
         cordoned = await self._cordoned_members_async()
-        available: list[Worker] = []
-        for worker in await self.get_workers_async(
-            sorted(await self.get_worker_ids_async())
-        ):
-            if not worker or await self.is_worker_stale_async(worker.id):
-                continue
-            if _is_cordoned(worker, cordoned):
-                continue
-            if hw_satisfies(worker, task) and capability_satisfies(worker, task):
-                available.append(worker)
-        return self.sort_workers(available)
+        workers = await self._read_workers_async(await self.get_worker_ids_async())
+        return self._satisfying(task, workers, cordoned)
+
+    def _satisfying(
+        self,
+        task: TaskEnvelope,
+        workers: list[tuple[Worker, bool]],
+        cordoned: set[str],
+    ) -> list[Worker]:
+        return self.sort_workers(
+            [
+                worker
+                for worker, stale in workers
+                if not stale
+                and not _is_cordoned(worker, cordoned)
+                and hw_satisfies(worker, task)
+                and capability_satisfies(worker, task)
+            ]
+        )
 
     def sort_workers(self, workers: list[Worker]) -> list[Worker]:
         decorated: list[tuple[Worker, int, int, int, int]] = []
@@ -1157,6 +1174,22 @@ def _parse_cordon_members(members: Iterable[str]) -> list[WorkerCordon]:
 
 def _matches_cordon(worker: Worker, cordon: WorkerCordon) -> bool:
     return worker.node_alias == cordon.node_alias and worker.alias == cordon.alias
+
+
+def _is_stale_ttl(ttl: float | None) -> bool:
+    return ttl is None or ttl < 0
+
+
+def _parse_worker_reads(
+    worker_ids: Sequence[str], replies: Sequence[Any]
+) -> list[tuple[Worker, bool]]:
+    """Pair each worker id's ``hgetall`` and heartbeat ``ttl`` replies, dropping
+    ids with no record."""
+    reads: list[tuple[Worker, bool]] = []
+    for worker_id, raw, ttl in zip(worker_ids, replies[::2], replies[1::2]):
+        if (worker := _parse_worker_from_redis(worker_id, raw)) is not None:
+            reads.append((worker, _is_stale_ttl(ttl)))
+    return reads
 
 
 def _is_cordoned(worker: Worker, cordoned_members: set[str]) -> bool:

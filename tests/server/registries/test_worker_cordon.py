@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -96,6 +96,17 @@ class _Registry(WorkerRegistry):
 
     async def get_workers_async(self, worker_ids: Sequence[str]) -> list[Worker | None]:
         return [self._workers.get(worker_id) for worker_id in worker_ids]
+
+    def _read_workers(self, worker_ids: Iterable[str]) -> list[tuple[Worker, bool]]:
+        return [
+            (self._workers[worker_id], worker_id in self._stale)
+            for worker_id in sorted(worker_ids)
+        ]
+
+    async def _read_workers_async(
+        self, worker_ids: Iterable[str]
+    ) -> list[tuple[Worker, bool]]:
+        return self._read_workers(worker_ids)
 
     def is_worker_stale(self, worker_id: str) -> bool:
         return worker_id in self._stale
