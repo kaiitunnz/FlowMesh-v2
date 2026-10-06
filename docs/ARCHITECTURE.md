@@ -588,6 +588,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   recreates a deleted record. A worker whose record is gone, as after a partition
   longer than that or a Redis wipe, is released by its supervisor on its next node
   heartbeat and registers again as a new incarnation.
+- **Provisioned workers outlive their supervisor.** A supervisor records each Docker
+  and Vast.ai worker it launches — its launch settings, token, container or instance,
+  and GPUs — in the supervisor state store (`REDIS_SUPERVISOR_STATE_URL`, the control
+  Redis by default), which the root never reads. A starting supervisor takes back every
+  recorded worker before it creates any: it holds the worker's GPUs again and ends its
+  previous registration as a loss, and the worker registers again under a new id. One
+  that does not register within five minutes is removed. A survivor keeps the settings
+  it was launched with, and a container or instance no record names is never touched.
 - **Worker and node identity.** A worker's alias is assigned by its
   supervisor: the supervisor passes it as `WORKER_ALIAS` to the workers it
   launches, an external worker reads it from its token, and registration

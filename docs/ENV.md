@@ -128,7 +128,7 @@ directory `flowmesh stack` runs in.
 | `FLOWMESH_PLUGIN_DIR` | `./plugins` | Host directory mounted at `/app/plugins` |
 | `REDIS_TLS_DIR` | `./secrets/tls/redis` | Host directory mounted at `/etc/ssl/redis` |
 | `SERVER_TLS_DIR` | `./secrets/tls/server` | Host directory mounted at `/etc/ssl/server` |
-| `SERVER_WORKER_CONFIG` | `./configs/worker_config.yaml` | Host file mounted at `/etc/flowmesh/worker_config.yaml` |
+| `SERVER_WORKER_CONFIG` | `./configs/worker_config.yaml` | Host file mounted at `/etc/flowmesh/worker_config.yaml`; each worker entry sets `worker_config.worker_alias` |
 | `FLOWMESH_PLUGIN_DATA_DIR` | `./plugin-data` | Writable mount at `/app/plugin-data` for plugin state. A path -> host bind-mount (auto-created); a bare name -> external Docker volume of that name. |
 | `SERVER_CUDA_PROBE_IMAGE` | `nvidia/cuda:12.9.1-base-ubuntu24.04` | CUDA image the server runs briefly to query local GPU names/indices |
 | `DOCKER_GPU_RUNTIME` | nvidia | Optional Docker runtime name for GPU probe/worker containers; leave empty unless the host requires a named runtime such as `nvidia` |
@@ -228,6 +228,7 @@ An external worker on a host other than its node's carries resident traffic over
 | `SUPERVISOR_GRPC_EXTERNAL_PORT` | – | External port (when port-forwarded) |
 | `EXTERNAL_WORKER_TOKEN` | – | Shared secret admitting `external` workers (empty disables them) |
 | `EXTERNAL_WORKER_TOKEN_FILE` | – | File holding the secret; wins over `EXTERNAL_WORKER_TOKEN` |
+| `VAST_API_KEY` | – | Vast.ai account the supervisor rents and removes Vast.ai workers under |
 | `SERVER_GRPC_TLS_*` | – | TLS certificate files |
 
 ## SSH session backend

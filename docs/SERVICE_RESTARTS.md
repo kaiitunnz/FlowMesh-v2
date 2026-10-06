@@ -53,6 +53,29 @@ requeue at the cost of an attempt when they can safely re-run and fail
 otherwise. A recreated node's supervisor re-creates its configured workers,
 which re-register themselves on startup. No cordon step is required.
 
+**Undrained supervisor stops.** A supervisor that stops without a drain — a
+crash, an OOM kill, or a `docker kill` of the `server` container — leaves its
+Docker and Vast.ai workers running. When it starts again it takes them back from
+their records: each keeps its container or instance and registers again under a
+new id, and the tasks it held requeue at the cost of an attempt, or fail when
+they cannot safely re-run. A worker that does not register again within five
+minutes is removed. A survivor keeps the settings and image it was launched
+with until a draining `flowmesh stack restart`. The configured workers file
+creates only the workers whose alias no record holds, so each entry sets
+`worker_config.worker_alias`, and removing an entry leaves its survivor running.
+
+- The records live in the supervisor state store. Losing or rolling it back
+  loses the workers it named, which then need removing by hand.
+- A crash between renting a Vast.ai instance and recording it leaves the
+  instance unrecorded; remove it by hand.
+- Drain a node's Vast.ai workers before changing `VAST_API_KEY`: a supervisor
+  manages only the instances its current key can reach.
+- A stopped worker started after a supervisor crash uses the deployment's
+  `HF_TOKEN` and `NEBULA_API_TOKEN`, not values its create request set.
+- Workers left running by a version that kept no records are not taken back.
+  Remove them by hand; a configured worker whose container name one holds fails
+  to start until then.
+
 **Node alias.** A node holds a lease on its `NODE_ALIAS` while it is live and
 releases it when it shuts down cleanly, so a restarted node re-registers under
 the same alias at once. A node that exits without unregistering (a crash or a
