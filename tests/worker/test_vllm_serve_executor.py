@@ -1220,3 +1220,60 @@ def test_teardown_gives_an_engine_child_its_grace_before_killing_it(
             leader.stdout.close()
         if child > 1 and _alive(child):
             os.kill(child, signal.SIGKILL)
+
+
+def test_concurrent_teardowns_signal_an_engine_once(tmp_path: Path) -> None:
+    # The child, like an engine core, handles one SIGTERM and then restores the default
+    # handler while it shuts down, so a second SIGTERM would kill it mid-grace.
+    marker = tmp_path / "shut-down"
+    child_script = (
+        "import pathlib, signal, sys, time\n"
+        "def stop(*_):\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+        "    time.sleep(1.0)\n"
+        f"    pathlib.Path({marker.as_posix()!r}).write_text('clean')\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(120)\n"
+    )
+    leader = subprocess.Popen(  # nosec B603 - argv list, no shell=True, sys.executable
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time\n"
+            f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}], "
+            "stdout=subprocess.PIPE, text=True)\n"
+            "child.stdout.readline()\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(120)\n",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    child = 0
+    executor = make_serve_executor()
+    try:
+        assert leader.stdout is not None
+        child = int(leader.stdout.readline())
+
+        first = threading.Thread(
+            target=executor._terminate_process_group, args=(leader,)
+        )
+        first.start()
+        time.sleep(0.3)
+        executor._terminate_process_group(leader)
+        first.join(timeout=30)
+
+        assert not first.is_alive()
+        assert marker.read_text() == "clean"
+        assert not _alive(child)
+    finally:
+        if leader.poll() is None:
+            leader.kill()
+            leader.wait(timeout=10)
+        if leader.stdout is not None:
+            leader.stdout.close()
+        if child > 1 and _alive(child):
+            os.kill(child, signal.SIGKILL)

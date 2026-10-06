@@ -16,6 +16,7 @@ import subprocess  # nosec B404
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -41,6 +42,7 @@ _HEALTH_POLL_INTERVAL_SEC = 2.0
 _DEFAULT_READINESS_TIMEOUT_SEC = 600.0
 _POLL_INTERVAL_SEC = 5.0
 _STOP_TIMEOUT_SEC = 15.0
+_KILL_WAIT_SEC = 5.0
 _GROUP_POLL_INTERVAL_SEC = 0.1
 _TAIL_MAX_LINES = 200
 _TAIL_SNIPPET_BYTES = 4096
@@ -90,6 +92,10 @@ class VLLMServeExecutor(Executor):
         self._signals = RunSignals()
         self._proc: subprocess.Popen[str] | None = None
         self._devices: tuple[str, ...] | None = None
+        self._teardown_lock = threading.Lock()
+        self._teardowns: weakref.WeakKeyDictionary[
+            subprocess.Popen[str], threading.Event
+        ] = weakref.WeakKeyDictionary()
 
     @property
     def binds_devices(self) -> bool:
@@ -359,6 +365,24 @@ class VLLMServeExecutor(Executor):
         logger.info("Serve task TTL reached; terminating vLLM server")
 
     def _terminate_process_group(self, proc: subprocess.Popen[str]) -> None:
+        # A stop or cancel and the run's own exit both tear the engine down. Only the
+        # first signals it: a second SIGTERM would kill an engine core that restored
+        # the default handler while it shuts down, so a later caller waits instead.
+        with self._teardown_lock:
+            done = self._teardowns.get(proc)
+            first = done is None
+            if done is None:
+                done = self._teardowns[proc] = threading.Event()
+        if not first:
+            done.wait(timeout=_STOP_TIMEOUT_SEC + _KILL_WAIT_SEC)
+            return
+        try:
+            self._signal_group_down(proc)
+        finally:
+            done.set()
+
+    @staticmethod
+    def _signal_group_down(proc: subprocess.Popen[str]) -> None:
         # The engine leads its own session, so its pid names the group even once the
         # leader has exited and been reaped while its engine core and workers live on.
         # Every member gets the stop timeout to shut down before the group is killed.
@@ -371,10 +395,12 @@ class VLLMServeExecutor(Executor):
             if not _group_alive(pgid):
                 break
             time.sleep(_GROUP_POLL_INTERVAL_SEC)
+        if proc.poll() is not None and not _group_alive(pgid):
+            return
         with contextlib.suppress(OSError):
             signal_process_group(pgid, signal.SIGKILL)
         with contextlib.suppress(Exception):
-            proc.wait(timeout=5.0)
+            proc.wait(timeout=_KILL_WAIT_SEC)
 
     def cancel(self, task_id: str) -> None:
         if not self._signals.cancel(task_id):
