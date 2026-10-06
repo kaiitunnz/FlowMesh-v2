@@ -79,7 +79,6 @@ class ServeRelayExecutor:
             owner=f"serve-edge:{os.getpid()}",
             keyspace=RESIDENT_RELAY_KEYSPACE,
         )
-        # Whether this root carries an attempt over a peer socket it dials.
         self.dials_peers = peer is not None
         self._carriage = origin_carriage(
             EdgeStreamSink(self._streams, edge_id),
@@ -107,8 +106,7 @@ class ServeRelayExecutor:
         self._attachment.start(loop)
 
     async def stop(self) -> None:
-        """Release every in-flight attempt's carriage, open no more, and stop the
-        attachment."""
+        """Release every attempt's carriage, open no more, then stop the attachment."""
         self._drive.stop()
         await self._attachment.stop()
 

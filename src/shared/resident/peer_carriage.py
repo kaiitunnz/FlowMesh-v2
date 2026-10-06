@@ -8,13 +8,15 @@ the same frames as the relay, so the handoff, route authorization, fences, windo
 cancellation are unchanged, and the target-side claim gate remains the only authority
 over the traffic.
 
-The origin dials the target itself: a workflow boundary's worker, whose payload then
-bypasses the root and the rendezvous, or the root for a gated serve request.
+The origin is both the source identity and the dialer — a workflow boundary's worker, or
+the root for a gated serve request — so a workflow boundary's payload bypasses the root
+and the rendezvous for the whole request and response.
 
 The target accepts the connection before the origin writes anything of the session on
-it. A dial the target refuses or never accepts fails before any frame reaches the
-target, records a classified path observation, and falls through to the relay base under
-the same claim, request identity, and held credit. Once a frame has been written the
+it. A dial that fails, or that the target refuses or never accepts, falls through to the
+relay base before any frame reaches the target, under the same claim, request identity,
+and held credit, and records a classified path observation unless the target was at its
+connection cap. Once a frame has been written the
 attempt never switches transport: a loss from there leaves the outcome ambiguous, which
 the origin reports as uncertain with its credit held. Such a loss records the same
 observation, so the re-drive resolves the transport as demoted and carries the relay
@@ -274,9 +276,9 @@ def origin_carriage(
 ) -> ClaimGatedServiceCarriage:
     """Return the carriage an origin's attempts ride.
 
-    An origin that cannot dial carries every attempt over ``base``. One that can dials
-    the transport control selects, reporting each attempt's path evidence to
-    ``report``, and falls back to ``base`` before delivery.
+    Without ``peer``, every attempt rides ``base``. With one, the origin dials the
+    transport control selects, reports each attempt's path evidence to ``report``, and
+    falls back to ``base`` before delivery.
     """
     if peer is None:
         return ControlRelayCarriage(base)

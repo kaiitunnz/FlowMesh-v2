@@ -76,8 +76,8 @@ class RelayWorkerBridge:
     def bind_peer(self, session_id: str, sink: FrameSink) -> None:
         """Answer one session's worker frames over the connection its origin dialed.
 
-        The binding is taken from whichever admitted dialer names the session first, and
-        a later connection naming it never takes it over: the forward direction is
+        The binding is taken from the first admitted dialer to name the session and held
+        until that connection releases it: the forward direction is
         claim-gated at the replica, while this reverse direction rests on the session id
         being unguessable and the dialer holding a deployment identity. Naming the
         expected origin to a target would need control to carry it.

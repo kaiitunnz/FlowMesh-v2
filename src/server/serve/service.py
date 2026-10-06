@@ -629,10 +629,10 @@ class GatedServe:
         """Settle on startup every gated serve request the restart ended.
 
         A request in flight at a restart lost its client and its origin with the root,
-        so each claim holding credit records a ``FAILED`` terminal fact first.
-        Every recorded fact then replays through the FSM, releasing its claim and
-        reaping the replica's request, so a crash between a fact and its release also
-        settles on the next start. Idempotent on a terminal claim.
+        so a ``FAILED`` terminal fact is first recorded for each one whose claim holds
+        credit. Every recorded fact then replays through the FSM, releasing its claim
+        and reaping the replica's request, so a crash between a fact and its release
+        also settles on the next start. Idempotent on a terminal claim.
         """
         for invocation_id in self.control.serve_invocations_holding_credit():
             self.record_terminal(

@@ -53,7 +53,7 @@ class ClaimGatedServiceCarriage(Protocol):
     def select(self, plan: ResidentCarriagePlan) -> FrameSink: ...
 
     def transport_of(self, sink: FrameSink) -> str:
-        """Return the transport the frames of the attempt ``sink`` carries rode."""
+        """Return the transport the attempt on ``sink`` rode, after any fallback."""
         ...
 
     def close(self, session_id: str) -> None:

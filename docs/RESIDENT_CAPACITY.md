@@ -81,8 +81,8 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
   so is one whose origin worker was lost. On a root restart, a workflow claim whose
   invocation is terminal in the restored ledger releases from that terminal; one whose
   invocation is still open keeps its credit. A gated serve request has the root as its
-  origin, so one in flight at a restart fails and its credit releases; its request on
-  the replica ends when reaped, or at the latest at its stream deadline.
+  origin, so one in flight at a restart fails and releases its credit; the replica ends
+  its engine request when reaped or, at the latest, at its stream deadline.
 - **Loss and reissue.** A transient or ambiguous route loss moves a credit-bearing claim to
   `UNCERTAIN` and re-drives the boundary under the held credit — the runtime re-issues the
   same durable invocation, which resumes on the fenced replica — releasing nothing until a

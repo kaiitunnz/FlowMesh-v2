@@ -5,7 +5,7 @@ rather than falling back: the listener is advertised either way, and serving it 
 plaintext would carry resident payloads over a wire the deployment asked to protect.
 Only the explicit disable flag, an operator attesting a trusted network, runs without
 it. The root's serve ingress, which only dials, carries its requests over the relay
-instead of dialing with material it cannot use, while its node still fails start-up.
+when its material is unusable, and its node fails start-up.
 """
 
 import dataclasses

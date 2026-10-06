@@ -142,8 +142,8 @@ class ServeOriginDrive:
     ) -> None:
         """Start one origin drive: send the bootstrap and stream the response.
 
-        A stopped drive opens nothing and reports nothing; the claim settles at the
-        root's next start.
+        Once ``stop`` has run, return at once; the claim settles at the root's next
+        start.
         """
         if self._stopped:
             return

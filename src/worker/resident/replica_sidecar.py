@@ -255,8 +255,8 @@ class ResidentReplicaSidecar:
             sink=sink,
             window_bytes=self._window_bytes,
             # An origin that stops draining for a whole stream deadline is gone, as
-            # one that stops sending is: the session ends rather than holding its
-            # engine request open.
+            # one that stops sending is, so the session ends and frees its engine
+            # request.
             send_deadline_sec=self._stream_deadline,
         )
         self._sessions[session_id] = session

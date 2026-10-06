@@ -61,9 +61,9 @@ async def open_accepted_connection(
     """Open a stream to the peer listener at ``endpoint`` once the target accepts it.
 
     The connect, handshake and accept share one ``timeout``. A refusal raises
-    ``PeerAcceptError``. Under mutual TLS a target that closes without answering
-    rejected the dialer's certificate in its own side of the handshake, which a TLS 1.3
-    dialer's side completes without seeing, so that close records as a TLS failure.
+    ``PeerAcceptError``. Under mutual TLS, a target that closes without answering has
+    rejected the dialer's certificate after the dialer's side of the handshake
+    completed, so that close records as a TLS failure.
     """
     writer: asyncio.StreamWriter | None = None
     try:

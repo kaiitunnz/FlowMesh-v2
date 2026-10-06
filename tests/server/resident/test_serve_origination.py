@@ -477,7 +477,7 @@ def test_the_serve_origin_opens_with_no_traceparent_when_telemetry_is_off() -> N
 
 def test_no_control_relay_candidate_holds_the_credit_without_opening() -> None:
     # control_relay is the base every attempt can fall back to; a resolved route
-    # without it holds the credit rather than opening on no transport.
+    # without it holds the credit and opens nothing.
     svc, stores, _settled, deps = _build(base_candidate=False)
     _adopt(svc)
     delivery = _ServeDelivery()

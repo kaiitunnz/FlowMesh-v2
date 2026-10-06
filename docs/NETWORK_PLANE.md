@@ -107,18 +107,18 @@ back to the relay. The replica's claim gate then fences the session to the invoc
 control admitted. TLS material is configured as files under the peer TLS directory, which
 the stack mounts read-only at `/etc/ssl/peer` where the configured paths resolve, and is
 base64-encoded only when a worker attachment is handed its transient copy. Material a
-node cannot read is fatal at start-up rather than a fallback to plaintext. A root with
-unusable material carries its serve requests over `control_relay`. An operator may
-instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest a trusted network, which warns on
-every listener and still requires the same trusted-pair policy.
+node cannot read is fatal at start-up rather than a fallback to plaintext, while the
+root's serve ingress, which only dials, carries its requests over `control_relay`. An
+operator may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest a trusted network,
+which warns on every listener and still requires the same trusted-pair policy.
 
-The target accepts a connection before the origin sends a session on it. A dial that
-fails, a refusal, a full listener, or a target that does not answer within the connect
-budget carries the session over `control_relay` under the same claim, request identity,
-and held credit, and every one but the full listener records classified path evidence.
-Once a frame has been written the attempt never switches transport: the outcome is
-ambiguous, so it settles as uncertain with its credit held and the demoted path steers
-the next drive. Only transport failures demote — a fence, tenant, descriptor,
+The target accepts a connection before the origin sends a session on it. After a failed
+dial, a refusal, a listener at its connection cap, or a target that does not answer within
+the connect budget, the origin carries the session over `control_relay` under the same
+claim, request identity, and held credit; each but the capped listener records classified
+path evidence. Once a frame has been written the attempt never switches transport: the
+outcome is ambiguous, so it settles as uncertain with its credit held and the demoted path
+steers the next drive. Only transport failures demote — a fence, tenant, descriptor,
 application, or engine rejection arrives as a frame and settles the boundary without
 touching the path.
 
@@ -161,10 +161,9 @@ The deputy dials each forward-dial candidate in order under the node's peer TLS 
 and sends a probe that the peer listener answers itself, before any session, sidecar, or
 engine, so a `node_relay` probe verifies the origin-to-node hop resident traffic dials. A
 failed connect or handshake, an unanswered probe, or a mismatched answer demotes the
-transport, as does a listener refusing the dialer's identity. A listener at its
-connection cap, or one that closes after the handshake without answering, demotes
-nothing. The echo dials peer listeners, so it probes only with
-`NETWORK_PLANE_PEER_ENABLED=true`.
+transport, as does a listener refusing the dialer's identity. A listener at its connection
+cap, or one that closes after the handshake without answering, demotes nothing. The echo
+dials peer listeners, so it probes only with `NETWORK_PLANE_PEER_ENABLED=true`.
 
 ## Reuse without resident contracts
 

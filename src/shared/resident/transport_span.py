@@ -22,7 +22,7 @@ def transport_span(
     """Open ``flowmesh.transport.<transport>`` for the transport control selected.
 
     The span parents on ``traceparent``, the stamp control put on the attempt, since an
-    origin's drive runs off the context that admitted it. Yield ``None`` without a
+    origin's drive runs outside the context that admitted it. Yield ``None`` without a
     tracer.
     """
     if tracer is None:

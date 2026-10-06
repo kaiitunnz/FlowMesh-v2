@@ -77,7 +77,7 @@ def _in_flight(*, drain: bool = False, uncertain: bool = False) -> ResidentSnaps
     )
     asyncio.run(svc._originate_serve(_origination(_ServeDelivery(), "inv-2")))
     if uncertain:
-        # A claim an earlier start left uncertain, before startup settled serve claims.
+        # A route loss before the restart left this claim uncertain.
         (claim,) = stores.claims.by_invocation("inv-1")
         svc._admission.on_route_loss(claim)
     if drain:

@@ -151,7 +151,7 @@ async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
 async def read_stream_frame(
     reader: asyncio.StreamReader,
 ) -> RelayFrame | ProbeFrame | AcceptFrame:
-    """Read one frame, probe or accept step, raising on broken framing or a bound."""
+    """Read one frame, probe or accept step, raising on broken or oversized framing."""
     meta_len = int.from_bytes(await reader.readexactly(_LENGTH_BYTES), "big")
     if meta_len > MAX_META_BYTES:
         raise FrameStreamError(f"relay frame header too large: {meta_len}")

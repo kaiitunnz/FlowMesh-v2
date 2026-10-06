@@ -228,8 +228,8 @@ def test_a_listener_that_reads_relay_frames_only_fails_fast_as_a_route_failure()
     None
 ):
     async def old_listener(reader, writer) -> None:
-        # A listener that predates the accept step fails to decode the request as a
-        # relay frame and closes.
+        # A listener without the accept step reads the request as a broken relay
+        # frame and closes.
         with contextlib.suppress(FrameStreamError):
             await read_relay_frame(reader)
         writer.close()

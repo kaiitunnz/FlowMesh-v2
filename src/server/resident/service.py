@@ -1172,11 +1172,7 @@ class ResidentCapacityControl:
                 self._settle_terminal_local(claim.invocation_id, failed=not outcome)
 
     def serve_invocations_holding_credit(self) -> list[str]:
-        """Return each gated serve invocation whose claim holds credit.
-
-        A gated serve request's origin is the root's serve edge, so on startup every
-        one of them lost its client and its data path in the restart.
-        """
+        """Return each gated serve invocation whose claim holds credit."""
         invocations: list[str] = []
         for claim in self._stores.claims.all():
             request = self._stores.invocations.get(claim.invocation_id)
@@ -1236,10 +1232,10 @@ class ResidentCapacityControl:
         deps = self._delivery
         assert deps is not None
         serve = orig.serve
-        # The route fence resolves from the origin's registered endpoint, which also
-        # dials an admitted peer session: the root node's for a gated serve request, the
-        # origin worker's node's for a workflow boundary. An origin is offered a peer
-        # transport only when it can dial one.
+        # The route fence resolves from the origin's node: the root node for a gated
+        # serve request, the origin worker's node for a workflow boundary. The origin
+        # itself dials an admitted peer session, so it is offered a peer transport only
+        # when it can dial one.
         trust: TrustedPeerPolicy | None = None
         policy_class = PolicyClass.DEFAULT
         if serve is not None:

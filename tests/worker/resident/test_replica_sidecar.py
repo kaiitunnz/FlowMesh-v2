@@ -890,7 +890,7 @@ def test_a_claim_on_a_withdrawn_engine_re_drives_as_an_unreachable_engine_does()
 
 def test_a_session_whose_origin_stops_draining_ends_at_the_stream_deadline() -> None:
     # An origin lost in a restart neither cancels nor drains its session: the replica
-    # ends it on its own rather than holding the engine request open.
+    # ends it on its own and frees the engine request.
     async def run() -> None:
         aclosed = asyncio.Event()
 
