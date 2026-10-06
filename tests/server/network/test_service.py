@@ -34,7 +34,13 @@ class _FakeNodeRegistry:
         return list(self._nodes.values())
 
 
-def _node(node_id: str, *, generation: int, cls=ReachabilityClass.ROUTABLE) -> Node:
+def _node(
+    node_id: str,
+    *,
+    generation: int,
+    cls=ReachabilityClass.ROUTABLE,
+    protocols: tuple[str, ...] = (),
+) -> Node:
     return Node(
         id=node_id,
         namespace="ns",
@@ -48,6 +54,7 @@ def _node(node_id: str, *, generation: int, cls=ReachabilityClass.ROUTABLE) -> N
             trust_domain="fm",
             reachability_class=cls,
             relay_attachment_id=f"att-{node_id}",
+            protocols=protocols,
         ),
     )
 
@@ -82,9 +89,16 @@ def _listener(node_id="nde-2", generation=0) -> ReplicaListenerAdvertisement:
     )
 
 
-def _plane(registry: _FakeNodeRegistry, *, peer: bool = False) -> NetworkPlane:
+def _plane(
+    registry: _FakeNodeRegistry, *, peer: bool = False, trusted: bool = False
+) -> NetworkPlane:
+    posture = (
+        TrustedPeerConfig(enabled=True, trust_domain="fm", classes=("routable",))
+        if trusted
+        else TrustedPeerConfig(enabled=peer)
+    )
     return NetworkPlane(
-        NetworkPlaneConfig(enabled=True, peer=TrustedPeerConfig(enabled=peer)),
+        NetworkPlaneConfig(enabled=True, peer=posture),
         registry,  # type: ignore[arg-type]
         logging.getLogger("test-network"),
     )
@@ -259,31 +273,6 @@ def test_a_peer_node_without_a_listener_dials_a_trusted_worker_directly() -> Non
     ]
 
 
-def _trusted_plane(registry: _FakeNodeRegistry) -> NetworkPlane:
-    return NetworkPlane(
-        NetworkPlaneConfig(
-            enabled=True,
-            peer=TrustedPeerConfig(
-                enabled=True, trust_domain="fm", classes=("routable",)
-            ),
-        ),
-        registry,  # type: ignore[arg-type]
-        logging.getLogger("test-network"),
-    )
-
-
-def _peer_node(node_id: str) -> Node:
-    node = _node(node_id, generation=1)
-    assert node.network_endpoint is not None
-    return node.model_copy(
-        update={
-            "network_endpoint": node.network_endpoint.model_copy(
-                update={"protocols": (PEER_PROTOCOL,)}
-            )
-        }
-    )
-
-
 @pytest.mark.parametrize(
     ("demoted", "untouched"),
     [
@@ -297,9 +286,9 @@ def test_the_root_serve_ingress_and_the_nodes_workers_keep_separate_evidence(
     # The root serve ingress and a worker on the root node dial from one node endpoint,
     # but a failure one of them observes never steers the other's route.
     registry = _FakeNodeRegistry()
-    registry.set(_peer_node("nde-1"))
-    registry.set(_peer_node("nde-2"))
-    plane = _trusted_plane(registry)
+    for node_id in ("nde-1", "nde-2"):
+        registry.set(_node(node_id, generation=1, protocols=(PEER_PROTOCOL,)))
+    plane = _plane(registry, trusted=True)
     listener = _listener().model_copy(update={"protocols": (PEER_PROTOCOL,)})
 
     def head(policy_class: PolicyClass) -> tuple[str, str]:

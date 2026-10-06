@@ -4,7 +4,8 @@ Mutual TLS is on by default, so material that is missing or unusable fails start
 rather than falling back: the listener is advertised either way, and serving it in
 plaintext would carry resident payloads over a wire the deployment asked to protect.
 Only the explicit disable flag, an operator attesting a trusted network, runs without
-it.
+it. The root's serve ingress, which only dials, carries its requests over the relay
+instead of dialing with material it cannot use, while its node still fails start-up.
 """
 
 import dataclasses
