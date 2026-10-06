@@ -16,14 +16,13 @@ The target accepts the connection before the origin writes anything of the sessi
 it. A dial that fails, or that the target refuses or never accepts, falls through to the
 relay base before any frame reaches the target, under the same claim, request identity,
 and held credit, and records a classified path observation unless the target was at its
-connection cap. Once a frame has been written the
-attempt never switches transport: a loss from there leaves the outcome ambiguous, which
-the origin reports as uncertain with its credit held. Such a loss records the same
-observation, so the re-drive resolves the transport as demoted and carries the relay
-base — an attempt is never replayed across transports, and a path that keeps failing
-stops being selected. Only a transport loss observes; a fence, tenant, descriptor,
-application, or engine rejection arrives as a frame and settles the boundary without
-touching the path.
+connection cap. Once a frame has been written the attempt never switches transport: a
+loss from there leaves the outcome ambiguous, which the origin reports as uncertain with
+its credit held. Such a loss records the same observation, so the re-drive resolves the
+transport as demoted and carries the relay base — an attempt is never replayed across
+transports, and a path that keeps failing stops being selected. Only a transport loss
+observes; a fence, tenant, descriptor, application, or engine rejection arrives as a
+frame and settles the boundary without touching the path.
 """
 
 import asyncio
