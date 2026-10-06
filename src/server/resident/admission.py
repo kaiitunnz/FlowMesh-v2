@@ -371,14 +371,14 @@ class AdmissionController:
 
     def settle_invocation_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason
-    ) -> None:
+    ) -> bool:
         """Settle every non-terminal claim of an invocation from a fenced terminal fact.
 
         This is the sole normal release path for an accepted credit. A workflow
         subject's fact is the orchestration engine's ``DS`` outcome; an external
         subject's is a durable external status-terminal fact. The controller consumes
         either by ``invocation_id``, tolerant of the claim's source state; it never
-        assumes a ``DS`` record exists.
+        assumes a ``DS`` record exists. Return whether any claim released.
         """
         released: list[str | None] = []
         for claim in self._stores.claims.by_invocation(invocation_id):
@@ -392,3 +392,4 @@ class AdmissionController:
         for replica_id in released:
             if replica_id is not None:
                 self._on_release(replica_id)
+        return bool(released)

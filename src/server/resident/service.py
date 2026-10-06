@@ -561,11 +561,11 @@ class ResidentCapacityControl:
 
     def _settle_terminal_local(self, invocation_id: str, failed: bool) -> None:
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
-        self._admission.settle_invocation_terminal(invocation_id, reason)
+        released = self._admission.settle_invocation_terminal(invocation_id, reason)
         self._transient_failures.pop(invocation_id, None)
-        self._reap_attempt(invocation_id)
+        self._reap_attempt(invocation_id, released)
 
-    def _reap_attempt(self, invocation_id: str) -> None:
+    def _reap_attempt(self, invocation_id: str, released: bool = False) -> None:
         """Reap both ends of a resident invocation on its fenced terminal.
 
         The origin reap cancels the origin driver's lane and drops the worker-private
@@ -573,7 +573,8 @@ class ResidentCapacityControl:
         session (a task-addressed serve invocation); the serve-worker reap tears down
         the replica's engine request; then the durable session record is deleted. Every
         step is best effort — a gone worker or an already-closed session simply has
-        nothing to reap.
+        nothing to reap. Without a live attempt, as after a restart, the replica's
+        request is reaped only when ``released`` reports this terminal released a claim.
         """
         attempt = self._attempts.pop(invocation_id, None)
         origination = self._originations.pop(invocation_id, None)
@@ -589,7 +590,8 @@ class ResidentCapacityControl:
                     "resident_reap",
                     {"task_id": task_id, "call_correlation": call_correlation},
                 )
-            self._reap_replica_requests(invocation_id)
+            if released:
+                self._reap_replica_requests(invocation_id)
             return
         if attempt.serve is not None:
             attempt.serve.close_session(attempt.session_id)
@@ -1127,9 +1129,9 @@ class ResidentCapacityControl:
         tolerates an already-gone attempt, so a duplicate or late report is a no-op.
         """
         delivery.record_terminal(reason, detail)
-        self._admission.settle_invocation_terminal(invocation_id, reason)
+        released = self._admission.settle_invocation_terminal(invocation_id, reason)
         self._transient_failures.pop(invocation_id, None)
-        self._reap_attempt(invocation_id)
+        self._reap_attempt(invocation_id, released)
         if success:
             delivery.complete()
         else:
@@ -1195,8 +1197,8 @@ class ResidentCapacityControl:
         On startup a recorded external status fact replays through the same FSM so a
         claim rehydrated UNCERTAIN releases; there is no live client to finalize.
         """
-        self._admission.settle_invocation_terminal(invocation_id, reason)
-        self._reap_attempt(invocation_id)
+        released = self._admission.settle_invocation_terminal(invocation_id, reason)
+        self._reap_attempt(invocation_id, released)
 
     async def _relay_bootstrap(
         self,

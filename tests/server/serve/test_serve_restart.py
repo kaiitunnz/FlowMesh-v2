@@ -15,6 +15,7 @@ from server.resident import ClaimState, ReplicaState, ResidentSnapshot
 from server.resident.state import ClaimTerminalReason
 from server.serve import (
     ServeBindingStore,
+    ServeStatusTerminal,
     ServeTerminalStatus,
     ServeTerminalStore,
 )
@@ -131,12 +132,17 @@ def test_a_restart_fails_each_serve_request_it_ended_and_frees_its_slot(
         terminal = terminals.get(invocation_id)
         assert terminal is not None
         assert (terminal.status, terminal.detail) == (ServeTerminalStatus.FAILED, _LOST)
-        # The replica's engine request is reaped through the serve task's worker.
+        # The replica's engine request is reaped once, through the serve task's worker.
         assert (
-            "wkr-replica",
-            "resident_sidecar_reap",
-            {"invocation_id": invocation_id},
-        ) in deps.relays
+            deps.relays.count(
+                (
+                    "wkr-replica",
+                    "resident_sidecar_reap",
+                    {"invocation_id": invocation_id},
+                )
+            )
+            == 1
+        )
     (replica,) = stores.directory.by_family(_FAMILY)
     assert stores.credit_ledger.held(replica.replica_id) == 0
 
@@ -203,3 +209,26 @@ def test_a_restart_leaves_a_workflow_claim_to_its_ledger() -> None:
     assert claim.state is ClaimState.UNCERTAIN and claim.replica_id is not None
     assert stores.credit_ledger.held(claim.replica_id) == 1
     assert terminals.all() == []
+
+
+def test_a_restart_reaps_nothing_for_requests_that_already_settled() -> None:
+    svc, stores, _settled, _deps = _build()
+    _adopt(svc)
+    terminals = ServeTerminalStore()
+    for invocation_id in ("inv-1", "inv-2"):
+        asyncio.run(svc._originate_serve(_origination(_ServeDelivery(), invocation_id)))
+        asyncio.run(
+            svc._on_ack(
+                _ack(svc, ResidentBootstrapOutcome.ACKED, invocation_id=invocation_id)
+            )
+        )
+        terminals.record(
+            ServeStatusTerminal(
+                invocation_id=invocation_id, status=ServeTerminalStatus.COMPLETED
+            )
+        )
+        svc.reconcile_serve_terminal(invocation_id, ClaimTerminalReason.COMPLETED)
+
+    _svc, _stores, deps, _terminals = _restart(stores.to_snapshot(), terminals)
+
+    assert [r for r in deps.relays if r[1] == "resident_sidecar_reap"] == []
