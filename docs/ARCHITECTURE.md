@@ -409,8 +409,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   payload bypasses the root and the rendezvous for the whole request and response; the
   root dials only as the origin of a gated serve request, with its own node's identity.
   Both carry the same frames, fences, windows, and cancellation as the relay, and the
-  target sidecar's claim gate is the only authority over the traffic. Mutual TLS between the pair is the
-  default. An untrusted, unreachable, or policy-ineligible pair is carried over
+  target sidecar's claim gate is the only authority over the traffic. Mutual TLS between
+  the pair is the default. An untrusted, unreachable, or policy-ineligible pair is carried over
   `control_relay`, and a dial that fails before delivery falls back to it under the same
   held credit. Enable with `NETWORK_PLANE_PEER_ENABLED=true`. See
   [`NETWORK_PLANE.md`](NETWORK_PLANE.md).

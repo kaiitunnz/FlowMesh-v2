@@ -52,7 +52,7 @@ class ClaimGatedServiceCarriage(Protocol):
     def select(self, plan: ResidentCarriagePlan) -> FrameSink: ...
 
     def transport_of(self, session_id: str) -> str:
-        """The transport an open attempt's frames actually ride."""
+        """Return the transport an open attempt's frames actually ride."""
         ...
 
     def close(self, session_id: str) -> None:

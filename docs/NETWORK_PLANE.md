@@ -94,9 +94,8 @@ substitutes a peer.
 Eligibility is a property of the pair, not of topology. The resolver offers a peer
 transport only when the deployment enables it, both ends sit in the configured trust
 domain, the target is exposed at an admitted reachability class, the origin can dial a
-peer, the target serves the transport — its listener for
-`worker_direct`, its node's peer listener for `node_relay` — and directional evidence has
-not demoted the path.
+peer, the target serves the transport — its listener for `worker_direct`, its node's peer
+listener for `node_relay` — and directional evidence has not demoted the path.
 
 Mutual TLS is on by default, enabled with `NETWORK_PLANE_PEER_ENABLED=true` over the
 identities `scripts/dev/generate_peer_tls_certs.sh` issues. The deployment CA issues each
@@ -110,9 +109,9 @@ the stack mounts read-only at `/etc/ssl/peer` where the configured paths resolve
 base64-encoded only when a worker attachment is handed its transient copy. Material a
 node cannot read is fatal at start-up rather than a fallback to plaintext. The root's
 serve ingress dials nothing with material it cannot use, and its requests ride
-`control_relay`. An operator
-may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest a trusted network, which
-warns on every listener and still requires the same trusted-pair policy.
+`control_relay`. An operator may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest
+a trusted network, which warns on every listener and still requires the same trusted-pair
+policy.
 
 A dial that fails before any frame reaches the target records classified path evidence
 and falls through to the relay under the same claim, request identity, and held credit.
