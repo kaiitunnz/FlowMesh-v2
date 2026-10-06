@@ -1,17 +1,18 @@
 import logging
 import threading
 from collections import Counter
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import Field, PrivateAttr, SecretStr, field_validator
 from vastai import VastAI  # type: ignore
 
 from shared.schemas.worker import SSHBackendName
-from shared.utils import parse_secret_env
 
 from ... import env
 from ...hooks import PrincipalContext
 from ...utils.helpers import ResourcePool
+from ..provisioning import ProviderHandle, Removal, WorkerRecord
 from ..resource_manager import GpuArch
 from ..schemas import WorkerHardware, WorkerInfo, WorkerStatus
 from .base import (
@@ -75,8 +76,6 @@ class VastAIWorkerConfig(WorkerConfig):
             )
         return v
 
-    vast_api_key: SecretStr | None = parse_secret_env("VAST_API_KEY")
-    """VastAI API key"""
     docker_registry: str = env.FLOWMESH_REGISTRY
     """Docker registry to pull worker images from"""
     version: str = env.FLOWMESH_VERSION
@@ -128,6 +127,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
         vastai_client: VastAI,
         instance_pool: ResourcePool[int],
         owner: PrincipalContext,
+        handle: ProviderHandle | None = None,
     ) -> None:
         super().__init__(token, alias, config, owner)
         self.config: VastAIWorkerConfig
@@ -137,6 +137,10 @@ class VastAIWorkerAdapter(WorkerAdapter):
         self._instance_id: int | None = config.instance_id
         self._created_instance = False
         self._holds_instance = False
+        if handle is not None:
+            self._instance_id = handle.instance_id
+            self._created_instance = handle.created_instance
+            self._holds_instance = True
         self._hardware: dict[str, Any] | WorkerHardware | None = None
         self._reserved_offer_id: int | None = None
 
@@ -216,6 +220,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
             self._instance_id = instance_id
             self._created_instance = False
             self._holds_instance = True
+            self._report_handle()
             self._hardware = instance_info
             return True
 
@@ -292,6 +297,11 @@ class VastAIWorkerAdapter(WorkerAdapter):
                 continue
 
             new_instance_id = resp.get("new_contract", instance_id)
+            self._instance_id = new_instance_id
+            self._created_instance = True
+            self._holds_instance = True
+            self._reserved_offer_id = instance_id
+            self._report_handle()
             hardware = self._get_instance_info(new_instance_id)
             if hardware is None:
                 logger.debug(
@@ -300,11 +310,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
                     new_instance_id,
                 )
                 hardware = instance_info
-            self._instance_id = new_instance_id
-            self._created_instance = True
-            self._holds_instance = True
             self._hardware = hardware
-            self._reserved_offer_id = instance_id
             logger.debug(
                 "Successfully created VastAI instance %s for worker %s.",
                 new_instance_id,
@@ -315,6 +321,13 @@ class VastAIWorkerAdapter(WorkerAdapter):
 
     def holds_worker(self) -> bool:
         return self._holds_instance
+
+    def handle(self) -> ProviderHandle | None:
+        if not self._holds_instance or self._instance_id is None:
+            return None
+        return ProviderHandle(
+            instance_id=self._instance_id, created_instance=self._created_instance
+        )
 
     def _stop(self) -> bool:
         instance_id = self._instance_id
@@ -382,33 +395,76 @@ class VastAIWorkerAdapter(WorkerAdapter):
 
 
 class VastAIWorkerFactory(WorkerFactory):
-    def __init__(self, system_principal: PrincipalContext) -> None:
-        super().__init__(system_principal)
-        self._client_cache: dict[str, VastAI] = {}
+    def __init__(
+        self,
+        system_principal: PrincipalContext,
+        api_key: SecretStr | None,
+        alias_taken: Callable[[str], bool] = lambda _: False,
+    ) -> None:
+        super().__init__(system_principal, alias_taken)
+        self._client = (
+            VastAI(api_key=api_key.get_secret_value(), raw=True, quiet=True)
+            if api_key
+            else None
+        )
         self._worker_id_registry: Counter[str] = Counter()
         self._instance_pool = ResourcePool[int]()
 
     def create_worker(
         self, token: WorkerTokenType, config: VastAIWorkerConfig
     ) -> VastAIWorkerAdapter:
-        api_key = (
-            config.vast_api_key.get_secret_value() if config.vast_api_key else None
-        )
-        if not api_key:
-            raise ValueError("VastAI API key is required to create a VastAI worker.")
-
-        client = self._client_cache.get(api_key)
-        if client is None:
-            client = VastAI(api_key=api_key, raw=True, quiet=True)
-            self._client_cache[api_key] = client
         return VastAIWorkerAdapter(
             token=token,
             alias=self._resolve_worker_alias(config),
             config=config,
-            vastai_client=client,
+            vastai_client=self._deployment_client(),
             instance_pool=self._instance_pool,
             owner=self.system_principal,
         )
+
+    def attach(
+        self, token: WorkerTokenType, record: WorkerRecord
+    ) -> VastAIWorkerAdapter:
+        return VastAIWorkerAdapter(
+            token=token,
+            alias=record.alias,
+            config=VastAIWorkerConfig.model_validate(record.config),
+            vastai_client=self._deployment_client(),
+            instance_pool=self._instance_pool,
+            owner=self.system_principal,
+            handle=record.handle,
+        )
+
+    def remove(self, handle: ProviderHandle) -> Removal:
+        instance_id = handle.instance_id
+        assert instance_id is not None
+        if self._client is None:
+            return Removal.UNKNOWN
+        try:
+            if handle.created_instance:
+                err = self._client.destroy_instance(id=instance_id)
+            else:
+                err = self._client.stop_instance(id=instance_id)
+            if err is None:
+                return Removal.REMOVED
+            # The client answers a failure and an instance already gone alike.
+            rows = self._client.show_instances()
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove VastAI instance %s: %s", instance_id, repr(exc)
+            )
+            return Removal.UNKNOWN
+        if isinstance(rows, list) and all(
+            isinstance(row, dict) and row.get("id") != instance_id for row in rows
+        ):
+            return Removal.ABSENT
+        logger.warning("Failed to remove VastAI instance %s: %s", instance_id, err)
+        return Removal.UNKNOWN
+
+    def _deployment_client(self) -> VastAI:
+        if self._client is None:
+            raise ValueError("VAST_API_KEY is required to manage VastAI workers.")
+        return self._client
 
     def destroy_worker(self, worker: WorkerAdapter) -> None:
         if not isinstance(worker, VastAIWorkerAdapter):
@@ -425,15 +481,21 @@ class VastAIWorkerFactory(WorkerFactory):
 
     def _get_next_worker_alias(self) -> str:
         prefix = "flowmesh_vastai_worker_"
-        next_id = self._worker_id_registry[prefix]
-        self._worker_id_registry[prefix] += 1
-        return f"{prefix}{next_id}"
+        while True:
+            next_id = self._worker_id_registry[prefix]
+            self._worker_id_registry[prefix] += 1
+            if not self._alias_taken(alias := f"{prefix}{next_id}"):
+                return alias
 
 
-def get_provider_spec(system_principal: PrincipalContext) -> ProviderSpec:
+def get_provider_spec(
+    system_principal: PrincipalContext,
+    api_key: SecretStr | None,
+    alias_taken: Callable[[str], bool] = lambda _: False,
+) -> ProviderSpec:
     return ProviderSpec(
         name=_PROVIDER_NAME,
         config_cls=VastAIWorkerConfig,
         adapter_cls=VastAIWorkerAdapter,
-        factory=VastAIWorkerFactory(system_principal),
+        factory=VastAIWorkerFactory(system_principal, api_key, alias_taken),
     )

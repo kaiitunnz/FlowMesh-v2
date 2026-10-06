@@ -146,7 +146,11 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self._released: RecentSet[str] = RecentSet(_WORKER_ID_MEMORY)
         # Worker ids whose registration reached the root.
         self._registered: RecentSet[str] = RecentSet(_WORKER_ID_MEMORY)
-        # Guards the three id sets.
+        # Ids a previous supervisor run of this node registered, unregistered again on
+        # each heartbeat while the root still records them here: the root hears an
+        # unregister over pub/sub, so it can miss one sent while it starts.
+        self._previous: set[str] = set()
+        # Guards the id sets.
         self._ids_lock = Lock()
         self._pending_unregisters: set[asyncio.Task[None]] = set()
         # Set once this supervisor starts stopping: a worker it admitted then would be
@@ -157,11 +161,22 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         """Refuse registrations, so a worker registers with the next supervisor."""
         self._stopping = True
 
+    def retire_previous_registrations(self, worker_ids: list[str]) -> None:
+        """Unregister the ids a previous supervisor run of this node registered."""
+        for worker_id in worker_ids:
+            self.worker_id_released(worker_id)
+        with self._ids_lock:
+            self._previous.update(worker_ids)
+
     def reconcile_workers(self) -> None:
         """Release every binding whose record the root does not hold for this node, so
         the worker registers again."""
         if self._stopping:
             return
+        try:
+            self._repeat_previous_unregisters()
+        except Exception as exc:
+            self._logger.warning("Failed to repeat earlier unregisters: %s", exc)
         with self._lock:
             missing, foreign = self._unowned_bindings_locked()
             # The root's record of a foreign id is another node's live worker, which
@@ -176,6 +191,22 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                 released,
                 ", ".join(gone),
             )
+
+    def _repeat_previous_unregisters(self) -> None:
+        with self._ids_lock:
+            previous = list(self._previous)
+        if not previous:
+            return
+        with self._redis.control_pipeline() as pipe:
+            for worker_id in previous:
+                pipe.hget(worker_key(worker_id), "node_alias")
+            aliases = pipe.execute()
+        for worker_id, alias in zip(previous, aliases):
+            if alias == self._node_alias:
+                self._relay_service.add_unregister(worker_id, self._node_alias)
+            else:
+                with self._ids_lock:
+                    self._previous.discard(worker_id)
 
     def _unowned_bindings_locked(self) -> tuple[list[str], list[str]]:
         """The bound ids the root holds no record of, and those whose record another
@@ -296,7 +327,24 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                 [*self._registry.bound_worker_ids(), *released],
             )
             incarnation = int(worker_meta["incarnation"])
-            self._registry.set_worker_id(token, worker_id)
+            try:
+                self._worker_manager.commit_worker_id(worker, worker_id)
+            except Exception as exc:
+                self._logger.error(
+                    "Failed to record worker %s's id %s: %s",
+                    worker.alias,
+                    worker_id,
+                    exc,
+                )
+                committed = False
+            else:
+                committed = True
+                self._registry.set_worker_id(token, worker_id)
+        if not committed:
+            self.worker_id_released(worker_id)
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE, "Supervisor could not record the worker"
+            )
         self._task_listener.add_worker(worker_id)
         worker.set_worker_id(worker_id)
         hardware = _reported_hardware(worker_meta, worker.alias, self._logger)
@@ -597,6 +645,10 @@ class GrpcServer:
     def begin_shutdown(self) -> None:
         """Refuse worker registrations while the supervisor stops."""
         self._servicer.begin_shutdown()
+
+    def retire_previous_registrations(self, worker_ids: list[str]) -> None:
+        """Unregister the ids a previous supervisor run of this node registered."""
+        self._servicer.retire_previous_registrations(worker_ids)
 
     def reconcile_workers(self) -> None:
         """Release the workers the root does not record for this node."""

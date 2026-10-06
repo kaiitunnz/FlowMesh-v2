@@ -50,6 +50,7 @@ from shared.tasks.worker_message import (
     NetworkInfo,
 )
 from shared.tasks.worker_message import WorkerHardware as ReportedHardware
+from tests.server.supervisor_helpers import memory_store
 
 SECRET = "s3cret-shared-across-the-fleet"
 
@@ -214,6 +215,7 @@ class TestDockerlessHost:
             config_path=str(tmp_path / "absent.yaml"),
             registry=WorkerRegistry(),
             logger=logging.getLogger("test"),
+            store=memory_store(),
         )
 
         #: The supervisor is alive and the external provider is usable, which is
@@ -238,6 +240,7 @@ class TestDockerlessHost:
             config_path=str(tmp_path / "absent.yaml"),
             registry=WorkerRegistry(),
             logger=logging.getLogger("test"),
+            store=memory_store(),
         )
         mgr._is_started = True
         mgr._default_worker_config = {}
@@ -331,6 +334,7 @@ def _build_servicer(
         "/nonexistent-worker-config.yaml",
         registry,
         logging.getLogger("test.wm"),
+        memory_store(),
         capacity_change_callback=capacity_change_callback,
     )
     factory = manager._providers["external"].factory

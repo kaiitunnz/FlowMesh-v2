@@ -64,8 +64,14 @@ class TestServerWorkerConfig:
         cfg = ServerWorkerConfig(
             default_worker_config={"tags": "gpu"},
             workers=[
-                WorkerInitConfig(provider="docker"),
-                WorkerInitConfig(provider="vastai", init_on_start=False),
+                WorkerInitConfig(
+                    provider="docker", worker_config={"worker_alias": "a"}
+                ),
+                WorkerInitConfig(
+                    provider="vastai",
+                    init_on_start=False,
+                    worker_config={"worker_alias": "b"},
+                ),
             ],
         )
         assert len(cfg.workers) == 2

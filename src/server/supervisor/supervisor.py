@@ -340,12 +340,13 @@ def _run_supervisor(
     from shared.utils.time import now_iso
 
     from ..clients import RedisClient
-    from ..clients.redis import resident_relay_client
+    from ..clients.redis import resident_relay_client, supervisor_state_client
     from ..network.reverse_relay import BinaryRedis
     from ..registries.node import NodeRegistry
     from ..registries.worker import WorkerRegistry as WorkerRecords
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
+    from .provisioning import WorkerProvisioningStore
     from .registry import WorkerRegistry as WorkerAdapterRegistry
     from .resource_manager import ResourceManager
     from .services.command_listener import CommandListener
@@ -450,7 +451,9 @@ def _run_supervisor(
         wm_cfg.config_path,
         worker_adapter_registry,
         logger,
+        WorkerProvisioningStore(supervisor_state_client(redis_cfg), identity),
         capacity_change_callback=lifecycle.heartbeat_now,
+        vast_api_key=wm_cfg.vast_api_key,
     )
     node_relays: NodeRelays | None = None
     if network_cfg.enabled:
@@ -560,16 +563,23 @@ def _run_supervisor(
         # Startup — lifecycle already started above (registration is synchronous)
         relay_service.start()
         task_listener.start()
+        grpc_server.retire_previous_registrations(await worker_manager.restore())
         await worker_manager.start()
         command_listener.start()
         await grpc_server.start()
+        worker_manager.grpc_ready()
         if node_relays is not None:
             node_relays.start(loop)
         if peer_listener is not None:
             await peer_listener.start()
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
-        lifecycle.set_heartbeat_callback(grpc_server.reconcile_workers)
+
+        def _on_heartbeat() -> None:
+            grpc_server.reconcile_workers()
+            worker_manager.on_heartbeat()
+
+        lifecycle.set_heartbeat_callback(_on_heartbeat)
         logger.info("Supervisor ready for node %s", node_id)
 
         # Wait for termination signal

@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from enum import StrEnum
 from typing import Any
 
@@ -20,6 +21,7 @@ from shared.utils.docker import sanitize_container_name
 from ... import env
 from ...hooks import PrincipalContext
 from ...utils.helpers import get_docker_client
+from ..provisioning import ProviderHandle, Removal, WorkerRecord
 from ..resource_manager import GpuArch, ResourceManager
 from ..schemas import WorkerHardware, WorkerInfo, WorkerStatus
 from .base import (
@@ -46,6 +48,76 @@ _ssh_network_suffix = sanitize_container_name(env.NODE_ALIAS, maxlen=32)
 _SSH_NETWORK_NAME = f"flowmesh_ssh_{_ssh_network_suffix or 'default'}"
 
 logger = logging.getLogger("supervisor")
+
+
+def _container_token(container: Container) -> str | None:
+    for entry in (container.attrs.get("Config") or {}).get("Env") or []:
+        name, _, value = entry.partition("=")
+        if name == "WORKER_TOKEN":
+            return value
+    return None
+
+
+def _remove_ssh_resources(client: DockerClient, container_name: str) -> None:
+    """Remove the SSH session containers and staging volumes of a worker container."""
+    # A volume is in use until the container mounting it is removed.
+    _remove_ssh_containers(client, container_name)
+    _remove_ssh_volumes(client, container_name)
+
+
+def _remove_ssh_containers(client: DockerClient, container_name: str) -> None:
+    try:
+        containers = client.containers.list(
+            all=True, filters={"label": f"{_SSH_OWNER_LABEL}={container_name}"}
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to list SSH session containers for worker %s: %s",
+            container_name,
+            repr(exc),
+        )
+        return
+
+    # The worker is stopped or gone, so its SSH containers are killed outright: a
+    # staging container's shell ignores SIGTERM.
+    for ssh_container in containers:
+        try:
+            ssh_container.remove(force=True)
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove SSH session container %s: %s",
+                ssh_container.name,
+                repr(exc),
+            )
+
+
+def _remove_ssh_volumes(client: DockerClient, container_name: str) -> None:
+    try:
+        volumes = client.volumes.list(
+            filters={
+                "label": [
+                    f"{_SSH_OWNER_LABEL}={container_name}",
+                    f"{_SSH_MANAGED_LABEL}=true",
+                ]
+            }
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to list SSH staging volumes for worker %s: %s",
+            container_name,
+            repr(exc),
+        )
+        return
+
+    for volume in volumes:
+        try:
+            volume.remove(force=True)
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove SSH staging volume %s: %s",
+                volume.name,
+                repr(exc),
+            )
 
 
 def _is_removal_in_progress(exc: Exception) -> bool:
@@ -166,6 +238,7 @@ class DockerWorkerAdapter(WorkerAdapter):
         config: DockerWorkerConfig,
         docker_client: DockerClient,
         owner: PrincipalContext,
+        container_id: str | None = None,
     ) -> None:
         if config.worker_type == WorkerType.GPU and (
             cuda_devices is None or len(cuda_devices) == 0
@@ -178,11 +251,13 @@ class DockerWorkerAdapter(WorkerAdapter):
         self.container_name = container_name
         self.cuda_devices = cuda_devices
         self.gpu_arch = gpu_arch
+        # The devices this adapter holds in the resource manager.
+        self.held_gpus = cuda_devices
 
         self._docker = docker_client
         self._status: WorkerStatus = WorkerStatus.STOPPED
         self._hardware: dict[str, Any] | WorkerHardware | None = None
-        self._is_started = False
+        self._container_id = container_id
 
     @property
     def status(self) -> WorkerStatus:
@@ -208,6 +283,45 @@ class DockerWorkerAdapter(WorkerAdapter):
 
     async def prepare(self) -> None:
         self._hardware = await asyncio.to_thread(self._probe_hardware)
+
+    def observe_reported_hardware(self, hardware: WorkerHardware) -> None:
+        if self._hardware is None:
+            self._hardware = hardware
+
+    def provisioned_fields(self) -> dict[str, Any]:
+        return {
+            "container_name": self.container_name,
+            "gpus": self.held_gpus,
+            "gpu_arch": self.gpu_arch.value if self.gpu_arch else None,
+        }
+
+    def handle(self) -> ProviderHandle | None:
+        if self._container_id is None:
+            return None
+        return ProviderHandle(
+            container_id=self._container_id, container_name=self.container_name
+        )
+
+    def recover_launch(self) -> bool | None:
+        try:
+            container = self._docker.containers.get(self.container_name)
+        except NotFound:
+            return False
+        except Exception as exc:
+            logger.warning(
+                "Failed to inspect Docker container %s: %s", self.container_name, exc
+            )
+            return None
+        if _container_token(container) != self.token:
+            logger.error(
+                "Container %s does not run worker %s; leaving it alone",
+                self.container_name,
+                self.alias,
+            )
+            return None
+        self._container_id = container.id
+        self._report_handle()
+        return True
 
     def get_image_name(self) -> str:
         return get_worker_image_name(
@@ -284,12 +398,19 @@ class DockerWorkerAdapter(WorkerAdapter):
             return False
 
         if existing is not None:
+            if existing.id != self._container_id:
+                logger.error(
+                    "Container %s is not worker %s's; remove it to start the worker",
+                    self.container_name,
+                    self.alias,
+                )
+                return False
             if existing.status == "running":
-                self._is_started = True
                 logger.warning("Container %s is already running.", self.container_name)
                 return True
             if not self._remove_stale_container(existing):
                 return False
+            self._container_id = None
 
         environment: dict[str, str] = self._base_environment()
         labels: dict[str, str] = self._base_labels()
@@ -318,15 +439,18 @@ class DockerWorkerAdapter(WorkerAdapter):
                 run_kwargs["shm_size"] = _GPU_WORKER_SHM_SIZE
             if docker_gid:
                 run_kwargs["group_add"] = [docker_gid]
-            self._docker.containers.run(**run_kwargs)
-            self._is_started = True
+            container = self._docker.containers.run(**run_kwargs)
         except Exception as exc:
             logger.error(
                 "Failed to start Docker container %s: %s",
                 self.container_name,
                 exc,
             )
+            # A launch that raised may still have created its container.
+            self.recover_launch()
             return False
+        self._container_id = container.id
+        self._report_handle()
 
         if self._hardware is None:
             self._hardware = self._probe_hardware()
@@ -391,23 +515,25 @@ class DockerWorkerAdapter(WorkerAdapter):
         return self._parse_hardware_output(output, output_prefix)
 
     def holds_worker(self) -> bool:
-        return self._is_started
+        return self._container_id is not None
 
     def _held_worker_runs(self) -> bool:
         return self._get_running_container() is not None
 
     def _stop(self) -> bool:
-        is_started = self._is_started
+        container_id = self._container_id
+        if container_id is None:
+            _remove_ssh_resources(self._docker, self.container_name)
+            return True
         try:
-            container = self._docker.containers.get(self.container_name)
+            container = self._docker.containers.get(container_id)
         except NotFound:
-            self._is_started = False
-            if is_started:
-                logger.warning("Container %s not found.", self.container_name)
-            self._remove_owned_ssh_resources()
+            self._container_id = None
+            logger.warning("Container %s not found.", self.container_name)
+            _remove_ssh_resources(self._docker, self.container_name)
             return True
         except Exception as exc:
-            self._log_failure(is_started, "fetch", exc)
+            self._log_failure("fetch", exc)
             return False
 
         # The worker stops first, so its shutdown gives up the SSH tasks it runs before
@@ -418,86 +544,27 @@ class DockerWorkerAdapter(WorkerAdapter):
         except NotFound:
             pass
         except Exception as exc:
-            self._log_failure(is_started, "stop", exc)
+            self._log_failure("stop", exc)
             return False
         try:
             container.remove()
         except NotFound:
             pass
         except Exception as exc:
-            self._log_failure(is_started, "remove", exc)
+            self._log_failure("remove", exc)
             return False
         finally:
-            self._remove_owned_ssh_resources()
-        self._is_started = False
+            _remove_ssh_resources(self._docker, self.container_name)
+        self._container_id = None
         return True
 
-    def _log_failure(self, is_started: bool, action: str, exc: Exception) -> None:
-        log_fn = logger.error if is_started else logger.warning
-        log_fn(
+    def _log_failure(self, action: str, exc: Exception) -> None:
+        logger.error(
             "Failed to %s Docker container %s: %s",
             action,
             self.container_name,
             repr(exc),
         )
-
-    def _remove_owned_ssh_resources(self) -> None:
-        # A volume is in use until the container mounting it is removed.
-        self._remove_owned_ssh_containers()
-        self._remove_owned_ssh_volumes()
-
-    def _remove_owned_ssh_containers(self) -> None:
-        try:
-            containers = self._docker.containers.list(
-                all=True, filters={"label": f"{_SSH_OWNER_LABEL}={self.container_name}"}
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to list SSH session containers for worker %s: %s",
-                self.container_name,
-                repr(exc),
-            )
-            return
-
-        # The worker is stopped or gone, so its SSH containers are killed outright: a
-        # staging container's shell ignores SIGTERM.
-        for ssh_container in containers:
-            try:
-                ssh_container.remove(force=True)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to remove SSH session container %s: %s",
-                    ssh_container.name,
-                    repr(exc),
-                )
-
-    def _remove_owned_ssh_volumes(self) -> None:
-        try:
-            volumes = self._docker.volumes.list(
-                filters={
-                    "label": [
-                        f"{_SSH_OWNER_LABEL}={self.container_name}",
-                        f"{_SSH_MANAGED_LABEL}=true",
-                    ]
-                }
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to list SSH staging volumes for worker %s: %s",
-                self.container_name,
-                repr(exc),
-            )
-            return
-
-        for volume in volumes:
-            try:
-                volume.remove(force=True)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to remove SSH staging volume %s: %s",
-                    volume.name,
-                    repr(exc),
-                )
 
     def _base_environment(self) -> dict[str, str]:
         environment = super()._base_environment()
@@ -624,8 +691,10 @@ class DockerWorkerAdapter(WorkerAdapter):
         return cmd
 
     def _get_running_container(self) -> Container | None:
+        if self._container_id is None:
+            return None
         try:
-            container = self._docker.containers.get(self.container_name)
+            container = self._docker.containers.get(self._container_id)
         except NotFound:
             return None
         except Exception as exc:
@@ -688,8 +757,12 @@ class DockerWorkerFactory(WorkerFactory):
     _CONTAINER_NAME_MAX_LEN = 128
     _CONTAINER_NAME_ALLOWED_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
-    def __init__(self, system_principal: PrincipalContext) -> None:
-        super().__init__(system_principal)
+    def __init__(
+        self,
+        system_principal: PrincipalContext,
+        alias_taken: Callable[[str], bool] = lambda _: False,
+    ) -> None:
+        super().__init__(system_principal, alias_taken)
         self._rm = ResourceManager.get_instance()
         self._docker = get_docker_client()
         self._worker_id_registry: Counter[str] = Counter()
@@ -726,12 +799,60 @@ class DockerWorkerFactory(WorkerFactory):
         )
         return worker
 
+    def attach(
+        self, token: WorkerTokenType, record: WorkerRecord
+    ) -> DockerWorkerAdapter:
+        config = DockerWorkerConfig.model_validate(record.config)
+        worker = DockerWorkerAdapter(
+            token=token,
+            alias=record.alias,
+            container_name=record.container_name or record.alias,
+            cuda_devices=record.gpus,
+            gpu_arch=GpuArch(record.gpu_arch) if record.gpu_arch else None,
+            config=config,
+            docker_client=self._docker,
+            owner=self.system_principal,
+            container_id=record.handle.container_id if record.handle else None,
+        )
+        worker.held_gpus = None
+        if record.gpus:
+            try:
+                self._rm.reserve_gpus(devices=record.gpus)
+            except ValueError as exc:
+                logger.error(
+                    "Could not hold GPUs %s of worker %s again: %s",
+                    record.gpus,
+                    record.alias,
+                    exc,
+                )
+            else:
+                worker.held_gpus = list(record.gpus)
+        return worker
+
+    def remove(self, handle: ProviderHandle) -> Removal:
+        assert handle.container_id is not None and handle.container_name is not None
+        try:
+            self._docker.containers.get(handle.container_id).remove(force=True)
+            outcome = Removal.REMOVED
+        except NotFound:
+            outcome = Removal.ABSENT
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove Docker container %s: %s",
+                handle.container_name,
+                repr(exc),
+            )
+            return Removal.UNKNOWN
+        _remove_ssh_resources(self._docker, handle.container_name)
+        return outcome
+
     def destroy_worker(self, worker: WorkerAdapter) -> None:
         if not isinstance(worker, DockerWorkerAdapter):
             raise ValueError("Invalid worker type")
 
         # Taken, not read: a repeated destroy must not drop another holder's hold.
-        devices, worker.cuda_devices = worker.cuda_devices, None
+        devices, worker.held_gpus = worker.held_gpus, None
+        worker.cuda_devices = None
         if devices:
             self._rm.deallocate_gpus(devices)
 
@@ -796,14 +917,19 @@ class DockerWorkerFactory(WorkerFactory):
                 prefix = "flowmesh_server_worker_gpu_"
             case _:
                 raise ValueError(f"Unsupported worker type: {worker_type}")
-        next_id = self._get_next_worker_id(prefix)
-        return f"{prefix}{next_id}"
+        alias = f"{prefix}{self._get_next_worker_id(prefix)}"
+        while self._alias_taken(alias):
+            alias = f"{prefix}{self._get_next_worker_id(prefix)}"
+        return alias
 
 
-def get_provider_spec(system_principal: PrincipalContext) -> ProviderSpec:
+def get_provider_spec(
+    system_principal: PrincipalContext,
+    alias_taken: Callable[[str], bool] = lambda _: False,
+) -> ProviderSpec:
     return ProviderSpec(
         name=_PROVIDER_NAME,
         config_cls=DockerWorkerConfig,
         adapter_cls=DockerWorkerAdapter,
-        factory=DockerWorkerFactory(system_principal),
+        factory=DockerWorkerFactory(system_principal, alias_taken),
     )

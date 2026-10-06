@@ -10,7 +10,6 @@ import redis
 from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
 
 from ..config import IdentityConfig
-from .adapters.base import WorkerConfig
 
 logger = logging.getLogger("supervisor")
 
@@ -61,7 +60,7 @@ class WorkerRecord(BaseModel):
     worker_id: str | None = None
 
 
-def recorded_config(config: WorkerConfig) -> dict[str, Any]:
+def recorded_config(config: BaseModel) -> dict[str, Any]:
     """``config``'s settings without its secret fields, which a rebuilt config reads
     from the environment again."""
     secret = {

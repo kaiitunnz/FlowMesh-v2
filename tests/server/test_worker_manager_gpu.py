@@ -207,12 +207,12 @@ class TestSharedHolds:
         devices, _ = rm.reserve_gpus(devices=[3])
         rm.claim_gpus_by_uuid(["GPU-3"])
         worker = object.__new__(DockerWorkerAdapter)
-        worker.cuda_devices = devices
+        worker.cuda_devices = worker.held_gpus = devices
 
         factory.destroy_worker(worker)
         factory.destroy_worker(worker)
 
-        assert worker.cuda_devices is None
+        assert worker.held_gpus is None
         assert rm.available_gpu_count() == 0
 
 

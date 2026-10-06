@@ -50,7 +50,7 @@ class WorkerRegistry:
         alias = worker.alias
         with self._get_state() as state:
             if token in state.registry:
-                raise ValueError(f"Worker with token '{token}' already exists")
+                raise ValueError(f"Worker with the token of '{alias}' already exists")
             if alias in state.alias_token_map:
                 raise ValueError(f"Worker with alias '{alias}' already exists")
             state.registry[token] = worker
