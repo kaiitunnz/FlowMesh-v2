@@ -20,6 +20,7 @@ from server.supervisor.adapters.docker import (
     WorkerType,
     _is_removal_in_progress,
 )
+from server.supervisor.provisioning import DockerHandle
 from server.supervisor.schemas import WorkerStatus
 
 _IN_PROGRESS = "removal of container gpu_0 is already in progress"
@@ -32,7 +33,9 @@ def _api_error(status_code: int, explanation: str | None) -> APIError:
     return APIError("boom", response=response, explanation=explanation)
 
 
-def _adapter(docker_client: MagicMock) -> DockerWorkerAdapter:
+def _adapter(
+    docker_client: MagicMock, container_id: str | None = None
+) -> DockerWorkerAdapter:
     adapter = DockerWorkerAdapter(
         token=WorkerTokenType("worker-token"),
         alias="gpu_0",
@@ -53,13 +56,18 @@ def _adapter(docker_client: MagicMock) -> DockerWorkerAdapter:
             principal_type="user",
             scopes=[],
         ),
+        handle=(
+            DockerHandle(container_id=container_id, container_name="gpu_0")
+            if container_id
+            else None
+        ),
     )
     adapter._hardware = {}
     return adapter
 
 
 def _stale_container(remove_error: Exception | None) -> MagicMock:
-    container = MagicMock(status="exited")
+    container = MagicMock(status="exited", id="c-stale")
     container.remove.side_effect = remove_error
     return container
 
@@ -145,19 +153,19 @@ class TestStartWithStaleContainer:
     def test_removes_a_stale_container_then_starts(self) -> None:
         stale = _stale_container(None)
         client = self._client(stale)
-        assert _adapter(client)._start() is True
+        assert _adapter(client, "c-stale")._start() is True
         stale.remove.assert_called_once_with(force=True)
         client.containers.run.assert_called_once()
 
     def test_waits_out_a_concurrent_removal_then_starts(self) -> None:
         stale = _stale_container(_api_error(409, _IN_PROGRESS))
         client = self._client(stale, SimpleNamespace(), NotFound("gone"))
-        assert _adapter(client)._start() is True
+        assert _adapter(client, "c-stale")._start() is True
         assert client.containers.run.call_args.kwargs["name"] == "gpu_0"
 
     def test_starts_when_the_container_is_gone_before_the_remove(self) -> None:
         client = self._client(_stale_container(NotFound("gone")))
-        assert _adapter(client)._start() is True
+        assert _adapter(client, "c-stale")._start() is True
         client.containers.run.assert_called_once()
 
     def test_other_conflicts_fail_the_start(
@@ -168,7 +176,7 @@ class TestStartWithStaleContainer:
         )
         client = self._client(stale)
         with caplog.at_level(logging.ERROR, logger="supervisor"):
-            assert _adapter(client)._start() is False
+            assert _adapter(client, "c-stale")._start() is False
         client.containers.run.assert_not_called()
         assert "You cannot remove a running container" in caplog.text
 
@@ -178,13 +186,13 @@ class TestStartWithStaleContainer:
         monkeypatch.setattr(docker_adapter, "_REMOVAL_IN_PROGRESS_TIMEOUT", 0)
         stale = _stale_container(_api_error(409, _IN_PROGRESS))
         client = self._client(stale, SimpleNamespace())
-        assert _adapter(client)._start() is False
+        assert _adapter(client, "c-stale")._start() is False
         client.containers.run.assert_not_called()
 
     def test_a_running_container_is_kept(self) -> None:
-        running = MagicMock(status="running")
+        running = MagicMock(status="running", id="c-stale")
         client = self._client(running)
-        assert _adapter(client)._start() is True
+        assert _adapter(client, "c-stale")._start() is True
         running.remove.assert_not_called()
         client.containers.run.assert_not_called()
 
@@ -214,7 +222,7 @@ class TestStopOrder:
         worker.stop.side_effect = lambda **_: events.append("worker stopped")
         worker.remove.side_effect = lambda **_: events.append("worker removed")
 
-        assert _adapter(self._docker(events, worker))._stop() is True
+        assert _adapter(self._docker(events, worker), "c1")._stop() is True
 
         assert events == [
             "worker stopped",
@@ -228,7 +236,7 @@ class TestStopOrder:
         worker = MagicMock()
         worker.stop.side_effect = APIError("stuck")
 
-        assert _adapter(self._docker(events, worker))._stop() is False
+        assert _adapter(self._docker(events, worker), "c1")._stop() is False
 
         assert events == []
 
@@ -240,7 +248,7 @@ class TestStopOrder:
         worker.stop.side_effect = lambda **_: events.append("worker stopped")
         worker.remove.side_effect = APIError("busy")
 
-        assert _adapter(self._docker(events, worker))._stop() is False
+        assert _adapter(self._docker(events, worker), "c1")._stop() is False
 
         assert events == [
             "worker stopped",
@@ -251,7 +259,7 @@ class TestStopOrder:
     def test_a_missing_worker_has_its_ssh_resources_removed(self) -> None:
         events: list[str] = []
 
-        assert _adapter(self._docker(events, NotFound("gone")))._stop() is True
+        assert _adapter(self._docker(events, NotFound("gone")), "c1")._stop() is True
 
         assert events == ["ssh removed", "volume removed"]
 
@@ -371,7 +379,7 @@ class TestConcurrentStops:
         docker_client.containers.get.return_value = worker
         docker_client.containers.list.return_value = []
         docker_client.volumes.list.return_value = []
-        adapter = _adapter(docker_client)
+        adapter = _adapter(docker_client, "c1")
         adapter.set_status(WorkerStatus.RUNNING)
 
         first = asyncio.ensure_future(adapter.stop())

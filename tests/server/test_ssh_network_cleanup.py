@@ -10,6 +10,7 @@ from server.supervisor.adapters.docker import (
 )
 from server.supervisor.manager import WorkerManager
 from server.supervisor.registry import WorkerRegistry
+from tests.server.supervisor_helpers import memory_store
 
 
 def _mock_net(
@@ -124,7 +125,11 @@ class TestWorkerManagerStop:
             ),
         ):
             manager = WorkerManager(
-                MagicMock(), "missing.yaml", WorkerRegistry(), MagicMock()
+                MagicMock(),
+                "missing.yaml",
+                WorkerRegistry(),
+                MagicMock(),
+                memory_store(),
             )
             manager._is_started = True
 

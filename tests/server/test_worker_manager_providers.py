@@ -14,6 +14,7 @@ from server.supervisor.manager import (
     WorkerManager,
 )
 from server.supervisor.registry import WorkerRegistry
+from tests.server.supervisor_helpers import memory_store
 
 
 def _manager() -> WorkerManager:
@@ -22,19 +23,20 @@ def _manager() -> WorkerManager:
         config_path="unused",
         registry=WorkerRegistry(),
         logger=logging.getLogger("test.supervisor"),
+        store=memory_store(),
     )
 
 
 def test_an_unavailable_docker_provider_leaves_the_others(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    def no_docker(_: PrincipalContext) -> None:
+    def no_docker(*_: object) -> None:
         raise DockerException("Error while fetching server API version")
 
     vastai_spec = MagicMock()
     vastai_spec.name = "vastai"
     monkeypatch.setattr(manager_module, "docker_provider_spec", no_docker)
-    monkeypatch.setattr(manager_module, "vastai_provider_spec", lambda _: vastai_spec)
+    monkeypatch.setattr(manager_module, "vastai_provider_spec", lambda *_: vastai_spec)
 
     with caplog.at_level(logging.WARNING, logger="test.supervisor"):
         wm = _manager()
@@ -50,7 +52,7 @@ def test_an_unavailable_docker_provider_leaves_the_others(
 async def test_a_worker_of_an_unavailable_provider_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def unavailable(_: PrincipalContext) -> None:
+    def unavailable(*_: object) -> None:
         raise RuntimeError("provider unavailable")
 
     monkeypatch.setattr(manager_module, "docker_provider_spec", unavailable)

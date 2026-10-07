@@ -3,15 +3,50 @@
 import logging
 import os
 from collections.abc import Callable
+from typing import Any
 from unittest.mock import MagicMock
 from weakref import WeakSet
 
+import fakeredis
+from pydantic import SecretStr
+
+from server.config import IdentityConfig
 from server.registries.node import NodeRegistry
 from server.supervisor.manager import WorkerManager
+from server.supervisor.provisioning import (
+    ProvisionedWorkers,
+    RunState,
+    WorkerProvisioningStore,
+    WorkerRecord,
+)
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.lifecycle import Lifecycle
 
 _LOGGER = logging.getLogger("test.supervisor")
+
+
+def memory_store(identity: IdentityConfig | None = None) -> WorkerProvisioningStore:
+    """A supervisor state store over an in-memory Redis."""
+    return WorkerProvisioningStore(
+        fakeredis.FakeRedis(decode_responses=True), identity or IdentityConfig()
+    )
+
+
+def worker_record(
+    alias: str,
+    provider: str = "docker",
+    token: str = "tok",
+    config: dict[str, Any] | None = None,
+    **fields: Any,
+) -> WorkerRecord:
+    """A record of a running worker, unless ``fields`` say otherwise."""
+    return WorkerRecord(
+        alias=alias,
+        provider=provider,
+        config=config or {},
+        token=SecretStr(token),
+        **{"run_state": RunState.RUNNING, **fields},
+    )
 
 
 class StubRegistry(NodeRegistry):
@@ -55,6 +90,13 @@ class StubWorkerManager(WorkerManager):
         self.config_path = os.devnull
         self.logger = _LOGGER
         self._registry = registry if registry is not None else MagicMock()
+        self.store = memory_store()
+        self._provisioned = ProvisionedWorkers(self.store)
+        self._removing = {}
+        self._to_provision = []
+        self._loop = None
+        self._stopping = False
+        self._tasks = set()
         self._is_started = True
         self._default_worker_config = {}
         self._capacity_change_callback: Callable[[], None] | None = None

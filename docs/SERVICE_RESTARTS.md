@@ -53,6 +53,32 @@ requeue at the cost of an attempt when they can safely re-run and fail
 otherwise. A recreated node's supervisor re-creates its configured workers,
 which re-register themselves on startup. No cordon step is required.
 
+**Undrained supervisor stops.** A supervisor that stops without a drain — a
+crash, an OOM kill, or a `docker kill` of the `server` container — leaves its
+Docker and Vast.ai workers running. When it starts again it takes them back from
+their records: each keeps its container or instance and registers again under a
+new id, and the tasks it held requeue at the cost of an attempt when they can
+safely re-run and fail otherwise. A worker that does not register again within
+five minutes is removed. A survivor keeps the settings and image it was launched
+with until a draining `flowmesh stack restart`. Each entry of the configured
+workers file sets `worker_config.worker_alias`, and a file missing one creates
+none of its workers. A starting supervisor creates only the entries no recorded
+worker holds, so removing an entry leaves its survivor running.
+
+- The records live in the supervisor state store (`REDIS_SUPERVISOR_STATE_URL`,
+  the control Redis by default). Losing or rolling it back leaves the workers it
+  named running untracked; remove them by hand.
+- A crash between renting a Vast.ai instance and recording it leaves the
+  instance unrecorded: destroy it in Vast.ai, then run
+  `flowmesh stack worker down <alias>`.
+- Drain a node's Vast.ai workers before changing `VAST_API_KEY`: a supervisor
+  forgets, without destroying, the instances its new key cannot see.
+- A worker the supervisor launches again after a crash uses the deployment's
+  `HF_TOKEN` and `NEBULA_API_TOKEN`, not values its create request set.
+- A supervisor never adopts or removes a container or instance no record names,
+  so a configured worker whose container name one holds fails to start until it
+  is removed by hand.
+
 **Node alias.** A node holds a lease on its `NODE_ALIAS` while it is live and
 releases it when it shuts down cleanly, so a restarted node re-registers under
 the same alias at once. A node that exits without unregistering (a crash or a

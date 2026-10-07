@@ -220,6 +220,7 @@ def get_provider_spec(system_principal: PrincipalContext) -> ProviderSpec:
         config_cls=ExternalWorkerConfig,
         adapter_cls=ExternalWorkerAdapter,
         factory=ExternalWorkerFactory(system_principal),
+        provisioned=False,
     )
 
 

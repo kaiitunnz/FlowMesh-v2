@@ -14,6 +14,7 @@ from shared.utils import parse_secret_env
 
 from ... import env
 from ...hooks import PrincipalContext
+from ..provisioning import ProviderHandle, Removal, WorkerRecord
 from ..schemas import WorkerHardware, WorkerInfo, WorkerStatus
 from .utils import to_env_str
 
@@ -124,6 +125,9 @@ class WorkerAdapter(ABC):
         self._last: _Operation | None = None
         self._closed = False
         self._event_streams = 0
+        # Called on the launching thread with the handle of each launch, as soon as
+        # the provider returns it.
+        self.on_handle: Callable[[ProviderHandle | None], None] | None = None
 
     @property
     @abstractmethod
@@ -292,8 +296,24 @@ class WorkerAdapter(ABC):
 
     @abstractmethod
     def holds_worker(self) -> bool:
-        """Whether this adapter started a worker it has not stopped."""
+        """Whether this adapter holds a launched worker it has not stopped."""
         pass
+
+    def handle(self) -> ProviderHandle | None:
+        """Return what the provider launched for the held worker, if any."""
+        return None
+
+    def recover_launch(self) -> bool | None:
+        """Look for what an interrupted launch of this worker left, blocking.
+
+        Return whether one was found, which the adapter then holds, or ``None`` when
+        that cannot be determined.
+        """
+        return None
+
+    def _report_handle(self) -> None:
+        if (callback := self.on_handle) is not None:
+            callback(self.handle())
 
     async def runs_held_worker(self) -> bool:
         """Whether this adapter holds a worker that is still running."""
@@ -440,6 +460,15 @@ class WorkerFactory(ABC):
     def destroy_worker(self, worker: WorkerAdapter) -> None:
         pass
 
+    def attach(self, token: WorkerTokenType, record: WorkerRecord) -> WorkerAdapter:
+        """Rebuild the adapter of a recorded worker, holding what it was launched with
+        and starting nothing."""
+        raise NotImplementedError(f"{type(self).__name__} keeps no worker records")
+
+    def remove(self, handle: ProviderHandle) -> Removal:
+        """Remove what ``handle`` names, blocking."""
+        raise NotImplementedError(f"{type(self).__name__} keeps no worker records")
+
     def on_worker_registered(self, worker: WorkerAdapter) -> bool:
         """React to the worker registering. Returns whether node capacity changed."""
         return False
@@ -453,10 +482,12 @@ class ProviderSpec:
     """Per-provider dispatch entry consumed by `WorkerManager`.
 
     Each provider module (e.g. `adapters.docker`, `adapters.vastai`) exposes a
-    `get_provider_spec(system_principal)` builder that returns one of these.
+    `get_provider_spec` builder that returns one of these.
     """
 
     name: str
     config_cls: type[WorkerConfig]
     adapter_cls: type[WorkerAdapter]
     factory: WorkerFactory
+    provisioned: bool = True
+    """Whether the supervisor launches the provider's workers and records them."""

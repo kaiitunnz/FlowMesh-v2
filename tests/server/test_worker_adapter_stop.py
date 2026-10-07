@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from docker.errors import NotFound
 
 from server.hooks import PrincipalContext
 from server.supervisor.adapters.base import ProviderSpec, WorkerTokenType
@@ -28,23 +29,33 @@ from tests.server.test_docker_removal_in_progress import _adapter
 
 class _Docker:
     def __init__(self) -> None:
-        self.container = MagicMock()
-        self.container.status = "exited"
+        self.container = MagicMock(id="c1", status="exited")
+        self.container.remove.side_effect = self._remove
+        self.gone = True
         self.client = MagicMock()
-        self.client.containers.get.return_value = self.container
+        self.client.containers.get.side_effect = self._get
         self.client.containers.run.side_effect = self._run
         self.client.containers.list.return_value = []
         self.client.volumes.list.return_value = []
         self.adapter = _adapter(self.client)
 
+    def _get(self, _: str) -> MagicMock:
+        if self.gone:
+            raise NotFound("gone")
+        return self.container
+
+    def _remove(self, **_: Any) -> None:
+        self.gone = True
+
     def _run(self, **_: Any) -> MagicMock:
+        self.gone = False
         self.container.status = "running"
         return self.container
 
     async def start(self) -> None:
         # What a successful start leaves behind.
-        self.container.status = "running"
-        self.adapter._is_started = True
+        self._run()
+        self.adapter._container_id = self.container.id
         self.adapter.set_status(WorkerStatus.RUNNING)
 
     @property
@@ -757,9 +768,15 @@ async def test_a_start_queued_behind_a_failed_removal_runs_the_container_again()
         world.container.status = "exited"
 
     world.container.stop.side_effect = stop
-    # The first start clears the exited container, the stop fails to remove the one it
-    # stopped, and the queued start clears that one.
-    world.container.remove.side_effect = [None, RuntimeError("daemon refused"), None]
+    # The stop fails to remove the container it stopped, and the queued start clears it.
+    outcomes = iter([RuntimeError("daemon refused"), None])
+
+    def remove(**_: Any) -> None:
+        if (error := next(outcomes)) is not None:
+            raise error
+        world.gone = True
+
+    world.container.remove.side_effect = remove
     wm = _manager(world, "docker")
     release, first, stopping, second = await _start_queued_behind_a_stop_on_a_start(
         world, wm

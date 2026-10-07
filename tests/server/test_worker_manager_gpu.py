@@ -207,12 +207,12 @@ class TestSharedHolds:
         devices, _ = rm.reserve_gpus(devices=[3])
         rm.claim_gpus_by_uuid(["GPU-3"])
         worker = object.__new__(DockerWorkerAdapter)
-        worker.cuda_devices = devices
+        worker.cuda_devices = worker.held_gpus = devices
 
         factory.destroy_worker(worker)
         factory.destroy_worker(worker)
 
-        assert worker.cuda_devices is None
+        assert worker.held_gpus is None
         assert rm.available_gpu_count() == 0
 
 
@@ -315,7 +315,7 @@ class TestDockerWorkerRuntimeSelection:
         )
         worker.alias = "worker-gpu-3"
         worker.container_name = "worker-gpu-3"
-        worker.cuda_devices = [3]
+        worker.cuda_devices = worker.held_gpus = [3]
         worker.gpu_arch = GpuArch.BLACKWELL
         worker._worker_id = None
         worker._status = WorkerStatus.STOPPED
@@ -327,7 +327,7 @@ class TestDockerWorkerRuntimeSelection:
 
     def test_info_reports_no_held_gpus_for_a_cpu_worker(self) -> None:
         worker = self._worker()
-        worker.cuda_devices = None
+        worker.cuda_devices = worker.held_gpus = None
         assert worker.get_info().held_gpus == []
 
     def test_gpu_worker_omits_runtime_by_default(

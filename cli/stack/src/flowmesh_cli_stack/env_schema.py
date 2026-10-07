@@ -416,6 +416,16 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.URL,
                     url_schemes={"redis", "rediss"},
                 ),
+                EnvVar(
+                    "REDIS_SUPERVISOR_STATE_URL",
+                    "",
+                    description=(
+                        "Redis endpoint, with its own credentials and TLS, for the "
+                        "supervisor's worker records; defaults to control."
+                    ),
+                    var_type=EnvVarType.URL,
+                    url_schemes={"redis", "rediss"},
+                ),
             ],
         ),
         EnvSection(
@@ -1662,9 +1672,20 @@ STACK_ENV_SCHEMA = EnvSchema(
             vars=[EnvVar("PREDOWNLOAD_MODEL_LIST", var_type=EnvVarType.CSV)],
         ),
         EnvSection(
+            title="Vast.ai (optional)",
+            vars=[
+                EnvVar(
+                    "VAST_API_KEY",
+                    description=(
+                        "Vast.ai API key the supervisor rents and removes workers "
+                        "under."
+                    ),
+                ),
+            ],
+        ),
+        EnvSection(
             title="API Keys injected into workers (optional)",
             vars=[
-                EnvVar("VAST_API_KEY"),
                 EnvVar("HF_TOKEN"),
                 EnvVar("NEBULA_API_TOKEN"),
             ],

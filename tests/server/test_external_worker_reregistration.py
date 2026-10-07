@@ -33,6 +33,7 @@ from shared.schemas.command import TaskMessage
 from shared.schemas.worker import WorkerCapabilities, WorkerStatus
 from shared.tasks import TaskType
 from tests.server.redis_helpers import fake_redis_client
+from tests.server.supervisor_helpers import memory_store
 from tests.support.waiting import until
 from tests.worker.factories import (
     make_worker_config,
@@ -86,6 +87,7 @@ class _Supervisor:
             config_path="unused",
             registry=registry,
             logger=_LOGGER,
+            store=memory_store(),
         )
         manager._is_started = True
         manager._default_worker_config = {}

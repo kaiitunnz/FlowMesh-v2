@@ -3,10 +3,17 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from pydantic import SecretStr
+
 from shared.content import ObjectStoreConfig
 from shared.tasks.specs import ModelBindingMode
 from shared.telemetry.config import TelemetryConfig
-from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
+from shared.utils.parsing import (
+    parse_bool_env,
+    parse_float_env,
+    parse_int_env,
+    parse_secret_env,
+)
 
 
 def _conservative_policy() -> str:
@@ -55,6 +62,7 @@ class RedisConfig:
     control_url: str = "redis://localhost:6379/0"
     telemetry_url: str = "redis://localhost:6379/0"
     resident_relay_url: str = "redis://localhost:6379/0"
+    supervisor_state_url: str = ""
     acl_enabled: bool = False
     username: str = "admin"
     password: str = ""
@@ -69,6 +77,7 @@ class RedisConfig:
             control_url=os.getenv("REDIS_CONTROL_URL") or redis_url,
             telemetry_url=telemetry,
             resident_relay_url=os.getenv("REDIS_RESIDENT_RELAY_URL") or telemetry,
+            supervisor_state_url=os.getenv("REDIS_SUPERVISOR_STATE_URL", "").strip(),
             acl_enabled=parse_bool_env("REDIS_ACL_ENABLED", False),
             username=os.getenv("REDIS_USERNAME", "admin"),
             password=os.getenv("REDIS_PASSWORD", ""),
@@ -314,6 +323,7 @@ class WorkerManagementConfig:
     enabled: bool = True
     config_path: str = "configs/worker_config.yaml"
     heartbeat_interval: int = 30
+    vast_api_key: SecretStr | None = None
 
     @property
     def heartbeat_ttl_sec(self) -> int:
@@ -325,6 +335,7 @@ class WorkerManagementConfig:
             enabled=parse_bool_env("ENABLE_SUPERVISOR", True),
             config_path=os.getenv("WORKER_CONFIG_PATH", "configs/worker_config.yaml"),
             heartbeat_interval=int(os.getenv("SERVER_HEARTBEAT_INTERVAL") or "30"),
+            vast_api_key=parse_secret_env("VAST_API_KEY"),
         )
 
 

@@ -177,7 +177,7 @@ class TestStopAndDestroyWorkerLog:
 
 def _docker_creating(release: threading.Event) -> tuple[MagicMock, MagicMock]:
     """A Docker client whose create outlives the cancel of the start awaiting it."""
-    created = MagicMock(status="running")
+    created = MagicMock(status="running", id="c1")
     containers: list[MagicMock] = []
     docker = MagicMock()
 
