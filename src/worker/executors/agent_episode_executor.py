@@ -7,10 +7,10 @@ step, and returns the step's :class:`HarnessResult`. The lane releases after the
 the server routes any boundary and re-dispatches with the next capsule and outcomes.
 """
 
-import functools
 import logging
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -61,6 +61,18 @@ from .episode_support import EpisodeStepResult, hydrate_delivered_outcomes
 from .harness import build_adapter
 
 _LOG = logging.getLogger("agent-episode-executor")
+# Cleanups that retry a teardown its step could not prove before the worker gives it up.
+_UNENDED_ATTEMPTS = 3
+
+
+@dataclass(frozen=True)
+class _Unended:
+    """A writer whose teardown was not proved, kept for a later cleanup to finish."""
+
+    task_id: str
+    writer: str
+    end: Callable[[], bool | None]
+    attempts: int = 0
 
 
 class AgentEpisodeExecutor(Executor):
@@ -75,30 +87,22 @@ class AgentEpisodeExecutor(Executor):
         self._episode_task_id: str | None = None
         self._sandbox_runtime: SandboxRuntime | None = None
         self._signals = RunSignals()
-        # Writers whose teardown was not proved, kept so a later cleanup can finish it.
-        self._unended: list[tuple[str, str, Callable[[], bool]]] = []
+        self._step_sandbox: AgentSandboxRuntime | None = None
+        self._unended: list[_Unended] = []
 
     def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
         with self._signals.running(task.task_id):
             try:
                 return self._step(task)
             except BaseException:
-                facade = self._lifecycle.responses_facade if self._lifecycle else None
-                try:
+                # The step has given up its turn and ended its harness. A cancelled
+                # step's give-up releases the episode's waiting turns; any other raised
+                # step releases them here. Control never learns of a group a raised step
+                # captured, so the worker drops the requests it stashed for it.
+                if (facade := self._facade()) is not None:
                     if not self._signals.cancelled:
-                        # A step that raised may leave its turn running on the harness,
-                        # so it gives the turn up; a cancelled step's give-up is
-                        # already under way.
-                        _give_up(task.task_id, self._adapter, facade)
-                except Exception:
-                    _LOG.exception(
-                        "Failed to give up the turn of task %s", task.task_id
-                    )
-                finally:
-                    # Control never learns of a group a raised step captured, so the
-                    # worker drops the requests it stashed for it.
-                    if facade is not None:
-                        facade.unregister_episode(task.task_id)
+                        facade.release_episode(task.task_id)
+                    facade.unregister_episode(task.task_id)
                 raise
 
     def _step(self, task: ExecutorTask) -> EpisodeStepResult:
@@ -109,7 +113,7 @@ class AgentEpisodeExecutor(Executor):
                 "agent-episode dispatch context"
             )
         state, holder = self._open_private_state(dispatch)
-        facade = self._lifecycle.responses_facade if self._lifecycle else None
+        facade = self._facade()
         prior = self._episode_task_id
         if facade is not None and prior is not None and prior != task.task_id:
             # A different task means the prior episode finished; drop its facade context
@@ -121,6 +125,7 @@ class AgentEpisodeExecutor(Executor):
         )
         self._episode_task_id = task.task_id
         self._adapter = adapter
+        self._step_sandbox = sandbox
         try:
             try:
                 result = self._run_adapter(task, dispatch, adapter, sandbox)
@@ -134,15 +139,18 @@ class AgentEpisodeExecutor(Executor):
                         adapter.cancel(task.task_id)
                     except Exception:
                         _LOG.exception("Failed to give up the turn of %s", task.task_id)
-                proved = self._end_writers(
-                    task.task_id, adapter, sandbox, holder, state
+                fence = self._end_writers(
+                    task.task_id, adapter, sandbox, dispatch, holder, state
                 )
-                if not proved and state is not None:
+                if fence is None and state is not None:
                     raise self._unproved(state) from exc
                 raise
-            proved = self._end_writers(task.task_id, adapter, sandbox, holder, state)
+            fence = self._end_writers(
+                task.task_id, adapter, sandbox, dispatch, holder, state
+            )
         finally:
             self._adapter = None
+            self._step_sandbox = None
         capturable = self._is_capturable_boundary(result, dispatch.model_binding)
         if (
             capturable
@@ -156,12 +164,12 @@ class AgentEpisodeExecutor(Executor):
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
         sealed = None
         if state is not None and holder is not None:
-            if not proved:
+            if fence is None:
                 raise self._unproved(state)
-            attachment = _attachment(dispatch)
-            sealed = holder.seal(
-                state, attachment, QuiescenceFence.of(state, attachment)
-            )
+            try:
+                sealed = holder.seal(state, _attachment(dispatch), fence)
+            except PrivateStateUnavailable as exc:
+                raise ExecutionError(f"PrivateStateUnavailable: {exc}") from exc
         # Captured last, so nothing after the capture can raise past a request the step
         # holds for control.
         if capturable:
@@ -242,48 +250,63 @@ class AgentEpisodeExecutor(Executor):
         task_id: str,
         adapter: HarnessAdapter,
         sandbox: AgentSandboxRuntime | None,
+        dispatch: AgentEpisodeDispatch,
         holder: PrivateStateHolder | None,
         state: MaterializedState | None,
-    ) -> bool:
-        """Stop every writer the step bound to its attachment; return whether that was
-        proved.
-
-        The harness and the sandbox are each ended whether or not the other could be,
-        and the sandbox admits no command from the moment the teardown begins.
-        """
+    ) -> QuiescenceFence | None:
+        """Stop every writer the step bound to its attachment; return the fence once
+        all were proved stopped. Each writer is ended even when another is not proved
+        stopped."""
         if sandbox is not None:
             sandbox.close()
-        quiesce = functools.partial(_quiesced, adapter, task_id)
-        proved = self._ended(task_id, "harness", quiesce, quiesce)
+        proved = self._ended(task_id, "harness", lambda: adapter.quiesce(task_id))
         if sandbox is not None:
             drained = self._ended(
                 task_id, "sandbox", sandbox.drain, sandbox.finish_reaps
             )
             proved = drained and proved
-        if not proved and holder is not None and state is not None:
-            holder.mark_unsealable(state)
-        return proved
+        if not proved:
+            if holder is not None and state is not None:
+                holder.mark_unsealable(state)
+            return None
+        if state is None:
+            return None
+        return QuiescenceFence.of(state, _attachment(dispatch))
 
     def _ended(
         self,
         task_id: str,
         writer: str,
-        end: Callable[[], bool],
-        retry: Callable[[], bool],
+        end: Callable[[], bool | None],
+        retry: Callable[[], bool | None] | None = None,
+        attempts: int = 0,
     ) -> bool:
-        """Run one writer's teardown; an unproved one keeps ``retry`` for cleanup."""
+        """Run one writer's teardown, which reports an unproved stop by returning False
+        or raising; keep ``retry`` (or ``end``) for a later cleanup when unproved, until
+        the attempts run out."""
         try:
-            if end():
+            if end() is not False:
                 return True
-        except Exception:
+            reason = "its reap was not proved"
+        except HarnessQuiescenceError as exc:
+            reason = str(exc)
+        except Exception as exc:
             _LOG.exception("Ending the %s of task %s failed", writer, task_id)
-        _LOG.error("The %s of task %s was not proved stopped", writer, task_id)
-        self._unended.append((task_id, writer, retry))
+            reason = repr(exc)
+        _LOG.error(
+            "The %s of task %s was not proved stopped: %s", writer, task_id, reason
+        )
+        if attempts < _UNENDED_ATTEMPTS:
+            self._unended.append(_Unended(task_id, writer, retry or end, attempts))
+        else:
+            _LOG.error(
+                "Giving up the %s of task %s, left without an owner", writer, task_id
+            )
         return False
 
     def _unproved(self, state: MaterializedState) -> Exception:
-        """The non-retryable failure of a step with no proved capture; a requested
-        cancellation ends it as cancelled."""
+        """Build the non-retryable failure of a step with no proved capture; a
+        requested cancellation ends it as cancelled."""
         unavailable = PrivateStateUnavailable(
             PrivateStateUnavailableReason.QUIESCENCE_UNPROVED,
             "the step's writers were not proved stopped before its seal",
@@ -418,8 +441,10 @@ class AgentEpisodeExecutor(Executor):
     def cancel(self, task_id: str) -> None:
         if not self._signals.cancel(task_id):
             return
+        if (sandbox := self._step_sandbox) is not None:
+            sandbox.close()
         adapter = self._adapter
-        facade = self._lifecycle.responses_facade if self._lifecycle else None
+        facade = self._facade()
         # Ending the harness waits for it to exit, and the caller may be the thread that
         # relays the worker's permits and reaps.
         threading.Thread(
@@ -430,13 +455,18 @@ class AgentEpisodeExecutor(Executor):
         ).start()
 
     def cleanup_after_run(self) -> None:
-        facade = self._lifecycle.responses_facade if self._lifecycle else None
+        facade = self._facade()
         if facade is not None and self._episode_task_id is not None:
             facade.unregister_episode(self._episode_task_id)
         self._episode_task_id = None
         unended, self._unended = self._unended, []
-        for task_id, writer, retry in unended:
-            self._ended(task_id, writer, retry, retry)
+        for entry in unended:
+            self._ended(
+                entry.task_id, entry.writer, entry.end, attempts=entry.attempts + 1
+            )
+
+    def _facade(self) -> ResponsesFacade | None:
+        return self._lifecycle.responses_facade if self._lifecycle else None
 
 
 def _give_up(
@@ -452,14 +482,6 @@ def _give_up(
         # or retry it into a fresh held turn.
         if facade is not None:
             facade.release_episode(task_id)
-
-
-def _quiesced(adapter: HarnessAdapter, task_id: str) -> bool:
-    try:
-        adapter.quiesce(task_id)
-    except HarnessQuiescenceError:
-        return False
-    return True
 
 
 def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:

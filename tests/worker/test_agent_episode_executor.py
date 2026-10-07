@@ -412,7 +412,7 @@ class _YieldingAdapter(_FakeAdapter):
 
 
 class _FailingSeal:
-    def seal(self, state: object, attachment: object, fence: object) -> None:
+    def seal(self, state: object, attachment: object, fence: Any) -> None:
         raise PrivateStateUnavailable(
             PrivateStateUnavailableReason.STALE_EPOCH,
             "superseded",
@@ -456,7 +456,7 @@ def test_a_step_whose_seal_fails_holds_no_request_for_control(
             lambda self, dispatch: (MagicMock(), _FailingSeal()),
         ),
         patch.object(aee, "_attachment", lambda dispatch: MagicMock()),
-        pytest.raises(PrivateStateUnavailable),
+        pytest.raises(ExecutionError, match="PrivateStateUnavailable: stale_epoch"),
     ):
         ex.run(msg, tmp_path)
 

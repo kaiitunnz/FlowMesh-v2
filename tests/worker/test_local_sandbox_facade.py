@@ -313,7 +313,7 @@ def test_an_unproved_command_ends_the_turn_before_any_further_model_call() -> No
         sandbox,
     )
 
-    with pytest.raises(FacadeTurnError, match="not proved reaped|left a process"):
+    with pytest.raises(FacadeTurnError, match="left a process behind"):
         facade.handle_turn(_TASK, token, {"input": "go"})
     # The harness retrying the turn reaches no model either.
     with pytest.raises(FacadeTurnError, match="not proved reaped"):

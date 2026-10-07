@@ -256,7 +256,9 @@ class ResponsesFacade:
             if ctx.sandbox is not None and ctx.sandbox.reap_unproved:
                 # A command may still be writing the workspace, so nothing it produced
                 # reaches another model call, however the harness retries the turn.
-                raise FacadeTurnError("a command of this turn was not proved reaped")
+                raise FacadeTurnError(
+                    "a command of this dispatch was not proved reaped"
+                )
             completion = self._egress_turn(
                 task_id, ctx, messages, tools, base, round_index
             )

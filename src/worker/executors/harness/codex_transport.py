@@ -22,7 +22,7 @@ injected at most once on a resume from the committed capsule. The untyped
 import contextlib
 import logging
 import os
-import subprocess  # nosec B404 - waits on the app-server's own supervisor
+import subprocess
 import threading
 import weakref
 from collections.abc import Iterator, Mapping, Sequence
@@ -169,7 +169,7 @@ class CodexTransportConfig:
         return f"{self.base_url.rstrip('/')}/agent/{self.task_id}/v1"
 
     def config_overrides(self) -> tuple[str, ...]:
-        """The ``--config`` overrides the app-server launches with."""
+        """Return the ``--config`` overrides the app-server launches with."""
         p = self.provider_id
         return (
             f'model_providers.{p}.name="{p}"',
@@ -189,9 +189,8 @@ class CodexTransportConfig:
             # Whatever a native tool starts gets no network, so it cannot egress around
             # the mediated facades.
             "sandbox_workspace_write.network_access=false",
-            # The curated-plugin sync clones a marketplace repository into the home
-            # behind the fabric's back: unmediated egress, and bulk in every sealed
-            # generation.
+            # The curated-plugin sync clones a marketplace repository into the home:
+            # unmediated egress, and bulk in every sealed generation.
             "features.plugins=false",
         )
 
@@ -259,10 +258,9 @@ def _end_app_server(
 ) -> bool:
     """End the app-server's whole tree; return whether its supervisor proved it reaped.
 
-    The app-server is first left to exit on its own once its stdin closes, flushing what
-    it holds; only then is its supervisor told to end the tree. The SDK's own close is
-    used last, once the process is gone, since it would kill a supervisor still
-    draining.
+    Closing stdin first lets the app-server exit and flush on its own before its
+    supervisor ends the tree; the SDK's own close runs last because it would kill a
+    supervisor still draining.
     """
     # ``_proc`` is private to the SDK; the exact version pin keeps this stable.
     proc = client._proc
@@ -304,7 +302,6 @@ class RealCodexAppServerTransport:
 
     @property
     def supervisor_pid(self) -> int:
-        # ``_proc`` is private to the SDK; the exact version pin keeps this stable.
         proc = self.client._proc
         if proc is None:
             raise RuntimeError("the Codex app-server is not running")
@@ -324,18 +321,19 @@ class RealCodexAppServerTransport:
             if self._closed:
                 raise CodexTransportError("the Codex app-server was closed")
             self._config.codex_home.mkdir(parents=True, exist_ok=True)
-            client = CodexClient(self._config.to_codex_config())
-            # Arm teardown before the process spawns, so a failure during start or
-            # initialize still reaps the app-server rather than leaking it.
-            self._spawned = client
-            self._finalizer = weakref.finalize(
-                self,
-                _end_app_server,
-                client,
-                self._config.exit_grace_sec,
-                self._config.reap_budget_sec,
-            )
+            # The launch config reads PATH, so it is built from the launch environment.
             with clean_launch_environ():
+                client = CodexClient(self._config.to_codex_config())
+                # Arm teardown before the process spawns, so a failure during start or
+                # initialize still reaps the app-server rather than leaking it.
+                self._spawned = client
+                self._finalizer = weakref.finalize(
+                    self,
+                    _end_app_server,
+                    client,
+                    self._config.exit_grace_sec,
+                    self._config.reap_budget_sec,
+                )
                 client.start()
         # A close during initialize ends the process, which fails the handshake.
         client.initialize()

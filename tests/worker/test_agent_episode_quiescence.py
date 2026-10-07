@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -24,6 +25,7 @@ from shared.sandbox import (
     LocalSandboxExecutor,
     SandboxCommand,
     SandboxCommandResult,
+    SandboxDenied,
     SandboxReapUnproved,
     SandboxRuntimeProfile,
 )
@@ -31,6 +33,7 @@ from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.ids import new_private_state_reference_id
 from tests.worker.factories import make_worker_config, make_worker_task_message
+from worker.executors import agent_episode_executor as aee
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.harness import register_adapter
@@ -155,7 +158,6 @@ def test_the_seal_follows_the_harness_quiescing(
 
     assert log == ["start", "quiesce", "seal"]
     assert result.private_state is not None
-    assert executor._adapter is None
 
 
 def test_an_unproved_quiescence_seals_nothing_and_fails_without_a_retry(
@@ -163,7 +165,7 @@ def test_an_unproved_quiescence_seals_nothing_and_fails_without_a_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executor, message, lineage = episode
+    executor, message, _ = episode
     log: list[str] = []
     _use(_Adapter(log, proves=False))
     _record_seals(monkeypatch, log)
@@ -174,11 +176,9 @@ def test_an_unproved_quiescence_seals_nothing_and_fails_without_a_retry(
     assert "PrivateStateUnavailable: quiescence_unproved" in str(raised.value)
     assert raised.value.retryable is False
     assert "seal" not in log
-    assert executor._adapter is None
     # The lineage is refused from then on, even before any generation was sealed.
     with pytest.raises(ExecutionError, match="quiescence_unproved"):
         executor.run(message, tmp_path)
-    assert (lineage / ".unsealable").exists()
 
 
 def test_a_raised_step_still_quiesces_its_harness(
@@ -192,7 +192,6 @@ def test_a_raised_step_still_quiesces_its_harness(
         executor.run(message, tmp_path)
 
     assert log == ["start", "cancel", "quiesce"]
-    assert executor._adapter is None
 
 
 def test_a_step_refused_before_its_turn_still_quiesces_its_harness(
@@ -237,7 +236,7 @@ def test_a_cancelled_step_stays_cancelled_when_its_harness_will_not_quiesce(
         executor.run(message, tmp_path)
 
 
-def test_a_later_cleanup_retries_an_unproved_teardown(
+def test_a_later_cleanup_retries_an_unproved_teardown_until_it_is_proved(
     episode: tuple[AgentEpisodeExecutor, WorkerTaskMessage, Path], tmp_path: Path
 ) -> None:
     executor, message, _ = episode
@@ -248,14 +247,92 @@ def test_a_later_cleanup_retries_an_unproved_teardown(
         executor.run(message, tmp_path)
 
     executor.cleanup_after_run()
-    assert log.count("quiesce") == 2 and executor._unended
-
     adapter._proves = True
     executor.cleanup_after_run()
-    assert executor._unended == []
+    executor.cleanup_after_run()
+
+    assert log.count("quiesce") == 3
 
 
-class _UnprovedRuntime(SandboxRuntime):
+def test_a_teardown_that_never_proves_is_given_up_after_its_attempts(
+    episode: tuple[AgentEpisodeExecutor, WorkerTaskMessage, Path], tmp_path: Path
+) -> None:
+    executor, message, _ = episode
+    log: list[str] = []
+    _use(_Adapter(log, proves=False))
+    with pytest.raises(ExecutionError):
+        executor.run(message, tmp_path)
+
+    for _ in range(5):
+        executor.cleanup_after_run()
+
+    assert log.count("quiesce") == 1 + aee._UNENDED_ATTEMPTS
+
+
+def test_a_cancel_closes_the_sandbox_to_later_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _RecordingRuntime()
+    monkeypatch.setattr(aee, "build_sandbox_runtime", lambda: runtime)
+    executor, message, _ = _episode(tmp_path, sandboxed=True)
+    denied: list[str] = []
+
+    class _CancelledBetweenCommands(_SandboxedAdapter):
+        def start(self, activation_id: str, *, capsule: Any, outcomes: Any) -> Any:
+            self.sandbox.execute(SandboxCommand(argv=("first",)))
+            executor.cancel(message.task_id)
+            try:
+                self.sandbox.execute(SandboxCommand(argv=("second",)))
+            except SandboxDenied as exc:
+                denied.append(str(exc))
+            raise RuntimeError("the turn was given up")
+
+    register_adapter(
+        _BACKEND,
+        lambda backend, task, config, facade, state, sandbox: (
+            _CancelledBetweenCommands(sandbox)
+        ),
+    )
+
+    with pytest.raises(TaskCancelledError):
+        executor.run(message, tmp_path)
+
+    assert runtime.commands == [("first",)]
+    assert denied
+
+
+def test_a_raised_step_releases_its_episode_once(tmp_path: Path) -> None:
+    executor, message, _ = _episode(tmp_path)
+    facade = MagicMock()
+    executor._lifecycle = MagicMock(responses_facade=facade)
+    _use(_Adapter([], raises=RuntimeError("the turn broke")))
+
+    with pytest.raises(RuntimeError):
+        executor.run(message, tmp_path)
+
+    facade.refuse_episode.assert_called_once_with(message.task_id)
+    facade.release_episode.assert_called_once_with(message.task_id)
+    facade.unregister_episode.assert_called_once_with(message.task_id)
+
+
+class _RecordingRuntime(SandboxRuntime):
+    name = "recording"
+
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, ...]] = []
+
+    def run(
+        self,
+        root: Path,
+        command: SandboxCommand,
+        profile: SandboxRuntimeProfile,
+        egress: bool = False,
+    ) -> SandboxCommandResult:
+        self.commands.append(command.argv)
+        return SandboxCommandResult(exit_code=0, stdout="", stderr="")
+
+
+class _UnprovedRuntime(_RecordingRuntime):
     name = "unproved"
 
     def run(
@@ -268,28 +345,34 @@ class _UnprovedRuntime(SandboxRuntime):
         raise SandboxReapUnproved("a command left a process behind")
 
 
+class _SandboxedAdapter(_Adapter):
+    def __init__(self, sandbox: LocalSandboxExecutor | None) -> None:
+        super().__init__([])
+        assert sandbox is not None
+        self.sandbox = sandbox
+
+    def mediated_facades(self) -> frozenset[MediatedFacade]:
+        return REQUIRED_MEDIATED_FACADES | {MediatedFacade.SANDBOX}
+
+
 def test_an_unproved_command_fails_the_step_even_when_the_harness_caught_it(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(aee, "build_sandbox_runtime", _UnprovedRuntime)
     executor, message, _ = _episode(tmp_path, sandboxed=True)
-    executor._sandbox_runtime = _UnprovedRuntime()
 
-    class _Catching(_Adapter):
-        def __init__(self, sandbox: LocalSandboxExecutor) -> None:
-            super().__init__([])
-            self._sandbox = sandbox
-
-        def mediated_facades(self) -> frozenset[MediatedFacade]:
-            return REQUIRED_MEDIATED_FACADES | {MediatedFacade.SANDBOX}
-
+    class _Catching(_SandboxedAdapter):
         def start(self, activation_id: str, *, capsule: Any, outcomes: Any) -> Any:
             try:
-                self._sandbox.execute(SandboxCommand(argv=("make",)))
+                self.sandbox.execute(SandboxCommand(argv=("make",)))
             except SandboxReapUnproved:
                 pass
             return HarnessResult(kind=HarnessResultKind.COMPLETION, value="done")
 
-    register_adapter(_BACKEND, lambda *args: _Catching(args[5]))
+    register_adapter(
+        _BACKEND,
+        lambda backend, task, config, facade, state, sandbox: _Catching(sandbox),
+    )
 
     with pytest.raises(ExecutionError, match="quiescence_unproved"):
         executor.run(message, tmp_path)

@@ -79,7 +79,7 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
             return settled and not self._unproved
 
     def finish_reaps(self) -> bool:
-        """Retry the reaps no command proved; return whether nothing is left running."""
+        """Retry each unproved reap; return whether nothing is left running."""
         with self._admission:
             unreaped, self._unreaped = self._unreaped, []
         still = [retry for retry in unreaped if not retry()]
