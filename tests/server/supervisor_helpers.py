@@ -2,8 +2,6 @@
 
 import logging
 import os
-import threading
-from collections import Counter
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock
@@ -16,6 +14,7 @@ from server.config import IdentityConfig
 from server.registries.node import NodeRegistry
 from server.supervisor.manager import WorkerManager
 from server.supervisor.provisioning import (
+    ProvisionedWorkers,
     RunState,
     WorkerProvisioningStore,
     WorkerRecord,
@@ -91,16 +90,11 @@ class StubWorkerManager(WorkerManager):
         self.config_path = os.devnull
         self.logger = _LOGGER
         self._registry = registry if registry is not None else MagicMock()
-        self._store = memory_store()
-        self._records = {}
-        self._records_lock = threading.RLock()
-        self._unsaved = set()
+        self.store = memory_store()
+        self._provisioned = ProvisionedWorkers(self.store)
         self._removing = {}
-        self._awaiting = set()
         self._to_provision = []
-        self._grace_deadline = None
         self._loop = None
-        self._in_flight = Counter()
         self._tasks = set()
         self._is_started = True
         self._default_worker_config = {}

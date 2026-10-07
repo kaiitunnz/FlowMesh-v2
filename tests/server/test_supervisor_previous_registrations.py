@@ -13,6 +13,7 @@ from server.clients.redis import worker_key
 from server.hooks import PrincipalContext
 from server.registries.worker import WorkerRegistry as WorkerRecords
 from server.supervisor.manager import WorkerManager
+from server.supervisor.provisioning import WorkerProvisioningStore
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from server.supervisor.services.task_listener import TaskListener
@@ -25,11 +26,16 @@ from tests.server.test_external_worker_reregistration import _RecordingRelay
 _LOGGER = logging.getLogger("test.previous_registrations")
 
 
-def _servicer() -> tuple[SupervisorServicer, WorkerManager, _RecordingRelay, Any]:
+def _servicer() -> (
+    tuple[
+        SupervisorServicer, WorkerManager, _RecordingRelay, Any, WorkerProvisioningStore
+    ]
+):
     client = fake_redis_client(fakeredis.FakeServer())
     registry = WorkerRegistry()
+    store = memory_store()
     manager = WorkerManager(
-        MagicMock(spec=PrincipalContext), "unused", registry, _LOGGER, memory_store()
+        MagicMock(spec=PrincipalContext), "unused", registry, _LOGGER, store
     )
     manager._is_started = True
     relay = _RecordingRelay()
@@ -44,14 +50,13 @@ def _servicer() -> tuple[SupervisorServicer, WorkerManager, _RecordingRelay, Any
         manager,
         _LOGGER,
     )
-    return servicer, manager, relay, client.sync
+    return servicer, manager, relay, client.sync, store
 
 
 def _provisioned(manager: WorkerManager) -> Any:
     adapter = _adapter(MagicMock())
     record = worker_record(adapter.alias, token=adapter.token)
-    assert manager._store.create(record)
-    manager._records[record.alias] = record
+    manager._provisioned.create(record)
     manager._registry.add(adapter)
     return adapter
 
@@ -62,12 +67,12 @@ def _unregisters(relay: _RecordingRelay) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_a_provisioned_worker_registers_once_its_id_is_recorded() -> None:
-    servicer, manager, _, _ = _servicer()
+    servicer, manager, _, _, store = _servicer()
     adapter = _provisioned(manager)
 
     worker_id = await _register(servicer, adapter.token, adapter.alias)
 
-    [record] = manager._store.load()
+    [record] = store.load()
     assert record.worker_id == worker_id
     assert servicer._registry.get_worker_id(adapter.token) == worker_id
 
@@ -76,9 +81,9 @@ async def test_a_provisioned_worker_registers_once_its_id_is_recorded() -> None:
 async def test_a_registration_whose_id_cannot_be_recorded_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    servicer, manager, relay, redis = _servicer()
+    servicer, manager, relay, redis, store = _servicer()
     adapter = _provisioned(manager)
-    monkeypatch.setattr(manager._store, "put", MagicMock(side_effect=ConnectionError))
+    monkeypatch.setattr(store, "put", MagicMock(side_effect=ConnectionError))
 
     with pytest.raises(_Aborted) as aborted:
         await _register(servicer, adapter.token, adapter.alias)
@@ -89,7 +94,7 @@ async def test_a_registration_whose_id_cannot_be_recorded_is_refused(
 
 
 def test_previous_registrations_are_unregistered_until_the_root_drops_them() -> None:
-    servicer, _, relay, redis = _servicer()
+    servicer, _, relay, redis, _ = _servicer()
     for worker_id, node_alias in (("wkr-1", "box"), ("wkr-2", "other")):
         redis.hash_set(worker_key(worker_id), {"node_alias": node_alias})
 

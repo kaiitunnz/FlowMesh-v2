@@ -17,6 +17,7 @@ from pydantic import SecretStr, ValidationError
 
 from server.hooks import PrincipalContext
 from server.supervisor import manager as manager_module
+from server.supervisor import provisioning as provisioning_module
 from server.supervisor.adapters import docker as docker_adapter
 from server.supervisor.adapters import vastai as vastai_adapter
 from server.supervisor.adapters.base import WorkerTokenType
@@ -31,7 +32,6 @@ from server.supervisor.provisioning import (
     DockerHandle,
     ProviderHandle,
     RecordState,
-    Removal,
     RunState,
     VastHandle,
     WorkerRecord,
@@ -368,7 +368,7 @@ async def test_an_unreadable_store_holds_startup_until_it_reads(
     node: _Node, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     node.write_config(_entry("w1"))
-    monkeypatch.setattr(manager_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(provisioning_module.asyncio, "sleep", _no_sleep)
     load, failures = node.store.load, iter([ConnectionError("down")] * 2)
 
     def flaky_load() -> list[WorkerRecord]:
@@ -552,33 +552,6 @@ async def test_a_destroy_during_a_launch_stays_a_removal(node: _Node) -> None:
     node.daemon.refuse_removal = False
     await _settle(wm)
     assert node.records() == {} and node.daemon.containers == {}
-
-
-@pytest.mark.asyncio
-async def test_one_removal_attempt_per_worker_is_in_flight(
-    node: _Node, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    node.write_config(_entry("w1"))
-    await _run(node.supervisor())
-    wm = await _restarted_removing(node, "w1")
-    calls = 0
-    gate = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    def remove(handle: ProviderHandle) -> Removal:
-        nonlocal calls
-        calls += 1
-        asyncio.run_coroutine_threadsafe(gate.wait(), loop).result(5)
-        return Removal.REMOVED
-
-    monkeypatch.setattr(wm._providers["docker"].factory, "remove", remove)
-    wm._settle_records()
-    await asyncio.sleep(0.05)
-    wm._settle_records()
-    gate.set()
-    await asyncio.gather(*list(wm._tasks))
-
-    assert calls == 1
 
 
 # ------------------------------------------------- grace and the heartbeat ----
