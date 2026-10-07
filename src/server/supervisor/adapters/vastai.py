@@ -385,6 +385,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
 def _release_instance(client: VastAI, handle: ProviderHandle) -> Removal:
     """Destroy a rented instance or stop a supplied one, blocking."""
     instance_id = handle.instance_id
+    assert instance_id is not None
     try:
         if handle.created_instance:
             err = client.destroy_instance(id=instance_id)
