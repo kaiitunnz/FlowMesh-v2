@@ -1,12 +1,13 @@
 """A per-tree supervisor that runs one command and proves its whole process tree reaped.
 
 Run as a fresh, single-threaded process: ``python -I subreaper.py [--receipt PATH]
-[--grace SEC] [--budget SEC] -- ARGV...``. The supervisor marks itself a child
+[--grace SEC] -- ARGV...``. The supervisor marks itself a child
 subreaper, so every descendant the command leaves behind is re-parented to it, whatever
 session or group that descendant moved to. It forks and execs the command, waits for it
 to exit (or for its own SIGTERM, which ends the command early), then terminates and
-reaps whatever remains until it has no child left. Escalation goes TERM, then KILL after
-the grace, within the cleanup budget.
+reaps whatever remains until it has no child left, escalating from TERM to KILL after
+the grace. It keeps draining for as long as anything remains, so the tree never loses
+its owner; the caller bounds how long it waits.
 
 Only that drain to no-children exits :data:`REAPED`; the command's own exit status goes
 to the receipt instead. Any other exit, or death by a signal, proves nothing about the
@@ -25,13 +26,12 @@ import sys
 import time
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 REAPED = 86  # the drain reached no children: the whole tree is gone
-UNPROVED = 87  # the cleanup budget ran out with descendants still alive
 UNSUPPORTED = 88  # the kernel would not make the supervisor a child subreaper
 
 DEFAULT_GRACE_SEC = 2.0
-DEFAULT_BUDGET_SEC = 10.0
 
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
@@ -47,13 +47,12 @@ def supervised_argv(
     *,
     receipt: Path | None = None,
     grace_sec: float = DEFAULT_GRACE_SEC,
-    budget_sec: float = DEFAULT_BUDGET_SEC,
 ) -> list[str]:
     """The argv that runs ``argv`` under a fresh supervisor."""
     head = [sys.executable, "-I", _SCRIPT.as_posix()]
     if receipt is not None:
         head += ["--receipt", receipt.as_posix()]
-    return [*head, "--grace", str(grace_sec), "--budget", str(budget_sec), "--", *argv]
+    return [*head, "--grace", str(grace_sec), "--", *argv]
 
 
 def reap_proved(returncode: int | None) -> bool:
@@ -69,7 +68,7 @@ def read_receipt(path: Path) -> int | None:
         return None
 
 
-def end_supervised(proc: subprocess.Popen[str], timeout_sec: float) -> bool:
+def end_supervised(proc: subprocess.Popen[Any], timeout_sec: float) -> bool:
     """Ask a running supervisor to end its tree and wait for its proof.
 
     The supervisor is never killed here: killing it would orphan the tree it is draining
@@ -175,16 +174,12 @@ class _Supervisor:
             if got is not None and got.si_signo == signal.SIGTERM:
                 return
 
-    def drain(self, grace_sec: float, budget_sec: float) -> bool:
-        """Terminate and reap the remaining tree; return whether it reached no
-        children within the budget."""
+    def drain(self, grace_sec: float) -> None:
+        """Terminate and reap the remaining tree until no child is left."""
         start = time.monotonic()
         terminated: set[int] = set()
         while self.reap_ready():
-            elapsed = time.monotonic() - start
-            if elapsed > budget_sec:
-                return False
-            kill = elapsed >= grace_sec
+            kill = time.monotonic() - start >= grace_sec
             for pid in _descendants():
                 if kill or pid not in terminated:
                     _signal_descendant(
@@ -192,7 +187,6 @@ class _Supervisor:
                     )
                     terminated.add(pid)
             signal.sigtimedwait({signal.SIGCHLD}, _WAIT_STEP_SEC)
-        return True
 
 
 def _write_receipt(path: Path, status: int | None) -> None:
@@ -216,7 +210,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="subreaper")
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--grace", type=float, default=DEFAULT_GRACE_SEC)
-    parser.add_argument("--budget", type=float, default=DEFAULT_BUDGET_SEC)
     parser.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
@@ -244,8 +237,7 @@ def main() -> None:
     os.close(devnull)
     supervisor = _Supervisor(libc, primary)
     supervisor.await_primary()
-    if not supervisor.drain(args.grace, args.budget):
-        os._exit(UNPROVED)
+    supervisor.drain(args.grace)
     if args.receipt is not None:
         _write_receipt(args.receipt, supervisor.status)
     os._exit(REAPED)

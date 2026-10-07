@@ -167,7 +167,7 @@ def test_a_raised_step_still_quiesces_its_harness(
     with pytest.raises(RuntimeError, match="the turn broke"):
         executor.run(message, tmp_path)
 
-    assert log[:2] == ["start", "quiesce"]
+    assert log == ["start", "cancel", "quiesce"]
     assert executor._adapter is None
 
 
@@ -181,7 +181,7 @@ def test_a_step_refused_before_its_turn_still_quiesces_its_harness(
     with pytest.raises(ExecutionError, match="does not mediate"):
         executor.run(message, tmp_path)
 
-    assert log == ["quiesce"]
+    assert log == ["cancel", "quiesce"]
 
 
 def test_a_raised_step_whose_harness_will_not_quiesce_fails_unproved(

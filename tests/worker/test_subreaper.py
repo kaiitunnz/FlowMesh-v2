@@ -13,7 +13,6 @@ import pytest
 from worker.utils import subreaper
 from worker.utils.subreaper import (
     REAPED,
-    UNPROVED,
     UNSUPPORTED,
     end_supervised,
     read_receipt,
@@ -48,10 +47,10 @@ def strays() -> Iterator[list[int]]:
             pass
 
 
-def _run(script: str, tmp_path: Path, **kwargs: float) -> tuple[int, int | None]:
+def _run(script: str, tmp_path: Path, grace_sec: float = 2.0) -> tuple[int, int | None]:
     receipt = tmp_path / "receipt.json"
     proc = subprocess.run(  # nosec B603 - argv list built by the test
-        supervised_argv([_SH, "-c", script], receipt=receipt, **kwargs),
+        supervised_argv([_SH, "-c", script], receipt=receipt, grace_sec=grace_sec),
         cwd=tmp_path,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -132,14 +131,23 @@ def test_successive_adoption_through_living_intermediate_parents(
     assert not any(_alive(pid) for pid in pids)
 
 
-def test_an_exhausted_budget_is_unproved(tmp_path: Path, strays: list[int]) -> None:
+def test_a_tree_still_draining_is_unproved_until_it_is_reaped(
+    tmp_path: Path, strays: list[int]
+) -> None:
     script = "sh -c 'trap \"\" TERM; echo $$ > pids; exec sleep 30' & sleep 0.2; exit 0"
-
-    returncode, status = _run(script, tmp_path, grace_sec=30.0, budget_sec=0.3)
+    proc = subprocess.Popen(  # nosec B603 - argv list built by the test
+        supervised_argv([_SH, "-c", script], grace_sec=30.0), cwd=tmp_path
+    )
+    deadline = time.monotonic() + 10
+    while not (tmp_path / "pids").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
     strays.extend(_pids(tmp_path / "pids"))
 
-    assert returncode == UNPROVED and not reap_proved(returncode)
-    assert status is None
+    assert not end_supervised(proc, 0.5)
+    # The supervisor still owns the tree, so a later attempt can still prove it.
+    assert proc.poll() is None
+    os.kill(strays[0], signal.SIGKILL)
+    assert end_supervised(proc, 10)
 
 
 def test_a_killed_supervisor_proves_nothing(tmp_path: Path, strays: list[int]) -> None:

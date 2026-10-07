@@ -25,12 +25,13 @@ from worker.executors.harness.codex_transport import (  # noqa: E402
     CodexTransportError,
     RealCodexAppServerTransport,
 )
-from worker.utils.subreaper import REAPED, UNPROVED  # noqa: E402
+from worker.utils.subreaper import REAPED  # noqa: E402
 
 
 class _Proc:
     """A supervisor whose app-server exits once its stdin closes, or ignores that and
-    leaves the supervisor's SIGTERM to end the tree."""
+    leaves the supervisor's SIGTERM to end the tree; one that does not prove keeps
+    draining past every wait."""
 
     exit_delay = 0.0
     exits_on_eof = True
@@ -47,8 +48,9 @@ class _Proc:
             threading.Timer(self.exit_delay, self._exit).start()
 
     def _exit(self) -> None:
-        self.returncode = REAPED if self.proves else UNPROVED
-        self.exited.set()
+        if self.proves:
+            self.returncode = REAPED
+            self.exited.set()
 
     def poll(self) -> int | None:
         return self.returncode

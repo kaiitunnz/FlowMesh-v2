@@ -27,6 +27,7 @@ from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -44,10 +45,13 @@ from shared.harness import (  # noqa: E402
     OutcomeKind,
 )
 from shared.private_state import (  # noqa: E402
-    StateComponentKind,
-    seal_component,
-    verify_component,
+    ActivationPrivateStateReference,
+    OwnerFence,
+    PrivateStateAttachment,
+    PrivateStateBinding,
 )
+from shared.tasks.task_type import TaskType  # noqa: E402
+from shared.tasks.worker_message import WorkerTaskMessage  # noqa: E402
 from shared.tools.contract import (  # noqa: E402
     AgentModelTurnProposal,
     MediatedOperationPermit,
@@ -58,10 +62,16 @@ from shared.utils.ids import (  # noqa: E402
     new_idempotency_key,
     new_invocation_id,
     new_mediated_permit_id,
+    new_private_state_reference_id,
+)
+from tests.worker.factories import (  # noqa: E402
+    make_worker_config,
+    make_worker_task_message,
 )
 from worker.egress import MediatedEgressSidecar  # noqa: E402
 from worker.egress import ModelEgress  # noqa: E402
 from worker.egress import PendingEgressRequestStore  # noqa: E402
+from worker.executors.agent_episode_executor import AgentEpisodeExecutor  # noqa: E402
 from worker.executors.harness.codex import CodexAppServerHarnessAdapter  # noqa: E402
 from worker.executors.harness.codex_transport import (  # noqa: E402
     CodexTransportConfig,
@@ -71,6 +81,7 @@ from worker.executors.harness.codex_transport import (  # noqa: E402
 from worker.model_turn import HeldModelEgress  # noqa: E402
 from worker.model_turn import ModelTurnRendezvous  # noqa: E402
 from worker.model_turn import ResponsesFacade  # noqa: E402
+from worker.private_state import PrivateStateHolder  # noqa: E402
 from worker.utils.subreaper import primary_child  # noqa: E402
 
 _TASK_ID = "tsk-codex-int"
@@ -441,37 +452,74 @@ def _alive(pid: int) -> bool:
     return stat[stat.rfind(")") + 2] != "Z"
 
 
-def test_a_quiesced_step_seals_a_home_that_still_verifies_later(
-    tmp_path: Path, transports: TransportFactory
-) -> None:
-    home = tmp_path / "codex_home"
-    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
-        transport = transports(facade.base_url, facade.token, home)
-        adapter = CodexAppServerHarnessAdapter(transport, "v1")
-        first = adapter.start(_TASK_ID, capsule=None, outcomes=[])
-        assert first.kind is HarnessResultKind.COMPLETION
-        supervisor = transport.supervisor_pid
+def test_an_episode_resumes_on_the_generation_its_step_sealed(tmp_path: Path) -> None:
+    """A step's seal still verifies once its app-server would have kept writing."""
+    root = tmp_path / "private"
+    reference = ActivationPrivateStateReference(
+        reference_id=new_private_state_reference_id(),
+        instance_id="wfl-int",
+        activation_id="act-int",
+    )
 
-        adapter.quiesce(_TASK_ID)
-        sealed = seal_component(
-            StateComponentKind.HARNESS_HOME_FS, home, reference_id="aps-int"
+    def episode(
+        binding: PrivateStateBinding, epoch: int, upstream: str
+    ) -> WorkerTaskMessage:
+        attachment = PrivateStateAttachment(
+            attachment_id=f"psa-{epoch}",
+            reference_id=reference.reference_id,
+            generation=binding.generation,
+            worker_id=_WORKER_ID,
+            incarnation=_WORKER_GEN,
+            write_epoch=epoch,
         )
+        return make_worker_task_message(
+            {"taskType": "agent", "task": "review", "harness": {"backend": "codex"}},
+            task_id=_TASK_ID,
+            task_type=TaskType.AGENT,
+            agent_episode={
+                "backend": {"backend": "codex", "version": "v1"},
+                "model_binding": {
+                    "mode": "openai",
+                    "url": upstream,
+                    "model": "codex-model",
+                },
+                "facade_descriptors": [_spawn_facade().model_dump(mode="json")],
+                "private_state": binding.model_dump(mode="json"),
+                "private_state_attachment": attachment.model_dump(mode="json"),
+            },
+        )
+
+    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
+        lifecycle = MagicMock()
+        lifecycle.responses_facade = facade._facade
+        executor = AgentEpisodeExecutor(
+            make_worker_config(private_state_dir=root), lifecycle=lifecycle
+        )
+        first = executor.run(
+            episode(PrivateStateBinding(reference=reference), 1, stub.base_url),
+            tmp_path / "out",
+        )
+        assert first.private_state is not None
+        sealed = first.private_state.manifest
         # Long enough for an idle app-server's log loop or a background sync to land.
         time.sleep(3.0)
 
-        verify_component(sealed, home, reference_id="aps-int")
-        assert not _alive(supervisor)
-        assert not _descendants(supervisor)
-
-        # A fresh app-server resumes the sealed rollout and finishes the episode.
-        group = facade.captured_group()
-        assert group is not None
-        resumed = transports(facade.base_url, facade.token, home)
-        done = CodexAppServerHarnessAdapter(resumed, "v1").start(
-            _TASK_ID, capsule=first.capsule, outcomes=[facade.fabric.settle(group)]
+        resumed = PrivateStateBinding(
+            reference=reference,
+            generation=sealed.generation,
+            manifest=sealed,
+            owner=OwnerFence(worker_id=_WORKER_ID, incarnation=_WORKER_GEN),
         )
-    assert done.kind is HarnessResultKind.COMPLETION
-    assert resumed.supervisor_pid != supervisor
+        executor.cleanup_after_run()
+        attachment = PrivateStateAttachment(
+            attachment_id="psa-check",
+            reference_id=reference.reference_id,
+            generation=sealed.generation,
+            worker_id=_WORKER_ID,
+            incarnation=_WORKER_GEN,
+            write_epoch=2,
+        )
+        PrivateStateHolder(root).open(resumed, attachment)
 
 
 def test_the_app_server_starts_no_process_of_its_own(

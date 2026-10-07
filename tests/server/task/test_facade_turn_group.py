@@ -490,7 +490,7 @@ def test_the_codex_sandbox_backs_the_facade_tool_filter() -> None:
         initial_input="t",
         task_id="tsk-1",
     )
-    overrides = cfg.to_codex_config().config_overrides
+    overrides = cfg.config_overrides()
     assert 'sandbox_mode="workspace-write"' in overrides  # confined if it runs
     assert "sandbox_workspace_write.network_access=false" in overrides  # no egress
     assert "tools.web_search=false" in overrides  # honored by a version that reads it

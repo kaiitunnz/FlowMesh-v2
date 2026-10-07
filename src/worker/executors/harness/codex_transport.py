@@ -167,9 +167,10 @@ class CodexTransportConfig:
         # this agent activation's registered episode.
         return f"{self.base_url.rstrip('/')}/agent/{self.task_id}/v1"
 
-    def to_codex_config(self) -> CodexConfig:
+    def config_overrides(self) -> tuple[str, ...]:
+        """The ``--config`` overrides the app-server launches with."""
         p = self.provider_id
-        overrides = (
+        return (
             f'model_providers.{p}.name="{p}"',
             f'model_providers.{p}.base_url="{self.provider_base_url()}"',
             f'model_providers.{p}.wire_api="responses"',
@@ -192,8 +193,10 @@ class CodexTransportConfig:
             # generation.
             "features.plugins=false",
         )
+
+    def to_codex_config(self) -> CodexConfig:
         argv = [_resolve_codex_bin(CodexConfig()).as_posix()]
-        for override in overrides:
+        for override in self.config_overrides():
             argv += ["--config", override]
         argv += ["app-server", "--listen", "stdio://"]
         env = {
@@ -205,7 +208,7 @@ class CodexTransportConfig:
         # The app-server runs under its own supervisor, which proves its whole process
         # tree reaped when it ends: a child Codex leaves behind cannot outlive the step
         # and keep writing the home a seal captures.
-        launch = supervised_argv(argv, budget_sec=self.reap_budget_sec)
+        launch = supervised_argv(argv)
         return CodexConfig(
             launch_args_override=tuple(launch),
             env=env,
@@ -250,10 +253,6 @@ def _outcome_to_response_items(item: CodexInjectItem) -> list[dict[str, Any]]:
     ]
 
 
-# Beyond the supervisor's own budget: the time it needs to exit once its drain is done.
-_SUPERVISOR_EXIT_SLACK_SEC = 2.0
-
-
 def _end_app_server(
     client: CodexClient, exit_grace_sec: float, budget_sec: float
 ) -> bool:
@@ -273,7 +272,7 @@ def _end_app_server(
             proc.stdin.close()
     with contextlib.suppress(subprocess.TimeoutExpired):
         proc.wait(exit_grace_sec)
-    if not end_supervised(proc, budget_sec + _SUPERVISOR_EXIT_SLACK_SEC):
+    if not end_supervised(proc, budget_sec):
         return False
     with contextlib.suppress(Exception):
         client.close()

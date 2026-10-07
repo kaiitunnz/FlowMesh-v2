@@ -122,10 +122,15 @@ class AgentEpisodeExecutor(Executor):
             try:
                 result = self._run_adapter(task, dispatch, adapter, sandbox)
             except BaseException as exc:
-                # The turn may still be running on the harness: refuse its further
-                # turns before ending it, as a give-up does.
+                # The turn may still be running on the harness: give it up, refusing
+                # its further turns, before ending the harness.
                 if facade is not None:
                     facade.refuse_episode(task.task_id)
+                if not self._signals.cancelled:
+                    try:
+                        adapter.cancel(task.task_id)
+                    except Exception:
+                        _LOG.exception("Failed to give up the turn of %s", task.task_id)
                 if not self._end_writers(task.task_id, adapter, holder, state):
                     if state is not None:
                         raise self._unproved(state) from exc
