@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from server.task.models import TaskRecord, TaskStatus
-from server.task.runtime import _failed_task_can_retry
+from server.task.runtime.reports import _failed_task_can_retry
 
 
 def _record(

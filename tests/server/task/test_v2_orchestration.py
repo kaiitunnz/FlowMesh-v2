@@ -196,10 +196,10 @@ class _WorkerRegistryStub:
         return []
 
 
-def _runtime(registry: FakeRegistry) -> TaskRuntime:
+def _runtime(registry: FakeRegistry, workers: Any = None) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
+        cast(Any, workers or _WorkerRegistryStub()),
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-test"),
@@ -315,11 +315,14 @@ def _planned(runtime: TaskRuntime, task_id: str, items: list[str]) -> dict[str, 
 
 
 def _live_runtime(
-    registry: FakeRegistry, name: str = "live", reader: Any = None
+    registry: FakeRegistry,
+    name: str = "live",
+    reader: Any = None,
+    workers: Any = None,
 ) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
+        cast(Any, workers or _WorkerRegistryStub()),
         OrchestrationConfig(),
         reader or make_result_reader(),
         logging.getLogger(name),

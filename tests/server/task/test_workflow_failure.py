@@ -9,7 +9,9 @@ import pytest
 from server.orchestration.state import AttemptStatus, WorkItemStatus
 from server.task.models import TaskStatus
 from server.task.results import ResultUnavailable, ResultUnreadable
-from server.task.runtime import TaskRuntime, _InputCheck, _PendingOp
+from server.task.runtime import TaskRuntime
+from server.task.runtime.boundary_router import _PendingOp
+from server.task.runtime.facade import _InputCheck
 from shared.content import reference_for
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from tests.server.dispatch_helpers import record_dispatch
@@ -110,16 +112,15 @@ def test_the_agents_pending_operations_are_reaped() -> None:
             return 1
 
     async def run() -> None:
-        runtime = _runtime(FakeRegistry())
-        runtime._worker_registry = cast(Any, _Workers())
+        runtime = _runtime(FakeRegistry(), _Workers())
         workflow_id, writer, _engine, env = await _held_boundary(runtime)
-        runtime._pending_ops["mop-held"] = _PendingOp(
+        runtime._router.pending_ops["mop-held"] = _PendingOp(
             writer, env.call_correlation, "wkr-1", "box", redrive_at=0.0
         )
 
         _fail(runtime, workflow_id)
 
-        assert runtime._pending_ops == {}
+        assert runtime._router.pending_ops == {}
         assert [(f.frame_kind, f.payload["agent_task_id"]) for f in frames] == [
             ("reap", writer)
         ]
@@ -157,8 +158,7 @@ async def test_a_task_still_running_is_interrupted() -> None:
             interrupts.append(args[1])
             return 1
 
-    runtime = _live_runtime(FakeRegistry())
-    runtime._worker_registry = cast(Any, _Workers())
+    runtime = _live_runtime(FakeRegistry(), workers=_Workers())
     _, ids = await _register(runtime, _PARALLEL)
     _pop_ready(runtime)
     side = ids["side"]
@@ -204,8 +204,7 @@ async def test_a_task_being_published_is_interrupted() -> None:
             interrupts.append(args[1])
             return 1
 
-    runtime = _live_runtime(FakeRegistry())
-    runtime._worker_registry = cast(Any, _Workers())
+    runtime = _live_runtime(FakeRegistry(), workers=_Workers())
     _, ids = await _register(runtime, _PARALLEL)
     _pop_ready(runtime)
     side = ids["side"]
@@ -228,8 +227,7 @@ async def test_a_release_error_stays_out_of_the_report_that_failed_the_workflow(
             attempted.append(args[1].task_id)
             raise ConnectionError("control redis unavailable")
 
-    runtime = _live_runtime(FakeRegistry())
-    runtime._worker_registry = cast(Any, _Workers())
+    runtime = _live_runtime(FakeRegistry(), workers=_Workers())
     monitor = _monitor(runtime)
     workflow_id, ids = await _register(runtime, _PARALLEL)
     _pop_ready(runtime)
@@ -259,7 +257,7 @@ async def test_a_release_error_stays_out_of_the_report_that_failed_the_workflow(
     assert events == ["TASK_SUCCEEDED"]
     assert attempted == [side]
     assert runtime._tasks[side].status == TaskStatus.FAILED
-    assert runtime._pending_terminations == []
+    assert runtime._terminations.pending_terminations == []
 
 
 class _RefusesDispatchedWrite(FakeRegistry):
@@ -283,8 +281,7 @@ async def _publishing_when_failed(
             interrupts.append(args[1].task_id)
             return 1
 
-    runtime = _live_runtime(registry)
-    runtime._worker_registry = cast(Any, _Workers())
+    runtime = _live_runtime(registry, workers=_Workers())
     _, ids = await _register(runtime, _PARALLEL)
     _pop_ready(runtime)
     record_dispatch(runtime, ids["planner"], cast(Any, _worker()), "dsp-p")

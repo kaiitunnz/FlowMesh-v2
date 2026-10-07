@@ -12,6 +12,8 @@ import logging
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from server.config import OrchestrationConfig
 from server.orchestration import (
     Advance,
@@ -27,7 +29,7 @@ from server.orchestration.state import (
 )
 from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, agent_inputs, content_bindings
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
     AgentOperator,
@@ -304,7 +306,9 @@ spec:
 """
 
 
-def test_region_output_binds_the_child_region_join_to_the_merge_input() -> None:
+def test_region_output_binds_the_child_region_join_to_the_merge_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from server.task.parser import parse_workflow
     from server.task.v2 import FrontendWorkflowSource, compile_workflow
     from server.task.v2.compiler.agent_binding import AgentBindingDefaults
@@ -348,18 +352,35 @@ def _runtime(budget: int | None = None) -> TaskRuntime:
     )
 
 
-def _write_result(runtime: TaskRuntime, task_id: str, payload: dict[str, Any]) -> None:
+def _write_result(
+    runtime: TaskRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    task_id: str,
+    payload: dict[str, Any],
+) -> None:
     """Bind a task's stored result the way its settled success would."""
     reference = store_result(runtime._results, task_id, payload)
     bound = runtime.__dict__.setdefault("_test_bindings", {})
     bound[task_id] = ResultBinding(task_id=task_id, reference=reference)
-    runtime._result_binding_locked = bound.get  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        content_bindings,
+        "result_binding_locked",
+        lambda tasks, engines, task_id: bound.get(task_id),
+    )
 
 
 def _drive_inputs(runtime: TaskRuntime, engine: Any, workflow_id: str) -> None:
     """Advance an engine's blocked agents as an applied advance does, then drive."""
     runtime._engines[workflow_id] = engine
-    runtime._stage_agent_inputs_locked(workflow_id, engine, Advance())
+    agent_inputs.stage_agent_inputs_locked(
+        runtime._tasks,
+        runtime._engines,
+        runtime._redrive,
+        runtime._input_budget_bytes,
+        workflow_id,
+        engine,
+        Advance(),
+    )
     runtime._redrive.run_due()
 
 
@@ -376,10 +397,12 @@ def _merge_engine() -> Any:
     return engine
 
 
-def test_an_input_records_the_producer_result_it_was_read_from() -> None:
+def test_an_input_records_the_producer_result_it_was_read_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = _runtime()
     engine = _merge_engine()
-    _write_result(runtime, "P", {"taskType": "agent", "value": "grounded"})
+    _write_result(runtime, monkeypatch, "P", {"taskType": "agent", "value": "grounded"})
 
     _drive_inputs(runtime, engine, "wfl-test")
 
@@ -388,17 +411,21 @@ def test_an_input_records_the_producer_result_it_was_read_from() -> None:
     assert member.value_ref is not None
     bound = runtime._test_bindings["P"]  # type: ignore[attr-defined]
     assert member.value_ref.content == bound.reference
-    (binding,) = runtime._agent_input_bindings(engine, "M")
+    (binding,) = agent_inputs.agent_input_bindings(
+        runtime._tasks, runtime._engines, engine, "M"
+    )
     (delivered,) = binding.members
     assert delivered.value is None
     assert delivered.source is not None
     assert delivered.source.reference == member.value_ref.content
 
 
-def test_an_input_is_not_read_under_the_runtime_lock() -> None:
+def test_an_input_is_not_read_under_the_runtime_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = _runtime()
     engine = _merge_engine()
-    _write_result(runtime, "P", {"taskType": "agent", "value": "grounded"})
+    _write_result(runtime, monkeypatch, "P", {"taskType": "agent", "value": "grounded"})
     reads: list[bool] = []
     read = runtime._results.read_reference
 
@@ -409,19 +436,37 @@ def test_an_input_is_not_read_under_the_runtime_lock() -> None:
     runtime._results.read_reference = _recording_read  # type: ignore[method-assign]
     runtime._engines["wfl-test"] = engine
     with runtime._lock:
-        runtime._stage_agent_inputs_locked("wfl-test", engine, Advance())
+        agent_inputs.stage_agent_inputs_locked(
+            runtime._tasks,
+            runtime._engines,
+            runtime._redrive,
+            runtime._input_budget_bytes,
+            "wfl-test",
+            engine,
+            Advance(),
+        )
     assert not reads and not engine.accepted_inputs_for_task("M")
     runtime._redrive.run_due()
     assert reads == [False]
     assert engine.accepted_inputs_for_task("M")
 
 
-def test_an_input_read_for_a_superseded_snapshot_is_read_again() -> None:
+def test_an_input_read_for_a_superseded_snapshot_is_read_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = _runtime()
     engine = _merge_engine()
-    _write_result(runtime, "P", {"taskType": "agent", "value": "first"})
+    _write_result(runtime, monkeypatch, "P", {"taskType": "agent", "value": "first"})
     runtime._engines["wfl-test"] = engine
-    runtime._stage_agent_inputs_locked("wfl-test", engine, Advance())
+    agent_inputs.stage_agent_inputs_locked(
+        runtime._tasks,
+        runtime._engines,
+        runtime._redrive,
+        runtime._input_budget_bytes,
+        "wfl-test",
+        engine,
+        Advance(),
+    )
     read = runtime._results.read_reference
     rebound: list[bool] = []
 
@@ -429,7 +474,9 @@ def test_an_input_read_for_a_superseded_snapshot_is_read_again() -> None:
         envelope = read(reference)
         if not rebound:
             rebound.append(True)
-            _write_result(runtime, "P", {"taskType": "agent", "value": "second"})
+            _write_result(
+                runtime, monkeypatch, "P", {"taskType": "agent", "value": "second"}
+            )
         return envelope
 
     runtime._results.read_reference = _read_then_rebind  # type: ignore[method-assign]
@@ -457,39 +504,51 @@ def test_input_bindings_projection_is_deterministic() -> None:
     engine.record_accepted_input(
         _accepted(activation, "reviews", ValueRef(kind="inline", literal="grounded")),
     )
-    first = runtime._agent_input_bindings(engine, "M")
-    second = runtime._agent_input_bindings(engine, "M")
+    first = agent_inputs.agent_input_bindings(
+        runtime._tasks, runtime._engines, engine, "M"
+    )
+    second = agent_inputs.agent_input_bindings(
+        runtime._tasks, runtime._engines, engine, "M"
+    )
     assert first == second  # stable projection over the durable manifest
     assert first[0].port == "reviews" and first[0].members[0].value == "grounded"
 
 
-def test_oversized_input_fails_the_agent_rather_than_truncating() -> None:
+def test_oversized_input_fails_the_agent_rather_than_truncating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = _runtime(budget=64)
     engine = _merge_engine()
-    _write_result(runtime, "P", {"taskType": "agent", "value": "x" * 5000})
+    _write_result(runtime, monkeypatch, "P", {"taskType": "agent", "value": "x" * 5000})
     _drive_inputs(runtime, engine, "wfl-test")
     wi = engine.work_item("M")
     assert wi.status in (WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED)
     assert wi.outcome is PublicationOutcome.DECLARED_FAILURE
 
 
-def test_an_input_at_the_budget_is_accepted() -> None:
+def test_an_input_at_the_budget_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _runtime(budget=64)
     engine = _merge_engine()
-    _write_result(runtime, "P", {"taskType": "agent", "value": "x" * 64})
+    _write_result(runtime, monkeypatch, "P", {"taskType": "agent", "value": "x" * 64})
     _drive_inputs(runtime, engine, "wfl-test")
     assert engine.work_item("M").outcome is None
     assert engine.accepted_inputs_for_task("M")
 
 
-def test_a_producer_that_settled_with_nothing_bound_fails_the_agent() -> None:
+def test_a_producer_that_settled_with_nothing_bound_fails_the_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = _runtime()
     engine = _merge_engine()
 
     def _unbound(task_id: str) -> ResultBinding | None:
         return None
 
-    runtime._result_binding_locked = _unbound  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        content_bindings,
+        "result_binding_locked",
+        lambda tasks, engines, task_id: _unbound(task_id),
+    )
     runtime._tasks["P"] = cast(
         Any,
         SimpleNamespace(
@@ -505,10 +564,12 @@ def test_a_producer_that_settled_with_nothing_bound_fails_the_agent() -> None:
     assert engine.work_item("M").outcome is PublicationOutcome.DECLARED_FAILURE
 
 
-def test_an_unreadable_input_fails_the_agent_rather_than_deferring() -> None:
+def test_an_unreadable_input_fails_the_agent_rather_than_deferring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = _runtime()
     engine = _merge_engine()
-    _write_result(runtime, "P", {"taskType": "agent", "value": "grounded"})
+    _write_result(runtime, monkeypatch, "P", {"taskType": "agent", "value": "grounded"})
     bound = runtime._test_bindings["P"]  # type: ignore[attr-defined]
     assert bound.reference is not None
     runtime._test_bindings["P"] = ResultBinding(  # type: ignore[attr-defined]

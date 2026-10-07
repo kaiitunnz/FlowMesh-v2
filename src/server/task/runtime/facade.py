@@ -20,28 +20,19 @@ from shared.content import ContentReference
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
-    EpisodeModelBinding,
-    HarnessBackendKey,
     HarnessCapsule,
     HarnessResult,
     HarnessResultKind,
-    InputBinding,
-    InputBindingMember,
     ServiceLeafEpisodeDispatch,
 )
 from shared.inference import (
     CanonicalInferenceContract,
-    CanonicalProjectionError,
-    InferenceSourceKind,
     InputResolutionBinding,
     ResolvedInputMaterialization,
-    canonical_contract,
-    element_contract,
 )
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
-    PrivateStateAttachment,
     PrivateStateSealReport,
     PrivateStateUnavailable,
 )
@@ -50,27 +41,16 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.sandbox import (
-    SANDBOX_EGRESS_INTERFACE,
-    SANDBOX_EXECUTE_INTERFACE,
-    LocalSandboxCapability,
-    SandboxEgressMode,
-)
-from shared.schemas.command import InterruptMessage, MediatedOpMessage, RevokeMessage
+from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import ResultEnvelope
-from shared.schemas.result.binding import collection_elements, value_text
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.credentials import set_spec_values
 from shared.tasks.result_binding import (
     ResultBinding,
     ResultElementRef,
-    ResultValueRef,
 )
 from shared.tasks.specs import (
-    InferenceEmbodimentKind,
-    InferenceSpecStrict,
-    InferenceSpecTemplate,
     ModelBindingMode,
     TaskSpecBase,
 )
@@ -80,22 +60,16 @@ from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 from shared.tools.contract import (
     AgentModelTurnProposal,
     MediatedOperationOutcome,
-    MediatedOperationPermit,
 )
-from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
 from shared.utils.redact import credential_scrubber
 
-from ..config import AgentBindingConfig, N8nConfig, OrchestrationConfig
-from ..hooks import SUPPLIER_RESOLVERS
-from ..orchestration import (
-    AcceptedInput,
-    AcceptedInputMember,
+from ...config import AgentBindingConfig, N8nConfig, OrchestrationConfig
+from ...hooks import SUPPLIER_RESOLVERS
+from ...orchestration import (
     Advance,
-    InputResolution,
     LedgerSnapshot,
     OrchestrationEngine,
-    PublicationOutcome,
     RecoveryDisposition,
     RegionError,
     ResultPublication,
@@ -104,26 +78,24 @@ from ..orchestration import (
     WorkItemStatus,
     dependency_failed,
 )
-from ..orchestration.episode import BoundaryEvent
-from ..orchestration.harness import to_boundary_event
-from ..orchestration.state import TERMINAL_WORK_ITEM_STATUSES
-from ..orchestration.telemetry import build_span_emitter
-from ..orchestration.tool_dispatch import (
+from ...orchestration.episode import BoundaryEvent
+from ...orchestration.harness import to_boundary_event
+from ...orchestration.telemetry import build_span_emitter
+from ...orchestration.tool_dispatch import (
     MODEL_INTERFACE,
     SEARCH_INTERFACE,
     FacadeTurnGroup,
-    InputMemberPlan,
     ToolInvocationEnvelope,
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from ..registries.worker import Worker, WorkerRegistry
-from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
-from ..services.credential_vault import CredentialVault
-from ..utils.cursors import page_slice
-from ..utils.query import QueryFilter
-from ..utils.time import now_iso, parse_iso_ts, ts_to_iso
-from .credentials import (
+from ...registries.worker import Worker, WorkerRegistry
+from ...registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
+from ...services.credential_vault import CredentialVault
+from ...utils.cursors import page_slice
+from ...utils.query import QueryFilter
+from ...utils.time import now_iso, parse_iso_ts
+from ..credentials import (
     CredentialRefs,
     InlineCredentials,
     TaskCredentials,
@@ -134,7 +106,7 @@ from .credentials import (
     take_inline_credentials,
     take_spec_credentials,
 )
-from .models import (
+from ..models import (
     SERVE_TASK_TYPES,
     SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -155,17 +127,17 @@ from .models import (
     categorize_task_type,
     task_order,
 )
-from .outputs import (
+from ..outputs import (
     OutputMember,
     PublishedOutput,
     PublishedOutputs,
     published_member,
     published_members,
 )
-from .parser import ParsedWorkflow, parse_workflow
-from .redrive import StoreRedriveScheduler
-from .results import ResultReader, ResultUnavailable, ResultUnreadable
-from .v2 import (
+from ..parser import ParsedWorkflow, parse_workflow
+from ..redrive import StoreRedriveScheduler
+from ..results import ResultReader, ResultUnreadable
+from ..v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
     InspectionReport,
@@ -174,110 +146,36 @@ from .v2 import (
     build_inspection,
     compile_bundle,
 )
-from .v2.compiler.agent_binding import AgentBindingDefaults
-from .v2.compiler.facades import run_command_schema
-from .v2.policy import PolicySurface
-from .v2.representations.admission import ResidentAdmissionBinding
-from .v2.representations.operators import (
+from ..v2.compiler.agent_binding import AgentBindingDefaults
+from ..v2.policy import PolicySurface
+from ..v2.representations.admission import ResidentAdmissionBinding
+from ..v2.representations.operators import (
     AgentModelGatewayBinding,
-    AgentOperator,
-    ResolvedEmbodiment,
-    ServiceDependency,
 )
-from .v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
-
-# A live-feasibility check: whether a lowered episode's declared alternative can be
-# placed now.
-EpisodeFeasibility = Callable[[EpisodeSpec], bool]
-
-
-def _sandbox_capability(
-    op: AgentOperator | None,
-    attachment: PrivateStateAttachment | None,
-    invoke_face: tuple[str, ...],
-) -> LocalSandboxCapability | None:
-    """The local execution authority for one dispatch of a sandbox-declaring agent.
-
-    It is minted from the agent's pinned envelope and the attachment that already fences
-    this dispatch's writes, so a command runs only under the holder and write epoch that
-    owns the workspace it mutates. An agent with no attachment has no workspace to run
-    in and gets none.
-
-    Both interfaces are resolved against ``invoke_face`` — what this activation may
-    actually invoke once its ancestors have attenuated it — rather than against the
-    pinned binding, which only records what the author asked for. A child whose parent
-    withheld ``sandbox.execute`` gets no capability at all and cannot run a command; one
-    whose parent withheld only ``sandbox.egress`` runs fenced under a binding that names
-    the opt-in. Neither a binding nor a command argument can widen what is minted here.
-    """
-    if op is None or op.sandbox_binding is None or attachment is None:
-        return None
-    if SANDBOX_EXECUTE_INTERFACE not in invoke_face:
-        return None
-    egress = (
-        op.sandbox_binding.network_egress
-        if SANDBOX_EGRESS_INTERFACE in invoke_face
-        else SandboxEgressMode.DENY
-    )
-    return LocalSandboxCapability(
-        attachment_id=attachment.attachment_id,
-        reference_id=attachment.reference_id,
-        worker_id=attachment.worker_id,
-        incarnation=attachment.incarnation,
-        write_epoch=attachment.write_epoch,
-        profile=op.sandbox_binding.profile,
-        network_egress=egress,
-    )
-
-
-def _effective_facades(
-    op: AgentOperator | None,
-    invoke_face: tuple[str, ...],
-    sandbox: LocalSandboxCapability | None,
-) -> tuple[FacadeDescriptor, ...]:
-    """The facades this dispatch offers the model, narrowed to what it may use.
-
-    The compiler pins the ceiling from the operator's declared authority; an
-    activation's effective grant can be narrower, so a locally-resolved facade is
-    reconciled here against it. Only ``LOCAL_INLINE`` facades are narrowed: a mediated
-    call the activation may not invoke settles as a durable authority denial, which is a
-    record worth keeping, while a local one is refused inside the worker and would leave
-    no trace of the offer at all.
-    """
-    if op is None:
-        return ()
-    facades: list[FacadeDescriptor] = []
-    for facade in op.facades:
-        if facade.resolution is not FacadeResolution.LOCAL_INLINE:
-            facades.append(facade)
-            continue
-        if facade.interface == SANDBOX_EXECUTE_INTERFACE:
-            if sandbox is None:
-                continue  # no effective execute: the tool is never offered
-            facade = facade.model_copy(
-                update={"tool_schema": run_command_schema(sandbox.egress_allowed)}
-            )
-        elif facade.interface is not None and facade.interface not in invoke_face:
-            continue
-        facades.append(facade)
-    return tuple(facades)
-
-
-# A spawn producer's fan-out read retries off the lock before the workflow fails.
-_FANOUT_READ_ATTEMPTS = 3
-_FANOUT_READ_BACKOFF_SEC = 0.2
-
-
-@dataclass(frozen=True)
-class _FanoutRead:
-    """How many elements a spawn producer's collection holds, or why it went unread."""
-
-    count: int = 0
-    # The stored result the count was read from; None for a producer that skipped.
-    reference: ContentReference | None = None
-    error: str | None = None
-    # The store could not be reached; the collection is still there to read later.
-    unavailable: bool = False
+from ..v2.representations.plan import InferenceEmbodimentMenu
+from . import (
+    agent_inputs,
+    content_bindings,
+    episode_dispatch,
+    fanout,
+    materialized_records,
+)
+from .boundary_router import MediatedBoundaryRouter, _PendingOp
+from .episode_dispatch import EpisodeFeasibility
+from .fanout import _FanoutRead
+from .reports import (
+    _LOSS_EFFECTS,
+    _failed_task_can_retry,
+    _in_flight_usage,
+    _membership,
+    _reported_child_references,
+    _reported_reference,
+    _reset_to_pending,
+    _settle_outcome,
+)
+from .reservations import WorkerReservations
+from .resident_tasks import ResidentServeTasks
+from .terminations import TerminationRelease, _Termination
 
 
 @dataclass(frozen=True)
@@ -319,177 +217,6 @@ class _StagedRegistration:
     candidate_ready: list[str]
     v2_bundle: PersistedV2Workflow | None
     v2_engine: OrchestrationEngine | None
-
-
-@dataclass(frozen=True)
-class _Revoke:
-    message: RevokeMessage
-    # The node the dispatch went to, when known apart from the worker's record, which
-    # the worker's unregister deletes.
-    node_id: str | None = None
-
-
-@dataclass
-class _PendingOp:
-    """A worker-originated tool operation whose permit was relayed to its origin
-    worker, and when control re-drives it if no outcome has arrived."""
-
-    agent_task_id: str
-    call_correlation: str
-    worker_id: str
-    # The node the origin worker registered on; after a store wipe its id can name
-    # another node's worker, which holds none of the operation's request.
-    node_alias: str
-    redrive_at: float
-    redrives: int = 0
-
-
-@dataclass
-class _Termination:
-    """What control still owes workers off its lock: interrupts and revokes to send,
-    operations to reap, and resident credits to release."""
-
-    interrupts: list[InterruptMessage]
-    # Each pending mediated operation's worker, agent task, and call.
-    reaps: list[tuple[str, str, str]]
-    resident_invocation_ids: list[str] = field(default_factory=list)
-    revokes: list[_Revoke] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class _InputElement:
-    """The producer element a leaf fan-out child runs on."""
-
-    producer_task_id: str
-    ref: ResultElementRef
-
-
-@dataclass(frozen=True)
-class _PortSnapshot:
-    """One agent input port whose members are each frozen to what supplies them."""
-
-    target_port: str
-    provenance: str
-    members: tuple[tuple[InputMemberPlan, ValueRef], ...]
-
-
-@dataclass(frozen=True)
-class _AgentInputSnapshot:
-    """An agent's pending input ports as of one look at the ledger."""
-
-    task_id: str
-    activation_id: str
-    ports: tuple[_PortSnapshot, ...]
-    # Why the agent's input can never be read, when a producer settled unbound.
-    unreadable: str | None = None
-
-    @property
-    def references(self) -> dict[str, ContentReference]:
-        """Each stored result the ports read, keyed by the producer it names."""
-        return {
-            value_ref.legacy_task_id or "": value_ref.content
-            for port in self.ports
-            for _member, value_ref in port.members
-            if value_ref.content is not None
-        }
-
-
-def _literal_text(value_ref: ValueRef | None) -> str | None:
-    """The value an inline input member carries itself."""
-    if value_ref is None:
-        return None
-    if value_ref.kind == "inline":
-        return value_ref.literal or ""
-    if value_ref.kind == "empty":
-        return ""
-    return None
-
-
-def _member_text(
-    value_ref: ValueRef, values: dict[ContentReference, ResultEnvelope | Exception]
-) -> str | None:
-    """The string an input member resolves to from the results read for it."""
-    if value_ref.content is None:
-        return _literal_text(value_ref)
-    envelope = values.get(value_ref.content)
-    if not isinstance(envelope, ResultEnvelope):
-        return None
-    return value_text(envelope, _element_of(value_ref))
-
-
-def _element_of(value_ref: ValueRef) -> int | None:
-    """The collection member a value reference selects, or None for the whole result."""
-    return (
-        int(value_ref.collection_key) if value_ref.collection_key is not None else None
-    )
-
-
-def _settled_at(record: TaskRecord) -> str | None:
-    return ts_to_iso(record.finished_ts) if record.finished_ts is not None else None
-
-
-def _reported_reference(raw: Any) -> ContentReference | None:
-    """A result reference a worker reported, or None when it reported none."""
-    if raw is None:
-        return None
-    try:
-        return ContentReference.model_validate(raw)
-    except ValidationError:
-        return None
-
-
-def _reset_to_pending(record: TaskRecord) -> None:
-    """Clear what a task's last dispatch left on it, returning it to PENDING."""
-    record.status = TaskStatus.PENDING
-    record.assigned_worker = None
-    record.dispatch_id = None
-    record.topic = None
-    record.dispatched_ts = None
-    record.started_ts = None
-    record.finished_ts = None
-    record.error = None
-
-
-def _membership(record: TaskRecord) -> str:
-    """The status set a task's record commits into. A task being cancelled still runs
-    on its worker. A child its region's residual policy cancelled settles its workflow
-    as a finished task does, never as a cancelled one."""
-    if record.status == TaskStatus.CANCELLING:
-        return TaskStatus.DISPATCHED
-    if record.status == TaskStatus.CANCELLED and record.residual_cancel:
-        return TaskStatus.DONE
-    return record.status
-
-
-def _failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
-    """Whether a failed task may be requeued: retryable, within the attempt budget,
-    and not settling."""
-    if record.status in SETTLING_TASK_STATUSES or retryable is False:
-        return False
-    return record.max_attempts < 0 or record.attempts < record.max_attempts
-
-
-def _settle_outcome(
-    effect: EventEffect,
-    record: TaskRecord | None,
-    merged_children: list[str],
-    usages: list[tuple[str, TaskUsage]],
-    impacted: tuple[tuple[str, str], ...] = (),
-) -> SettleOutcome:
-    return SettleOutcome(
-        effect,
-        record.status if record is not None else None,
-        usages if effect in (EventEffect.APPLIED, EventEffect.FAILED) else [],
-        merged_children,
-        impacted,
-    )
-
-
-_LOSS_EFFECTS = {
-    DispatchEnd.RETURNED: EventEffect.RETURNED,
-    DispatchEnd.FAILED: EventEffect.FAILED,
-    DispatchEnd.STALE: EventEffect.STALE,
-}
 
 
 @dataclass
@@ -546,15 +273,6 @@ def _supplier_id(worker: Worker) -> str:
     return ""
 
 
-def _reported_child_references(payload: dict[str, Any]) -> dict[str, ContentReference]:
-    """The result references a merged dispatch reported for its children, by child."""
-    return {
-        str(child_id): parsed
-        for child_id, raw in (payload.get("child_result_references") or {}).items()
-        if (parsed := _reported_reference(raw)) is not None
-    }
-
-
 def _binding_defaults(
     cfg: AgentBindingConfig,
     sandbox_enabled: bool = False,
@@ -600,18 +318,6 @@ _OP_PERMIT_SLACK_SEC = 60.0
 # deadline plus this long times 2^n - 1 after the n-th re-drive, and its boundary fails
 # once it has been re-driven _OP_REDRIVE_LIMIT times.
 _OP_REDRIVE_BACKOFF_SEC = 30.0
-_OP_REDRIVE_LIMIT = 5
-# A generous bound on a materialized external-model completion; a larger response
-# settles by reference under the reference-backed outcome contract.
-_MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
-
-
-def _in_flight_usage(
-    task_id: str, payload: dict[str, Any]
-) -> list[tuple[str, TaskUsage]]:
-    """The usage row for a dispatch whose task runs on rather than settling."""
-    usage = TaskUsage.from_payload(payload, TaskStatus.DISPATCHED)
-    return [(task_id, usage)] if usage is not None else []
 
 
 def _captured_calls(
@@ -656,6 +362,79 @@ def _listing_fields(
 
 class TaskRuntime:
     """In-memory task registry with FIFO-ready queue and dependency tracking."""
+
+    def take_stale_ops(
+        self, occurrence: tuple[str, str]
+    ) -> list[tuple[str, _PendingOp]]:
+        """Drop and return the pending operations of one boundary occurrence."""
+        return self._router.take_stale_ops(occurrence)
+
+    def record_issued_op(self, permit_id: str, op: _PendingOp) -> None:
+        self._router.record_issued_op(permit_id, op)
+
+    def take_settled(self, outcome: MediatedOperationOutcome) -> _PendingOp | None:
+        """Drop and return the pending operation an outcome settles."""
+        return self._router.take_settled(outcome)
+
+    def take_overdue(
+        self,
+        worker_id: str,
+        now: float,
+        exhausted: list[_PendingOp],
+        redrive: list[tuple[str, _PendingOp]],
+    ) -> None:
+        """Sort a worker's overdue operations into those out of re-drives, which are
+        dropped, and those to re-drive, which are charged one."""
+        self._router.take_overdue(worker_id, now, exhausted, redrive)
+
+    def discard_op(self, permit_id: str, op: _PendingOp) -> None:
+        """Drop a pending operation unless a re-mint replaced it."""
+        self._router.discard_op(permit_id, op)
+
+    def pending_for_worker(self, worker_id: str) -> set[tuple[str, str]]:
+        """The (agent task, call) of each operation a worker originated."""
+        return self._router.pending_for_worker(worker_id)
+
+    def drop_worker_ops(self, worker_id: str) -> None:
+        """Drop every pending operation a departed worker originated."""
+        self._router.drop_worker_ops(worker_id)
+
+    def ledger_saved(self, workflow_id: str) -> None:
+        """Queue each termination that waited on the workflow's ledger save."""
+        self._terminations.ledger_saved(workflow_id)
+
+    def has_undurable(self, workflow_id: str) -> bool:
+        return self._terminations.has_undurable(workflow_id)
+
+    def take_terminations(self) -> list[_Termination]:
+        """Take every termination queued for release."""
+        return self._terminations.take_terminations()
+
+    def take_ended(self) -> list[tuple[str, str]]:
+        """Take every reservation whose dispatch ended."""
+        return self._reservations.take_ended()
+
+    def requeue_ended(self, failed: list[tuple[str, str]]) -> None:
+        """Keep the reservations whose release failed for the next release."""
+        self._reservations.requeue_ended(failed)
+
+    def hold_dispatch_locked(self, task_id: str, held: tuple[str, str]) -> None:
+        """Reserve a dispatch's worker for its task, ending the one it replaces."""
+        self._reservations.hold_dispatch_locked(task_id, held)
+
+    def seed_held_dispatches_locked(self) -> None:
+        """Reserve each restored dispatch's worker, as its dispatch did."""
+        self._reservations.seed_held_dispatches_locked()
+
+    def seed_dispatched_resident_locked(self) -> None:
+        """Record the dispatch each restored resident serve task runs under."""
+        self._resident_tasks.seed_dispatched_resident_locked()
+
+    def request_yield(self, task_id: str) -> bool:
+        return self._resident_tasks.request_yield(task_id)
+
+    def dispatches_on_locked(self, worker_id: str) -> list[tuple[str, str]]:
+        return self._resident_tasks.dispatches_on_locked(worker_id)
 
     def __init__(
         self,
@@ -725,12 +504,6 @@ class TaskRuntime:
         # The last dispatch of each task that ended by returning it to the queue: its
         # worker and dispatch id, and the tasks the return moved.
         self._returned_dispatches: dict[str, tuple[str, str | None, list[str]]] = {}
-        # The worker and dispatch holding each dispatched task, until a commit moves the
-        # task off it and releases the worker's reservation for it.
-        self._held_dispatches: dict[str, tuple[str, str]] = {}
-        # Reservations of dispatches that ended, released after the lock; one whose
-        # release failed stays here for the next release.
-        self._ended_dispatches: list[tuple[str, str]] = []
         self._input_checks: dict[str, _InputCheck] = {}
         self._report_writes = _ReportWrites()
         self._unacknowledged: dict[str, _Unacknowledged] = {}
@@ -746,23 +519,11 @@ class TaskRuntime:
         # executes a fabric-served tool ("search/v1"). Both take the durable envelope.
         self._model_settler: Callable[[ToolInvocationEnvelope], None] | None = None
         self._tool_broker: Callable[[ToolInvocationEnvelope], None] | None = None
-        self._resident_terminal_hook: Callable[[str, bool], None] | None = None
         self._failure_reporter: Callable[[TaskEvent], None] | None = None
-        self._pending_terminations: list[_Termination] = []
-        # Terminations whose workflow's ledger has not been saved since: each releases
-        # only after that save succeeds.
-        self._undurable_terminations: dict[str, list[_Termination]] = {}
         # The worker-originated resident path: originate admits and relays the handoff
         # to the origin worker; the ack and outcome handlers consume the worker's fenced
         # transition reports. Set when resident-capacity control is enabled.
         self._resident_originate: Callable[[ToolInvocationEnvelope], bool] | None = None
-        self._resident_task_ended: Callable[[str], None] | None = None
-        self._resident_task_updated: Callable[[str], None] | None = None
-        self._resident_yield_requested: Callable[[str], None] | None = None
-        # The dispatch each resident task was last committed DISPATCHED under, so a
-        # commit moving it elsewhere, or under another dispatch, reports that the
-        # earlier dispatch ended.
-        self._dispatched_resident: dict[str, str | None] = {}
         self._resident_ack: Callable[[ResidentBootstrapAck], None] | None = None
         self._resident_outcome: Callable[[ResidentOpOutcome], None] | None = None
         self._resident_route_observation: (
@@ -772,11 +533,23 @@ class TaskRuntime:
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
         self._pending_facade_groups: dict[str, FacadeTurnGroup] = {}
-        # Worker-originated tool operations whose permit was relayed to the origin
-        # worker's egress sidecar, keyed by permit id. Reaps custody on settle or
-        # cancel. In-memory and rebuilt on restart from the pending boundary, never
-        # durably persisted.
-        self._pending_ops: dict[str, _PendingOp] = {}
+
+        self._router = MediatedBoundaryRouter(
+            self._tasks,
+            self._engines,
+            self._worker_registry,
+            self._web_search,
+            self._model_egress_timeout_sec,
+            self._content_scope_authority,
+            self._control,
+        )
+        self._terminations = TerminationRelease(
+            self._router, self._tasks, self._worker_registry, self._logger
+        )
+        self._resident_tasks = ResidentServeTasks(self._tasks)
+        self._reservations = WorkerReservations(
+            self._tasks, self._engines, self._worker_registry, self._logger
+        )
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -1159,7 +932,7 @@ class TaskRuntime:
                     self._install_rehydrated_workflow_locked(
                         workflow_id, tasks, sched, rehydrated_at
                     )
-                self._interrupt_cancelling_locked(workflow_id)
+                self._terminations.interrupt_cancelling_locked(workflow_id)
                 # A workflow whose last task settled just before the crash has no
                 # event left to close it: replay the completion notification for
                 # every restored workflow, and let the finalizer reject the ones
@@ -1169,19 +942,8 @@ class TaskRuntime:
             restored.append(workflow_id)
         with self._cv:
             self._restore_merges_locked()
-            self._dispatched_resident.update(
-                (task_id, record.dispatch_id)
-                for task_id, record in self._tasks.items()
-                if record.resident and record.status == TaskStatus.DISPATCHED
-            )
-            self._held_dispatches.update(
-                (record.task_id, (record.assigned_worker, record.dispatch_id))
-                for record in self._tasks.values()
-                if _membership(record) == TaskStatus.DISPATCHED
-                and record.assigned_worker is not None
-                and record.dispatch_id is not None
-                and not self._dispatch_ended_at_suspension_locked(record)
-            )
+            self._resident_tasks.seed_dispatched_resident_locked()
+            self._reservations.seed_held_dispatches_locked()
             live = [
                 workflow_id
                 for workflow_id in restored
@@ -1564,25 +1326,7 @@ class TaskRuntime:
         )
         for persisted in records:
             if persisted.record.resident:
-                self._observe_resident_locked(persisted.record)
-
-    def _observe_resident_locked(self, record: TaskRecord) -> None:
-        task_id = record.task_id
-        ended = task_id in self._dispatched_resident
-        if record.status == TaskStatus.DISPATCHED:
-            ended = ended and self._dispatched_resident[task_id] != record.dispatch_id
-            self._dispatched_resident[task_id] = record.dispatch_id
-        else:
-            self._dispatched_resident.pop(task_id, None)
-            ended = ended or record.status in SETTLING_TASK_STATUSES
-        if ended and self._resident_task_ended is not None:
-            self._resident_task_ended(task_id)
-        elif (
-            record.status == TaskStatus.DISPATCHED
-            and record.latest_update_dispatch_id == record.dispatch_id
-            and self._resident_task_updated is not None
-        ):
-            self._resident_task_updated(task_id)
+                self._resident_tasks.observe_resident_locked(persisted.record)
 
     def _persist_locked(self, *task_ids: str) -> None:
         """Commit task records (no membership change) atomically, per workflow."""
@@ -1635,57 +1379,17 @@ class TaskRuntime:
                 )
                 if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
                     self._notify_terminal_transition(workflow_id)
-            self._release_ended_dispatches_locked(task_ids)
+            self._reservations.release_ended_dispatches_locked(task_ids)
 
         self._write_locked(commit, lambda held: held.task_ids.extend(task_ids))
-
-    def _release_ended_dispatches_locked(self, task_ids: Sequence[str]) -> None:
-        """Release each worker reserved for a dispatch that ended: its task moved off
-        it, or it ended at a suspension.
-
-        A worker reporting its status names the dispatch it concerns, and its IDLE
-        clears the reservation itself; one that names none is fenced while reserved, so
-        the end of the dispatch is what frees it. The release is a no-op once the
-        worker's own IDLE cleared it, and never frees a later reservation.
-        """
-        for task_id in dict.fromkeys(task_ids):
-            held = self._held_dispatches.get(task_id)
-            record = self._tasks.get(task_id)
-            if held is None or (
-                record is not None
-                and _membership(record) == TaskStatus.DISPATCHED
-                and record.dispatch_id == held[1]
-                and not self._dispatch_ended_at_suspension_locked(record)
-            ):
-                continue
-            del self._held_dispatches[task_id]
-            self._ended_dispatches.append(held)
 
     def _release_ended_workers(self) -> None:
         """Release, off the lock, each worker reserved for a dispatch that ended."""
         with self._lock:
-            ended, self._ended_dispatches = self._ended_dispatches, []
-        if failed := self._release_workers(ended):
+            ended = self._reservations.take_ended()
+        if failed := self._reservations.release_workers(ended):
             with self._lock:
-                self._ended_dispatches[:0] = failed
-
-    def _release_workers(
-        self, reservations: Sequence[tuple[str, str]]
-    ) -> list[tuple[str, str]]:
-        """Release each worker from its dispatch; returns those that failed."""
-        failed: list[tuple[str, str]] = []
-        for worker_id, dispatch_id in reservations:
-            try:
-                self._worker_registry.release_worker(worker_id, dispatch_id)
-            except Exception as exc:
-                self._logger.warning(
-                    "Failed to release worker %s from dispatch %s: %s",
-                    worker_id,
-                    dispatch_id,
-                    exc,
-                )
-                failed.append((worker_id, dispatch_id))
-        return failed
+                self._reservations.requeue_ended(failed)
 
     def release_ended_reservations(self) -> None:
         """Release every worker reserved for a dispatch not in flight, such as one
@@ -1699,14 +1403,16 @@ class TaskRuntime:
         ]
         with self._lock:
             for r in ended:
-                self._revoke_locked(r.task_id, r.worker_id, r.dispatch_id)
+                self._terminations.revoke_locked(r.task_id, r.worker_id, r.dispatch_id)
         self._release_pending_terminations()
-        self._release_workers([(r.worker_id, r.dispatch_id) for r in ended])
+        self._reservations.release_workers(
+            [(r.worker_id, r.dispatch_id) for r in ended]
+        )
 
     def revoke_dispatch(self, task_id: str, worker_id: str, dispatch_id: str) -> None:
         """Revoke one dispatch on its worker, which control does not hold."""
         with self._lock:
-            self._revoke_locked(task_id, worker_id, dispatch_id)
+            self._terminations.revoke_locked(task_id, worker_id, dispatch_id)
         self._release_pending_terminations()
 
     def _write_locked(
@@ -2113,7 +1819,9 @@ class TaskRuntime:
         worker_id = record.assigned_worker
         if record.status == TaskStatus.CANCELLING:
             self._settle_cancelled_locked(record, time.time())
-            self._reap_captures_locked(worker_id, task_id, _captured_calls(hr, group))
+            self._router.reap_captures_locked(
+                worker_id, task_id, _captured_calls(hr, group)
+            )
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
             record.pending_facade_group = None
@@ -2127,7 +1835,9 @@ class TaskRuntime:
             ):
                 self._cv.notify_all()
             self._save_ledger_locked(record.workflow_id)
-            self._reap_captures_locked(worker_id, task_id, _captured_calls(hr, group))
+            self._router.reap_captures_locked(
+                worker_id, task_id, _captured_calls(hr, group)
+            )
             return
         request = hr.request
         if request is None:
@@ -2186,7 +1896,7 @@ class TaskRuntime:
         self._save_ledger_locked(record.workflow_id)
         if denied_capture is not None:
             worker_id, call = denied_capture
-            self._reap_captured_request_locked(
+            self._router.reap_captured_request_locked(
                 worker_id, task_id, call, request.interface
             )
         if changed:
@@ -2333,8 +2043,8 @@ class TaskRuntime:
                 self._save_ledger_locked(record.workflow_id)
                 # A fenced failure terminal releases the resident credit just as a
                 # completion does; nothing else may release an accepted credit.
-                self._release_resident_credit(invocation_id, failed=True)
-                self._reap_mediated_op(captured_on, task_id, call_correlation)
+                self._router.release_resident_credit(invocation_id, failed=True)
+                self._router.reap_mediated_op(captured_on, task_id, call_correlation)
                 if changed:
                     self._cv.notify_all()
                 return changed
@@ -2351,8 +2061,8 @@ class TaskRuntime:
             else:
                 self._apply_advance_locked(record.workflow_id, advance)
             self._save_ledger_locked(record.workflow_id)
-            self._release_resident_credit(invocation_id, failed=False)
-            self._reap_mediated_op(captured_on, task_id, call_correlation)
+            self._router.release_resident_credit(invocation_id, failed=False)
+            self._router.reap_mediated_op(captured_on, task_id, call_correlation)
             self._cv.notify_all()
             return True
 
@@ -2392,13 +2102,9 @@ class TaskRuntime:
         again, keyed to its dispatch. A lost task dispatch resolves as lost.
         """
         with self._cv:
-            pending = {
-                (op.agent_task_id, op.call_correlation)
-                for op in self._pending_ops.values()
-                if op.worker_id == worker_id
-            }
-            self._queue_interrupts_locked(
-                self._cancelling_interrupts_locked(
+            pending = self._router.pending_for_worker(worker_id)
+            self._terminations.queue_interrupts_locked(
+                self._terminations.cancelling_interrupts_locked(
                     lambda record: record.assigned_worker == worker_id
                 )
             )
@@ -2418,15 +2124,7 @@ class TaskRuntime:
         exhausted: list[_PendingOp] = []
         redrive: list[tuple[str, _PendingOp]] = []
         with self._cv:
-            for permit_id, op in list(self._pending_ops.items()):
-                if op.worker_id != worker_id or op.redrive_at > now:
-                    continue
-                if op.redrives >= _OP_REDRIVE_LIMIT:
-                    del self._pending_ops[permit_id]
-                    exhausted.append(op)
-                else:
-                    op.redrives += 1
-                    redrive.append((permit_id, op))
+            self._router.take_overdue(worker_id, now, exhausted, redrive)
         try:
             for op in exhausted:
                 self._logger.warning(
@@ -2450,8 +2148,7 @@ class TaskRuntime:
                 # Its boundary has settled or ended, so no outcome will reap the
                 # operation.
                 with self._cv:
-                    if self._pending_ops.get(permit_id) is op:
-                        del self._pending_ops[permit_id]
+                    self._router.discard_op(permit_id, op)
 
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
@@ -2516,7 +2213,9 @@ class TaskRuntime:
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error=error
             )
-            self._relay_resident_reap(worker_id, env.task_id, env.call_correlation)
+            self._router.relay_resident_reap(
+                worker_id, env.task_id, env.call_correlation
+            )
 
     def on_resident_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None:
         """Consume an origin worker's resident bootstrap-phase report."""
@@ -2535,13 +2234,6 @@ class TaskRuntime:
         if self._resident_route_observation is not None:
             self._resident_route_observation(observation)
 
-    def _op_permit_budget(self, interface: str) -> tuple[int, float, int]:
-        """The (max_results, timeout, result_char_cap) budget a permit runs within."""
-        if interface == MODEL_INTERFACE:
-            return 1, self._model_egress_timeout_sec, _MODEL_PERMIT_RESULT_CHAR_CAP
-        cfg = self._web_search
-        return cfg.max_results, cfg.timeout_sec, cfg.result_char_cap
-
     def _resolve_op_credential(
         self, agent: TaskRecord, interface: str
     ) -> _OpCredential | _MissingCredential:
@@ -2551,7 +2243,12 @@ class TaskRuntime:
         """
         if interface != MODEL_INTERFACE:
             return _OpCredential()
-        return self._model_credential(agent, self.resolve_model_binding(agent.task_id))
+        return self._model_credential(
+            agent,
+            episode_dispatch.resolve_model_binding(
+                self._tasks, self._engines, agent.task_id
+            ),
+        )
 
     def _model_credential(
         self, agent: TaskRecord, binding: AgentModelGatewayBinding | None
@@ -2577,39 +2274,6 @@ class TaskRuntime:
                 binding.url, self._agent_binding_defaults.default_url
             )
         )
-
-    def _assign_content_scope(
-        self, permit: MediatedOperationPermit, agent: TaskRecord
-    ) -> str:
-        """Assign the scope this permit's outcome materializes in, and record it.
-
-        The scope is the task's owner, so a result materializes in the tenant's
-        namespace rather than the egressing worker's. Recording it against the permit's
-        idempotency key is what lets the finalization this outcome later reports be
-        checked against the scope control assigned, rather than one the reporting
-        worker names for itself.
-        """
-        if self._content_scope_authority is not None and permit.idempotency_key:
-            self._content_scope_authority(permit.idempotency_key, agent.org_id)
-        return agent.org_id
-
-    def _stamped_permit_payload(
-        self, permit: MediatedOperationPermit, agent: TaskRecord
-    ) -> dict[str, Any]:
-        """The permit's wire payload, carrying what only the dispatching record knows.
-
-        The trace stamp is post-mint: the boundary span id derives from the permit's own
-        ``invocation_id``, which does not exist as an object until minting returns.
-        """
-        stamp: dict[str, Any] = {
-            "content_scope": self._assign_content_scope(permit, agent)
-        }
-        if self._control.enabled:
-            stamp["traceparent"] = format_traceparent(
-                workflow_to_trace_id_int(agent.workflow_id),
-                derived_span_id(SpanIdKind.INVOCATION, permit.invocation_id),
-            )
-        return permit.model_copy(update=stamp).model_dump(mode="json")
 
     def _dispatch_worker_originated_op(self, env: ToolInvocationEnvelope) -> None:
         """Mint a permit and relay a boundary's egress operation to its origin worker.
@@ -2637,13 +2301,7 @@ class TaskRuntime:
             )
             return
         occurrence = (env.task_id, env.call_correlation)
-        stale = [
-            (permit_id, op)
-            for permit_id, op in self._pending_ops.items()
-            if (op.agent_task_id, op.call_correlation) == occurrence
-        ]
-        for permit_id, _ in stale:
-            del self._pending_ops[permit_id]
+        stale = self._router.take_stale_ops(occurrence)
         if any(op.node_alias != worker.node_alias for _, op in stale):
             self._logger.warning(
                 "worker-originated tool op for %s: %s now names a worker of another "
@@ -2661,7 +2319,7 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error=op_credential.reason
             )
             return
-        max_results, timeout_sec, result_char_cap = self._op_permit_budget(
+        max_results, timeout_sec, result_char_cap = self._router.op_permit_budget(
             env.interface
         )
         deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
@@ -2685,20 +2343,23 @@ class TaskRuntime:
         # A re-drive re-mints under a fresh permit id, keeping one pending op per
         # occurrence and its re-drive count.
         redrives = max((op.redrives for _, op in stale), default=0)
-        self._pending_ops[permit.permit_id] = _PendingOp(
-            env.task_id,
-            env.call_correlation,
-            worker_id,
-            worker.node_alias,
-            redrive_at=deadline + _OP_REDRIVE_BACKOFF_SEC * (2**redrives - 1),
-            redrives=redrives,
+        self._router.record_issued_op(
+            permit.permit_id,
+            _PendingOp(
+                env.task_id,
+                env.call_correlation,
+                worker_id,
+                worker.node_alias,
+                redrive_at=deadline + _OP_REDRIVE_BACKOFF_SEC * (2**redrives - 1),
+                redrives=redrives,
+            ),
         )
         self._worker_registry.publish_mediated_op(
             worker,
             MediatedOpMessage(
                 worker_id=worker_id,
                 frame_kind="permit",
-                payload=self._stamped_permit_payload(permit, agent),
+                payload=self._router.stamped_permit_payload(permit, agent),
             ),
         )
 
@@ -2724,7 +2385,9 @@ class TaskRuntime:
             if agent is None or engine is None:
                 return
             if not self._dispatch_live_locked(agent, proposer_id, proposal.dispatch_id):
-                self._deny_model_turn(proposal, proposer_id, "model turn not held")
+                self._router.deny_model_turn(
+                    proposal, proposer_id, "model turn not held"
+                )
                 return
             worker_id = proposer_id
             worker = self._worker_registry.get_worker(worker_id)
@@ -2732,7 +2395,9 @@ class TaskRuntime:
                 # A gone origin worker cannot receive a relay: the held turn fails on
                 # its own permit deadline.
                 return
-            binding = self.resolve_model_binding(proposal.agent_task_id)
+            binding = episode_dispatch.resolve_model_binding(
+                self._tasks, self._engines, proposal.agent_task_id
+            )
             permit = None
             reason = "model turn egress denied"
             if binding is not None and binding.mode is ModelBindingMode.OPENAI:
@@ -2740,7 +2405,7 @@ class TaskRuntime:
                 if isinstance(op_credential, _MissingCredential):
                     reason = op_credential.reason
                 else:
-                    _, timeout_sec, result_char_cap = self._op_permit_budget(
+                    _, timeout_sec, result_char_cap = self._router.op_permit_budget(
                         MODEL_INTERFACE
                     )
                     deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
@@ -2757,35 +2422,16 @@ class TaskRuntime:
                         deployment_credential=op_credential.deployment_credential,
                     )
             if permit is None:
-                self._deny_model_turn(proposal, worker_id, reason)
+                self._router.deny_model_turn(proposal, worker_id, reason)
                 return
             self._worker_registry.publish_mediated_op(
                 worker,
                 MediatedOpMessage(
                     worker_id=worker_id,
                     frame_kind="permit",
-                    payload=self._stamped_permit_payload(permit, agent),
+                    payload=self._router.stamped_permit_payload(permit, agent),
                 ),
             )
-
-    def _deny_model_turn(
-        self, proposal: AgentModelTurnProposal, worker_id: str, reason: str
-    ) -> None:
-        """Relay a deny frame that fails a held turn before its deadline."""
-        if (worker := self._worker_registry.get_worker(worker_id)) is None:
-            return
-        self._worker_registry.publish_mediated_op(
-            worker,
-            MediatedOpMessage(
-                worker_id=worker_id,
-                frame_kind="deny",
-                payload={
-                    "agent_task_id": proposal.agent_task_id,
-                    "call_correlation": proposal.call_correlation,
-                    "reason": reason,
-                },
-            ),
-        )
 
     def settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         """Settle an agent boundary from its origin worker's fenced outcome report.
@@ -2803,13 +2449,7 @@ class TaskRuntime:
 
     def _settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         with self._cv:
-            pending = self._pending_ops.pop(outcome.permit_id, None)
-            # A re-mint of the same operation is settled by this outcome too.
-            occurrence = (outcome.agent_task_id, outcome.call_correlation)
-            for permit_id, op in list(self._pending_ops.items()):
-                if (op.agent_task_id, op.call_correlation) == occurrence:
-                    pending = pending or op
-                    del self._pending_ops[permit_id]
+            pending = self._router.take_settled(outcome)
             worker_id = (
                 pending.worker_id
                 if pending
@@ -2822,7 +2462,7 @@ class TaskRuntime:
             if engine is None or not engine.boundary_settleable(agent_task_id, call):
                 # No settle follows a duplicate or late report, so the request its
                 # worker holds is reaped here.
-                self._reap_mediated_op(worker_id, agent_task_id, call)
+                self._router.reap_mediated_op(worker_id, agent_task_id, call)
                 return
             if outcome.error is not None:
                 self._settle_episode_invocation(
@@ -2844,78 +2484,6 @@ class TaskRuntime:
     def _assigned_worker_locked(self, agent_task_id: str) -> str | None:
         record = self._tasks.get(agent_task_id)
         return record.assigned_worker if record else None
-
-    def _reap_mediated_op(
-        self, worker_id: str | None, agent_task_id: str, call: str
-    ) -> None:
-        """Relay a best-effort reap so the origin worker drops the request custody."""
-        if not worker_id:
-            return
-        worker = self._worker_registry.get_worker(worker_id)
-        if worker is None:
-            return
-        self._worker_registry.publish_mediated_op(
-            worker,
-            MediatedOpMessage(
-                worker_id=worker_id,
-                frame_kind="reap",
-                payload={"agent_task_id": agent_task_id, "call_correlation": call},
-            ),
-        )
-
-    def _reap_captured_request_locked(
-        self, worker_id: str | None, task_id: str, call: str, interface: str | None
-    ) -> None:
-        """Relay a reap for a request the worker captured for a boundary that will
-        never run, from whichever store holds it."""
-        record = self._tasks.get(task_id)
-        engine = self._engines.get(record.workflow_id) if record else None
-        if (
-            interface == MODEL_INTERFACE
-            and engine is not None
-            and engine.service_dependency(task_id) is not None
-        ):
-            self._relay_resident_reap(worker_id, task_id, call)
-        else:
-            self._reap_mediated_op(worker_id, task_id, call)
-
-    def _relay_resident_reap(
-        self, worker_id: str | None, task_id: str, call: str
-    ) -> None:
-        """Relay a best-effort reap so the worker drops a captured resident request."""
-        if not worker_id:
-            return
-        worker = self._worker_registry.get_worker(worker_id)
-        if worker is None:
-            return
-        self._worker_registry.publish_mediated_op(
-            worker,
-            MediatedOpMessage(
-                worker_id=worker_id,
-                frame_kind="resident_reap",
-                payload={"task_id": task_id, "call_correlation": call},
-            ),
-        )
-
-    def _reap_ops_for_agents_locked(self, agent_task_ids: Sequence[str]) -> None:
-        """Reap pending tool operations whose agent boundary just failed clean."""
-        for worker_id, agent_task_id, call in self._take_ops_for_agents_locked(
-            agent_task_ids
-        ):
-            self._reap_mediated_op(worker_id, agent_task_id, call)
-
-    def _take_ops_for_agents_locked(
-        self, agent_task_ids: Sequence[str]
-    ) -> list[tuple[str, str, str]]:
-        """Drop the agents' pending tool operations, returning each one's worker, agent
-        and call for reaping."""
-        agents = set(agent_task_ids)
-        taken: list[tuple[str, str, str]] = []
-        for permit_id, op in list(self._pending_ops.items()):
-            if op.agent_task_id in agents:
-                del self._pending_ops[permit_id]
-                taken.append((op.worker_id, op.agent_task_id, op.call_correlation))
-        return taken
 
     def set_model_settler(
         self, settler: Callable[[ToolInvocationEnvelope], None]
@@ -2949,7 +2517,7 @@ class TaskRuntime:
         cancelling. It runs under the runtime's lock, so it must hand the work
         off and never call back in.
         """
-        self._resident_task_ended = hook
+        self._resident_tasks.set_resident_task_end_hook(hook)
 
     def set_resident_task_update_hook(self, hook: Callable[[str], None]) -> None:
         """Install the consumer told when a dispatched resident serve task reports an
@@ -2958,7 +2526,7 @@ class TaskRuntime:
         It runs under the runtime's lock, so it must hand the work off and never call
         back in.
         """
-        self._resident_task_updated = hook
+        self._resident_tasks.set_resident_task_update_hook(hook)
 
     def set_resident_yield_hook(self, hook: Callable[[str], None]) -> None:
         """Install the consumer asked to free a worker a resident serve task occupies.
@@ -2966,7 +2534,7 @@ class TaskRuntime:
         The hook receives the serve task's id. It may run on the dispatcher's thread, so
         it must hand the work off and never call back in.
         """
-        self._resident_yield_requested = hook
+        self._resident_tasks.set_resident_yield_hook(hook)
 
     def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
         """Install the consumer that releases a resident admission credit on DS
@@ -2976,7 +2544,7 @@ class TaskRuntime:
         outcome was a failure, so the Admission controller advances the linked claim to
         terminal on any fenced outcome — the sole normal credit release.
         """
-        self._resident_terminal_hook = hook
+        self._router.set_resident_terminal_hook(hook)
 
     def resident_invocation_completed(
         self, workflow_id: str, invocation_id: str
@@ -2988,12 +2556,6 @@ class TaskRuntime:
             return (
                 engine.boundary_invocation_completed(invocation_id) if engine else None
             )
-
-    def _release_resident_credit(
-        self, invocation_id: str | None, *, failed: bool
-    ) -> None:
-        if invocation_id is not None and self._resident_terminal_hook is not None:
-            self._resident_terminal_hook(invocation_id, failed)
 
     def originate_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> None:
         """Record a turn-scoped facade group a worker captured on a held model turn.
@@ -3072,12 +2634,9 @@ class TaskRuntime:
         later environment change.
         """
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is None:
-                return None
-            op = engine.agent_operator(task_id)
-            return op.model_binding if op is not None else None
+            return episode_dispatch.resolve_model_binding(
+                self._tasks, self._engines, task_id
+            )
 
     def gateway_binding_for(
         self, task_id: str
@@ -3088,14 +2647,9 @@ class TaskRuntime:
         secret only within the workflow that minted it.
         """
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if record is None or engine is None:
-                return None
-            op = engine.agent_operator(task_id)
-            if op is None or op.model_binding is None:
-                return None
-            return record.workflow_id, op.model_binding
+            return episode_dispatch.gateway_binding_for(
+                self._tasks, self._engines, task_id
+            )
 
     def resolve_service_dependency(
         self, task_id: str
@@ -3108,20 +2662,16 @@ class TaskRuntime:
         workflow.
         """
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if record is None or engine is None:
-                return None
-            return engine.resident_admission_binding(record.workflow_id, task_id)
+            return episode_dispatch.resolve_service_dependency(
+                self._tasks, self._engines, task_id
+            )
 
     def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:
         """Whether a mediated boundary still awaits its outcome."""
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if record is None or engine is None:
-                return False
-            return engine.boundary_settleable(task_id, call_correlation)
+            return episode_dispatch.boundary_settleable(
+                self._tasks, self._engines, task_id, call_correlation
+            )
 
     def _apply_private_state_seal_locked(self, task_id: str, sealed: Any) -> None:
         """Record the generation a holder sealed, ignoring a fenced-out report."""
@@ -3146,9 +2696,9 @@ class TaskRuntime:
         sealed generation yet, both of which any eligible worker may run.
         """
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            return engine.private_state_owner(task_id) if engine else None
+            return episode_dispatch.private_state_owner(
+                self._tasks, self._engines, task_id
+            )
 
     def agent_episode_dispatch(
         self, task_id: str, holder: OwnerFence
@@ -3161,47 +2711,8 @@ class TaskRuntime:
         grant supersedes any prior epoch, fencing a stale holder out of the write.
         """
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is None:
-                return None
-            op = engine.agent_operator(task_id)
-            harness = op.harness_binding if op is not None else None
-            if harness is None:
-                return None
-            model = op.model_binding if op is not None else None
-            model_binding = (
-                EpisodeModelBinding(mode=model.mode, url=model.url, model=model.model)
-                if model is not None
-                else None
-            )
-            granted = engine.grant_private_state(
-                task_id, holder.worker_id, holder.incarnation
-            )
-            capsule_blob, outcomes = engine.episode_context(task_id)
-            invoke_face = engine.effective_invoke_face(task_id)
-            sandbox = _sandbox_capability(
-                op, granted[1] if granted else None, invoke_face
-            )
-            # First-turn dataflow inputs are delivered only on the first dispatch; a
-            # resume injects only the harness's own delivered outcomes.
-            input_bindings = (
-                self._agent_input_bindings(engine, task_id)
-                if capsule_blob is None
-                else ()
-            )
-            return AgentEpisodeDispatch(
-                backend=HarnessBackendKey(
-                    backend=harness.backend, version=harness.version
-                ),
-                capsule_blob=capsule_blob,
-                delivered_outcomes=outcomes,
-                input_bindings=input_bindings,
-                model_binding=model_binding,
-                facade_descriptors=_effective_facades(op, invoke_face, sandbox),
-                private_state=granted[0] if granted else None,
-                private_state_attachment=granted[1] if granted else None,
-                sandbox=sandbox,
+            return episode_dispatch.agent_episode_dispatch(
+                self._tasks, self._engines, task_id, holder
             )
 
     def service_episode_dispatch(
@@ -3218,72 +2729,29 @@ class TaskRuntime:
         than the dependency's presence.
         """
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is None:
-                return None
-            dependency = self._resident_served_dependency_locked(engine, task_id)
-            if dependency is None:
-                return None
-            _capsule, outcomes = engine.episode_context(task_id)
-            return ServiceLeafEpisodeDispatch(
-                interface=dependency.interface.value,
-                delivered_outcomes=outcomes,
+            return episode_dispatch.service_episode_dispatch(
+                self._tasks, self._engines, task_id
             )
 
     def serves_from_replica(self, task_id: str) -> bool:
         """Whether a task's dispatch carries its invocation to a resident replica, a
         menu-resolved or pinned resident leaf, rather than loading a model locally."""
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            return (
-                engine is not None
-                and self._resident_served_dependency_locked(engine, task_id) is not None
+            return episode_dispatch.serves_from_replica(
+                self._tasks, self._engines, task_id
             )
-
-    def _resident_served_dependency_locked(
-        self, engine: OrchestrationEngine, task_id: str
-    ) -> ServiceDependency | None:
-        """The resident dependency a leaf's dispatch is served from, or None."""
-        dependency = engine.service_dependency(task_id)
-        if dependency is None or engine.agent_operator(task_id) is not None:
-            return None
-        if engine.embodiment_menu(task_id) is not None:
-            resolved = self._resolved_embodiment_locked(engine, task_id)
-            if (
-                resolved is None
-                or resolved.kind is not InferenceEmbodimentKind.RESIDENT_SERVED
-            ):
-                return None
-        return dependency
-
-    def _resolved_embodiment_locked(
-        self, engine: OrchestrationEngine, task_id: str
-    ) -> ResolvedEmbodiment | None:
-        menu = engine.embodiment_menu(task_id)
-        if menu is None or (selection := engine.embodiment_selection(task_id)) is None:
-            return None
-        candidate = menu.candidate(selection.alternative_id)
-        if candidate is None:
-            return None
-        return ResolvedEmbodiment(
-            alternative_id=candidate.alternative_id, kind=candidate.kind
-        )
 
     def embodiment_pinned(self, task_id: str) -> bool:
         """Whether a task's resolved embodiment is committed to the run carrying it."""
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            return engine.embodiment_pinned(task_id) if engine else False
+            return episode_dispatch.embodiment_pinned(
+                self._tasks, self._engines, task_id
+            )
 
     def embodiment_menu(self, task_id: str) -> InferenceEmbodimentMenu | None:
         """The embodiments a ready task's plan node offers, if it offers a menu."""
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            return engine.embodiment_menu(task_id) if engine else None
+            return episode_dispatch.embodiment_menu(self._tasks, self._engines, task_id)
 
     def record_embodiment_selection(
         self, task_id: str, alternative_id: str, selector: str, evidence: str
@@ -3327,7 +2795,7 @@ class TaskRuntime:
 
     def _register_child_locked(self, child_task_id: str, template: TaskRecord) -> None:
         """Install a self-contained task record for one materialized child."""
-        self._tasks[child_task_id] = self._synthesize_child_record(
+        self._tasks[child_task_id] = materialized_records.synthesize_child_record(
             template, child_task_id
         )
         self._original_deps[child_task_id] = set()
@@ -3469,37 +2937,9 @@ class TaskRuntime:
         ``spec``, when given, is the dispatched spec with its credentials restored.
         """
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if record is None or engine is None:
-                return None
-            spec = spec or record.task.spec
-            if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
-                return None
-            element = self._input_element_locked(task_id)
-            try:
-                contract = (
-                    element_contract(
-                        spec, element.producer_task_id, element.ref.element
-                    )
-                    if element is not None
-                    else canonical_contract(spec)
-                )
-            except CanonicalProjectionError:
-                self._logger.warning(
-                    "[fabric] a contract leaf's request is no longer projectable: %s",
-                    task_id,
-                )
-                return None
-            if engine.embodiment_menu(task_id) is None:
-                if engine.service_dependency(task_id) is None:
-                    return None
-                if (
-                    contract.source.kind is InferenceSourceKind.LITERAL
-                    and len(contract.source.items) <= 1
-                ):
-                    return None
-            return contract
+            return episode_dispatch.declared_contract(
+                self._tasks, self._engines, self._logger, task_id, spec
+            )
 
     def record_input_resolution(
         self,
@@ -3536,7 +2976,9 @@ class TaskRuntime:
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
         """The binding a task's recorded resolution carries, if one was recorded."""
         with self._lock:
-            resolution = self._input_resolution_locked(task_id)
+            resolution = content_bindings.input_resolution_locked(
+                self._tasks, self._engines, task_id
+            )
         return resolution.binding if resolution is not None else None
 
     def content_scope(self, task_id: str) -> str:
@@ -3585,89 +3027,17 @@ class TaskRuntime:
                 record is not None
                 and record.status not in TERMINAL_TASK_STATUSES
                 and self._holds_dispatch_locked(record, worker_id, None)
-                and self._consumes_locked(record, reference)
+                and content_bindings.consumes_locked(
+                    self._tasks, self._engines, self._original_deps, record, reference
+                )
             )
-
-    def _consumes_locked(self, record: TaskRecord, reference: ContentReference) -> bool:
-        """Whether a task is bound to exactly this object as one of its inputs."""
-        if reference.authorization_scope != record.org_id:
-            return False
-        task_id = record.task_id
-        resolution = self._input_resolution_locked(task_id)
-        if resolution is not None and resolution.reference == reference:
-            return True
-        if self._upstream_result_is_locked(record, reference):
-            return True
-        engine = self._engines.get(record.workflow_id)
-        if engine is None:
-            return False
-        if self._frozen_input_is_locked(engine, task_id, reference):
-            return True
-        _, outcomes = engine.episode_context(task_id)
-        return any(
-            outcome.outcome_ref is not None and outcome.outcome_ref.content == reference
-            for outcome in outcomes
-        )
 
     def upstream_task_ids(self, task_id: str) -> set[str]:
         """Every task of its workflow a task depends on, directly or transitively."""
         with self._lock:
-            return self._upstream_task_ids_locked(task_id)
-
-    def _upstream_task_ids_locked(self, task_id: str) -> set[str]:
-        # A record stored with a dependency outside its workflow never reaches it: a
-        # stage name resolves only within the workflow that declared it.
-        record = self._tasks.get(task_id)
-        workflow_id = record.workflow_id if record else None
-        pending = list(self._original_deps.get(task_id, ()))
-        visited: set[str] = set()
-        while pending:
-            dep_id = pending.pop()
-            upstream = self._tasks.get(dep_id)
-            if dep_id in visited or upstream is None:
-                continue
-            if upstream.workflow_id != workflow_id:
-                continue
-            visited.add(dep_id)
-            pending.extend(self._original_deps.get(dep_id, ()))
-        return visited
-
-    def _upstream_result_is_locked(
-        self, record: TaskRecord, reference: ContentReference
-    ) -> bool:
-        """Whether a settled upstream of the task, or of one merged into its dispatch,
-        is bound to exactly this result."""
-        for member_id in (record.task_id, *(record.merged_children or [])):
-            member = self._tasks.get(member_id)
-            if member is None:
-                continue
-            for dep_id in self._upstream_task_ids_locked(member_id):
-                upstream = self._tasks.get(dep_id)
-                if (
-                    upstream is None
-                    or upstream.workflow_id != member.workflow_id
-                    or upstream.status != TaskStatus.DONE
-                ):
-                    continue
-                binding = self._result_binding_locked(dep_id)
-                if binding is not None and binding.reference == reference:
-                    return True
-        return False
-
-    def _frozen_input_is_locked(
-        self, engine: OrchestrationEngine, task_id: str, reference: ContentReference
-    ) -> bool:
-        """Whether an accepted input of the task, or its fan-out element, is frozen
-        to exactly this producer result."""
-        child_input = engine.child_input(task_id)
-        if child_input is not None and child_input.content == reference:
-            return True
-        return any(
-            (source := self._member_source_locked(member.value_ref)) is not None
-            and source.reference == reference
-            for accepted in engine.accepted_inputs_for_task(task_id)
-            for member in accepted.members
-        )
+            return content_bindings.upstream_task_ids(
+                self._tasks, self._original_deps, task_id
+            )
 
     def input_element(self, task_id: str) -> ResultElementRef | None:
         """The producer element a leaf fan-out child runs on, for its worker to hydrate.
@@ -3679,39 +3049,18 @@ class TaskRuntime:
             engine = self._engines.get(record.workflow_id) if record else None
             if engine is None or engine.agent_operator(task_id) is not None:
                 return None
-            element = self._input_element_locked(task_id)
+            element = content_bindings.input_element_locked(
+                self._tasks, self._engines, task_id
+            )
         return element.ref if element is not None else None
-
-    def _input_element_locked(self, task_id: str) -> _InputElement | None:
-        record = self._tasks.get(task_id)
-        engine = self._engines.get(record.workflow_id) if record else None
-        if engine is None:
-            return None
-        child_input = engine.child_input(task_id)
-        if (
-            child_input is None
-            or child_input.content is None
-            or child_input.collection_key is None
-            or child_input.legacy_task_id is None
-        ):
-            return None
-        return _InputElement(
-            child_input.legacy_task_id,
-            ResultElementRef(
-                reference=child_input.content, element=int(child_input.collection_key)
-            ),
-        )
 
     def recorded_input_reference(self, task_id: str) -> ContentReference | None:
         """Where a task's prepared request is, for the run that hydrates it."""
         with self._lock:
-            resolution = self._input_resolution_locked(task_id)
+            resolution = content_bindings.input_resolution_locked(
+                self._tasks, self._engines, task_id
+            )
         return resolution.reference if resolution is not None else None
-
-    def _input_resolution_locked(self, task_id: str) -> InputResolution | None:
-        record = self._tasks.get(task_id)
-        engine = self._engines.get(record.workflow_id) if record else None
-        return engine.input_resolution(task_id) if engine else None
 
     def prepares_inputs(self, task_id: str) -> bool:
         """Whether this dispatch resolves a task's inputs rather than running it.
@@ -3722,10 +3071,14 @@ class TaskRuntime:
         dispatches like any other.
         """
         with self._lock:
-            contract = self.declared_contract(task_id)
+            contract = episode_dispatch.declared_contract(
+                self._tasks, self._engines, self._logger, task_id
+            )
             if contract is None or not contract.source.prepared_before_selection:
                 return False
-            resolution = self._input_resolution_locked(task_id)
+            resolution = content_bindings.input_resolution_locked(
+                self._tasks, self._engines, task_id
+            )
             return resolution is None or resolution.reference is None
 
     def _apply_input_materialization_locked(self, task_id: str, payload: Any) -> None:
@@ -3848,7 +3201,9 @@ class TaskRuntime:
         resolves through the reference its success bound on its record.
         """
         with self._lock:
-            return self._result_binding_locked(task_id)
+            return content_bindings.result_binding_locked(
+                self._tasks, self._engines, task_id
+            )
 
     def read_result(self, task_id: str) -> ResultEnvelope | None:
         """A task's result envelope, None when it has none; raises when unreadable."""
@@ -3859,82 +3214,6 @@ class TaskRuntime:
         """A task's stored result envelope bytes, None when it has none."""
         binding = self.result_binding(task_id)
         return self._results.read_bytes(binding) if binding is not None else None
-
-    def _result_binding_locked(self, task_id: str) -> ResultBinding | None:
-        record = self._tasks.get(task_id)
-        if record is None:
-            return None
-        if (engine := self._engines.get(record.workflow_id)) is None:
-            if record.result_reference is None and record.result_skip is None:
-                return None
-            return ResultBinding(
-                task_id=task_id,
-                reference=record.result_reference,
-                skip=record.result_skip,
-                settled_at=_settled_at(record),
-            )
-        settled = engine.legacy_task_value(task_id)
-        if settled is None:
-            return None
-        outcome, value_ref = settled
-        if outcome is PublicationOutcome.EXPLICIT_EMPTY:
-            if record.result_skip is None:
-                return None
-            return ResultBinding(
-                task_id=task_id, skip=record.result_skip, settled_at=_settled_at(record)
-            )
-        if (
-            outcome is not PublicationOutcome.SUCCESS
-            or value_ref is None
-            or value_ref.content is None
-        ):
-            return None
-        return ResultBinding(task_id=task_id, reference=value_ref.content)
-
-    def _settled_unbound_locked(self, task_id: str) -> bool:
-        """Whether a task settled successfully with no result bound to read."""
-        record = self._tasks.get(task_id)
-        if record is None or record.status != TaskStatus.DONE:
-            return False
-        if record.result_skip is not None:
-            return False
-        engine = self._engines.get(record.workflow_id)
-        if engine is None:
-            return record.result_reference is None
-        settled = engine.legacy_task_value(task_id)
-        return settled is not None and settled[0] is PublicationOutcome.SUCCESS
-
-    def _bind_result_locked(
-        self,
-        record: TaskRecord,
-        reference: ContentReference | None,
-        skip: dict[str, Any] | None,
-    ) -> None:
-        """Bind a settling task's result once; a later success never re-points it."""
-        if record.result_reference is not None or record.result_skip is not None:
-            return
-        if skip is not None:
-            record.result_skip = skip
-            return
-        record.result_reference = self._accepted_reference(record, reference)
-
-    def _accepted_reference(
-        self, record: TaskRecord, reference: ContentReference | None
-    ) -> ContentReference | None:
-        """A reported result reference, when it lies in the scope control gave the task.
-
-        Control reads a bound result under its own store access, so a reference naming
-        another scope's object is refused here rather than served to this task's owner.
-        """
-        if reference is None or reference.authorization_scope == record.org_id:
-            return reference
-        self._logger.error(
-            "Task %s reported a result in scope %s outside its own %s; not binding it",
-            record.task_id,
-            reference.authorization_scope,
-            record.org_id,
-        )
-        return None
 
     def recovery_disposition(
         self, workflow_id: str, task_id: str
@@ -3974,9 +3253,9 @@ class TaskRuntime:
             # follows.
             if self._apply_advance_locked(record.workflow_id, advance):
                 self._cv.notify_all()
-            self._reap_ops_for_agents_locked(advance.failed)
+            self._router.reap_ops_for_agents_locked(advance.failed)
             if invocation_ids := engine.terminalize_unsettled_invocations([task_id]):
-                self._hold_termination_locked(
+                self._terminations.hold_termination_locked(
                     record.workflow_id,
                     _Termination([], [], resident_invocation_ids=invocation_ids),
                 )
@@ -3997,11 +3276,9 @@ class TaskRuntime:
                     self._workflow_registry.save_ledger_snapshot(
                         workflow_id, engine.to_snapshot()
                     )
-            self._pending_terminations += self._undurable_terminations.pop(
-                workflow_id, []
-            )
+            self._terminations.ledger_saved(workflow_id)
 
-        if engine is None and workflow_id not in self._undurable_terminations:
+        if engine is None and not self._terminations.has_undurable(workflow_id):
             return
         self._write_locked(save, lambda held: held.workflow_ids.append(workflow_id))
 
@@ -4025,13 +3302,6 @@ class TaskRuntime:
         if failed:
             self._commit_locked(*failed)
 
-    def _hold_termination_locked(
-        self, workflow_id: str, termination: _Termination
-    ) -> None:
-        """Hold what a termination releases until the workflow's next ledger save
-        succeeds; ``_release_pending_terminations`` releases it after the lock."""
-        self._undurable_terminations.setdefault(workflow_id, []).append(termination)
-
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
         """Apply an engine advance: fail and persist what it failed, cancel what a
         residual policy cancelled, then record the inputs its agents accept, retire
@@ -4052,7 +3322,15 @@ class TaskRuntime:
             )
         if engine is not None:
             staged = Advance()
-            self._stage_agent_inputs_locked(workflow_id, engine, staged)
+            agent_inputs.stage_agent_inputs_locked(
+                self._tasks,
+                self._engines,
+                self._redrive,
+                self._input_budget_bytes,
+                workflow_id,
+                engine,
+                staged,
+            )
             changed |= bool(staged.failed)
             self._fail_v2_advance_locked(engine, staged)
             advance.extend(staged)
@@ -4146,7 +3424,9 @@ class TaskRuntime:
             self._logger.error("Failing workflow %s: %s", workflow_id, read.error)
             self._fail_workflow_locked(workflow_id, read.error)
             return advance
-        binding = self._result_binding_locked(producer_task_id)
+        binding = content_bindings.result_binding_locked(
+            self._tasks, self._engines, producer_task_id
+        )
         content = binding.reference if binding is not None else None
         if content != read.reference:
             # The read predates the binding the producer settled with: read again.
@@ -4168,7 +3448,7 @@ class TaskRuntime:
                 if child_is_agent:
                     child_task_id = engine.create_fanout_child(spawn_op, value_ref)
                     self._register_child_locked(child_task_id, template_record)
-                    self._mint_fanout_facet_locked(
+                    agent_inputs.mint_fanout_facet_locked(
                         engine, child_task_id, producer_task_id, index, value_ref
                     )
                     advance.extend(engine.reconsider_admission(child_task_id))
@@ -4340,7 +3620,12 @@ class TaskRuntime:
             if engine is None:
                 return
             producers = [
-                (task_id, self._result_binding_locked(task_id))
+                (
+                    task_id,
+                    content_bindings.result_binding_locked(
+                        self._tasks, self._engines, task_id
+                    ),
+                )
                 for task_id, record in self._tasks.items()
                 if record.workflow_id == workflow_id
                 and record.status == TaskStatus.DONE
@@ -4350,15 +3635,19 @@ class TaskRuntime:
             snapshots = [
                 snapshot
                 for task_id in engine.blocked_input_agents()
-                if (snapshot := self._agent_input_snapshot_locked(engine, task_id))
+                if (
+                    snapshot := agent_inputs.agent_input_snapshot_locked(
+                        self._tasks, self._engines, engine, task_id
+                    )
+                )
                 is not None
                 and snapshot.references
             ]
         reads = {
-            task_id: self._read_fanout(task_id, binding)
+            task_id: fanout.read_fanout(self._results, task_id, binding)
             for task_id, binding in producers
         }
-        values = self._read_input_values(snapshots)
+        values = agent_inputs.read_input_values(self._results, snapshots)
         with self._cv:
             if (engine := self._engines.get(workflow_id)) is None:
                 return
@@ -4370,13 +3659,19 @@ class TaskRuntime:
                     )
                 )
             for snapshot in snapshots:
-                if self._agent_input_snapshot_locked(engine, snapshot.task_id) != (
-                    snapshot
-                ):
+                if agent_inputs.agent_input_snapshot_locked(
+                    self._tasks, self._engines, engine, snapshot.task_id
+                ) != (snapshot):
                     self._redrive.drive_now(workflow_id)
                     continue
-                self._settle_agent_inputs_locked(
-                    workflow_id, engine, snapshot, values, advance
+                agent_inputs.settle_agent_inputs_locked(
+                    self._redrive,
+                    self._input_budget_bytes,
+                    workflow_id,
+                    engine,
+                    snapshot,
+                    values,
+                    advance,
                 )
             if self._apply_advance_locked(workflow_id, advance):
                 self._cv.notify_all()
@@ -4407,299 +3702,13 @@ class TaskRuntime:
                 or not engine.spawn_awaits_children(spawn_op)
             ):
                 return None
-            reference = self._accepted_reference(record, reference)
-        return self._read_fanout(
-            task_id, ResultBinding(task_id=task_id, reference=reference, skip=skip)
-        )
-
-    def _read_fanout(self, task_id: str, binding: ResultBinding | None) -> _FanoutRead:
-        """Count a producer's collection off the lock, retrying a store that is away."""
-        if binding is not None and binding.skip is not None:
-            return _FanoutRead()
-        if binding is None or binding.reference is None:
-            return _FanoutRead(error=f"fan-out producer {task_id} has no bound result")
-        for attempt in range(_FANOUT_READ_ATTEMPTS):
-            try:
-                envelope = self._results.read(binding)
-            except ResultUnreadable as exc:
-                return _FanoutRead(
-                    error=f"fan-out producer {task_id} result is unreadable: {exc}"
-                )
-            except ResultUnavailable as exc:
-                if attempt + 1 == _FANOUT_READ_ATTEMPTS:
-                    return _FanoutRead(error=str(exc), unavailable=True)
-                time.sleep(_FANOUT_READ_BACKOFF_SEC)
-                continue
-            return _FanoutRead(
-                count=len(collection_elements(envelope)), reference=binding.reference
+            reference = content_bindings.accepted_reference(
+                self._logger, record, reference
             )
-        raise AssertionError("unreachable")
-
-    def _mint_fanout_facet_locked(
-        self,
-        engine: OrchestrationEngine,
-        child_task_id: str,
-        producer_task_id: str,
-        index: int,
-        value_ref: ValueRef,
-    ) -> None:
-        """Record a fan-out child's typed entry-port input from its producer element."""
-        wi = engine.work_item(child_task_id)
-        if wi is None:
-            return
-        entry_port = engine.agent_entry_port(wi.operator_id)
-        if entry_port is None:
-            return
-        engine.record_accepted_input(
-            AcceptedInput(
-                activation_id=wi.activation_id,
-                target_port=entry_port,
-                occurrence_key=str(index),
-                provenance="spawn_element",
-                members=(
-                    AcceptedInputMember(
-                        source_operator_id=producer_task_id,
-                        source_activation_id=wi.activation_id,
-                        child_index=index,
-                        outcome=PublicationOutcome.SUCCESS,
-                        value_ref=value_ref,
-                    ),
-                ),
-            )
-        )
-
-    def _stage_agent_inputs_locked(
-        self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
-    ) -> None:
-        """Record each edge-bound agent's accepted inputs that need no stored read.
-
-        An agent whose bound inputs have to be read from the store is left for an
-        immediate off-lock re-drive, which reads them and records them there.
-        """
-        drive = False
-        for task_id in engine.blocked_input_agents():
-            snapshot = self._agent_input_snapshot_locked(engine, task_id)
-            if snapshot is None:
-                continue
-            if snapshot.references:
-                drive = True
-                continue
-            self._settle_agent_inputs_locked(workflow_id, engine, snapshot, {}, advance)
-        if drive:
-            self._redrive.drive_now(workflow_id)
-
-    def _agent_input_snapshot_locked(
-        self, engine: OrchestrationEngine, task_id: str
-    ) -> _AgentInputSnapshot | None:
-        """What an agent's pending input ports resolve from, as the ledger stands.
-
-        Each member of a port whose producers are all bound is frozen to the result its
-        producer settled with. A port with a member whose producer has nothing bound
-        waits for a later advance; a producer that settled with nothing bound makes the
-        whole input unreadable.
-        """
-        plan = engine.agent_input_plan(task_id)
-        if plan is None:
-            return None
-        ports: list[_PortSnapshot] = []
-        unreadable: str | None = None
-        for port in plan.ports:
-            members: list[tuple[InputMemberPlan, ValueRef]] = []
-            for member in port.members:
-                value_ref = ValueRef(
-                    kind=member.value_ref_kind,
-                    legacy_task_id=member.legacy_task_id,
-                    collection_key=member.collection_key,
-                    literal=member.literal,
-                )
-                if value_ref.kind == "legacy_task_result":
-                    producer = value_ref.legacy_task_id or ""
-                    binding = self._result_binding_locked(producer)
-                    if binding is None or binding.reference is None:
-                        if self._settled_unbound_locked(producer):
-                            unreadable = f"task {producer} settled with no bound result"
-                        break
-                    value_ref = value_ref.model_copy(
-                        update={"content": binding.reference}
-                    )
-                elif value_ref.kind not in ("inline", "empty"):
-                    break
-                members.append((member, value_ref))
-            if unreadable is not None:
-                break
-            if len(members) == len(port.members):
-                ports.append(
-                    _PortSnapshot(
-                        target_port=port.target_port,
-                        provenance=port.provenance,
-                        members=tuple(members),
-                    )
-                )
-        return _AgentInputSnapshot(
-            task_id=task_id,
-            activation_id=plan.activation_id,
-            ports=tuple(ports),
-            unreadable=unreadable,
-        )
-
-    def _read_input_values(
-        self, snapshots: list[_AgentInputSnapshot]
-    ) -> dict[ContentReference, ResultEnvelope | Exception]:
-        """Read every result the snapshots' inputs are frozen to, off the lock."""
-        values: dict[ContentReference, ResultEnvelope | Exception] = {}
-        for snapshot in snapshots:
-            for reference in snapshot.references.values():
-                if reference in values:
-                    continue
-                try:
-                    values[reference] = self._results.read_reference(reference)
-                except (ResultUnavailable, ResultUnreadable) as exc:
-                    values[reference] = exc
-        return values
-
-    def _settle_agent_inputs_locked(
-        self,
-        workflow_id: str,
-        engine: OrchestrationEngine,
-        snapshot: _AgentInputSnapshot,
-        values: dict[ContentReference, ResultEnvelope | Exception],
-        advance: Advance,
-    ) -> None:
-        """Record an agent's accepted inputs from their read values, then re-admit.
-
-        The budget counts the bytes of the resolved member strings; inputs over it fail
-        the agent as a declared failure.
-        """
-        task_id = snapshot.task_id
-        if snapshot.unreadable is not None:
-            advance.extend(
-                engine.on_failed(
-                    task_id, f"input_unreadable: {snapshot.unreadable}", retryable=False
-                )
-            )
-            return
-        read = [values.get(ref) for ref in snapshot.references.values()]
-        if any(isinstance(value, ResultUnavailable) for value in read):
-            self._redrive.schedule(workflow_id)
-            return
-        if unreadable := next(
-            (value for value in read if isinstance(value, ResultUnreadable)), None
-        ):
-            advance.extend(
-                engine.on_failed(
-                    task_id, f"input_unreadable: {unreadable}", retryable=False
-                )
-            )
-            return
-        total_bytes = 0
-        accepted: list[AcceptedInput] = []
-        for port in snapshot.ports:
-            texts = [
-                _member_text(value_ref, values) for _member, value_ref in port.members
-            ]
-            if any(text is None for text in texts):
-                continue
-            total_bytes += sum(len((text or "").encode("utf-8")) for text in texts)
-            accepted.append(
-                AcceptedInput(
-                    activation_id=snapshot.activation_id,
-                    target_port=port.target_port,
-                    provenance=port.provenance,
-                    members=tuple(
-                        AcceptedInputMember(
-                            source_operator_id=member.source_operator_id,
-                            source_activation_id=member.source_activation_id,
-                            child_index=member.child_index,
-                            outcome=PublicationOutcome(member.outcome),
-                            value_ref=value_ref,
-                            ordinal=member.ordinal,
-                        )
-                        for member, value_ref in port.members
-                    ),
-                )
-            )
-        if total_bytes > self._input_budget_bytes:
-            advance.extend(
-                engine.on_failed(
-                    task_id,
-                    f"input_too_large: resolved input is {total_bytes} bytes, "
-                    f"over the {self._input_budget_bytes}-byte budget",
-                    retryable=False,
-                )
-            )
-            return
-        for entry in accepted:
-            engine.record_accepted_input(entry)
-        advance.extend(engine.reconsider_admission(task_id))
-
-    def _agent_input_bindings(
-        self, engine: OrchestrationEngine, task_id: str
-    ) -> tuple[InputBinding, ...]:
-        """The first-turn input bindings for an agent's input ports.
-
-        A member a producer's result supplies names that result for the worker to
-        hydrate; an inline member carries its own literal.
-        """
-        bindings: list[InputBinding] = []
-        for ordinal, accepted in enumerate(engine.accepted_inputs_for_task(task_id)):
-            members = tuple(
-                InputBindingMember(
-                    source_operator_id=member.source_operator_id,
-                    source_activation_id=member.source_activation_id,
-                    child_index=member.child_index,
-                    outcome=member.outcome.value,
-                    value=_literal_text(member.value_ref),
-                    source=self._member_source_locked(member.value_ref),
-                    ordinal=member.ordinal,
-                )
-                for member in accepted.members
-            )
-            bindings.append(
-                InputBinding(
-                    port=accepted.target_port,
-                    provenance=accepted.provenance,
-                    ordinal=accepted.ordinal or ordinal,
-                    members=members,
-                )
-            )
-        return tuple(bindings)
-
-    def _member_source_locked(
-        self, value_ref: ValueRef | None
-    ) -> ResultValueRef | None:
-        """The stored result an input member reads, when a producer supplies it."""
-        if value_ref is None or value_ref.kind != "legacy_task_result":
-            return None
-        reference = value_ref.content
-        if reference is None and value_ref.legacy_task_id:
-            binding = self._result_binding_locked(value_ref.legacy_task_id)
-            reference = binding.reference if binding is not None else None
-        if reference is None:
-            return None
-        return ResultValueRef(reference=reference, element=_element_of(value_ref))
-
-    def _synthesize_child_record(
-        self, template: TaskRecord, child_task_id: str
-    ) -> TaskRecord:
-        """Clone a child-template record for one materialized child."""
-        return template.model_copy(
-            deep=True,
-            update={
-                "task_id": child_task_id,
-                "status": TaskStatus.PENDING,
-                "assigned_worker": None,
-                "started_ts": None,
-                "finished_ts": None,
-                "error": None,
-                "usages": [],
-                "position_in_epoch": None,
-                "graph_node_name": None,
-                "local_name": None,
-                "merge_key": None,
-                "merged_children": None,
-                "selected_worker": None,
-                "submitted_ts": time.time(),
-            },
+        return fanout.read_fanout(
+            self._results,
+            task_id,
+            ResultBinding(task_id=task_id, reference=reference, skip=skip),
         )
 
     def _fail_v2_records_locked(
@@ -4750,7 +3759,7 @@ class TaskRuntime:
             and record.status not in TERMINAL_TASK_STATUSES
         ]
         self._fail_v2_records_locked(non_terminal, reason, persist=True)
-        self._hold_termination_locked(workflow_id, termination)
+        self._terminations.hold_termination_locked(workflow_id, termination)
         self._save_ledger_locked(workflow_id)
         self._reclaim_vault_if_settled_locked(workflow_id)
         self._cv.notify_all()
@@ -4964,7 +3973,9 @@ class TaskRuntime:
         for child_id in child_ids:
             record = self._tasks.get(child_id)
             reference = child_references.get(child_id)
-            if record is not None and self._accepted_reference(record, reference):
+            if record is not None and content_bindings.accepted_reference(
+                self._logger, record, reference
+            ):
                 settled.append(child_id)
             else:
                 unsettled.append(child_id)
@@ -5000,7 +4011,7 @@ class TaskRuntime:
         if not child_record:
             return ready_children
         child_record.status = TaskStatus.DONE
-        self._bind_result_locked(child_record, reference, None)
+        content_bindings.bind_result_locked(self._logger, child_record, reference, None)
         child_record.error = None
         child_record.finished_ts = finished_ts
         if started_ts is not None and child_record.started_ts is None:
@@ -5256,10 +4267,7 @@ class TaskRuntime:
         record.dispatch_id = publish.dispatch_id
         if publish.dispatch_id is not None:
             held = (publish.worker_id, publish.dispatch_id)
-            earlier = self._held_dispatches.get(task_id)
-            if earlier is not None and earlier != held:
-                self._ended_dispatches.append(earlier)
-            self._held_dispatches[task_id] = held
+            self._reservations.hold_dispatch_locked(task_id, held)
         record.merged_dispatch_worker = (
             publish.worker_id if self._merge_children_map.get(task_id) else None
         )
@@ -5448,7 +4456,7 @@ class TaskRuntime:
                 if record.status in TERMINAL_TASK_STATUSES:
                     # A late report of a dispatch its task already settled routes
                     # nothing it carries, so its worker drops what it holds for it.
-                    self._reap_captures_locked(
+                    self._router.reap_captures_locked(
                         worker_id,
                         task_id,
                         _captured_calls(harness_result, carried_group),
@@ -5472,7 +4480,7 @@ class TaskRuntime:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result, group)
-                    self._release_ended_dispatches_locked([task_id])
+                    self._reservations.release_ended_dispatches_locked([task_id])
                     return _settle_outcome(
                         effect, record, [], _in_flight_usage(task_id, payload)
                     )
@@ -5482,7 +4490,7 @@ class TaskRuntime:
                     usages = self._settle_cancelled_usage_locked(
                         record, payload, finished_ts, started_ts
                     )
-                    self._reap_captures_locked(
+                    self._router.reap_captures_locked(
                         worker_id, task_id, _captured_calls(harness_result, group)
                     )
                     return _settle_outcome(effect, record, [], usages)
@@ -5495,7 +4503,7 @@ class TaskRuntime:
                     self._route_and_dispatch_facade_group_locked(
                         task_id, group, harness_result.capsule
                     )
-                    self._release_ended_dispatches_locked([task_id])
+                    self._reservations.release_ended_dispatches_locked([task_id])
                     return _settle_outcome(
                         effect, record, [], _in_flight_usage(task_id, payload)
                     )
@@ -5553,7 +4561,9 @@ class TaskRuntime:
                     record.started_ts = started_ts
                 record.merged_children = None
                 record.merged_dispatch_worker = None
-                self._bind_result_locked(record, reference, skip)
+                content_bindings.bind_result_locked(
+                    self._logger, record, reference, skip
+                )
                 if usage is not None:
                     record.usages.append(usage)
 
@@ -5749,8 +4759,12 @@ class TaskRuntime:
                 failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
                 and record.status != TaskStatus.CANCELLING
             ):
-                if consumed := self._consumed_inputs_locked(
-                    record, unavailable_inputs or ()
+                if consumed := content_bindings.consumed_inputs_locked(
+                    self._tasks,
+                    self._engines,
+                    self._original_deps,
+                    record,
+                    unavailable_inputs or (),
                 ):
                     held_dispatch = record.dispatch_id
                     end = self._return_dispatch_locked(
@@ -5811,16 +4825,6 @@ class TaskRuntime:
             usages.append((record.task_id, usage))
             self._commit_locked(record.task_id)
         return FailureOutcome(loss.end, record.attempts, list(loss.impacted), usages)
-
-    def _consumed_inputs_locked(
-        self, record: TaskRecord, references: Sequence[ContentReference]
-    ) -> tuple[ContentReference, ...]:
-        """The named objects the task consumes, each once."""
-        return tuple(
-            reference
-            for reference in dict.fromkeys(references)
-            if self._consumes_locked(record, reference)
-        )
 
     def _hold_for_input_check_locked(
         self,
@@ -5883,8 +4887,11 @@ class TaskRuntime:
                     if holder is not None:
                         self._heal_returned_locked(task_id, holder, None)
                     return DispatchEnd.STALE
-                if holder is not None and self._dispatch_ended_at_suspension_locked(
-                    record
+                if (
+                    holder is not None
+                    and episode_dispatch.dispatch_ended_at_suspension_locked(
+                        self._engines, record
+                    )
                 ):
                     return DispatchEnd.STALE
                 if record.status in TERMINAL_TASK_STATUSES:
@@ -5968,7 +4975,7 @@ class TaskRuntime:
             return
         step = payload.get("agent_episode")
         carried = payload.get("agent_episode_facade_group")
-        self._reap_captures_locked(
+        self._router.reap_captures_locked(
             worker_id,
             record.task_id,
             _captured_calls(
@@ -5980,16 +4987,6 @@ class TaskRuntime:
                 ),
             ),
         )
-
-    def _reap_captures_locked(
-        self,
-        worker_id: str | None,
-        task_id: str,
-        captures: list[tuple[str, str | None]],
-    ) -> None:
-        """Reap the requests a step captured for boundaries control never runs."""
-        for call, interface in captures:
-            self._reap_captured_request_locked(worker_id, task_id, call, interface)
 
     def _heal_returned_locked(
         self, task_id: str, worker_id: str, dispatch_id: str | None
@@ -6169,7 +5166,7 @@ class TaskRuntime:
             # for their own terminals.
             self._notify_terminal_transition(workflow_id)
 
-        self._release_terminated_work(termination)
+        self._terminations.release_terminated_work(termination)
         self._release_ended_workers()
         self._credential_vault.purge(workflow_id)
         return touched
@@ -6225,137 +5222,21 @@ class TaskRuntime:
                 # The worker may already be running the task.
                 self._take_dispatch_locked(record, publish)
             if record.status == TaskStatus.DISPATCHED and (
-                interrupt := self._interrupt_for(record, reason)
+                interrupt := self._terminations.interrupt_for(record, reason)
             ):
                 interrupts.append(interrupt)
             self._input_checks.pop(record.task_id, None)
             self._task_epoch_index.pop(record.task_id, None)
-        reaps = self._take_ops_for_agents_locked([r.task_id for r in records])
+        reaps = self._router.take_ops_for_agents_locked([r.task_id for r in records])
         return _Termination(interrupts, reaps)
-
-    @staticmethod
-    def _interrupt_for(record: TaskRecord, reason: str) -> InterruptMessage | None:
-        # A merged child's batch keeps running for siblings from other workflows.
-        if not record.assigned_worker or record.merged_parent_id:
-            return None
-        return InterruptMessage(
-            task_id=record.task_id,
-            worker_id=record.assigned_worker,
-            reason=reason,
-            dispatch_id=record.dispatch_id,
-        )
-
-    def _revoke_locked(
-        self,
-        task_id: str,
-        worker_id: str,
-        dispatch_id: str | None,
-        node_id: str | None = None,
-    ) -> None:
-        """Queue the revocation of a dispatch that resolved without its worker ending
-        it."""
-        if dispatch_id is None:
-            return
-        message = RevokeMessage(
-            task_id=task_id, worker_id=worker_id, dispatch_id=dispatch_id
-        )
-        self._pending_terminations.append(
-            _Termination([], [], revokes=[_Revoke(message, node_id)])
-        )
-
-    def _queue_interrupts_locked(self, interrupts: list[InterruptMessage]) -> None:
-        if interrupts:
-            self._pending_terminations.append(_Termination(interrupts, []))
-
-    def _cancelling_interrupts_locked(
-        self, include: Callable[[TaskRecord], bool]
-    ) -> list[InterruptMessage]:
-        """An interrupt for each task being cancelled that ``include`` selects."""
-        return [
-            interrupt
-            for record in self._tasks.values()
-            if record.status == TaskStatus.CANCELLING
-            and include(record)
-            and (interrupt := self._interrupt_for(record, record.error or "cancelled"))
-        ]
-
-    def _interrupt_cancelling_locked(self, workflow_id: str) -> None:
-        """Queue an interrupt for each task a restart found still being cancelled,
-        whose worker may never have received one."""
-        self._queue_interrupts_locked(
-            self._cancelling_interrupts_locked(
-                lambda record: record.workflow_id == workflow_id
-            )
-        )
-
-    def _release_terminated_work(self, termination: _Termination) -> None:
-        """Send what ``termination`` owes workers, best effort: each resident credit,
-        interrupt, revoke, and reap is attempted however the others fare."""
-        # The fenced terminal releases each in-flight resident invocation's credit, so a
-        # lost or draining replica is not held forever.
-        for invocation_id in termination.resident_invocation_ids:
-            try:
-                self._release_resident_credit(invocation_id, failed=True)
-            except Exception:
-                self._logger.exception(
-                    "Releasing the resident credit of %s failed", invocation_id
-                )
-        for interrupt in termination.interrupts:
-            try:
-                worker = self._worker_registry.get_worker(interrupt.worker_id)
-                if worker is None:
-                    self._logger.warning(
-                        "Cannot publish interrupt for %s; worker %s missing",
-                        interrupt.task_id,
-                        interrupt.worker_id,
-                    )
-                else:
-                    self._worker_registry.publish_interrupt(worker, interrupt)
-            except Exception:
-                self._logger.exception(
-                    "Interrupting %s on %s failed",
-                    interrupt.task_id,
-                    interrupt.worker_id,
-                )
-        for revoke in termination.revokes:
-            message = revoke.message
-            try:
-                node_id = revoke.node_id
-                if node_id is None and (
-                    worker := self._worker_registry.get_worker(message.worker_id)
-                ):
-                    node_id = worker.node_id
-                if node_id is None:
-                    self._logger.warning(
-                        "Cannot revoke dispatch %s of %s; worker %s missing",
-                        message.dispatch_id,
-                        message.task_id,
-                        message.worker_id,
-                    )
-                else:
-                    self._worker_registry.publish_revoke(node_id, message)
-            except Exception:
-                self._logger.exception(
-                    "Revoking dispatch %s on %s failed",
-                    message.dispatch_id,
-                    message.worker_id,
-                )
-        # The worker drops a reaped operation and its custody.
-        for worker_id, agent_task_id, call in termination.reaps:
-            try:
-                self._reap_mediated_op(worker_id, agent_task_id, call)
-            except Exception:
-                self._logger.exception(
-                    "Reaping the operation of %s on %s failed", agent_task_id, worker_id
-                )
 
     def _release_pending_terminations(self) -> None:
         """Release, off the lock, what control queued under it, and each worker
         reserved for a dispatch that ended."""
         with self._lock:
-            pending, self._pending_terminations = self._pending_terminations, []
+            pending = self._terminations.take_terminations()
         for termination in pending:
-            self._release_terminated_work(termination)
+            self._terminations.release_terminated_work(termination)
         self._release_ended_workers()
 
     def _commit_cancelled_locked(
@@ -6434,7 +5315,7 @@ class TaskRuntime:
         termination.resident_invocation_ids = engine.terminalize_unsettled_invocations(
             touched
         )
-        self._hold_termination_locked(workflow_id, termination)
+        self._terminations.hold_termination_locked(workflow_id, termination)
         return bool(touched)
 
     def _cancel_record_locked(
@@ -6565,7 +5446,9 @@ class TaskRuntime:
                     record.status,
                 )
                 return _settle_outcome(EventEffect.SETTLED, record, [], [])
-            if self._dispatch_ended_at_suspension_locked(record):
+            if episode_dispatch.dispatch_ended_at_suspension_locked(
+                self._engines, record
+            ):
                 return _settle_outcome(EventEffect.STALE, record, [], [])
             if record.status == TaskStatus.DISPATCHED:
                 return self._return_given_up_locked(record, worker_id, payload)
@@ -6664,11 +5547,11 @@ class TaskRuntime:
                 f"{record.max_attempts} attempts"
             ),
         )
-        self._reap_ops_for_agents_locked(
+        self._router.reap_ops_for_agents_locked(
             [record.task_id, *(task_id for task_id, _ in failed)]
         )
         if invocation_ids := engine.terminalize_unsettled_invocations([record.task_id]):
-            self._hold_termination_locked(
+            self._terminations.hold_termination_locked(
                 record.workflow_id,
                 _Termination([], [], resident_invocation_ids=invocation_ids),
             )
@@ -6756,13 +5639,7 @@ class TaskRuntime:
         """The resident serve tasks dispatched to ``worker_id``, each with its
         dispatch."""
         with self._lock:
-            return [
-                (task_id, dispatch_id)
-                for task_id, dispatch_id in self._dispatched_resident.items()
-                if dispatch_id is not None
-                and (record := self._tasks.get(task_id)) is not None
-                and record.assigned_worker == worker_id
-            ]
+            return self._resident_tasks.dispatches_on_locked(worker_id)
 
     def request_resident_yield(self, task_id: str, dispatch_id: str) -> bool:
         """Ask resident capacity to free the worker a resident serve task occupies
@@ -6780,10 +5657,7 @@ class TaskRuntime:
                 or record.dispatch_id != dispatch_id
             ):
                 return False
-        if self._resident_yield_requested is None:
-            return False
-        self._resident_yield_requested(task_id)
-        return True
+        return self._resident_tasks.request_yield(task_id)
 
     def live_resident_task_ids(self) -> set[str]:
         """Ids of the resident serve tasks neither settled nor cancelling."""
@@ -6904,7 +5778,7 @@ class TaskRuntime:
                 publish = self._publishing.get(task_id)
                 if publish and not publish.recorded and publish.worker_id == worker_id:
                     self._publishing[task_id] = None
-                    self._revoke_locked(
+                    self._terminations.revoke_locked(
                         task_id, worker_id, publish.dispatch_id, node_id
                     )
                     children = self._merge_children_map.pop(task_id, [])
@@ -6920,7 +5794,9 @@ class TaskRuntime:
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                     continue
                 # A boundary whose raw request only this worker holds is lost with it.
-                if self._dispatch_ended_at_suspension_locked(record) and not (
+                if episode_dispatch.dispatch_ended_at_suspension_locked(
+                    self._engines, record
+                ) and not (
                     self._engines[record.workflow_id].awaits_worker_held_boundary(
                         task_id
                     )
@@ -6928,7 +5804,9 @@ class TaskRuntime:
                     continue
                 self._rehydrated_dispatched.pop(task_id, None)
                 if not record.merged_parent_id:
-                    self._revoke_locked(task_id, worker_id, record.dispatch_id, node_id)
+                    self._terminations.revoke_locked(
+                        task_id, worker_id, record.dispatch_id, node_id
+                    )
                 if (
                     record.status == TaskStatus.DISPATCHED
                     and record.workflow_id in self._engines
@@ -6941,9 +5819,7 @@ class TaskRuntime:
             # A pending tool operation on the departed worker lost its private request
             # custody with the worker; drop the stale mapping so its boundary re-mints
             # on a fresh worker rather than waiting on an outcome that can never arrive.
-            for permit_id, op in list(self._pending_ops.items()):
-                if op.worker_id == worker_id:
-                    del self._pending_ops[permit_id]
+            self._router.drop_worker_ops(worker_id)
         return WorkerRecovery(recovered, resolved)
 
     def resolve_disowned_dispatch(
@@ -6972,7 +5848,9 @@ class TaskRuntime:
                     or record.assigned_worker != worker_id
                     or record.dispatch_id != dispatch_id
                     or record.started_ts is not None
-                    or not self._awaits_its_dispatch_locked(record)
+                    or not episode_dispatch.awaits_its_dispatch_locked(
+                        self._engines, record
+                    )
                 ):
                     return None
                 since = max(
@@ -6981,7 +5859,7 @@ class TaskRuntime:
                 )
                 if time.time() - since < bound_sec:
                     return None
-                self._revoke_locked(task_id, worker_id, dispatch_id)
+                self._terminations.revoke_locked(task_id, worker_id, dispatch_id)
                 if worker_id not in record.failed_workers:
                     record.failed_workers.append(worker_id)
                 record.last_error = (
@@ -7018,32 +5896,6 @@ class TaskRuntime:
         )
         return _settle_outcome(EventEffect.FAILED, record, [], usages, tuple(impacted))
 
-    def _awaits_its_dispatch_locked(self, record: TaskRecord) -> bool:
-        """Whether the task's dispatch may still run it: always for a cancelling or v1
-        task; for any other v2 task, while its work item is unsettled and its dispatch
-        did not end at a suspension."""
-        engine = self._engines.get(record.workflow_id)
-        if engine is None or record.status == TaskStatus.CANCELLING:
-            return True
-        wi = engine.work_item(record.task_id)
-        return (
-            wi is not None
-            and wi.status not in TERMINAL_WORK_ITEM_STATUSES
-            and not self._dispatch_ended_at_suspension_locked(record)
-        )
-
-    def _dispatch_ended_at_suspension_locked(self, record: TaskRecord) -> bool:
-        """Whether a task's dispatch ended at a suspension: a step of it ran and
-        suspended on a boundary, so its worker holds nothing of it, though the task
-        stays DISPATCHED until the boundary settles."""
-        engine = self._engines.get(record.workflow_id)
-        wi = engine.work_item(record.task_id) if engine is not None else None
-        return (
-            record.status == TaskStatus.DISPATCHED
-            and wi is not None
-            and wi.status is WorkItemStatus.BLOCKED
-        )
-
     def dispatch_in_flight(
         self, task_id: str, dispatch_id: str, worker_id: str
     ) -> bool:
@@ -7051,7 +5903,9 @@ class TaskRuntime:
         not ended at a suspension."""
         with self._lock:
             record = self._tasks.get(task_id)
-            if record is None or self._dispatch_ended_at_suspension_locked(record):
+            if record is None or episode_dispatch.dispatch_ended_at_suspension_locked(
+                self._engines, record
+            ):
                 return False
             publish = self._publishing.get(task_id)
             in_flight = record.status in (
@@ -7154,7 +6008,9 @@ class TaskRuntime:
     ) -> dict[str, Any]:
         """Return a task's ``TaskInfo`` fields to build from after the lock is
         released, duplicating the containers a record appends to in place."""
-        element = self._input_element_locked(task_id)
+        element = content_bindings.input_element_locked(
+            self._tasks, self._engines, task_id
+        )
         return {
             **{
                 name: value.copy() if isinstance(value, (list, dict)) else value

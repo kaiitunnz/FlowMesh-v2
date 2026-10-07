@@ -5,7 +5,7 @@ says what its ancestors left it. The mint takes the intersection for both interf
 a child never inherits code execution or egress its parent withheld.
 """
 
-from server.task.runtime import _effective_facades, _sandbox_capability
+from server.task.runtime.episode_dispatch import _effective_facades, _sandbox_capability
 from server.task.v2.compiler.facades import run_command_schema
 from server.task.v2.representations.operators import (
     AgentOperator,

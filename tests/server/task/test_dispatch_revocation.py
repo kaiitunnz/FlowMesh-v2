@@ -51,8 +51,7 @@ class _Registry(WorkerRegistry):
 
 
 def _runtime(registry: _Registry) -> tuple[TaskRuntime, str]:
-    runtime = _runtime_v2(FakeRegistry())
-    runtime._worker_registry = registry
+    runtime = _runtime_v2(FakeRegistry(), registry)
     _, ids = asyncio.run(_register_v2(runtime, LINEAR))
     assert pop_ready(runtime) == ids["a"]
     return runtime, ids["a"]

@@ -50,7 +50,7 @@ def test_an_attached_worker_gets_its_pending_operation_re_minted() -> None:
             first["agent_task_id"],
             first["call_correlation"],
         )
-        assert list(runtime._pending_ops) == [again["permit_id"]]
+        assert list(runtime._router.pending_ops) == [again["permit_id"]]
 
     asyncio.run(run())
 
@@ -75,7 +75,7 @@ def test_the_first_permit_s_outcome_settles_its_re_mint_too() -> None:
             )
         )
 
-        assert runtime._pending_ops == {}
+        assert runtime._router.pending_ops == {}
 
     asyncio.run(run())
 
@@ -94,9 +94,8 @@ def test_another_worker_attaching_re_relays_nothing() -> None:
 
 
 def test_an_attached_worker_is_interrupted_again_for_its_cancelling_task() -> None:
-    runtime = _runtime_v2(FakeRegistry())
     registry = MagicMock()
-    runtime._worker_registry = registry
+    runtime = _runtime_v2(FakeRegistry(), registry)
     workflow_id, ids = asyncio.run(_register_v2(runtime, LINEAR))
     task_id = ids["a"]
     assert pop_ready(runtime) == task_id

@@ -12,9 +12,8 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration import Advance, PublicationOutcome
-from server.task import runtime as runtime_module
 from server.task.redrive import StoreRedriveScheduler
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, agent_inputs, content_bindings, fanout
 from server.task.v2.representations.template import TemplateEdge
 from shared.content import (
     OCTET_STREAM,
@@ -75,7 +74,7 @@ class _FlakyStore(FabricObjectStore):
 
 @pytest.fixture(autouse=True)
 def _no_read_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(runtime_module, "_FANOUT_READ_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(fanout, "_FANOUT_READ_BACKOFF_SEC", 0.0)
 
 
 def _runtime(
@@ -153,7 +152,7 @@ async def test_a_missing_producer_result_still_fails_the_workflow() -> None:
     assert not scheduler.pending(workflow_id)
 
 
-def _agent_consuming(runtime: TaskRuntime) -> Any:
+def _agent_consuming(runtime: TaskRuntime, monkeypatch: pytest.MonkeyPatch) -> Any:
     engine = _engine(
         _bundle(
             [_leaf("P"), _input_agent("M", ("reviews",))],
@@ -165,19 +164,31 @@ def _agent_consuming(runtime: TaskRuntime) -> Any:
     engine.on_succeeded("P")
     reference = store_result(runtime._results, "P", {"value": "grounded"})
     bound = {"P": ResultBinding(task_id="P", reference=reference)}
-    runtime._result_binding_locked = lambda task_id: bound.get(  # type: ignore[method-assign]
-        task_id
+    monkeypatch.setattr(
+        content_bindings,
+        "result_binding_locked",
+        lambda tasks, engines, task_id: bound.get(task_id),
     )
     return engine
 
 
-def test_an_agent_input_waits_out_an_unreachable_store() -> None:
+def test_an_agent_input_waits_out_an_unreachable_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime, flaky, (scheduler,), clock = _runtime(FakeRegistry())
-    engine = _agent_consuming(runtime)
+    engine = _agent_consuming(runtime, monkeypatch)
     runtime._engines["wfl-agent"] = engine
 
     flaky.error = ContentUnavailable("store down")
-    runtime._stage_agent_inputs_locked("wfl-agent", engine, Advance())
+    agent_inputs.stage_agent_inputs_locked(
+        runtime._tasks,
+        runtime._engines,
+        runtime._redrive,
+        runtime._input_budget_bytes,
+        "wfl-agent",
+        engine,
+        Advance(),
+    )
     assert scheduler.run_due() == ["wfl-agent"]
     assert engine.work_item("M").outcome is None
     assert not engine.accepted_inputs_for_task("M")
@@ -192,13 +203,21 @@ def test_an_agent_input_waits_out_an_unreachable_store() -> None:
     assert not scheduler.pending("wfl-agent")
 
 
-def test_a_missing_agent_input_fails_the_agent() -> None:
+def test_a_missing_agent_input_fails_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime, flaky, (scheduler,), _clock = _runtime(FakeRegistry())
-    engine = _agent_consuming(runtime)
+    engine = _agent_consuming(runtime, monkeypatch)
     runtime._engines["wfl-agent"] = engine
 
     flaky.error = ContentHydrationError("no such object")
-    runtime._stage_agent_inputs_locked("wfl-agent", engine, Advance())
+    agent_inputs.stage_agent_inputs_locked(
+        runtime._tasks,
+        runtime._engines,
+        runtime._redrive,
+        runtime._input_budget_bytes,
+        "wfl-agent",
+        engine,
+        Advance(),
+    )
     scheduler.run_due()
     assert engine.work_item("M").outcome is PublicationOutcome.DECLARED_FAILURE
     assert not scheduler.pending("wfl-agent")

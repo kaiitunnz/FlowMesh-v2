@@ -18,7 +18,9 @@ from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.orchestration.tool_dispatch import ToolInvocationEnvelope
 from server.task.models import EventEffect, SettleOutcome
 from server.task.results import ResultUnreadable
-from server.task.runtime import TaskRuntime, _HeldWrites, _Termination, _Unacknowledged
+from server.task.runtime import TaskRuntime
+from server.task.runtime.facade import _HeldWrites, _Unacknowledged
+from server.task.runtime.terminations import _Termination
 from shared.tools.contract import MediatedOperationOutcome
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
@@ -173,13 +175,17 @@ def test_a_save_under_a_held_report_keeps_its_release_held() -> None:
     current = runtime._report_writes.held = _HeldWrites(error=RuntimeError("down"))
     try:
         with runtime._cv:
-            runtime._hold_termination_locked(scenario.workflow_id, termination)
+            runtime._terminations.hold_termination_locked(
+                scenario.workflow_id, termination
+            )
             runtime._save_ledger_locked(scenario.workflow_id)
     finally:
         runtime._report_writes.held = None
 
-    assert runtime._pending_terminations == []
-    assert runtime._undurable_terminations[scenario.workflow_id] == [termination]
+    assert runtime._terminations.pending_terminations == []
+    assert runtime._terminations.undurable_terminations[scenario.workflow_id] == [
+        termination
+    ]
     assert current.workflow_ids == [scenario.workflow_id]
 
 
@@ -191,7 +197,7 @@ def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
     planner = scenario.ids["planner"]
     termination = _Termination([], [], resident_invocation_ids=["inv-x"])
     with runtime._cv:
-        runtime._hold_termination_locked(scenario.workflow_id, termination)
+        runtime._terminations.hold_termination_locked(scenario.workflow_id, termination)
     runtime._unacknowledged[planner] = _Unacknowledged(
         "TASK_CANCELLED",
         "wkr-1",
@@ -203,7 +209,7 @@ def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
     runtime.mark_cancelled(planner, "wkr-1", {}, _TS, "dsp-p")
 
     assert released == ["inv-x"]
-    assert runtime._pending_terminations == []
+    assert runtime._terminations.pending_terminations == []
 
 
 def _lock_probe(runtime: TaskRuntime) -> list[bool]:
@@ -222,14 +228,14 @@ def _lock_probe(runtime: TaskRuntime) -> list[bool]:
         thread.start()
         thread.join()
 
-    runtime._release_terminated_work = release  # type: ignore[method-assign]
-    runtime._pending_terminations.append(_Termination([], []))
+    runtime._terminations.release_terminated_work = release  # type: ignore[method-assign]
+    runtime._terminations.pending_terminations.append(_Termination([], []))
     return owned
 
 
 def test_a_mediated_outcome_releases_off_the_lock() -> None:
     runtime = _runtime(FakeRegistry())
-    runtime._reap_mediated_op = lambda *_: None  # type: ignore[method-assign]
+    runtime._router.reap_mediated_op = lambda *_: None  # type: ignore[method-assign]
     owned = _lock_probe(runtime)
 
     runtime.settle_mediated_operation(
@@ -255,7 +261,7 @@ def test_a_boundary_settled_under_the_lock_leaves_its_release_pending() -> None:
         runtime._dispatch_resident_op(cast(ToolInvocationEnvelope, env))
 
     assert owned == []
-    assert runtime._pending_terminations
+    assert runtime._terminations.pending_terminations
 
 
 def test_a_redispatched_boundary_releases_off_the_lock() -> None:

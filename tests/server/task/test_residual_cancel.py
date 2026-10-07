@@ -162,7 +162,9 @@ def test_a_restart_interrupts_a_task_whose_cancel_interrupt_was_lost(
         record_dispatch(runtime, running, cast(Any, _worker("wkr-2")))
         # The root crashes after the cancel is durable, before it interrupts the worker.
         with monkeypatch.context() as patch:
-            patch.setattr(runtime, "_release_terminated_work", lambda *_: None)
+            patch.setattr(
+                runtime._terminations, "release_terminated_work", lambda *_: None
+            )
             runtime.cancel_workflow(workflow_id)
 
         restored = _live_runtime(registry, "restored", reader=runtime._results)
