@@ -1,0 +1,197 @@
+"""The per-tree supervisor: only a REAPED exit proves every descendant gone."""
+
+import os
+import signal
+import subprocess  # nosec B404 - the supervisor under test is a subprocess
+import sys
+import time
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from worker.utils import subreaper
+from worker.utils.subreaper import (
+    REAPED,
+    UNPROVED,
+    UNSUPPORTED,
+    end_supervised,
+    read_receipt,
+    reap_proved,
+    supervised_argv,
+)
+
+pytestmark = pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="child subreapers are Linux-only"
+)
+
+_SH = "/bin/sh"
+
+
+def _alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return state[state.rfind(")") + 2] != "Z"
+
+
+@pytest.fixture
+def strays() -> Iterator[list[int]]:
+    """Pids a test may leave behind on purpose; killed afterwards either way."""
+    pids: list[int] = []
+    yield pids
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _run(script: str, tmp_path: Path, **kwargs: float) -> tuple[int, int | None]:
+    receipt = tmp_path / "receipt.json"
+    proc = subprocess.run(  # nosec B603 - argv list built by the test
+        supervised_argv([_SH, "-c", script], receipt=receipt, **kwargs),
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+    )
+    return proc.returncode, read_receipt(receipt)
+
+
+def _pids(path: Path) -> list[int]:
+    return [int(line) for line in path.read_text().split()]
+
+
+def test_a_finished_command_reports_its_own_status_apart_from_the_proof(
+    tmp_path: Path,
+) -> None:
+    returncode, status = _run("exit 3", tmp_path)
+
+    assert returncode == REAPED and reap_proved(returncode)
+    assert status == 3
+
+
+def test_an_unexecutable_command_is_still_a_proved_reap(tmp_path: Path) -> None:
+    receipt = tmp_path / "receipt.json"
+    proc = subprocess.run(  # nosec B603 - argv list built by the test
+        supervised_argv([(tmp_path / "missing").as_posix()], receipt=receipt),
+        capture_output=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == REAPED
+    assert read_receipt(receipt) == 127
+
+
+def test_a_detached_writer_is_reaped_before_the_proof(tmp_path: Path) -> None:
+    script = (
+        "setsid sh -c 'while :; do echo x >> log; sleep 0.02; done' & "
+        "echo $! > pids; exit 0"
+    )
+
+    returncode, _ = _run(script, tmp_path)
+
+    assert returncode == REAPED
+    assert not any(_alive(pid) for pid in _pids(tmp_path / "pids"))
+    size = (tmp_path / "log").stat().st_size
+    time.sleep(0.2)
+    assert (tmp_path / "log").stat().st_size == size
+
+
+def test_a_descendant_ignoring_term_is_killed_after_the_grace(tmp_path: Path) -> None:
+    script = "sh -c 'trap \"\" TERM; echo $$ > pids; exec sleep 30' & sleep 0.2; exit 0"
+
+    started = time.monotonic()
+    returncode, _ = _run(script, tmp_path, grace_sec=0.3)
+
+    assert returncode == REAPED
+    assert time.monotonic() - started < 10
+    assert not any(_alive(pid) for pid in _pids(tmp_path / "pids"))
+
+
+def test_successive_adoption_through_living_intermediate_parents(
+    tmp_path: Path,
+) -> None:
+    # Each level detaches into its own session and leaves a child behind; the middle
+    # level outlives its parent and ignores TERM, so its own child is adopted only once
+    # it is killed.
+    leaf = "echo $$ >> pids; exec sleep 30"
+    middle = (
+        f"trap '' TERM; echo $$ >> pids; setsid sh -c \"{leaf}\" & "
+        "while :; do sleep 1; done"
+    )
+    script = f"setsid sh -c '{middle}' & echo $! >> pids; sleep 0.3; exit 0"
+
+    returncode, _ = _run(script, tmp_path, grace_sec=0.3)
+
+    assert returncode == REAPED
+    pids = _pids(tmp_path / "pids")
+    assert len(pids) >= 3
+    assert not any(_alive(pid) for pid in pids)
+
+
+def test_an_exhausted_budget_is_unproved(tmp_path: Path, strays: list[int]) -> None:
+    script = "sh -c 'trap \"\" TERM; echo $$ > pids; exec sleep 30' & sleep 0.2; exit 0"
+
+    returncode, status = _run(script, tmp_path, grace_sec=30.0, budget_sec=0.3)
+    strays.extend(_pids(tmp_path / "pids"))
+
+    assert returncode == UNPROVED and not reap_proved(returncode)
+    assert status is None
+
+
+def test_a_killed_supervisor_proves_nothing(tmp_path: Path, strays: list[int]) -> None:
+    script = "setsid sh -c 'echo $$ > pids; exec sleep 30' & wait"
+    proc = subprocess.Popen(  # nosec B603 - argv list built by the test
+        supervised_argv([_SH, "-c", script]), cwd=tmp_path
+    )
+    deadline = time.monotonic() + 10
+    while not (tmp_path / "pids").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    strays.extend(_pids(tmp_path / "pids"))
+
+    proc.kill()
+    proc.wait(10)
+
+    assert not reap_proved(proc.returncode)
+    assert _alive(strays[0])
+
+
+def test_ending_a_running_supervisor_reaps_its_command(tmp_path: Path) -> None:
+    receipt = tmp_path / "receipt.json"
+    script = "setsid sh -c 'echo $$ > pids; exec sleep 30' & sleep 30"
+    proc = subprocess.Popen(  # nosec B603 - argv list built by the test
+        supervised_argv([_SH, "-c", script], receipt=receipt, grace_sec=0.3),
+        cwd=tmp_path,
+        text=True,
+    )
+    deadline = time.monotonic() + 10
+    while not (tmp_path / "pids").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert end_supervised(proc, 10)
+    assert read_receipt(receipt) == -signal.SIGTERM
+    assert not any(_alive(pid) for pid in _pids(tmp_path / "pids"))
+
+
+def test_a_supervisor_the_kernel_will_not_make_a_subreaper_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "ran"
+    runner = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('s', {subreaper.__file__!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "module._become_subreaper = lambda libc: False\n"
+        f"sys.argv = ['subreaper', '--', {_SH!r}, '-c', 'touch {marker}']\n"
+        "module.main()\n"
+    )
+    proc = subprocess.run(  # nosec B603 - argv list built by the test
+        [sys.executable, "-I", "-c", runner], capture_output=True, timeout=30
+    )
+
+    assert proc.returncode == UNSUPPORTED
+    assert not marker.exists()
