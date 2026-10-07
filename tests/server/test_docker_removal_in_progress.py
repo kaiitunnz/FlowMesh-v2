@@ -20,7 +20,7 @@ from server.supervisor.adapters.docker import (
     WorkerType,
     _is_removal_in_progress,
 )
-from server.supervisor.provisioning import ProviderHandle
+from server.supervisor.provisioning import DockerHandle
 from server.supervisor.schemas import WorkerStatus
 
 _IN_PROGRESS = "removal of container gpu_0 is already in progress"
@@ -57,7 +57,7 @@ def _adapter(
             scopes=[],
         ),
         handle=(
-            ProviderHandle(container_id=container_id, container_name="gpu_0")
+            DockerHandle(container_id=container_id, container_name="gpu_0")
             if container_id
             else None
         ),

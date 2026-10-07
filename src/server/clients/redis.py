@@ -331,8 +331,24 @@ def resident_relay_sync_client(cfg: RedisConfig) -> redis.Redis:
     )
 
 
-def supervisor_state_client(cfg: RedisConfig) -> redis.Redis:
-    """Build a blocking client on the supervisor state store.
+def supervisor_state_client(cfg: RedisConfig) -> async_redis.Redis:
+    """Build an async client on the supervisor state store."""
+    url, kwargs = _supervisor_state_connection(cfg, AsyncSSLConnection)
+    return async_redis.from_url(
+        url, decode_responses=True, **_keepalive_kwargs(), **kwargs
+    )
+
+
+def supervisor_state_sync_client(cfg: RedisConfig) -> redis.Redis:
+    """Build a blocking client on the supervisor state store."""
+    url, kwargs = _supervisor_state_connection(cfg, SyncSSLConnection)
+    return redis.from_url(url, decode_responses=True, **_keepalive_kwargs(), **kwargs)
+
+
+def _supervisor_state_connection(
+    cfg: RedisConfig, connection_class: type[Any]
+) -> tuple[str, dict[str, Any]]:
+    """Return the state store's URL and the arguments it connects with.
 
     An endpoint the operator names connects with its own URL's credentials and TLS;
     otherwise the store is the control Redis, reached as the control client reaches it.
@@ -343,16 +359,9 @@ def supervisor_state_client(cfg: RedisConfig) -> redis.Redis:
         "socket_timeout": _STATE_STORE_TIMEOUT_SEC,
     }
     if cfg.supervisor_state_url:
-        return redis.from_url(
-            cfg.supervisor_state_url,
-            decode_responses=True,
-            **_keepalive_kwargs(),
-            **timeouts,
-        )
-    url, ssl_kwargs = _deployment_connection(cfg.control_url, cfg, SyncSSLConnection)
-    return redis.from_url(
-        url, decode_responses=True, **_keepalive_kwargs(), **timeouts, **ssl_kwargs
-    )
+        return cfg.supervisor_state_url, timeouts
+    url, ssl_kwargs = _deployment_connection(cfg.control_url, cfg, connection_class)
+    return url, timeouts | ssl_kwargs
 
 
 def _deployment_connection(

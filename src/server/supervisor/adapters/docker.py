@@ -21,7 +21,7 @@ from shared.utils.docker import sanitize_container_name
 from ... import env
 from ...hooks import PrincipalContext
 from ...utils.helpers import get_docker_client
-from ..provisioning import ProviderHandle, Removal, WorkerRecord
+from ..provisioning import DockerHandle, ProviderHandle, Removal, WorkerRecord
 from ..resource_manager import GpuArch, ResourceManager
 from ..schemas import WorkerHardware, WorkerInfo, WorkerStatus
 from .base import (
@@ -239,7 +239,7 @@ class DockerWorkerAdapter(WorkerAdapter):
         docker_client: DockerClient,
         owner: PrincipalContext,
         held_gpus: list[int] | None = None,
-        handle: ProviderHandle | None = None,
+        handle: DockerHandle | None = None,
     ) -> None:
         if config.worker_type == WorkerType.GPU and (
             cuda_devices is None or len(cuda_devices) == 0
@@ -289,10 +289,10 @@ class DockerWorkerAdapter(WorkerAdapter):
         if self._hardware is None:
             self._hardware = hardware
 
-    def handle(self) -> ProviderHandle | None:
+    def handle(self) -> DockerHandle | None:
         if self._container_id is None:
             return None
-        return ProviderHandle(
+        return DockerHandle(
             container_id=self._container_id, container_name=self.container_name
         )
 
@@ -801,6 +801,9 @@ class DockerWorkerFactory(WorkerFactory):
         self, token: WorkerTokenType, record: WorkerRecord
     ) -> DockerWorkerAdapter:
         config = DockerWorkerConfig.model_validate(record.config)
+        handle = record.handle
+        if handle is not None and not isinstance(handle, DockerHandle):
+            raise TypeError(f"Not a Docker handle: {handle!r}")
         if config.container_name is None:
             raise ValueError(f"the record of worker {record.alias} names no container")
         held: list[int] | None = None
@@ -825,11 +828,12 @@ class DockerWorkerFactory(WorkerFactory):
             docker_client=self._docker,
             owner=self.system_principal,
             held_gpus=held,
-            handle=record.handle,
+            handle=handle,
         )
 
     def remove(self, handle: ProviderHandle) -> Removal:
-        assert handle.container_id is not None and handle.container_name is not None
+        if not isinstance(handle, DockerHandle):
+            raise TypeError(f"Not a Docker handle: {handle!r}")
         try:
             self._docker.containers.get(handle.container_id).remove(force=True)
             outcome = Removal.REMOVED

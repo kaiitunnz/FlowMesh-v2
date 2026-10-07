@@ -340,7 +340,7 @@ def _run_supervisor(
     from shared.utils.time import now_iso
 
     from ..clients import RedisClient
-    from ..clients.redis import resident_relay_client, supervisor_state_client
+    from ..clients.redis import resident_relay_client, supervisor_state_sync_client
     from ..network.reverse_relay import BinaryRedis
     from ..registries.node import NodeRegistry
     from ..registries.worker import WorkerRegistry as WorkerRecords
@@ -451,7 +451,7 @@ def _run_supervisor(
         wm_cfg.config_path,
         worker_adapter_registry,
         logger,
-        WorkerProvisioningStore(supervisor_state_client(redis_cfg), identity),
+        WorkerProvisioningStore(supervisor_state_sync_client(redis_cfg), identity),
         capacity_change_callback=lifecycle.heartbeat_now,
         vast_api_key=wm_cfg.vast_api_key,
     )

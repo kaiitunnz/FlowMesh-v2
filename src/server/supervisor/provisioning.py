@@ -3,11 +3,11 @@
 import json
 import logging
 from enum import StrEnum
-from typing import Any, cast, get_args
+from typing import Annotated, Any, Literal, cast, get_args
 from urllib.parse import quote
 
 import redis
-from pydantic import BaseModel, ConfigDict, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from ..config import IdentityConfig
 
@@ -33,17 +33,29 @@ class Removal(StrEnum):
     UNKNOWN = "unknown"
 
 
-class ProviderHandle(BaseModel):
-    """What a provider launched for a worker."""
+class DockerHandle(BaseModel):
+    """The container a Docker worker runs in."""
 
     model_config = ConfigDict(frozen=True)
 
-    container_id: str | None = None
-    container_name: str | None = None
-    instance_id: int | None = None
-    created_instance: bool = False
+    provider: Literal["docker"] = "docker"
+    container_id: str
+    container_name: str
+
+
+class VastHandle(BaseModel):
+    """The Vast.ai instance a worker runs on."""
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: Literal["vastai"] = "vastai"
+    instance_id: int
+    created_instance: bool
     """Whether the instance was rented for the worker: removal destroys a rented
     instance and stops a supplied one."""
+
+
+ProviderHandle = Annotated[DockerHandle | VastHandle, Field(discriminator="provider")]
 
 
 class WorkerRecord(BaseModel):
@@ -85,8 +97,8 @@ class WorkerProvisioningStore:
         records = []
         for alias, value in raw.items():
             try:
-                records.append(WorkerRecord.model_validate(json.loads(value)))
-            except ValueError as exc:
+                records.append(WorkerRecord.model_validate_json(value))
+            except ValidationError as exc:
                 logger.error(
                     "Ignoring unreadable record of worker %s: %s", alias, type(exc)
                 )

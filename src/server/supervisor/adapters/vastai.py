@@ -12,7 +12,7 @@ from shared.schemas.worker import SSHBackendName
 from ... import env
 from ...hooks import PrincipalContext
 from ...utils.helpers import ResourcePool
-from ..provisioning import ProviderHandle, Removal, WorkerRecord
+from ..provisioning import ProviderHandle, Removal, VastHandle, WorkerRecord
 from ..resource_manager import GpuArch
 from ..schemas import WorkerHardware, WorkerInfo, WorkerStatus
 from .base import (
@@ -127,17 +127,21 @@ class VastAIWorkerAdapter(WorkerAdapter):
         vastai_client: VastAI,
         instance_pool: ResourcePool[int],
         owner: PrincipalContext,
-        handle: ProviderHandle | None = None,
+        handle: VastHandle | None = None,
     ) -> None:
         super().__init__(token, alias, config, owner)
         self.config: VastAIWorkerConfig
         self._client = vastai_client
         self._instance_pool = instance_pool
         self._status: WorkerStatus = WorkerStatus.STOPPED
-        self._instance_id: int | None = config.instance_id
-        self._created_instance = False
-        self._holds_instance = False
-        if handle is not None:
+        self._instance_id: int | None
+        self._created_instance: bool
+        self._holds_instance: bool
+        if handle is None:
+            self._instance_id = config.instance_id
+            self._created_instance = False
+            self._holds_instance = False
+        else:
             self._instance_id = handle.instance_id
             self._created_instance = handle.created_instance
             self._holds_instance = True
@@ -322,10 +326,10 @@ class VastAIWorkerAdapter(WorkerAdapter):
     def holds_worker(self) -> bool:
         return self._holds_instance
 
-    def handle(self) -> ProviderHandle | None:
+    def handle(self) -> VastHandle | None:
         if not self._holds_instance or self._instance_id is None:
             return None
-        return ProviderHandle(
+        return VastHandle(
             instance_id=self._instance_id, created_instance=self._created_instance
         )
 
@@ -339,7 +343,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
         )
         outcome = _release_instance(
             self._client,
-            ProviderHandle(
+            VastHandle(
                 instance_id=instance_id, created_instance=self._created_instance
             ),
         )
@@ -382,10 +386,9 @@ class VastAIWorkerAdapter(WorkerAdapter):
         self._reserved_offer_id = None
 
 
-def _release_instance(client: VastAI, handle: ProviderHandle) -> Removal:
+def _release_instance(client: VastAI, handle: VastHandle) -> Removal:
     """Destroy a rented instance or stop a supplied one, blocking."""
     instance_id = handle.instance_id
-    assert instance_id is not None
     try:
         if handle.created_instance:
             err = client.destroy_instance(id=instance_id)
@@ -432,9 +435,14 @@ class VastAIWorkerFactory(WorkerFactory):
         self, token: WorkerTokenType, record: WorkerRecord
     ) -> VastAIWorkerAdapter:
         config = VastAIWorkerConfig.model_validate(record.config)
-        return self._adapter(token, record.alias, config, record.handle)
+        handle = record.handle
+        if handle is not None and not isinstance(handle, VastHandle):
+            raise TypeError(f"Not a VastAI handle: {handle!r}")
+        return self._adapter(token, record.alias, config, handle)
 
     def remove(self, handle: ProviderHandle) -> Removal:
+        if not isinstance(handle, VastHandle):
+            raise TypeError(f"Not a VastAI handle: {handle!r}")
         if self._client is None:
             return Removal.UNKNOWN
         return _release_instance(self._client, handle)
@@ -444,7 +452,7 @@ class VastAIWorkerFactory(WorkerFactory):
         token: WorkerTokenType,
         alias: str,
         config: VastAIWorkerConfig,
-        handle: ProviderHandle | None = None,
+        handle: VastHandle | None = None,
     ) -> VastAIWorkerAdapter:
         if self._client is None:
             raise ValueError("VAST_API_KEY is required to manage VastAI workers.")

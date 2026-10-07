@@ -28,10 +28,12 @@ from server.supervisor.manager import (
     WorkerManager,
 )
 from server.supervisor.provisioning import (
+    DockerHandle,
     ProviderHandle,
     RecordState,
     Removal,
     RunState,
+    VastHandle,
     WorkerRecord,
 )
 from server.supervisor.registry import WorkerRegistry
@@ -406,7 +408,7 @@ async def test_a_launch_commits_its_handle_and_a_failed_commit_is_saved_later(
     await _run(wm)
     info = await wm.create_worker(WorkerInitConfig())
     [container] = node.daemon.containers.values()
-    assert node.records()[info.alias].handle == ProviderHandle(
+    assert node.records()[info.alias].handle == DockerHandle(
         container_id=container.id, container_name=container.name
     )
 
@@ -426,7 +428,7 @@ async def test_a_launch_commits_its_handle_and_a_failed_commit_is_saved_later(
     await _settle(wm)
 
     [relaunched] = node.daemon.containers.values()
-    assert node.records()[info.alias].handle == ProviderHandle(
+    assert node.records()[info.alias].handle == DockerHandle(
         container_id=relaunched.id, container_name=relaunched.name
     )
     assert node.daemon.runs == 2
@@ -646,7 +648,7 @@ async def test_the_grace_leaves_a_worker_the_operator_is_launching(
     assert await starting
 
     [launched] = node.daemon.containers.values()
-    assert node.records()["w1"].handle == ProviderHandle(
+    assert node.records()["w1"].handle == DockerHandle(
         container_id=launched.id, container_name="w1"
     )
 
@@ -697,7 +699,7 @@ async def test_an_interrupted_create_finds_its_container_by_name_and_token(
 
     await _run(node.supervisor())
 
-    assert node.records()["w1"].handle == ProviderHandle(
+    assert node.records()["w1"].handle == DockerHandle(
         container_id=container.id, container_name="w1"
     )
     assert node.daemon.runs == 0
@@ -748,7 +750,7 @@ async def test_a_vast_instance_is_recorded_before_it_is_queried_and_restored(
 
     info = await wm.create_worker(WorkerInitConfig(provider="vastai"))
 
-    assert seen == [ProviderHandle(instance_id=100, created_instance=True)]
+    assert seen == [VastHandle(instance_id=100, created_instance=True)]
     assert node.vast_keys == ["deployment-key"]
     second = node.supervisor()
     await _run(second)
