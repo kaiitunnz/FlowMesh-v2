@@ -181,7 +181,7 @@ def test_live_fanout_closes_join_over_dispatched_children() -> None:
     assert summary is not None and summary.outcome is PublicationOutcome.SUCCESS
     keyed = [
         p
-        for slot, p in eng._publications.items()  # type: ignore[attr-defined]
+        for slot, p in eng._publication.publications.items()  # type: ignore[attr-defined]
         if p.output_id == "results"
     ]
     assert len(keyed) == 3  # one keyed publication per dispatched child

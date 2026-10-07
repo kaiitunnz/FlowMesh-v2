@@ -22,6 +22,7 @@ from server.orchestration import (
     ScopeBudget,
     WorkItemStatus,
 )
+from server.orchestration.engine.snapshot import SnapshotCodec
 from server.orchestration.state import Activation, BoundaryEvent, LedgerSnapshot
 from server.orchestration.telemetry import (
     ActivationClassificationError,
@@ -686,13 +687,13 @@ def test_telemetry_adds_no_ledger_event_kind() -> None:
 
 def test_telemetry_never_triggers_a_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"n": 0}
-    original = OrchestrationEngine.to_snapshot
+    original = SnapshotCodec.to_snapshot
 
-    def _counting_to_snapshot(self: OrchestrationEngine) -> Any:
+    def _counting_to_snapshot(self: SnapshotCodec) -> Any:
         calls["n"] += 1
         return original(self)
 
-    monkeypatch.setattr(OrchestrationEngine, "to_snapshot", _counting_to_snapshot)
+    monkeypatch.setattr(SnapshotCodec, "to_snapshot", _counting_to_snapshot)
 
     tracer, _exporter, config = recording_tracer(TelemetryLevel.FULL)
     emitter = TelemetrySpanEmitter(tracer, config, _WORKFLOW_ID)

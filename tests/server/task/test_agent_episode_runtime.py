@@ -686,7 +686,9 @@ def test_a_suspended_episode_renews_store_access_under_its_dispatch() -> None:
 
 
 def _boundary_env(engine, writer, call: str):
-    return engine._boundary_events[(engine.work_item(writer).activation_id, call)]
+    return engine._boundaries.boundary_events[
+        (engine.work_item(writer).activation_id, call)
+    ]
 
 
 def test_audit_settle_racing_cancellation_manufactures_no_terminal() -> None:

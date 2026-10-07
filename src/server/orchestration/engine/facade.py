@@ -17,15 +17,13 @@ physical decision that never changes what the engine considers ready.
 import contextlib
 import functools
 import logging
-from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
-from enum import Enum, auto
 from typing import Any
 
 from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
 from shared.content import ContentReference
-from shared.harness import DeliveredOutcome, OutcomeKind
+from shared.harness import DeliveredOutcome
 from shared.inference import InputResolutionBinding
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
@@ -38,7 +36,6 @@ from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 from shared.tools.contract import MediatedOperationPermit
 from shared.utils import (
     new_activation_id,
-    new_attempt_id,
     new_authority_grant_id,
     new_idempotency_key,
     new_invocation_id,
@@ -70,12 +67,9 @@ from ...task.v2.representations.results import CardinalityKind, ResultDeclaratio
 from ...utils.time import now_iso
 from ..guardrails import ScopeBudget
 from ..outcomes import (
-    attenuate,
     check_admissible,
     is_compensable,
     is_replayable,
-    next_on_acknowledge,
-    next_on_reissue,
     next_on_terminal,
     next_on_uncertain,
 )
@@ -85,7 +79,6 @@ from ..state import (
     AcceptedInput,
     AcceptedInputMember,
     Activation,
-    Attempt,
     AttemptStatus,
     AuthorityDecision,
     AuthorityDecisionKind,
@@ -95,7 +88,6 @@ from ..state import (
     Continuation,
     DelegatedAuthorityGrant,
     DenialKind,
-    EffectReceipt,
     EmbodimentSelection,
     InputPreparation,
     InputResolution,
@@ -116,24 +108,25 @@ from ..state import (
     WorkflowInstance,
     WorkItem,
     WorkItemStatus,
-    slot_identity,
 )
 from ..telemetry import NULL_SPAN_EMITTER, TelemetrySpanEmitter
 from ..tool_dispatch import (
     MODEL_INTERFACE,
     AgentInputPlan,
-    FacadeCallMember,
-    FacadeCompletionMode,
     FacadeTurnGroup,
-    GrantSnapshot,
-    InputMemberPlan,
-    InputPortPlan,
     ToolInvocationEnvelope,
     ToolOutcomeStatus,
 )
 from .advance import Advance, RegionError, dependency_failed
-from .failures import FailureLedger
+from .attempts import AttemptLifecycle, _LossResolution
+from .authority import AuthorityLedger
+from .boundaries import BoundaryLedger
+from .embodiments import EmbodimentLedger
+from .failures import _DECLARED_FAILURE_REASON, FailureLedger
+from .inputs import AcceptedInputLedger
 from .ledger import OrchestrationLedger
+from .publications import PublicationLedger
+from .snapshot import SnapshotCodec
 from .topology import _CONTROL_KINDS, PlanTopology
 
 _CHILD_INIT_OPENERS = frozenset({OperatorKind.SPAWN, OperatorKind.AGENT})
@@ -146,15 +139,10 @@ _DEDUP_CAPABLE = frozenset(
         BoundaryEventKind.EXTERNAL_EFFECT,
     }
 )
-# Boundary kinds an off-lane handler settles while their episode is suspended.
-_MEDIATED_BOUNDARY_KINDS = frozenset(
-    {BoundaryEventKind.INVOCATION, BoundaryEventKind.EXTERNAL_EFFECT}
-)
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
 _AMBIGUITY_TERMINAL_REASON = "ambiguity-terminal effect"
-_DECLARED_FAILURE_REASON = "declared-failure obligation"
 
 
 def _ambiguity_terminal_reason(error: str | None) -> str:
@@ -163,22 +151,6 @@ def _ambiguity_terminal_reason(error: str | None) -> str:
     if error is None:
         return _AMBIGUITY_TERMINAL_REASON
     return f"{error} ({_AMBIGUITY_TERMINAL_REASON})"
-
-
-_OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
-
-
-class _LossResolution(Enum):
-    """How the loss of a work item's worker resolves it."""
-
-    NOTHING = auto()
-    PREPARE_AGAIN = auto()
-    BOUNDARY_FAILS = auto()
-    RUN_AGAIN = auto()
-    FAILS = auto()
-
-
-_RERUN_ON_LOSS = frozenset({_LossResolution.PREPARE_AGAIN, _LossResolution.RUN_AGAIN})
 
 
 def _control_key(operator_id: str) -> str:
@@ -254,22 +226,6 @@ def _ds_drive(
     return decorator
 
 
-def _rekeyed_publications(
-    slots: Iterable[ResultSlot], publications: Iterable[ResultPublication]
-) -> dict[str, ResultPublication]:
-    """Index publications by slot identity, re-keying any stored under the unscoped
-    key format."""
-    current = {slot.legacy_slot_key: slot.slot_key for slot in slots}
-    identities = set(current.values())
-    indexed: dict[str, ResultPublication] = {}
-    for publication in publications:
-        key = publication.slot_key
-        if key not in identities and (rekeyed := current.get(key)) is not None:
-            publication = publication.model_copy(update={"slot_key": rekeyed})
-        indexed[publication.slot_key] = publication
-    return indexed
-
-
 class OrchestrationEngine:
     """Drives one workflow instance's semantic readiness over its durable ledger."""
 
@@ -294,153 +250,26 @@ class OrchestrationEngine:
         self._initial = Advance()
         self._control = control if control is not None else NULL_CONTROL_TRACER
 
-        self._ledger.scopes = {s.scope_id: s for s in snapshot.scopes}
-        self._ledger.scopes.setdefault(
-            self._ledger.root_scope.scope_id, self._ledger.root_scope
+        self._publication = PublicationLedger(self._ledger, self._topology)
+        self._embodiments = EmbodimentLedger(self._ledger, self._topology)
+        self._inputs = AcceptedInputLedger(self._ledger, self._topology)
+        self._authority = AuthorityLedger(self._ledger, self._topology)
+        self._boundaries = BoundaryLedger(self._ledger, self._authority)
+        self._attempt_lifecycle = AttemptLifecycle(
+            self._ledger, self._embodiments, self._inputs, self._boundaries
         )
-        self._ledger.activations = {}
-        # Per-scope and dynamic activation counts that number and budget each child.
-        self._ledger.scope_population = Counter()
-        self._ledger.scope_children = Counter()
-        self._ledger.dynamic_activations = 0
-        for activation in snapshot.activations:
-            self._ledger.add_activation(activation)
-        self._ledger.work_items = {w.work_item_id: w for w in snapshot.work_items}
-        self._ledger.continuations = {c.work_item_id: c for c in snapshot.continuations}
-        self._ledger.records = list(snapshot.records)
-        self._accepted_inputs = list(snapshot.accepted_inputs)
-        self._accepted_by_activation: dict[str, list[AcceptedInput]] = {}
-        for accepted in self._accepted_inputs:
-            self._accepted_by_activation.setdefault(accepted.activation_id, []).append(
-                accepted
-            )
-        self._ledger.region_aggregates = list(snapshot.region_aggregates)
-        self._ledger.aggregate_by_join = {}
-        # A stored ledger may hold a nested level's aggregate after its root level's;
-        # the root level's is the one delivered downstream.
-        for aggregate in self._ledger.region_aggregates:
-            join_op = aggregate.join_operator_id
-            if join_op not in self._ledger.aggregate_by_join or not any(
-                (act := self._ledger.activations.get(member.child_activation_id))
-                is not None
-                and not self._ledger.root_level(act.scope_id)
-                for member in aggregate.members
-            ):
-                self._ledger.aggregate_by_join[join_op] = aggregate
-        self._ledger.invocations = {i.invocation_id: i for i in snapshot.invocations}
-        self._ledger.attempts = {a.attempt_id: a for a in snapshot.attempts}
-        self._embodiment_selections = {
-            sel.work_item_id: sel for sel in snapshot.embodiment_selections
-        }
-        self._input_resolutions = {
-            res.work_item_id: res for res in snapshot.input_resolutions
-        }
-        self._input_preparations = {
-            prep.work_item_id: prep for prep in snapshot.input_preparations
-        }
-        self._receipts = {r.invocation_id: r for r in snapshot.effect_receipts}
-        self._decisions = list(snapshot.authority_decisions)
-        self._grants = {g.grant_id: g for g in snapshot.delegated_grants}
-        self._ledger.capabilities = {
-            (c.scope_id, c.axis): c for c in snapshot.progress_capabilities
-        }
-        self._slots = {s.slot_key: s for s in snapshot.result_slots}
-        self._publications = _rekeyed_publications(
-            self._slots.values(), snapshot.result_publications
+        self._codec = SnapshotCodec(
+            self._ledger,
+            self._topology,
+            self._failures,
+            self._publication,
+            self._embodiments,
+            self._inputs,
+            self._authority,
+            self._boundaries,
+            self._attempt_lifecycle,
         )
-        self._ledger.trace = list(snapshot.trace)
-
-        # (agent activation, region operator) -> the synthetic opener activation that
-        # owns that region's child-init scope, rebuilt from the persisted openers.
-        self._ledger.region_openers = {
-            (a.parent_activation_id, a.operator_id): a.activation_id
-            for a in self._ledger.activations.values()
-            if a.kind == "region" and a.parent_activation_id
-        }
-        # Mediated boundaries, keyed by (activation, adapter-local call correlation):
-        # the correlation rule that maps a re-driven facade call to its recorded key.
-        self._boundary_events = {
-            (b.activation, b.call_correlation): b
-            for b in snapshot.boundary_events
-            if b.activation and b.call_correlation
-        }
-        self._ledger.wi_by_task = {
-            w.legacy_task_id: w.work_item_id
-            for w in self._ledger.work_items.values()
-            if w.legacy_task_id
-        }
-        # The operator index resolves a static leaf's forward-record successor; a
-        # dispatched child or iteration shares its body operator across instances, so it
-        # is addressed by task or activation, never by operator.
-        self._ledger.wi_by_operator = {
-            w.operator_id: w.work_item_id
-            for w in self._ledger.work_items.values()
-            if w.legacy_task_id
-            and not self._ledger.is_dynamic_activation(w.activation_id)
-        }
-        self._ledger.wi_by_activation = {
-            w.activation_id: w.work_item_id for w in self._ledger.work_items.values()
-        }
-        self._slots_by_operator: dict[str, list[str]] = {}
-        self._slots_by_output: dict[str, list[str]] = {}
-        for slot in self._slots.values():
-            self._slots_by_operator.setdefault(slot.source_operator_id, []).append(
-                slot.slot_key
-            )
-            self._slots_by_output.setdefault(slot.output_id, []).append(slot.slot_key)
-
-        # Scope ownership is keyed on the opener activation, so one operator can own a
-        # scope per recursion level; an operator handle resolves through the index.
-        self._ledger.scope_by_activation = {
-            s.owner_activation_id: s.scope_id
-            for s in self._ledger.scopes.values()
-            if s.owner_activation_id
-        }
-        self._ledger.owner_acts_by_operator = {}
-        for s in self._ledger.scopes.values():
-            if s.owner_operator_id and s.owner_activation_id:
-                self._ledger.owner_acts_by_operator.setdefault(
-                    s.owner_operator_id, []
-                ).append(s.owner_activation_id)
-        self._ledger.loop_time = {}
-        for scope in self._ledger.scopes.values():
-            owner = scope.owner_operator_id
-            if owner and self._topology.kind(owner) is OperatorKind.LOOP_CONTEXT:
-                self._ledger.loop_time[scope.scope_id] = max(
-                    (
-                        a.loop_time
-                        for a in self._ledger.activations.values()
-                        if a.scope_id == scope.scope_id
-                    ),
-                    default=0,
-                )
-        # Released scopes are authoritative scope-level state, restored directly rather
-        # than re-derived from records: a recursive region's levels share one join/loop
-        # operator, so a record could not attribute a release to the right level.
-        self._ledger.released_scopes = set(snapshot.released_scopes)
-        # Control operators settled as a declared failure; a late record from another
-        # input never fires one.
-        self._failures.failed_regions = set(snapshot.failed_regions)
-        # Child-init scopes a failed agent opened and that had not released: each
-        # one's join never releases.
-        self._failures.failed_scopes = set(snapshot.failed_scopes)
-        # Why each task settled as a declared failure: its own reason, or the failure
-        # it depends on. A ledger stored without them names each failed work item's own.
-        self._failures.failure_reasons = dict(snapshot.failure_reasons)
-        for wi in self._ledger.work_items.values():
-            if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
-                self._failures.failure_reasons.setdefault(
-                    wi.legacy_task_id, wi.failure_reason or _DECLARED_FAILURE_REASON
-                )
-        # A spawn-site denial names no work item; an agent's denied boundary names one
-        # and never refuses a later spawn.
-        self._denied_spawns = {
-            d.operator_id
-            for d in self._decisions
-            if d.kind is AuthorityDecisionKind.DENIED
-            and d.operator_id
-            and d.work_item_id is None
-        }
+        self._codec.restore(snapshot)
 
         # Binds the emitter to this engine's own live collections (mutated in place,
         # never reassigned) and re-derives every already-settled entity from them --
@@ -636,60 +465,11 @@ class OrchestrationEngine:
     @_ds_drive(ControlPlaneWindow.QUEUE)
     def on_dispatched(self, task_id: str, worker_id: str | None) -> None:
         """Record a physical attempt and issue or reissue the work item's invocation."""
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
-            return
-        if wi.invocation_id is None:
-            invocation = Invocation(
-                invocation_id=new_invocation_id(),
-                work_item_id=wi.work_item_id,
-                state=InvocationState.ISSUED,
-                replayable=is_replayable(wi.effect_class, wi.replay_contract),
-                compensable=is_compensable(wi.effect_class, wi.replay_contract),
-            )
-            wi.invocation_id = invocation.invocation_id
-            self._ledger.invocations[invocation.invocation_id] = invocation
-        else:
-            invocation = self._ledger.invocations[wi.invocation_id]
-            invocation.state = next_on_reissue(invocation.state)
-        attempt = Attempt(
-            attempt_id=new_attempt_id(),
-            work_item_id=wi.work_item_id,
-            invocation_id=wi.invocation_id,
-            attempt_no=len(wi.attempt_ids) + 1,
-            worker_id=worker_id,
-            started_at=now_iso(),
-            alternative_id=(
-                selection.alternative_id
-                if (selection := self._embodiment_selections.get(wi.work_item_id))
-                else None
-            ),
-        )
-        wi.attempt_ids.append(attempt.attempt_id)
-        self._ledger.attempts[attempt.attempt_id] = attempt
-        wi.status = WorkItemStatus.DISPATCHED
-        self._ledger.emit(
-            "attempt_issued",
-            work_item_id=wi.work_item_id,
-            attempt_id=attempt.attempt_id,
-            invocation_id=wi.invocation_id or "",
-            operator_id=wi.operator_id,
-        )
+        self._attempt_lifecycle.on_dispatched(task_id, worker_id)
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def on_started(self, task_id: str) -> None:
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.invocation_id is None:
-            return
-        if attempt := self._ledger.latest_attempt(wi):
-            attempt.status = AttemptStatus.RUNNING
-        invocation = self._ledger.invocations[wi.invocation_id]
-        invocation.state = next_on_acknowledge(invocation.state)
-        self._ledger.emit(
-            "invocation_acknowledged",
-            work_item_id=wi.work_item_id,
-            invocation_id=wi.invocation_id,
-        )
+        self._attempt_lifecycle.on_started(task_id)
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def on_succeeded(
@@ -721,7 +501,7 @@ class OrchestrationEngine:
                 content=content,
             )
         )
-        self._settle_attempt_terminal(wi, outcome)
+        self._attempt_lifecycle.settle_attempt_terminal(wi, outcome)
         activation = self._ledger.activations[wi.activation_id]
         # An agent's terminal completion settles every declared child region, so a
         # spawn_agent scope closes even without an explicit SpawnSeal.
@@ -738,23 +518,10 @@ class OrchestrationEngine:
         self._ledger.emitter.emit_work_item(wi)
         self._ledger.emitter.emit_activation(wi.activation_id)
         self._ledger.private_state.release(wi.activation_id)
-        self._publish(wi.operator_id, outcome, value_ref)
+        self._publication.publish(wi.operator_id, outcome, value_ref)
         return self._deliver_record(wi.operator_id, wi.activation_id, value_ref).extend(
             released
         )
-
-    def _settle_attempt_terminal(
-        self, wi: WorkItem, outcome: PublicationOutcome
-    ) -> None:
-        if attempt := self._ledger.latest_attempt(wi):
-            attempt.status = AttemptStatus.SUCCEEDED
-            attempt.finished_at = now_iso()
-            self._ledger.emitter.emit_attempt(attempt)
-        if wi.invocation_id is not None:
-            invocation = self._ledger.invocations[wi.invocation_id]
-            invocation.state = next_on_terminal(invocation.state)
-            self._ledger.emitter.emit_boundary(invocation)
-            self._record_receipt(wi, outcome)
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def on_failed(self, task_id: str, error: str, *, retryable: bool) -> Advance:
@@ -762,7 +529,7 @@ class OrchestrationEngine:
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
-        self._fail_open_attempt(wi, error)
+        self._attempt_lifecycle.fail_open_attempt(wi, error)
         if retryable:
             wi.status = WorkItemStatus.READY
             self._ledger.emit(
@@ -773,17 +540,6 @@ class OrchestrationEngine:
             return Advance(retry=[wi.legacy_task_id])
         wi.failure_reason = error
         return self._settle_failed_wi(wi)
-
-    def _fail_open_attempt(self, wi: WorkItem, error: str) -> None:
-        """Close the work item's attempt as failed while it is still in flight; one
-        already closed keeps its outcome."""
-        attempt = self._ledger.latest_attempt(wi)
-        if attempt is None or attempt.status not in _OPEN_ATTEMPT_STATUSES:
-            return
-        attempt.status = AttemptStatus.FAILED
-        attempt.finished_at = now_iso()
-        attempt.error = error
-        self._ledger.emitter.emit_attempt(attempt)
 
     def _settle_failed_wi(self, wi: WorkItem) -> Advance:
         """Settle a work item as a declared failure: a child drains its scope, anything
@@ -813,18 +569,7 @@ class OrchestrationEngine:
 
         The attempt is not charged: the work item runs again under its invocation.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.status is not WorkItemStatus.DISPATCHED:
-            return False
-        if attempt := self._ledger.latest_attempt(wi):
-            attempt.status = AttemptStatus.RETURNED
-            attempt.finished_at = now_iso()
-            self._ledger.emitter.emit_attempt(attempt)
-        wi.status = WorkItemStatus.READY
-        self._ledger.emit(
-            "attempt_returned", work_item_id=wi.work_item_id, operator_id=wi.operator_id
-        )
-        return True
+        return self._attempt_lifecycle.on_returned(task_id)
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def on_uncertain(self, task_id: str, error: str | None = None) -> Advance:
@@ -835,7 +580,7 @@ class OrchestrationEngine:
         it, and a work item that cannot run again fails with it beside the reason.
         """
         wi = self._ledger.work_item_for_task(task_id)
-        resolution = self._resolve_loss(wi)
+        resolution = self._attempt_lifecycle.resolve_loss(wi)
         if wi is None or resolution is _LossResolution.NOTHING:
             return Advance()
         if resolution is _LossResolution.PREPARE_AGAIN:
@@ -991,15 +736,18 @@ class OrchestrationEngine:
         advance = Advance()
         per_region: dict[str, int] = {}
         for member in group.members:
-            if (wi.activation_id, member.call_correlation) in self._boundary_events:
+            if (
+                wi.activation_id,
+                member.call_correlation,
+            ) in self._boundaries.boundary_events:
                 continue  # a re-driven group reuses its recorded members
-            event = self._facade_member_event(group.group_id, member)
+            event = self._boundaries.facade_member_event(group.group_id, member)
             if member.kind is BoundaryEventKind.SPAWN:
                 self._route_group_spawn(op, wi, event, per_region, advance)
             else:
                 self._route_group_invocation(op, wi, event)
-        members = self._group_members(wi.activation_id, group.group_id)
-        if self._group_awaits_unresolved(members):
+        members = self._boundaries.group_members(wi.activation_id, group.group_id)
+        if self._boundaries.group_awaits_unresolved(members):
             self._suspend_work_item(wi, "episode_group_suspended")
             return advance
         # No await-outcome member is pending: the group settled at admission. Stage its
@@ -1008,24 +756,6 @@ class OrchestrationEngine:
         wi.pending_outcome_group = group.group_id
         wi.pending_outcome_call = None
         return advance
-
-    def _facade_member_event(
-        self, group_id: str, member: FacadeCallMember
-    ) -> BoundaryEvent:
-        is_spawn = member.kind is BoundaryEventKind.SPAWN
-        return BoundaryEvent(
-            kind=member.kind,
-            interface=None if is_spawn else member.interface_or_region,
-            child_region_ref=member.interface_or_region if is_spawn else None,
-            call_correlation=member.call_correlation,
-            request_payload=member.request_payload,
-            request_digest=member.request_digest,
-            injection_target=member.harness_call_id,
-            injection_tool=member.tool_name,
-            group_id=group_id,
-            group_ordinal=member.ordinal,
-            completion_mode=member.completion_mode.value,
-        )
 
     def _route_group_invocation(
         self, op: LogicalOperator | None, wi: WorkItem, event: BoundaryEvent
@@ -1076,7 +806,7 @@ class OrchestrationEngine:
             # A budget overflow is a typed quota outcome, never a denial and never a
             # sibling-poisoning failure: the member acks quota and creates no child.
             self._record_boundary(wi, event)
-            self._set_member_outcome(
+            self._boundaries.set_member_outcome(
                 wi,
                 event.call_correlation,
                 f"{ToolOutcomeStatus.QUOTA.value}: the {region!r} spawn budget was "
@@ -1093,7 +823,7 @@ class OrchestrationEngine:
             child_advance = self.materialize_child(opener, value_ref=child_input)
         except RegionError as exc:
             self._record_boundary(wi, event)
-            self._set_member_outcome(
+            self._boundaries.set_member_outcome(
                 wi,
                 event.call_correlation,
                 f"{ToolOutcomeStatus.UNAVAILABLE.value}: the {region!r} region cannot "
@@ -1102,24 +832,12 @@ class OrchestrationEngine:
             return
         advance.extend(child_advance)
         self._record_boundary(wi, event)
-        self._set_member_outcome(
+        self._boundaries.set_member_outcome(
             wi,
             event.call_correlation,
             f"{ToolOutcomeStatus.SUCCESS.value}: spawned a {region!r} reviewer child",
         )
         per_region[region] = per_region.get(region, 0) + 1
-
-    def _set_member_outcome(
-        self, wi: WorkItem, call_correlation: str | None, value: str
-    ) -> None:
-        """Settle a group member's outcome in place without re-readying the lane."""
-        if call_correlation is None:
-            return
-        corr = (wi.activation_id, call_correlation)
-        if (env := self._boundary_events.get(corr)) is not None:
-            self._boundary_events[corr] = env.model_copy(
-                update={"outcome_value": value}
-            )
 
     def _region_child_count(self, agent_activation: str, region: str) -> int:
         """The children already materialized under an agent's named spawn region."""
@@ -1135,89 +853,20 @@ class OrchestrationEngine:
             return 0
         return self._ledger.scope_children[scope_id]
 
-    def _group_members(self, activation_id: str, group_id: str) -> list[BoundaryEvent]:
-        members = [
-            env
-            for (act, _), env in self._boundary_events.items()
-            if act == activation_id and env.group_id == group_id
-        ]
-        members.sort(key=lambda e: e.group_ordinal or 0)
-        return members
-
-    @staticmethod
-    def _boundary_resolved(env: BoundaryEvent) -> bool:
-        """Whether a boundary is settled: an inline value, a reference, or a denial."""
-        return (
-            env.outcome_value is not None
-            or env.outcome_ref is not None
-            or env.denial is not None
-        )
-
     def retries_on_loss(self, task_id: str) -> bool:
         """Whether the loss of the task's worker runs its work item again, as
         ``on_uncertain`` resolves it, rather than failing it."""
-        return (
-            self._resolve_loss(self._ledger.work_item_for_task(task_id))
-            in _RERUN_ON_LOSS
-        )
-
-    def _resolve_loss(self, wi: WorkItem | None) -> _LossResolution:
-        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
-            return _LossResolution.NOTHING
-        if wi.invocation_id is None:
-            if wi.work_item_id in self._input_preparations:
-                return _LossResolution.PREPARE_AGAIN
-            return _LossResolution.NOTHING
-        if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
-            return _LossResolution.BOUNDARY_FAILS
-        if self._ledger.invocations[wi.invocation_id].replayable:
-            return _LossResolution.RUN_AGAIN
-        return _LossResolution.FAILS
+        return self._attempt_lifecycle.retries_on_loss(task_id)
 
     def awaits_worker_held_boundary(self, task_id: str) -> bool:
         """Whether the task is suspended on an unsettled boundary whose raw request
         only its capturing worker holds."""
-        wi = self._ledger.work_item_for_task(task_id)
-        return (
-            wi is not None
-            and wi.status is WorkItemStatus.BLOCKED
-            and self._has_pending_local_boundary(wi)
-        )
+        return self._boundaries.awaits_worker_held_boundary(task_id)
 
     def suspending_worker(self, task_id: str) -> str | None:
         """The worker whose step suspended the task on a mediated boundary that awaits
         its outcome, or None when the task is not suspended on one."""
-        wi = self._ledger.work_item_for_task(task_id)
-        if (
-            wi is None
-            or wi.status is not WorkItemStatus.BLOCKED
-            or not self._awaits_mediated_outcome(wi)
-            or (attempt := self._ledger.latest_attempt(wi)) is None
-        ):
-            return None
-        return attempt.worker_id
-
-    def _has_pending_local_boundary(self, wi: WorkItem) -> bool:
-        """Whether the work item awaits an unsettled worker-originated boundary.
-
-        A recorded request digest marks a boundary whose raw request lives only on the
-        capturing worker; if that worker is lost the boundary cannot be recovered here.
-        """
-        return any(
-            act == wi.activation_id
-            and env.request_digest is not None
-            and not self._boundary_resolved(env)
-            for (act, _), env in self._boundary_events.items()
-        )
-
-    @classmethod
-    def _group_awaits_unresolved(cls, members: Sequence[BoundaryEvent]) -> bool:
-        """Whether the group holds an await-outcome member with no settled outcome."""
-        return any(
-            e.completion_mode == FacadeCompletionMode.AWAIT_OUTCOME.value
-            and not cls._boundary_resolved(e)
-            for e in members
-        )
+        return self._attempt_lifecycle.suspending_worker(task_id)
 
     def has_open_facade_group(self, task_id: str) -> bool:
         """Whether a recorded facade group for this episode still holds the resume gate.
@@ -1225,33 +874,13 @@ class OrchestrationEngine:
         A group is open only while an await-outcome member is unsettled; a spawn-only
         group closes at admission, so the fence lets the next turn issue another group.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None:
-            return False
-        return self._group_awaits_unresolved(
-            [
-                env
-                for (act, _), env in self._boundary_events.items()
-                if act == wi.activation_id and env.group_id is not None
-            ]
-        )
+        return self._boundaries.has_open_facade_group(task_id)
 
     def group_dispatch_envelopes(
         self, task_id: str, group_id: str
     ) -> list[ToolInvocationEnvelope]:
         """The dispatch envelopes for a group's still-unresolved invocation members."""
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None:
-            return []
-        out: list[ToolInvocationEnvelope] = []
-        for env in self._group_members(wi.activation_id, group_id):
-            if env.kind is not BoundaryEventKind.INVOCATION:
-                continue
-            if self._boundary_resolved(env):
-                continue
-            if (envelope := self._envelope_from(wi, env)) is not None:
-                out.append(envelope)
-        return out
+        return self._boundaries.group_dispatch_envelopes(task_id, group_id)
 
     def deliver_boundary_outcome(self, task_id: str, call_correlation: str) -> Advance:
         """Re-ready a boundary-suspended work item once its outcome is durable.
@@ -1266,7 +895,7 @@ class OrchestrationEngine:
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status is not WorkItemStatus.BLOCKED:
             return Advance()
-        if (wi.activation_id, call_correlation) not in self._boundary_events:
+        if (wi.activation_id, call_correlation) not in self._boundaries.boundary_events:
             return Advance()
         wi.status = WorkItemStatus.READY
         self._ledger.emit(
@@ -1294,22 +923,7 @@ class OrchestrationEngine:
         A continue-boundary re-dispatches without suspending, so its finished attempt is
         marked succeeded here rather than left perpetually running.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is not None and (attempt := self._ledger.latest_attempt(wi)) is not None:
-            if attempt.status in (AttemptStatus.ISSUED, AttemptStatus.RUNNING):
-                attempt.status = AttemptStatus.SUCCEEDED
-                attempt.finished_at = now_iso()
-                self._ledger.emitter.emit_attempt(attempt)
-
-    def _awaits_mediated_outcome(self, wi: WorkItem) -> bool:
-        """Whether the work item's activation awaits a mediated boundary with no
-        outcome."""
-        return any(
-            act == wi.activation_id
-            and env.kind in _MEDIATED_BOUNDARY_KINDS
-            and not self._boundary_resolved(env)
-            for (act, _), env in self._boundary_events.items()
-        )
+        self._attempt_lifecycle.close_latest_attempt(task_id)
 
     def pending_tool_dispatches(self) -> list[ToolInvocationEnvelope]:
         """Mediated boundaries suspended with no durable outcome, for a restart.
@@ -1320,31 +934,13 @@ class OrchestrationEngine:
         it back to its handler by (kind, interface) — a search to the broker, a model to
         the gateway — never misrouting on the recovered kind.
         """
-        pending: list[ToolInvocationEnvelope] = []
-        for (activation, corr), env in self._boundary_events.items():
-            if env.kind not in _MEDIATED_BOUNDARY_KINDS:
-                continue
-            if self._boundary_resolved(env):
-                continue
-            wi = self._ledger.wi_by_activation.get(activation)
-            work_item = self._ledger.work_items.get(wi) if wi else None
-            if work_item is None or work_item.status is not WorkItemStatus.BLOCKED:
-                continue
-            if (envelope := self._envelope_from(work_item, env)) is not None:
-                pending.append(envelope)
-        return pending
+        return self._boundaries.pending_tool_dispatches()
 
     def tool_dispatch_envelope(
         self, task_id: str, call_correlation: str
     ) -> ToolInvocationEnvelope | None:
         """The dispatch envelope for a recorded mediated boundary, or None if absent."""
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None:
-            return None
-        env = self._boundary_events.get((wi.activation_id, call_correlation))
-        if env is None:
-            return None
-        return self._envelope_from(wi, env)
+        return self._boundaries.tool_dispatch_envelope(task_id, call_correlation)
 
     def pending_tool_dispatch(
         self, task_id: str, call_correlation: str
@@ -1356,41 +952,7 @@ class OrchestrationEngine:
         dispatch a restart would; a settled, terminalized, or cancelled boundary yields
         nothing.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.status is not WorkItemStatus.BLOCKED:
-            return None
-        env = self._boundary_events.get((wi.activation_id, call_correlation))
-        if env is None or self._boundary_resolved(env):
-            return None
-        return self._envelope_from(wi, env)
-
-    def _envelope_from(
-        self, wi: WorkItem, env: BoundaryEvent
-    ) -> ToolInvocationEnvelope | None:
-        if env.invocation_id is None or env.call_correlation is None:
-            return None
-        return ToolInvocationEnvelope(
-            kind=env.kind,
-            interface=env.interface or MODEL_INTERFACE,
-            invocation_id=env.invocation_id,
-            task_id=wi.legacy_task_id,
-            activation_id=wi.activation_id,
-            call_correlation=env.call_correlation,
-            idempotency_key=env.idempotency_key,
-            request_payload=env.request_payload,
-            request_digest=env.request_digest,
-            grant_snapshot=self._grant_snapshot_for(wi),
-        )
-
-    def _grant_snapshot_for(self, wi: WorkItem) -> GrantSnapshot:
-        grant_id = self._ledger.workflow_instance.root_grant_id
-        if (act := self._ledger.activations.get(wi.activation_id)) is not None:
-            if (scope := self._ledger.scopes.get(act.scope_id)) is not None:
-                grant_id = scope.grant_id or grant_id
-        return GrantSnapshot(
-            grant_id=grant_id,
-            policy_envelope=self._ledger.workflow_instance.policy_envelope,
-        )
+        return self._boundaries.pending_tool_dispatch(task_id, call_correlation)
 
     def mint_operation_permit(
         self,
@@ -1421,13 +983,13 @@ class OrchestrationEngine:
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return None
-        env = self._boundary_events.get((wi.activation_id, call_correlation))
+        env = self._boundaries.boundary_events.get((wi.activation_id, call_correlation))
         if env is None or env.invocation_id is None or env.request_digest is None:
             return None
         interface = env.interface or ""
         epoch = 0
         if (act := self._ledger.activations.get(wi.activation_id)) is not None:
-            epoch = self._grant_for_scope(act.scope_id).epoch
+            epoch = self._authority.grant_for_scope(act.scope_id).epoch
         return MediatedOperationPermit(
             permit_id=new_mediated_permit_id(),
             agent_task_id=wi.legacy_task_id,
@@ -1479,7 +1041,7 @@ class OrchestrationEngine:
         op = self._topology.operators.get(act.operator_id) if act is not None else None
         if wi is None or act is None or not isinstance(op, AgentOperator):
             return None
-        invoke, _ = self._agent_faces(op, wi)
+        invoke, _ = self._authority.agent_faces(op, wi)
         if MODEL_INTERFACE not in invoke:
             return None
         return MediatedOperationPermit(
@@ -1493,7 +1055,7 @@ class OrchestrationEngine:
             request_digest=request_digest,
             target_id=target_id,
             target_generation=target_generation,
-            policy_epoch=self._grant_for_scope(act.scope_id).epoch,
+            policy_epoch=self._authority.grant_for_scope(act.scope_id).epoch,
             deadline_epoch=deadline_epoch,
             max_results=1,
             timeout_sec=timeout_sec,
@@ -1514,11 +1076,7 @@ class OrchestrationEngine:
         BLOCKED work item, not a task record's status, since cancellation can leave the
         record CANCELLING while the work item is already CANCELLED.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.status is not WorkItemStatus.BLOCKED:
-            return False
-        env = self._boundary_events.get((wi.activation_id, call_correlation))
-        return env is not None and not self._boundary_resolved(env)
+        return self._boundaries.boundary_settleable(task_id, call_correlation)
 
     def settle_boundary_outcome(
         self,
@@ -1538,9 +1096,9 @@ class OrchestrationEngine:
         if wi is None:
             return Advance()
         corr = (wi.activation_id, call_correlation)
-        env = self._boundary_events.get(corr)
+        env = self._boundaries.boundary_events.get(corr)
         resolved = wi.status is not WorkItemStatus.BLOCKED or (
-            env is not None and self._boundary_resolved(env)
+            env is not None and self._boundaries.boundary_resolved(env)
         )
         if resolved:
             # A duplicate/late settle of an already-resolved member, or any settle for a
@@ -1550,12 +1108,12 @@ class OrchestrationEngine:
             return Advance()
         if env is not None and (value is not None or ref is not None):
             env = env.model_copy(update={"outcome_value": value, "outcome_ref": ref})
-            self._boundary_events[corr] = env
+            self._boundaries.store_event(corr, env)
         if env is not None and env.group_id is not None:
             # A group member settled: hold the resume until every await-outcome member
             # is resolved, then re-ready exactly once with the full ordered vector.
-            members = self._group_members(wi.activation_id, env.group_id)
-            if self._group_awaits_unresolved(members):
+            members = self._boundaries.group_members(wi.activation_id, env.group_id)
+            if self._boundaries.group_awaits_unresolved(members):
                 return Advance()
             wi.pending_outcome_group = env.group_id
             wi.pending_outcome_call = None
@@ -1576,7 +1134,7 @@ class OrchestrationEngine:
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return None
-        env = self._boundary_events.get((wi.activation_id, call_correlation))
+        env = self._boundaries.boundary_events.get((wi.activation_id, call_correlation))
         if env is None or env.invocation_id is None:
             return None
         invocation = self._ledger.invocations.get(env.invocation_id)
@@ -1588,14 +1146,7 @@ class OrchestrationEngine:
     def boundary_invocation_completed(self, invocation_id: str) -> bool | None:
         """Whether a terminal boundary invocation completed with an outcome; None while
         it is unknown or not terminal."""
-        invocation = self._ledger.invocations.get(invocation_id)
-        if invocation is None or invocation.state not in TERMINAL_INVOCATION_STATES:
-            return None
-        return any(
-            env.invocation_id == invocation_id
-            and (env.outcome_value is not None or env.outcome_ref is not None)
-            for env in self._boundary_events.values()
-        )
+        return self._boundaries.boundary_invocation_completed(invocation_id)
 
     def terminalize_unsettled_invocations(
         self, task_ids: Iterable[str] | None = None
@@ -1617,7 +1168,10 @@ class OrchestrationEngine:
             }
         )
         ids: list[str] = []
-        for activation, invocation_id in self._unsettled_invocation_boundaries():
+        for (
+            activation,
+            invocation_id,
+        ) in self._boundaries.unsettled_invocation_boundaries():
             if activations is not None and activation not in activations:
                 continue
             invocation = self._ledger.invocations.get(invocation_id)
@@ -1635,22 +1189,7 @@ class OrchestrationEngine:
         Such a task's worker released the lane, so it holds no dispatch and returns no
         terminal; a task mid-step is not among them.
         """
-        tasks: list[str] = []
-        for activation, _ in self._unsettled_invocation_boundaries():
-            wi_id = self._ledger.wi_by_activation.get(activation)
-            if (wi := self._ledger.work_items.get(wi_id) if wi_id else None) is None:
-                continue
-            if wi.legacy_task_id not in tasks:
-                tasks.append(wi.legacy_task_id)
-        return tasks
-
-    def _unsettled_invocation_boundaries(self) -> list[tuple[str, str]]:
-        """Each unsettled mediated-boundary invocation id and its owning activation."""
-        return [
-            (activation, env.invocation_id)
-            for (activation, _), env in self._boundary_events.items()
-            if env.invocation_id is not None and not self._boundary_resolved(env)
-        ]
+        return self._boundaries.suspended_boundary_tasks()
 
     def episode_context(
         self, task_id: str
@@ -1661,47 +1200,16 @@ class OrchestrationEngine:
         item's continuation, and the one pending outcome is reconstructed from its
         settled boundary envelope, so a re-dispatch after a restart carries it again.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None:
-            return None, ()
-        outcomes: tuple[DeliveredOutcome, ...] = ()
-        if wi.pending_outcome_group is not None:
-            members = self._group_members(wi.activation_id, wi.pending_outcome_group)
-            outcomes = tuple(self._delivered_outcome(env) for env in members)
-        elif wi.pending_outcome_call is not None:
-            env = self._boundary_events.get((wi.activation_id, wi.pending_outcome_call))
-            if env is not None:
-                outcomes = (self._delivered_outcome(env),)
-        return wi.continuation_ref, outcomes
-
-    @staticmethod
-    def _delivered_outcome(env: BoundaryEvent) -> DeliveredOutcome:
-        corr = env.call_correlation or ""
-        if env.denial is not None:
-            return DeliveredOutcome(
-                call_correlation=corr,
-                idempotency_key=env.idempotency_key,
-                kind=OutcomeKind.DENIED,
-                denial=env.denial,
-                injection_target=env.injection_target,
-                injection_tool=env.injection_tool,
-                injection_arguments=env.request_payload,
-            )
-        return DeliveredOutcome(
-            call_correlation=corr,
-            idempotency_key=env.idempotency_key,
-            kind=OutcomeKind.RESULT,
-            value=env.outcome_value,
-            outcome_ref=env.outcome_ref,
-            injection_target=env.injection_target,
-            injection_tool=env.injection_tool,
-        )
+        return self._boundaries.episode_context(task_id)
 
     def _is_boundary_redrive(self, wi: WorkItem, event: BoundaryEvent) -> bool:
         """Whether a boundary reissues a recorded facade call under its stable id."""
         if event.call_correlation is None:
             return False
-        if (wi.activation_id, event.call_correlation) not in self._boundary_events:
+        if (
+            wi.activation_id,
+            event.call_correlation,
+        ) not in self._boundaries.boundary_events:
             return False
         self._ledger.emit(
             "boundary_redriven",
@@ -1728,7 +1236,7 @@ class OrchestrationEngine:
             BoundaryEventKind.INVOCATION,
             BoundaryEventKind.EXTERNAL_EFFECT,
         ):
-            invoke, _ = self._agent_faces(op, wi)
+            invoke, _ = self._authority.agent_faces(op, wi)
             if event.interface is not None and event.interface not in invoke:
                 return (
                     DenialKind.POLICY
@@ -1771,7 +1279,7 @@ class OrchestrationEngine:
         agent = self._ledger.activations[agent_activation]
         agent_op = self._topology.operators[agent.operator_id]
         assert isinstance(agent_op, AgentOperator)
-        _, agent_delegate = self._agent_face_tuples(agent_op, agent.scope_id)
+        _, agent_delegate = self._authority.agent_face_tuples(agent_op, agent.scope_id)
         opener_act = Activation(
             activation_id=new_activation_id(),
             instance_id=self._ledger.workflow_instance.instance_id,
@@ -1788,25 +1296,6 @@ class OrchestrationEngine:
             parent_delegate=agent_delegate,
         )
         return opener_act.activation_id
-
-    def _agent_faces(
-        self, op: AgentOperator, wi: WorkItem
-    ) -> tuple[frozenset[str], frozenset[str]]:
-        """The agent's effective invoke/delegate faces: its ceiling under policy."""
-        invoke, delegate = self._agent_face_tuples(
-            op, self._ledger.activations[wi.activation_id].scope_id
-        )
-        return frozenset(invoke), frozenset(delegate)
-
-    def _agent_face_tuples(
-        self, op: AgentOperator, agent_scope_id: str
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The agent's invoke/delegate faces: the scope grant under ceiling+policy."""
-        scope_grant = self._grant_for_scope(agent_scope_id)
-        envelope = self._policy_interfaces()
-        invoke = attenuate(scope_grant.invoke, op.authority.invoke, envelope)
-        delegate = attenuate(invoke, op.authority.delegate, envelope)
-        return invoke, delegate
 
     def _record_boundary(
         self,
@@ -1826,15 +1315,18 @@ class OrchestrationEngine:
         if event.call_correlation is None:
             return None
         corr = (wi.activation_id, event.call_correlation)
-        existing = self._boundary_events.get(corr)
+        existing = self._boundaries.boundary_events.get(corr)
         key = existing.idempotency_key if existing else new_idempotency_key()
-        self._boundary_events[corr] = event.model_copy(
-            update={
-                "activation": wi.activation_id,
-                "idempotency_key": key,
-                "invocation_id": invocation_id,
-                "denial": denial,
-            }
+        self._boundaries.store_event(
+            corr,
+            event.model_copy(
+                update={
+                    "activation": wi.activation_id,
+                    "idempotency_key": key,
+                    "invocation_id": invocation_id,
+                    "denial": denial,
+                }
+            ),
         )
         detail = {"idempotency_key": key or "", "call": event.call_correlation}
         if denial is not None:
@@ -1858,7 +1350,7 @@ class OrchestrationEngine:
         to receive it rather than silently proceeding.
         """
         subject = event.interface or event.child_region_ref or event.child_ref or ""
-        self._decisions.append(
+        self._authority.record_decision(
             AuthorityDecision(
                 grant_id=self._ledger.root_grant.grant_id,
                 interface=subject,
@@ -1989,7 +1481,7 @@ class OrchestrationEngine:
             work_item_id=wi.work_item_id, required_ports={entry_port}
         )
         if value_ref is not None and value_ref.kind == "inline":
-            self.record_accepted_input(
+            self._inputs.record_accepted_input(
                 AcceptedInput(
                     activation_id=activation.activation_id,
                     target_port=entry_port,
@@ -2020,39 +1512,19 @@ class OrchestrationEngine:
 
     def record_accepted_input(self, accepted: AcceptedInput) -> None:
         """Record a durable accepted input on an agent's target port (idempotent)."""
-        existing = self._accepted_by_activation.setdefault(accepted.activation_id, [])
-        if any(a.target_port == accepted.target_port for a in existing):
-            return
-        self._accepted_inputs.append(accepted)
-        existing.append(accepted)
+        self._inputs.record_accepted_input(accepted)
 
     def accepted_inputs_for(self, activation_id: str) -> tuple[AcceptedInput, ...]:
         """The recorded accepted inputs for one activation, ordered by ordinal."""
-        return tuple(
-            sorted(
-                self._accepted_by_activation.get(activation_id, ()),
-                key=lambda a: (a.ordinal, a.target_port),
-            )
-        )
+        return self._inputs.accepted_inputs_for(activation_id)
 
     def accepted_inputs_for_task(self, task_id: str) -> tuple[AcceptedInput, ...]:
         """The recorded accepted inputs for a task's activation, ordered by ordinal."""
-        wi = self._ledger.work_item_for_task(task_id)
-        return self.accepted_inputs_for(wi.activation_id) if wi else ()
+        return self._inputs.accepted_inputs_for_task(task_id)
 
     def blocked_input_agents(self) -> list[str]:
         """Task ids of agents blocked on an unsatisfied declared-input manifest."""
-        pending: list[str] = []
-        for wi in self._ledger.work_items.values():
-            if wi.status is not WorkItemStatus.BLOCKED or not wi.legacy_task_id:
-                continue
-            cont = self._ledger.continuations.get(wi.work_item_id)
-            if cont is None or not cont.required_ports:
-                continue
-            have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
-            if not cont.required_ports <= have:
-                pending.append(wi.legacy_task_id)
-        return pending
+        return self._inputs.blocked_input_agents()
 
     def reconsider_admission(self, task_id: str) -> Advance:
         """Re-attempt admission of a work item after its input manifest changed."""
@@ -2071,112 +1543,7 @@ class OrchestrationEngine:
         arrival. A fan-out child's inline entry port is minted at materialization and is
         not returned here.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None:
-            return None
-        cont = self._ledger.continuations.get(wi.work_item_id)
-        if cont is None or not cont.required_ports:
-            return None
-        have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
-        ports: list[InputPortPlan] = []
-        for port in sorted(cont.required_ports):
-            if port in have:
-                continue
-            resolved = self._port_members(wi.operator_id, port)
-            if resolved is None:
-                continue
-            provenance, members = resolved
-            ports.append(
-                InputPortPlan(target_port=port, provenance=provenance, members=members)
-            )
-        if not ports:
-            return None
-        return AgentInputPlan(activation_id=wi.activation_id, ports=tuple(ports))
-
-    def _port_members(
-        self, agent_op: str, port: str
-    ) -> tuple[str, tuple[InputMemberPlan, ...]] | None:
-        """The ordered members feeding a port, or None if a source is unsettled."""
-        sources = [
-            edge.from_op
-            for edge in self._topology.bundle.template.edges
-            if edge.to_op == agent_op and edge.to_port == port and not edge.feedback
-        ]
-        if not sources:
-            return None
-        provenance = "producer"
-        members: list[InputMemberPlan] = []
-        ordinal = 0
-        for source in sources:
-            if self._topology.kind(source) is OperatorKind.JOIN:
-                provenance = "join_aggregate"
-                aggregate = self._ledger.aggregate_by_join.get(source)
-                if aggregate is None:
-                    return (
-                        None  # the join has not released and frozen its aggregate yet
-                    )
-                for member in sorted(aggregate.members, key=lambda m: m.child_key):
-                    child_op = (
-                        self._ledger.activations[member.child_activation_id].operator_id
-                        if member.child_activation_id in self._ledger.activations
-                        else source
-                    )
-                    members.append(
-                        self._member_plan(
-                            child_op,
-                            member.child_activation_id,
-                            (
-                                int(member.child_key)
-                                if member.child_key.isdigit()
-                                else None
-                            ),
-                            member.outcome,
-                            member.value_ref,
-                            ordinal,
-                        )
-                    )
-                    ordinal += 1
-            else:
-                src_wi_id = self._ledger.wi_by_operator.get(source)
-                src_wi = self._ledger.work_items.get(src_wi_id) if src_wi_id else None
-                if src_wi is None or src_wi.outcome is None:
-                    return None
-                members.append(
-                    self._member_plan(
-                        source,
-                        src_wi.activation_id,
-                        None,
-                        src_wi.outcome,
-                        ValueRef(
-                            kind="legacy_task_result",
-                            legacy_task_id=src_wi.legacy_task_id,
-                        ),
-                        ordinal,
-                    )
-                )
-                ordinal += 1
-        return provenance, tuple(members)
-
-    @staticmethod
-    def _member_plan(
-        source_operator_id: str,
-        source_activation_id: str,
-        child_index: int | None,
-        outcome: PublicationOutcome,
-        value_ref: ValueRef | None,
-        ordinal: int,
-    ) -> InputMemberPlan:
-        return InputMemberPlan(
-            source_operator_id=source_operator_id,
-            source_activation_id=source_activation_id,
-            child_index=child_index,
-            outcome=outcome.value,
-            value_ref_kind=value_ref.kind if value_ref else "empty",
-            legacy_task_id=value_ref.legacy_task_id if value_ref else None,
-            collection_key=value_ref.collection_key if value_ref else None,
-            literal=value_ref.literal if value_ref else None,
-            ordinal=ordinal,
-        )
+        return self._inputs.agent_input_plan(task_id)
 
     def _create_child(
         self,
@@ -2195,7 +1562,7 @@ class OrchestrationEngine:
         )
         body_ref = operator_id or child_ref or spawn_op
         body_op = self._topology.operators.get(body_ref)
-        if spawn_op in self._denied_spawns:
+        if spawn_op in self._authority.denied_spawns:
             self._ledger.emit(
                 "child_rejected", operator_id=spawn_op, detail={"reason": "denied"}
             )
@@ -2401,7 +1768,7 @@ class OrchestrationEngine:
         cap = self._capability(activation.scope_id, ProgressAxis.CHILD_INIT)
         cap.outstanding = max(0, cap.outstanding - 1)
         spawn_op = self._ledger.scopes[activation.scope_id].owner_operator_id or ""
-        self._publish_keyed(spawn_op, activation, outcome, value_ref)
+        self._publication.publish_keyed(spawn_op, activation, outcome, value_ref)
         self._ledger.emit(
             "child_settled",
             operator_id=activation.operator_id,
@@ -2503,31 +1870,11 @@ class OrchestrationEngine:
         quota/rate/capacity/transport outcomes. It does not seal the child-init
         capability: grant denial and cardinality sealing stay distinct.
         """
-        self._denied_spawns.add(spawn_op)
-        scope_id = self._ledger.scope_id_for(spawn_op)
-        self._decisions.append(
-            AuthorityDecision(
-                grant_id=self._grant_for_scope(scope_id or "").grant_id,
-                interface=interface,
-                kind=AuthorityDecisionKind.DENIED,
-                operator_id=spawn_op,
-                scope_id=scope_id,
-                denial_kind=kind,
-                reason=f"interface {interface!r} outside spawn-site {kind.value} face",
-            )
-        )
-        self._ledger.emit(
-            "policy_denied" if kind is DenialKind.POLICY else "authority_denied",
-            operator_id=spawn_op,
-        )
+        self._authority.deny_spawn(spawn_op, interface, kind=kind)
 
     def can_delegate(self, region_op: str, interface: str) -> bool:
         """Whether a child of ``region_op`` may itself delegate ``interface``."""
-        scope_id = self._ledger.scope_id_for(region_op)
-        return (
-            scope_id is not None
-            and interface in self._grant_for_scope(scope_id).delegate
-        )
+        return self._authority.can_delegate(region_op, interface)
 
     # ------------------------------------------------------------------ #
     # Cancellation (a durable semantic event)
@@ -2556,10 +1903,12 @@ class OrchestrationEngine:
                 wi.operator_id
             ) not in (OperatorKind.LEAF, OperatorKind.AGENT):
                 continue
-            self._fail_open_attempt(wi, reason)
+            self._attempt_lifecycle.fail_open_attempt(wi, reason)
             advance.extend(self._settle_failed_wi(wi))
-        for slot in list(self._slots.values()):
-            self._write_publication(slot, PublicationOutcome.DECLARED_FAILURE, None)
+        for slot in list(self._publication.slots.values()):
+            self._publication.write_publication(
+                slot, PublicationOutcome.DECLARED_FAILURE, None
+            )
         return advance
 
     @_ds_drive(ControlPlaneWindow.POST_START)
@@ -2589,11 +1938,11 @@ class OrchestrationEngine:
             if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
                 self._cancel_work_item(wi)
                 cancelled.append(wi.legacy_task_id)
-        if scope.grant_id and scope.grant_id in self._grants:
-            grant = self._grants[scope.grant_id]
+        if scope.grant_id and scope.grant_id in self._authority.grants:
+            grant = self._authority.grants[scope.grant_id]
             if not grant.revoked:
-                self._grants[scope.grant_id] = grant.model_copy(
-                    update={"revoked": True}
+                self._authority.store_grant(
+                    scope.grant_id, grant.model_copy(update={"revoked": True})
                 )
                 self._ledger.emit(
                     "grant_revoked",
@@ -2664,7 +2013,7 @@ class OrchestrationEngine:
         self._frontier_closed(scope_id)
         if not self._ledger.root_level(scope_id):
             return Advance()
-        self._publish(release_op, outcome, ValueRef(kind="empty"))
+        self._publication.publish(release_op, outcome, ValueRef(kind="empty"))
         return self._deliver_record(
             release_op,
             self._ledger.control_activation(release_op),
@@ -2678,7 +2027,7 @@ class OrchestrationEngine:
             return
         wi.status = WorkItemStatus.CANCELLED
         self._ledger.private_state.release(wi.activation_id)
-        self._publish(
+        self._publication.publish(
             wi.operator_id, PublicationOutcome.EXPLICIT_EMPTY, ValueRef(kind="empty")
         )
         # Recorded before the emitter reads the trace: a cancelled item with no attempt
@@ -2867,7 +2216,7 @@ class OrchestrationEngine:
         cancelled = self._apply_residual_policy(join, scope_id)
         if nested:
             return Advance(cancelled=cancelled)
-        self._publish(join_op, outcome, value_ref)
+        self._publication.publish(join_op, outcome, value_ref)
         advance = self._deliver_record(
             join_op, self._ledger.control_activation(join_op), value_ref
         )
@@ -3124,7 +2473,7 @@ class OrchestrationEngine:
             "loop_egress", operator_id=loop_op, detail={"scope": scope_id}
         )
         carried = self._ledger.latest_carried(scope_id)
-        self._publish(loop_op, PublicationOutcome.SUCCESS, carried)
+        self._publication.publish(loop_op, PublicationOutcome.SUCCESS, carried)
         return self._deliver_record(
             loop_op, self._ledger.control_activation(loop_op), carried
         )
@@ -3165,7 +2514,7 @@ class OrchestrationEngine:
             parent_scope_id or self._ledger.root_scope.scope_id
         ]
         self._check_scope_depth(parent.scope_id)
-        grant = self._mint_delegated_grant(
+        grant = self._authority.mint_delegated_grant(
             opener_op, parent.scope_id, parent_delegate=parent_delegate
         )
         scope = Scope(
@@ -3178,8 +2527,8 @@ class OrchestrationEngine:
             depth=parent.depth + 1,
         )
         self._ledger.scopes[scope.scope_id] = scope
-        self._grants[grant.grant_id] = grant.model_copy(
-            update={"scope_id": scope.scope_id}
+        self._authority.store_grant(
+            grant.grant_id, grant.model_copy(update={"scope_id": scope.scope_id})
         )
         return scope
 
@@ -3209,45 +2558,6 @@ class OrchestrationEngine:
     # Authority: delegated-grant minting with monotone attenuation
     # ------------------------------------------------------------------ #
 
-    def _mint_delegated_grant(
-        self,
-        opener_op: str,
-        parent_scope_id: str,
-        *,
-        parent_delegate: tuple[str, ...] | None = None,
-    ) -> DelegatedAuthorityGrant:
-        parent = self._grant_for_scope(parent_scope_id)
-        # An agent-selected region attenuates from the agent's delegate face, supplied
-        # here, rather than the enclosing scope's raw delegate face.
-        base = parent.delegate if parent_delegate is None else parent_delegate
-        opener = self._topology.operators[opener_op]
-        ceiling = (
-            opener.authority
-            if isinstance(opener, (SpawnRegion, AgentOperator))
-            else None
-        )
-        ceiling_invoke = ceiling.invoke if ceiling else base
-        ceiling_delegate = ceiling.delegate if ceiling else base
-        envelope = self._policy_interfaces()
-        invoke = attenuate(base, ceiling_invoke, envelope)
-        delegate = attenuate(invoke, ceiling_delegate, envelope)
-        grant = DelegatedAuthorityGrant(
-            grant_id=new_authority_grant_id(),
-            instance_id=self._ledger.workflow_instance.instance_id,
-            scope_id="",
-            parent_grant_id=parent.grant_id,
-            policy_id=parent.policy_id,
-            invoke=invoke,
-            delegate=delegate,
-            epoch=parent.epoch + 1,
-        )
-        self._ledger.emit(
-            "grant_delegated",
-            operator_id=opener_op,
-            detail={"invoke": ",".join(invoke), "delegate": ",".join(delegate)},
-        )
-        return grant
-
     def effective_invoke_face(self, task_id: str) -> tuple[str, ...]:
         """The interfaces this agent activation may invoke.
 
@@ -3258,25 +2568,7 @@ class OrchestrationEngine:
         operator's own declared ceiling names it. A task that is not an agent invokes
         nothing through this face.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        act = self._ledger.activations.get(wi.activation_id) if wi is not None else None
-        op = self._topology.operators.get(wi.operator_id) if wi is not None else None
-        if act is None or not isinstance(op, AgentOperator):
-            return ()
-        invoke, _delegate = self._agent_face_tuples(op, act.scope_id)
-        return invoke
-
-    def _grant_for_scope(
-        self, scope_id: str
-    ) -> AuthorityGrant | DelegatedAuthorityGrant:
-        scope = self._ledger.scopes.get(scope_id)
-        if scope and scope.grant_id and scope.grant_id in self._grants:
-            return self._grants[scope.grant_id]
-        return self._ledger.root_grant
-
-    def _policy_interfaces(self) -> tuple[str, ...]:
-        # The pinned policy envelope caps every face; the root grant projects it.
-        return self._ledger.root_grant.delegate or self._ledger.root_grant.invoke
+        return self._authority.effective_invoke_face(task_id)
 
     # ------------------------------------------------------------------ #
     # Readiness, settlement, publication (static path)
@@ -3315,13 +2607,16 @@ class OrchestrationEngine:
             return
         cont = self._ledger.continuations.get(work_item_id)
         if cont is not None and cont.required_ports:
-            have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+            have = {
+                a.target_port
+                for a in self._inputs.accepted_inputs_for(wi.activation_id)
+            }
             if not cont.required_ports <= have:
                 return
         interface = self._topology.requested_interface(wi.operator_id)
         if interface is not None and interface not in self._ledger.root_grant.invoke:
             reason = f"interface {interface!r} outside root grant invoke face"
-            self._decisions.append(
+            self._authority.record_decision(
                 AuthorityDecision(
                     work_item_id=work_item_id,
                     grant_id=self._ledger.root_grant.grant_id,
@@ -3340,7 +2635,7 @@ class OrchestrationEngine:
             advance.extend(self._settle_failed_wi(wi))
             return
         if interface is not None:
-            self._decisions.append(
+            self._authority.record_decision(
                 AuthorityDecision(
                     work_item_id=work_item_id,
                     grant_id=self._ledger.root_grant.grant_id,
@@ -3388,7 +2683,7 @@ class OrchestrationEngine:
             self._ledger.emitter.emit_work_item(wi)
             self._ledger.emitter.emit_activation(wi.activation_id)
             self._ledger.private_state.release(wi.activation_id)
-            self._publish(
+            self._publication.publish(
                 operator_id, PublicationOutcome.EXPLICIT_EMPTY, ValueRef(kind="empty")
             )
         for successor in sorted(self._topology.forward.get(operator_id, ())):
@@ -3424,7 +2719,9 @@ class OrchestrationEngine:
         self._ledger.emitter.emit_work_item(wi)
         self._ledger.emitter.emit_activation(wi.activation_id)
         self._ledger.private_state.release(wi.activation_id)
-        self._publish(wi.operator_id, PublicationOutcome.DECLARED_FAILURE, None)
+        self._publication.publish(
+            wi.operator_id, PublicationOutcome.DECLARED_FAILURE, None
+        )
         cascade.failed.append(wi.legacy_task_id)
         self._fail_agent_regions(wi, cascade, visited)
         self._fail_downstream(wi.operator_id, cascade, visited)
@@ -3512,7 +2809,7 @@ class OrchestrationEngine:
         self._settle_region_failed(operator_id)
         if kind is OperatorKind.SPAWN:
             self._fail_spawn_template(operator_id, cascade)
-            self._publish_keyed(
+            self._publication.publish_keyed(
                 operator_id, None, PublicationOutcome.DECLARED_FAILURE, None
             )
             if (join_op := self._topology.join_for_spawn(operator_id)) is not None:
@@ -3522,7 +2819,9 @@ class OrchestrationEngine:
     def _settle_region_failed(self, operator_id: str) -> None:
         self._failures.mark_region_failed(operator_id)
         self._ledger.emit("region_failed", operator_id=operator_id)
-        self._publish(operator_id, PublicationOutcome.DECLARED_FAILURE, None)
+        self._publication.publish(
+            operator_id, PublicationOutcome.DECLARED_FAILURE, None
+        )
 
     def _fail_spawn_template(self, spawn_op: str, cascade: Advance) -> None:
         """Fail a failed spawn's child template, and the templates nested under it,
@@ -3533,7 +2832,7 @@ class OrchestrationEngine:
         for failed in self._ledger.template_closure(
             template, self._instantiable_by_live
         ):
-            self._publish(failed, PublicationOutcome.DECLARED_FAILURE, None)
+            self._publication.publish(failed, PublicationOutcome.DECLARED_FAILURE, None)
             cascade.failed.append(failed)
 
     def _instantiable_by_live(self, template: str, dead: list[str]) -> bool:
@@ -3557,74 +2856,6 @@ class OrchestrationEngine:
         together with what is nested under it."""
         return self._ledger.template_closure(template, excluded)
 
-    def _publish(
-        self, operator_id: str, outcome: PublicationOutcome, value_ref: ValueRef | None
-    ) -> None:
-        for slot_key in self._slots_by_operator.get(operator_id, ()):
-            self._write_publication(self._slots[slot_key], outcome, value_ref)
-
-    def _publish_keyed(
-        self,
-        spawn_op: str,
-        activation: Activation | None,
-        outcome: PublicationOutcome,
-        value_ref: ValueRef | None,
-    ) -> None:
-        """Publish a spawn child's member of each collection the spawn declares, or,
-        with no child, the collection's one member."""
-        for decl in self._topology.bundle.template.result_declarations:
-            if (
-                decl.source_ref != spawn_op
-                or decl.cardinality is not CardinalityKind.KEYED_COLLECTION
-            ):
-                continue
-            self._write_publication(
-                ResultSlot(
-                    instance_id=self._ledger.workflow_instance.instance_id,
-                    output_id=decl.output_id,
-                    source_operator_id=spawn_op,
-                    scope_id=activation.scope_id if activation else None,
-                    logical_key=str(activation.child_index) if activation else None,
-                ),
-                outcome,
-                value_ref,
-            )
-
-    def _write_publication(
-        self, slot: ResultSlot, outcome: PublicationOutcome, value_ref: ValueRef | None
-    ) -> None:
-        if slot.slot_key in self._publications:
-            return
-        if slot.slot_key not in self._slots:
-            self._slots_by_output.setdefault(slot.output_id, []).append(slot.slot_key)
-        self._slots[slot.slot_key] = slot.model_copy(update={"published": True})
-        self._publications[slot.slot_key] = ResultPublication(
-            slot_key=slot.slot_key,
-            output_id=slot.output_id,
-            outcome=outcome,
-            value_ref=value_ref,
-        )
-        self._ledger.emit(
-            "result_published",
-            operator_id=slot.source_operator_id,
-            slot_key=slot.slot_key,
-            outcome=outcome.value,
-        )
-
-    def _record_receipt(self, wi: WorkItem, outcome: PublicationOutcome) -> None:
-        if wi.invocation_id is None or wi.invocation_id in self._receipts:
-            return
-        self._receipts[wi.invocation_id] = EffectReceipt(
-            invocation_id=wi.invocation_id,
-            work_item_id=wi.work_item_id,
-            outcome=outcome,
-        )
-        self._ledger.emit(
-            "effect_receipt",
-            work_item_id=wi.work_item_id,
-            invocation_id=wi.invocation_id,
-        )
-
     # ------------------------------------------------------------------ #
     # Queries
     # ------------------------------------------------------------------ #
@@ -3637,19 +2868,13 @@ class OrchestrationEngine:
         sequence: int | None = None,
     ) -> ResultPublication | None:
         """The terminal publication of exactly one slot, if it has one."""
-        return self._publications.get(
-            slot_identity(
-                self._ledger.workflow_instance.instance_id,
-                output_id,
-                scope_id,
-                logical_key,
-                sequence,
-            )
+        return self._publication.output_publication(
+            output_id, scope_id, logical_key, sequence
         )
 
     def output_slots(self, output_id: str) -> list[ResultSlot]:
         """Every slot a declared output holds so far, pending or published."""
-        return [self._slots[key] for key in self._slots_by_output.get(output_id, ())]
+        return self._publication.output_slots(output_id)
 
     def output_slot(
         self,
@@ -3659,15 +2884,7 @@ class OrchestrationEngine:
         sequence: int | None = None,
     ) -> ResultSlot | None:
         """Exactly one slot of a declared output, if it holds one."""
-        return self._slots.get(
-            slot_identity(
-                self._ledger.workflow_instance.instance_id,
-                output_id,
-                scope_id,
-                logical_key,
-                sequence,
-            )
-        )
+        return self._publication.output_slot(output_id, scope_id, logical_key, sequence)
 
     def published_outputs(self) -> list[tuple[str, ResultDeclaration]]:
         """Each published declaration with the public name it was authored under."""
@@ -3675,7 +2892,7 @@ class OrchestrationEngine:
 
     def resolve_legacy_task(self, task_id: str) -> ResultPublication | None:
         """Resolve a legacy task id's induced output slot (compatibility adapter)."""
-        return self.output_publication(f"legacy:{task_id}")
+        return self._publication.resolve_legacy_task(task_id)
 
     def legacy_task_value(
         self, task_id: str
@@ -3687,12 +2904,7 @@ class OrchestrationEngine:
         no slot of its own, so it reads as the value its work item settled with. Either
         way the value is the one bound at settlement and never re-pointed.
         """
-        if (publication := self.resolve_legacy_task(task_id)) is not None:
-            return publication.outcome, publication.value_ref
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.status is not WorkItemStatus.SETTLED or wi.outcome is None:
-            return None
-        return wi.outcome, wi.value_ref
+        return self._publication.legacy_task_value(task_id)
 
     def failure_reason(self, task_id: str) -> str | None:
         """Why a task settled as a declared failure, or None for one that has not."""
@@ -3714,7 +2926,7 @@ class OrchestrationEngine:
         Carries the fabric-assigned idempotency key, the causal invocation id, and the
         outcome (or denial) the continuation resumes with.
         """
-        return self._boundary_events.get((activation_id, call_correlation))
+        return self._boundaries.boundary_envelope(activation_id, call_correlation)
 
     def contract_trace(self) -> list[tuple[str, str]]:
         """A compact (kind, subject) projection of the trace for test inspection."""
@@ -3733,11 +2945,7 @@ class OrchestrationEngine:
         return self._ledger.region_scope_for(agent_activation, role)
 
     def grant_for(self, region_op: str) -> DelegatedAuthorityGrant | None:
-        scope_id = self._ledger.scope_id_for(region_op)
-        if scope_id is None:
-            return None
-        grant_id = self._ledger.scopes[scope_id].grant_id
-        return self._grants.get(grant_id) if grant_id else None
+        return self._authority.grant_for(region_op)
 
     def region_closed(self, region_op: str) -> bool:
         return self._ledger.region_closed(region_op)
@@ -3792,8 +3000,7 @@ class OrchestrationEngine:
 
     def embodiment_selection(self, task_id: str) -> EmbodimentSelection | None:
         """The embodiment a task is already bound to, if one was resolved."""
-        wi = self._ledger.work_item_for_task(task_id)
-        return self._embodiment_selections.get(wi.work_item_id) if wi else None
+        return self._embodiments.embodiment_selection(task_id)
 
     def embodiment_pinned(self, task_id: str) -> bool:
         """Whether a resolved embodiment is committed to the run that carries it.
@@ -3804,10 +3011,7 @@ class OrchestrationEngine:
         other embodiment; a local candidate carries no invocation and commits when its
         attempt is issued, which is where it was delivered to a worker.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.work_item_id not in self._embodiment_selections:
-            return False
-        return wi.invocation_id is not None or bool(wi.attempt_ids)
+        return self._embodiments.embodiment_pinned(task_id)
 
     def record_embodiment_selection(
         self, task_id: str, alternative_id: str, selector: str, evidence: str
@@ -3817,36 +3021,17 @@ class OrchestrationEngine:
         A pinned selection is kept: the caller receives the standing one rather than a
         replacement.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None:
-            return None
-        if (standing := self._embodiment_selections.get(wi.work_item_id)) is not None:
-            if self.embodiment_pinned(task_id):
-                return standing
-        selection = EmbodimentSelection(
-            work_item_id=wi.work_item_id,
-            alternative_id=alternative_id,
-            plan_version=self._topology.bundle.plan.plan_version.content_digest,
-            selector=selector,
-            evidence=evidence,
+        return self._embodiments.record_embodiment_selection(
+            task_id, alternative_id, selector, evidence
         )
-        self._embodiment_selections[wi.work_item_id] = selection
-        self._ledger.emit(
-            "embodiment_selected",
-            work_item_id=wi.work_item_id,
-            detail={"alternative_id": alternative_id, "selector": selector},
-        )
-        return selection
 
     def input_resolution(self, task_id: str) -> InputResolution | None:
         """The resolution a task's inputs were materialized under, if one exists."""
-        wi = self._ledger.work_item_for_task(task_id)
-        return self._input_resolutions.get(wi.work_item_id) if wi else None
+        return self._embodiments.input_resolution(task_id)
 
     def input_preparation(self, task_id: str) -> InputPreparation | None:
         """The preparation dispatch a task's inputs are being resolved by, if any."""
-        wi = self._ledger.work_item_for_task(task_id)
-        return self._input_preparations.get(wi.work_item_id) if wi else None
+        return self._embodiments.input_preparation(task_id)
 
     def on_input_preparation_dispatched(
         self, task_id: str, worker_id: str | None
@@ -3857,17 +3042,7 @@ class OrchestrationEngine:
         candidate-specific commitments, and a work item whose inputs are still being
         resolved has not chosen an embodiment to commit to.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
-            return
-        self._input_preparations[wi.work_item_id] = InputPreparation(
-            work_item_id=wi.work_item_id, worker_id=worker_id
-        )
-        self._ledger.emit(
-            "input_preparation_dispatched",
-            work_item_id=wi.work_item_id,
-            operator_id=wi.operator_id,
-        )
+        self._embodiments.on_input_preparation_dispatched(task_id, worker_id)
 
     def record_input_resolution(
         self,
@@ -3885,24 +3060,7 @@ class OrchestrationEngine:
         request a later run hydrates is durable exactly when the binding proving what it
         is becomes durable.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
-            return None
-        if (standing := self._input_resolutions.get(wi.work_item_id)) is not None:
-            return standing
-        resolution = InputResolution(
-            work_item_id=wi.work_item_id, binding=binding, reference=reference
-        )
-        self._input_resolutions[wi.work_item_id] = resolution
-        self._ledger.emit(
-            "input_resolved",
-            work_item_id=wi.work_item_id,
-            detail={
-                "request_digest": binding.request_digest,
-                "cardinality": str(binding.cardinality),
-            },
-        )
-        return resolution
+        return self._embodiments.record_input_resolution(task_id, binding, reference)
 
     def episode_spec(self, task_id: str) -> EpisodeSpec | None:
         """The run-to-yield episode a task's operator lowers to, if the plan cut it."""
@@ -3913,8 +3071,7 @@ class OrchestrationEngine:
 
     def child_input(self, task_id: str) -> ValueRef | None:
         """The child-init input a spawned child task runs on, if it has one."""
-        wi = self._ledger.work_item_for_task(task_id)
-        return wi.child_input if wi is not None else None
+        return self._inputs.child_input(task_id)
 
     def agent_operator(self, task_id: str) -> AgentOperator | None:
         """The agent operator a dispatched task realizes, resolving its work item."""
@@ -4017,37 +3174,7 @@ class OrchestrationEngine:
     # ------------------------------------------------------------------ #
 
     def to_snapshot(self) -> LedgerSnapshot:
-        return LedgerSnapshot(
-            instance=self._ledger.workflow_instance,
-            root_scope=self._ledger.root_scope,
-            root_grant=self._ledger.root_grant,
-            scopes=list(self._ledger.scopes.values()),
-            activations=list(self._ledger.activations.values()),
-            work_items=list(self._ledger.work_items.values()),
-            continuations=list(self._ledger.continuations.values()),
-            records=list(self._ledger.records),
-            accepted_inputs=list(self._accepted_inputs),
-            region_aggregates=list(self._ledger.region_aggregates),
-            invocations=list(self._ledger.invocations.values()),
-            attempts=list(self._ledger.attempts.values()),
-            embodiment_selections=list(self._embodiment_selections.values()),
-            input_resolutions=list(self._input_resolutions.values()),
-            input_preparations=list(self._input_preparations.values()),
-            boundary_events=list(self._boundary_events.values()),
-            effect_receipts=list(self._receipts.values()),
-            authority_decisions=list(self._decisions),
-            delegated_grants=list(self._grants.values()),
-            progress_capabilities=list(self._ledger.capabilities.values()),
-            result_slots=list(self._slots.values()),
-            result_publications=list(self._publications.values()),
-            trace=list(self._ledger.trace),
-            private_state=self._ledger.private_state.lineages(),
-            released_scopes=sorted(self._ledger.released_scopes),
-            failed_regions=sorted(self._failures.failed_regions),
-            failed_scopes=sorted(self._failures.failed_scopes),
-            failure_reasons=dict(self._failures.failure_reasons),
-            next_seq=self._ledger.next_seq,
-        )
+        return self._codec.to_snapshot()
 
     def reconcile_failure(self, task_id: str) -> list[str]:
         """Fail what a task's settled failure left standing downstream of it.
@@ -4106,33 +3233,7 @@ class OrchestrationEngine:
         retry is not orphaned; a work item whose predecessors have not all settled, or
         whose declared inputs have not all been accepted, stays blocked.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
-            return False
-        cont = self._ledger.continuations.get(wi.work_item_id)
-        if cont is not None and (
-            cont.waiting_on
-            or not cont.required_ports
-            <= {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
-        ):
-            wi.status = WorkItemStatus.BLOCKED
-            return False
-        if wi.status is WorkItemStatus.BLOCKED and self._awaits_mediated_outcome(wi):
-            # A crash beat the ledger save of the boundary's settle; the boundary is
-            # re-issued, and the episode resumes only with its outcome.
-            return False
-        if wi.status is WorkItemStatus.DISPATCHED:
-            if attempt := self._ledger.latest_attempt(wi):
-                attempt.status = AttemptStatus.LOST
-                attempt.finished_at = now_iso()
-                self._ledger.emitter.emit_attempt(attempt)
-            self._ledger.emit(
-                "attempt_lost_on_restart",
-                work_item_id=wi.work_item_id,
-                operator_id=wi.operator_id,
-            )
-        wi.status = WorkItemStatus.READY
-        return True
+        return self._attempt_lifecycle.reconcile_pending(task_id)
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -4173,11 +3274,4 @@ class OrchestrationEngine:
         applying it would preempt the live turn. A genuine terminal report lands while
         its attempt is still issued or running.
         """
-        wi = self._ledger.work_item_for_task(task_id)
-        if wi is None:
-            return False
-        attempt = self._ledger.latest_attempt(wi)
-        return attempt is not None and attempt.status in (
-            AttemptStatus.ISSUED,
-            AttemptStatus.RUNNING,
-        )
+        return self._attempt_lifecycle.latest_attempt_open(task_id)

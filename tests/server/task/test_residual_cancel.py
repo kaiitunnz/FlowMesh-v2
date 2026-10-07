@@ -346,7 +346,7 @@ def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -
         ]
         assert (
             sub_scope.grant_id is not None
-            and engine._grants[sub_scope.grant_id].revoked
+            and engine._authority.grants[sub_scope.grant_id].revoked
         )
         if state == "running":
             assert _status(runtime, sub) == TaskStatus.CANCELLING

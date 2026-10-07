@@ -1,5 +1,25 @@
 """Declared-failure facts of one workflow instance."""
 
+_DECLARED_FAILURE_REASON = "declared-failure obligation"
+
+
+_DECLARED_FAILURE_REASON = "declared-failure obligation"
+
+
+_DECLARED_FAILURE_REASON = "declared-failure obligation"
+
+
+_DECLARED_FAILURE_REASON = "declared-failure obligation"
+
+
+_DECLARED_FAILURE_REASON = "declared-failure obligation"
+
+
+_DECLARED_FAILURE_REASON = "declared-failure obligation"
+
+
+_DECLARED_FAILURE_REASON = "declared-failure obligation"
+
 
 class FailureLedger:
     """Holds which control regions and child-init scopes settled as a declared failure,

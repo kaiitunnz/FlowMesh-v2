@@ -436,11 +436,11 @@ def test_denied_boundary_redrive_is_idempotent() -> None:
         kind=BoundaryEventKind.INVOCATION, call_correlation="c0", interface="danger"
     )
     eng.route_boundary_event("A", request)
-    decisions = len(eng._decisions)  # type: ignore[attr-defined]
+    decisions = len(eng._authority.decisions)  # type: ignore[attr-defined]
     # A re-driven denial maps to the recorded call rather than re-denying it.
     eng.on_dispatched("A", "w2")
     eng.route_boundary_event("A", request)
-    assert len(eng._decisions) == decisions  # type: ignore[attr-defined]
+    assert len(eng._authority.decisions) == decisions  # type: ignore[attr-defined]
     assert "boundary_redriven" in {k for k, _ in eng.contract_trace()}
 
 
@@ -1245,7 +1245,7 @@ def test_a_restart_restores_only_the_spawn_site_denials() -> None:
         ),
     )
     eng.deny_spawn("worker:spawn", "x")
-    live = set(eng._denied_spawns)
+    live = set(eng._authority.denied_spawns)
 
     restored = OrchestrationEngine(eng.to_snapshot(), eng._topology.bundle)
-    assert restored._denied_spawns == live == {"worker:spawn"}
+    assert restored._authority.denied_spawns == live == {"worker:spawn"}
