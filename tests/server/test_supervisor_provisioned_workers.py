@@ -32,6 +32,7 @@ from server.supervisor.provisioning import (
     DockerHandle,
     ProviderHandle,
     RecordState,
+    Removal,
     RunState,
     VastHandle,
     WorkerRecord,
@@ -649,6 +650,276 @@ async def test_interrupted_stops_and_removals_finish_without_grace(
     record = node.records()["stopping"]
     assert (record.run_state, record.handle) == (RunState.STOPPED, None)
     assert set(node.records()) == {"stopping"}
+
+
+# -------------------------------------------- concurrent lifecycle actions ----
+
+
+def _gate() -> tuple[threading.Event, threading.Event]:
+    return threading.Event(), threading.Event()
+
+
+def _hold_run_check(worker: Any) -> tuple[threading.Event, threading.Event]:
+    """Hold a start in its check of whether the worker's container still runs."""
+    entered, release = _gate()
+
+    def held() -> bool:
+        entered.set()
+        assert release.wait(5)
+        return False
+
+    worker._held_worker_runs = held
+    return entered, release
+
+
+@pytest.mark.asyncio
+async def test_a_start_refuses_a_worker_an_expiry_began_removing(node: _Node) -> None:
+    node.write_config(_entry("w1", worker_type="gpu", cuda_devices=[1]))
+    await _run(node.supervisor())
+    second = node.supervisor()
+    await _run(second)
+    worker = second._registry.get_by_alias("w1")
+    [container] = node.daemon.containers.values()
+    container.status = "exited"
+    checking, release_check = _hold_run_check(worker)
+    starting = asyncio.ensure_future(second.start_worker("w1"))
+    await asyncio.to_thread(checking.wait, 5)
+
+    factory = second._providers["docker"].factory
+    removing, release_remove = _gate()
+
+    def unconfirmed_remove(handle: Any) -> Removal:
+        removing.set()
+        assert release_remove.wait(5)
+        return Removal.UNKNOWN
+
+    factory.remove = unconfirmed_remove  # type: ignore[method-assign]
+    node.expire_grace()
+    second._settle_records()
+    await asyncio.to_thread(removing.wait, 5)
+    release_check.set()
+    with pytest.raises(ValueError, match="being destroyed"):
+        await starting
+    release_remove.set()
+    await asyncio.gather(*list(second._tasks))
+    assert node.records()["w1"].state is RecordState.REMOVING
+
+    del factory.remove
+    await _settle(second)
+
+    assert "w1" not in node.records() and node.daemon.containers == {}
+    assert 1 in node.rm._env.available_gpus
+
+
+@pytest.mark.asyncio
+async def test_a_start_refuses_a_worker_a_destroy_began_removing(node: _Node) -> None:
+    wm = node.supervisor()
+    await _run(wm)
+    info = await wm.create_worker(WorkerInitConfig())
+    worker = wm._registry.get_by_alias(info.alias)
+    [container] = node.daemon.containers.values()
+    container.status = "exited"
+    worker.set_status(WorkerStatus.STOPPED)
+    checking, release_check = _hold_run_check(worker)
+    starting = asyncio.ensure_future(wm.start_worker(info.alias))
+    await asyncio.to_thread(checking.wait, 5)
+
+    node.daemon.refuse_removal = True
+    await wm.destroy_workers(None)
+    release_check.set()
+    with pytest.raises(ValueError, match="being destroyed"):
+        await starting
+    assert node.records()[info.alias].state is RecordState.REMOVING
+
+    node.daemon.refuse_removal = False
+    await _settle(wm)
+    assert info.alias not in node.records() and node.daemon.containers == {}
+
+
+async def _cancelled_stop(node: _Node) -> tuple[WorkerManager, str]:
+    """A stop cancelled after its container stopped, before its record caught up."""
+    wm = node.supervisor()
+    await _run(wm)
+    info = await wm.create_worker(WorkerInitConfig())
+    worker = wm._registry.get_by_alias(info.alias)
+    worker.set_status(WorkerStatus.RUNNING)
+    [container] = node.daemon.containers.values()
+    stopping_container, release_stop = _gate()
+    stop = container.stop
+
+    def held_stop(timeout: float | None = None) -> None:
+        stopping_container.set()
+        assert release_stop.wait(5)
+        stop(timeout)
+
+    container.stop = held_stop  # type: ignore[method-assign]
+    stopping = asyncio.ensure_future(wm.stop_worker(info.alias))
+    await asyncio.to_thread(stopping_container.wait, 5)
+    stopping.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    release_stop.set()
+    for _ in range(200):
+        if not worker.holds_worker():
+            break
+        await asyncio.sleep(0.01)
+    worker.set_status(WorkerStatus.STOPPED)
+    record = node.records()[info.alias]
+    assert (record.run_state, node.daemon.containers) == (RunState.STOPPED, {})
+    assert record.handle is not None
+    return wm, info.alias
+
+
+@pytest.mark.asyncio
+async def test_the_heartbeat_clears_what_a_cancelled_stop_left_recorded(
+    node: _Node,
+) -> None:
+    wm, alias = await _cancelled_stop(node)
+
+    wm._settle_records()
+    assert await asyncio.gather(*list(wm._tasks)) == [None]
+
+    assert node.records()[alias].handle is None
+    wm._settle_records()
+    assert not wm._tasks
+
+
+@pytest.mark.asyncio
+async def test_a_heartbeat_stop_leaves_a_worker_the_operator_started(
+    node: _Node,
+) -> None:
+    wm, alias = await _cancelled_stop(node)
+
+    starting = asyncio.ensure_future(wm.start_worker(alias))
+    wm._settle_records()
+    assert await starting
+    await asyncio.gather(*list(wm._tasks))
+
+    [container] = node.daemon.containers.values()
+    record = node.records()[alias]
+    assert (record.run_state, container.status) == (RunState.RUNNING, "running")
+    assert record.handle is not None
+
+
+@pytest.mark.asyncio
+async def test_a_late_heartbeat_stop_leaves_a_worker_the_operator_started(
+    node: _Node,
+) -> None:
+    wm, alias = await _cancelled_stop(node)
+    worker = wm._registry.get_by_alias(alias)
+    commit = worker.on_handle
+    assert commit is not None
+    committed = threading.Event()
+
+    def on_handle(handle: ProviderHandle | None) -> None:
+        commit(handle)
+        if handle is not None:
+            committed.set()
+
+    worker.on_handle = on_handle
+    finish_stop = wm._finish_stop
+
+    async def late_finish_stop(alias: str) -> None:
+        # The loop is held up until the launch thread has committed its container.
+        await asyncio.to_thread(committed.wait, 5)
+        await finish_stop(alias)
+
+    wm._finish_stop = late_finish_stop  # type: ignore[method-assign]
+    starting = asyncio.ensure_future(wm.start_worker(alias))
+    wm._settle_records()
+    assert await starting
+    await asyncio.gather(*list(wm._tasks))
+
+    [container] = node.daemon.containers.values()
+    record = node.records()[alias]
+    assert (record.run_state, container.status) == (RunState.RUNNING, "running")
+    assert record.handle is not None
+
+
+@pytest.mark.asyncio
+async def test_a_destroy_racing_an_expiry_leaves_no_removal_behind(
+    node: _Node,
+) -> None:
+    node.write_config(_entry("w1"))
+    await _run(node.supervisor())
+    second = node.supervisor()
+    await _run(second)
+    worker = second._registry.get_by_alias("w1")
+    factory = second._providers["docker"].factory
+    remove = type(factory).remove
+    removing, release_remove = _gate()
+
+    def held_remove(handle: Any) -> Removal:
+        removing.set()
+        assert release_remove.wait(5)
+        return remove(factory, handle)
+
+    factory.remove = held_remove  # type: ignore[method-assign]
+    stopping, release_stop = _gate()
+
+    def conflicting_stop() -> bool:
+        stopping.set()
+        assert release_stop.wait(5)
+        return False
+
+    worker._stop = conflicting_stop  # type: ignore[method-assign]
+    node.expire_grace()
+    asyncio.get_running_loop().call_soon(second._settle_records)
+    destroying = asyncio.ensure_future(second.destroy_worker("w1"))
+    await asyncio.to_thread(removing.wait, 5)
+    await asyncio.to_thread(stopping.wait, 5)
+    release_remove.set()
+    await asyncio.gather(*list(second._tasks))
+    release_stop.set()
+    await destroying
+
+    assert "w1" not in node.records() and node.daemon.containers == {}
+    assert "w1" not in second._removing
+
+
+@pytest.mark.asyncio
+async def test_a_settle_that_fails_before_its_work_starts_holds_no_worker(
+    node: _Node, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node.write_config(_entry("w1"))
+    await _run(node.supervisor())
+    wm = await _restarted_removing(node, "w1")
+    failing = MagicMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(wm, "_finish_removal", failing)
+
+    wm._settle_records()
+    assert failing.called and not wm._tasks
+    monkeypatch.undo()
+    await _settle(wm)
+
+    assert "w1" not in node.records()
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_manager_ends_its_heartbeat_work(node: _Node) -> None:
+    node.write_config(_entry("w1"))
+    await _run(node.supervisor())
+    wm = await _restarted_removing(node, "w1")
+    factory = wm._providers["docker"].factory
+    removing, release_remove = _gate()
+
+    def held_remove(handle: Any) -> Removal:
+        removing.set()
+        release_remove.wait(5)
+        return Removal.UNKNOWN
+
+    factory.remove = held_remove  # type: ignore[method-assign]
+    wm._settle_records()
+    [task] = wm._tasks
+    await asyncio.to_thread(removing.wait, 5)
+
+    await wm.stop()
+    release_remove.set()
+
+    assert task.cancelled() and not wm._tasks
+    wm._settle_records()
+    assert not wm._tasks
+    assert node.records()["w1"].state is RecordState.REMOVING
 
 
 # --------------------------------------------- interrupted Docker creation ----

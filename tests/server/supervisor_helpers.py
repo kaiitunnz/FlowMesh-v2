@@ -95,6 +95,7 @@ class StubWorkerManager(WorkerManager):
         self._removing = {}
         self._to_provision = []
         self._loop = None
+        self._stopping = False
         self._tasks = set()
         self._is_started = True
         self._default_worker_config = {}

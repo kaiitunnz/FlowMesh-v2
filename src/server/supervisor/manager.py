@@ -134,6 +134,7 @@ class WorkerManager:
         self._removing: dict[str, WorkerAdapter] = {}
         self._to_provision: list[WorkerAdapter] = []
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._stopping = False
         self._tasks: set[asyncio.Task[Any]] = set()
         # External provider is always available.
         specs = [external_provider_spec(system_principal)]
@@ -212,6 +213,7 @@ class WorkerManager:
             return
 
         self._is_started = True
+        self._stopping = False
         self._default_worker_config = {}
         self._loop = asyncio.get_running_loop()
         to_start, self._to_provision = self._to_provision, []
@@ -313,6 +315,12 @@ class WorkerManager:
             self.logger.warning("WorkerManager is not started.")
             return
 
+        # A removal cancelled here keeps its record, which the next start finishes.
+        self._stopping = True
+        settling = list(self._tasks)
+        for task in settling:
+            task.cancel()
+        await asyncio.gather(*settling, return_exceptions=True)
         await self._stop_and_destroy_workers(self._registry.all_workers())
         self._report_capacity_change()
         for spec in self._providers.values():
@@ -519,19 +527,26 @@ class WorkerManager:
             self.logger.exception("Failed to settle worker records")
 
     def _settle(self) -> None:
+        if self._stopping:
+            return
         self._provisioned.retry_unsaved()
         for alias, due in self._provisioned.due(time.monotonic()):
             if due is Due.REMOVE:
-                self._spawn(alias, self._finish_removal(alias))
+                self._spawn(alias, self._finish_removal)
             elif due is Due.EXPIRE:
-                self._spawn(alias, self._expire(alias))
-            elif (worker := self._registry.try_get_by_alias(alias)) is not None:
-                self._spawn(alias, self._stop_worker(worker))
+                self._spawn(alias, self._expire)
             else:
-                self._provisioned.settled(alias)
+                self._spawn(alias, self._finish_stop)
 
-    def _spawn(self, alias: str, work: Coroutine[Any, Any, Any]) -> None:
-        task = asyncio.ensure_future(work)
+    def _spawn(
+        self, alias: str, settle: Callable[[str], Coroutine[Any, Any, Any]]
+    ) -> None:
+        self._provisioned.claim(alias)
+        try:
+            task = asyncio.ensure_future(settle(alias))
+        except BaseException:
+            self._provisioned.settled(alias)
+            raise
         self._tasks.add(task)
 
         def done(_: asyncio.Task[Any]) -> None:
@@ -558,6 +573,25 @@ class WorkerManager:
             self._registry.discard(worker)
             self._removing[alias] = worker
         await self._finish_removal(alias)
+
+    async def _finish_stop(self, alias: str) -> None:
+        """Stop a stopped worker whose record still names what it ran on."""
+        record = self._provisioned.get(alias)
+        worker = self._registry.try_get_by_alias(alias)
+        # An operator may have started the worker since the heartbeat scheduled this.
+        if (
+            record is None
+            or record.run_state is not RunState.STOPPED
+            or record.handle is None
+            or worker is None
+            or worker.has_pending_start()
+        ):
+            return
+        if not _is_live(worker):
+            # What the record names has gone, as when a cancelled stop finished.
+            self._provisioned.update(alias, strict=False, handle=None)
+            return
+        await self._stop_worker(worker)
 
     async def _finish_removal(self, alias: str) -> None:
         """Remove what a removing worker's record names, then the record."""
@@ -589,12 +623,13 @@ class WorkerManager:
     async def _start_worker(self, worker: WorkerAdapter) -> bool:
         if not self.is_started:
             raise ManagerNotStartedError()
-        if worker.closed:
-            raise ValueError(f"Worker '{worker.alias}' is being destroyed")
+        self._refuse_if_removing(worker)
         if worker.status is not WorkerStatus.STOPPED or await worker.runs_held_worker():
             raise ValueError(
                 f"Worker '{worker.alias}' is starting, running or stopping"
             )
+        # A removal may have begun while the check above waited.
+        self._refuse_if_removing(worker)
 
         alias = worker.alias
         with self._provisioned.operating(alias):
@@ -613,6 +648,13 @@ class WorkerManager:
             self.logger.error("Worker %s failed to start", alias)
             return False
         return True
+
+    def _refuse_if_removing(self, worker: WorkerAdapter) -> None:
+        record = self._provisioned.get(worker.alias)
+        if worker.closed or (
+            record is not None and record.state is RecordState.REMOVING
+        ):
+            raise ValueError(f"Worker '{worker.alias}' is being destroyed")
 
     def _destroy_worker(self, worker: WorkerAdapter) -> None:
         if worker in self._destroyed:
@@ -682,8 +724,10 @@ class WorkerManager:
 
         if recorded:
             if not success:
-                # The heartbeat removes what the record names, then the record.
-                self._removing[worker_alias] = worker
+                # The heartbeat removes what the record names, then the record,
+                # unless a concurrent removal already forgot it.
+                if worker_alias in self._provisioned:
+                    self._removing[worker_alias] = worker
                 return False
             self._confirm_removal(worker_alias, worker)
 

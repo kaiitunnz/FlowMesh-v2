@@ -137,6 +137,9 @@ class ProvisionedWorkers:
     """The records of a node's provisioned workers and what their recovery still
     owes, by alias."""
 
+    # Called on the supervisor's event loop, except the handle commit from a launch
+    # thread; ``_lock`` serializes every record write.
+
     def __init__(self, store: WorkerProvisioningStore) -> None:
         self._store = store
         # A launching thread commits a handle while the loop writes the rest.
@@ -188,11 +191,17 @@ class ProvisionedWorkers:
 
     def update(self, alias: str, strict: bool = True, **changes: Any) -> None:
         """Change ``alias``'s record. When the store write fails, a strict update raises
-        and changes nothing; any other keeps the change for ``retry_unsaved``."""
+        and changes nothing; any other keeps the change for ``retry_unsaved``.
+
+        A removing record stays removing until it is forgotten; a change of state is
+        dropped from it.
+        """
         with self._lock:
             record = self._records.get(alias)
             if record is None:
                 return
+            if record.state is RecordState.REMOVING:
+                changes.pop("state", None)
             updated = record.model_copy(update=changes)
             try:
                 self._store.put(updated)
@@ -209,15 +218,8 @@ class ProvisionedWorkers:
         """Return the callback a worker's adapter reports what it launched to."""
 
         def commit(handle: ProviderHandle | None) -> None:
-            with self._lock:
-                record = self._records.get(alias)
-                launched = (
-                    handle is not None
-                    and record is not None
-                    and record.state is RecordState.PROVISIONING
-                )
-                state = {"state": RecordState.PRESENT} if launched else {}
-                self.update(alias, strict=False, handle=handle, **state)
+            state = {"state": RecordState.PRESENT} if handle is not None else {}
+            self.update(alias, strict=False, handle=handle, **state)
 
         return commit
 
@@ -265,7 +267,7 @@ class ProvisionedWorkers:
         """Mark an operator's lifecycle operation on ``alias``, which ends a restored
         worker's grace and keeps the heartbeat off it."""
         self._awaiting.discard(alias)
-        self._in_flight[alias] += 1
+        self.claim(alias)
         try:
             yield
         finally:
@@ -273,12 +275,13 @@ class ProvisionedWorkers:
 
     def retry_unsaved(self) -> None:
         """Write again the records a lenient update could not save."""
-        for alias in list(self._unsaved):
+        with self._lock:
+            unsaved = list(self._unsaved)
+        for alias in unsaved:
             self.update(alias, strict=False)
 
     def due(self, now: float) -> list[tuple[str, Due]]:
-        """Return what each record no operation is under way on is owed, and claim
-        those aliases until ``settled``."""
+        """Return what each record no operation is under way on is owed."""
         deadline = self._grace_deadline
         expired = deadline is not None and now >= deadline
         due: list[tuple[str, Due]] = []
@@ -295,9 +298,11 @@ class ProvisionedWorkers:
                 due.append((alias, Due.EXPIRE))
             elif record.handle is not None and record.run_state is RunState.STOPPED:
                 due.append((alias, Due.FINISH_STOP))
-        for alias, _ in due:
-            self._in_flight[alias] += 1
         return due
+
+    def claim(self, alias: str) -> None:
+        """Keep the heartbeat off ``alias`` until ``settled``."""
+        self._in_flight[alias] += 1
 
     def settled(self, alias: str) -> None:
         """End one operation or claim on ``alias``."""

@@ -179,15 +179,37 @@ def test_no_grace_expires_before_it_opens() -> None:
     assert provisioned.due(1e9) == []
 
 
-def test_what_is_due_stays_claimed_until_settled() -> None:
+def test_a_claimed_alias_is_not_due_until_settled() -> None:
     provisioned, _ = _provisioned(
         worker_record("w1", state=RecordState.REMOVING, handle=_HANDLE)
     )
 
     assert provisioned.due(0.0) == [("w1", Due.REMOVE)]
+    assert provisioned.due(0.0) == [("w1", Due.REMOVE)]
+    provisioned.claim("w1")
     assert provisioned.due(0.0) == []
     provisioned.settled("w1")
     assert provisioned.due(0.0) == [("w1", Due.REMOVE)]
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_a_removing_record_stays_removing_until_forgotten(strict: bool) -> None:
+    provisioned, store = _provisioned(
+        worker_record("w1", state=RecordState.REMOVING, handle=_HANDLE)
+    )
+
+    provisioned.update(
+        "w1",
+        strict=strict,
+        run_state=RunState.STOPPED,
+        state=RecordState.PROVISIONING,
+    )
+    provisioned.launch_ended("w1", None)
+    provisioned.handle_committer("w1")(None)
+
+    record = _stored(store)["w1"]
+    assert record.state is RecordState.REMOVING
+    assert (record.run_state, record.handle) == (RunState.STOPPED, None)
 
 
 def test_an_operation_ends_the_grace_and_keeps_the_heartbeat_off() -> None:
