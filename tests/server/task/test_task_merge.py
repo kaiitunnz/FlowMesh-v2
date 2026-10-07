@@ -803,7 +803,7 @@ async def test_a_restored_task_merges_under_its_current_key() -> None:
     legacy_key = "vllm:legacy-unscoped"
     for task_id in (x["a"], y["b"]):
         runtime._tasks[task_id].merge_key = legacy_key
-        runtime._persist_locked(task_id)
+        runtime._committer.persist_locked(task_id)
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -870,7 +870,7 @@ async def test_a_restart_returns_the_children_of_a_parent_no_longer_running(
     ids = await _dispatch_merged(runtime, dispatch=False)
     if parent_status != TaskStatus.PENDING:
         runtime._tasks[ids["a"]].status = parent_status
-        runtime._persist_locked(ids["a"])
+        runtime._committer.persist_locked(ids["a"])
 
     restored = _runtime(registry)
     await restored.rehydrate()

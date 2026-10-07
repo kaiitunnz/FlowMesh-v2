@@ -19,7 +19,7 @@ from server.orchestration.tool_dispatch import ToolInvocationEnvelope
 from server.task.models import EventEffect, SettleOutcome
 from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime
-from server.task.runtime.facade import _HeldWrites, _Unacknowledged
+from server.task.runtime.commits import HeldWrites, _Unacknowledged
 from server.task.runtime.terminations import Termination
 from shared.tools.contract import MediatedOperationOutcome
 from tests.server.dispatch_helpers import record_dispatch
@@ -172,15 +172,17 @@ def test_a_save_under_a_held_report_keeps_its_release_held() -> None:
     scenario = _Scenario()
     runtime = scenario.runtime
     termination = Termination([], [], resident_invocation_ids=["inv-x"])
-    current = runtime._report_writes.held = _HeldWrites(error=RuntimeError("down"))
+    current = runtime._committer.report_writes.held = HeldWrites(
+        error=RuntimeError("down")
+    )
     try:
         with runtime._cv:
             runtime._terminations.hold_termination_locked(
                 scenario.workflow_id, termination
             )
-            runtime._save_ledger_locked(scenario.workflow_id)
+            runtime._committer.save_ledger_locked(scenario.workflow_id)
     finally:
-        runtime._report_writes.held = None
+        runtime._committer.report_writes.held = None
 
     assert runtime._terminations.pending_terminations == []
     assert runtime._terminations.undurable_terminations[scenario.workflow_id] == [
@@ -198,11 +200,11 @@ def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
     termination = Termination([], [], resident_invocation_ids=["inv-x"])
     with runtime._cv:
         runtime._terminations.hold_termination_locked(scenario.workflow_id, termination)
-    runtime._unacknowledged[planner] = _Unacknowledged(
+    runtime._committer.unacknowledged[planner] = _Unacknowledged(
         "TASK_CANCELLED",
         "wkr-1",
         "dsp-p",
-        _HeldWrites(workflow_ids=[scenario.workflow_id]),
+        HeldWrites(workflow_ids=[scenario.workflow_id]),
         SettleOutcome(EventEffect.SETTLED, "cancelled", [], []),
     )
 

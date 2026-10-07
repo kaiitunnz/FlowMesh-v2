@@ -436,7 +436,7 @@ async def test_a_check_that_fails_to_apply_runs_again_without_stalling_the_drive
     fixture.report(_unavailable(task_id, [reference]))
     drives: list[str] = []
     monkeypatch.setattr(runtime, "_redrive_workflow", drives.append)
-    commit = runtime._commit_locked
+    commit = runtime._committer.commit_locked
     failures = [RuntimeError("redis down")]
 
     def _flaky_commit(*task_ids: str) -> None:
@@ -444,7 +444,7 @@ async def test_a_check_that_fails_to_apply_runs_again_without_stalling_the_drive
             raise failures.pop()
         commit(*task_ids)
 
-    monkeypatch.setattr(runtime, "_commit_locked", _flaky_commit)
+    monkeypatch.setattr(runtime._committer, "commit_locked", _flaky_commit)
     fixture.scheduler.run_due()
 
     assert drives == [workflow_id]

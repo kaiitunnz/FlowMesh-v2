@@ -196,14 +196,16 @@ class _WorkerRegistryStub:
         return []
 
 
-def _runtime(registry: FakeRegistry, workers: Any = None) -> TaskRuntime:
+def _runtime(
+    registry: FakeRegistry, workers: Any = None, vault: Any = None
+) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
         cast(Any, workers or _WorkerRegistryStub()),
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-test"),
-        credential_vault=InMemoryCredentialVault(),
+        credential_vault=vault if vault is not None else InMemoryCredentialVault(),
     )
 
 

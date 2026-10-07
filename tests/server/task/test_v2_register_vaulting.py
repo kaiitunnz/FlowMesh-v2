@@ -151,7 +151,7 @@ async def test_repersist_with_no_terminal_tasks_commits_the_schedule():
     calls: list = []
     reg.commit_transition = lambda *a, **k: calls.append((a, k))  # type: ignore[method-assign]
     with runtime._cv:
-        runtime._repersist_terminal_workflow_locked(workflow_id)
+        runtime._committer.repersist_terminal_workflow_locked(workflow_id)
     assert len(calls) == 1
     assert calls[0][1].get("sched") is not None
 
@@ -165,7 +165,7 @@ async def test_reclaim_on_a_non_final_settlement_is_a_noop():
     calls: list = []
     reg.commit_transition = lambda *a, **k: calls.append((a, k))  # type: ignore[method-assign]
     with runtime._cv:
-        runtime._reclaim_vault_if_settled_locked(workflow_id)
+        runtime._committer.reclaim_vault_if_settled_locked(workflow_id)
     assert calls == []
     assert workflow_id not in vault.purged
 

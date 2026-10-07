@@ -998,4 +998,4 @@ async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> No
         if call.args[0].type == "TASK_REQUEUED"
     ]
     assert len(requeued) == 1
-    assert task_id not in runtime._unacknowledged
+    assert task_id not in runtime._committer.unacknowledged

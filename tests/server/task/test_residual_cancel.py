@@ -395,7 +395,7 @@ async def test_a_committed_cancelling_task_stays_in_the_dispatched_set() -> None
     registry.commit_transition = spy  # type: ignore[method-assign]
     with runtime._cv:
         runtime._tasks[loser].status = TaskStatus.CANCELLING
-        runtime._commit_locked(loser)
+        runtime._committer.commit_locked(loser)
 
     assert dispatched == [loser]
 

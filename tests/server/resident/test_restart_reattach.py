@@ -347,7 +347,7 @@ def test_a_restart_never_reattaches_an_endpoint_no_dispatch_reported() -> None:
     assert record is not None
     record.latest_update_dispatch_id = None
     with node.runtime._lock:
-        node.runtime._persist_locked(serve_task_id)
+        node.runtime._committer.persist_locked(serve_task_id)
 
     node.restart()
 

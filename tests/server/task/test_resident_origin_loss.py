@@ -155,7 +155,7 @@ def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
 
         registry.save_ledger_snapshot = save  # type: ignore[method-assign]
         with runtime._cv:
-            runtime._save_ledger_locked(workflow_id)
+            runtime._committer.save_ledger_locked(workflow_id)
         runtime._release_pending_terminations()
         assert releases == [env.invocation_id]
 
