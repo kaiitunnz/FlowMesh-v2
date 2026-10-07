@@ -50,16 +50,12 @@ class PrivateStateUnavailableReason(StrEnum):
     CONTAINMENT_VIOLATION = "containment_violation"
     # A step's writers were not proved stopped, so no recoverable capture exists.
     QUIESCENCE_UNPROVED = "quiescence_unproved"
-    # A component declares a capture mode this holder cannot capture or restore.
     UNSUPPORTED_CAPTURE = "unsupported_capture"
 
 
 class PrivateStateUnavailable(Exception):
-    """Raised when a generation cannot be safely captured or supplied in full.
-
-    The continuation fails closed: it neither seals under a live writer nor resumes
-    against a fresh, partial, or foreign generation.
-    """
+    """Raised when a generation cannot be safely captured or supplied in full; the
+    continuation fails closed."""
 
     def __init__(
         self, reason: PrivateStateUnavailableReason, detail: str, *, reference_id: str

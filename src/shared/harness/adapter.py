@@ -302,11 +302,9 @@ class HarnessAdapter(ABC):
     def quiesce(self, activation_id: str) -> None:
         """End every process and writer the step started on the activation's state.
 
-        Returns only once nothing the backend launched can still write the activation's
-        private state, which is what lets the step's generation seal; raises
-        :class:`HarnessQuiescenceError` when that cannot be proved within the backend's
-        bound. The adapter is spent afterwards, and the next step resumes on a fresh
-        harness from the sealed generation and its capsule.
+        Return only once nothing the backend launched can still write the activation's
+        private state, or raise :class:`HarnessQuiescenceError` when that is not proved
+        within the backend's bound. The adapter is spent afterwards.
         """
 
     def mediated_facades(self) -> frozenset[MediatedFacade]:

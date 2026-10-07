@@ -184,8 +184,8 @@ class PrivateStateHolder:
         )
 
     def mark_unsealable(self, state: MaterializedState) -> None:
-        """Refuse every later open of a lineage whose step could not prove its writers
-        stopped, so no attempt resumes on or seals a tree no fence covers."""
+        """Mark a lineage whose step could not prove its writers stopped, so every later
+        open of it fails as ``quiescence_unproved``."""
         marker = self._root / state.reference_id / _UNSEALABLE_FILE
         try:
             marker.touch(mode=0o600, exist_ok=True)

@@ -87,12 +87,14 @@ to write it; the executor materializes the bound generation before building the 
 and seals the components together when the step yields.
 
 A step seals only once every writer it started on that state is proved stopped: the
-adapter quiesces its harness — the `codex` app-server and every process it started
-exit — and the dispatch's sandbox admits no further command and waits out those in
-flight. The next step resumes on a fresh harness process from the sealed generation and
-its capsule. A step whose writers are not proved stopped seals nothing and fails without
-a retry as `PrivateStateUnavailable: quiescence_unproved`, and its lineage refuses every
-later dispatch.
+adapter ends its harness, for `codex` the app-server and every process it started, and
+the dispatch's sandbox admits no further command and waits out those in flight. The next
+step resumes on a fresh harness process from the sealed generation and its capsule. A
+step whose writers are not proved stopped seals nothing and fails without a retry as
+`PrivateStateUnavailable: quiescence_unproved`, or settles as cancelled when its
+cancellation was requested; every later dispatch on its lineage fails the same way. The
+worker retries ending such a step's processes at its next few cleanups and then leaves
+them running.
 
 The holder verifies every required component against its seal before the harness starts,
 refuses an attachment whose write epoch a later dispatch superseded, and keeps each

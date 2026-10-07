@@ -288,20 +288,19 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the capacity admission a `ServiceClaim` carries.
   Each dispatch mints a fresh write epoch, so a superseded holder can neither write nor
   seal. Components seal together at one quiescence fence, so a harness home never
-  resumes beside a workspace from another private-state generation. The fence holds
-  once every writer the step started on the state — its harness's whole process tree and
-  its sandbox commands — is proved stopped, so the next step resumes on a fresh harness
-  process; a step that cannot prove its writers stopped seals nothing, fails as
-  `quiescence_unproved`, and its lineage refuses later dispatches. While a generation is
-  sealed local to the holder that produced it, that holder is a hard scheduler
-  feasibility constraint resolved at dispatch: the episode lane yields as any other does,
-  and an episode waits while its holder is busy. A resident replica prefers a worker
+  resumes beside a workspace from another private-state generation. A step reaches that
+  fence only once every writer it started — its harness's whole process tree and its
+  sandbox commands — is proved stopped, and the next step starts a fresh harness process
+  on the sealed generation. While a generation is sealed local to the holder that
+  produced it, that holder is a hard scheduler feasibility constraint resolved at
+  dispatch: the episode lane yields as any other does, and an episode waits while its
+  holder is busy. A resident replica prefers a worker
   holding no agent's private state when one is idle, a public `serve` task waits for
   one, and a demand replica occupying a waiting episode's holder retires once no claim
   holds it and no claim of its family is pending, so the episode resumes there. Owner
-  loss, a worker-incarnation change, or a component that does not match its seal fails
-  closed as a typed `PrivateStateUnavailable` rather than resuming against a fresh or
-  partial home.
+  loss, a worker-incarnation change, a component that does not match its seal, or a
+  step that cannot prove its writers stopped fails closed as a typed
+  `PrivateStateUnavailable`.
   One activation reaches another's state only by holding a valid binding and attachment
   for it, which the ledger's owner and write-epoch fences decide; the `0700` private
   root, keyed by the opaque reference, separates a holder's lineages from other users on
@@ -318,9 +317,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   network egress, bounds its resources, and reaps every process it started before the
   command completes; commands become durable together at the agent's ordinary boundary
   seal, and a loss before the seal fails closed as `PrivateStateUnavailable`. A child
-  runs commands only where its parent delegated the interface. The feature is a single-trusted-tenant development posture, not
-  multi-tenant isolation; an operator enables it for the fleet with
-  `AGENT_SANDBOX_ENABLED`.
+  runs commands only where its parent delegated the interface. The feature is a
+  single-trusted-tenant development posture, not multi-tenant isolation; an operator
+  enables it for the fleet with `AGENT_SANDBOX_ENABLED`.
 - **Author-owned sandbox egress.** An agent that declares the distinct `sandbox.egress`
   authority runs its commands with the network fence relaxed, where the deployment sets
   `AGENT_SANDBOX_EGRESS_ENABLED`; a ceiling that carries the interface only to delegate
