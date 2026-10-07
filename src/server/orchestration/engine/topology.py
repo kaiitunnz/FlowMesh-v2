@@ -43,7 +43,8 @@ def effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryCl
 class PlanTopology:
     """Answers operator, edge and region-structure questions about one compiled plan.
 
-    Every component reads ``operators`` through this object on each lookup.
+    Every component reads ``operators`` through this object on each lookup and never
+    copies it, so a replaced operator is seen everywhere.
     """
 
     def __init__(self, bundle: PersistedV2Workflow) -> None:

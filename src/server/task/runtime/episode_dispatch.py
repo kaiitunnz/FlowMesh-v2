@@ -235,7 +235,7 @@ def service_episode_dispatch(
     engine = engines.get(record.workflow_id) if record else None
     if engine is None:
         return None
-    dependency = resident_served_dependency_locked(engine, task_id)
+    dependency = _resident_served_dependency_locked(engine, task_id)
     if dependency is None:
         return None
     _capsule, outcomes = engine.episode_context(task_id)
@@ -254,11 +254,11 @@ def serves_from_replica(
     engine = engines.get(record.workflow_id) if record else None
     return (
         engine is not None
-        and resident_served_dependency_locked(engine, task_id) is not None
+        and _resident_served_dependency_locked(engine, task_id) is not None
     )
 
 
-def resident_served_dependency_locked(
+def _resident_served_dependency_locked(
     engine: OrchestrationEngine, task_id: str
 ) -> ServiceDependency | None:
     """The resident dependency a leaf's dispatch is served from, or None."""
@@ -266,7 +266,7 @@ def resident_served_dependency_locked(
     if dependency is None or engine.agent_operator(task_id) is not None:
         return None
     if engine.embodiment_menu(task_id) is not None:
-        resolved = resolved_embodiment_locked(engine, task_id)
+        resolved = _resolved_embodiment_locked(engine, task_id)
         if (
             resolved is None
             or resolved.kind is not InferenceEmbodimentKind.RESIDENT_SERVED
@@ -275,7 +275,7 @@ def resident_served_dependency_locked(
     return dependency
 
 
-def resolved_embodiment_locked(
+def _resolved_embodiment_locked(
     engine: OrchestrationEngine, task_id: str
 ) -> ResolvedEmbodiment | None:
     menu = engine.embodiment_menu(task_id)

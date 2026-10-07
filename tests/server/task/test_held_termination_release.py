@@ -237,7 +237,7 @@ def _lock_probe(runtime: TaskRuntime) -> list[bool]:
 
 def test_a_mediated_outcome_releases_off_the_lock() -> None:
     runtime = _runtime(FakeRegistry())
-    runtime._router.reap_mediated_op = lambda *_: None  # type: ignore[method-assign]
+    runtime._mediated_ops.reap_mediated_op = lambda *_: None  # type: ignore[method-assign]
     owned = _lock_probe(runtime)
 
     runtime.settle_mediated_operation(

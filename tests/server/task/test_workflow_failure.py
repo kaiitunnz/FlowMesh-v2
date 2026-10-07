@@ -10,8 +10,8 @@ from server.orchestration.state import AttemptStatus, WorkItemStatus
 from server.task.models import TaskStatus
 from server.task.results import ResultUnavailable, ResultUnreadable
 from server.task.runtime import TaskRuntime
-from server.task.runtime.boundary_router import PendingOp
 from server.task.runtime.input_checks import _InputCheck
+from server.task.runtime.mediated_ops import PendingOp
 from shared.content import reference_for
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from tests.server.dispatch_helpers import record_dispatch
@@ -114,13 +114,13 @@ def test_the_agents_pending_operations_are_reaped() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry(), _Workers())
         workflow_id, writer, _engine, env = await _held_boundary(runtime)
-        runtime._router.pending_ops["mop-held"] = PendingOp(
+        runtime._mediated_ops.pending_ops["mop-held"] = PendingOp(
             writer, env.call_correlation, "wkr-1", "box", redrive_at=0.0
         )
 
         _fail(runtime, workflow_id)
 
-        assert runtime._router.pending_ops == {}
+        assert runtime._mediated_ops.pending_ops == {}
         assert [(f.frame_kind, f.payload["agent_task_id"]) for f in frames] == [
             ("reap", writer)
         ]

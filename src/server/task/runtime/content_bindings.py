@@ -51,12 +51,12 @@ def consumes_locked(
     resolution = input_resolution_locked(tasks, engines, task_id)
     if resolution is not None and resolution.reference == reference:
         return True
-    if upstream_result_is_locked(tasks, engines, original_deps, record, reference):
+    if _upstream_result_is_locked(tasks, engines, original_deps, record, reference):
         return True
     engine = engines.get(record.workflow_id)
     if engine is None:
         return False
-    if frozen_input_is_locked(tasks, engines, engine, task_id, reference):
+    if _frozen_input_is_locked(tasks, engines, engine, task_id, reference):
         return True
     _, outcomes = engine.episode_context(task_id)
     return any(
@@ -86,7 +86,7 @@ def upstream_task_ids_locked(
     return visited
 
 
-def upstream_result_is_locked(
+def _upstream_result_is_locked(
     tasks: dict[str, TaskRecord],
     engines: dict[str, OrchestrationEngine],
     original_deps: dict[str, set[str]],
@@ -113,7 +113,7 @@ def upstream_result_is_locked(
     return False
 
 
-def frozen_input_is_locked(
+def _frozen_input_is_locked(
     tasks: dict[str, TaskRecord],
     engines: dict[str, OrchestrationEngine],
     engine: OrchestrationEngine,

@@ -9,10 +9,7 @@ class ResidentServeTasks:
     """Records the dispatch each resident serve task runs under and tells resident
     capacity when one ends, reports an update, or should yield its worker."""
 
-    def __init__(
-        self,
-        tasks: dict[str, TaskRecord],
-    ) -> None:
+    def __init__(self, tasks: dict[str, TaskRecord]) -> None:
         self._tasks = tasks
         self.resident_task_ended: Callable[[str], None] | None = None
         self.resident_task_updated: Callable[[str], None] | None = None

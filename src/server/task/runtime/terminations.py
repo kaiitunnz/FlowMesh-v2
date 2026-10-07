@@ -8,7 +8,7 @@ from shared.schemas.command import InterruptMessage, RevokeMessage
 
 from ...registries.worker import WorkerRegistry
 from ..models import TaskRecord, TaskStatus
-from .boundary_router import MediatedBoundaryRouter
+from .mediated_ops import MediatedOperations
 
 
 @dataclass(frozen=True)
@@ -32,17 +32,18 @@ class Termination:
 
 
 class TerminationRelease:
-    """Holds each termination until the ledger save it waits on succeeds, queues
-    interrupts and revokes, and sends them to workers off the lock."""
+    """Holds each termination until the ledger save it waits on succeeds, then
+    releases its resident credits and sends its interrupts, revokes and reaps to
+    workers off the lock."""
 
     def __init__(
         self,
-        router: MediatedBoundaryRouter,
+        mediated_ops: MediatedOperations,
         tasks: dict[str, TaskRecord],
         worker_registry: WorkerRegistry,
         logger: logging.Logger,
     ) -> None:
-        self._router = router
+        self._mediated_ops = mediated_ops
         self._tasks = tasks
         self._worker_registry = worker_registry
         self._logger = logger
@@ -132,7 +133,7 @@ class TerminationRelease:
         # lost or draining replica is not held forever.
         for invocation_id in termination.resident_invocation_ids:
             try:
-                self._router.release_resident_credit(invocation_id, failed=True)
+                self._mediated_ops.release_resident_credit(invocation_id, failed=True)
             except Exception:
                 self._logger.exception(
                     "Releasing the resident credit of %s failed", invocation_id
@@ -180,7 +181,7 @@ class TerminationRelease:
         # The worker drops a reaped operation and its custody.
         for worker_id, agent_task_id, call in termination.reaps:
             try:
-                self._router.reap_mediated_op(worker_id, agent_task_id, call)
+                self._mediated_ops.reap_mediated_op(worker_id, agent_task_id, call)
             except Exception:
                 self._logger.exception(
                     "Reaping the operation of %s on %s failed", agent_task_id, worker_id

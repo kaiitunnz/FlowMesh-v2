@@ -5,9 +5,7 @@ from typing import Any, cast
 
 import pytest
 
-from server.orchestration import OrchestrationEngine
 from server.orchestration.state import (
-    BoundaryEvent,
     InvocationState,
     LedgerSnapshot,
     PublicationOutcome,
@@ -27,7 +25,7 @@ from shared.harness import BoundaryEventKind
 from shared.tasks import TaskType
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.orchestration.helpers import engine as ledger_engine
-from tests.server.orchestration.helpers import recursive_agent_bundle
+from tests.server.orchestration.helpers import recursive_agent_bundle, spawn_in
 from tests.server.task.test_agent_episode_runtime import _SCRIPT, _step
 from tests.server.task.test_resident_origin_loss import (
     _capture_resident_boundary,
@@ -400,18 +398,6 @@ async def test_a_committed_cancelling_task_stays_in_the_dispatched_set() -> None
     assert dispatched == [loser]
 
 
-def _spawn_worker(eng: OrchestrationEngine, parent: str, call: str) -> str:
-    """Spawn one ``worker`` child under ``parent`` and return its task id."""
-    return eng.route_boundary_event(
-        parent,
-        BoundaryEvent(
-            kind=BoundaryEventKind.SPAWN,
-            call_correlation=call,
-            child_region_ref="worker",
-        ),
-    ).ready[0]
-
-
 def test_a_join_release_cancels_a_nested_subtree_and_fails_a_denied_admission() -> None:
     # An any-join that cancels its residual children feeds an external-effect leaf the
     # root grant does not cover.
@@ -425,10 +411,10 @@ def test_a_join_release_cancels_a_nested_subtree_and_fails_a_denied_admission() 
         recursive_agent_bundle(JoinCompletion.ANY, ResidualPolicy.CANCEL, effect)
     )
     eng.on_dispatched("A", "w1")
-    first = _spawn_worker(eng, "A", "s1")
+    first = spawn_in(eng, "A", "s1", "worker")
     eng.on_dispatched(first, "w2")
-    grandchild = _spawn_worker(eng, first, "g1")
-    second = _spawn_worker(eng, "A", "s2")
+    grandchild = spawn_in(eng, first, "g1", "worker")
+    second = spawn_in(eng, "A", "s2", "worker")
     eng.on_dispatched(second, "w3")
     eng.on_started(second)
 

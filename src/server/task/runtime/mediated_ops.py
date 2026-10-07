@@ -1,4 +1,4 @@
-"""The worker-originated mediated operations control has relayed."""
+"""Worker-originated mediated operations whose permits control has relayed."""
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -38,16 +38,15 @@ class PendingOp:
 # A pending operation's boundary fails once it has been re-driven this many times.
 _OP_REDRIVE_LIMIT = 5
 
-
 # A generous bound on a materialized external-model completion; a larger response
 # settles by reference under the reference-backed outcome contract.
 _MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
 
 
-class MediatedBoundaryRouter:
-    """Holds each mediated operation whose permit control relayed to its origin
-    worker, sizes and stamps permits, relays reaps and denials to workers, and
-    releases a settled invocation's resident credit."""
+class MediatedOperations:
+    """Holds each mediated operation whose permit was relayed to its origin worker,
+    sizes and stamps permits, relays reaps and denials to workers, and releases a
+    settled invocation's resident credit."""
 
     def __init__(
         self,
@@ -101,14 +100,12 @@ class MediatedBoundaryRouter:
         return pending
 
     def take_overdue(
-        self,
-        worker_id: str,
-        now: float,
-        exhausted: list[PendingOp],
-        redrive: list[tuple[str, PendingOp]],
-    ) -> None:
+        self, worker_id: str, now: float
+    ) -> tuple[list[PendingOp], list[tuple[str, PendingOp]]]:
         """Sort a worker's overdue operations into those out of re-drives, which are
         dropped, and those to re-drive, which are charged one."""
+        exhausted: list[PendingOp] = []
+        redrive: list[tuple[str, PendingOp]] = []
         for permit_id, op in list(self.pending_ops.items()):
             if op.worker_id != worker_id or op.redrive_at > now:
                 continue
@@ -118,6 +115,7 @@ class MediatedBoundaryRouter:
             else:
                 op.redrives += 1
                 redrive.append((permit_id, op))
+        return exhausted, redrive
 
     def discard_op(self, permit_id: str, op: PendingOp) -> None:
         """Drop a pending operation unless a re-mint replaced it."""
@@ -133,7 +131,7 @@ class MediatedBoundaryRouter:
         }
 
     def drop_worker_ops(self, worker_id: str) -> None:
-        """Drop every pending operation a departed worker originated."""
+        """Drop every pending operation a worker originated."""
         for permit_id, op in list(self.pending_ops.items()):
             if op.worker_id == worker_id:
                 del self.pending_ops[permit_id]

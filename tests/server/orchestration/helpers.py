@@ -10,7 +10,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Tracer
 
-from server.orchestration import OrchestrationEngine, ScopeBudget
+from server.orchestration import BoundaryEvent, OrchestrationEngine, ScopeBudget
 from server.orchestration.telemetry import TelemetrySpanEmitter
 from server.task.v2 import FrontendWorkflowSource, PersistedV2Workflow
 from server.task.v2.compiler.bindings import leaf_profile
@@ -267,3 +267,13 @@ def span_signature(span: ReadableSpan) -> tuple[object, ...]:
         span.end_time,
         tuple(sorted(dict(span.attributes or {}).items())),
     )
+
+
+def spawn_in(eng: OrchestrationEngine, task: str, call: str, role: str) -> str:
+    """Spawn one ``role`` child under ``task`` and return its task id."""
+    return eng.route_boundary_event(
+        task,
+        BoundaryEvent(
+            kind=BoundaryEventKind.SPAWN, call_correlation=call, child_region_ref=role
+        ),
+    ).ready[0]

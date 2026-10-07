@@ -50,7 +50,7 @@ def test_an_attached_worker_gets_its_pending_operation_re_minted() -> None:
             first["agent_task_id"],
             first["call_correlation"],
         )
-        assert list(runtime._router.pending_ops) == [again["permit_id"]]
+        assert list(runtime._mediated_ops.pending_ops) == [again["permit_id"]]
 
     asyncio.run(run())
 
@@ -75,7 +75,7 @@ def test_the_first_permit_s_outcome_settles_its_re_mint_too() -> None:
             )
         )
 
-        assert runtime._router.pending_ops == {}
+        assert runtime._mediated_ops.pending_ops == {}
 
     asyncio.run(run())
 

@@ -122,7 +122,8 @@ class SnapshotCodec:
         )
         self._ledger.trace = list(snapshot.trace)
 
-        # Rebuilt from the persisted openers.
+        # Not persisted: each region activation names the parent and operator that
+        # opened it.
         self._ledger.region_openers = {
             (a.parent_activation_id, a.operator_id): a.activation_id
             for a in self._ledger.activations.values()

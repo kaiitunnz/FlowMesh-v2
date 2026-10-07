@@ -16,7 +16,6 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration import (
-    Advance,
     OrchestrationEngine,
     PublicationOutcome,
     WorkItemStatus,
@@ -45,6 +44,7 @@ from server.task.v2.representations.template import TemplateEdge
 from shared.tasks import TaskType
 from shared.tasks.result_binding import ResultBinding
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
+from tests.server.dispatch_helpers import stage_agent_inputs
 from tests.server.result_store import make_result_reader, store_result
 from tests.server.task.test_v2_agent_harness import _bundle, _decl, _engine, _leaf
 from tests.server.task.test_v2_orchestration import (
@@ -306,9 +306,7 @@ spec:
 """
 
 
-def test_region_output_binds_the_child_region_join_to_the_merge_input(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_region_output_binds_the_child_region_join_to_the_merge_input() -> None:
     from server.task.parser import parse_workflow
     from server.task.v2 import FrontendWorkflowSource, compile_workflow
     from server.task.v2.compiler.agent_binding import AgentBindingDefaults
@@ -372,15 +370,7 @@ def _write_result(
 def _drive_inputs(runtime: TaskRuntime, engine: Any, workflow_id: str) -> None:
     """Advance an engine's blocked agents as an applied advance does, then drive."""
     runtime._engines[workflow_id] = engine
-    agent_inputs.stage_agent_inputs_locked(
-        runtime._tasks,
-        runtime._engines,
-        runtime._redrive,
-        runtime._input_budget_bytes,
-        workflow_id,
-        engine,
-        Advance(),
-    )
+    stage_agent_inputs(runtime, workflow_id, engine)
     runtime._redrive.run_due()
 
 
@@ -436,15 +426,7 @@ def test_an_input_is_not_read_under_the_runtime_lock(
     runtime._results.read_reference = _recording_read  # type: ignore[method-assign]
     runtime._engines["wfl-test"] = engine
     with runtime._lock:
-        agent_inputs.stage_agent_inputs_locked(
-            runtime._tasks,
-            runtime._engines,
-            runtime._redrive,
-            runtime._input_budget_bytes,
-            "wfl-test",
-            engine,
-            Advance(),
-        )
+        stage_agent_inputs(runtime, "wfl-test", engine)
     assert not reads and not engine.accepted_inputs_for_task("M")
     runtime._redrive.run_due()
     assert reads == [False]
@@ -458,15 +440,7 @@ def test_an_input_read_for_a_superseded_snapshot_is_read_again(
     engine = _merge_engine()
     _write_result(runtime, monkeypatch, "P", {"taskType": "agent", "value": "first"})
     runtime._engines["wfl-test"] = engine
-    agent_inputs.stage_agent_inputs_locked(
-        runtime._tasks,
-        runtime._engines,
-        runtime._redrive,
-        runtime._input_budget_bytes,
-        "wfl-test",
-        engine,
-        Advance(),
-    )
+    stage_agent_inputs(runtime, "wfl-test", engine)
     read = runtime._results.read_reference
     rebound: list[bool] = []
 

@@ -461,7 +461,7 @@ def test_held_model_turn_mints_a_worker_permit_without_a_settle() -> None:
         assert permit.request_digest == "deadbeef"
         assert permit.invocation_id and permit.idempotency_key
         # No suspending boundary and no pending op: the held turn settles in-worker.
-        assert not runtime._router.pending_ops
+        assert not runtime._mediated_ops.pending_ops
 
     asyncio.run(run())
 
@@ -669,13 +669,12 @@ def test_cancellation_reaps_a_pending_mediated_op() -> None:
         writer = ids["writer"]
 
         _dispatch_agent(runtime, writer)
-        assert (
-            runtime._router.pending_ops
-        )  # a permit is outstanding on the origin worker
+        # A permit is outstanding on the origin worker.
+        assert runtime._mediated_ops.pending_ops
 
         runtime.cancel_workflow(runtime._tasks[writer].workflow_id)
         assert len(_reap_frames(runtime)) == 1
-        assert not runtime._router.pending_ops
+        assert not runtime._mediated_ops.pending_ops
 
     asyncio.run(run())
 
@@ -694,7 +693,7 @@ def test_origin_worker_loss_fails_the_boundary_clean() -> None:
         # stale pending-op mapping is dropped.
         runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
         assert runtime._tasks[writer].status == TaskStatus.FAILED
-        assert not runtime._router.pending_ops
+        assert not runtime._mediated_ops.pending_ops
 
     asyncio.run(run())
 
@@ -845,7 +844,7 @@ def test_a_gone_vaulted_key_fails_the_boundary_without_a_permit() -> None:
         _dispatch_agent(runtime, writer, script=_MODEL_SCRIPT)
 
         assert not _permit_frames(runtime)
-        assert not runtime._router.pending_ops
+        assert not runtime._mediated_ops.pending_ops
         # The worker drops the captured request it can no longer egress.
         assert _reap_frames(runtime) == [
             {"agent_task_id": writer, "call_correlation": "m0"}
@@ -1105,7 +1104,7 @@ def test_a_boundary_a_drained_worker_could_not_finish_fails_the_agent() -> None:
 
         record = runtime.get_record(writer)
         assert record is not None and record.status is TaskStatus.FAILED
-        assert not runtime._router.pending_ops
+        assert not runtime._mediated_ops.pending_ops
 
     asyncio.run(run())
 

@@ -48,9 +48,9 @@ _DEDUP_CAPABLE = frozenset(
 
 
 class EpisodeBoundaryRouter:
-    """Routes each boundary an episode yields into the ledger, validating an agent's
-    against its signature and authority, suspends the episode on it and settles its
-    outcome."""
+    """Routes each boundary an episode yields into the ledger: validates an agent's
+    boundary against its signature and authority, suspends the episode on it, and
+    settles its outcome."""
 
     def __init__(
         self,

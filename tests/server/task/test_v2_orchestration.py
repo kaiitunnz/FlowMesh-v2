@@ -201,7 +201,7 @@ def _runtime(
 ) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
-        cast(Any, workers or _WorkerRegistryStub()),
+        cast(Any, workers if workers is not None else _WorkerRegistryStub()),
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-test"),
@@ -324,9 +324,9 @@ def _live_runtime(
 ) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
-        cast(Any, workers or _WorkerRegistryStub()),
+        cast(Any, workers if workers is not None else _WorkerRegistryStub()),
         OrchestrationConfig(),
-        reader or make_result_reader(),
+        reader if reader is not None else make_result_reader(),
         logging.getLogger(name),
         credential_vault=InMemoryCredentialVault(),
         redrive=lambda fire, logger: StoreRedriveScheduler(

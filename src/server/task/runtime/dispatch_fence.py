@@ -135,7 +135,7 @@ class DispatchFence:
                 self._record_dispatch_locked(record, publish)
         return True
 
-    def begin_publish(self, task_id: str, publish: Publish) -> bool:
+    def begin_publish_locked(self, task_id: str, publish: Publish) -> bool:
         """Mark a dispatch as being published, so its worker's earliest events apply."""
         record = self._tasks.get(task_id)
         if record is None or record.status != TaskStatus.PENDING:
@@ -143,7 +143,7 @@ class DispatchFence:
         self.publishing[task_id] = publish
         return True
 
-    def mark_dispatched(self, task_id: str) -> bool:
+    def mark_dispatched_locked(self, task_id: str) -> bool:
         """Record the publish `begin_publish` marked; returns whether it holds the
         task."""
         publish = self.publishing.pop(task_id, None)
@@ -216,7 +216,7 @@ class DispatchFence:
         if worker_id == held_worker and dispatch_id in (None, held_dispatch):
             self._committer.recommit_locked(HeldWrites(moved.copy()))
 
-    def dispatch_in_flight(
+    def dispatch_in_flight_locked(
         self, task_id: str, dispatch_id: str, worker_id: str
     ) -> bool:
         """Whether a dispatch to a worker is being published or holds its task, and

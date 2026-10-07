@@ -60,6 +60,7 @@ from server.task.v2.representations.template import (
 )
 from server.task.v2.representations.versioning import VersionId
 from shared.tasks import TaskType
+from tests.server.orchestration.helpers import spawn_in
 
 _SIGNATURE = BoundarySignature(
     events=(
@@ -973,11 +974,11 @@ def test_a_failed_agent_instance_fails_only_its_own_region_scope() -> None:
     bundle = _recursive_agent_bundle()
     eng = _engine(bundle, budget=ScopeBudget(max_scope_depth=8))
     _dispatch_agent(eng)
-    failing = _spawn_in(eng, "A", "c0", "worker")
-    sibling = _spawn_in(eng, "A", "c1", "worker")
+    failing = spawn_in(eng, "A", "c0", "worker")
+    sibling = spawn_in(eng, "A", "c1", "worker")
     for instance in (failing, sibling):
         eng.on_dispatched(instance, "w1")
-    grandchild = _spawn_in(eng, failing, "c0", "self")
+    grandchild = spawn_in(eng, failing, "c0", "self")
     eng.on_dispatched(grandchild, "w1")
     failing_act = _work_item(eng, failing).activation_id
 
@@ -990,7 +991,7 @@ def test_a_failed_agent_instance_fails_only_its_own_region_scope() -> None:
     assert failed_scope not in snapshot.released_scopes
     assert not snapshot.failed_regions
     # A sibling instance of the same template still spawns and releases its own region.
-    nephew = _spawn_in(eng, sibling, "c0", "self")
+    nephew = spawn_in(eng, sibling, "c0", "self")
     eng.on_dispatched(nephew, "w1")
     eng.on_succeeded(nephew)
     eng.on_succeeded(sibling)
@@ -1015,9 +1016,9 @@ def _self_recursive_agent() -> PersistedV2Workflow:
 def _nested_level(eng: OrchestrationEngine) -> tuple[str, str]:
     """A's instance I1 spawns a grandchild G into I1's own scope of the region."""
     _dispatch_agent(eng)
-    i1 = _spawn_in(eng, "A", "c0", "self")
+    i1 = spawn_in(eng, "A", "c0", "self")
     eng.on_dispatched(i1, "w1")
-    grandchild = _spawn_in(eng, i1, "c0", "self")
+    grandchild = spawn_in(eng, i1, "c0", "self")
     eng.on_dispatched(grandchild, "w1")
     return i1, grandchild
 
@@ -1061,7 +1062,7 @@ _SELF_SEAL = BoundaryEvent(
 def test_a_nested_levels_release_delivers_nothing_downstream() -> None:
     eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
     _dispatch_agent(eng)
-    instance = _spawn_in(eng, "A", "c0", "self")
+    instance = spawn_in(eng, "A", "c0", "self")
     eng.on_dispatched(instance, "w1")
 
     # The instance's own, never-entered region closes as it completes.
@@ -1074,7 +1075,7 @@ def test_a_nested_levels_release_delivers_nothing_downstream() -> None:
 def test_a_failed_agent_fails_what_a_nested_level_released() -> None:
     eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
     _dispatch_agent(eng)
-    instance = _spawn_in(eng, "A", "c0", "self")
+    instance = spawn_in(eng, "A", "c0", "self")
     eng.on_dispatched(instance, "w1")
     assert eng.on_succeeded(instance).ready == []
 
@@ -1158,15 +1159,6 @@ def _work_item(eng: OrchestrationEngine, task: str) -> WorkItem:
     return wi
 
 
-def _spawn_in(eng: OrchestrationEngine, task: str, call: str, role: str) -> str:
-    return eng.route_boundary_event(
-        task,
-        BoundaryEvent(
-            kind=BoundaryEventKind.SPAWN, call_correlation=call, child_region_ref=role
-        ),
-    ).ready[0]
-
-
 def _numbered_by_scope_order(eng: OrchestrationEngine) -> bool:
     """Each child's index counts every activation its scope held before it."""
     seen: dict[str, int] = {}
@@ -1180,18 +1172,18 @@ def _numbered_by_scope_order(eng: OrchestrationEngine) -> bool:
 def test_a_child_index_counts_every_activation_in_its_scope_across_a_restart() -> None:
     eng = _engine(_recursive_agent_bundle(), budget=ScopeBudget(max_scope_depth=8))
     _dispatch_agent(eng)
-    lvl1 = _spawn_in(eng, "A", "c0", "worker")
+    lvl1 = spawn_in(eng, "A", "c0", "worker")
     eng.on_dispatched(lvl1, "w1")
     # The nested spawn mints lvl1's region opener inside lvl1's own scope.
-    _spawn_in(eng, lvl1, "c0", "self")
-    second = _spawn_in(eng, "A", "c1", "worker")
+    spawn_in(eng, lvl1, "c0", "self")
+    second = spawn_in(eng, "A", "c1", "worker")
 
     activations = {a.activation_id: a for a in eng.to_snapshot().activations}
     assert activations[second].child_index == 2
     assert _numbered_by_scope_order(eng)
 
     restored = OrchestrationEngine(eng.to_snapshot(), eng._topology.bundle)
-    third = _spawn_in(restored, "A", "c2", "worker")
+    third = spawn_in(restored, "A", "c2", "worker")
     activations = {a.activation_id: a for a in restored.to_snapshot().activations}
     assert activations[third].child_index == 3
     assert _numbered_by_scope_order(restored)
@@ -1202,13 +1194,13 @@ def test_the_activation_budget_holds_across_a_restart() -> None:
         _spawning_agent(child=_leaf("child")), budget=ScopeBudget(max_activations=2)
     )
     _dispatch_agent(eng)
-    _spawn_in(eng, "A", "c0", "worker")
+    spawn_in(eng, "A", "c0", "worker")
     restored = OrchestrationEngine(
         eng.to_snapshot(), eng._topology.bundle, budget=ScopeBudget(max_activations=2)
     )
-    _spawn_in(restored, "A", "c1", "worker")
+    spawn_in(restored, "A", "c1", "worker")
     with pytest.raises(RegionError):
-        _spawn_in(restored, "A", "c2", "worker")
+        spawn_in(restored, "A", "c2", "worker")
 
 
 def test_spawning_a_child_never_rescans_every_activation() -> None:
@@ -1229,7 +1221,7 @@ def test_spawning_a_child_never_rescans_every_activation() -> None:
     sys.setprofile(count)
     try:
         for i in range(8):
-            _spawn_in(eng, "A", f"c{i}", "worker")
+            spawn_in(eng, "A", f"c{i}", "worker")
     finally:
         sys.setprofile(None)
     assert scans == 0

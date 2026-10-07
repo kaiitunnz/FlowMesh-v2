@@ -20,7 +20,6 @@ from ..models import TaskRecord
 from ..redrive import StoreRedriveScheduler
 from ..results import ResultReader, ResultUnavailable, ResultUnreadable
 from . import content_bindings
-from .content_bindings import element_of
 
 
 @dataclass(frozen=True)
@@ -73,7 +72,7 @@ def _member_text(
     envelope = values.get(value_ref.content)
     if not isinstance(envelope, ResultEnvelope):
         return None
-    return value_text(envelope, element_of(value_ref))
+    return value_text(envelope, content_bindings.element_of(value_ref))
 
 
 def mint_fanout_facet_locked(

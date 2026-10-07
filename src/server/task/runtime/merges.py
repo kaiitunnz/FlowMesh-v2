@@ -134,7 +134,9 @@ class TaskMerges:
         )
         self._committer.commit_locked(task_id, *returned)
 
-    def merged_child_record(self, task_id: str, child_id: str) -> TaskRecord | None:
+    def merged_child_record_locked(
+        self, task_id: str, child_id: str
+    ) -> TaskRecord | None:
         """A child's record while it is still merged into ``task_id``'s dispatch."""
         record = self._tasks.get(child_id)
         if (
@@ -145,7 +147,7 @@ class TaskMerges:
             return None
         return record
 
-    def release_merged_child(
+    def release_merged_child_locked(
         self, task_id: str, child_id: str, merge_key: str | None
     ) -> None:
         """Take one child out of a task's merge and return it to the ready queue, to
@@ -236,7 +238,7 @@ class TaskMerges:
             )
         )
 
-    def finalize_merged_child_success(
+    def finalize_merged_child_success_locked(
         self,
         child_id: str,
         worker_id: str | None,

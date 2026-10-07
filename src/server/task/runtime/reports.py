@@ -1,4 +1,5 @@
-"""Helpers that classify and project worker reports and task records."""
+"""Worker reports and task records read for settlement: reported references,
+membership, retry eligibility, outcomes and in-flight usage."""
 
 from typing import Any
 

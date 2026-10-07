@@ -3,8 +3,9 @@
 from types import SimpleNamespace
 from typing import cast
 
+from server.orchestration import Advance, OrchestrationEngine
 from server.registries.worker import Worker
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, agent_inputs
 from server.task.v2.representations.operators import ResolvedEmbodiment
 
 
@@ -39,4 +40,19 @@ def resolved_embodiment(
         return None
     return ResolvedEmbodiment(
         alternative_id=candidate.alternative_id, kind=candidate.kind
+    )
+
+
+def stage_agent_inputs(
+    runtime: TaskRuntime, workflow_id: str, engine: OrchestrationEngine
+) -> None:
+    """Stage an engine's agent inputs as the runtime does after an advance."""
+    agent_inputs.stage_agent_inputs_locked(
+        runtime._tasks,
+        runtime._engines,
+        runtime._redrive,
+        runtime._input_budget_bytes,
+        workflow_id,
+        engine,
+        Advance(),
     )

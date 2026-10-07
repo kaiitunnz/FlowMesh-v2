@@ -1,4 +1,4 @@
-"""The worker each dispatched task holds."""
+"""Worker reservations of dispatched tasks."""
 
 import logging
 from collections.abc import Sequence
@@ -42,14 +42,15 @@ class WorkerReservations:
         self.ended_dispatches[:0] = failed
 
     def hold_dispatch_locked(self, task_id: str, held: tuple[str, str]) -> None:
-        """Reserve a dispatch's worker for its task, ending the one it replaces."""
+        """Reserve a dispatch's worker for its task, queueing the reservation it
+        replaces for release."""
         earlier = self.held_dispatches.get(task_id)
         if earlier is not None and earlier != held:
             self.ended_dispatches.append(earlier)
         self.held_dispatches[task_id] = held
 
     def seed_held_dispatches_locked(self) -> None:
-        """Reserve each restored dispatch's worker, as its dispatch did."""
+        """Reserve the worker of each restored dispatch that still holds its task."""
         self.held_dispatches.update(
             (record.task_id, (record.assigned_worker, record.dispatch_id))
             for record in self._tasks.values()

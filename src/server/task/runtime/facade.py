@@ -1,3 +1,5 @@
+"""The task runtime: every workflow's task records, scheduling and dispatch."""
+
 import logging
 import threading
 import time
@@ -145,12 +147,12 @@ from . import (
     fanout,
     materialized_records,
 )
-from .boundary_router import MediatedBoundaryRouter, PendingOp
 from .commits import TransitionCommitter
 from .dispatch_fence import DispatchFence, Publish, supplier_id
 from .episode_dispatch import EpisodeFeasibility
 from .fanout import FanoutRead
 from .input_checks import INPUT_VERDICT_REPORT, InputChecks
+from .mediated_ops import MediatedOperations, PendingOp
 from .merges import TaskMerges
 from .record_failures import RecordFailures
 from .reports import (
@@ -298,14 +300,12 @@ class TaskRuntime:
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._credential_vault = credential_vault
-        self._content_scope_authority = content_scope_authority
         self._n8n_credential_password = (n8n or N8nConfig()).credential_password
         self._control = control if control is not None else NULL_CONTROL_TRACER
         self._tracer = tracer
         self._telemetry = telemetry
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
-        self._model_egress_timeout_sec = orchestration.gateway.timeout_sec
         self._input_budget_bytes = orchestration.agent_input_budget_bytes
         self._max_prepared_input_bytes = orchestration.max_prepared_input_bytes
         self._agent_binding_defaults = _binding_defaults(
@@ -350,17 +350,17 @@ class TaskRuntime:
         self._record_failures = RecordFailures(
             self._dag, self._ready, self._tasks, self._failed
         )
-        self._router = MediatedBoundaryRouter(
+        self._mediated_ops = MediatedOperations(
             self._tasks,
             self._engines,
             self._worker_registry,
             self._web_search,
-            self._model_egress_timeout_sec,
-            self._content_scope_authority,
+            orchestration.gateway.timeout_sec,
+            content_scope_authority,
             self._control,
         )
         self._terminations = TerminationRelease(
-            self._router, self._tasks, self._worker_registry, self._logger
+            self._mediated_ops, self._tasks, self._worker_registry, self._logger
         )
         self._resident_tasks = ResidentServeTasks(self._tasks)
         self._reservations = WorkerReservations(
@@ -1286,7 +1286,7 @@ class TaskRuntime:
         worker_id = record.assigned_worker
         if record.status == TaskStatus.CANCELLING:
             self._settle_cancelled_locked(record, time.time())
-            self._router.reap_captures_locked(
+            self._mediated_ops.reap_captures_locked(
                 worker_id, task_id, _captured_calls(hr, group)
             )
             return
@@ -1302,7 +1302,7 @@ class TaskRuntime:
             ):
                 self._cv.notify_all()
             self._committer.save_ledger_locked(record.workflow_id)
-            self._router.reap_captures_locked(
+            self._mediated_ops.reap_captures_locked(
                 worker_id, task_id, _captured_calls(hr, group)
             )
             return
@@ -1363,7 +1363,7 @@ class TaskRuntime:
         self._committer.save_ledger_locked(record.workflow_id)
         if denied_capture is not None:
             worker_id, call = denied_capture
-            self._router.reap_captured_request_locked(
+            self._mediated_ops.reap_captured_request_locked(
                 worker_id, task_id, call, request.interface
             )
         if changed:
@@ -1510,8 +1510,10 @@ class TaskRuntime:
                 self._committer.save_ledger_locked(record.workflow_id)
                 # A fenced failure terminal releases the resident credit just as a
                 # completion does; nothing else may release an accepted credit.
-                self._router.release_resident_credit(invocation_id, failed=True)
-                self._router.reap_mediated_op(captured_on, task_id, call_correlation)
+                self._mediated_ops.release_resident_credit(invocation_id, failed=True)
+                self._mediated_ops.reap_mediated_op(
+                    captured_on, task_id, call_correlation
+                )
                 if changed:
                     self._cv.notify_all()
                 return changed
@@ -1528,8 +1530,8 @@ class TaskRuntime:
             else:
                 self._apply_advance_locked(record.workflow_id, advance)
             self._committer.save_ledger_locked(record.workflow_id)
-            self._router.release_resident_credit(invocation_id, failed=False)
-            self._router.reap_mediated_op(captured_on, task_id, call_correlation)
+            self._mediated_ops.release_resident_credit(invocation_id, failed=False)
+            self._mediated_ops.reap_mediated_op(captured_on, task_id, call_correlation)
             self._cv.notify_all()
             return True
 
@@ -1569,7 +1571,7 @@ class TaskRuntime:
         again, keyed to its dispatch. A lost task dispatch resolves as lost.
         """
         with self._cv:
-            pending = self._router.pending_for_worker(worker_id)
+            pending = self._mediated_ops.pending_for_worker(worker_id)
             self._terminations.queue_interrupts_locked(
                 self._terminations.cancelling_interrupts_locked(
                     lambda record: record.assigned_worker == worker_id
@@ -1588,10 +1590,8 @@ class TaskRuntime:
         its outcome returns it. A boundary re-driven _OP_REDRIVE_LIMIT times fails.
         """
         now = time.time()
-        exhausted: list[PendingOp] = []
-        redrive: list[tuple[str, PendingOp]] = []
         with self._cv:
-            self._router.take_overdue(worker_id, now, exhausted, redrive)
+            exhausted, redrive = self._mediated_ops.take_overdue(worker_id, now)
         try:
             for op in exhausted:
                 self._logger.warning(
@@ -1615,7 +1615,7 @@ class TaskRuntime:
                 # Its boundary has settled or ended, so no outcome will reap the
                 # operation.
                 with self._cv:
-                    self._router.discard_op(permit_id, op)
+                    self._mediated_ops.discard_op(permit_id, op)
 
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
@@ -1680,7 +1680,7 @@ class TaskRuntime:
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error=error
             )
-            self._router.relay_resident_reap(
+            self._mediated_ops.relay_resident_reap(
                 worker_id, env.task_id, env.call_correlation
             )
 
@@ -1763,7 +1763,7 @@ class TaskRuntime:
             )
             return
         occurrence = (env.task_id, env.call_correlation)
-        stale = self._router.take_stale_ops(occurrence)
+        stale = self._mediated_ops.take_stale_ops(occurrence)
         if any(op.node_alias != worker.node_alias for _, op in stale):
             self._logger.warning(
                 "worker-originated tool op for %s: %s now names a worker of another "
@@ -1781,7 +1781,7 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error=op_credential.reason
             )
             return
-        max_results, timeout_sec, result_char_cap = self._router.op_permit_budget(
+        max_results, timeout_sec, result_char_cap = self._mediated_ops.op_permit_budget(
             env.interface
         )
         deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
@@ -1805,7 +1805,7 @@ class TaskRuntime:
         # A re-drive re-mints under a fresh permit id, keeping one pending op per
         # occurrence and its re-drive count.
         redrives = max((op.redrives for _, op in stale), default=0)
-        self._router.record_issued_op(
+        self._mediated_ops.record_issued_op(
             permit.permit_id,
             PendingOp(
                 env.task_id,
@@ -1821,7 +1821,7 @@ class TaskRuntime:
             MediatedOpMessage(
                 worker_id=worker_id,
                 frame_kind="permit",
-                payload=self._router.stamped_permit_payload(permit, agent),
+                payload=self._mediated_ops.stamped_permit_payload(permit, agent),
             ),
         )
 
@@ -1849,7 +1849,7 @@ class TaskRuntime:
             if not self._fence.dispatch_live_locked(
                 agent, proposer_id, proposal.dispatch_id
             ):
-                self._router.deny_model_turn(
+                self._mediated_ops.deny_model_turn(
                     proposal, proposer_id, "model turn not held"
                 )
                 return
@@ -1867,8 +1867,8 @@ class TaskRuntime:
                 if isinstance(op_credential, _MissingCredential):
                     reason = op_credential.reason
                 else:
-                    _, timeout_sec, result_char_cap = self._router.op_permit_budget(
-                        MODEL_INTERFACE
+                    _, timeout_sec, result_char_cap = (
+                        self._mediated_ops.op_permit_budget(MODEL_INTERFACE)
                     )
                     deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
                     permit = engine.authorize_model_turn(
@@ -1884,14 +1884,14 @@ class TaskRuntime:
                         deployment_credential=op_credential.deployment_credential,
                     )
             if permit is None:
-                self._router.deny_model_turn(proposal, worker_id, reason)
+                self._mediated_ops.deny_model_turn(proposal, worker_id, reason)
                 return
             self._worker_registry.publish_mediated_op(
                 worker,
                 MediatedOpMessage(
                     worker_id=worker_id,
                     frame_kind="permit",
-                    payload=self._router.stamped_permit_payload(permit, agent),
+                    payload=self._mediated_ops.stamped_permit_payload(permit, agent),
                 ),
             )
 
@@ -1911,7 +1911,7 @@ class TaskRuntime:
 
     def _settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         with self._cv:
-            pending = self._router.take_settled(outcome)
+            pending = self._mediated_ops.take_settled(outcome)
             worker_id = (
                 pending.worker_id
                 if pending
@@ -1924,7 +1924,7 @@ class TaskRuntime:
             if engine is None or not engine.boundary_settleable(agent_task_id, call):
                 # No settle follows a duplicate or late report, so the request its
                 # worker holds is reaped here.
-                self._router.reap_mediated_op(worker_id, agent_task_id, call)
+                self._mediated_ops.reap_mediated_op(worker_id, agent_task_id, call)
                 return
             if outcome.error is not None:
                 self._settle_episode_invocation(
@@ -2006,7 +2006,7 @@ class TaskRuntime:
         outcome was a failure, so the Admission controller advances the linked claim to
         terminal on any fenced outcome — the sole normal credit release.
         """
-        self._router.set_resident_terminal_hook(hook)
+        self._mediated_ops.set_resident_terminal_hook(hook)
 
     def resident_invocation_completed(
         self, workflow_id: str, invocation_id: str
@@ -2661,7 +2661,7 @@ class TaskRuntime:
             # follows.
             if self._apply_advance_locked(record.workflow_id, advance):
                 self._cv.notify_all()
-            self._router.reap_ops_for_agents_locked(advance.failed)
+            self._mediated_ops.reap_ops_for_agents_locked(advance.failed)
             if invocation_ids := engine.terminalize_unsettled_invocations([task_id]):
                 self._terminations.hold_termination_locked(
                     record.workflow_id,
@@ -3078,7 +3078,7 @@ class TaskRuntime:
     def merged_child_record(self, task_id: str, child_id: str) -> TaskRecord | None:
         """A child's record while it is still merged into ``task_id``'s dispatch."""
         with self._cv:
-            return self._merges.merged_child_record(task_id, child_id)
+            return self._merges.merged_child_record_locked(task_id, child_id)
 
     def release_merged_child(
         self, task_id: str, child_id: str, merge_key: str | None
@@ -3087,7 +3087,7 @@ class TaskRuntime:
         merge next under ``merge_key``, or to run alone when it is None."""
         try:
             with self._cv:
-                self._merges.release_merged_child(task_id, child_id, merge_key)
+                self._merges.release_merged_child_locked(task_id, child_id, merge_key)
         finally:
             self._release_ended_workers()
 
@@ -3121,7 +3121,7 @@ class TaskRuntime:
             worker.id, dispatch_id, supplier_id(worker), input_preparation
         )
         with self._cv:
-            return self._fence.begin_publish(task_id, publish)
+            return self._fence.begin_publish_locked(task_id, publish)
 
     def abandon_publish(self, task_id: str) -> bool:
         """Drop the mark of a dispatch whose publish failed.
@@ -3154,7 +3154,7 @@ class TaskRuntime:
         """
         try:
             with self._cv:
-                return self._fence.mark_dispatched(task_id)
+                return self._fence.mark_dispatched_locked(task_id)
         finally:
             self._release_ended_workers()
 
@@ -3331,7 +3331,7 @@ class TaskRuntime:
                 if record.status in TERMINAL_TASK_STATUSES:
                     # A late report of a dispatch its task already settled routes
                     # nothing it carries, so its worker drops what it holds for it.
-                    self._router.reap_captures_locked(
+                    self._mediated_ops.reap_captures_locked(
                         worker_id,
                         task_id,
                         _captured_calls(harness_result, carried_group),
@@ -3365,7 +3365,7 @@ class TaskRuntime:
                     usages = self._settle_cancelled_usage_locked(
                         record, payload, finished_ts, started_ts
                     )
-                    self._router.reap_captures_locked(
+                    self._mediated_ops.reap_captures_locked(
                         worker_id, task_id, _captured_calls(harness_result, group)
                     )
                     return settle_outcome(effect, record, [], usages)
@@ -3470,7 +3470,7 @@ class TaskRuntime:
                 record.merged_children = settled_children or None
             for merged_child in settled_children:
                 ready_children.extend(
-                    self._merges.finalize_merged_child_success(
+                    self._merges.finalize_merged_child_success_locked(
                         merged_child,
                         worker_id,
                         finished_ts,
@@ -3812,7 +3812,7 @@ class TaskRuntime:
             return
         step = payload.get("agent_episode")
         carried = payload.get("agent_episode_facade_group")
-        self._router.reap_captures_locked(
+        self._mediated_ops.reap_captures_locked(
             worker_id,
             record.task_id,
             _captured_calls(
@@ -4054,7 +4054,9 @@ class TaskRuntime:
                 interrupts.append(interrupt)
             self._inputs.drop_check(record.task_id)
             self._epochs.forget_task(record.task_id)
-        reaps = self._router.take_ops_for_agents_locked([r.task_id for r in records])
+        reaps = self._mediated_ops.take_ops_for_agents_locked(
+            [r.task_id for r in records]
+        )
         return Termination(interrupts, reaps)
 
     def _release_pending_terminations(self) -> None:
@@ -4343,7 +4345,7 @@ class TaskRuntime:
                 f"{record.max_attempts} attempts"
             ),
         )
-        self._router.reap_ops_for_agents_locked(
+        self._mediated_ops.reap_ops_for_agents_locked(
             [record.task_id, *(task_id for task_id, _ in failed)]
         )
         if invocation_ids := engine.terminalize_unsettled_invocations([record.task_id]):
@@ -4615,7 +4617,7 @@ class TaskRuntime:
             # A pending tool operation on the departed worker lost its private request
             # custody with the worker; drop the stale mapping so its boundary re-mints
             # on a fresh worker rather than waiting on an outcome that can never arrive.
-            self._router.drop_worker_ops(worker_id)
+            self._mediated_ops.drop_worker_ops(worker_id)
         return WorkerRecovery(recovered, resolved)
 
     def resolve_disowned_dispatch(
@@ -4698,7 +4700,9 @@ class TaskRuntime:
         """Whether a dispatch to a worker is being published or holds its task, and has
         not ended at a suspension."""
         with self._lock:
-            return self._fence.dispatch_in_flight(task_id, dispatch_id, worker_id)
+            return self._fence.dispatch_in_flight_locked(
+                task_id, dispatch_id, worker_id
+            )
 
     def has_rehydrated_in_flight(self, worker_id: str, within_sec: float) -> bool:
         """

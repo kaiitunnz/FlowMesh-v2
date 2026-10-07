@@ -101,7 +101,7 @@ _CARRIERS: dict[str, str] = {
 }
 
 # The seven NONE kinds, with a representative payload shape drawn from the real
-# minting call sites in runtime.py / resident/service.py.
+# minting call sites in task/runtime/mediated_ops.py / resident/service.py.
 _NONE_PAYLOADS: dict[str, dict[str, Any]] = {
     "deny": {
         "agent_task_id": "tsk-agent",
