@@ -5,7 +5,7 @@ process after the supervisor that runs the app-server; no process is started or
 signalled.
 """
 
-import subprocess  # nosec B404 - only for its TimeoutExpired
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -37,13 +37,18 @@ class _Proc:
     exits_on_eof = True
     proves = True
 
+    # No such process, so a pidfd wait falls back to ``wait``.
+    pid = 1 << 22
+
     def __init__(self) -> None:
+        self.eof = threading.Event()
         self.exited = threading.Event()
         self.signalled = threading.Event()
         self.stdin = SimpleNamespace(close=self._on_eof)
         self.returncode: int | None = None
 
     def _on_eof(self) -> None:
+        self.eof.set()
         if self.exits_on_eof:
             threading.Timer(self.exit_delay, self._exit).start()
 
@@ -148,9 +153,11 @@ def test_every_close_returns_once_the_app_server_exited(
     (client,) = _Client.made
     proc = client._proc
     assert proc is not None
-    proc.exit_delay = 0.1
+    proc.exit_delay = 0.3
     first = threading.Thread(target=transport.close, daemon=True)
     first.start()
+    # The first close is under way and waiting on the exit when the second arrives.
+    assert _wait_for(proc.eof.is_set)
 
     assert transport.close()
     assert proc.exited.is_set()

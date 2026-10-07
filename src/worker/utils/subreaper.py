@@ -1,17 +1,18 @@
 """A per-tree supervisor that runs one command and proves its whole process tree reaped.
 
-Run as a fresh, single-threaded process: ``python -I subreaper.py [--receipt-fd FD]
+Run as a fresh, single-threaded process: ``python -I -S subreaper.py [--receipt-fd FD]
 [--grace SEC] -- ARGV...``. The supervisor marks itself a child subreaper, so every
-descendant the command leaves behind is re-parented to it, whatever
-session or group that descendant moved to. It forks and execs the command, waits for it
-to exit (or for its own SIGTERM, which ends the command early), then terminates and
-reaps whatever remains until it has no child left, escalating from TERM to KILL after
-the grace. It keeps draining for as long as anything remains, so the tree never loses
-its owner; the caller bounds how long it waits.
+descendant the command leaves behind is re-parented to it, whatever session or group
+that descendant moved to. It forks and execs the command as the leader of its own
+process group, waits for it to exit (or for a SIGTERM from the process that launched
+the supervisor, which ends the command early), then terminates and reaps whatever
+remains until it has no child left, escalating from TERM to KILL after the grace. It
+keeps draining for as long as anything remains, so the tree never loses its owner; the
+caller bounds how long it waits.
 
-Only that drain to no-children exits :data:`REAPED`; the command's own exit status, and
-whether the supervisor ended it, go to the receipt instead. Any other exit after the
-fork, or death by a signal, proves nothing about the tree.
+Only that drain to no children exits :data:`REAPED`; the receipt carries the command's
+own exit status and whether the supervisor ended it. Any other exit after the fork, or
+death by a signal, proves nothing about the tree.
 """
 
 import argparse
@@ -20,13 +21,14 @@ import ctypes
 import errno
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
 import time
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, NoReturn
 
 REAPED = 86  # the drain reached no children: the whole tree is gone
 UNSUPPORTED = 88  # the kernel would not make the supervisor a child subreaper
@@ -40,6 +42,21 @@ _WAIT_STEP_SEC = 0.05
 _SYS_PIDFD_SEND_SIGNAL = 424
 _SYS_PIDFD_OPEN = 434
 _SCRIPT = Path(__file__).resolve()
+# Held blocked in the supervisor: SIGCHLD and SIGTERM it waits on, the rest it would
+# otherwise die of when the command signals its parent.
+_HELD = frozenset(
+    {
+        signal.SIGCHLD,
+        signal.SIGTERM,
+        signal.SIGHUP,
+        signal.SIGINT,
+        signal.SIGQUIT,
+        signal.SIGUSR1,
+        signal.SIGUSR2,
+        signal.SIGALRM,
+        signal.SIGPIPE,
+    }
+)
 
 
 def supervised_argv(
@@ -48,19 +65,19 @@ def supervised_argv(
     receipt_fd: int | None = None,
     grace_sec: float = DEFAULT_GRACE_SEC,
 ) -> list[str]:
-    """The argv that runs ``argv`` under a fresh supervisor.
+    """Build the argv that runs ``argv`` under a fresh supervisor.
 
     ``receipt_fd`` is a pipe the supervisor inherits and writes its receipt to; the
     command never holds it.
     """
-    head = [sys.executable, "-I", _SCRIPT.as_posix()]
+    head = [sys.executable, "-I", "-S", _SCRIPT.as_posix()]
     if receipt_fd is not None:
         head += ["--receipt-fd", str(receipt_fd)]
     return [*head, "--grace", str(grace_sec), "--", *argv]
 
 
 def reap_proved(returncode: int | None) -> bool:
-    """Whether a supervisor's exit status proves its tree reaped.
+    """Map a supervisor's exit status to whether it proves its tree reaped.
 
     A supervisor the kernel would not make a subreaper, or one a SIGTERM ended, never
     forked: the signal is blocked from before the fork, so it can end the supervisor
@@ -90,6 +107,29 @@ def read_receipt(fd: int) -> Receipt | None:
         os.close(fd)
 
 
+def wait_supervisor(proc: subprocess.Popen[Any], timeout_sec: float) -> bool:
+    """Wait up to ``timeout_sec`` for a supervisor to exit; return whether it did.
+
+    The wait blocks on the process's pidfd, so it returns as soon as the supervisor
+    exits.
+    """
+    if proc.poll() is not None:
+        return True
+    libc = ctypes.CDLL(None, use_errno=True)
+    if (fd := libc.syscall(_SYS_PIDFD_OPEN, proc.pid, 0)) < 0:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout_sec)
+        return proc.poll() is not None
+    try:
+        select.select([fd], [], [], timeout_sec)
+    finally:
+        os.close(fd)
+    # A pidfd is readable once the process exits, which a reap may briefly trail.
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(_WAIT_STEP_SEC)
+    return proc.poll() is not None
+
+
 def end_supervised(proc: subprocess.Popen[Any], timeout_sec: float) -> bool:
     """Ask a running supervisor to end its tree and wait for its proof.
 
@@ -100,18 +140,18 @@ def end_supervised(proc: subprocess.Popen[Any], timeout_sec: float) -> bool:
     if proc.poll() is None:
         with contextlib.suppress(ProcessLookupError):
             proc.send_signal(signal.SIGTERM)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout_sec)
+        wait_supervisor(proc, timeout_sec)
     return reap_proved(proc.returncode)
 
 
 def primary_child(supervisor_pid: int) -> int | None:
-    """The command a supervisor runs: its earliest-started child, ahead of any child it
-    adopted later."""
-    children: list[tuple[int, int]] = []
-    for pid, (ppid, started) in _process_table().items():
-        if ppid == supervisor_pid:
-            children.append((started, pid))
+    """Return the command a supervisor runs: its earliest-started child, ahead of any
+    child it adopted later."""
+    children = [
+        (started, pid)
+        for pid, (ppid, started) in _process_table().items()
+        if ppid == supervisor_pid
+    ]
     return min(children)[1] if children else None
 
 
@@ -125,7 +165,7 @@ def _become_subreaper(libc: ctypes.CDLL) -> bool:
 
 
 def _process_table() -> dict[int, tuple[int, int]]:
-    """Every visible process's parent pid and start time."""
+    """Map every visible process to its parent pid and start time."""
     table: dict[int, tuple[int, int]] = {}
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
@@ -140,16 +180,28 @@ def _process_table() -> dict[int, tuple[int, int]]:
     return table
 
 
+def _children(pid: int) -> set[int]:
+    """Return a process's direct children, read from each of its threads."""
+    found: set[int] = set()
+    with contextlib.suppress(OSError):
+        for task in os.listdir(f"/proc/{pid}/task"):
+            with contextlib.suppress(OSError, ValueError):
+                found.update(
+                    int(child)
+                    for child in Path(f"/proc/{pid}/task/{task}/children")
+                    .read_text()
+                    .split()
+                )
+    return found
+
+
 def _descendants() -> set[int]:
-    parents = {pid: ppid for pid, (ppid, _) in _process_table().items()}
     found: set[int] = set()
     frontier = [os.getpid()]
     while frontier:
-        parent = frontier.pop()
-        for pid, ppid in parents.items():
-            if ppid == parent and pid not in found:
-                found.add(pid)
-                frontier.append(pid)
+        for child in _children(frontier.pop()) - found:
+            found.add(child)
+            frontier.append(child)
     return found
 
 
@@ -158,15 +210,15 @@ def _signal_tree(libc: ctypes.CDLL, pids: set[int], sig: int) -> None:
 
     Pinning each pid first, then confirming it is still in the tree, keeps a recycled
     pid that left the tree from being signalled. The raw syscalls stand in for
-    ``os.pidfd_open``, which an interpreter built against an older libc omits; a kernel
-    without pidfds gets a plain kill of a pid found in the tree a moment before.
+    ``os.pidfd_open``, which an interpreter built against an older libc omits; a pid
+    that cannot be pinned gets a plain kill if it was in the tree a moment before.
     """
     pinned: dict[int, int] = {}
     unpinned: set[int] = set()
     for pid in pids:
         if (fd := libc.syscall(_SYS_PIDFD_OPEN, pid, 0)) >= 0:
             pinned[pid] = fd
-        elif ctypes.get_errno() == errno.ENOSYS:
+        elif ctypes.get_errno() != errno.ESRCH:
             unpinned.add(pid)
     try:
         members = _descendants()
@@ -174,7 +226,7 @@ def _signal_tree(libc: ctypes.CDLL, pids: set[int], sig: int) -> None:
             if pid in members:
                 libc.syscall(_SYS_PIDFD_SEND_SIGNAL, fd, sig, None, 0)
         for pid in unpinned & members:
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, sig)
     finally:
         for fd in pinned.values():
@@ -187,24 +239,40 @@ class _Supervisor:
         self.primary = primary
         self.status: int | None = None
         self.ended = False
+        # The command stays an unreaped zombie until the rest of the tree is gone, so
+        # its process group id is not recycled while the drain signals that group.
+        self.primary_reaped = False
 
-    def reap_ready(self) -> bool:
-        """Reap every exited child; return whether any child remains."""
-        while True:
-            try:
-                pid, status = os.waitpid(-1, os.WNOHANG)
-            except ChildProcessError:
+    def reap_others(self) -> set[int]:
+        """Reap every exited child but the command; return the others left."""
+        others = _children(os.getpid()) - {self.primary}
+        for pid in list(others):
+            with contextlib.suppress(ChildProcessError):
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    others.discard(pid)
+        return others
+
+    def primary_exited(self) -> bool:
+        if self.status is None:
+            flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+            if (info := os.waitid(os.P_PID, self.primary, flags)) is None:
                 return False
-            if pid == 0:
-                return True
-            if pid == self.primary:
-                self.status = os.waitstatus_to_exitcode(status)
+            exited = info.si_code == os.CLD_EXITED
+            self.status = info.si_status if exited else -info.si_status
+        return True
 
     def await_primary(self) -> None:
-        """Wait for the command to exit or for the supervisor's own SIGTERM."""
-        while self.reap_ready() and self.status is None:
+        """Wait for the command to exit or for its launcher's SIGTERM."""
+        launcher = os.getppid()
+        while True:
             got = signal.sigtimedwait({signal.SIGCHLD, signal.SIGTERM}, 1.0)
-            if got is not None and got.si_signo == signal.SIGTERM:
+            if self.primary_exited():
+                return
+            if (
+                got is not None
+                and got.si_signo == signal.SIGTERM
+                and got.si_pid == launcher
+            ):
                 self.ended = True
                 return
 
@@ -212,13 +280,25 @@ class _Supervisor:
         """Terminate and reap the remaining tree until no child is left."""
         start = time.monotonic()
         terminated: set[int] = set()
-        while self.reap_ready():
+        while True:
+            others = self.reap_others()
+            if not self.primary_reaped and not others and self.primary_exited():
+                os.waitpid(self.primary, 0)
+                self.primary_reaped = True
+            if self.primary_reaped:
+                try:
+                    os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    return
+            kill = time.monotonic() - start >= grace_sec
+            sig = signal.SIGKILL if kill else signal.SIGTERM
+            if not self.primary_reaped and (kill or self.primary not in terminated):
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(self.primary, sig)
             pids = _descendants()
-            if time.monotonic() - start >= grace_sec:
-                _signal_tree(self.libc, pids, signal.SIGKILL)
-            elif fresh := pids - terminated:
-                _signal_tree(self.libc, fresh, signal.SIGTERM)
-                terminated |= fresh
+            if targets := (pids if kill else pids - terminated):
+                _signal_tree(self.libc, targets, sig)
+            terminated |= pids | {self.primary}
             signal.sigtimedwait({signal.SIGCHLD}, _WAIT_STEP_SEC)
 
 
@@ -228,8 +308,11 @@ def _write_receipt(fd: int, supervisor: _Supervisor) -> None:
         pipe.write(json.dumps(payload).encode())
 
 
-def _exec_child(argv: list[str], mask: Iterable[int]) -> None:
+def _exec_child(argv: list[str], mask: Iterable[int]) -> NoReturn:
     try:
+        # The command leads a group of its own, so a signal it sends its group never
+        # reaches the supervisor, and the drain can end that whole group at once.
+        os.setpgid(0, 0)
         # The interpreter ignores these at startup and an exec keeps that, so the
         # command gets the defaults any process starts with.
         for sig in (signal.SIGPIPE, signal.SIGXFSZ):
@@ -258,9 +341,9 @@ def main() -> None:
         os.set_inheritable(args.receipt_fd, False)
     with contextlib.suppress(PermissionError):
         os.setsid()
-    # Blocked before the fork, so neither signal is lost or takes its default action
-    # between the fork and the wait; the command gets the original mask back.
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD, signal.SIGTERM})
+    # Blocked before the fork, so none is lost or takes its default action between the
+    # fork and the wait; the command gets the original mask back.
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, _HELD)
     primary = os.fork()
     if primary == 0:
         _exec_child(argv, mask)

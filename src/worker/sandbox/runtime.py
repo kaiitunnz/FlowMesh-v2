@@ -4,12 +4,12 @@ A runtime executes a command against the activation's own workspace and returns 
 bounded result. The fence is kernel-enforced and unprivileged, so it holds in an
 ordinary worker container: Landlock denies every path outside the workspace and the
 read-only runtime, a seccomp filter denies IP sockets and io_uring, and the envelope's
-resource limits bound the command. Each command runs under its own unfenced supervisor,
-which reaps everything the command started, including a process in a session of its
-own, before the action completes; a tree it cannot prove reaped fails the command. A
-dispatch whose capability carries the egress opt-in relaxes the two network layers and
-nothing else: the workspace confinement, the envelope, and the reaping bound it as they
-bound any other command.
+resource limits bound the command. Each command runs under its own supervisor, outside
+the fence, which reaps everything the command started, including a process in a session
+of its own, before the action completes; a tree it cannot prove reaped fails the
+command. A dispatch whose capability carries the egress opt-in relaxes the two network
+layers and nothing else: the workspace confinement, the envelope, and the reaping bound
+it as they bound any other command.
 
 What the fence does not provide, because an unprivileged container cannot: no mount
 namespace or private root view, no PID or IPC isolation (processes on one worker remain
@@ -48,6 +48,7 @@ from ..utils.subreaper import (
     end_supervised,
     read_receipt,
     supervised_argv,
+    wait_supervisor,
 )
 
 _LOG = logging.getLogger("sandbox-runtime")
@@ -171,6 +172,8 @@ class PosixProcessSandbox(SandboxRuntime):
         }
         launcher = [
             sys.executable,
+            "-I",
+            "-S",
             _LAUNCHER.as_posix(),
             json.dumps(spec),
             program,
@@ -199,15 +202,20 @@ class PosixProcessSandbox(SandboxRuntime):
             raise SandboxUnavailable(f"the sandbox could not start a command: {exc}")
         finally:
             os.close(receipt_end)
-        streams = _Streams(proc)
+        budget = self._reap_budget_sec
         try:
-            proc.wait(timeout=deadline)
-            expired = False
-        except subprocess.TimeoutExpired:
-            expired = True
-        # The supervisor has drained what the command left behind by the time it exits;
-        # one still running past the deadline is told to end the command.
-        if not end_supervised(proc, budget := self._reap_budget_sec):
+            streams = _Streams(proc)
+            expired = not wait_supervisor(proc, deadline)
+            # The supervisor has drained what the command left behind by the time it
+            # exits; one still running past the deadline is told to end the command.
+            proved = end_supervised(proc, budget)
+        except Exception as exc:
+            # The tree may be running; it keeps its owner for a later reap.
+            raise SandboxReapUnproved(
+                f"the sandbox lost track of {command.argv[0]!r}: {exc}",
+                retry=lambda: _finish_reap(proc, budget, receipt),
+            ) from exc
+        if not proved:
             raise SandboxReapUnproved(
                 f"the command {command.argv[0]!r} left processes it could not prove "
                 "reaped",
@@ -241,9 +249,8 @@ def _finish_reap(proc: subprocess.Popen[str], budget_sec: float, receipt: int) -
 class _Streams:
     """Drain a command's pipes off the waiting thread and keep a bounded prefix.
 
-    Waiting on the process rather than on end-of-pipe is what keeps a stray background
-    writer from holding the episode open to the deadline; draining concurrently is what
-    keeps a chatty command from blocking on a full pipe before it can exit.
+    Draining concurrently keeps a chatty command from blocking on a full pipe before it
+    can exit.
     """
 
     def __init__(self, proc: subprocess.Popen[str]) -> None:

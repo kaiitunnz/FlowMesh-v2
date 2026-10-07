@@ -1,15 +1,20 @@
 """The per-tree supervisor: only a REAPED exit proves every descendant gone."""
 
+import ctypes
+import errno
 import os
 import signal
-import subprocess  # nosec B404 - the supervisor under test is a subprocess
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
+from tests.worker.processes import recorded_pids, running
 from worker.utils import subreaper
 from worker.utils.subreaper import (
     REAPED,
@@ -26,14 +31,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 _SH = "/bin/sh"
-
-
-def _alive(pid: int) -> bool:
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return False
-    return state[state.rfind(")") + 2] != "Z"
+# Holds the command until its background process has armed itself.
+_READY = "while [ ! -s ready ]; do sleep 0.01; done; "
 
 
 @pytest.fixture
@@ -78,10 +77,6 @@ def _run(
     return proc.returncode, read_receipt(receipt)
 
 
-def _pids(path: Path) -> list[int]:
-    return [int(line) for line in path.read_text().split()]
-
-
 def test_a_finished_command_reports_its_own_status_apart_from_the_proof(
     tmp_path: Path,
 ) -> None:
@@ -120,28 +115,32 @@ def test_the_command_gets_default_dispositions_and_no_receipt_pipe(
 
 def test_a_detached_writer_is_reaped_before_the_proof(tmp_path: Path) -> None:
     script = (
-        "setsid sh -c 'while :; do echo x >> log; sleep 0.02; done' & "
-        "echo $! > pids; exit 0"
+        "setsid sh -c 'echo x >> log; echo > ready; while :; do echo x >> log; "
+        "sleep 0.02; done' & "
+        f"echo $! > pids; {_READY}exit 0"
     )
 
     returncode, _ = _run(script, tmp_path)
 
     assert returncode == REAPED
-    assert not any(_alive(pid) for pid in _pids(tmp_path / "pids"))
+    assert not any(running(pid) for pid in recorded_pids(tmp_path / "pids"))
     size = (tmp_path / "log").stat().st_size
     time.sleep(0.2)
     assert (tmp_path / "log").stat().st_size == size
 
 
 def test_a_descendant_ignoring_term_is_killed_after_the_grace(tmp_path: Path) -> None:
-    script = "sh -c 'trap \"\" TERM; echo $$ > pids; exec sleep 30' & sleep 0.2; exit 0"
+    script = (
+        "sh -c 'trap \"\" TERM; echo $$ > pids; echo > ready; exec sleep 30' & "
+        f"{_READY}exit 0"
+    )
 
     started = time.monotonic()
     returncode, _ = _run(script, tmp_path, grace_sec=0.3)
 
     assert returncode == REAPED
     assert time.monotonic() - started < 10
-    assert not any(_alive(pid) for pid in _pids(tmp_path / "pids"))
+    assert not any(running(pid) for pid in recorded_pids(tmp_path / "pids"))
 
 
 def test_successive_adoption_through_living_intermediate_parents(
@@ -160,22 +159,25 @@ def test_successive_adoption_through_living_intermediate_parents(
     returncode, _ = _run(script, tmp_path, grace_sec=0.3)
 
     assert returncode == REAPED
-    pids = _pids(tmp_path / "pids")
+    pids = recorded_pids(tmp_path / "pids")
     assert len(pids) >= 3
-    assert not any(_alive(pid) for pid in pids)
+    assert not any(running(pid) for pid in pids)
 
 
 def test_a_tree_still_draining_is_unproved_until_it_is_reaped(
     tmp_path: Path, strays: list[int]
 ) -> None:
-    script = "sh -c 'trap \"\" TERM; echo $$ > pids; exec sleep 30' & sleep 0.2; exit 0"
+    script = (
+        "sh -c 'trap \"\" TERM; echo $$ > pids; echo > ready; exec sleep 30' & "
+        f"{_READY}exit 0"
+    )
     proc = subprocess.Popen(  # nosec B603 - argv list built by the test
         supervised_argv([_SH, "-c", script], grace_sec=30.0), cwd=tmp_path
     )
     deadline = time.monotonic() + 10
     while not (tmp_path / "pids").exists() and time.monotonic() < deadline:
         time.sleep(0.02)
-    strays.extend(_pids(tmp_path / "pids"))
+    strays.extend(recorded_pids(tmp_path / "pids"))
 
     assert not end_supervised(proc, 0.5)
     # The supervisor still owns the tree, so a later attempt can still prove it.
@@ -192,13 +194,13 @@ def test_a_killed_supervisor_proves_nothing(tmp_path: Path, strays: list[int]) -
     deadline = time.monotonic() + 10
     while not (tmp_path / "pids").exists() and time.monotonic() < deadline:
         time.sleep(0.02)
-    strays.extend(_pids(tmp_path / "pids"))
+    strays.extend(recorded_pids(tmp_path / "pids"))
 
     proc.kill()
     proc.wait(10)
 
     assert not reap_proved(proc.returncode)
-    assert _alive(strays[0])
+    assert running(strays[0])
 
 
 def test_ending_a_running_supervisor_reaps_its_command(tmp_path: Path) -> None:
@@ -210,10 +212,10 @@ def test_ending_a_running_supervisor_reaps_its_command(tmp_path: Path) -> None:
 
     assert end_supervised(proc, 10)
     assert read_receipt(receipt) == Receipt(status=-signal.SIGTERM, ended=True)
-    assert not any(_alive(pid) for pid in _pids(tmp_path / "pids"))
+    assert not any(running(pid) for pid in recorded_pids(tmp_path / "pids"))
 
 
-def test_a_supervisor_ended_before_it_forks_proves_its_empty_tree() -> None:
+def test_only_a_drain_or_an_exit_before_the_fork_proves_a_tree() -> None:
     # Before the supervisor blocks SIGTERM nothing has forked, so dying of it is proof.
     assert reap_proved(-signal.SIGTERM)
     assert not reap_proved(-signal.SIGKILL)
@@ -239,3 +241,28 @@ def test_a_supervisor_the_kernel_will_not_make_a_subreaper_runs_nothing(
 
     assert proc.returncode == UNSUPPORTED
     assert not marker.exists()
+
+
+def test_a_pid_whose_pidfd_cannot_be_opened_is_still_signalled() -> None:
+    real = ctypes.CDLL(None, use_errno=True)
+
+    class _Refusing:
+        """A libc whose pidfd_open fails as a seccomp profile without it does."""
+
+        def syscall(self, number: int, *args: Any) -> int:
+            if number == subreaper._SYS_PIDFD_OPEN:
+                ctypes.set_errno(errno.EPERM)
+                return -1
+            return int(real.syscall(number, *args))
+
+    child = subprocess.Popen(["/bin/sleep", "30"])  # nosec B603 - fixed argv
+    try:
+        # The child is not the test's own descendant, so the tree check is bypassed.
+        with patch.object(subreaper, "_descendants", lambda: {child.pid}):
+            subreaper._signal_tree(
+                cast(ctypes.CDLL, _Refusing()), {child.pid}, signal.SIGKILL
+            )
+        assert child.wait(5) == -signal.SIGKILL
+    finally:
+        if child.poll() is None:
+            child.kill()

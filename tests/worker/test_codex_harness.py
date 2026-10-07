@@ -300,7 +300,7 @@ def test_the_app_server_launches_under_its_supervisor_without_plugin_sync(
 
     launch = config.launch_args_override
     assert launch is not None
-    assert launch[2] == subreaper.__file__
+    assert Path(launch[3]) == Path(subreaper.__file__).resolve()
     command = launch[launch.index("--") + 1 :]
     assert command[-3:] == ("app-server", "--listen", "stdio://")
     assert "features.plugins=false" in command

@@ -21,6 +21,7 @@ recovery.
 
 import json
 import os
+import signal
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -68,6 +69,7 @@ from tests.worker.factories import (  # noqa: E402
     make_worker_config,
     make_worker_task_message,
 )
+from tests.worker.processes import descendants, running  # noqa: E402
 from worker.egress import MediatedEgressSidecar  # noqa: E402
 from worker.egress import ModelEgress  # noqa: E402
 from worker.egress import PendingEgressRequestStore  # noqa: E402
@@ -424,34 +426,6 @@ def test_stalled_turn_raises_a_transport_error(
             release.set()
 
 
-def _descendants(root: int) -> set[int]:
-    parents: dict[int, int] = {}
-    for entry in os.listdir("/proc"):
-        if entry.isdigit():
-            try:
-                stat = Path(f"/proc/{entry}/stat").read_text()
-            except OSError:
-                continue
-            parents[int(entry)] = int(stat[stat.rfind(")") + 2 :].split()[1])
-    found: set[int] = set()
-    frontier = [root]
-    while frontier:
-        parent = frontier.pop()
-        for pid, ppid in parents.items():
-            if ppid == parent and pid not in found:
-                found.add(pid)
-                frontier.append(pid)
-    return found
-
-
-def _alive(pid: int) -> bool:
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return False
-    return stat[stat.rfind(")") + 2] != "Z"
-
-
 def test_an_episode_resumes_on_the_generation_its_step_sealed(tmp_path: Path) -> None:
     """A step's seal still verifies once its app-server would have kept writing."""
     root = tmp_path / "private"
@@ -533,12 +507,12 @@ def test_the_app_server_starts_no_process_of_its_own(
         app_server = transport.pid
         seen: set[int] = set()
         for _ in range(12):
-            seen |= _descendants(app_server)
+            seen |= descendants(app_server)
             time.sleep(0.25)
         adapter.quiesce(_TASK_ID)
 
     assert not seen
-    assert not _alive(app_server)
+    assert not running(app_server)
 
 
 def test_a_plugin_sync_the_app_server_starts_is_reaped_with_it(
@@ -566,7 +540,7 @@ def test_a_plugin_sync_the_app_server_starts_is_reaped_with_it(
         seen: set[int] = set()
         deadline = time.monotonic() + 5.0
         while not seen and time.monotonic() < deadline:
-            seen |= _descendants(app_server)
+            seen |= descendants(app_server)
             time.sleep(0.05)
         if not seen:
             adapter.quiesce(_TASK_ID)
@@ -574,7 +548,7 @@ def test_a_plugin_sync_the_app_server_starts_is_reaped_with_it(
 
         adapter.quiesce(_TASK_ID)
 
-    assert not any(_alive(pid) for pid in seen)
+    assert not any(running(pid) for pid in seen)
 
 
 def test_a_lost_supervisor_leaves_the_step_unproved(
@@ -588,10 +562,10 @@ def test_a_lost_supervisor_leaves_the_step_unproved(
         app_server = transport.pid
         assert primary_child(transport.supervisor_pid) == app_server
 
-        os.kill(transport.supervisor_pid, 9)
+        os.kill(transport.supervisor_pid, signal.SIGKILL)
         try:
             with pytest.raises(HarnessQuiescenceError):
                 adapter.quiesce(_TASK_ID)
         finally:
-            if _alive(app_server):
-                os.kill(app_server, 9)
+            if running(app_server):
+                os.kill(app_server, signal.SIGKILL)
