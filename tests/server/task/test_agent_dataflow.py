@@ -28,7 +28,7 @@ from server.orchestration.state import (
 )
 from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
-from server.task.runtime import TaskRuntime, agent_inputs, content_bindings
+from server.task.runtime import TaskRuntime
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
     AgentOperator,
@@ -361,9 +361,9 @@ def _write_result(
     bound = runtime.__dict__.setdefault("_test_bindings", {})
     bound[task_id] = ResultBinding(task_id=task_id, reference=reference)
     monkeypatch.setattr(
-        content_bindings,
+        runtime._content_bindings,
         "result_binding_locked",
-        lambda tasks, engines, task_id: bound.get(task_id),
+        lambda task_id: bound.get(task_id),
     )
 
 
@@ -401,9 +401,7 @@ def test_an_input_records_the_producer_result_it_was_read_from(
     assert member.value_ref is not None
     bound = runtime._test_bindings["P"]  # type: ignore[attr-defined]
     assert member.value_ref.content == bound.reference
-    (binding,) = agent_inputs.agent_input_bindings(
-        runtime._tasks, runtime._engines, engine, "M"
-    )
+    (binding,) = runtime._agent_inputs.agent_input_bindings(engine, "M")
     (delivered,) = binding.members
     assert delivered.value is None
     assert delivered.source is not None
@@ -478,12 +476,8 @@ def test_input_bindings_projection_is_deterministic() -> None:
     engine.record_accepted_input(
         _accepted(activation, "reviews", ValueRef(kind="inline", literal="grounded")),
     )
-    first = agent_inputs.agent_input_bindings(
-        runtime._tasks, runtime._engines, engine, "M"
-    )
-    second = agent_inputs.agent_input_bindings(
-        runtime._tasks, runtime._engines, engine, "M"
-    )
+    first = runtime._agent_inputs.agent_input_bindings(engine, "M")
+    second = runtime._agent_inputs.agent_input_bindings(engine, "M")
     assert first == second  # stable projection over the durable manifest
     assert first[0].port == "reviews" and first[0].members[0].value == "grounded"
 
@@ -519,9 +513,9 @@ def test_a_producer_that_settled_with_nothing_bound_fails_the_agent(
         return None
 
     monkeypatch.setattr(
-        content_bindings,
+        runtime._content_bindings,
         "result_binding_locked",
-        lambda tasks, engines, task_id: _unbound(task_id),
+        lambda task_id: _unbound(task_id),
     )
     runtime._tasks["P"] = cast(
         Any,

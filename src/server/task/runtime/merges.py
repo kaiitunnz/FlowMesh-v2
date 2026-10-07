@@ -1,14 +1,13 @@
 """Task merging: coalescing ready tasks into one dispatch and returning them."""
 
-import logging
 import threading
 from collections import defaultdict
 
 from shared.content import ContentReference
 
 from ..models import TERMINAL_TASK_STATUSES, TaskRecord, TaskStatus, TaskUsage
-from . import content_bindings
 from .commits import TransitionCommitter
+from .content_bindings import ContentBindings
 from .reports import reset_to_pending
 from .scheduling import ReadyQueue
 from .static_dag import StaticDag
@@ -24,19 +23,19 @@ class TaskMerges:
         ready: ReadyQueue,
         dag: StaticDag,
         committer: TransitionCommitter,
+        content_bindings: ContentBindings,
         tasks: dict[str, TaskRecord],
         completed: set[str],
         failed: set[str],
-        logger: logging.Logger,
         cv: threading.Condition,
     ) -> None:
         self._ready = ready
         self._dag = dag
         self._committer = committer
+        self._content_bindings = content_bindings
         self._tasks = tasks
         self._completed = completed
         self._failed = failed
-        self._logger = logger
         self._cv = cv
         self.merge_children_map: dict[str, list[str]] = defaultdict(list)
         self.merge_parent_map: dict[str, str] = {}
@@ -214,8 +213,8 @@ class TaskMerges:
         for child_id in child_ids:
             record = self._tasks.get(child_id)
             reference = child_references.get(child_id)
-            if record is not None and content_bindings.accepted_reference(
-                self._logger, record, reference
+            if record is not None and self._content_bindings.accepted_reference(
+                record, reference
             ):
                 settled.append(child_id)
             else:
@@ -252,7 +251,7 @@ class TaskMerges:
         if not child_record:
             return ready_children
         child_record.status = TaskStatus.DONE
-        content_bindings.bind_result_locked(self._logger, child_record, reference, None)
+        self._content_bindings.bind_result_locked(child_record, reference, None)
         child_record.error = None
         child_record.finished_ts = finished_ts
         if started_ts is not None and child_record.started_ts is None:

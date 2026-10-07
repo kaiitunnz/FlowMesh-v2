@@ -685,6 +685,16 @@ def test_a_suspended_episode_renews_store_access_under_its_dispatch() -> None:
     asyncio.run(run())
 
 
+def test_a_dispatch_that_ended_at_a_suspension_is_no_longer_in_flight() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        _, writer, _, _ = await _held_boundary(runtime, "dsp-1")
+
+        assert not runtime.dispatch_in_flight(writer, "dsp-1", "wkr-1")
+
+    asyncio.run(run())
+
+
 def _boundary_env(engine, writer, call: str):
     return engine._boundaries.boundary_events[
         (engine.work_item(writer).activation_id, call)

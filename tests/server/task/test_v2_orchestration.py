@@ -335,6 +335,19 @@ def _live_runtime(
     )
 
 
+def test_runtime_components_read_the_tables_filled_after_construction() -> None:
+    runtime = _runtime(FakeRegistry())
+    for component in (runtime._content_bindings, runtime._episode_dispatch):
+        assert component._tasks is runtime._tasks
+        assert component._engines is runtime._engines
+    assert runtime._content_bindings._original_deps is runtime._original_deps
+
+    runtime._tasks["tsk-a"] = cast(Any, SimpleNamespace(workflow_id="wfl-1"))
+    runtime._tasks["tsk-b"] = cast(Any, SimpleNamespace(workflow_id="wfl-1"))
+    runtime._original_deps["tsk-b"] = {"tsk-a"}
+    assert runtime._content_bindings.upstream_task_ids_locked("tsk-b") == {"tsk-a"}
+
+
 def _read_off_the_lock(runtime: TaskRuntime) -> list[bool]:
     """Record, for every stored result the runtime reads, whether it held its lock."""
     held: list[bool] = []

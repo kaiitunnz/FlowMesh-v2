@@ -14,7 +14,7 @@ from server.config import OrchestrationConfig
 from server.orchestration import PublicationOutcome
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultReader
-from server.task.runtime import TaskRuntime, content_bindings, fanout
+from server.task.runtime import TaskRuntime, fanout
 from server.task.v2.representations.template import TemplateEdge
 from shared.content import (
     OCTET_STREAM,
@@ -168,9 +168,9 @@ def _agent_consuming(runtime: TaskRuntime, monkeypatch: pytest.MonkeyPatch) -> A
     reference = store_result(runtime._results, "P", {"value": "grounded"})
     bound = {"P": ResultBinding(task_id="P", reference=reference)}
     monkeypatch.setattr(
-        content_bindings,
+        runtime._content_bindings,
         "result_binding_locked",
-        lambda tasks, engines, task_id: bound.get(task_id),
+        lambda task_id: bound.get(task_id),
     )
     return engine
 

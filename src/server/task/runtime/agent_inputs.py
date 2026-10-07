@@ -16,10 +16,10 @@ from ...orchestration import (
     ValueRef,
 )
 from ...orchestration.tool_dispatch import InputMemberPlan
-from ..models import TaskRecord
 from ..redrive import StoreRedriveScheduler
 from ..results import ResultReader, ResultUnavailable, ResultUnreadable
 from . import content_bindings
+from .content_bindings import ContentBindings
 
 
 @dataclass(frozen=True)
@@ -108,95 +108,6 @@ def mint_fanout_facet_locked(
     )
 
 
-def stage_agent_inputs_locked(
-    tasks: dict[str, TaskRecord],
-    engines: dict[str, OrchestrationEngine],
-    redrive: StoreRedriveScheduler,
-    input_budget_bytes: int,
-    workflow_id: str,
-    engine: OrchestrationEngine,
-    advance: Advance,
-) -> None:
-    """Record each edge-bound agent's accepted inputs that need no stored read.
-
-    An agent whose bound inputs have to be read from the store is left for an
-    immediate off-lock re-drive, which reads them and records them there.
-    """
-    drive = False
-    for task_id in engine.blocked_input_agents():
-        snapshot = agent_input_snapshot_locked(tasks, engines, engine, task_id)
-        if snapshot is None:
-            continue
-        if snapshot.references:
-            drive = True
-            continue
-        settle_agent_inputs_locked(
-            redrive, input_budget_bytes, workflow_id, engine, snapshot, {}, advance
-        )
-    if drive:
-        redrive.drive_now(workflow_id)
-
-
-def agent_input_snapshot_locked(
-    tasks: dict[str, TaskRecord],
-    engines: dict[str, OrchestrationEngine],
-    engine: OrchestrationEngine,
-    task_id: str,
-) -> _AgentInputSnapshot | None:
-    """What an agent's pending input ports resolve from, as the ledger stands.
-
-    Each member of a port whose producers are all bound is frozen to the result its
-    producer settled with. A port with a member whose producer has nothing bound
-    waits for a later advance; a producer that settled with nothing bound makes the
-    whole input unreadable.
-    """
-    plan = engine.agent_input_plan(task_id)
-    if plan is None:
-        return None
-    ports: list[_PortSnapshot] = []
-    unreadable: str | None = None
-    for port in plan.ports:
-        members: list[tuple[InputMemberPlan, ValueRef]] = []
-        for member in port.members:
-            value_ref = ValueRef(
-                kind=member.value_ref_kind,
-                legacy_task_id=member.legacy_task_id,
-                collection_key=member.collection_key,
-                literal=member.literal,
-            )
-            if value_ref.kind == "legacy_task_result":
-                producer = value_ref.legacy_task_id or ""
-                binding = content_bindings.result_binding_locked(
-                    tasks, engines, producer
-                )
-                if binding is None or binding.reference is None:
-                    if content_bindings.settled_unbound_locked(
-                        tasks, engines, producer
-                    ):
-                        unreadable = f"task {producer} settled with no bound result"
-                    break
-                value_ref = value_ref.model_copy(update={"content": binding.reference})
-            elif value_ref.kind not in ("inline", "empty"):
-                break
-            members.append((member, value_ref))
-        if unreadable is not None:
-            break
-        if len(members) == len(port.members):
-            ports.append(
-                _PortSnapshot(
-                    target_port=port.target_port,
-                    provenance=port.provenance,
-                    members=tuple(members),
-                )
-            )
-    return _AgentInputSnapshot(
-        task_id=task_id,
-        activation_id=plan.activation_id,
-        ports=tuple(ports),
-        unreadable=unreadable,
-    )
-
-
 def read_input_values(
     results: ResultReader, snapshots: list[_AgentInputSnapshot]
 ) -> dict[ContentReference, ResultEnvelope | Exception]:
@@ -213,114 +124,206 @@ def read_input_values(
     return values
 
 
-def settle_agent_inputs_locked(
-    redrive: StoreRedriveScheduler,
-    input_budget_bytes: int,
-    workflow_id: str,
-    engine: OrchestrationEngine,
-    snapshot: _AgentInputSnapshot,
-    values: dict[ContentReference, ResultEnvelope | Exception],
-    advance: Advance,
-) -> None:
-    """Record an agent's accepted inputs from their read values, then re-admit.
+class AgentInputs:
+    """Stages and settles each agent's declared inputs from upstream results,
+    re-driving a read the store could not serve."""
 
-    The budget counts the bytes of the resolved member strings; inputs over it fail
-    the agent as a declared failure.
-    """
-    task_id = snapshot.task_id
-    if snapshot.unreadable is not None:
-        advance.extend(
-            engine.on_failed(
-                task_id, f"input_unreadable: {snapshot.unreadable}", retryable=False
-            )
-        )
-        return
-    read = [values.get(ref) for ref in snapshot.references.values()]
-    if any(isinstance(value, ResultUnavailable) for value in read):
-        redrive.schedule(workflow_id)
-        return
-    if unreadable := next(
-        (value for value in read if isinstance(value, ResultUnreadable)), None
-    ):
-        advance.extend(
-            engine.on_failed(
-                task_id, f"input_unreadable: {unreadable}", retryable=False
-            )
-        )
-        return
-    total_bytes = 0
-    accepted: list[AcceptedInput] = []
-    for port in snapshot.ports:
-        texts = [_member_text(value_ref, values) for _member, value_ref in port.members]
-        if any(text is None for text in texts):
-            continue
-        total_bytes += sum(len((text or "").encode("utf-8")) for text in texts)
-        accepted.append(
-            AcceptedInput(
-                activation_id=snapshot.activation_id,
-                target_port=port.target_port,
-                provenance=port.provenance,
-                members=tuple(
-                    AcceptedInputMember(
-                        source_operator_id=member.source_operator_id,
-                        source_activation_id=member.source_activation_id,
-                        child_index=member.child_index,
-                        outcome=PublicationOutcome(member.outcome),
-                        value_ref=value_ref,
-                        ordinal=member.ordinal,
+    def __init__(
+        self,
+        content_bindings: ContentBindings,
+        redrive: StoreRedriveScheduler,
+        input_budget_bytes: int,
+    ) -> None:
+        self._content_bindings = content_bindings
+        self._redrive = redrive
+        self._input_budget_bytes = input_budget_bytes
+
+    def stage_agent_inputs_locked(
+        self,
+        workflow_id: str,
+        engine: OrchestrationEngine,
+        advance: Advance,
+    ) -> None:
+        """Record each edge-bound agent's accepted inputs that need no stored read.
+
+        An agent whose bound inputs have to be read from the store is left for an
+        immediate off-lock re-drive, which reads them and records them there.
+        """
+        drive = False
+        for task_id in engine.blocked_input_agents():
+            snapshot = self.agent_input_snapshot_locked(engine, task_id)
+            if snapshot is None:
+                continue
+            if snapshot.references:
+                drive = True
+                continue
+            self.settle_agent_inputs_locked(workflow_id, engine, snapshot, {}, advance)
+        if drive:
+            self._redrive.drive_now(workflow_id)
+
+    def agent_input_snapshot_locked(
+        self,
+        engine: OrchestrationEngine,
+        task_id: str,
+    ) -> _AgentInputSnapshot | None:
+        """What an agent's pending input ports resolve from, as the ledger stands.
+
+        Each member of a port whose producers are all bound is frozen to the result its
+        producer settled with. A port with a member whose producer has nothing bound
+        waits for a later advance; a producer that settled with nothing bound makes the
+        whole input unreadable.
+        """
+        plan = engine.agent_input_plan(task_id)
+        if plan is None:
+            return None
+        ports: list[_PortSnapshot] = []
+        unreadable: str | None = None
+        for port in plan.ports:
+            members: list[tuple[InputMemberPlan, ValueRef]] = []
+            for member in port.members:
+                value_ref = ValueRef(
+                    kind=member.value_ref_kind,
+                    legacy_task_id=member.legacy_task_id,
+                    collection_key=member.collection_key,
+                    literal=member.literal,
+                )
+                if value_ref.kind == "legacy_task_result":
+                    producer = value_ref.legacy_task_id or ""
+                    binding = self._content_bindings.result_binding_locked(producer)
+                    if binding is None or binding.reference is None:
+                        if self._content_bindings.settled_unbound_locked(producer):
+                            unreadable = f"task {producer} settled with no bound result"
+                        break
+                    value_ref = value_ref.model_copy(
+                        update={"content": binding.reference}
                     )
-                    for member, value_ref in port.members
-                ),
-            )
+                elif value_ref.kind not in ("inline", "empty"):
+                    break
+                members.append((member, value_ref))
+            if unreadable is not None:
+                break
+            if len(members) == len(port.members):
+                ports.append(
+                    _PortSnapshot(
+                        target_port=port.target_port,
+                        provenance=port.provenance,
+                        members=tuple(members),
+                    )
+                )
+        return _AgentInputSnapshot(
+            task_id=task_id,
+            activation_id=plan.activation_id,
+            ports=tuple(ports),
+            unreadable=unreadable,
         )
-    if total_bytes > input_budget_bytes:
-        advance.extend(
-            engine.on_failed(
-                task_id,
-                f"input_too_large: resolved input is {total_bytes} bytes, "
-                f"over the {input_budget_bytes}-byte budget",
-                retryable=False,
-            )
-        )
-        return
-    for entry in accepted:
-        engine.record_accepted_input(entry)
-    advance.extend(engine.reconsider_admission(task_id))
 
+    def settle_agent_inputs_locked(
+        self,
+        workflow_id: str,
+        engine: OrchestrationEngine,
+        snapshot: _AgentInputSnapshot,
+        values: dict[ContentReference, ResultEnvelope | Exception],
+        advance: Advance,
+    ) -> None:
+        """Record an agent's accepted inputs from their read values, then re-admit.
 
-def agent_input_bindings(
-    tasks: dict[str, TaskRecord],
-    engines: dict[str, OrchestrationEngine],
-    engine: OrchestrationEngine,
-    task_id: str,
-) -> tuple[InputBinding, ...]:
-    """The first-turn input bindings for an agent's input ports.
+        The budget counts the bytes of the resolved member strings; inputs over it fail
+        the agent as a declared failure.
+        """
+        task_id = snapshot.task_id
+        if snapshot.unreadable is not None:
+            advance.extend(
+                engine.on_failed(
+                    task_id, f"input_unreadable: {snapshot.unreadable}", retryable=False
+                )
+            )
+            return
+        read = [values.get(ref) for ref in snapshot.references.values()]
+        if any(isinstance(value, ResultUnavailable) for value in read):
+            self._redrive.schedule(workflow_id)
+            return
+        if unreadable := next(
+            (value for value in read if isinstance(value, ResultUnreadable)), None
+        ):
+            advance.extend(
+                engine.on_failed(
+                    task_id, f"input_unreadable: {unreadable}", retryable=False
+                )
+            )
+            return
+        total_bytes = 0
+        accepted: list[AcceptedInput] = []
+        for port in snapshot.ports:
+            texts = [
+                _member_text(value_ref, values) for _member, value_ref in port.members
+            ]
+            if any(text is None for text in texts):
+                continue
+            total_bytes += sum(len((text or "").encode("utf-8")) for text in texts)
+            accepted.append(
+                AcceptedInput(
+                    activation_id=snapshot.activation_id,
+                    target_port=port.target_port,
+                    provenance=port.provenance,
+                    members=tuple(
+                        AcceptedInputMember(
+                            source_operator_id=member.source_operator_id,
+                            source_activation_id=member.source_activation_id,
+                            child_index=member.child_index,
+                            outcome=PublicationOutcome(member.outcome),
+                            value_ref=value_ref,
+                            ordinal=member.ordinal,
+                        )
+                        for member, value_ref in port.members
+                    ),
+                )
+            )
+        if total_bytes > self._input_budget_bytes:
+            advance.extend(
+                engine.on_failed(
+                    task_id,
+                    f"input_too_large: resolved input is {total_bytes} bytes, "
+                    f"over the {self._input_budget_bytes}-byte budget",
+                    retryable=False,
+                )
+            )
+            return
+        for entry in accepted:
+            engine.record_accepted_input(entry)
+        advance.extend(engine.reconsider_admission(task_id))
 
-    A member a producer's result supplies names that result for the worker to
-    hydrate; an inline member carries its own literal.
-    """
-    bindings: list[InputBinding] = []
-    for ordinal, accepted in enumerate(engine.accepted_inputs_for_task(task_id)):
-        members = tuple(
-            InputBindingMember(
-                source_operator_id=member.source_operator_id,
-                source_activation_id=member.source_activation_id,
-                child_index=member.child_index,
-                outcome=member.outcome.value,
-                value=_literal_text(member.value_ref),
-                source=content_bindings.member_source_locked(
-                    tasks, engines, member.value_ref
-                ),
-                ordinal=member.ordinal,
+    def agent_input_bindings(
+        self,
+        engine: OrchestrationEngine,
+        task_id: str,
+    ) -> tuple[InputBinding, ...]:
+        """The first-turn input bindings for an agent's input ports.
+
+        A member a producer's result supplies names that result for the worker to
+        hydrate; an inline member carries its own literal.
+        """
+        bindings: list[InputBinding] = []
+        for ordinal, accepted in enumerate(engine.accepted_inputs_for_task(task_id)):
+            members = tuple(
+                InputBindingMember(
+                    source_operator_id=member.source_operator_id,
+                    source_activation_id=member.source_activation_id,
+                    child_index=member.child_index,
+                    outcome=member.outcome.value,
+                    value=_literal_text(member.value_ref),
+                    source=self._content_bindings.member_source_locked(
+                        member.value_ref
+                    ),
+                    ordinal=member.ordinal,
+                )
+                for member in accepted.members
             )
-            for member in accepted.members
-        )
-        bindings.append(
-            InputBinding(
-                port=accepted.target_port,
-                provenance=accepted.provenance,
-                ordinal=accepted.ordinal or ordinal,
-                members=members,
+            bindings.append(
+                InputBinding(
+                    port=accepted.target_port,
+                    provenance=accepted.provenance,
+                    ordinal=accepted.ordinal or ordinal,
+                    members=members,
+                )
             )
-        )
-    return tuple(bindings)
+        return tuple(bindings)

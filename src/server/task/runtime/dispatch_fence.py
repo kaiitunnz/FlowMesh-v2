@@ -12,8 +12,8 @@ from ..models import (
     TaskRecord,
     TaskStatus,
 )
-from . import episode_dispatch
 from .commits import HeldWrites, TransitionCommitter
+from .episode_dispatch import EpisodeDispatch
 from .merges import TaskMerges
 from .reservations import WorkerReservations
 from .scheduling import ReadyQueue
@@ -50,6 +50,7 @@ class DispatchFence:
         committer: TransitionCommitter,
         ready: ReadyQueue,
         reservations: WorkerReservations,
+        episode_dispatch: EpisodeDispatch,
         tasks: dict[str, TaskRecord],
         engines: dict[str, OrchestrationEngine],
     ) -> None:
@@ -57,6 +58,7 @@ class DispatchFence:
         self._committer = committer
         self._ready = ready
         self._reservations = reservations
+        self._episode_dispatch = episode_dispatch
         self._tasks = tasks
         self._engines = engines
         # The dispatch being published for each task, until the dispatcher records it;
@@ -222,8 +224,9 @@ class DispatchFence:
         """Whether a dispatch to a worker is being published or holds its task, and
         has not ended at a suspension."""
         record = self._tasks.get(task_id)
-        if record is None or episode_dispatch.dispatch_ended_at_suspension_locked(
-            self._engines, record
+        if (
+            record is None
+            or self._episode_dispatch.dispatch_ended_at_suspension_locked(record)
         ):
             return False
         publish = self.publishing.get(task_id)

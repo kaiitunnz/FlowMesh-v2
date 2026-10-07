@@ -3,10 +3,9 @@
 import logging
 from collections.abc import Sequence
 
-from ...orchestration import OrchestrationEngine
 from ...registries.worker import WorkerRegistry
 from ..models import TaskRecord, TaskStatus
-from . import episode_dispatch
+from .episode_dispatch import EpisodeDispatch
 from .reports import membership
 
 
@@ -17,12 +16,12 @@ class WorkerReservations:
     def __init__(
         self,
         tasks: dict[str, TaskRecord],
-        engines: dict[str, OrchestrationEngine],
+        episode_dispatch: EpisodeDispatch,
         worker_registry: WorkerRegistry,
         logger: logging.Logger,
     ) -> None:
         self._tasks = tasks
-        self._engines = engines
+        self._episode_dispatch = episode_dispatch
         self._worker_registry = worker_registry
         self._logger = logger
         # The worker and dispatch holding each dispatched task, until a commit moves the
@@ -57,9 +56,7 @@ class WorkerReservations:
             if membership(record) == TaskStatus.DISPATCHED
             and record.assigned_worker is not None
             and record.dispatch_id is not None
-            and not episode_dispatch.dispatch_ended_at_suspension_locked(
-                self._engines, record
-            )
+            and not self._episode_dispatch.dispatch_ended_at_suspension_locked(record)
         )
 
     def release_ended_dispatches_locked(self, task_ids: Sequence[str]) -> None:
@@ -78,8 +75,8 @@ class WorkerReservations:
                 record is not None
                 and membership(record) == TaskStatus.DISPATCHED
                 and record.dispatch_id == held[1]
-                and not episode_dispatch.dispatch_ended_at_suspension_locked(
-                    self._engines, record
+                and not self._episode_dispatch.dispatch_ended_at_suspension_locked(
+                    record
                 )
             ):
                 continue
