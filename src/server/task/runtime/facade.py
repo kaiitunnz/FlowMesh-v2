@@ -1710,12 +1710,7 @@ class TaskRuntime:
         """
         if interface != MODEL_INTERFACE:
             return _OpCredential()
-        return self._model_credential(
-            agent,
-            episode_dispatch.resolve_model_binding(
-                self._tasks, self._engines, agent.task_id
-            ),
-        )
+        return self._model_credential(agent, self.resolve_model_binding(agent.task_id))
 
     def _model_credential(
         self, agent: TaskRecord, binding: AgentModelGatewayBinding | None
@@ -1864,9 +1859,7 @@ class TaskRuntime:
                 # A gone origin worker cannot receive a relay: the held turn fails on
                 # its own permit deadline.
                 return
-            binding = episode_dispatch.resolve_model_binding(
-                self._tasks, self._engines, proposal.agent_task_id
-            )
+            binding = self.resolve_model_binding(proposal.agent_task_id)
             permit = None
             reason = "model turn egress denied"
             if binding is not None and binding.mode is ModelBindingMode.OPENAI:
@@ -2484,9 +2477,7 @@ class TaskRuntime:
         dispatches like any other.
         """
         with self._lock:
-            contract = episode_dispatch.declared_contract(
-                self._tasks, self._engines, self._logger, task_id
-            )
+            contract = self.declared_contract(task_id)
             if contract is None or not contract.source.prepared_before_selection:
                 return False
             resolution = content_bindings.input_resolution_locked(
