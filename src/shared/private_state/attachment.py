@@ -57,7 +57,7 @@ class PrivateStateUnavailableReason(StrEnum):
 class PrivateStateUnavailable(Exception):
     """Raised when a generation cannot be safely captured or supplied in full.
 
-    The continuation fails closed rather than sealing under a live writer or resuming
+    The continuation fails closed: it neither seals under a live writer nor resumes
     against a fresh, partial, or foreign generation.
     """
 

@@ -6,10 +6,10 @@ ordinary worker container: Landlock denies every path outside the workspace and 
 read-only runtime, a seccomp filter denies IP sockets and io_uring, and the envelope's
 resource limits bound the command. The command runs under its own supervisor, outside
 those layers, which reaps everything the command started — including a process that
-detached into a session of its own — before the action completes, and a command whose
-tree it could not prove reaped fails rather than completing. A dispatch whose capability
-carries the egress opt-in relaxes the two network layers and nothing else: the workspace
-confinement, the envelope, and the reaping bound it as they bound any other command.
+detached into a session of its own — before the action completes; a command whose tree
+it could not prove reaped fails. A dispatch whose capability carries the egress opt-in
+relaxes the two network layers and nothing else: the workspace confinement, the
+envelope, and the reaping bound it as they bound any other command.
 
 What the fence does not provide, because an unprivileged container cannot: no mount
 namespace or private root view, no PID or IPC isolation (processes on one worker remain

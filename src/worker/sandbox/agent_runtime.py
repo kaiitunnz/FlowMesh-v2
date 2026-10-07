@@ -63,7 +63,7 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
             return self._unproved
 
     def close(self) -> None:
-        """Admit no further command; a later one is denied rather than run."""
+        """Close admission, so a later command is denied."""
         with self._admission:
             self._open = False
 

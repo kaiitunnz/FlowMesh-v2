@@ -133,8 +133,8 @@ class SandboxReapUnproved(Exception):
     """A command's process tree was not proved reaped.
 
     Unlike a denial this does not settle the action: something the command started may
-    still be writing the workspace, so the turn that ran it ends rather than carrying
-    on, and the dispatch can no longer seal its private state. ``retry`` tries the reap
+    be writing the workspace, so the turn that ran it ends and the dispatch cannot seal
+    its private state. ``retry`` tries the reap
     again and returns whether it was then proved.
     """
 

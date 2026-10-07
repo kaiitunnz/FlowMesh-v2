@@ -44,7 +44,7 @@ class CaptureMode(StrEnum):
 
     # A filesystem tree captured once every writer of the step that produced it is
     # proved stopped, and restored by verifying that exact tree before a fresh harness
-    # process starts on it. No live process state is part of the capture.
+    # process starts on it.
     QUIESCENT_TREE = "quiescent_tree"
 
 
