@@ -11,10 +11,10 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
-from server.orchestration import Advance, PublicationOutcome
-from server.task import runtime as runtime_module
+from server.orchestration import PublicationOutcome
 from server.task.redrive import StoreRedriveScheduler
-from server.task.runtime import TaskRuntime
+from server.task.results import ResultReader
+from server.task.runtime import TaskRuntime, fanout
 from server.task.v2.representations.template import TemplateEdge
 from shared.content import (
     OCTET_STREAM,
@@ -25,7 +25,7 @@ from shared.content import (
 )
 from shared.tasks.result_binding import ResultBinding
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
-from tests.server.dispatch_helpers import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch, stage_agent_inputs
 from tests.server.result_store import make_result_reader, store_result
 from tests.server.task.test_agent_dataflow import (
     _bundle,
@@ -75,15 +75,17 @@ class _FlakyStore(FabricObjectStore):
 
 @pytest.fixture(autouse=True)
 def _no_read_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(runtime_module, "_FANOUT_READ_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(fanout, "_FANOUT_READ_BACKOFF_SEC", 0.0)
 
 
 def _runtime(
-    registry: FakeRegistry,
+    registry: FakeRegistry, reader: ResultReader | None = None
 ) -> tuple[TaskRuntime, _FlakyStore, list[StoreRedriveScheduler], _Clock]:
-    reader = make_result_reader()
-    flaky = _FlakyStore(reader.store)
-    reader._store = flaky
+    if reader is None:
+        reader = make_result_reader()
+        reader._store = _FlakyStore(reader.store)
+    flaky = reader._store
+    assert isinstance(flaky, _FlakyStore)
     clock = _Clock()
     schedulers: list[StoreRedriveScheduler] = []
 
@@ -153,7 +155,7 @@ async def test_a_missing_producer_result_still_fails_the_workflow() -> None:
     assert not scheduler.pending(workflow_id)
 
 
-def _agent_consuming(runtime: TaskRuntime) -> Any:
+def _agent_consuming(runtime: TaskRuntime, monkeypatch: pytest.MonkeyPatch) -> Any:
     engine = _engine(
         _bundle(
             [_leaf("P"), _input_agent("M", ("reviews",))],
@@ -165,19 +167,23 @@ def _agent_consuming(runtime: TaskRuntime) -> Any:
     engine.on_succeeded("P")
     reference = store_result(runtime._results, "P", {"value": "grounded"})
     bound = {"P": ResultBinding(task_id="P", reference=reference)}
-    runtime._result_binding_locked = lambda task_id: bound.get(  # type: ignore[method-assign]
-        task_id
+    monkeypatch.setattr(
+        runtime._content_bindings,
+        "result_binding_locked",
+        lambda task_id: bound.get(task_id),
     )
     return engine
 
 
-def test_an_agent_input_waits_out_an_unreachable_store() -> None:
+def test_an_agent_input_waits_out_an_unreachable_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime, flaky, (scheduler,), clock = _runtime(FakeRegistry())
-    engine = _agent_consuming(runtime)
+    engine = _agent_consuming(runtime, monkeypatch)
     runtime._engines["wfl-agent"] = engine
 
     flaky.error = ContentUnavailable("store down")
-    runtime._stage_agent_inputs_locked("wfl-agent", engine, Advance())
+    stage_agent_inputs(runtime, "wfl-agent", engine)
     assert scheduler.run_due() == ["wfl-agent"]
     assert engine.work_item("M").outcome is None
     assert not engine.accepted_inputs_for_task("M")
@@ -192,13 +198,13 @@ def test_an_agent_input_waits_out_an_unreachable_store() -> None:
     assert not scheduler.pending("wfl-agent")
 
 
-def test_a_missing_agent_input_fails_the_agent() -> None:
+def test_a_missing_agent_input_fails_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime, flaky, (scheduler,), _clock = _runtime(FakeRegistry())
-    engine = _agent_consuming(runtime)
+    engine = _agent_consuming(runtime, monkeypatch)
     runtime._engines["wfl-agent"] = engine
 
     flaky.error = ContentHydrationError("no such object")
-    runtime._stage_agent_inputs_locked("wfl-agent", engine, Advance())
+    stage_agent_inputs(runtime, "wfl-agent", engine)
     scheduler.run_due()
     assert engine.work_item("M").outcome is PublicationOutcome.DECLARED_FAILURE
     assert not scheduler.pending("wfl-agent")
@@ -251,8 +257,7 @@ async def test_a_restart_records_the_inputs_a_crash_left_unread() -> None:
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None and not engine.accepted_inputs_for_task(agent)
 
-    restored, _flaky2, (rescheduler,), _clock2 = _runtime(registry)
-    restored._results = runtime._results
+    restored, _flaky2, (rescheduler,), _clock2 = _runtime(registry, runtime._results)
     assert await restored.rehydrate() == 1
     # The agent waits, blocked on its inputs.
     assert agent not in _pop_ready(restored)

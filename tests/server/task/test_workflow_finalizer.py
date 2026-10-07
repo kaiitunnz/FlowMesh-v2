@@ -344,8 +344,7 @@ def test_the_vault_still_purges_when_the_last_task_settles() -> None:
                 purged.append(workflow_id)
 
         registry = FakeRegistry()
-        runtime = _runtime(registry)
-        runtime._credential_vault = cast(Any, _RecordingVault())
+        runtime = _runtime(registry, vault=_RecordingVault())
         workflow_id, ids = await _register(runtime, _CHAIN)
         head, tail = ids["head"], ids["tail"]
 

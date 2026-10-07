@@ -52,13 +52,12 @@ def sync() -> _RecordingSync:
 
 
 def _setup(sync: _RecordingSync) -> tuple[TaskRuntime, EventMonitor, str]:
-    runtime = _runtime_v2(FakeRegistry())
+    registry = WorkerRegistry(cast(Any, _Rds(sync)))
+    runtime = _runtime_v2(FakeRegistry(), registry)
     _, ids = asyncio.run(_register_v2(runtime, LINEAR))
     task_id = ids["a"]
     assert pop_ready(runtime) == task_id
     monitor = _monitor(runtime)
-    registry = WorkerRegistry(cast(Any, _Rds(sync)))
-    runtime._worker_registry = registry
     monitor._worker_registry = registry
     return runtime, monitor, task_id
 

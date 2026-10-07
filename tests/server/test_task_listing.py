@@ -23,9 +23,9 @@ from pydantic import TypeAdapter
 from server.app_state import get_logger, get_runtime
 from server.auth.security import authenticate_connection
 from server.routers.v1 import tasks as tasks_router
-from server.task import runtime as runtime_module
 from server.task.models import TaskInfo
 from server.task.runtime import TaskRuntime
+from server.task.runtime import facade as runtime_module
 from server.utils.cursors import encode_cursor
 from server.utils.query import QueryFilter
 from tests.server.task.test_v2_orchestration import FakeRegistry, _live_runtime

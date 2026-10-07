@@ -196,14 +196,16 @@ class _WorkerRegistryStub:
         return []
 
 
-def _runtime(registry: FakeRegistry) -> TaskRuntime:
+def _runtime(
+    registry: FakeRegistry, workers: Any = None, vault: Any = None
+) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
+        cast(Any, workers if workers is not None else _WorkerRegistryStub()),
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("v2-test"),
-        credential_vault=InMemoryCredentialVault(),
+        credential_vault=vault if vault is not None else InMemoryCredentialVault(),
     )
 
 
@@ -315,19 +317,35 @@ def _planned(runtime: TaskRuntime, task_id: str, items: list[str]) -> dict[str, 
 
 
 def _live_runtime(
-    registry: FakeRegistry, name: str = "live", reader: Any = None
+    registry: FakeRegistry,
+    name: str = "live",
+    reader: Any = None,
+    workers: Any = None,
 ) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
+        cast(Any, workers if workers is not None else _WorkerRegistryStub()),
         OrchestrationConfig(),
-        reader or make_result_reader(),
+        reader if reader is not None else make_result_reader(),
         logging.getLogger(name),
         credential_vault=InMemoryCredentialVault(),
         redrive=lambda fire, logger: StoreRedriveScheduler(
             fire, logger, run_thread=False
         ),
     )
+
+
+def test_runtime_components_read_the_tables_filled_after_construction() -> None:
+    runtime = _runtime(FakeRegistry())
+    for component in (runtime._content_bindings, runtime._episode_dispatch):
+        assert component._tasks is runtime._tasks
+        assert component._engines is runtime._engines
+    assert runtime._content_bindings._original_deps is runtime._original_deps
+
+    runtime._tasks["tsk-a"] = cast(Any, SimpleNamespace(workflow_id="wfl-1"))
+    runtime._tasks["tsk-b"] = cast(Any, SimpleNamespace(workflow_id="wfl-1"))
+    runtime._original_deps["tsk-b"] = {"tsk-a"}
+    assert runtime._content_bindings.upstream_task_ids_locked("tsk-b") == {"tsk-a"}
 
 
 def _read_off_the_lock(runtime: TaskRuntime) -> list[bool]:

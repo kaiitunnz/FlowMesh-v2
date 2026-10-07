@@ -353,7 +353,7 @@ async def _stored_hang(
     )
     engine = _engine(runtime, workflow_id)
     with monkeypatch.context() as patch:
-        patch.setattr(engine, "_fail_region", lambda *_args: None)
+        patch.setattr(engine._flow, "_fail_region", lambda *_args: None)
         _fail(runtime, ids["a"])
     blob = json.loads(registry.ledger_blobs[workflow_id])
     del blob["failed_regions"]
@@ -401,7 +401,9 @@ def test_a_restart_fails_the_regions_of_a_stored_cascade_failed_agent(
         # A stored workflow whose failure cascaded into an agent and stopped there.
         with monkeypatch.context() as patch:
             patch.setattr(
-                _engine(runtime, workflow_id), "_fail_agent_regions", lambda *_: None
+                _engine(runtime, workflow_id)._flow,
+                "_fail_agent_regions",
+                lambda *_: None,
             )
             _fail(runtime, ids["a"])
         assert not runtime.workflow_settlement(workflow_id).settled
@@ -1078,7 +1080,9 @@ def test_a_fan_out_persists_what_it_failed_before_the_ledger(shape: str) -> None
         if shape == "denied_children":
             # Every child's effect falls outside the grant, so admission denies it.
             engine = _engine(runtime, workflow_id)
-            engine._root_grant = engine._root_grant.model_copy(update={"invoke": ()})
+            engine._ledger.root_grant = engine._ledger.root_grant.model_copy(
+                update={"invoke": ()}
+            )
             items = ["h1", "h2"]
         after = ids["after"]
         writes: list[str] = []

@@ -71,7 +71,7 @@ def test_the_runtime_notifies_the_completion_finalizer(server_main: Any) -> None
     # A terminal the control plane settles publishes no task event, so without this
     # wiring such a workflow never emits its span and never closes its log stream.
     assert (
-        server_main.RUNTIME._on_workflow_settled
+        server_main.RUNTIME._committer.on_workflow_settled
         == server_main.EVENT_MONITOR.finalizer.request
     )
 

@@ -191,7 +191,7 @@ async def test_a_v2_return_closes_its_attempt_without_charging_it() -> None:
     work_item = engine.work_item(task_id)
     assert work_item is not None
     assert work_item.status is WorkItemStatus.READY
-    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+    assert [engine._ledger.attempts[a].status for a in work_item.attempt_ids] == [
         AttemptStatus.RETURNED
     ]
     assert runtime._tasks[task_id].attempts == 0
@@ -200,7 +200,7 @@ async def test_a_v2_return_closes_its_attempt_without_charging_it() -> None:
     record_dispatch(runtime, task_id, cast(Any, _worker("wkr-2")), "dsp-2")
     runtime.mark_started(task_id, "wkr-2", {}, _TS, dispatch_id="dsp-2")
     runtime.mark_succeeded(task_id, "wkr-2", {}, _TS, dispatch_id="dsp-2")
-    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+    assert [engine._ledger.attempts[a].status for a in work_item.attempt_ids] == [
         AttemptStatus.RETURNED,
         AttemptStatus.SUCCEEDED,
     ]
@@ -275,7 +275,7 @@ class _Attributing:
 
     def ready(self) -> str | None:
         with self.runtime._cv:
-            return self.runtime._pop_ready_locked()
+            return self.runtime._ready.pop_ready_locked()
 
 
 @pytest.mark.anyio
@@ -309,7 +309,7 @@ async def test_input_control_reads_fine_runs_again_blaming_no_worker() -> None:
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 0
     assert record.failed_workers == []
-    assert task_id not in runtime._input_checks
+    assert task_id not in runtime._inputs.input_checks
     assert fixture.ready() == task_id
 
 
@@ -329,7 +329,7 @@ async def test_input_missing_at_control_fails_the_task_as_a_reported_failure() -
     assert record.attempts == 0
     assert record.failed_workers == []
     fixture.scheduler.run_due()
-    assert task_id not in runtime._input_checks
+    assert task_id not in runtime._inputs.input_checks
     dependent = next(
         other for other, deps in runtime._original_deps.items() if task_id in deps
     )
@@ -355,7 +355,7 @@ async def test_a_v2_input_missing_at_control_keeps_the_returned_attempt() -> Non
     work_item = engine.work_item(task_id)
     assert work_item is not None
     assert work_item.status is WorkItemStatus.SETTLED
-    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+    assert [engine._ledger.attempts[a].status for a in work_item.attempt_ids] == [
         AttemptStatus.RETURNED
     ]
 
@@ -380,7 +380,7 @@ async def test_a_worker_cannot_report_its_own_input_unreadable() -> None:
     )
 
     assert runtime._tasks[task_id].status == TaskStatus.PENDING
-    assert task_id in runtime._input_checks
+    assert task_id in runtime._inputs.input_checks
 
 
 @pytest.mark.anyio
@@ -436,7 +436,7 @@ async def test_a_check_that_fails_to_apply_runs_again_without_stalling_the_drive
     fixture.report(_unavailable(task_id, [reference]))
     drives: list[str] = []
     monkeypatch.setattr(runtime, "_redrive_workflow", drives.append)
-    commit = runtime._commit_locked
+    commit = runtime._committer.commit_locked
     failures = [RuntimeError("redis down")]
 
     def _flaky_commit(*task_ids: str) -> None:
@@ -444,15 +444,15 @@ async def test_a_check_that_fails_to_apply_runs_again_without_stalling_the_drive
             raise failures.pop()
         commit(*task_ids)
 
-    monkeypatch.setattr(runtime, "_commit_locked", _flaky_commit)
+    monkeypatch.setattr(runtime._committer, "commit_locked", _flaky_commit)
     fixture.scheduler.run_due()
 
     assert drives == [workflow_id]
-    assert task_id in runtime._input_checks
+    assert task_id in runtime._inputs.input_checks
     assert fixture.scheduler.pending(workflow_id)
 
     fixture.scheduler.run_due()
-    assert task_id not in runtime._input_checks
+    assert task_id not in runtime._inputs.input_checks
 
 
 @pytest.mark.anyio
@@ -468,7 +468,7 @@ async def test_a_report_naming_inputs_the_task_does_not_consume_is_charged() -> 
 
     record = runtime._tasks[task_id]
     assert fixture.probe.reads == []
-    assert task_id not in runtime._input_checks
+    assert task_id not in runtime._inputs.input_checks
     assert record.attempts == 1
     assert record.failed_workers == ["wkr-1"]
 
@@ -481,7 +481,7 @@ async def test_a_task_cancelled_while_held_is_left_settled() -> None:
     fixture.report(_unavailable(task_id, [reference]))
 
     runtime.cancel_workflow(runtime._tasks[task_id].workflow_id)
-    assert task_id not in runtime._input_checks
+    assert task_id not in runtime._inputs.input_checks
     fixture.scheduler.run_due()
 
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
@@ -534,14 +534,14 @@ async def test_a_verdict_whose_write_failed_is_handled_again_and_finalizes_once(
     registry.fail_next = True
     stream.pump()
     assert registry.durable_status(task_id) != TaskStatus.FAILED
-    assert task_id in runtime._input_checks
+    assert task_id in runtime._inputs.input_checks
     fixture.scheduler.run_due()  # control reports its verdict again
     stream.pump()
 
     assert registry.durable_status(task_id) == TaskStatus.FAILED
     assert _finalized(fixture).count(task_id) == 1
     fixture.scheduler.run_due()
-    assert task_id not in runtime._input_checks
+    assert task_id not in runtime._inputs.input_checks
 
 
 @pytest.mark.anyio
@@ -661,5 +661,5 @@ async def test_verdicts_reported_again_while_the_monitor_lags_back_off() -> None
     now[0] += 60
     fixture.scheduler.run_due()
     assert _finalized(fixture).count(task_id) == 1
-    assert task_id not in runtime._input_checks
+    assert task_id not in runtime._inputs.input_checks
     assert workflow_id not in fixture.scheduler._recheck_streak

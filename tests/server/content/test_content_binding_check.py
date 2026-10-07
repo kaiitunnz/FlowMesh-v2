@@ -1,5 +1,6 @@
 """What a task's own bindings entitle its worker to read."""
 
+import logging
 import threading
 from types import SimpleNamespace
 from typing import Any, cast
@@ -14,6 +15,8 @@ from server.orchestration.state import (
 )
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from server.task.runtime.content_bindings import ContentBindings
+from server.task.runtime.dispatch_fence import DispatchFence
 from shared.content import ContentReference, reference_for
 from shared.harness.adapter import DeliveredOutcome
 from shared.outcome import OutcomeManifest
@@ -92,7 +95,6 @@ def _runtime(
     """
     runtime = object.__new__(TaskRuntime)
     runtime._lock = threading.RLock()
-    runtime._publishing = {}
     tasks: dict[str, Any] = {
         "tsk-1": _record(
             "tsk-1", status, assigned=assigned, merged_children=merged_children
@@ -115,6 +117,16 @@ def _runtime(
                 accepted=accepted,
             )
         },
+    )
+    runtime._content_bindings = ContentBindings(
+        runtime._tasks,
+        runtime._engines,
+        runtime._original_deps,
+        logging.getLogger("test.content_binding_check"),
+    )
+    unused = cast(Any, None)
+    runtime._fence = DispatchFence(
+        unused, unused, unused, unused, unused, runtime._tasks, runtime._engines
     )
     return runtime
 
@@ -308,6 +320,6 @@ def test_a_merged_child_from_another_workflow_reads_its_own_upstream() -> None:
         result_reference=_UPSTREAM,
         finished_ts=None,
     )
-    runtime._original_deps = {"tsk-child": {"tsk-dep"}}
+    runtime._original_deps["tsk-child"] = {"tsk-dep"}
 
     assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _UPSTREAM)

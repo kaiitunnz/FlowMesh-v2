@@ -8,8 +8,7 @@ from unittest.mock import MagicMock
 
 from server.orchestration.state import WorkItemStatus
 from server.registries.worker import ReportOutcome
-from server.task import runtime as runtime_module
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, facade, mediated_ops
 from shared.schemas.event import WorkerEvent
 from shared.schemas.worker import WorkerStatus
 from shared.tools.contract import (
@@ -43,7 +42,7 @@ def _heartbeat(runtime: TaskRuntime) -> None:
 
 
 def _overdue(runtime: TaskRuntime) -> None:
-    for op in runtime._pending_ops.values():
+    for op in runtime._mediated_ops.pending_ops.values():
         op.redrive_at = 0.0
 
 
@@ -77,7 +76,7 @@ def test_an_operation_whose_outcome_never_arrives_settles_through_a_re_drive() -
         assert again["permit_id"] != first["permit_id"]
         assert again["idempotency_key"] == first["idempotency_key"]
         runtime.settle_mediated_operation(_outcome(writer, again))
-        assert runtime._pending_ops == {}
+        assert runtime._mediated_ops.pending_ops == {}
         _dispatch_agent(runtime, writer)
         writer_wi = engine.work_item(writer)
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
@@ -92,15 +91,15 @@ def test_an_operation_re_driven_to_its_limit_fails_its_boundary() -> None:
         writer = ids["writer"]
         engine = _dispatch_agent(runtime, writer)
 
-        for _ in range(runtime_module._OP_REDRIVE_LIMIT):
+        for _ in range(mediated_ops._OP_REDRIVE_LIMIT):
             _overdue(runtime)
             _heartbeat(runtime)
-        assert len(_permit_frames(runtime)) == 1 + runtime_module._OP_REDRIVE_LIMIT
+        assert len(_permit_frames(runtime)) == 1 + mediated_ops._OP_REDRIVE_LIMIT
         _overdue(runtime)
         _heartbeat(runtime)
 
-        assert len(_permit_frames(runtime)) == 1 + runtime_module._OP_REDRIVE_LIMIT
-        assert runtime._pending_ops == {}
+        assert len(_permit_frames(runtime)) == 1 + mediated_ops._OP_REDRIVE_LIMIT
+        assert runtime._mediated_ops.pending_ops == {}
         assert not engine.boundary_settleable(
             writer, _permit_frames(runtime)[0]["call_correlation"]
         )
@@ -114,17 +113,17 @@ def test_each_re_drive_waits_longer() -> None:
         _, ids = await _register(runtime, _SEARCH_WF)
         _dispatch_agent(runtime, ids["writer"])
         [first] = _permit_frames(runtime)
-        [op] = runtime._pending_ops.values()
+        [op] = runtime._mediated_ops.pending_ops.values()
         assert op.redrive_at == first["deadline_epoch"]
 
         _overdue(runtime)
         _heartbeat(runtime)
 
         [_, again] = _permit_frames(runtime)
-        [op] = runtime._pending_ops.values()
+        [op] = runtime._mediated_ops.pending_ops.values()
         assert (op.redrives, op.redrive_at) == (
             1,
-            again["deadline_epoch"] + runtime_module._OP_REDRIVE_BACKOFF_SEC,
+            again["deadline_epoch"] + facade._OP_REDRIVE_BACKOFF_SEC,
         )
 
     asyncio.run(run())
@@ -145,7 +144,7 @@ def test_no_operation_is_re_minted_to_another_node_s_worker_under_its_id() -> No
         runtime.redeliver_to_worker("wkr-1")
 
         assert _permit_frames(runtime) == [first]
-        assert runtime._pending_ops == {}
+        assert runtime._mediated_ops.pending_ops == {}
         assert not engine.boundary_settleable(writer, first["call_correlation"])
 
     asyncio.run(run())

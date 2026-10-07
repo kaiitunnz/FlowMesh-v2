@@ -80,4 +80,4 @@ def test_engine_grants_the_declared_agent_interface() -> None:
     bundle = _bundle()
     eng = OrchestrationEngine.build("wfl-agent", "owner", "org", bundle)
     # The declared interface is granted, so it survives at the root invoke face.
-    assert "model" in eng._root_grant.invoke  # type: ignore[attr-defined]
+    assert "model" in eng._ledger.root_grant.invoke

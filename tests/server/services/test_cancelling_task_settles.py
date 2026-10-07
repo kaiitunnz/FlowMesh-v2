@@ -119,7 +119,7 @@ async def test_a_returned_cancelling_task_settles_rather_than_waiting() -> None:
     assert end is DispatchEnd.CANCELLED
 
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
-    assert task_id not in runtime._ready_index
+    assert task_id not in runtime._ready.ready_index
 
 
 @pytest.mark.anyio
@@ -144,7 +144,7 @@ async def test_a_retried_failure_of_a_cancelling_merged_parent_runs_its_children
         record = runtime._tasks[child]
         assert record.status == TaskStatus.PENDING
         assert record.merge_key is None
-        assert child in runtime._ready_index
+        assert child in runtime._ready.ready_index
 
 
 @pytest.mark.anyio
@@ -169,5 +169,5 @@ async def test_a_task_cancelled_while_the_dispatcher_holds_it_stays_cancelled() 
 
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
     assert runtime._tasks[task_id].attempts == 0
-    assert task_id not in runtime._ready_index
+    assert task_id not in runtime._ready.ready_index
     assert registry.durable_status(task_id) == TaskStatus.CANCELLED

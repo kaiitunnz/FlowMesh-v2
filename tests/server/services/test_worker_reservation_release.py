@@ -159,8 +159,7 @@ async def _suspended(
     workflows: Any, registry: WorkerRegistry
 ) -> tuple[TaskRuntime, EventMonitor, str, str]:
     """An agent whose step on the live worker suspended on a model boundary."""
-    runtime = _v2_runtime(workflows)
-    runtime._worker_registry = registry
+    runtime = _v2_runtime(workflows, registry)
     monitor = _monitor(runtime)
     monitor._worker_registry = registry
     runtime.set_model_settler(lambda _envelope: None)
@@ -211,8 +210,7 @@ def test_a_suspended_worker_whose_release_failed_is_freed_after_a_restart(
     registry.release_worker = release  # type: ignore[method-assign]
     assert _state(client) == {"status": "BUSY", "reserved_dispatch": "dsp-1"}
 
-    restored = _v2_runtime(workflows)
-    restored._worker_registry = registry
+    restored = _v2_runtime(workflows, registry)
     restored.set_model_settler(lambda _envelope: None)
     asyncio.run(restored.rehydrate())
     if freed_by == "sweep":

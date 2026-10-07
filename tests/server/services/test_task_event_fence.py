@@ -165,7 +165,7 @@ async def test_a_late_start_after_its_worker_left_does_not_re_dispatch_the_task(
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
     assert record.assigned_worker is None
-    assert task_id in runtime._ready_index
+    assert task_id in runtime._ready.ready_index
 
 
 @pytest.mark.anyio
@@ -301,7 +301,7 @@ async def test_a_failure_replayed_after_a_restart_spends_one_attempt(
     record = restored._tasks[task_id]
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 1
-    assert task_id in restored._ready_index
+    assert task_id in restored._ready.ready_index
 
 
 @pytest.mark.anyio
@@ -322,7 +322,7 @@ async def test_a_failure_handled_again_after_its_commit_failed_is_committed_once
 
     record = runtime._tasks[task_id]
     assert record.attempts == 1
-    assert task_id in runtime._ready_index
+    assert task_id in runtime._ready.ready_index
     assert registry.durable_status(task_id) == TaskStatus.PENDING
 
 
@@ -396,7 +396,7 @@ async def test_a_failure_before_its_dispatch_is_recorded_returns_the_task() -> N
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 1
-    assert task_id in runtime._ready_index
+    assert task_id in runtime._ready.ready_index
 
 
 class _Crash(Exception):
@@ -428,7 +428,7 @@ async def test_a_dispatch_lost_before_it_was_recorded_runs_again() -> None:
 
     record = restored._tasks[task_id]
     assert record.status == TaskStatus.PENDING
-    assert task_id in restored._ready_index
+    assert task_id in restored._ready.ready_index
 
 
 @pytest.mark.anyio
@@ -642,7 +642,7 @@ async def test_a_dispatch_a_cancel_recorded_but_never_delivered_settles_cancelle
     dispatcher.dispatch_once(task_id)
 
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
-    assert task_id not in runtime._ready_index
+    assert task_id not in runtime._ready.ready_index
 
 
 @pytest.mark.anyio
@@ -679,7 +679,7 @@ async def test_a_terminal_landing_while_its_worker_unregisters_stays_settled(
     record = runtime._tasks[task_id]
     assert record.status == settled
     assert record.attempts == 0
-    assert task_id not in runtime._ready_index
+    assert task_id not in runtime._ready.ready_index
 
 
 @pytest.mark.anyio
@@ -823,7 +823,7 @@ async def test_a_cancel_before_the_publish_begins_publishes_nothing() -> None:
 
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
     assert worker_registry.publish_task.call_count == 0
-    assert task_id not in runtime._publishing
+    assert task_id not in runtime._fence.publishing
 
 
 class _FlakyWrites(_Registry):
@@ -998,4 +998,4 @@ async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> No
         if call.args[0].type == "TASK_REQUEUED"
     ]
     assert len(requeued) == 1
-    assert task_id not in runtime._unacknowledged
+    assert task_id not in runtime._committer.unacknowledged

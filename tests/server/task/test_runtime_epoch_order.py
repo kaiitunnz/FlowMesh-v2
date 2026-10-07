@@ -121,7 +121,7 @@ spec:
 """
     workflow_id, node_ids = _register(runtime, payload)
 
-    assert runtime._workflow_epoch_frontier[workflow_id] == 0
+    assert runtime._epochs.workflow_epoch_frontier[workflow_id] == 0
 
     first = pop_ready(runtime)
     second = pop_ready(runtime)
@@ -129,16 +129,16 @@ spec:
     assert second == node_ids["b"]
 
     runtime.mark_succeeded(node_ids["a"], None, {}, "2026-02-19T00:00:00Z")
-    assert runtime._workflow_epoch_frontier[workflow_id] == 0
+    assert runtime._epochs.workflow_epoch_frontier[workflow_id] == 0
 
     runtime.mark_succeeded(node_ids["b"], None, {}, "2026-02-19T00:00:01Z")
-    assert runtime._workflow_epoch_frontier[workflow_id] == 1
+    assert runtime._epochs.workflow_epoch_frontier[workflow_id] == 1
 
     third = pop_ready(runtime)
     assert third == node_ids["c"]
 
     runtime.mark_succeeded(node_ids["c"], None, {}, "2026-02-19T00:00:02Z")
-    assert workflow_id not in runtime._workflow_epoch_frontier
+    assert workflow_id not in runtime._epochs.workflow_epoch_frontier
 
 
 def test_runtime_unordered_in_epoch_allows_any_order() -> None:
@@ -173,8 +173,8 @@ spec:
 """
     workflow_id, node_ids = _register(runtime, payload)
 
-    assert runtime._workflow_epoch_frontier[workflow_id] == 0
-    assert workflow_id not in runtime._workflow_in_epoch_order
+    assert runtime._epochs.workflow_epoch_frontier[workflow_id] == 0
+    assert workflow_id not in runtime._epochs.workflow_in_epoch_order
 
     first = pop_ready(runtime)
     second = pop_ready(runtime)
@@ -303,8 +303,8 @@ spec:
     parent.merged_children = [child_id]
     child.status = TaskStatus.DISPATCHED
     child.merged_parent_id = parent_id
-    runtime._merge_children_map[parent_id] = [child_id]
-    runtime._merge_parent_map[child_id] = parent_id
+    runtime._merges.merge_children_map[parent_id] = [child_id]
+    runtime._merges.merge_parent_map[child_id] = parent_id
 
     cancelled = runtime.cancel_workflow(workflow_id)
 
@@ -316,5 +316,5 @@ spec:
     assert updated_parent.status == TaskStatus.CANCELLING
     assert updated_child.status == TaskStatus.CANCELLED
     assert updated_child.merged_parent_id is None
-    assert runtime._merge_children_map[parent_id] == []
+    assert runtime._merges.merge_children_map[parent_id] == []
     assert len(worker_registry.published_interrupts) == 1

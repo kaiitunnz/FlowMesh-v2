@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from server.task.parser import parse_workflow
-from server.task.runtime import _sandbox_capability
+from server.task.runtime.episode_dispatch import _sandbox_capability
 from server.task.v2 import (
     CompileError,
     FrontendWorkflowSource,

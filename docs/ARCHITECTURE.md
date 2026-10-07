@@ -106,13 +106,15 @@ src/
     main.py               Entrypoint, FLOWMESH_PLUGINS loader, EventMonitor wiring
     network/              Network plane: endpoint directory, reachability, resolver, relay
     orchestration/        Durable orchestration ledger (DS), engine, outcomes
+      engine/               Orchestration engine, its ledger, stores and actors
     registries/           Worker / Node registries (Redis-backed)
     routers/v1/           workflows, tasks, results, workers, nodes, ssh, stack, system
     schemas/              REST API request and response schemas
     services/             monitoring, log streaming, ssh forwarding, runtime
     ssh/                  Root origin of relayed SSH connections
     supervisor/           Per-node agent (gRPC server, adapters, lifecycle)
-    task/                 parser, runtime, models, merge / epoch helpers
+    task/                 parser, runtime, models, results, credentials
+      runtime/              Task runtime, its scheduling, commits and dispatch fence
       v2/                   versioned representations, compiler
     tools/                Fabric-served external-tool control authority (broker)
     utils/                concurrent, cursors, helpers, logging, query, time

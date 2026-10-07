@@ -31,8 +31,8 @@ from ...registries.worker import WorkerRegistry
 from ...schemas.common import OkResponse
 from ...schemas.logs import LogEntry, LogEvent, LogQueryResponse
 from ...schemas.tasks import TaskPage
-from ...task.models import SERVE_TASK_TYPES, TaskOrder, task_order
-from ...task.runtime import TaskInfo, TaskRuntime
+from ...task.models import SERVE_TASK_TYPES, TaskInfo, TaskOrder, task_order
+from ...task.runtime import TaskRuntime
 from ...utils.cursors import decode_position, encode_cursor
 from ...utils.query import QueryFilter
 from ._listing import (

@@ -685,8 +685,20 @@ def test_a_suspended_episode_renews_store_access_under_its_dispatch() -> None:
     asyncio.run(run())
 
 
+def test_a_dispatch_that_ended_at_a_suspension_is_no_longer_in_flight() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        _, writer, _, _ = await _held_boundary(runtime, "dsp-1")
+
+        assert not runtime.dispatch_in_flight(writer, "dsp-1", "wkr-1")
+
+    asyncio.run(run())
+
+
 def _boundary_env(engine, writer, call: str):
-    return engine._boundary_events[(engine.work_item(writer).activation_id, call)]
+    return engine._boundaries.boundary_events[
+        (engine.work_item(writer).activation_id, call)
+    ]
 
 
 def test_audit_settle_racing_cancellation_manufactures_no_terminal() -> None:
@@ -844,7 +856,7 @@ def test_a_replayed_step_leaves_the_next_step_on_the_same_holder() -> None:
         runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
         children = len(engine.to_snapshot().work_items)
         with runtime._cv:
-            assert runtime._pop_ready_locked() == writer
+            assert runtime._ready.pop_ready_locked() == writer
         record_dispatch(runtime, writer, "wkr-1", "dsp-2")
 
         replay = runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
@@ -854,7 +866,7 @@ def test_a_replayed_step_leaves_the_next_step_on_the_same_holder() -> None:
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.DISPATCHED
         assert record.dispatch_id == "dsp-2"
-        assert writer not in runtime._ready_index
+        assert writer not in runtime._ready.ready_index
         assert len(engine.to_snapshot().work_items) == children
 
     asyncio.run(run())
@@ -881,7 +893,7 @@ def test_a_step_that_suspends_before_its_dispatch_is_recorded_resumes() -> None:
             "v1",
         )
         with runtime._cv:
-            assert runtime._pop_ready_locked() == writer
+            assert runtime._ready.pop_ready_locked() == writer
         dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
         runtime.begin_publish(writer, _WORKER, "dsp-1")
@@ -913,7 +925,7 @@ def test_a_first_report_handled_again_after_its_record_failed_opens_the_attempt(
             [ScriptedStep(op="complete", value="done")], "v1"
         )
         with runtime._cv:
-            assert runtime._pop_ready_locked() == writer
+            assert runtime._ready.pop_ready_locked() == writer
         dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
         runtime.begin_publish(writer, _WORKER, "dsp-1")

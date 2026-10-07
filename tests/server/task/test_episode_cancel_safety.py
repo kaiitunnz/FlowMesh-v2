@@ -108,7 +108,7 @@ def test_a_step_success_racing_a_cancel_does_not_re_admit_the_episode() -> None:
 
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.CANCELLED
-        assert writer not in runtime._ready_index
+        assert writer not in runtime._ready.ready_index
         engine = runtime.orchestration_engine(workflow_id)
         assert engine is not None
         wi = engine.work_item(writer)
@@ -230,7 +230,7 @@ def test_a_late_start_does_not_erase_a_cancellation() -> None:
         )
 
         assert runtime._tasks[writer].status == TaskStatus.CANCELLED
-        assert writer not in runtime._ready_index
+        assert writer not in runtime._ready.ready_index
         assert registry.remaining_of(workflow_id) == set()
 
     asyncio.run(run())
@@ -258,7 +258,7 @@ def test_a_racing_dispatch_does_not_erase_a_cancellation() -> None:
         )
 
         assert runtime._tasks[writer].status == TaskStatus.CANCELLED
-        assert writer not in runtime._ready_index
+        assert writer not in runtime._ready.ready_index
         assert registry.remaining_of(workflow_id) == set()
 
     asyncio.run(run())
@@ -277,7 +277,7 @@ def test_a_return_settles_a_cancelling_episode() -> None:
 
         assert end is DispatchEnd.CANCELLED
         assert runtime._tasks[writer].status == TaskStatus.CANCELLED
-        assert writer not in runtime._ready_index
+        assert writer not in runtime._ready.ready_index
 
     asyncio.run(run())
 

@@ -324,7 +324,7 @@ async def test_a_preparation_handled_again_after_its_save_failed_readies_the_lea
     runtime.mark_succeeded(task_id, "wkr-1", payload, now_iso(), "dsp-prep")
 
     assert runtime._tasks[task_id].status == TaskStatus.PENDING
-    assert task_id in runtime._ready_index
+    assert task_id in runtime._ready.ready_index
     assert runtime.recorded_input_reference(task_id) is not None
 
 

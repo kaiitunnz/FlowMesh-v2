@@ -96,7 +96,9 @@ def _spawn_children(eng: OrchestrationEngine, count: int) -> list[str]:
                 child_region_ref="worker",
             ),
         )
-    return [a.activation_id for a in eng._activations.values() if a.kind == "child"]
+    return [
+        a.activation_id for a in eng._ledger.activations.values() if a.kind == "child"
+    ]
 
 
 def _seal(eng: OrchestrationEngine) -> None:
@@ -117,18 +119,18 @@ def _drive(level: TelemetryLevel, children_count: int) -> tuple[int, int, int]:
     reads = _Reads()
     # The emitter reads the collections the engine handed it at attach, so the counting
     # ones have to replace those before anything binds to them.
-    eng._trace = _CountingTrace(reads, eng._trace)
-    eng._work_items = _CountingDict(reads, eng._work_items)
-    eng._activations = _CountingDict(reads, eng._activations)
-    eng._scopes = _CountingDict(reads, eng._scopes)
+    eng._ledger.trace = _CountingTrace(reads, eng._ledger.trace)
+    eng._ledger.work_items = _CountingDict(reads, eng._ledger.work_items)
+    eng._ledger.activations = _CountingDict(reads, eng._ledger.activations)
+    eng._ledger.scopes = _CountingDict(reads, eng._ledger.scopes)
     span_emitter.attach(
-        activations=eng._activations,
-        scopes=eng._scopes,
-        work_items=eng._work_items,
-        attempts=eng._attempts,
-        invocations=eng._invocations,
-        trace=eng._trace,
-        scope_closed=eng._scope_closed,
+        activations=eng._ledger.activations,
+        scopes=eng._ledger.scopes,
+        work_items=eng._ledger.work_items,
+        attempts=eng._ledger.attempts,
+        invocations=eng._ledger.invocations,
+        trace=eng._ledger.trace,
+        scope_closed=eng._ledger.scope_closed,
     )
     children = _spawn_children(eng, children_count)
     assert len(children) == children_count
@@ -213,7 +215,7 @@ def test_indexes_pick_up_records_added_after_the_first_emit() -> None:
         )
     second = [
         a.activation_id
-        for a in eng._activations.values()
+        for a in eng._ledger.activations.values()
         if a.kind == "child" and a.activation_id not in set(first)
     ]
     assert len(second) == 3
@@ -229,7 +231,7 @@ def test_indexes_pick_up_records_added_after_the_first_emit() -> None:
     }
     settled = {
         wi.work_item_id
-        for wi in eng._work_items.values()
+        for wi in eng._ledger.work_items.values()
         if wi.activation_id in set(first) | set(second)
     }
     assert settled <= episode_work_items
@@ -299,7 +301,7 @@ def _spawn_chain(eng: OrchestrationEngine, depth: int) -> list[str]:
         )
         child = next(
             a.activation_id
-            for a in eng._activations.values()
+            for a in eng._ledger.activations.values()
             if a.kind == "child" and a.activation_id not in known
         )
         known.add(child)

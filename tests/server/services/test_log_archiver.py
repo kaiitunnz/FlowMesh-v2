@@ -19,8 +19,8 @@ from server.clients.redis import (
 )
 from server.services import log_archiver
 from server.services.log_archiver import TaskLogArchiver
-from server.task import runtime as runtime_module
 from server.task.models import TaskInfo, TaskStatus
+from server.task.runtime import facade as runtime_module
 from tests.server.task.test_v2_orchestration import FakeRegistry, _live_runtime
 
 

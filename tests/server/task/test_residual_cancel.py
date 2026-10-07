@@ -5,12 +5,27 @@ from typing import Any, cast
 
 import pytest
 
-from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.orchestration.state import (
+    InvocationState,
+    LedgerSnapshot,
+    PublicationOutcome,
+    WorkItemStatus,
+)
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
-from server.task.v2.representations.operators import JoinRegion
+from server.task.v2.compiler.bindings import leaf_profile
+from server.task.v2.representations.operators import (
+    JoinCompletion,
+    JoinRegion,
+    LeafOperator,
+    Port,
+    ResidualPolicy,
+)
 from shared.harness import BoundaryEventKind
+from shared.tasks import TaskType
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.orchestration.helpers import engine as ledger_engine
+from tests.server.orchestration.helpers import recursive_agent_bundle, spawn_in
 from tests.server.task.test_agent_episode_runtime import _SCRIPT, _step
 from tests.server.task.test_resident_origin_loss import (
     _capture_resident_boundary,
@@ -88,7 +103,7 @@ async def test_a_pending_residual_child_is_cancelled_and_never_dispatched() -> N
     runtime, workflow_id, ids, (winner, loser) = await _fanned_out(registry, 2)
     with runtime._cv:
         # The loser waits in the ready queue for a worker.
-        runtime._enqueue_ready_locked(loser)
+        runtime._ready.enqueue_ready_locked(loser)
 
     _win(runtime, winner)
 
@@ -162,7 +177,9 @@ def test_a_restart_interrupts_a_task_whose_cancel_interrupt_was_lost(
         record_dispatch(runtime, running, cast(Any, _worker("wkr-2")))
         # The root crashes after the cancel is durable, before it interrupts the worker.
         with monkeypatch.context() as patch:
-            patch.setattr(runtime, "_release_terminated_work", lambda *_: None)
+            patch.setattr(
+                runtime._terminations, "release_terminated_work", lambda *_: None
+            )
             runtime.cancel_workflow(workflow_id)
 
         restored = _live_runtime(registry, "restored", reader=runtime._results)
@@ -219,9 +236,9 @@ def test_an_agents_cancel_residual_releases_a_cancelled_childs_credit() -> None:
         workflow_id, ids = await _register(runtime, _HEAD + _RESIDENT_REVIEWER)
         engine = _engine(runtime, workflow_id)
         join_op = f"{ids['lead']}:reviewer:spawn:join"
-        join = engine._operators[join_op]
+        join = engine._topology.operators[join_op]
         assert isinstance(join, JoinRegion)
-        engine._operators[join_op] = join.model_copy(
+        engine._topology.operators[join_op] = join.model_copy(
             update={"residual_policy": "cancel"}
         )
 
@@ -318,9 +335,9 @@ def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -
         workflow_id, ids = await _register(runtime, _HEAD + _NESTED_REVIEWERS)
         engine = _engine(runtime, workflow_id)
         join_op = f"{ids['lead']}:reviewer:spawn:join"
-        join = engine._operators[join_op]
+        join = engine._topology.operators[join_op]
         assert isinstance(join, JoinRegion)
-        engine._operators[join_op] = join.model_copy(
+        engine._topology.operators[join_op] = join.model_copy(
             update={"residual_policy": "cancel"}
         )
         lead, lead_adapter = ids["lead"], _spawner("reviewer", "done")
@@ -333,7 +350,7 @@ def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -
             record_dispatch(runtime, sub, cast(Any, _worker("wkr-3")))
         else:
             with runtime._cv:
-                runtime._enqueue_ready_locked(sub)
+                runtime._ready.enqueue_ready_locked(sub)
 
         # The lead completes while its reviewer and the reviewer's own child still run.
         _step(runtime, lead_adapter, lead)
@@ -341,10 +358,12 @@ def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -
         assert _status(runtime, reviewer) == TaskStatus.CANCELLED
         sub_wi = engine.work_item(sub)
         assert sub_wi is not None
-        sub_scope = engine._scopes[engine._activations[sub_wi.activation_id].scope_id]
+        sub_scope = engine._ledger.scopes[
+            engine._ledger.activations[sub_wi.activation_id].scope_id
+        ]
         assert (
             sub_scope.grant_id is not None
-            and engine._grants[sub_scope.grant_id].revoked
+            and engine._authority.grants[sub_scope.grant_id].revoked
         )
         if state == "running":
             assert _status(runtime, sub) == TaskStatus.CANCELLING
@@ -374,6 +393,47 @@ async def test_a_committed_cancelling_task_stays_in_the_dispatched_set() -> None
     registry.commit_transition = spy  # type: ignore[method-assign]
     with runtime._cv:
         runtime._tasks[loser].status = TaskStatus.CANCELLING
-        runtime._commit_locked(loser)
+        runtime._committer.commit_locked(loser)
 
     assert dispatched == [loser]
+
+
+def test_a_join_release_cancels_a_nested_subtree_and_fails_a_denied_admission() -> None:
+    # An any-join that cancels its residual children feeds an external-effect leaf the
+    # root grant does not cover.
+    effect = LeafOperator(
+        operator_id="D",
+        source_ref="D",
+        outputs=(Port(name="out"),),
+        profile=leaf_profile(TaskType.SSH),
+    )
+    eng = ledger_engine(
+        recursive_agent_bundle(JoinCompletion.ANY, ResidualPolicy.CANCEL, effect)
+    )
+    eng.on_dispatched("A", "w1")
+    first = spawn_in(eng, "A", "s1", "worker")
+    eng.on_dispatched(first, "w2")
+    grandchild = spawn_in(eng, first, "g1", "worker")
+    second = spawn_in(eng, "A", "s2", "worker")
+    eng.on_dispatched(second, "w3")
+    eng.on_started(second)
+
+    advance = eng.on_succeeded(second)
+
+    # The first child and the grandchild in the region it entered are cancelled as
+    # residual, and the released join's record reaches D, whose admission is denied.
+    assert set(advance.cancelled) == {first, grandchild}
+    assert advance.failed == ["D"]
+    assert advance.ready == []
+    for task_id in (first, grandchild):
+        wi = eng.work_item(task_id)
+        assert wi is not None and wi.status is WorkItemStatus.CANCELLED
+    denied = eng.work_item("D")
+    assert denied is not None and denied.outcome is PublicationOutcome.DECLARED_FAILURE
+    assert (
+        eng.failure_reason("D")
+        == "authority denied: interface 'D' outside root grant invoke face"
+    )
+    kinds = [event.kind for event in eng._ledger.trace]
+    assert kinds.index("join_released") < kinds.index("scope_cancelled")
+    assert kinds.index("scope_cancelled") < kinds.index("authority_denied")

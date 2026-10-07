@@ -139,7 +139,9 @@ async def test_a_replayed_skip_republishes_as_explicit_empty(
     skip = {"skipped": True, "reason": "condition_not_met"}
     # A crash after the task's terminal persist and before the ledger save leaves the
     # skip only on the record; the restart replays it from there.
-    monkeypatch.setattr(runtime, "_save_ledger_locked", lambda _workflow_id: None)
+    monkeypatch.setattr(
+        runtime._committer, "save_ledger_locked", lambda _workflow_id: None
+    )
     record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, None, {}, _TS, skip=skip)
 
@@ -159,7 +161,7 @@ async def test_a_merged_child_binds_only_its_own_result() -> None:
     parent, own, unreported = ids["a"], ids["b"], "tsk-unreported"
     record = runtime._tasks[own].model_copy(update={"task_id": unreported})
     runtime._tasks[unreported] = record
-    runtime._merge_children_map[parent] = [own, unreported]
+    runtime._merges.merge_children_map[parent] = [own, unreported]
     payload = _stored(runtime, parent, "parent")
     payload["child_result_references"] = {
         own: _stored(runtime, own, "own")["result_reference"]

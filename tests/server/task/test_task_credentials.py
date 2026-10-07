@@ -210,7 +210,7 @@ def test_a_failing_purge_leaves_the_registration_error(original):
     runtime = _runtime(vault=vault)
 
     with (
-        mock.patch("server.task.runtime.compile_bundle", side_effect=original),
+        mock.patch("server.task.runtime.facade.compile_bundle", side_effect=original),
         mock.patch.object(vault, "purge", side_effect=ConnectionError("down")),
     ):
         with pytest.raises(type(original)):
@@ -428,7 +428,7 @@ def test_a_record_that_cannot_be_vaulted_loads_and_runs_as_stored(monkeypatch):
     def refuse(*args: Any) -> Any:
         raise RuntimeError("unreadable spec")
 
-    monkeypatch.setattr("server.task.runtime.take_spec_credentials", refuse)
+    monkeypatch.setattr("server.task.runtime.facade.take_spec_credentials", refuse)
     asyncio.run(runtime.rehydrate())
 
     call = _task_named(runtime, stored["live"], "call")
