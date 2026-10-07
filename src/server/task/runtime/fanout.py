@@ -11,8 +11,6 @@ from ..results import ResultReader, ResultUnavailable, ResultUnreadable
 
 # A spawn producer's fan-out read retries off the lock before the workflow fails.
 _FANOUT_READ_ATTEMPTS = 3
-
-
 _FANOUT_READ_BACKOFF_SEC = 0.2
 
 

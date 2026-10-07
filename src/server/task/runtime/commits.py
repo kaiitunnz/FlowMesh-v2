@@ -66,8 +66,8 @@ class _Unacknowledged:
 
 class TransitionCommitter:
     """Commits task records, their status-set moves and each workflow's ledger, holds
-    back a report's writes once one fails so its replay completes them, and notifies
-    each workflow's terminal transition."""
+    back a report's writes once one fails so its replay completes them, notifies each
+    workflow's terminal transition, and purges a settled workflow's credentials."""
 
     def __init__(
         self,
@@ -175,7 +175,7 @@ class TransitionCommitter:
         in-memory mutations means a failed or crashed write can't leave durable state
         half-applied: the transaction commits in full or not at all. Event-driven
         callers additionally heal via the at-least-once replay
-        (``_repersist_terminal_workflow_locked``); the API-driven cancel relies on this
+        (``repersist_terminal_workflow_locked``); the API-driven cancel relies on this
         atomicity alone. Assumes the in-memory mutations never raise, which holds while
         ordered tasks carry ``position_in_epoch`` (so the ready-queue helpers never hit
         their guards).
@@ -258,7 +258,7 @@ class TransitionCommitter:
     def notify_terminal_transition(self, workflow_id: str) -> None:
         """Tell the completion finalizer a workflow may have reached its end.
 
-        Every terminal commit funnels through `_commit_locked`, whether a worker
+        Every terminal commit funnels through `commit_locked`, whether a worker
         reported it or the control plane settled it alone, so one notification covers
         both.
         It carries a workflow id and nothing else: the finalizer decides whether the

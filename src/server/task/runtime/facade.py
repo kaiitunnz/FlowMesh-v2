@@ -224,8 +224,7 @@ def _is_default_url(url: str | None, default_url: str | None) -> bool:
 # to cover dispatch and queue latency before the origin worker validates it.
 _OP_PERMIT_SLACK_SEC = 60.0
 # A pending operation whose outcome has not arrived is re-driven at its permit's
-# deadline plus this long times 2^n - 1 after the n-th re-drive, and its boundary fails
-# once it has been re-driven _OP_REDRIVE_LIMIT times.
+# deadline plus this long times 2^n - 1 after the n-th re-drive.
 _OP_REDRIVE_BACKOFF_SEC = 30.0
 
 
@@ -1113,7 +1112,7 @@ class TaskRuntime:
             engine.on_dispatched(task_id, worker_id)
 
     # ------------------------------------------------------------------ #
-    # Durable state persistence
+    # Worker reservations and revokes
     # ------------------------------------------------------------------ #
 
     def _release_ended_workers(self) -> None:
@@ -2449,7 +2448,7 @@ class TaskRuntime:
     def upstream_task_ids(self, task_id: str) -> set[str]:
         """Every task of its workflow a task depends on, directly or transitively."""
         with self._lock:
-            return content_bindings.upstream_task_ids(
+            return content_bindings.upstream_task_ids_locked(
                 self._tasks, self._original_deps, task_id
             )
 
@@ -4020,8 +4019,9 @@ class TaskRuntime:
         interrupted with every other running task, the agents' mediated operations are
         taken for reaping, the pending re-drive and held input checks are dropped, and
         every unsettled boundary invocation is terminalized. It writes nothing: the
-        caller's terminal commit persists it, and ``_release_terminated_work`` releases
-        what it returns once that commit is made.
+        caller's terminal commit persists it, and
+        ``TerminationRelease.release_terminated_work`` releases what it returns once
+        that commit is made.
         """
         self._redrive.settle(workflow_id)
         termination = self._take_task_work_locked(

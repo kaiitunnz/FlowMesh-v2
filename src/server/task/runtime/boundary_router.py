@@ -35,6 +35,7 @@ class PendingOp:
     redrives: int = 0
 
 
+# A pending operation's boundary fails once it has been re-driven this many times.
 _OP_REDRIVE_LIMIT = 5
 
 

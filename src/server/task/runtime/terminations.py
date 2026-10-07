@@ -67,7 +67,7 @@ class TerminationRelease:
         self, workflow_id: str, termination: Termination
     ) -> None:
         """Hold what a termination releases until the workflow's next ledger save
-        succeeds; ``_release_pending_terminations`` releases it after the lock."""
+        succeeds; the runtime releases it after the lock."""
         self.undurable_terminations.setdefault(workflow_id, []).append(termination)
 
     @staticmethod

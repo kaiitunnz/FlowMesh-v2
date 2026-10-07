@@ -65,13 +65,6 @@ def consumes_locked(
     )
 
 
-def upstream_task_ids(
-    tasks: dict[str, TaskRecord], original_deps: dict[str, set[str]], task_id: str
-) -> set[str]:
-    """Every task of its workflow a task depends on, directly or transitively."""
-    return upstream_task_ids_locked(tasks, original_deps, task_id)
-
-
 def upstream_task_ids_locked(
     tasks: dict[str, TaskRecord], original_deps: dict[str, set[str]], task_id: str
 ) -> set[str]:
