@@ -71,6 +71,7 @@ class _FakeAdapter(HarnessAdapter):
         self._bypass = bypass
         self.started: list[str | None] = []
         self.cancelled: list[str] = []
+        self.quiesced: list[str] = []
 
     def backend_key(self) -> HarnessBackendKey:
         return HarnessBackendKey(backend="fake", version="v1")
@@ -81,6 +82,9 @@ class _FakeAdapter(HarnessAdapter):
 
     def cancel(self, activation_id: str) -> None:
         self.cancelled.append(activation_id)
+
+    def quiesce(self, activation_id: str) -> None:
+        self.quiesced.append(activation_id)
 
     def mediated_facades(self) -> frozenset[MediatedFacade]:
         return (
@@ -408,7 +412,7 @@ class _YieldingAdapter(_FakeAdapter):
 
 
 class _FailingSeal:
-    def seal(self, state: object, attachment: object) -> None:
+    def seal(self, state: object, attachment: object, fence: object) -> None:
         raise PrivateStateUnavailable(
             PrivateStateUnavailableReason.STALE_EPOCH,
             "superseded",

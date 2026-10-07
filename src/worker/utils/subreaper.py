@@ -84,6 +84,16 @@ def end_supervised(proc: subprocess.Popen[str], timeout_sec: float) -> bool:
     return reap_proved(proc.returncode)
 
 
+def primary_child(supervisor_pid: int) -> int | None:
+    """The command a supervisor runs: its earliest-started child, ahead of any child it
+    adopted later."""
+    children: list[tuple[int, int]] = []
+    for pid, (ppid, started) in _process_table().items():
+        if ppid == supervisor_pid:
+            children.append((started, pid))
+    return min(children)[1] if children else None
+
+
 def _become_subreaper(libc: ctypes.CDLL) -> bool:
     if libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
         return False
@@ -93,8 +103,9 @@ def _become_subreaper(libc: ctypes.CDLL) -> bool:
     return flag.value == 1
 
 
-def _parents() -> dict[int, int]:
-    parents: dict[int, int] = {}
+def _process_table() -> dict[int, tuple[int, int]]:
+    """Every visible process's parent pid and start time."""
+    table: dict[int, tuple[int, int]] = {}
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
@@ -104,8 +115,12 @@ def _parents() -> dict[int, int]:
             continue
         # A command name may hold spaces or parentheses; fields follow the last ")".
         fields = stat[stat.rfind(")") + 2 :].split()
-        parents[int(entry)] = int(fields[1])
-    return parents
+        table[int(entry)] = (int(fields[1]), int(fields[19]))
+    return table
+
+
+def _parents() -> dict[int, int]:
+    return {pid: ppid for pid, (ppid, _) in _process_table().items()}
 
 
 def _descendants() -> set[int]:

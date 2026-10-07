@@ -37,6 +37,7 @@ from shared.utils.ids import new_state_bundle_manifest_id
 
 _PRIVATE_MODE = 0o700
 _EPOCH_FILE = ".attachment"
+_UNSEALABLE_FILE = ".unsealable"
 _OPAQUE_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -56,6 +57,22 @@ class MaterializedState:
     @property
     def workspace(self) -> Path:
         return self.components[StateComponentKind.WORKSPACE_FS]
+
+
+@dataclass(frozen=True)
+class QuiescenceFence:
+    """Proof that every writer bound to one attachment stopped before its seal.
+
+    Only the agent-episode executor mints one, once its step's harness and sandbox
+    writers are proved stopped; a seal accepts it only for the state and attachment it
+    names.
+    """
+
+    reference_id: str
+    profile: BundleProfile
+    generation: int
+    attachment_id: str
+    write_epoch: int
 
 
 class PrivateStateHolder:
@@ -95,6 +112,12 @@ class PrivateStateHolder:
                 reference_id=reference_id,
             )
         lineage = self._lineage_root(binding)
+        if (lineage / _UNSEALABLE_FILE).exists():
+            raise PrivateStateUnavailable(
+                PrivateStateUnavailableReason.QUIESCENCE_UNPROVED,
+                "a step on this lineage ended without proving its writers stopped",
+                reference_id=reference_id,
+            )
         _claim_epoch(lineage, attachment)
         kinds = sorted(required_components(binding.reference.profile))
         if binding.manifest is None:
@@ -111,9 +134,28 @@ class PrivateStateHolder:
         )
 
     def seal(
-        self, state: MaterializedState, attachment: PrivateStateAttachment
+        self,
+        state: MaterializedState,
+        attachment: PrivateStateAttachment,
+        fence: QuiescenceFence,
     ) -> PrivateStateSealReport:
-        """Seal every component of the lineage as the next coherent generation."""
+        """Seal every component of the lineage as the next coherent generation.
+
+        The fence must name this state and attachment: a generation is captured only
+        once the writers of the step that produced it are proved stopped.
+        """
+        if fence != QuiescenceFence(
+            reference_id=state.reference_id,
+            profile=state.profile,
+            generation=state.generation,
+            attachment_id=attachment.attachment_id,
+            write_epoch=attachment.write_epoch,
+        ):
+            raise PrivateStateUnavailable(
+                PrivateStateUnavailableReason.QUIESCENCE_UNPROVED,
+                "the quiescence fence is not this attachment's",
+                reference_id=state.reference_id,
+            )
         lineage = self._root / state.reference_id
         _verify_epoch(lineage, attachment)
         generation = state.generation + 1
@@ -132,6 +174,12 @@ class PrivateStateHolder:
         return PrivateStateSealReport(
             manifest=manifest, write_epoch=attachment.write_epoch
         )
+
+    def mark_unsealable(self, state: MaterializedState) -> None:
+        """Refuse every later open of a lineage whose step could not prove its writers
+        stopped, so no attempt resumes on or seals a tree no fence covers."""
+        marker = self._root / state.reference_id / _UNSEALABLE_FILE
+        marker.touch(mode=0o600, exist_ok=True)
 
     @staticmethod
     def _restore(

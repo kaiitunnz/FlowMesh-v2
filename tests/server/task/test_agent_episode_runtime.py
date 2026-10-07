@@ -379,6 +379,9 @@ class _AlwaysCompleteAdapter(HarnessAdapter):
     def cancel(self, activation_id: str) -> None:
         return None
 
+    def quiesce(self, activation_id: str) -> None:
+        return None
+
 
 def _complete(
     runtime: Any,

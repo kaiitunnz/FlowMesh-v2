@@ -24,7 +24,11 @@ from shared.harness import (
     HarnessResultKind,
     MediatedFacade,
 )
-from shared.private_state import PrivateStateAttachment, PrivateStateUnavailable
+from shared.private_state import (
+    PrivateStateAttachment,
+    PrivateStateUnavailable,
+    PrivateStateUnavailableReason,
+)
 from shared.tasks.specs.misc import ModelBindingMode
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import (
@@ -40,7 +44,7 @@ from shared.tools.search.schema import (
 
 from ..egress import CapturedRequest, PendingEgressRequestStore
 from ..model_turn import ResponsesFacade
-from ..private_state import MaterializedState, PrivateStateHolder
+from ..private_state import MaterializedState, PrivateStateHolder, QuiescenceFence
 from ..resident import capture_resident_request
 from ..sandbox import AgentSandboxRuntime, SandboxRuntime, build_sandbox_runtime
 from .base_executor import (
@@ -68,6 +72,8 @@ class AgentEpisodeExecutor(Executor):
         self._episode_task_id: str | None = None
         self._sandbox_runtime: SandboxRuntime | None = None
         self._signals = RunSignals()
+        # Adapters whose teardown was not proved, kept so a later cleanup can finish it.
+        self._unended: list[tuple[str, HarnessAdapter]] = []
 
     def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
         with self._signals.running(task.task_id):
@@ -111,45 +117,22 @@ class AgentEpisodeExecutor(Executor):
             dispatch.backend, task, self._config, facade, state, sandbox
         )
         self._episode_task_id = task.task_id
-        missing = REQUIRED_MEDIATED_FACADES - adapter.mediated_facades()
-        if missing:
-            raise ExecutionError(
-                f"harness backend {dispatch.backend.backend!r} does not mediate "
-                + ", ".join(sorted(missing))
-            )
-        if (
-            sandbox is not None
-            and MediatedFacade.SANDBOX not in adapter.mediated_facades()
-        ):
-            # The agent may run code but this backend would run it natively, outside the
-            # fence: refuse rather than execute unconfined.
-            raise ExecutionError(
-                f"harness backend {dispatch.backend.backend!r} does not mediate the "
-                "sandbox its agent declares"
-            )
         self._adapter = adapter
-        capsule = (
-            HarnessCapsule(backend=dispatch.backend, blob=dispatch.capsule_blob)
-            if dispatch.capsule_blob is not None
-            else None
-        )
-        outcomes = hydrate_delivered_outcomes(
-            self._lifecycle, task.task_id, dispatch.delivered_outcomes
-        )
-        for outcome in outcomes:
-            _LOG.info(
-                "[fabric] injecting %s outcome at call %s",
-                outcome.kind.value,
-                outcome.call_correlation,
-            )
         try:
-            self._signals.raise_if_cancelled()
-            result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
-        except Exception as exc:
-            # However a cancelled turn unwinds, the step ends as cancelled.
-            if self._signals.cancelled and not isinstance(exc, TaskCancelledError):
-                raise TaskCancelledError(f"Task {task.task_id} cancelled") from exc
-            raise
+            try:
+                result = self._run_adapter(task, dispatch, adapter, sandbox)
+            except BaseException as exc:
+                # The turn may still be running on the harness: refuse its further
+                # turns before ending it, as a give-up does.
+                if facade is not None:
+                    facade.refuse_episode(task.task_id)
+                if not self._end_writers(task.task_id, adapter, holder, state):
+                    if state is not None:
+                        raise self._unproved(state) from exc
+                raise
+            proved = self._end_writers(task.task_id, adapter, holder, state)
+        finally:
+            self._adapter = None
         capturable = self._is_capturable_boundary(result, dispatch.model_binding)
         if (
             capturable
@@ -163,9 +146,11 @@ class AgentEpisodeExecutor(Executor):
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
         sealed = None
         if state is not None and holder is not None:
-            # The step has run to its yield, so the components are quiescent and seal as
-            # one generation the next resume binds.
-            sealed = holder.seal(state, _attachment(dispatch))
+            if not proved:
+                raise self._unproved(state)
+            sealed = holder.seal(
+                state, attachment := _attachment(dispatch), _fence(state, attachment)
+            )
         # Captured last, so nothing after the capture can raise past a request the step
         # holds for control.
         if capturable:
@@ -193,6 +178,91 @@ class AgentEpisodeExecutor(Executor):
             facade_group=group,
             private_state=sealed,
         )
+
+    def _run_adapter(
+        self,
+        task: ExecutorTask,
+        dispatch: AgentEpisodeDispatch,
+        adapter: HarnessAdapter,
+        sandbox: AgentSandboxRuntime | None,
+    ) -> HarnessResult:
+        """Validate the backend and run its one step from the shipped capsule."""
+        missing = REQUIRED_MEDIATED_FACADES - adapter.mediated_facades()
+        if missing:
+            raise ExecutionError(
+                f"harness backend {dispatch.backend.backend!r} does not mediate "
+                + ", ".join(sorted(missing))
+            )
+        if (
+            sandbox is not None
+            and MediatedFacade.SANDBOX not in adapter.mediated_facades()
+        ):
+            # The agent may run code but this backend would run it natively, outside the
+            # fence: refuse rather than execute unconfined.
+            raise ExecutionError(
+                f"harness backend {dispatch.backend.backend!r} does not mediate the "
+                "sandbox its agent declares"
+            )
+        capsule = (
+            HarnessCapsule(backend=dispatch.backend, blob=dispatch.capsule_blob)
+            if dispatch.capsule_blob is not None
+            else None
+        )
+        outcomes = hydrate_delivered_outcomes(
+            self._lifecycle, task.task_id, dispatch.delivered_outcomes
+        )
+        for outcome in outcomes:
+            _LOG.info(
+                "[fabric] injecting %s outcome at call %s",
+                outcome.kind.value,
+                outcome.call_correlation,
+            )
+        try:
+            self._signals.raise_if_cancelled()
+            return adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
+        except Exception as exc:
+            # However a cancelled turn unwinds, the step ends as cancelled.
+            if self._signals.cancelled and not isinstance(exc, TaskCancelledError):
+                raise TaskCancelledError(f"Task {task.task_id} cancelled") from exc
+            raise
+
+    def _end_writers(
+        self,
+        task_id: str,
+        adapter: HarnessAdapter,
+        holder: PrivateStateHolder | None,
+        state: MaterializedState | None,
+    ) -> bool:
+        """Stop every writer the step bound to its attachment; return whether that was
+        proved.
+
+        An unproved teardown keeps the adapter for a later attempt and refuses the
+        lineage from then on.
+        """
+        try:
+            adapter.quiesce(task_id)
+        except Exception:
+            _LOG.exception("The harness of task %s did not quiesce", task_id)
+            self._unended.append((task_id, adapter))
+            if holder is not None and state is not None:
+                holder.mark_unsealable(state)
+            return False
+        return True
+
+    def _unproved(self, state: MaterializedState) -> Exception:
+        """The step's failure when its writers were not proved stopped.
+
+        No recoverable capture of the step exists, so it fails without a retry; a
+        cancellation the step was asked for still ends it as cancelled.
+        """
+        unavailable = PrivateStateUnavailable(
+            PrivateStateUnavailableReason.QUIESCENCE_UNPROVED,
+            "the step's writers were not proved stopped before its seal",
+            reference_id=state.reference_id,
+        )
+        if self._signals.cancelled:
+            return TaskCancelledError(f"cancelled; {unavailable}")
+        return ExecutionError(f"PrivateStateUnavailable: {unavailable}")
 
     def _sandbox(
         self, dispatch: AgentEpisodeDispatch, state: MaterializedState | None
@@ -335,7 +405,13 @@ class AgentEpisodeExecutor(Executor):
         if facade is not None and self._episode_task_id is not None:
             facade.unregister_episode(self._episode_task_id)
         self._episode_task_id = None
-        self._adapter = None
+        unended, self._unended = self._unended, []
+        for task_id, adapter in unended:
+            try:
+                adapter.quiesce(task_id)
+            except Exception:
+                _LOG.warning("The harness of task %s is still not quiesced", task_id)
+                self._unended.append((task_id, adapter))
 
 
 def _give_up(
@@ -351,6 +427,19 @@ def _give_up(
         # or retry it into a fresh held turn.
         if facade is not None:
             facade.release_episode(task_id)
+
+
+def _fence(
+    state: MaterializedState, attachment: PrivateStateAttachment
+) -> QuiescenceFence:
+    """The fence a step's seal carries once its writers are proved stopped."""
+    return QuiescenceFence(
+        reference_id=state.reference_id,
+        profile=state.profile,
+        generation=state.generation,
+        attachment_id=attachment.attachment_id,
+        write_epoch=attachment.write_epoch,
+    )
 
 
 def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:

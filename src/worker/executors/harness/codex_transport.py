@@ -22,6 +22,7 @@ injected at most once on a resume from the committed capsule. The untyped
 import contextlib
 import logging
 import os
+import subprocess  # nosec B404 - waits on the app-server's own supervisor
 import threading
 import weakref
 from collections.abc import Iterator, Mapping, Sequence
@@ -29,7 +30,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openai_codex.client import CodexClient, CodexConfig
+from openai_codex.client import (
+    CodexClient,
+    CodexConfig,
+    _installed_codex_path_dirs,
+    _prepend_path_dirs,
+    _resolve_codex_bin,
+)
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
     ErrorNotification,
@@ -40,6 +47,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from shared.utils.redact import redact_url
+from worker.utils.subreaper import end_supervised, primary_child, supervised_argv
 
 from .codex import CodexEvent, CodexInjectItem
 
@@ -137,6 +145,10 @@ class CodexTransportConfig:
     sandbox_mode: str = "workspace-write"
     turn_input: str = "continue"
     turn_timeout_sec: float = 120.0
+    # How long the app-server may take to exit once its stdin closes, and how long its
+    # supervisor may take to reap whatever it left running.
+    exit_grace_sec: float = 5.0
+    reap_budget_sec: float = 10.0
     cwd: Path | None = None
 
     def __post_init__(self) -> None:
@@ -175,10 +187,27 @@ class CodexTransportConfig:
             # Whatever a native tool starts gets no network, so it cannot egress around
             # the mediated facades.
             "sandbox_workspace_write.network_access=false",
+            # The curated-plugin sync clones a marketplace repository into the home
+            # behind the fabric's back: unmediated egress, and bulk in every sealed
+            # generation.
+            "features.plugins=false",
         )
-        env = {"CODEX_HOME": self.codex_home.as_posix(), _KEY_ENV: self.env_key_value}
+        argv = [_resolve_codex_bin(CodexConfig()).as_posix()]
+        for override in overrides:
+            argv += ["--config", override]
+        argv += ["app-server", "--listen", "stdio://"]
+        env = {
+            "CODEX_HOME": self.codex_home.as_posix(),
+            _KEY_ENV: self.env_key_value,
+            "PATH": os.environ.get("PATH", os.defpath),
+        }
+        _prepend_path_dirs(env, _installed_codex_path_dirs())
+        # The app-server runs under its own supervisor, which proves its whole process
+        # tree reaped when it ends: a child Codex leaves behind cannot outlive the step
+        # and keep writing the home a seal captures.
+        launch = supervised_argv(argv, budget_sec=self.reap_budget_sec)
         return CodexConfig(
-            config_overrides=overrides,
+            launch_args_override=tuple(launch),
             env=env,
             cwd=self.cwd.as_posix() if self.cwd is not None else None,
             experimental_api=True,
@@ -221,12 +250,34 @@ def _outcome_to_response_items(item: CodexInjectItem) -> list[dict[str, Any]]:
     ]
 
 
-def _close_client(client: CodexClient) -> None:
-    # Teardown is best-effort; a lost app-server process is already gone.
-    try:
+# Beyond the supervisor's own budget: the time it needs to exit once its drain is done.
+_SUPERVISOR_EXIT_SLACK_SEC = 2.0
+
+
+def _end_app_server(
+    client: CodexClient, exit_grace_sec: float, budget_sec: float
+) -> bool:
+    """End the app-server's whole tree; return whether its supervisor proved it reaped.
+
+    The app-server is first left to exit on its own once its stdin closes, flushing what
+    it holds; only then is its supervisor told to end the tree. The SDK's own close is
+    used last, once the process is gone, since it would kill a supervisor still
+    draining.
+    """
+    # ``_proc`` is private to the SDK; the exact version pin keeps this stable.
+    proc = client._proc
+    if proc is None:
+        return True
+    if proc.stdin is not None:
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(exit_grace_sec)
+    if not end_supervised(proc, budget_sec + _SUPERVISOR_EXIT_SLACK_SEC):
+        return False
+    with contextlib.suppress(Exception):
         client.close()
-    except Exception:
-        pass
+    return True
 
 
 class RealCodexAppServerTransport:
@@ -235,6 +286,9 @@ class RealCodexAppServerTransport:
     def __init__(self, config: CodexTransportConfig) -> None:
         self._config = config
         self._client: CodexClient | None = None
+        # The launched client until its tree is proved reaped, which a later close
+        # retries after an unproved one.
+        self._spawned: CodexClient | None = None
         self._finalizer: weakref.finalize | None = None
         self._fresh_thread = False
         # Orders a connect against a close, so a close that lands while the app-server
@@ -249,12 +303,19 @@ class RealCodexAppServerTransport:
         return self._client
 
     @property
-    def pid(self) -> int:
+    def supervisor_pid(self) -> int:
         # ``_proc`` is private to the SDK; the exact version pin keeps this stable.
         proc = self.client._proc
         if proc is None:
             raise RuntimeError("the Codex app-server is not running")
         return proc.pid
+
+    @property
+    def pid(self) -> int:
+        """The app-server's own pid, below its supervisor."""
+        if (pid := primary_child(self.supervisor_pid)) is None:
+            raise RuntimeError("the Codex app-server is not running")
+        return pid
 
     def _connect(self) -> CodexClient:
         with self._lock:
@@ -266,7 +327,14 @@ class RealCodexAppServerTransport:
             client = CodexClient(self._config.to_codex_config())
             # Arm teardown before the process spawns, so a failure during start or
             # initialize still reaps the app-server rather than leaking it.
-            self._finalizer = weakref.finalize(self, _close_client, client)
+            self._spawned = client
+            self._finalizer = weakref.finalize(
+                self,
+                _end_app_server,
+                client,
+                self._config.exit_grace_sec,
+                self._config.reap_budget_sec,
+            )
             with clean_launch_environ():
                 client.start()
         # A close during initialize ends the process, which fails the handshake.
@@ -353,11 +421,25 @@ class RealCodexAppServerTransport:
     def cancel(self, thread_id: str | None) -> None:
         self.close()
 
-    def close(self) -> None:
+    def quiesce(self) -> bool:
+        return self.close()
+
+    def close(self) -> bool:
+        """End the app-server's tree; return whether its supervisor proved it reaped.
+
+        An unproved close keeps the tree's ownership, so a later close tries again.
+        """
         # Held through the exit, so a concurrent close returns only once it happened.
         with self._lock:
             self._closed = True
-            finalizer, self._finalizer = self._finalizer, None
             self._client = None
-            if finalizer is not None:
-                finalizer()
+            if (client := self._spawned) is None:
+                return True
+            cfg = self._config
+            if not _end_app_server(client, cfg.exit_grace_sec, cfg.reap_budget_sec):
+                return False
+            self._spawned = None
+            if (finalizer := self._finalizer) is not None:
+                finalizer.detach()
+                self._finalizer = None
+            return True

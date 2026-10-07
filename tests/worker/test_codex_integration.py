@@ -39,8 +39,14 @@ import logging  # noqa: E402
 from shared.harness import (  # noqa: E402
     BoundaryEventKind,
     DeliveredOutcome,
+    HarnessQuiescenceError,
     HarnessResultKind,
     OutcomeKind,
+)
+from shared.private_state import (  # noqa: E402
+    StateComponentKind,
+    seal_component,
+    verify_component,
 )
 from shared.tools.contract import (  # noqa: E402
     AgentModelTurnProposal,
@@ -65,6 +71,7 @@ from worker.executors.harness.codex_transport import (  # noqa: E402
 from worker.model_turn import HeldModelEgress  # noqa: E402
 from worker.model_turn import ModelTurnRendezvous  # noqa: E402
 from worker.model_turn import ResponsesFacade  # noqa: E402
+from worker.utils.subreaper import primary_child  # noqa: E402
 
 _TASK_ID = "tsk-codex-int"
 _FINAL_TEXT = "final"
@@ -404,3 +411,139 @@ def test_stalled_turn_raises_a_transport_error(
                 adapter.start(_TASK_ID, capsule=None, outcomes=[])
         finally:
             release.set()
+
+
+def _descendants(root: int) -> set[int]:
+    parents: dict[int, int] = {}
+    for entry in os.listdir("/proc"):
+        if entry.isdigit():
+            try:
+                stat = Path(f"/proc/{entry}/stat").read_text()
+            except OSError:
+                continue
+            parents[int(entry)] = int(stat[stat.rfind(")") + 2 :].split()[1])
+    found: set[int] = set()
+    frontier = [root]
+    while frontier:
+        parent = frontier.pop()
+        for pid, ppid in parents.items():
+            if ppid == parent and pid not in found:
+                found.add(pid)
+                frontier.append(pid)
+    return found
+
+
+def _alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat[stat.rfind(")") + 2] != "Z"
+
+
+def test_a_quiesced_step_seals_a_home_that_still_verifies_later(
+    tmp_path: Path, transports: TransportFactory
+) -> None:
+    home = tmp_path / "codex_home"
+    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
+        transport = transports(facade.base_url, facade.token, home)
+        adapter = CodexAppServerHarnessAdapter(transport, "v1")
+        first = adapter.start(_TASK_ID, capsule=None, outcomes=[])
+        assert first.kind is HarnessResultKind.COMPLETION
+        supervisor = transport.supervisor_pid
+
+        adapter.quiesce(_TASK_ID)
+        sealed = seal_component(
+            StateComponentKind.HARNESS_HOME_FS, home, reference_id="aps-int"
+        )
+        # Long enough for an idle app-server's log loop or a background sync to land.
+        time.sleep(3.0)
+
+        verify_component(sealed, home, reference_id="aps-int")
+        assert not _alive(supervisor)
+        assert not _descendants(supervisor)
+
+        # A fresh app-server resumes the sealed rollout and finishes the episode.
+        group = facade.captured_group()
+        assert group is not None
+        resumed = transports(facade.base_url, facade.token, home)
+        done = CodexAppServerHarnessAdapter(resumed, "v1").start(
+            _TASK_ID, capsule=first.capsule, outcomes=[facade.fabric.settle(group)]
+        )
+    assert done.kind is HarnessResultKind.COMPLETION
+    assert resumed.supervisor_pid != supervisor
+
+
+def test_the_app_server_starts_no_process_of_its_own(
+    tmp_path: Path, transports: TransportFactory
+) -> None:
+    home = tmp_path / "codex_home"
+    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
+        transport = transports(facade.base_url, facade.token, home)
+        adapter = CodexAppServerHarnessAdapter(transport, "v1")
+        adapter.start(_TASK_ID, capsule=None, outcomes=[])
+        app_server = transport.pid
+        seen: set[int] = set()
+        for _ in range(12):
+            seen |= _descendants(app_server)
+            time.sleep(0.25)
+        adapter.quiesce(_TASK_ID)
+
+    assert not seen
+    assert not _alive(app_server)
+
+
+def test_a_plugin_sync_the_app_server_starts_is_reaped_with_it(
+    tmp_path: Path, transports: TransportFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    to_codex_config = CodexTransportConfig.to_codex_config
+
+    def with_plugins(self: CodexTransportConfig) -> Any:
+        config = to_codex_config(self)
+        assert config.launch_args_override is not None
+        launch = tuple(
+            "features.plugins=true" if arg == "features.plugins=false" else arg
+            for arg in config.launch_args_override
+        )
+        config.launch_args_override = launch
+        return config
+
+    monkeypatch.setattr(CodexTransportConfig, "to_codex_config", with_plugins)
+    home = tmp_path / "codex_home"
+    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
+        transport = transports(facade.base_url, facade.token, home)
+        adapter = CodexAppServerHarnessAdapter(transport, "v1")
+        transport.thread_start()
+        app_server = transport.pid
+        seen: set[int] = set()
+        deadline = time.monotonic() + 5.0
+        while not seen and time.monotonic() < deadline:
+            seen |= _descendants(app_server)
+            time.sleep(0.05)
+        if not seen:
+            adapter.quiesce(_TASK_ID)
+            pytest.skip("the app-server started no plugin sync to reap")
+
+        adapter.quiesce(_TASK_ID)
+
+    assert not any(_alive(pid) for pid in seen)
+
+
+def test_a_lost_supervisor_leaves_the_step_unproved(
+    tmp_path: Path, transports: TransportFactory
+) -> None:
+    home = tmp_path / "codex_home"
+    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
+        transport = transports(facade.base_url, facade.token, home)
+        adapter = CodexAppServerHarnessAdapter(transport, "v1")
+        adapter.start(_TASK_ID, capsule=None, outcomes=[])
+        app_server = transport.pid
+        assert primary_child(transport.supervisor_pid) == app_server
+
+        os.kill(transport.supervisor_pid, 9)
+        try:
+            with pytest.raises(HarnessQuiescenceError):
+                adapter.quiesce(_TASK_ID)
+        finally:
+            if _alive(app_server):
+                os.kill(app_server, 9)

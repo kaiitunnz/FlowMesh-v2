@@ -121,6 +121,10 @@ class _AppServer:
     def cancel(self, thread_id: str | None) -> None:
         self.closed.set()
 
+    def quiesce(self) -> bool:
+        self.closed.set()
+        return True
+
 
 def _codex_runner(
     tmp_path: Path, backend: str
@@ -274,6 +278,9 @@ class _SearchingAppServer:
     def cancel(self, thread_id: str | None) -> None:
         pass
 
+    def quiesce(self) -> bool:
+        return True
+
 
 def _permit(interface: str, task_id: str, call_correlation: str) -> dict[str, Any]:
     return MediatedOperationPermit(
@@ -324,7 +331,7 @@ def test_a_give_up_during_the_seal_keeps_the_searches_the_turn_asked_for(
         """Seals while the worker is told to stop, returning once the give-up has
         reached the facade."""
 
-        def seal(self, state: Any, attachment: Any) -> None:
+        def seal(self, state: Any, attachment: Any, fence: Any) -> None:
             runner.stop()
             facade = lifecycle.responses_facade
             assert facade is not None

@@ -31,6 +31,7 @@ from worker.executors.harness.codex import (
     CodexTurnCancelled,
     _agent_task,
 )
+from worker.utils import subreaper
 
 
 class FakeCodexAppServer:
@@ -75,6 +76,9 @@ class FakeCodexAppServer:
 
     def cancel(self, thread_id: str | None) -> None:
         self.cancelled += 1
+
+    def quiesce(self) -> bool:
+        return True
 
 
 def _outcome(corr: str, value: str = "child") -> DeliveredOutcome:
@@ -278,3 +282,27 @@ def test_the_backend_binds_the_materialized_components_as_its_home_and_cwd(
 
     assert config.env is not None and config.env["CODEX_HOME"] == home.as_posix()
     assert config.cwd == workspace.as_posix()
+
+
+def test_the_app_server_launches_under_its_supervisor_without_plugin_sync(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("openai_codex")
+    from worker.executors.harness.codex_transport import CodexTransportConfig
+
+    config = CodexTransportConfig(
+        base_url="http://gw",
+        model="m",
+        codex_home=tmp_path,
+        initial_input="t",
+        task_id="tsk-1",
+    ).to_codex_config()
+
+    launch = config.launch_args_override
+    assert launch is not None
+    assert launch[2] == subreaper.__file__
+    command = launch[launch.index("--") + 1 :]
+    assert command[-3:] == ("app-server", "--listen", "stdio://")
+    assert "features.plugins=false" in command
+    assert 'model_provider="flowmesh"' in command
+    assert config.env is not None and config.env["PATH"]

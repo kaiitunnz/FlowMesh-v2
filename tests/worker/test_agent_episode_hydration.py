@@ -39,6 +39,9 @@ class _RecordingAdapter(HarnessAdapter):
     def cancel(self, activation_id: str) -> None:
         pass
 
+    def quiesce(self, activation_id: str) -> None:
+        pass
+
     def mediated_facades(self) -> frozenset[MediatedFacade]:
         return REQUIRED_MEDIATED_FACADES
 
