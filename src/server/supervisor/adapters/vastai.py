@@ -473,8 +473,6 @@ class VastAIWorkerFactory(WorkerFactory):
         return
 
     def _resolve_worker_alias(self, config: VastAIWorkerConfig) -> str:
-        if config.label is not None:
-            return config.label
         if config.worker_alias is not None:
             return config.worker_alias
         return self._get_next_worker_alias()

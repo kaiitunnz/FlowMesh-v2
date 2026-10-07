@@ -148,11 +148,13 @@ class _Vast:
         self.on_show_instance: Any = None
         self.gate: threading.Event | None = None
         self.creating = threading.Event()
+        self.labels: list[str] = []
 
     def search_offers(self, **_: Any) -> list[dict[str, Any]]:
         return [{"id": 7, "gpu_name": "N/A"}]
 
-    def create_instance(self, **_: Any) -> dict[str, Any]:
+    def create_instance(self, label: str, **_: Any) -> dict[str, Any]:
+        self.labels.append(label)
         self.creating.set()
         if self.gate is not None:
             assert self.gate.wait(5)
@@ -827,6 +829,38 @@ async def test_a_vast_worker_whose_instance_is_gone_stops(node: _Node) -> None:
     assert node.records()[info.alias].handle is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "worker_config, alias, label",
+    [
+        ({"label": "my-box"}, "flowmesh_vastai_worker_0", "my-box"),
+        ({"worker_alias": "v1", "label": "my-box"}, "v1", "my-box"),
+        ({"worker_alias": "v1"}, "v1", "v1"),
+    ],
+)
+async def test_a_vast_label_names_only_the_instance(
+    node: _Node, worker_config: dict[str, Any], alias: str, label: str
+) -> None:
+    wm = node.supervisor()
+    await _run(wm)
+
+    info = await wm.create_worker(
+        WorkerInitConfig(provider="vastai", worker_config=worker_config)
+    )
+
+    assert (info.alias, node.vast.labels) == (alias, [label])
+    ServerWorkerConfig.model_validate(
+        {
+            "workers": [
+                {
+                    "provider": "vastai",
+                    "worker_config": {"worker_alias": "v1", "label": "my-box"},
+                }
+            ]
+        }
+    )
+
+
 def test_vast_workers_need_the_deployment_key(node: _Node) -> None:
     factory = vastai_adapter.VastAIWorkerFactory(_PRINCIPAL, None, lambda _: False)
     with pytest.raises(ValueError, match="VAST_API_KEY"):
@@ -901,17 +935,6 @@ async def test_a_docker_worker_takes_its_registration_hardware_only_unprobed(
         (
             {"default_worker_config": {"worker_alias": "a"}, "workers": []},
             "cannot set worker_alias",
-        ),
-        (
-            {
-                "workers": [
-                    {
-                        "provider": "vastai",
-                        "worker_config": {"worker_alias": "a", "label": "b"},
-                    }
-                ]
-            },
-            "label other than its alias",
         ),
     ],
 )

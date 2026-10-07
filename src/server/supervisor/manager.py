@@ -108,15 +108,6 @@ class ServerWorkerConfig(BaseModel):
             if alias in aliases:
                 raise ValueError(f"Worker alias '{alias}' is declared more than once")
             aliases.add(alias)
-            label = config.get("label")
-            if entry.provider.strip().lower() == "vastai" and label not in (
-                None,
-                alias,
-            ):
-                raise ValueError(
-                    f"Worker '{alias}' sets a label other than its alias; a VastAI "
-                    "worker takes its label as its alias"
-                )
         return self
 
 
