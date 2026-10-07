@@ -8,6 +8,7 @@ from ...task.v2.representations.operators import (
     LeafProfile,
     LogicalOperator,
     OperatorKind,
+    RecoveryClass,
     SpawnRegion,
 )
 from ...task.v2.representations.results import ResultDeclaration
@@ -25,6 +26,20 @@ _REGION_KINDS = frozenset(
 # a dispatchable run-to-yield episode that also owns a child-init scope for its
 # spawn_agent children.
 _CONTROL_KINDS = _REGION_KINDS
+
+
+_CHILD_INIT_OPENERS = frozenset({OperatorKind.SPAWN, OperatorKind.AGENT})
+
+
+def _effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryClass]:
+    """A dispatchable operator's effect/recovery: a leaf's profile, else pure/recompute.
+
+    An agent episode is itself pure and recomputable; its mediated effects flow through
+    boundary events rather than the episode's own effect class.
+    """
+    if isinstance(op, LeafOperator):
+        return op.profile.effect, op.profile.recovery
+    return EffectClass.PURE, RecoveryClass.RECOMPUTE
 
 
 class PlanTopology:

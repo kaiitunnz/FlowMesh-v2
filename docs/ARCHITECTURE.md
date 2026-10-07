@@ -106,6 +106,7 @@ src/
     main.py               Entrypoint, FLOWMESH_PLUGINS loader, EventMonitor wiring
     network/              Network plane: endpoint directory, reachability, resolver, relay
     orchestration/        Durable orchestration ledger (DS), engine, outcomes
+      engine/               Engine facade, ledger hub and stores, region actors
     registries/           Worker / Node registries (Redis-backed)
     routers/v1/           workflows, tasks, results, workers, nodes, ssh, stack, system
     schemas/              REST API request and response schemas

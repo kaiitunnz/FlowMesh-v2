@@ -42,6 +42,10 @@ _EVENT_FIELDS = frozenset(
 )
 
 
+def _control_key(operator_id: str) -> str:
+    return f"control:{operator_id}"
+
+
 class OrchestrationLedger:
     """Holds one workflow instance's shared work-item, activation, scope, capability,
     attempt, invocation, record and trace collections, with their indexes, and appends

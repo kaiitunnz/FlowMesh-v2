@@ -99,19 +99,19 @@ __all__ = [
 # dispatches; distinct vocabulary from an Activation's own kind
 # (``child``/``iteration``/``region``).
 _NO_EXTENT_OPERATOR_KINDS = REGION_OPERATOR_KINDS
-# ``iteration`` activations (``engine.py::loop_feedback``) own neither a work item nor
-# a scope: unlike a spawn child, the loop primitive materializes no dispatchable body
-# for its own activation. Checked directly since it is already a first-class
-# Activation.kind, not an operator id needing a cross-reference.
+# ``iteration`` activations (``engine/loops.py::loop_feedback``) own neither a work
+# item nor a scope: unlike a spawn child, the loop primitive materializes no
+# dispatchable body for its own activation. Checked directly since it is already a
+# first-class Activation.kind, not an operator id needing a cross-reference.
 #
 # ``leaf``/``agent`` root activations that name a spawn's ``child_template_ref`` are
-# the same story under a different kind: ``engine.py::build`` excludes a child template
-# from ``dispatchable`` (it is only ever instantiated as a "child"-kind activation per
-# spawn, never dispatched itself), so it permanently owns neither a work item nor a
-# scope. The work-item branch is checked first, so this is reachable only once that
-# has already come back empty -- a genuinely dispatchable leaf/agent always owns a
-# work item from the moment ``build()`` constructs it, so this never masks one that
-# merely has not settled yet.
+# the same story under a different kind: ``engine/facade.py::build`` excludes a child
+# template from ``dispatchable`` (it is only ever instantiated as a "child"-kind
+# activation per spawn, never dispatched itself), so it permanently owns neither a
+# work item nor a scope. The work-item branch is checked first, so this is reachable
+# only once that has already come back empty -- a genuinely dispatchable leaf/agent
+# always owns a work item from the moment ``build()`` constructs it, so this never
+# masks one that merely has not settled yet.
 _NO_EXTENT_ACTIVATION_KINDS = frozenset({"iteration", "leaf", "agent"})
 
 

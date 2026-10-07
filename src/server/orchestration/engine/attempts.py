@@ -2,6 +2,7 @@
 
 from enum import Enum, auto
 
+from shared.content import ContentReference
 from shared.utils import (
     new_attempt_id,
     new_invocation_id,
@@ -14,6 +15,7 @@ from ..outcomes import (
     next_on_acknowledge,
     next_on_reissue,
     next_on_terminal,
+    next_on_uncertain,
 )
 from ..state import (
     TERMINAL_WORK_ITEM_STATUSES,
@@ -23,15 +25,31 @@ from ..state import (
     Invocation,
     InvocationState,
     PublicationOutcome,
+    ValueRef,
     WorkItem,
     WorkItemStatus,
 )
+from .advance import Advance
 from .boundaries import BoundaryLedger
+from .dataflow import RegionFlow
 from .embodiments import EmbodimentLedger
 from .inputs import AcceptedInputLedger
 from .ledger import OrchestrationLedger
+from .publications import PublicationLedger
+from .spawns import SpawnRegions
 
 _OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
+
+
+_AMBIGUITY_TERMINAL_REASON = "ambiguity-terminal effect"
+
+
+def _ambiguity_terminal_reason(error: str | None) -> str:
+    """Why a work item that cannot run again failed: its executor's own message, when
+    it reported one, beside the reason."""
+    if error is None:
+        return _AMBIGUITY_TERMINAL_REASON
+    return f"{error} ({_AMBIGUITY_TERMINAL_REASON})"
 
 
 class _LossResolution(Enum):
@@ -54,14 +72,20 @@ class AttemptLifecycle:
     def __init__(
         self,
         ledger: OrchestrationLedger,
+        publication: PublicationLedger,
         embodiments: EmbodimentLedger,
         inputs: AcceptedInputLedger,
         boundaries: BoundaryLedger,
+        flow: RegionFlow,
+        spawns: SpawnRegions,
     ) -> None:
         self._ledger = ledger
+        self._publication = publication
         self._embodiments = embodiments
         self._inputs = inputs
         self._boundaries = boundaries
+        self._flow = flow
+        self._spawns = spawns
         self.receipts: dict[str, EffectReceipt] = {}
 
     def on_dispatched(self, task_id: str, worker_id: str | None) -> None:
@@ -290,3 +314,142 @@ class AttemptLifecycle:
             AttemptStatus.ISSUED,
             AttemptStatus.RUNNING,
         )
+
+    def on_succeeded(
+        self,
+        task_id: str,
+        *,
+        empty: bool = False,
+        content: ContentReference | None = None,
+    ) -> Advance:
+        """Settle a work item on success and release its successors.
+
+        ``empty`` marks a conditional-skip settlement, resolving the declared output to
+        an explicit-empty publication rather than a value. ``content`` is the stored
+        result the settled value is bound to; it binds once, with the settlement, so a
+        later success for the same work item cannot re-point it.
+        """
+        wi = self._ledger.work_item_for_task(task_id)
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
+            return Advance()
+        outcome = (
+            PublicationOutcome.EXPLICIT_EMPTY if empty else PublicationOutcome.SUCCESS
+        )
+        value_ref = (
+            ValueRef(kind="empty")
+            if empty
+            else ValueRef(
+                kind="legacy_task_result",
+                legacy_task_id=wi.legacy_task_id,
+                content=content,
+            )
+        )
+        self.settle_attempt_terminal(wi, outcome)
+        activation = self._ledger.activations[wi.activation_id]
+        # An agent's terminal completion settles every declared child region, so a
+        # spawn_agent scope closes even without an explicit SpawnSeal.
+        released = self._spawns.agent_terminal_regions(wi.operator_id, wi.activation_id)
+        if activation.kind == "child":
+            # A dispatched spawn child settles through its scope's child-init account,
+            # never as a static forward record: the join closes on capability drain.
+            return self._flow.settle_child_wi(
+                wi, activation, outcome, value_ref
+            ).extend(released)
+        wi.status = WorkItemStatus.SETTLED
+        wi.outcome = outcome
+        wi.value_ref = value_ref
+        self._ledger.emitter.emit_work_item(wi)
+        self._ledger.emitter.emit_activation(wi.activation_id)
+        self._ledger.private_state.release(wi.activation_id)
+        self._publication.publish(wi.operator_id, outcome, value_ref)
+        return self._flow.deliver_record(
+            wi.operator_id, wi.activation_id, value_ref
+        ).extend(released)
+
+    def on_failed(self, task_id: str, error: str, *, retryable: bool) -> Advance:
+        """Retry a work item as a fresh attempt, or settle it and cascade failure."""
+        wi = self._ledger.work_item_for_task(task_id)
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
+            return Advance()
+        self.fail_open_attempt(wi, error)
+        if retryable:
+            wi.status = WorkItemStatus.READY
+            self._ledger.emit(
+                "attempt_retry",
+                work_item_id=wi.work_item_id,
+                operator_id=wi.operator_id,
+            )
+            return Advance(retry=[wi.legacy_task_id])
+        wi.failure_reason = error
+        return self._flow.settle_failed_wi(wi)
+
+    def on_uncertain(self, task_id: str, error: str | None = None) -> Advance:
+        """Resolve a lost acknowledgement, route loss, or failure that may follow the
+        work item's external effect.
+
+        ``error`` is the executor's message for a reported failure; the attempt keeps
+        it, and a work item that cannot run again fails with it beside the reason.
+        """
+        wi = self._ledger.work_item_for_task(task_id)
+        resolution = self.resolve_loss(wi)
+        if wi is None or resolution is _LossResolution.NOTHING:
+            return Advance()
+        if resolution is _LossResolution.PREPARE_AGAIN:
+            # An input preparation commits to no invocation and reserves nothing, so
+            # the task resolves its inputs again on another worker.
+            self._ledger.emit(
+                "input_preparation_lost",
+                work_item_id=wi.work_item_id,
+                operator_id=wi.operator_id,
+            )
+            return Advance(retry=[wi.legacy_task_id])
+        assert wi.invocation_id is not None
+        if resolution is _LossResolution.BOUNDARY_FAILS:
+            # The worker that captured this boundary's request is lost, and the
+            # worker-private request cannot be recovered here (a fresh permit would need
+            # a fresh proposal on a new worker). Fail the boundary clean so the workflow
+            # errors rather than resuming the agent past a boundary with no outcome.
+            self._ledger.emit(
+                "invocation_ambiguity_terminal",
+                work_item_id=wi.work_item_id,
+                invocation_id=wi.invocation_id,
+            )
+            self._ledger.emitter.emit_boundary(
+                self._ledger.invocations[wi.invocation_id]
+            )
+            wi.failure_reason = _ambiguity_terminal_reason(error)
+            return self._flow.settle_failed_wi(wi)
+        invocation = self._ledger.invocations[wi.invocation_id]
+        invocation.state = next_on_uncertain(
+            invocation.state,
+            replayable=invocation.replayable,
+            compensable=invocation.compensable,
+        )
+        self._ledger.emitter.emit_boundary(invocation)
+        if attempt := self._ledger.latest_attempt(wi):
+            attempt.status = AttemptStatus.LOST
+            attempt.finished_at = now_iso()
+            if error is not None:
+                attempt.error = error
+            self._ledger.emitter.emit_attempt(attempt)
+        if resolution is _LossResolution.RUN_AGAIN:
+            wi.status = WorkItemStatus.READY
+            self._ledger.emit(
+                "invocation_uncertain_retry",
+                work_item_id=wi.work_item_id,
+                invocation_id=wi.invocation_id,
+                error=error,
+            )
+            return Advance(retry=[wi.legacy_task_id])
+        self._ledger.emit(
+            (
+                "invocation_compensation_required"
+                if invocation.compensable
+                else "invocation_ambiguity_terminal"
+            ),
+            work_item_id=wi.work_item_id,
+            invocation_id=wi.invocation_id,
+            error=error,
+        )
+        wi.failure_reason = _ambiguity_terminal_reason(error)
+        return self._flow.settle_failed_wi(wi)
