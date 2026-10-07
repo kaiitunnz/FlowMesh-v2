@@ -1,23 +1,23 @@
 """A per-tree supervisor that runs one command and proves its whole process tree reaped.
 
-Run as a fresh, single-threaded process: ``python -I subreaper.py [--receipt PATH]
-[--grace SEC] -- ARGV...``. The supervisor marks itself a child
-subreaper, so every descendant the command leaves behind is re-parented to it, whatever
+Run as a fresh, single-threaded process: ``python -I subreaper.py [--receipt-fd FD]
+[--grace SEC] -- ARGV...``. The supervisor marks itself a child subreaper, so every
+descendant the command leaves behind is re-parented to it, whatever
 session or group that descendant moved to. It forks and execs the command, waits for it
 to exit (or for its own SIGTERM, which ends the command early), then terminates and
 reaps whatever remains until it has no child left, escalating from TERM to KILL after
 the grace. It keeps draining for as long as anything remains, so the tree never loses
 its owner; the caller bounds how long it waits.
 
-Only that drain to no-children exits :data:`REAPED`; the command's own exit status goes
-to the receipt instead. Any other exit, or death by a signal, proves nothing about the
-tree. The module needs only the standard library, so the worker imports its helpers and
-runs the same file as the supervisor.
+Only that drain to no-children exits :data:`REAPED`; the command's own exit status, and
+whether the supervisor ended it, go to the receipt instead. Any other exit after the
+fork, or death by a signal, proves nothing about the tree.
 """
 
 import argparse
 import contextlib
 import ctypes
+import errno
 import json
 import os
 import signal
@@ -26,7 +26,7 @@ import sys
 import time
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 REAPED = 86  # the drain reached no children: the whole tree is gone
 UNSUPPORTED = 88  # the kernel would not make the supervisor a child subreaper
@@ -45,27 +45,49 @@ _SCRIPT = Path(__file__).resolve()
 def supervised_argv(
     argv: list[str],
     *,
-    receipt: Path | None = None,
+    receipt_fd: int | None = None,
     grace_sec: float = DEFAULT_GRACE_SEC,
 ) -> list[str]:
-    """The argv that runs ``argv`` under a fresh supervisor."""
+    """The argv that runs ``argv`` under a fresh supervisor.
+
+    ``receipt_fd`` is a pipe the supervisor inherits and writes its receipt to; the
+    command never holds it.
+    """
     head = [sys.executable, "-I", _SCRIPT.as_posix()]
-    if receipt is not None:
-        head += ["--receipt", receipt.as_posix()]
+    if receipt_fd is not None:
+        head += ["--receipt-fd", str(receipt_fd)]
     return [*head, "--grace", str(grace_sec), "--", *argv]
 
 
 def reap_proved(returncode: int | None) -> bool:
-    """Whether a supervisor's exit status proves its tree reaped."""
-    return returncode == REAPED
+    """Whether a supervisor's exit status proves its tree reaped.
+
+    A supervisor the kernel would not make a subreaper, or one a SIGTERM ended, never
+    forked: the signal is blocked from before the fork, so it can end the supervisor
+    only while there is no tree.
+    """
+    return returncode in (REAPED, UNSUPPORTED, -signal.SIGTERM)
 
 
-def read_receipt(path: Path) -> int | None:
-    """The supervised command's exit status from a receipt, or None without one."""
+class Receipt(NamedTuple):
+    """What a supervisor reports about the command it ran."""
+
+    status: int | None  # the command's exit status, negative for a signal
+    ended: bool  # whether the supervisor ended the command before it exited
+
+
+def read_receipt(fd: int) -> Receipt | None:
+    """Read and close a receipt pipe once its supervisor exited; None without one."""
+    chunks: list[bytes] = []
     try:
-        return int(json.loads(path.read_text())["status"])
+        while chunk := os.read(fd, 4096):
+            chunks.append(chunk)
+        raw = json.loads(b"".join(chunks))
+        return Receipt(status=raw["status"], ended=bool(raw["ended"]))
     except (OSError, ValueError, KeyError, TypeError):
         return None
+    finally:
+        os.close(fd)
 
 
 def end_supervised(proc: subprocess.Popen[Any], timeout_sec: float) -> bool:
@@ -110,20 +132,16 @@ def _process_table() -> dict[int, tuple[int, int]]:
             continue
         try:
             stat = Path(f"/proc/{entry}/stat").read_text()
-        except OSError:
+            # A command name may hold spaces or parentheses; fields follow the last ")".
+            fields = stat[stat.rfind(")") + 2 :].split()
+            table[int(entry)] = (int(fields[1]), int(fields[19]))
+        except (OSError, ValueError, IndexError):
             continue
-        # A command name may hold spaces or parentheses; fields follow the last ")".
-        fields = stat[stat.rfind(")") + 2 :].split()
-        table[int(entry)] = (int(fields[1]), int(fields[19]))
     return table
 
 
-def _parents() -> dict[int, int]:
-    return {pid: ppid for pid, (ppid, _) in _process_table().items()}
-
-
 def _descendants() -> set[int]:
-    parents = _parents()
+    parents = {pid: ppid for pid, (ppid, _) in _process_table().items()}
     found: set[int] = set()
     frontier = [os.getpid()]
     while frontier:
@@ -135,18 +153,32 @@ def _descendants() -> set[int]:
     return found
 
 
-def _signal_descendant(libc: ctypes.CDLL, pid: int, sig: int) -> None:
-    # Pinning the pid first, then confirming it is still in the tree, keeps a recycled
-    # pid that left the tree from being signalled. The raw syscalls stand in for
-    # ``os.pidfd_open``, which an interpreter built against an older libc omits.
-    fd = libc.syscall(_SYS_PIDFD_OPEN, pid, 0)
-    if fd < 0:
-        return
+def _signal_tree(libc: ctypes.CDLL, pids: set[int], sig: int) -> None:
+    """Signal every pid of ``pids`` that is still in the tree.
+
+    Pinning each pid first, then confirming it is still in the tree, keeps a recycled
+    pid that left the tree from being signalled. The raw syscalls stand in for
+    ``os.pidfd_open``, which an interpreter built against an older libc omits; a kernel
+    without pidfds gets a plain kill of a pid found in the tree a moment before.
+    """
+    pinned: dict[int, int] = {}
+    unpinned: set[int] = set()
+    for pid in pids:
+        if (fd := libc.syscall(_SYS_PIDFD_OPEN, pid, 0)) >= 0:
+            pinned[pid] = fd
+        elif ctypes.get_errno() == errno.ENOSYS:
+            unpinned.add(pid)
     try:
-        if pid in _descendants():
-            libc.syscall(_SYS_PIDFD_SEND_SIGNAL, fd, sig, None, 0)
+        members = _descendants()
+        for pid, fd in pinned.items():
+            if pid in members:
+                libc.syscall(_SYS_PIDFD_SEND_SIGNAL, fd, sig, None, 0)
+        for pid in unpinned & members:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, sig)
     finally:
-        os.close(fd)
+        for fd in pinned.values():
+            os.close(fd)
 
 
 class _Supervisor:
@@ -154,6 +186,7 @@ class _Supervisor:
         self.libc = libc
         self.primary = primary
         self.status: int | None = None
+        self.ended = False
 
     def reap_ready(self) -> bool:
         """Reap every exited child; return whether any child remains."""
@@ -172,6 +205,7 @@ class _Supervisor:
         while self.reap_ready() and self.status is None:
             got = signal.sigtimedwait({signal.SIGCHLD, signal.SIGTERM}, 1.0)
             if got is not None and got.si_signo == signal.SIGTERM:
+                self.ended = True
                 return
 
     def drain(self, grace_sec: float) -> None:
@@ -179,26 +213,27 @@ class _Supervisor:
         start = time.monotonic()
         terminated: set[int] = set()
         while self.reap_ready():
-            kill = time.monotonic() - start >= grace_sec
-            for pid in _descendants():
-                if kill or pid not in terminated:
-                    _signal_descendant(
-                        self.libc, pid, signal.SIGKILL if kill else signal.SIGTERM
-                    )
-                    terminated.add(pid)
+            pids = _descendants()
+            if time.monotonic() - start >= grace_sec:
+                _signal_tree(self.libc, pids, signal.SIGKILL)
+            elif fresh := pids - terminated:
+                _signal_tree(self.libc, fresh, signal.SIGTERM)
+                terminated |= fresh
             signal.sigtimedwait({signal.SIGCHLD}, _WAIT_STEP_SEC)
 
 
-def _write_receipt(path: Path, status: int | None) -> None:
-    staged = path.with_name(f".{path.name}.tmp")
-    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        json.dump({"status": status}, handle)
-    staged.replace(path)
+def _write_receipt(fd: int, supervisor: _Supervisor) -> None:
+    payload = {"status": supervisor.status, "ended": supervisor.ended}
+    with os.fdopen(fd, "wb") as pipe:
+        pipe.write(json.dumps(payload).encode())
 
 
 def _exec_child(argv: list[str], mask: Iterable[int]) -> None:
     try:
+        # The interpreter ignores these at startup and an exec keeps that, so the
+        # command gets the defaults any process starts with.
+        for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+            signal.signal(sig, signal.SIG_DFL)
         signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         os.execv(argv[0], argv)  # nosec B606 - argv list from the worker, no shell
     except OSError as exc:
@@ -208,7 +243,7 @@ def _exec_child(argv: list[str], mask: Iterable[int]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="subreaper")
-    parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--receipt-fd", type=int)
     parser.add_argument("--grace", type=float, default=DEFAULT_GRACE_SEC)
     parser.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -219,18 +254,18 @@ def main() -> None:
     if not _become_subreaper(libc):
         os.write(2, b"subreaper: the kernel refused PR_SET_CHILD_SUBREAPER\n")
         os._exit(UNSUPPORTED)
-    if os.getsid(0) != os.getpid():
+    if args.receipt_fd is not None:
+        os.set_inheritable(args.receipt_fd, False)
+    with contextlib.suppress(PermissionError):
         os.setsid()
     # Blocked before the fork, so neither signal is lost or takes its default action
     # between the fork and the wait; the command gets the original mask back.
-    mask = signal.pthread_sigmask(
-        signal.SIG_BLOCK, {signal.SIGCHLD, signal.SIGTERM, signal.SIGINT}
-    )
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD, signal.SIGTERM})
     primary = os.fork()
     if primary == 0:
         _exec_child(argv, mask)
     # The command alone owns the stdio pipes, so its reader sees end-of-file when the
-    # command closes them rather than when the supervisor finally exits.
+    # command closes them.
     devnull = os.open(os.devnull, os.O_RDWR)
     os.dup2(devnull, 0)
     os.dup2(devnull, 1)
@@ -238,8 +273,10 @@ def main() -> None:
     supervisor = _Supervisor(libc, primary)
     supervisor.await_primary()
     supervisor.drain(args.grace)
-    if args.receipt is not None:
-        _write_receipt(args.receipt, supervisor.status)
+    if args.receipt_fd is not None:
+        # The tree is gone either way; a missing receipt reads as an unknown status.
+        with contextlib.suppress(OSError):
+            _write_receipt(args.receipt_fd, supervisor)
     os._exit(REAPED)
 
 

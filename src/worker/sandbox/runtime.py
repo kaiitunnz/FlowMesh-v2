@@ -4,12 +4,12 @@ A runtime executes a command against the activation's own workspace and returns 
 bounded result. The fence is kernel-enforced and unprivileged, so it holds in an
 ordinary worker container: Landlock denies every path outside the workspace and the
 read-only runtime, a seccomp filter denies IP sockets and io_uring, and the envelope's
-resource limits bound the command. The command runs under its own supervisor, outside
-those layers, which reaps everything the command started — including a process that
-detached into a session of its own — before the action completes; a command whose tree
-it could not prove reaped fails. A dispatch whose capability carries the egress opt-in
-relaxes the two network layers and nothing else: the workspace confinement, the
-envelope, and the reaping bound it as they bound any other command.
+resource limits bound the command. Each command runs under its own unfenced supervisor,
+which reaps everything the command started, including a process in a session of its
+own, before the action completes; a tree it cannot prove reaped fails the command. A
+dispatch whose capability carries the egress opt-in relaxes the two network layers and
+nothing else: the workspace confinement, the envelope, and the reaping bound it as they
+bound any other command.
 
 What the fence does not provide, because an unprivileged container cannot: no mount
 namespace or private root view, no PID or IPC isolation (processes on one worker remain
@@ -27,7 +27,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -45,6 +44,7 @@ from shared.sandbox import (
 
 from ..utils.subreaper import (
     DEFAULT_GRACE_SEC,
+    UNSUPPORTED,
     end_supervised,
     read_receipt,
     supervised_argv,
@@ -178,11 +178,9 @@ class PosixProcessSandbox(SandboxRuntime):
         ]
         limit = profile.command_timeout_sec
         deadline = min(command.timeout_sec or limit, limit)
-        # Outside the workspace, so the command cannot forge the status it reports.
-        scratch = Path(tempfile.mkdtemp(prefix="sandbox-reap-"))
-        receipt = scratch / "receipt.json"
+        receipt, receipt_end = os.pipe()
         argv = supervised_argv(
-            launcher, receipt=receipt, grace_sec=self._reap_grace_sec
+            launcher, receipt_fd=receipt_end, grace_sec=self._reap_grace_sec
         )
         try:
             proc = subprocess.Popen(  # nosec B603 - argv list, no shell, absolute program via shutil.which()
@@ -194,27 +192,36 @@ class PosixProcessSandbox(SandboxRuntime):
                 stderr=subprocess.PIPE,
                 text=True,
                 start_new_session=True,
+                pass_fds=(receipt_end,),
             )
         except OSError as exc:
-            shutil.rmtree(scratch, ignore_errors=True)
+            os.close(receipt)
             raise SandboxUnavailable(f"the sandbox could not start a command: {exc}")
+        finally:
+            os.close(receipt_end)
         streams = _Streams(proc)
         try:
             proc.wait(timeout=deadline)
-            timed_out = False
+            expired = False
         except subprocess.TimeoutExpired:
-            timed_out = True
+            expired = True
         # The supervisor has drained what the command left behind by the time it exits;
         # one still running past the deadline is told to end the command.
         if not end_supervised(proc, budget := self._reap_budget_sec):
             raise SandboxReapUnproved(
                 f"the command {command.argv[0]!r} left processes it could not prove "
                 "reaped",
-                retry=lambda: _finish_reap(proc, budget, scratch),
+                retry=lambda: _finish_reap(proc, budget, receipt),
             )
-        status = read_receipt(receipt)
-        shutil.rmtree(scratch, ignore_errors=True)
+        if proc.returncode == UNSUPPORTED:
+            os.close(receipt)
+            raise SandboxUnavailable("the kernel cannot supervise a command's tree")
+        outcome = read_receipt(receipt)
         stdout, stderr = streams.collect()
+        # The supervisor ended the command only past its deadline; one it never forked
+        # leaves no receipt.
+        timed_out = outcome.ended if outcome is not None else expired
+        status = outcome.status if outcome is not None else None
         return SandboxCommandResult(
             exit_code=-1 if timed_out or status is None else status,
             stdout=stdout,
@@ -223,11 +230,11 @@ class PosixProcessSandbox(SandboxRuntime):
         )
 
 
-def _finish_reap(proc: subprocess.Popen[str], budget_sec: float, scratch: Path) -> bool:
+def _finish_reap(proc: subprocess.Popen[str], budget_sec: float, receipt: int) -> bool:
     """Try an unproved command's reap again, releasing its receipt once proved."""
     if not end_supervised(proc, budget_sec):
         return False
-    shutil.rmtree(scratch, ignore_errors=True)
+    os.close(receipt)
     return True
 
 

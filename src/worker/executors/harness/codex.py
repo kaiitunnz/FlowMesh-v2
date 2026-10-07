@@ -88,8 +88,7 @@ class CodexAppServerTransport(Protocol):
         ...
 
     def quiesce(self) -> bool:
-        """End the app-server and everything it started; return whether that was
-        proved."""
+        """End the app-server's whole tree; return whether its reap was proved."""
         ...
 
 

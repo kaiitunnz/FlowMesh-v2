@@ -14,6 +14,7 @@ from worker.utils import subreaper
 from worker.utils.subreaper import (
     REAPED,
     UNSUPPORTED,
+    Receipt,
     end_supervised,
     read_receipt,
     reap_proved,
@@ -47,15 +48,33 @@ def strays() -> Iterator[list[int]]:
             pass
 
 
-def _run(script: str, tmp_path: Path, grace_sec: float = 2.0) -> tuple[int, int | None]:
-    receipt = tmp_path / "receipt.json"
-    proc = subprocess.run(  # nosec B603 - argv list built by the test
-        supervised_argv([_SH, "-c", script], receipt=receipt, grace_sec=grace_sec),
+def _supervise(
+    script_or_argv: str | list[str], tmp_path: Path, grace_sec: float = 2.0
+) -> tuple[subprocess.Popen[bytes], int]:
+    """Start a supervisor over a shell script (or an argv), returning it and its
+    receipt pipe."""
+    argv = (
+        [_SH, "-c", script_or_argv]
+        if isinstance(script_or_argv, str)
+        else script_or_argv
+    )
+    receipt, receipt_end = os.pipe()
+    proc = subprocess.Popen(  # nosec B603 - argv list built by the test
+        supervised_argv(argv, receipt_fd=receipt_end, grace_sec=grace_sec),
         cwd=tmp_path,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=30,
+        pass_fds=(receipt_end,),
     )
+    os.close(receipt_end)
+    return proc, receipt
+
+
+def _run(
+    script: str, tmp_path: Path, grace_sec: float = 2.0
+) -> tuple[int, Receipt | None]:
+    proc, receipt = _supervise(script, tmp_path, grace_sec)
+    proc.wait(30)
     return proc.returncode, read_receipt(receipt)
 
 
@@ -66,22 +85,37 @@ def _pids(path: Path) -> list[int]:
 def test_a_finished_command_reports_its_own_status_apart_from_the_proof(
     tmp_path: Path,
 ) -> None:
-    returncode, status = _run("exit 3", tmp_path)
+    returncode, receipt = _run("exit 3", tmp_path)
 
     assert returncode == REAPED and reap_proved(returncode)
-    assert status == 3
+    assert receipt == Receipt(status=3, ended=False)
 
 
 def test_an_unexecutable_command_is_still_a_proved_reap(tmp_path: Path) -> None:
-    receipt = tmp_path / "receipt.json"
-    proc = subprocess.run(  # nosec B603 - argv list built by the test
-        supervised_argv([(tmp_path / "missing").as_posix()], receipt=receipt),
-        capture_output=True,
-        timeout=30,
-    )
+    proc, receipt = _supervise([(tmp_path / "missing").as_posix()], tmp_path)
+    proc.wait(30)
 
     assert proc.returncode == REAPED
-    assert read_receipt(receipt) == 127
+    assert read_receipt(receipt) == Receipt(status=127, ended=False)
+
+
+def test_the_command_gets_default_dispositions_and_no_receipt_pipe(
+    tmp_path: Path,
+) -> None:
+    returncode, receipt = _run(
+        "grep -E '^SigIgn' /proc/self/status > ignored; ls /proc/self/fd > fds",
+        tmp_path,
+    )
+
+    assert returncode == REAPED and receipt is not None and receipt.status == 0
+    ignored = int((tmp_path / "ignored").read_text().split()[1], 16)
+    assert ignored & ((1 << (signal.SIGPIPE - 1)) | (1 << (signal.SIGXFSZ - 1))) == 0
+    assert sorted(int(fd) for fd in (tmp_path / "fds").read_text().split()) <= [
+        0,
+        1,
+        2,
+        3,
+    ]
 
 
 def test_a_detached_writer_is_reaped_before_the_proof(tmp_path: Path) -> None:
@@ -168,20 +202,22 @@ def test_a_killed_supervisor_proves_nothing(tmp_path: Path, strays: list[int]) -
 
 
 def test_ending_a_running_supervisor_reaps_its_command(tmp_path: Path) -> None:
-    receipt = tmp_path / "receipt.json"
     script = "setsid sh -c 'echo $$ > pids; exec sleep 30' & sleep 30"
-    proc = subprocess.Popen(  # nosec B603 - argv list built by the test
-        supervised_argv([_SH, "-c", script], receipt=receipt, grace_sec=0.3),
-        cwd=tmp_path,
-        text=True,
-    )
+    proc, receipt = _supervise(script, tmp_path, grace_sec=0.3)
     deadline = time.monotonic() + 10
     while not (tmp_path / "pids").exists() and time.monotonic() < deadline:
         time.sleep(0.02)
 
     assert end_supervised(proc, 10)
-    assert read_receipt(receipt) == -signal.SIGTERM
+    assert read_receipt(receipt) == Receipt(status=-signal.SIGTERM, ended=True)
     assert not any(_alive(pid) for pid in _pids(tmp_path / "pids"))
+
+
+def test_a_supervisor_ended_before_it_forks_proves_its_empty_tree() -> None:
+    # Before the supervisor blocks SIGTERM nothing has forked, so dying of it is proof.
+    assert reap_proved(-signal.SIGTERM)
+    assert not reap_proved(-signal.SIGKILL)
+    assert not reap_proved(1)
 
 
 def test_a_supervisor_the_kernel_will_not_make_a_subreaper_runs_nothing(

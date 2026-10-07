@@ -70,16 +70,22 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
     def drain(self) -> bool:
         """Close admission, wait out the commands in flight, and return whether every
         command of the dispatch was proved reaped."""
-        profile = self._capability.profile
-        bound = profile.command_timeout_sec + _DRAIN_SLACK_SEC
+        bound = self._capability.profile.command_timeout_sec + _DRAIN_SLACK_SEC
         with self._admission:
             self._open = False
             settled = self._admission.wait_for(lambda: self._running == 0, bound)
+        self.finish_reaps()
+        with self._admission:
+            return settled and not self._unproved
+
+    def finish_reaps(self) -> bool:
+        """Retry the reaps no command proved; return whether nothing is left running."""
+        with self._admission:
             unreaped, self._unreaped = self._unreaped, []
         still = [retry for retry in unreaped if not retry()]
         with self._admission:
             self._unreaped.extend(still)
-            return settled and not self._unproved
+            return not self._unreaped and self._running == 0
 
     def execute(self, command: SandboxCommand) -> SandboxCommandResult:
         with self._admission:

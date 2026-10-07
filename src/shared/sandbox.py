@@ -132,10 +132,8 @@ class SandboxUnavailable(Exception):
 class SandboxReapUnproved(Exception):
     """A command's process tree was not proved reaped.
 
-    Unlike a denial this does not settle the action: something the command started may
-    be writing the workspace, so the turn that ran it ends and the dispatch cannot seal
-    its private state. ``retry`` tries the reap
-    again and returns whether it was then proved.
+    The action is unsettled: the turn that ran it ends and the dispatch cannot seal its
+    private state. ``retry`` reattempts the reap and returns whether it was proved.
     """
 
     def __init__(self, message: str, retry: Callable[[], bool] | None = None) -> None:

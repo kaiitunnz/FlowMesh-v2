@@ -290,10 +290,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   seal. Components seal together at one quiescence fence, so a harness home never
   resumes beside a workspace from another private-state generation. The fence holds
   once every writer the step started on the state — its harness's whole process tree and
-  its sandbox commands — is proved stopped; each component is a quiescent filesystem
-  tree, restored by verification onto a fresh harness process, and a step that cannot
-  prove its writers stopped seals nothing and fails as `quiescence_unproved`. While a
-  generation is sealed local to the holder that produced it, that holder is a hard scheduler
+  its sandbox commands — is proved stopped, so the next step resumes on a fresh harness
+  process; a step that cannot prove its writers stopped seals nothing, fails as
+  `quiescence_unproved`, and its lineage refuses later dispatches. While a generation is
+  sealed local to the holder that produced it, that holder is a hard scheduler
   feasibility constraint resolved at dispatch: the episode lane yields as any other does,
   and an episode waits while its holder is busy. A resident replica prefers a worker
   holding no agent's private state when one is idle, a public `serve` task waits for
@@ -317,9 +317,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   trip or cross-worker hop. The runtime confines a command to its workspace, denies
   network egress, bounds its resources, and reaps every process it started before the
   command completes; commands become durable together at the agent's ordinary boundary
-  seal, and a loss before the seal fails closed as
-  `PrivateStateUnavailable`. A child runs commands only where its parent delegated the
-  interface. The feature is a single-trusted-tenant development posture, not
+  seal, and a loss before the seal fails closed as `PrivateStateUnavailable`. A child
+  runs commands only where its parent delegated the interface. The feature is a single-trusted-tenant development posture, not
   multi-tenant isolation; an operator enables it for the fleet with
   `AGENT_SANDBOX_ENABLED`.
 - **Author-owned sandbox egress.** An agent that declares the distinct `sandbox.egress`

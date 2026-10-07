@@ -45,18 +45,6 @@ def _attachment(
     )
 
 
-def _fence(
-    state: MaterializedState, attachment: PrivateStateAttachment
-) -> QuiescenceFence:
-    return QuiescenceFence(
-        reference_id=state.reference_id,
-        profile=state.profile,
-        generation=state.generation,
-        attachment_id=attachment.attachment_id,
-        write_epoch=attachment.write_epoch,
-    )
-
-
 def _advance(
     holder: PrivateStateHolder, binding: PrivateStateBinding, epoch: int
 ) -> tuple[PrivateStateBinding, MaterializedState]:
@@ -64,7 +52,7 @@ def _advance(
     attachment = _attachment(binding, write_epoch=epoch)
     state = holder.open(binding, attachment)
     (state.harness_home / "rollout.jsonl").write_text(f"turn-{epoch}")
-    report = holder.seal(state, attachment, _fence(state, attachment))
+    report = holder.seal(state, attachment, QuiescenceFence.of(state, attachment))
     return (
         PrivateStateBinding(
             reference=binding.reference,
@@ -200,7 +188,9 @@ def test_a_superseded_epoch_cannot_seal(tmp_path: Path) -> None:
     holder.open(binding, _attachment(binding, write_epoch=2))
 
     with pytest.raises(PrivateStateUnavailable) as raised:
-        holder.seal(state, stale_attachment, _fence(state, stale_attachment))
+        holder.seal(
+            state, stale_attachment, QuiescenceFence.of(state, stale_attachment)
+        )
 
     assert raised.value.reason is PrivateStateUnavailableReason.STALE_EPOCH
 
@@ -260,7 +250,7 @@ def test_a_seal_refuses_a_fence_for_another_attachment(tmp_path: Path) -> None:
     other = _attachment(binding, write_epoch=2)
 
     with pytest.raises(PrivateStateUnavailable) as raised:
-        holder.seal(state, attachment, _fence(state, other))
+        holder.seal(state, attachment, QuiescenceFence.of(state, other))
 
     assert raised.value.reason is PrivateStateUnavailableReason.QUIESCENCE_UNPROVED
 
@@ -293,7 +283,7 @@ def test_a_component_the_holder_cannot_capture_fails_closed(
     )
 
     for refused in (
-        lambda: holder.seal(state, attachment, _fence(state, attachment)),
+        lambda: holder.seal(state, attachment, QuiescenceFence.of(state, attachment)),
         lambda: holder.open(binding, attachment),
     ):
         with pytest.raises(PrivateStateUnavailable) as raised:

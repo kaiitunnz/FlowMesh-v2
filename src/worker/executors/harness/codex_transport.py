@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# The underscored helpers are private to the SDK; the exact pin keeps them stable.
 from openai_codex.client import (
     CodexClient,
     CodexConfig,

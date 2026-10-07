@@ -16,9 +16,11 @@ at 0700 and unreachable once the holder's incarnation ends, since no later incar
 satisfies an owner fence.
 """
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 from shared.private_state import (
     BundleProfile,
@@ -37,6 +39,7 @@ from shared.private_state import (
 )
 from shared.utils.ids import new_state_bundle_manifest_id
 
+_LOG = logging.getLogger("private-state")
 _PRIVATE_MODE = 0o700
 _EPOCH_FILE = ".attachment"
 _UNSEALABLE_FILE = ".unsealable"
@@ -64,18 +67,24 @@ class MaterializedState:
 
 @dataclass(frozen=True)
 class QuiescenceFence:
-    """Proof that every writer bound to one attachment stopped before its seal.
-
-    Only the agent-episode executor mints one, once its step's harness and sandbox
-    writers are proved stopped; a seal accepts it only for the state and attachment it
-    names.
-    """
+    """Proof that every writer bound to one attachment stopped before its seal; a seal
+    accepts it only for the state and attachment it names."""
 
     reference_id: str
     profile: BundleProfile
     generation: int
     attachment_id: str
     write_epoch: int
+
+    @classmethod
+    def of(cls, state: MaterializedState, attachment: PrivateStateAttachment) -> Self:
+        return cls(
+            reference_id=state.reference_id,
+            profile=state.profile,
+            generation=state.generation,
+            attachment_id=attachment.attachment_id,
+            write_epoch=attachment.write_epoch,
+        )
 
 
 class PrivateStateHolder:
@@ -148,13 +157,7 @@ class PrivateStateHolder:
         The fence must name this state and attachment: a generation is captured only
         once the writers of the step that produced it are proved stopped.
         """
-        if fence != QuiescenceFence(
-            reference_id=state.reference_id,
-            profile=state.profile,
-            generation=state.generation,
-            attachment_id=attachment.attachment_id,
-            write_epoch=attachment.write_epoch,
-        ):
+        if fence != QuiescenceFence.of(state, attachment):
             raise PrivateStateUnavailable(
                 PrivateStateUnavailableReason.QUIESCENCE_UNPROVED,
                 "the quiescence fence is not this attachment's",
@@ -184,7 +187,10 @@ class PrivateStateHolder:
         """Refuse every later open of a lineage whose step could not prove its writers
         stopped, so no attempt resumes on or seals a tree no fence covers."""
         marker = self._root / state.reference_id / _UNSEALABLE_FILE
-        marker.touch(mode=0o600, exist_ok=True)
+        try:
+            marker.touch(mode=0o600, exist_ok=True)
+        except OSError:
+            _LOG.exception("Could not mark lineage %s unsealable", state.reference_id)
 
     @staticmethod
     def _restore(

@@ -263,3 +263,4 @@ def test_an_unproved_command_leaves_the_dispatch_unable_to_seal(state) -> None:
     # The leftover tree is reaped on the drain, but the dispatch stays unsealable.
     assert not sandbox.drain()
     assert runtime.reaped
+    assert sandbox.finish_reaps()

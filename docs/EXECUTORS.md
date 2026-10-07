@@ -67,7 +67,7 @@ Declared per agent under `spec.harness`:
 
 - `backend` — the adapter binding: `scripted` (a deterministic backend that replays a
   declared step sequence from `params.script`) or `codex` (the version-pinned Codex
-  app-server binding, run with its curated-plugin sync off).
+  app-server binding).
 - `version` — pins the adapter/protocol so a capsule resumes only on a match.
 - `params` — backend configuration. The `codex` backend's model upstream comes from
   `model_binding`, which it reaches through the worker-local Responses facade. A param
@@ -86,15 +86,13 @@ generation to resume and the `PrivateStateAttachment` authorizing this worker in
 to write it; the executor materializes the bound generation before building the adapter
 and seals the components together when the step yields.
 
-A step seals only once every writer it started on that state is proved stopped. The
-adapter quiesces its harness — the `codex` app-server and every process it started exit,
-reaped by a per-tree supervisor even when one detached into a session of its own — and
-the dispatch's sandbox admits no further command and waits out those in flight. Each
-component is a quiescent tree: captured at that fence and restored by verifying the
-exact sealed tree, so the next step resumes on a fresh harness process from the sealed
-generation and its capsule. A step whose writers are not proved stopped seals nothing
-and fails without a retry as `PrivateStateUnavailable: quiescence_unproved`, and its
-lineage refuses every later dispatch.
+A step seals only once every writer it started on that state is proved stopped: the
+adapter quiesces its harness — the `codex` app-server and every process it started
+exit — and the dispatch's sandbox admits no further command and waits out those in
+flight. The next step resumes on a fresh harness process from the sealed generation and
+its capsule. A step whose writers are not proved stopped seals nothing and fails without
+a retry as `PrivateStateUnavailable: quiescence_unproved`, and its lineage refuses every
+later dispatch.
 
 The holder verifies every required component against its seal before the harness starts,
 refuses an attachment whose write epoch a later dispatch superseded, and keeps each
@@ -126,8 +124,8 @@ Commands mutate `workspace_fs` and become durable at the episode's ordinary seal
 worker loss before it leaves the last sealed generation intact. A command completes only
 once everything it started is reaped, including a process that detached into its own
 session; a command whose tree is not proved reaped ends the turn that ran it, and the
-step fails as `quiescence_unproved`. Egress is denied by
-default — reaching a model, tool, or external effect takes the mediated boundary.
+step fails as `quiescence_unproved`. Egress is denied by default — reaching a model,
+tool, or external effect takes the mediated boundary.
 
 Declaring the separate `sandbox.egress` interface, on a deployment that sets
 `AGENT_SANDBOX_EGRESS_ENABLED`, relaxes the network fence for the agent's own commands;

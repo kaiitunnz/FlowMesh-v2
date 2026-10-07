@@ -7,6 +7,7 @@ step, and returns the step's :class:`HarnessResult`. The lane releases after the
 the server routes any boundary and re-dispatches with the next capsule and outcomes.
 """
 
+import functools
 import logging
 import threading
 from collections.abc import Callable
@@ -133,9 +134,11 @@ class AgentEpisodeExecutor(Executor):
                         adapter.cancel(task.task_id)
                     except Exception:
                         _LOG.exception("Failed to give up the turn of %s", task.task_id)
-                if not self._end_writers(task.task_id, adapter, sandbox, holder, state):
-                    if state is not None:
-                        raise self._unproved(state) from exc
+                proved = self._end_writers(
+                    task.task_id, adapter, sandbox, holder, state
+                )
+                if not proved and state is not None:
+                    raise self._unproved(state) from exc
                 raise
             proved = self._end_writers(task.task_id, adapter, sandbox, holder, state)
         finally:
@@ -155,8 +158,9 @@ class AgentEpisodeExecutor(Executor):
         if state is not None and holder is not None:
             if not proved:
                 raise self._unproved(state)
+            attachment = _attachment(dispatch)
             sealed = holder.seal(
-                state, attachment := _attachment(dispatch), _fence(state, attachment)
+                state, attachment, QuiescenceFence.of(state, attachment)
             )
         # Captured last, so nothing after the capture can raise past a request the step
         # holds for control.
@@ -245,35 +249,41 @@ class AgentEpisodeExecutor(Executor):
         proved.
 
         The harness and the sandbox are each ended whether or not the other could be,
-        and the sandbox admits no command from the moment the teardown begins. An
-        unproved teardown keeps what it could not end for a later attempt and refuses
-        the lineage from then on.
+        and the sandbox admits no command from the moment the teardown begins.
         """
         if sandbox is not None:
             sandbox.close()
-        proved = self._ended(task_id, "harness", lambda: _quiesced(adapter, task_id))
+        quiesce = functools.partial(_quiesced, adapter, task_id)
+        proved = self._ended(task_id, "harness", quiesce, quiesce)
         if sandbox is not None:
-            proved = self._ended(task_id, "sandbox", sandbox.drain) and proved
+            drained = self._ended(
+                task_id, "sandbox", sandbox.drain, sandbox.finish_reaps
+            )
+            proved = drained and proved
         if not proved and holder is not None and state is not None:
             holder.mark_unsealable(state)
         return proved
 
-    def _ended(self, task_id: str, writer: str, end: Callable[[], bool]) -> bool:
+    def _ended(
+        self,
+        task_id: str,
+        writer: str,
+        end: Callable[[], bool],
+        retry: Callable[[], bool],
+    ) -> bool:
+        """Run one writer's teardown; an unproved one keeps ``retry`` for cleanup."""
         try:
             if end():
                 return True
         except Exception:
             _LOG.exception("Ending the %s of task %s failed", writer, task_id)
         _LOG.error("The %s of task %s was not proved stopped", writer, task_id)
-        self._unended.append((task_id, writer, end))
+        self._unended.append((task_id, writer, retry))
         return False
 
     def _unproved(self, state: MaterializedState) -> Exception:
-        """The step's failure when its writers were not proved stopped.
-
-        No recoverable capture of the step exists, so it fails without a retry; a
-        cancellation the step was asked for still ends it as cancelled.
-        """
+        """The non-retryable failure of a step with no proved capture; a requested
+        cancellation ends it as cancelled."""
         unavailable = PrivateStateUnavailable(
             PrivateStateUnavailableReason.QUIESCENCE_UNPROVED,
             "the step's writers were not proved stopped before its seal",
@@ -425,8 +435,8 @@ class AgentEpisodeExecutor(Executor):
             facade.unregister_episode(self._episode_task_id)
         self._episode_task_id = None
         unended, self._unended = self._unended, []
-        for task_id, writer, end in unended:
-            self._ended(task_id, writer, end)
+        for task_id, writer, retry in unended:
+            self._ended(task_id, writer, retry, retry)
 
 
 def _give_up(
@@ -450,19 +460,6 @@ def _quiesced(adapter: HarnessAdapter, task_id: str) -> bool:
     except HarnessQuiescenceError:
         return False
     return True
-
-
-def _fence(
-    state: MaterializedState, attachment: PrivateStateAttachment
-) -> QuiescenceFence:
-    """The fence a step's seal carries once its writers are proved stopped."""
-    return QuiescenceFence(
-        reference_id=state.reference_id,
-        profile=state.profile,
-        generation=state.generation,
-        attachment_id=attachment.attachment_id,
-        write_epoch=attachment.write_epoch,
-    )
 
 
 def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:

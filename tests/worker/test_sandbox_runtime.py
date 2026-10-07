@@ -479,3 +479,21 @@ def test_a_supervised_command_still_cannot_read_proc(runtime, profile, tmp_path)
 
     assert result.exit_code != 0
     assert "Pid:" not in result.stdout
+
+
+def test_a_command_finished_before_its_deadline_is_not_timed_out(profile, tmp_path):
+    runtime = PosixProcessSandbox(reap_grace_sec=1.0)
+
+    # The supervisor is draining a TERM-ignoring leftover when the deadline passes.
+    result = run(
+        runtime,
+        profile,
+        tmp_path,
+        "sh",
+        "-c",
+        "setsid sh -c 'trap \"\" TERM; exec sleep 30' & exit 0",
+        timeout_sec=0.3,
+    )
+
+    assert not result.timed_out
+    assert result.exit_code == 0
