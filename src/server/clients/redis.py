@@ -29,6 +29,10 @@ REDIS_CONN_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+# Long enough for a reachable store, short enough not to stall the supervisor's loop.
+_STATE_STORE_TIMEOUT_SEC = 5.0
+
+
 def _keepalive_kwargs() -> dict[str, Any]:
     """Connection kwargs that keep an idle Redis socket alive.
 
@@ -305,7 +309,9 @@ def resident_relay_client(cfg: RedisConfig) -> async_redis.Redis:
     Unlike the control and telemetry clients this does not decode responses, so a
     frame's raw-bytes payload rides a stream field verbatim, not through a text codec.
     """
-    url, ssl_kwargs = _relay_connection(cfg, AsyncSSLConnection)
+    url, ssl_kwargs = _deployment_connection(
+        cfg.resident_relay_url, cfg, AsyncSSLConnection
+    )
     return async_redis.from_url(
         url, decode_responses=False, **_keepalive_kwargs(), **ssl_kwargs
     )
@@ -317,41 +323,43 @@ def resident_relay_sync_client(cfg: RedisConfig) -> redis.Redis:
     A relay session's routing record lands where the bridges that route its frames
     read it.
     """
-    url, ssl_kwargs = _relay_connection(cfg, SyncSSLConnection)
+    url, ssl_kwargs = _deployment_connection(
+        cfg.resident_relay_url, cfg, SyncSSLConnection
+    )
     return redis.from_url(
         url, decode_responses=True, **_keepalive_kwargs(), **ssl_kwargs
     )
 
 
 def supervisor_state_client(cfg: RedisConfig) -> redis.Redis:
-    """A blocking client on the supervisor state store.
+    """Build a blocking client on the supervisor state store.
 
     An endpoint the operator names connects with its own URL's credentials and TLS;
     otherwise the store is the control Redis, reached as the control client reaches it.
+    Its calls run on the supervisor's event loop, so they time out.
     """
+    timeouts = {
+        "socket_connect_timeout": _STATE_STORE_TIMEOUT_SEC,
+        "socket_timeout": _STATE_STORE_TIMEOUT_SEC,
+    }
     if cfg.supervisor_state_url:
         return redis.from_url(
-            cfg.supervisor_state_url, decode_responses=True, **_keepalive_kwargs()
+            cfg.supervisor_state_url,
+            decode_responses=True,
+            **_keepalive_kwargs(),
+            **timeouts,
         )
     url, ssl_kwargs = _deployment_connection(cfg.control_url, cfg, SyncSSLConnection)
     return redis.from_url(
-        url, decode_responses=True, **_keepalive_kwargs(), **ssl_kwargs
+        url, decode_responses=True, **_keepalive_kwargs(), **timeouts, **ssl_kwargs
     )
-
-
-def _relay_connection(
-    cfg: RedisConfig, connection_class: type[Any]
-) -> tuple[str, dict[str, Any]]:
-    """The relay Redis URL with its credentials, and the TLS arguments it connects
-    with."""
-    return _deployment_connection(cfg.resident_relay_url, cfg, connection_class)
 
 
 def _deployment_connection(
     url: str, cfg: RedisConfig, connection_class: type[Any]
 ) -> tuple[str, dict[str, Any]]:
-    """``url`` with the deployment's Redis credentials, and the TLS arguments it
-    connects with."""
+    """Return ``url`` with the deployment's Redis credentials, and the TLS arguments
+    it connects with."""
     url = _with_redis_auth(
         url,
         acl_enabled=cfg.acl_enabled,

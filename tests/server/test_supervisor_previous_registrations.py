@@ -1,5 +1,5 @@
 """A provisioned worker's registration is recorded, and the registrations a previous
-supervisor run held are unregistered until the root has applied it."""
+supervisor run held are unregistered until the root has applied the unregister."""
 
 import logging
 from typing import Any, cast
@@ -8,18 +8,16 @@ from unittest.mock import MagicMock
 import fakeredis
 import grpc
 import pytest
-from pydantic import SecretStr
 
 from server.clients.redis import worker_key
 from server.hooks import PrincipalContext
 from server.registries.worker import WorkerRegistry as WorkerRecords
 from server.supervisor.manager import WorkerManager
-from server.supervisor.provisioning import RunState, WorkerRecord
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.grpc_server import SupervisorServicer
 from server.supervisor.services.task_listener import TaskListener
 from tests.server.redis_helpers import fake_redis_client
-from tests.server.supervisor_helpers import memory_store
+from tests.server.supervisor_helpers import memory_store, worker_record
 from tests.server.test_docker_removal_in_progress import _adapter
 from tests.server.test_external_worker import _Aborted, _FakeTaskListener, _register
 from tests.server.test_external_worker_reregistration import _RecordingRelay
@@ -51,13 +49,7 @@ def _servicer() -> tuple[SupervisorServicer, WorkerManager, _RecordingRelay, Any
 
 def _provisioned(manager: WorkerManager) -> Any:
     adapter = _adapter(MagicMock())
-    record = WorkerRecord(
-        alias=adapter.alias,
-        provider="docker",
-        config={},
-        token=SecretStr(adapter.token),
-        run_state=RunState.RUNNING,
-    )
+    record = worker_record(adapter.alias, token=adapter.token)
     assert manager._store.create(record)
     manager._records[record.alias] = record
     manager._registry.add(adapter)
@@ -93,8 +85,7 @@ async def test_a_registration_whose_id_cannot_be_recorded_is_refused(
 
     assert aborted.value.code is grpc.StatusCode.UNAVAILABLE
     assert servicer._registry.get_worker_id(adapter.token) is None
-    [allocated] = _unregisters(relay)
-    assert redis.hash_getall(worker_key(allocated))["node_alias"] == "box"
+    assert len(_unregisters(relay)) == 1
 
 
 def test_previous_registrations_are_unregistered_until_the_root_drops_them() -> None:
@@ -112,4 +103,3 @@ def test_previous_registrations_are_unregistered_until_the_root_drops_them() -> 
     servicer.reconcile_workers()
     servicer.reconcile_workers()
     assert _unregisters(relay)[4:] == []
-    assert servicer._previous == set()

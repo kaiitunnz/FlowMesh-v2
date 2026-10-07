@@ -3,7 +3,9 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections import Counter
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
+from contextlib import contextmanager
 from typing import Any, Self
 from weakref import WeakSet
 
@@ -143,7 +145,7 @@ class WorkerManager:
         # The record of each provisioned worker, by alias. A launching thread commits
         # a handle while the loop writes the rest.
         self._records: dict[str, WorkerRecord] = {}
-        self._records_lock = threading.Lock()
+        self._records_lock = threading.RLock()
         # Aliases whose latest record has not reached the store.
         self._unsaved: set[str] = set()
         # Adapters of workers being removed, out of the registry.
@@ -153,8 +155,9 @@ class WorkerManager:
         self._to_provision: list[WorkerAdapter] = []
         self._grace_deadline: float | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._in_flight: set[str] = set()
-        self._tasks: set[asyncio.Task[None]] = set()
+        # Lifecycle operations under way, by alias; the heartbeat leaves those alone.
+        self._in_flight: Counter[str] = Counter()
+        self._tasks: set[asyncio.Task[Any]] = set()
         # External provider is always available.
         specs = [external_provider_spec(system_principal)]
         for label, build_spec in (
@@ -186,7 +189,7 @@ class WorkerManager:
     async def restore(self) -> list[str]:
         """Take back the workers this node's records name, before any is created.
 
-        Returns the worker ids their last registrations took.
+        Return the worker ids their last registrations took.
         """
         for record in await self._load_records():
             self._records[record.alias] = record
@@ -215,7 +218,7 @@ class WorkerManager:
                     )
                     continue
                 if not found:
-                    self._update(record.alias, save=False, state=RecordState.PRESENT)
+                    self._update(record.alias, strict=False, state=RecordState.PRESENT)
             record = self._records[record.alias]
             if record.run_state is RunState.RUNNING:
                 if record.handle is None:
@@ -249,43 +252,11 @@ class WorkerManager:
         self._loop = asyncio.get_running_loop()
         to_start, self._to_provision = self._to_provision, []
 
-        if not os.path.isfile(self.config_path):
-            self.logger.warning(
-                (
-                    "Worker config file '%s' does not exist. "
-                    "Skipping worker initialization."
-                ),
-                self.config_path,
-            )
-            await self._start_workers(to_start, [])
-            return
-
-        # Load worker configs from the config file
-        with open(self.config_path, encoding="utf-8") as f:
-            raw = f.read()
-        config_data = yaml.safe_load(raw) if raw.strip() else None
-        if config_data is None:
-            self.logger.info(
-                "Worker config file '%s' is empty. Skipping worker initialization.",
-                self.config_path,
-            )
-            await self._start_workers(to_start, [])
-            return
-
-        try:
-            server_config = ServerWorkerConfig.model_validate(config_data)
-        except ValidationError as exc:
-            self.logger.error(
-                "Worker config file '%s' is invalid; creating none of its workers: %s",
-                self.config_path,
-                exc,
-            )
-            await self._start_workers(to_start, [])
-            return
-        self._default_worker_config = server_config.default_worker_config
-
+        server_config = self._read_boot_config()
+        if server_config is not None:
+            self._default_worker_config = server_config.default_worker_config
         to_prepare: list[WorkerAdapter] = []
-        for init_config in server_config.workers:
+        for init_config in server_config.workers if server_config else []:
             alias = init_config.worker_config["worker_alias"]
             if self._alias_taken(alias):
                 self.logger.info("Worker %s is already provisioned.", alias)
@@ -307,6 +278,33 @@ class WorkerManager:
                 self.logger.error("Failed to register worker: %s", exc)
 
         await self._start_workers(to_start, to_prepare)
+
+    def _read_boot_config(self) -> ServerWorkerConfig | None:
+        if not os.path.isfile(self.config_path):
+            self.logger.warning(
+                "Worker config file '%s' does not exist. "
+                "Skipping worker initialization.",
+                self.config_path,
+            )
+            return None
+        with open(self.config_path, encoding="utf-8") as f:
+            raw = f.read()
+        try:
+            config_data = yaml.safe_load(raw) if raw.strip() else None
+            if config_data is None:
+                self.logger.info(
+                    "Worker config file '%s' is empty. Skipping worker initialization.",
+                    self.config_path,
+                )
+                return None
+            return ServerWorkerConfig.model_validate(config_data)
+        except (yaml.YAMLError, ValidationError) as exc:
+            self.logger.error(
+                "Worker config file '%s' is invalid; creating none of its workers: %s",
+                self.config_path,
+                exc,
+            )
+            return None
 
     async def _start_workers(
         self, to_start: list[WorkerAdapter], to_prepare: list[WorkerAdapter]
@@ -502,6 +500,8 @@ class WorkerManager:
         worker = spec.factory.create_worker(token, config)
 
         try:
+            if worker.alias in self._records:
+                raise ValueError
             self._registry.add(worker)
         except ValueError:
             self._destroy_worker(worker)
@@ -524,8 +524,6 @@ class WorkerManager:
             config=recorded_config(worker.config),
             token=SecretStr(worker.token),
             run_state=RunState.RUNNING if init_on_start else RunState.STOPPED,
-            state=RecordState.PRESENT,
-            **worker.provisioned_fields(),
         )
         with self._records_lock:
             if record.alias in self._records or not self._store.create(record):
@@ -536,9 +534,10 @@ class WorkerManager:
     def _alias_taken(self, alias: str) -> bool:
         return alias in self._records or self._registry.exists_by_alias(alias)
 
-    def _update(self, alias: str, save: bool = True, **changes: Any) -> None:
-        """Change ``alias``'s record; with ``save``, a store failure raises and changes
-        nothing, and otherwise the next heartbeat saves it."""
+    def _update(self, alias: str, strict: bool = True, **changes: Any) -> None:
+        """Change ``alias``'s record. When the store write fails, a strict update raises
+        and changes nothing; any other keeps the change for the next heartbeat to
+        save."""
         with self._records_lock:
             record = self._records.get(alias)
             if record is None:
@@ -547,7 +546,7 @@ class WorkerManager:
             try:
                 self._store.put(updated)
             except Exception:
-                if save:
+                if strict:
                     raise
                 self.logger.exception("Failed to save the record of worker %s", alias)
                 self._unsaved.add(alias)
@@ -559,15 +558,26 @@ class WorkerManager:
         self, worker: WorkerAdapter
     ) -> Callable[[ProviderHandle | None], None]:
         def commit(handle: ProviderHandle | None) -> None:
-            self._update(
-                worker.alias, save=False, handle=handle, state=RecordState.PRESENT
-            )
+            with self._records_lock:
+                record = self._records.get(worker.alias)
+                launched = (
+                    handle is not None
+                    and record is not None
+                    and record.state is RecordState.PROVISIONING
+                )
+                state = RecordState.PRESENT if launched else None
+                self._update(
+                    worker.alias,
+                    strict=False,
+                    handle=handle,
+                    **({"state": state} if state else {}),
+                )
 
         return commit
 
     def commit_worker_id(self, worker: WorkerAdapter, worker_id: str) -> None:
-        """Record the id a provisioned worker registered under; raises when the store
-        cannot."""
+        """Record the id a provisioned worker registered under; raise when the store
+        write fails."""
         self._update(worker.alias, worker_id=worker_id)
 
     def grpc_ready(self) -> None:
@@ -579,17 +589,17 @@ class WorkerManager:
         heartbeat thread."""
         loop = self._loop
         if loop is not None and not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(self._settle(), loop)
+            loop.call_soon_threadsafe(self._settle_records)
 
-    async def _settle(self) -> None:
+    def _settle_records(self) -> None:
         try:
-            self._settle_records()
+            self._settle()
         except Exception:
             self.logger.exception("Failed to settle worker records")
 
-    def _settle_records(self) -> None:
+    def _settle(self) -> None:
         for alias in list(self._unsaved):
-            self._update(alias, save=False)
+            self._update(alias, strict=False)
         deadline = self._grace_deadline
         expired = deadline is not None and time.monotonic() >= deadline
         for alias, record in list(self._records.items()):
@@ -605,28 +615,44 @@ class WorkerManager:
                 self._spawn(alias, self._expire(alias))
             elif record.handle is not None and record.run_state is RunState.STOPPED:
                 if (worker := self._registry.try_get_by_alias(alias)) is not None:
-                    self._spawn(alias, self._finish_stop(worker))
+                    self._spawn(alias, self._stop_worker(worker))
 
-    def _spawn(self, alias: str, work: Coroutine[Any, Any, None]) -> None:
-        self._in_flight.add(alias)
+    def _spawn(self, alias: str, work: Coroutine[Any, Any, Any]) -> None:
+        self._enter(alias)
         task = asyncio.ensure_future(work)
         self._tasks.add(task)
 
-        def done(_: asyncio.Task[None]) -> None:
-            self._in_flight.discard(alias)
+        def done(_: asyncio.Task[Any]) -> None:
+            self._leave(alias)
             self._tasks.discard(task)
             if not task.cancelled() and (exc := task.exception()) is not None:
                 self.logger.error("Failed to settle worker %s: %r", alias, exc)
 
         task.add_done_callback(done)
 
-    async def _finish_stop(self, worker: WorkerAdapter) -> None:
+    @contextmanager
+    def _busy(self, alias: str) -> Iterator[None]:
+        """Mark an operator's lifecycle operation on ``alias``, which ends the grace
+        of a restored worker and keeps the heartbeat off it."""
+        self._awaiting.discard(alias)
+        self._enter(alias)
         try:
-            await self._stop_worker(worker)
-        except Exception as exc:
-            self.logger.warning("Failed to stop worker %s: %s", worker.alias, exc)
+            yield
+        finally:
+            self._leave(alias)
+
+    def _enter(self, alias: str) -> None:
+        self._in_flight[alias] += 1
+
+    def _leave(self, alias: str) -> None:
+        self._in_flight[alias] -= 1
+        if self._in_flight[alias] <= 0:
+            del self._in_flight[alias]
 
     async def _expire(self, alias: str) -> None:
+        # A registration may have landed since the heartbeat scheduled this.
+        if alias not in self._awaiting:
+            return
         self.logger.warning(
             "Worker %s did not register again within %.0fs; removing it",
             alias,
@@ -655,13 +681,15 @@ class WorkerManager:
                 "Could not confirm the removal of worker %s; retrying", alias
             )
             return
-        self._update(alias, save=False, handle=None)
-        if (worker := self._removing.pop(alias, None)) is not None:
+        self._confirm_removal(alias)
+
+    def _confirm_removal(self, alias: str, worker: WorkerAdapter | None = None) -> None:
+        """Release a worker whose container or instance is gone, and forget it."""
+        worker = self._removing.pop(alias, None) or worker
+        self._awaiting.discard(alias)
+        if worker is not None:
             self._destroy_worker(worker)
             self._report_capacity_change()
-        self._forget_record(alias)
-
-    def _forget_record(self, alias: str) -> None:
         with self._records_lock:
             try:
                 self._store.delete(alias)
@@ -684,17 +712,26 @@ class WorkerManager:
             )
 
         alias = worker.alias
-        self._update(alias, run_state=RunState.RUNNING, state=RecordState.PROVISIONING)
-        started = False
-        try:
-            started = await worker.start()
-        finally:
-            if worker.handle() is None:
-                self._update(alias, save=False, state=RecordState.PRESENT)
+        with self._busy(alias):
+            self._update(
+                alias, run_state=RunState.RUNNING, state=RecordState.PROVISIONING
+            )
+            # A cancelled start leaves its launch to commit its own handle, so only a
+            # launch that ended marks the record as holding none.
+            try:
+                started = await worker.start()
+            except Exception:
+                self._launch_ended(worker)
+                raise
+            self._launch_ended(worker)
         if not started:
             self.logger.error("Worker %s failed to start", alias)
             return False
         return True
+
+    def _launch_ended(self, worker: WorkerAdapter) -> None:
+        if worker.handle() is None:
+            self._update(worker.alias, strict=False, state=RecordState.PRESENT)
 
     def _destroy_worker(self, worker: WorkerAdapter) -> None:
         if worker in self._destroyed:
@@ -726,21 +763,23 @@ class WorkerManager:
 
         async def stop_and_destroy(worker: WorkerAdapter) -> None:
             async with sema:
-                await self._stop_and_destroy_worker(worker)
+                try:
+                    await self._stop_and_destroy_worker(worker)
+                except Exception as exc:
+                    # Its record stays, so the next start takes the worker back.
+                    self.logger.error(
+                        "Failed to destroy worker %s: %s", worker.alias, repr(exc)
+                    )
 
         await asyncio.gather(*(stop_and_destroy(worker) for worker in workers))
 
     async def _stop_and_destroy_worker(self, worker: WorkerAdapter) -> bool:
         worker_alias = worker.alias
         recorded = worker_alias in self._records and worker not in self._destroyed
-        if recorded:
-            self._update(worker_alias, state=RecordState.REMOVING)
-            self._in_flight.add(worker_alias)
-        try:
-            return await self._destroy(worker, recorded)
-        finally:
+        with self._busy(worker_alias):
             if recorded:
-                self._in_flight.discard(worker_alias)
+                self._update(worker_alias, state=RecordState.REMOVING)
+            return await self._destroy(worker, recorded)
 
     async def _destroy(self, worker: WorkerAdapter, recorded: bool) -> bool:
         worker_alias = worker.alias
@@ -765,8 +804,7 @@ class WorkerManager:
                 # The heartbeat removes what the record names, then the record.
                 self._removing[worker_alias] = worker
                 return False
-            self._update(worker_alias, save=False, handle=None)
-            self._forget_record(worker_alias)
+            self._confirm_removal(worker_alias, worker)
 
         try:
             self._destroy_worker(worker)
@@ -789,20 +827,23 @@ class WorkerManager:
         if not (_is_live(worker) or worker.has_pending_start()):
             raise ValueError(f"Worker '{worker_alias}' is not starting or running")
 
-        self._update(worker_alias, run_state=RunState.STOPPED)
-        self.logger.info("Stopping worker %s...", worker_alias)
-        try:
-            success = await worker.stop()
-            if success:
-                self._update(worker_alias, save=False, handle=None)
-                if not worker.has_event_stream:
-                    # A worker with no event stream open sends nothing that would mark
-                    # it stopped, so it is marked here and can be started again.
-                    worker.set_status(WorkerStatus.STOPPED)
-                self.logger.info("Worker %s stopped.", worker_alias)
-            else:
+        with self._busy(worker_alias):
+            self._update(worker_alias, run_state=RunState.STOPPED)
+            self.logger.info("Stopping worker %s...", worker_alias)
+            try:
+                success = await worker.stop()
+            except Exception as exc:
+                self.logger.error(
+                    "Failed to stop worker %s: %s", worker_alias, repr(exc)
+                )
+                return False
+            if not success:
                 self.logger.error("Failed to stop worker %s", worker_alias)
-            return success
-        except Exception as exc:
-            self.logger.error("Failed to stop worker %s: %s", worker_alias, repr(exc))
-            return False
+                return False
+            self._update(worker_alias, strict=False, handle=None)
+            if not worker.has_event_stream:
+                # A worker with no event stream open sends nothing that would mark
+                # it stopped, so it is marked here and can be started again.
+                worker.set_status(WorkerStatus.STOPPED)
+            self.logger.info("Worker %s stopped.", worker_alias)
+            return True

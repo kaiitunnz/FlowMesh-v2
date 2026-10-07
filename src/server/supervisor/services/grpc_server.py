@@ -147,8 +147,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # Worker ids whose registration reached the root.
         self._registered: RecentSet[str] = RecentSet(_WORKER_ID_MEMORY)
         # Ids a previous supervisor run of this node registered, unregistered again on
-        # each heartbeat while the root still records them here: the root hears an
-        # unregister over pub/sub, so it can miss one sent while it starts.
+        # each heartbeat while the root records them under this node: the root hears
+        # an unregister over pub/sub, so it can miss one sent while it starts.
         self._previous: set[str] = set()
         # Guards the id sets.
         self._ids_lock = Lock()

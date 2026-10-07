@@ -4,6 +4,7 @@ from those records when it starts again."""
 import asyncio
 import itertools
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +19,8 @@ from server.hooks import PrincipalContext
 from server.supervisor import manager as manager_module
 from server.supervisor.adapters import docker as docker_adapter
 from server.supervisor.adapters import vastai as vastai_adapter
+from server.supervisor.adapters.base import WorkerTokenType
+from server.supervisor.adapters.external import mint_external_token
 from server.supervisor.manager import (
     WORKER_RECONNECT_GRACE_SEC,
     ServerWorkerConfig,
@@ -27,13 +30,15 @@ from server.supervisor.manager import (
 from server.supervisor.provisioning import (
     ProviderHandle,
     RecordState,
+    Removal,
     RunState,
     WorkerRecord,
 )
 from server.supervisor.registry import WorkerRegistry
-from server.supervisor.resource_manager import GpuArch, MachineEnv, ResourceManager
-from server.supervisor.schemas import WorkerHardware
-from tests.server.supervisor_helpers import memory_store
+from server.supervisor.resource_manager import ResourceManager
+from server.supervisor.schemas import WorkerHardware, WorkerStatus
+from tests.server.supervisor_helpers import memory_store, worker_record
+from tests.server.test_worker_manager_gpu import _resource_manager
 
 _LOGGER = logging.getLogger("test.provisioned")
 _PRINCIPAL = PrincipalContext(
@@ -77,14 +82,14 @@ class _Daemon:
         self.containers: dict[str, _Container] = {}
         self.runs = 0
         self.refuse_removal = False
+        self.refuse_runs = False
         self.unreachable = False
+        # When set, a launch waits for it; ``launching`` tells a test it has begun.
+        self.gate: threading.Event | None = None
+        self.launching = threading.Event()
         self.volumes = MagicMock()
         self.volumes.list.return_value = []
         self.networks = MagicMock()
-
-    @property
-    def api(self) -> "_Daemon":
-        return self
 
     def get(self, key: str) -> _Container:
         if self.unreachable:
@@ -97,6 +102,11 @@ class _Daemon:
     def run(self, **kwargs: Any) -> Any:
         if kwargs.get("remove"):
             return b""
+        self.launching.set()
+        if self.gate is not None:
+            assert self.gate.wait(5)
+        if self.refuse_runs:
+            raise APIError("run refused")
         name = kwargs["name"]
         if any(c.name == name for c in self.containers.values()):
             raise APIError(f'The container name "/{name}" is already in use')
@@ -125,17 +135,6 @@ def _client(daemon: _Daemon) -> Any:
     )
 
 
-def _resource_manager(gpus: int = 4) -> ResourceManager:
-    rm = object.__new__(ResourceManager)
-    rm._env = MachineEnv(
-        cpu_count=16,
-        gpu_families={i: GpuArch.HOPPER for i in range(gpus)},
-        available_gpus=set(range(gpus)),
-        gpu_uuids={},
-    )
-    return rm
-
-
 class _Vast:
     """The VastAI client's calls, in the shapes the real client returns."""
 
@@ -145,11 +144,16 @@ class _Vast:
         self.destroy_result: Any = None
         self.listing: Any = None
         self.on_show_instance: Any = None
+        self.gate: threading.Event | None = None
+        self.creating = threading.Event()
 
     def search_offers(self, **_: Any) -> list[dict[str, Any]]:
         return [{"id": 7, "gpu_name": "N/A"}]
 
     def create_instance(self, **_: Any) -> dict[str, Any]:
+        self.creating.set()
+        if self.gate is not None:
+            assert self.gate.wait(5)
         instance_id = 100 + len(self.created)
         self.created.append(instance_id)
         self.live.add(instance_id)
@@ -181,7 +185,6 @@ class _Node:
         self.vast = _Vast()
         self.config_path = tmp_path / "workers.yaml"
         self.vast_keys: list[str] = []
-        self.released: list[str] = []
         monkeypatch.setattr(
             docker_adapter, "get_docker_client", lambda: _client(self.daemon)
         )
@@ -191,6 +194,11 @@ class _Node:
             return self.vast
 
         monkeypatch.setattr(vastai_adapter, "VastAI", vast)
+        self.clock = [1000.0]
+        # The manager's clock only: the event loop's timers keep real time.
+        monkeypatch.setattr(
+            manager_module, "time", SimpleNamespace(monotonic=lambda: self.clock[0])
+        )
 
     def write_config(self, *workers: dict[str, Any]) -> None:
         self.config_path.write_text(
@@ -201,14 +209,14 @@ class _Node:
 
     def supervisor(self, gpus: int = 4) -> WorkerManager:
         """A fresh supervisor run: new registry, new GPU pool, same node."""
-        self.rm = _resource_manager(gpus)
+        self.rm = _resource_manager(set(range(gpus)))
         self.monkeypatch.setattr(
             ResourceManager, "get_instance", classmethod(lambda cls: self.rm)
         )
         return WorkerManager(
             _PRINCIPAL,
             str(self.config_path),
-            WorkerRegistry(on_worker_id_released=self.released.append),
+            WorkerRegistry(),
             _LOGGER,
             self.store,
             vast_api_key=SecretStr("deployment-key"),
@@ -216,6 +224,9 @@ class _Node:
 
     def records(self) -> dict[str, WorkerRecord]:
         return {r.alias: r for r in self.store.load()}
+
+    def expire_grace(self) -> None:
+        self.clock[0] += WORKER_RECONNECT_GRACE_SEC + 1
 
 
 async def _no_sleep(_: float) -> None:
@@ -242,6 +253,20 @@ def _entry(alias: str, init_on_start: bool = True, **config: Any) -> dict[str, A
     }
 
 
+def _gpu_request(**config: Any) -> WorkerInitConfig:
+    return WorkerInitConfig(worker_config={"worker_type": "gpu", **config})
+
+
+async def _restarted_removing(node: _Node, alias: str) -> WorkerManager:
+    """Mark ``alias`` removing, as a destroy the supervisor crashed in, and restart."""
+    record = node.records()[alias]
+    node.store.put(record.model_copy(update={"state": RecordState.REMOVING}))
+    restarted = node.supervisor()
+    await _run(restarted)
+    assert not restarted._registry.exists_by_alias(alias)
+    return restarted
+
+
 @pytest.fixture
 def node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Node:
     return _Node(monkeypatch, tmp_path)
@@ -261,9 +286,7 @@ async def test_a_restart_takes_back_every_provisioned_worker_without_relaunching
     )
     first = node.supervisor()
     await _run(first)
-    api = await first.create_worker(
-        WorkerInitConfig(worker_config={"worker_type": "gpu", "gpu_count": 1})
-    )
+    api = await first.create_worker(_gpu_request(gpu_count=1))
     for worker in first._registry.all_workers():
         first.commit_worker_id(worker, f"wkr-{worker.alias}")
     containers = {c.name: c.id for c in node.daemon.containers.values()}
@@ -281,9 +304,8 @@ async def test_a_restart_takes_back_every_provisioned_worker_without_relaunching
     assert restored["pinned"].token == "pinned-token"
     assert all(w.holds_worker() for w in restored.values())
     assert sorted(previous) == sorted(f"wkr-{alias}" for alias in tokens)
-    assert sorted(node.rm._env.available_gpus) == sorted(
-        {0, 1, 2, 3} - {2, *restored[api.alias].cuda_devices}  # type: ignore[attr-defined]
-    )
+    held = {2, *(restored[api.alias].get_info().held_gpus or [])}
+    assert node.rm._env.available_gpus == {0, 1, 2, 3} - held
 
 
 @pytest.mark.asyncio
@@ -292,16 +314,13 @@ async def test_a_survivors_gpus_are_held_before_any_worker_is_created(
 ) -> None:
     first = node.supervisor(gpus=2)
     await _run(first)
-    await first.create_worker(
-        WorkerInitConfig(worker_config={"worker_type": "gpu", "cuda_devices": [0]})
-    )
+    await first.create_worker(_gpu_request(cuda_devices=[0]))
 
     node.write_config(_entry("later", worker_type="gpu", gpu_count=1))
     second = node.supervisor(gpus=2)
     await _run(second)
 
-    later = second._registry.get_by_alias("later")
-    assert later.cuda_devices == [1]  # type: ignore[attr-defined]
+    assert second._registry.get_by_alias("later").get_info().held_gpus == [1]
     assert node.rm.available_gpu_count() == 0
 
 
@@ -323,11 +342,16 @@ async def test_changed_or_removed_config_leaves_a_survivor_as_it_was_launched(
 
 
 @pytest.mark.asyncio
-async def test_an_invalid_config_still_restores_every_survivor(node: _Node) -> None:
+@pytest.mark.parametrize(
+    "content", [yaml.safe_dump({"workers": [{"provider": "docker"}]}), "workers: ["]
+)
+async def test_an_invalid_config_still_restores_every_survivor(
+    node: _Node, content: str
+) -> None:
     node.write_config(_entry("w1"))
     await _run(node.supervisor())
 
-    node.config_path.write_text(yaml.safe_dump({"workers": [{"provider": "docker"}]}))
+    node.config_path.write_text(content)
     second = node.supervisor()
     await _run(second)
 
@@ -350,8 +374,7 @@ async def test_an_unreadable_store_holds_startup_until_it_reads(
         return load()
 
     monkeypatch.setattr(node.store, "load", flaky_load)
-    wm = node.supervisor()
-    await _run(wm)
+    await _run(node.supervisor())
 
     assert node.daemon.runs == 1
 
@@ -368,9 +391,7 @@ async def test_a_create_whose_record_cannot_be_written_launches_nothing(
     monkeypatch.setattr(node.store, "create", MagicMock(side_effect=ConnectionError))
 
     with pytest.raises(ConnectionError):
-        await wm.create_worker(
-            WorkerInitConfig(worker_config={"worker_type": "gpu", "gpu_count": 2})
-        )
+        await wm.create_worker(_gpu_request(gpu_count=2))
 
     assert node.daemon.runs == 0
     assert node.rm.available_gpu_count() == 4
@@ -405,7 +426,9 @@ async def test_a_launch_commits_its_handle_and_a_failed_commit_is_saved_later(
     await _settle(wm)
 
     [relaunched] = node.daemon.containers.values()
-    assert node.records()[info.alias].handle.container_id == relaunched.id  # type: ignore[union-attr]
+    assert node.records()[info.alias].handle == ProviderHandle(
+        container_id=relaunched.id, container_name=relaunched.name
+    )
     assert node.daemon.runs == 2
 
 
@@ -431,9 +454,7 @@ async def test_a_stopped_worker_keeps_its_record_and_a_destroyed_one_loses_it(
 ) -> None:
     wm = node.supervisor()
     await _run(wm)
-    info = await wm.create_worker(
-        WorkerInitConfig(worker_config={"worker_type": "gpu", "gpu_count": 1})
-    )
+    info = await wm.create_worker(_gpu_request(gpu_count=1))
 
     await wm.stop_worker(info.alias)
     record = node.records()[info.alias]
@@ -446,28 +467,114 @@ async def test_a_stopped_worker_keeps_its_record_and_a_destroyed_one_loses_it(
 
 
 @pytest.mark.asyncio
-async def test_a_destroy_that_cannot_remove_its_container_retries_on_the_heartbeat(
-    node: _Node,
+async def test_a_relaunch_records_no_container_it_has_replaced(node: _Node) -> None:
+    wm = node.supervisor()
+    await _run(wm)
+    info = await wm.create_worker(WorkerInitConfig())
+    [container] = node.daemon.containers.values()
+    container.status = "exited"
+    wm._registry.get_by_alias(info.alias).set_status(WorkerStatus.STOPPED)
+    node.daemon.refuse_runs = True
+
+    assert not await wm.start_worker(info.alias)
+
+    assert node.daemon.containers == {}
+    record = node.records()[info.alias]
+    assert (record.run_state, record.handle) == (RunState.RUNNING, None)
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_the_store_refuses_still_stops_the_manager(
+    node: _Node, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node.write_config(_entry("w1"), _entry("w2"))
+    wm = node.supervisor()
+    await _run(wm)
+    monkeypatch.setattr(node.store, "put", MagicMock(side_effect=ConnectionError))
+
+    await wm.stop()
+
+    assert not wm.is_started
+    assert len(node.daemon.containers) == 2
+    assert set(node.records()) == {"w1", "w2"}
+
+
+# ---------------------------------------------------------------- removal ----
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restarted", [False, True])
+async def test_an_unconfirmed_removal_keeps_the_record_and_gpus_until_it_is_confirmed(
+    node: _Node, restarted: bool
 ) -> None:
     wm = node.supervisor()
     await _run(wm)
-    info = await wm.create_worker(
-        WorkerInitConfig(worker_config={"worker_type": "gpu", "gpu_count": 1})
-    )
-    node.daemon.refuse_removal = True
+    info = await wm.create_worker(_gpu_request(cuda_devices=[1]))
+    if restarted:
+        wm = await _restarted_removing(node, info.alias)
+        node.daemon.unreachable = True
+    else:
+        node.daemon.refuse_removal = True
+        assert not await wm.destroy_worker(info.alias)
+        assert not wm._registry.exists_by_alias(info.alias)
 
-    assert not await wm.destroy_worker(info.alias)
-    assert node.records()[info.alias].state is RecordState.REMOVING
-    assert not wm._registry.exists_by_alias(info.alias)
     await _settle(wm)
-    assert info.alias in node.records()
-    assert node.rm.available_gpu_count() == 3
+    assert node.records()[info.alias].state is RecordState.REMOVING
+    assert 1 not in node.rm._env.available_gpus
 
+    node.daemon.refuse_removal = node.daemon.unreachable = False
+    await _settle(wm)
+    assert node.records() == {} and node.daemon.containers == {}
+    assert 1 in node.rm._env.available_gpus
+
+
+@pytest.mark.asyncio
+async def test_a_destroy_during_a_launch_stays_a_removal(node: _Node) -> None:
+    wm = node.supervisor()
+    await _run(wm)
+    info = await wm.create_worker(WorkerInitConfig(init_on_start=False))
+    node.daemon.gate = threading.Event()
+    starting = asyncio.ensure_future(wm.start_worker(info.alias))
+    await asyncio.to_thread(node.daemon.launching.wait, 5)
+    node.daemon.refuse_removal = True
+    destroying = asyncio.ensure_future(wm.destroy_worker(info.alias))
+    await asyncio.sleep(0.05)
+
+    node.daemon.gate.set()
+    assert await starting
+    assert not await destroying
+
+    assert node.records()[info.alias].state is RecordState.REMOVING
     node.daemon.refuse_removal = False
     await _settle(wm)
-
     assert node.records() == {} and node.daemon.containers == {}
-    assert node.rm.available_gpu_count() == 4
+
+
+@pytest.mark.asyncio
+async def test_one_removal_attempt_per_worker_is_in_flight(
+    node: _Node, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node.write_config(_entry("w1"))
+    await _run(node.supervisor())
+    wm = await _restarted_removing(node, "w1")
+    calls = 0
+    gate = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def remove(handle: ProviderHandle) -> Removal:
+        nonlocal calls
+        calls += 1
+        asyncio.run_coroutine_threadsafe(gate.wait(), loop).result(5)
+        return Removal.REMOVED
+
+    monkeypatch.setattr(wm._providers["docker"].factory, "remove", remove)
+    wm._settle_records()
+    await asyncio.sleep(0.05)
+    wm._settle_records()
+    gate.set()
+    await asyncio.gather(*list(wm._tasks))
+
+    assert calls == 1
 
 
 # ------------------------------------------------- grace and the heartbeat ----
@@ -475,25 +582,73 @@ async def test_a_destroy_that_cannot_remove_its_container_retries_on_the_heartbe
 
 @pytest.mark.asyncio
 async def test_a_survivor_that_never_registers_is_removed_once_the_grace_ends(
-    node: _Node, monkeypatch: pytest.MonkeyPatch
+    node: _Node,
 ) -> None:
     node.write_config(_entry("silent"), _entry("back"))
     await _run(node.supervisor())
-    clock = [1000.0]
-    monkeypatch.setattr(manager_module.time, "monotonic", lambda: clock[0])
     second = node.supervisor()
     await _run(second)
     second.worker_registered(second._registry.get_by_alias("back"), None)
 
-    clock[0] += WORKER_RECONNECT_GRACE_SEC - 1
+    node.clock[0] += WORKER_RECONNECT_GRACE_SEC - 1
     await _settle(second)
     assert len(node.daemon.containers) == 2
 
-    clock[0] += 1
+    node.clock[0] += 1
     await _settle(second)
 
     assert [c.name for c in node.daemon.containers.values()] == ["back"]
     assert set(node.records()) == {"back"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["restart", "recreate"])
+async def test_an_operator_action_ends_a_restored_workers_grace(
+    node: _Node, action: str
+) -> None:
+    node.write_config(_entry("w1"))
+    await _run(node.supervisor())
+    second = node.supervisor()
+    await _run(second)
+    if action == "restart":
+        await second.stop_worker("w1")
+        assert await second.start_worker("w1")
+    else:
+        await second.destroy_worker("w1")
+        await second.create_worker(
+            WorkerInitConfig(worker_config={**_DEFAULTS, "worker_alias": "w1"})
+        )
+    [launched] = node.daemon.containers.values()
+
+    node.expire_grace()
+    await _settle(second)
+
+    assert node.daemon.containers == {launched.id: launched}
+    assert node.records()["w1"].handle is not None
+
+
+@pytest.mark.asyncio
+async def test_the_grace_leaves_a_worker_the_operator_is_launching(
+    node: _Node,
+) -> None:
+    node.write_config(_entry("w1"))
+    await _run(node.supervisor())
+    second = node.supervisor()
+    await _run(second)
+    await second.stop_worker("w1")
+    node.daemon.gate = threading.Event()
+    starting = asyncio.ensure_future(second.start_worker("w1"))
+    await asyncio.to_thread(node.daemon.launching.wait, 5)
+
+    node.expire_grace()
+    await _settle(second)
+    node.daemon.gate.set()
+    assert await starting
+
+    [launched] = node.daemon.containers.values()
+    assert node.records()["w1"].handle == ProviderHandle(
+        container_id=launched.id, container_name="w1"
+    )
 
 
 @pytest.mark.asyncio
@@ -519,75 +674,16 @@ async def test_interrupted_stops_and_removals_finish_without_grace(
     assert set(node.records()) == {"stopping"}
 
 
-@pytest.mark.asyncio
-async def test_an_unknown_removal_keeps_the_record_until_it_is_confirmed(
-    node: _Node,
-) -> None:
-    node.write_config(_entry("w1", worker_type="gpu", cuda_devices=[1]))
-    await _run(node.supervisor())
-    node.store.put(
-        node.records()["w1"].model_copy(update={"state": RecordState.REMOVING})
-    )
-    second = node.supervisor()
-    await _run(second)
-
-    node.daemon.unreachable = True
-    await _settle(second)
-    assert "w1" in node.records()
-    assert 1 not in node.rm._env.available_gpus
-
-    node.daemon.unreachable = False
-    node.daemon.containers.clear()
-    await _settle(second)
-    assert node.records() == {}
-    assert 1 in node.rm._env.available_gpus
-
-
-@pytest.mark.asyncio
-async def test_one_removal_attempt_per_worker_is_in_flight(
-    node: _Node, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    node.write_config(_entry("w1"))
-    await _run(node.supervisor())
-    node.store.put(
-        node.records()["w1"].model_copy(update={"state": RecordState.REMOVING})
-    )
-    second = node.supervisor()
-    await _run(second)
-    factory = second._providers["docker"].factory
-    calls = 0
-    gate = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    def remove(handle: ProviderHandle) -> Any:
-        nonlocal calls
-        calls += 1
-        asyncio.run_coroutine_threadsafe(gate.wait(), loop).result(5)
-        return docker_adapter.Removal.REMOVED
-
-    monkeypatch.setattr(factory, "remove", remove)
-    second._settle_records()
-    await asyncio.sleep(0.05)
-    second._settle_records()
-    gate.set()
-    await asyncio.gather(*list(second._tasks))
-
-    assert calls == 1
-
-
 # --------------------------------------------- interrupted Docker creation ----
 
 
 def _launching(node: _Node, alias: str, token: str) -> None:
     node.store.create(
-        WorkerRecord(
-            alias=alias,
-            provider="docker",
-            config={**_DEFAULTS, "worker_alias": alias},
-            token=SecretStr(token),
-            run_state=RunState.RUNNING,
+        worker_record(
+            alias,
+            token=token,
+            config={**_DEFAULTS, "worker_alias": alias, "container_name": alias},
             state=RecordState.PROVISIONING,
-            container_name=alias,
         )
     )
 
@@ -599,13 +695,12 @@ async def test_an_interrupted_create_finds_its_container_by_name_and_token(
     _launching(node, "w1", "tok-1")
     container = node.daemon.add_foreign("w1", token="tok-1")
 
-    wm = node.supervisor()
-    await _run(wm)
+    await _run(node.supervisor())
 
     assert node.records()["w1"].handle == ProviderHandle(
         container_id=container.id, container_name="w1"
     )
-    assert node.daemon.runs == 0 and "w1" in wm._awaiting
+    assert node.daemon.runs == 0
 
 
 @pytest.mark.asyncio
@@ -664,12 +759,10 @@ async def test_a_vast_instance_is_recorded_before_it_is_queried_and_restored(
 @pytest.mark.asyncio
 async def test_an_interrupted_vast_create_is_never_rented_again(node: _Node) -> None:
     node.store.create(
-        WorkerRecord(
-            alias="v1",
+        worker_record(
+            "v1",
             provider="vastai",
             config={"worker_alias": "v1"},
-            token=SecretStr("tok"),
-            run_state=RunState.RUNNING,
             state=RecordState.PROVISIONING,
         )
     )
@@ -677,6 +770,27 @@ async def test_an_interrupted_vast_create_is_never_rented_again(node: _Node) -> 
 
     assert node.vast.created == []
     assert "v1" in node.records()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_vast_start_keeps_its_launch_unresolved(
+    node: _Node,
+) -> None:
+    wm = node.supervisor()
+    await _run(wm)
+    info = await wm.create_worker(
+        WorkerInitConfig(provider="vastai", init_on_start=False)
+    )
+    node.vast.gate = threading.Event()
+    starting = asyncio.ensure_future(wm.start_worker(info.alias))
+    await asyncio.to_thread(node.vast.creating.wait, 5)
+
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    assert node.records()[info.alias].state is RecordState.PROVISIONING
+    node.vast.gate.set()
 
 
 @pytest.mark.asyncio
@@ -690,23 +804,33 @@ async def test_a_vast_removal_is_confirmed_only_by_the_api(
     wm = node.supervisor()
     await _run(wm)
     info = await wm.create_worker(WorkerInitConfig(provider="vastai"))
-    node.store.put(
-        node.records()[info.alias].model_copy(update={"state": RecordState.REMOVING})
-    )
-    second = node.supervisor()
-    await _run(second)
+    restarted = await _restarted_removing(node, info.alias)
     node.vast.destroy_result, node.vast.listing = destroy_result, listing
 
-    await _settle(second)
+    await _settle(restarted)
 
     assert (info.alias not in node.records()) is gone
 
 
-def test_vast_workers_take_the_deployment_key_only(node: _Node) -> None:
-    assert "vast_api_key" not in vastai_adapter.VastAIWorkerConfig.model_fields
-    factory = vastai_adapter.VastAIWorkerFactory(_PRINCIPAL, None)
+@pytest.mark.asyncio
+async def test_a_vast_worker_whose_instance_is_gone_stops(node: _Node) -> None:
+    wm = node.supervisor()
+    await _run(wm)
+    info = await wm.create_worker(WorkerInitConfig(provider="vastai"))
+    node.vast.live.clear()
+    node.vast.destroy_result = ""
+
+    assert await wm.stop_worker(info.alias)
+
+    assert node.records()[info.alias].handle is None
+
+
+def test_vast_workers_need_the_deployment_key(node: _Node) -> None:
+    factory = vastai_adapter.VastAIWorkerFactory(_PRINCIPAL, None, lambda _: False)
     with pytest.raises(ValueError, match="VAST_API_KEY"):
-        factory.create_worker("tok", vastai_adapter.VastAIWorkerConfig())  # type: ignore[arg-type]
+        factory.create_worker(
+            WorkerTokenType("tok"), vastai_adapter.VastAIWorkerConfig()
+        )
 
 
 # --------------------------------------------------- aliases and hardware ----
@@ -729,6 +853,22 @@ async def test_a_generated_alias_skips_one_a_restored_worker_holds(
 
     assert docker.alias == "flowmesh_server_worker_cpu_1"
     assert vast.alias == "flowmesh_vastai_worker_1"
+
+
+@pytest.mark.asyncio
+async def test_an_external_worker_cannot_take_a_recorded_alias(
+    node: _Node, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("server.env.EXTERNAL_WORKER_TOKEN", "secret")
+    node.write_config(_entry("w1"))
+    await _run(node.supervisor())
+    wm = await _restarted_removing(node, "w1")
+    node.daemon.unreachable = True
+
+    token = WorkerTokenType(mint_external_token("secret", "w1"))
+    assert await wm.admit_worker(token) is None
+
+    assert node.records()["w1"].state is RecordState.REMOVING
 
 
 @pytest.mark.asyncio
@@ -755,10 +895,7 @@ async def test_a_docker_worker_takes_its_registration_hardware_only_unprobed(
     "config, error",
     [
         ({"workers": [{"provider": "docker"}]}, "must set worker_config.worker_alias"),
-        (
-            {"workers": [_entry("a"), _entry("a")]},
-            "declared more than once",
-        ),
+        ({"workers": [_entry("a"), _entry("a")]}, "declared more than once"),
         (
             {"default_worker_config": {"worker_alias": "a"}, "workers": []},
             "cannot set worker_alias",

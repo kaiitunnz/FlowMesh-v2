@@ -3,11 +3,11 @@
 import json
 import logging
 from enum import StrEnum
-from typing import Any, get_args
+from typing import Any, cast, get_args
 from urllib.parse import quote
 
 import redis
-from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, SecretStr
 
 from ..config import IdentityConfig
 
@@ -21,7 +21,7 @@ class RunState(StrEnum):
 
 class RecordState(StrEnum):
     PROVISIONING = "provisioning"
-    """No launch has committed a handle yet."""
+    """A launch is in progress and has committed no handle yet."""
     PRESENT = "present"
     REMOVING = "removing"
     """The worker is being destroyed; its handle is removed before the record."""
@@ -42,7 +42,8 @@ class ProviderHandle(BaseModel):
     container_name: str | None = None
     instance_id: int | None = None
     created_instance: bool = False
-    """Whether the instance was rented for the worker, rather than supplied."""
+    """Whether the instance was rented for the worker: removal destroys a rented
+    instance and stops a supplied one."""
 
 
 class WorkerRecord(BaseModel):
@@ -52,17 +53,14 @@ class WorkerRecord(BaseModel):
     """The worker's launch settings, without its secret fields."""
     token: SecretStr
     run_state: RunState
-    state: RecordState = RecordState.PROVISIONING
-    container_name: str | None = None
+    state: RecordState = RecordState.PRESENT
     handle: ProviderHandle | None = None
-    gpus: list[int] | None = None
-    gpu_arch: str | None = None
     worker_id: str | None = None
 
 
 def recorded_config(config: BaseModel) -> dict[str, Any]:
-    """``config``'s settings without its secret fields, which a rebuilt config reads
-    from the environment again."""
+    """Return ``config``'s settings without its secret fields, which a rebuilt config
+    reads from the environment again."""
     secret = {
         name
         for name, field in type(config).model_fields.items()
@@ -83,19 +81,19 @@ class WorkerProvisioningStore:
         self._key = f"supervisor-state:{scope}:workers"
 
     def load(self) -> list[WorkerRecord]:
-        raw: dict[str, str] = self._redis.hgetall(self._key)  # type: ignore[assignment]
+        raw = cast(dict[str, str], self._redis.hgetall(self._key))
         records = []
         for alias, value in raw.items():
             try:
                 records.append(WorkerRecord.model_validate(json.loads(value)))
-            except (ValueError, ValidationError) as exc:
+            except ValueError as exc:
                 logger.error(
                     "Ignoring unreadable record of worker %s: %s", alias, type(exc)
                 )
         return records
 
     def create(self, record: WorkerRecord) -> bool:
-        """Store a new record; returns False when its alias already has one."""
+        """Store a new record; return False when its alias already has one."""
         return bool(self._redis.hsetnx(self._key, record.alias, _encode(record)))
 
     def put(self, record: WorkerRecord) -> None:

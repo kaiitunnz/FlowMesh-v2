@@ -3,16 +3,23 @@
 import logging
 import os
 import threading
+from collections import Counter
 from collections.abc import Callable
+from typing import Any
 from unittest.mock import MagicMock
 from weakref import WeakSet
 
 import fakeredis
+from pydantic import SecretStr
 
 from server.config import IdentityConfig
 from server.registries.node import NodeRegistry
 from server.supervisor.manager import WorkerManager
-from server.supervisor.provisioning import WorkerProvisioningStore
+from server.supervisor.provisioning import (
+    RunState,
+    WorkerProvisioningStore,
+    WorkerRecord,
+)
 from server.supervisor.registry import WorkerRegistry
 from server.supervisor.services.lifecycle import Lifecycle
 
@@ -23,6 +30,23 @@ def memory_store(identity: IdentityConfig | None = None) -> WorkerProvisioningSt
     """A supervisor state store over an in-memory Redis."""
     return WorkerProvisioningStore(
         fakeredis.FakeRedis(decode_responses=True), identity or IdentityConfig()
+    )
+
+
+def worker_record(
+    alias: str,
+    provider: str = "docker",
+    token: str = "tok",
+    config: dict[str, Any] | None = None,
+    **fields: Any,
+) -> WorkerRecord:
+    """A record of a running worker, unless ``fields`` say otherwise."""
+    return WorkerRecord(
+        alias=alias,
+        provider=provider,
+        config=config or {},
+        token=SecretStr(token),
+        **{"run_state": RunState.RUNNING, **fields},
     )
 
 
@@ -69,14 +93,14 @@ class StubWorkerManager(WorkerManager):
         self._registry = registry if registry is not None else MagicMock()
         self._store = memory_store()
         self._records = {}
-        self._records_lock = threading.Lock()
+        self._records_lock = threading.RLock()
         self._unsaved = set()
         self._removing = {}
         self._awaiting = set()
         self._to_provision = []
         self._grace_deadline = None
         self._loop = None
-        self._in_flight = set()
+        self._in_flight = Counter()
         self._tasks = set()
         self._is_started = True
         self._default_worker_config = {}

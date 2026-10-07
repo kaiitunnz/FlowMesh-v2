@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, NewType
+from typing import NewType
 
 from pydantic import BaseModel, ConfigDict, SecretStr
 
@@ -296,22 +296,18 @@ class WorkerAdapter(ABC):
 
     @abstractmethod
     def holds_worker(self) -> bool:
-        """Whether this adapter started a worker it has not stopped."""
+        """Whether this adapter holds a launched worker it has not stopped."""
         pass
 
     def handle(self) -> ProviderHandle | None:
-        """What the provider launched for the held worker, if any."""
+        """Return what the provider launched for the held worker, if any."""
         return None
-
-    def provisioned_fields(self) -> dict[str, Any]:
-        """What a worker record keeps of this adapter beyond its config."""
-        return {}
 
     def recover_launch(self) -> bool | None:
         """Look for what an interrupted launch of this worker left, blocking.
 
-        Returns whether one was found, which the adapter then holds, or ``None`` when
-        that cannot be told.
+        Return whether one was found, which the adapter then holds, or ``None`` when
+        that cannot be determined.
         """
         return None
 
@@ -453,13 +449,8 @@ class WorkerAdapter(ABC):
 
 
 class WorkerFactory(ABC):
-    def __init__(
-        self,
-        system_principal: PrincipalContext,
-        alias_taken: Callable[[str], bool] = lambda _: False,
-    ) -> None:
+    def __init__(self, system_principal: PrincipalContext) -> None:
         self.system_principal = system_principal
-        self._alias_taken = alias_taken
 
     @abstractmethod
     def create_worker(self, token: WorkerTokenType, *args, **kwargs) -> WorkerAdapter:
@@ -491,7 +482,7 @@ class ProviderSpec:
     """Per-provider dispatch entry consumed by `WorkerManager`.
 
     Each provider module (e.g. `adapters.docker`, `adapters.vastai`) exposes a
-    `get_provider_spec(system_principal)` builder that returns one of these.
+    `get_provider_spec` builder that returns one of these.
     """
 
     name: str

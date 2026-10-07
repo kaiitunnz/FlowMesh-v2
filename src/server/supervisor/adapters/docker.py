@@ -238,7 +238,8 @@ class DockerWorkerAdapter(WorkerAdapter):
         config: DockerWorkerConfig,
         docker_client: DockerClient,
         owner: PrincipalContext,
-        container_id: str | None = None,
+        held_gpus: list[int] | None = None,
+        handle: ProviderHandle | None = None,
     ) -> None:
         if config.worker_type == WorkerType.GPU and (
             cuda_devices is None or len(cuda_devices) == 0
@@ -252,12 +253,12 @@ class DockerWorkerAdapter(WorkerAdapter):
         self.cuda_devices = cuda_devices
         self.gpu_arch = gpu_arch
         # The devices this adapter holds in the resource manager.
-        self.held_gpus = cuda_devices
+        self.held_gpus = held_gpus
 
         self._docker = docker_client
         self._status: WorkerStatus = WorkerStatus.STOPPED
         self._hardware: dict[str, Any] | WorkerHardware | None = None
-        self._container_id = container_id
+        self._container_id = handle.container_id if handle else None
 
     @property
     def status(self) -> WorkerStatus:
@@ -277,7 +278,7 @@ class DockerWorkerAdapter(WorkerAdapter):
             provider=_PROVIDER_NAME,
             status=self.status,
             hardware=hardware,
-            held_gpus=(self.cuda_devices or []).copy(),
+            held_gpus=(self.held_gpus or []).copy(),
             ssh_limits=self.config.ssh.to_limits() if self.config.enable_ssh else None,
         )
 
@@ -287,13 +288,6 @@ class DockerWorkerAdapter(WorkerAdapter):
     def observe_reported_hardware(self, hardware: WorkerHardware) -> None:
         if self._hardware is None:
             self._hardware = hardware
-
-    def provisioned_fields(self) -> dict[str, Any]:
-        return {
-            "container_name": self.container_name,
-            "gpus": self.held_gpus,
-            "gpu_arch": self.gpu_arch.value if self.gpu_arch else None,
-        }
 
     def handle(self) -> ProviderHandle | None:
         if self._container_id is None:
@@ -411,6 +405,7 @@ class DockerWorkerAdapter(WorkerAdapter):
             if not self._remove_stale_container(existing):
                 return False
             self._container_id = None
+            self._report_handle()
 
         environment: dict[str, str] = self._base_environment()
         labels: dict[str, str] = self._base_labels()
@@ -446,7 +441,7 @@ class DockerWorkerAdapter(WorkerAdapter):
                 self.container_name,
                 exc,
             )
-            # A launch that raised may still have created its container.
+            # A launch that raised may have created its container.
             self.recover_launch()
             return False
         self._container_id = container.id
@@ -758,11 +753,10 @@ class DockerWorkerFactory(WorkerFactory):
     _CONTAINER_NAME_ALLOWED_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
     def __init__(
-        self,
-        system_principal: PrincipalContext,
-        alias_taken: Callable[[str], bool] = lambda _: False,
+        self, system_principal: PrincipalContext, alias_taken: Callable[[str], bool]
     ) -> None:
-        super().__init__(system_principal, alias_taken)
+        super().__init__(system_principal)
+        self._alias_taken = alias_taken
         self._rm = ResourceManager.get_instance()
         self._docker = get_docker_client()
         self._worker_id_registry: Counter[str] = Counter()
@@ -787,7 +781,11 @@ class DockerWorkerFactory(WorkerFactory):
             if config.container_name
             else self._sanitize_container_name(alias, config)
         )
-        worker = DockerWorkerAdapter(
+        # The resolved name and devices are part of what a record keeps.
+        config = config.model_copy(
+            update={"container_name": container_name, "cuda_devices": cuda_devices}
+        )
+        return DockerWorkerAdapter(
             token=token,
             alias=alias,
             container_name=container_name,
@@ -796,38 +794,39 @@ class DockerWorkerFactory(WorkerFactory):
             config=config,
             docker_client=self._docker,
             owner=self.system_principal,
+            held_gpus=cuda_devices,
         )
-        return worker
 
     def attach(
         self, token: WorkerTokenType, record: WorkerRecord
     ) -> DockerWorkerAdapter:
         config = DockerWorkerConfig.model_validate(record.config)
-        worker = DockerWorkerAdapter(
-            token=token,
-            alias=record.alias,
-            container_name=record.container_name or record.alias,
-            cuda_devices=record.gpus,
-            gpu_arch=GpuArch(record.gpu_arch) if record.gpu_arch else None,
-            config=config,
-            docker_client=self._docker,
-            owner=self.system_principal,
-            container_id=record.handle.container_id if record.handle else None,
-        )
-        worker.held_gpus = None
-        if record.gpus:
+        if config.container_name is None:
+            raise ValueError(f"the record of worker {record.alias} names no container")
+        held: list[int] | None = None
+        gpu_arch: GpuArch | None = None
+        if config.cuda_devices:
             try:
-                self._rm.reserve_gpus(devices=record.gpus)
+                held, gpu_arch = self._rm.reserve_gpus(devices=config.cuda_devices)
             except ValueError as exc:
                 logger.error(
                     "Could not hold GPUs %s of worker %s again: %s",
-                    record.gpus,
+                    config.cuda_devices,
                     record.alias,
                     exc,
                 )
-            else:
-                worker.held_gpus = list(record.gpus)
-        return worker
+        return DockerWorkerAdapter(
+            token=token,
+            alias=record.alias,
+            container_name=config.container_name,
+            cuda_devices=config.cuda_devices,
+            gpu_arch=gpu_arch,
+            config=config,
+            docker_client=self._docker,
+            owner=self.system_principal,
+            held_gpus=held,
+            handle=record.handle,
+        )
 
     def remove(self, handle: ProviderHandle) -> Removal:
         assert handle.container_id is not None and handle.container_name is not None
@@ -917,15 +916,14 @@ class DockerWorkerFactory(WorkerFactory):
                 prefix = "flowmesh_server_worker_gpu_"
             case _:
                 raise ValueError(f"Unsupported worker type: {worker_type}")
-        alias = f"{prefix}{self._get_next_worker_id(prefix)}"
-        while self._alias_taken(alias):
+        while True:
             alias = f"{prefix}{self._get_next_worker_id(prefix)}"
-        return alias
+            if not self._alias_taken(alias):
+                return alias
 
 
 def get_provider_spec(
-    system_principal: PrincipalContext,
-    alias_taken: Callable[[str], bool] = lambda _: False,
+    system_principal: PrincipalContext, alias_taken: Callable[[str], bool]
 ) -> ProviderSpec:
     return ProviderSpec(
         name=_PROVIDER_NAME,
