@@ -526,3 +526,6 @@ class TransitionCommitter:
     def set_completion_notifier(self, notify: Callable[[str], None]) -> None:
         """Install the callback that a terminal transition notifies."""
         self.on_workflow_settled = notify
+
+    def drop_unacknowledged(self, task_id: str) -> None:
+        del self.unacknowledged[task_id]

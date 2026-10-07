@@ -31,7 +31,7 @@ class RecordFailures:
         record.assigned_worker = None
         record.finished_ts = time.time()
         self._failed.add(task_id)
-        self._dag.pending_deps.pop(task_id, None)
+        self._dag.forget_pending(task_id)
         self._ready.remove_from_ready_locked(task_id)
 
     def fail_v1_dependents_locked(self, primary: str) -> list[tuple[str, str]]:
@@ -41,9 +41,9 @@ class RecordFailures:
         frontier = [primary]
         while frontier:
             failed = frontier.pop()
-            for child in self._dag.dependents.pop(failed, set()):
-                if (pending := self._dag.pending_deps.get(child)) is not None:
-                    pending.discard(failed)
+            for child in self._dag.take_dependents(failed):
+                if self._dag.pending_deps.get(child) is not None:
+                    self._dag.discard_dependency(child, failed)
                 record = self._tasks.get(child)
                 if not record or record.status != TaskStatus.PENDING:
                     continue

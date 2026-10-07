@@ -168,10 +168,7 @@ class TaskMerges:
             _, selected_worker_hint = self._ready.merge_key_by_task.get(
                 child_id, (None, None)
             )
-            self._ready.merge_key_by_task[child_id] = (
-                merge_key,
-                selected_worker_hint,
-            )
+            self._ready.set_merge_key(child_id, (merge_key, selected_worker_hint))
             returned = self.return_merged_children_locked([child_id])
         self._committer.commit_locked(task_id, *returned)
 
@@ -195,7 +192,7 @@ class TaskMerges:
             child_record.merge_slice = None
             if unmerge:
                 child_record.merge_key = None
-                self._ready.merge_key_by_task.pop(child_id, None)
+                self._ready.forget_merge_key(child_id)
             self._ready.remove_from_ready_locked(child_id)
             self._ready.enqueue_ready_locked(child_id, front=True)
             returned.append(child_id)
@@ -266,20 +263,29 @@ class TaskMerges:
             child_record.usages.append(usage)
         self._completed.add(child_id)
         self._failed.discard(child_id)
-        self._dag.pending_deps.pop(child_id, None)
+        self._dag.forget_pending(child_id)
         self.merge_parent_map.pop(child_id, None)
-        self._ready.merge_key_by_task.pop(child_id, None)
+        self._ready.forget_merge_key(child_id)
         self._ready.remove_from_ready_locked(child_id)
         self._ready.merge_bucket_remove(child_id)
-        dependents = list(self._dag.dependents.pop(child_id, set()))
+        dependents = list(self._dag.take_dependents(child_id))
         for dep_id in dependents:
             pending = self._dag.pending_deps.get(dep_id)
             if pending is None:
                 continue
-            pending.discard(child_id)
+            self._dag.discard_dependency(dep_id, child_id)
             if not pending:
                 dep_record = self._tasks.get(dep_id)
                 if dep_record and dep_record.status == TaskStatus.PENDING:
                     if self._ready.enqueue_ready_locked(dep_id):
                         ready_children.append(dep_id)
         return ready_children
+
+    def take_children(self, task_id: str) -> list[str]:
+        return self.merge_children_map.pop(task_id, [])
+
+    def take_parent(self, task_id: str) -> str | None:
+        return self.merge_parent_map.pop(task_id, None)
+
+    def drop_merged_child(self, parent_id: str, child_id: str) -> None:
+        self.merge_children_map[parent_id].remove(child_id)

@@ -82,7 +82,7 @@ class DispatchFence:
         task_id = record.task_id
         dispatch_id = record.dispatch_id
         moved = self._merges.return_merged_children_locked(
-            [task_id, *self._merges.merge_children_map.pop(task_id, [])], unmerge=True
+            [task_id, *self._merges.take_children(task_id)], unmerge=True
         )
         self.returned_dispatches[task_id] = (worker_id, dispatch_id, moved)
         record.merged_children = None
@@ -181,7 +181,7 @@ class DispatchFence:
         ) and stash.dispatch_id is None:
             # A report naming no dispatch matches on its worker alone, which the next
             # dispatch may share.
-            del self._committer.unacknowledged[task_id]
+            self._committer.drop_unacknowledged(task_id)
         record.status = TaskStatus.DISPATCHED
         record.assigned_worker = publish.worker_id
         record.dispatch_id = publish.dispatch_id
@@ -232,3 +232,14 @@ class DispatchFence:
             TaskStatus.CANCELLING,
         ) or (publish is not None and not publish.recorded)
         return in_flight and self.dispatch_live_locked(record, worker_id, dispatch_id)
+
+    def take_publish(self, task_id: str) -> Publish | None:
+        return self.publishing.pop(task_id, None)
+
+    def mark_publish_lost(self, task_id: str) -> None:
+        self.publishing[task_id] = None
+
+    def remember_return(
+        self, task_id: str, returned: tuple[str, str | None, list[str]]
+    ) -> None:
+        self.returned_dispatches[task_id] = returned

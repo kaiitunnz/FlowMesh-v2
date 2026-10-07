@@ -182,3 +182,6 @@ class InputChecks:
             and record.status == TaskStatus.PENDING
             and (check.worker_id, check.dispatch_id) == (worker_id, dispatch_id)
         )
+
+    def drop_check(self, task_id: str) -> None:
+        self.input_checks.pop(task_id, None)

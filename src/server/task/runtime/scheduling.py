@@ -27,6 +27,26 @@ class EpochFrontier:
             return True
         return epoch_index == frontier
 
+    def set_frontier(self, workflow_id: str, frontier: int) -> None:
+        self.workflow_epoch_frontier[workflow_id] = frontier
+
+    def complete_epoch(self, workflow_id: str) -> None:
+        self.workflow_epoch_tasks[workflow_id].popleft()
+
+    def drop_frontier(self, workflow_id: str) -> None:
+        self.workflow_epoch_frontier.pop(workflow_id, None)
+
+    def drop_epochs(self, workflow_id: str) -> None:
+        self.workflow_epoch_tasks.pop(workflow_id, None)
+
+    def forget_workflow(self, workflow_id: str) -> None:
+        self.workflow_epoch_tasks.pop(workflow_id, None)
+        self.workflow_epoch_frontier.pop(workflow_id, None)
+        self.workflow_in_epoch_order.pop(workflow_id, None)
+
+    def forget_task(self, task_id: str) -> None:
+        self.task_epoch_index.pop(task_id, None)
+
 
 class ReadyQueue:
     """Queues the pending tasks ready to dispatch, in position order within an
@@ -160,7 +180,7 @@ class ReadyQueue:
 
         ready: list[str] = []
         while True:
-            self._epochs.workflow_epoch_frontier[workflow_id] = frontier
+            self._epochs.set_frontier(workflow_id, frontier)
             current_tasks = epoch_tasks[0] if epoch_tasks else set()
             if current_tasks and not all(
                 (task := self._tasks.get(task_id)) is not None
@@ -170,12 +190,12 @@ class ReadyQueue:
                 break
 
             if epoch_tasks:
-                epoch_tasks.popleft()
+                self._epochs.complete_epoch(workflow_id)
             frontier += 1
-            self._epochs.workflow_epoch_frontier[workflow_id] = frontier
+            self._epochs.set_frontier(workflow_id, frontier)
             if not epoch_tasks:
-                self._epochs.workflow_epoch_frontier.pop(workflow_id, None)
-                self._epochs.workflow_epoch_tasks.pop(workflow_id, None)
+                self._epochs.drop_frontier(workflow_id)
+                self._epochs.drop_epochs(workflow_id)
                 break
 
             for task_id in epoch_tasks[0]:
@@ -188,3 +208,9 @@ class ReadyQueue:
                     ready.append(task_id)
 
         return ready
+
+    def set_merge_key(self, task_id: str, key: tuple[str | None, str | None]) -> None:
+        self.merge_key_by_task[task_id] = key
+
+    def forget_merge_key(self, task_id: str) -> None:
+        self.merge_key_by_task.pop(task_id, None)

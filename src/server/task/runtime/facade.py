@@ -1257,12 +1257,12 @@ class TaskRuntime:
                 record.finished_ts = time.time()
                 self._failed.add(task_id)
                 self._completed.discard(task_id)
-                self._dag.pending_deps.pop(task_id, None)
+                self._dag.forget_pending(task_id)
                 self._ready.remove_from_ready_locked(task_id)
                 self._ready.merge_bucket_remove(task_id)
-                self._ready.merge_key_by_task.pop(task_id, None)
+                self._ready.forget_merge_key(task_id)
                 returned += self._merges.return_merged_children_locked(
-                    self._merges.merge_children_map.pop(task_id, []), unmerge=True
+                    self._merges.take_children(task_id), unmerge=True
                 )
                 impacted.append((task_id, reason))
 
@@ -3214,7 +3214,7 @@ class TaskRuntime:
         """
         try:
             with self._cv:
-                publish = self._fence.publishing.pop(task_id, None)
+                publish = self._fence.take_publish(task_id)
                 if publish is None or not publish.recorded:
                     return True
                 record = self._tasks.get(task_id)
@@ -3527,19 +3527,17 @@ class TaskRuntime:
 
             self._completed.add(task_id)
             self._failed.discard(task_id)
-            self._dag.pending_deps.pop(task_id, None)
+            self._dag.forget_pending(task_id)
             ready_children: list[str] = []
-            merged_children_ids: list[str] = self._merges.merge_children_map.pop(
-                task_id, []
-            )
-            self._ready.merge_key_by_task.pop(task_id, None)
+            merged_children_ids: list[str] = self._merges.take_children(task_id)
+            self._ready.forget_merge_key(task_id)
 
-            dependents = list(self._dag.dependents.pop(task_id, set()))
+            dependents = list(self._dag.take_dependents(task_id))
             for child in dependents:
                 pending = self._dag.pending_deps.get(child)
                 if pending is None:
                     continue
-                pending.discard(task_id)
+                self._dag.discard_dependency(child, task_id)
                 if not pending:
                     child_record = self._tasks.get(child)
                     if child_record and child_record.status == TaskStatus.PENDING:
@@ -3693,7 +3691,7 @@ class TaskRuntime:
                     and stash.dispatch_id in (None, dispatch_id)
                 ):
                     self._committer.recommit_locked(stash.held)
-                    del self._committer.unacknowledged[task_id]
+                    self._committer.drop_unacknowledged(task_id)
                 record.last_error = error
                 impacted, usages = self._mark_failed(
                     task_id, worker_id, payload, ts, error=error
@@ -3847,7 +3845,7 @@ class TaskRuntime:
         moved = [
             task_id,
             *self._merges.return_merged_children_locked(
-                self._merges.merge_children_map.pop(task_id, [])
+                self._merges.take_children(task_id)
             ),
         ]
         engine = self._engines.get(record.workflow_id)
@@ -3877,10 +3875,8 @@ class TaskRuntime:
         """
         task_id = record.task_id
         if record.assigned_worker is not None:
-            self._fence.returned_dispatches[task_id] = (
-                record.assigned_worker,
-                record.dispatch_id,
-                moved,
+            self._fence.remember_return(
+                task_id, (record.assigned_worker, record.dispatch_id, moved)
             )
         reset_to_pending(record)
         if self._ready.enqueue_ready_locked(task_id, front=front):
@@ -3999,10 +3995,10 @@ class TaskRuntime:
 
             self._failed.add(task_id)
             self._completed.discard(task_id)
-            self._dag.pending_deps.pop(task_id, None)
+            self._dag.forget_pending(task_id)
             self._ready.remove_from_ready_locked(task_id)
-            merged_children_ids = self._merges.merge_children_map.pop(task_id, [])
-            self._ready.merge_key_by_task.pop(task_id, None)
+            merged_children_ids = self._merges.take_children(task_id)
+            self._ready.forget_merge_key(task_id)
 
             impacted = self._record_failures.fail_v1_dependents_locked(task_id)
 
@@ -4109,9 +4105,7 @@ class TaskRuntime:
             ],
             reason,
         )
-        self._epochs.workflow_epoch_tasks.pop(workflow_id, None)
-        self._epochs.workflow_epoch_frontier.pop(workflow_id, None)
-        self._epochs.workflow_in_epoch_order.pop(workflow_id, None)
+        self._epochs.forget_workflow(workflow_id)
         if (engine := self._engines.get(workflow_id)) is None:
             return termination
         if failure is None:
@@ -4140,8 +4134,8 @@ class TaskRuntime:
                 interrupt := self._terminations.interrupt_for(record, reason)
             ):
                 interrupts.append(interrupt)
-            self._inputs.input_checks.pop(record.task_id, None)
-            self._epochs.task_epoch_index.pop(record.task_id, None)
+            self._inputs.drop_check(record.task_id)
+            self._epochs.forget_task(record.task_id)
         reaps = self._router.take_ops_for_agents_locked([r.task_id for r in records])
         return Termination(interrupts, reaps)
 
@@ -4239,11 +4233,11 @@ class TaskRuntime:
         failed or was lost, which runs each of them alone.
         """
         task_id = record.task_id
-        if (parent_id := self._merges.merge_parent_map.pop(task_id, None)) is not None:
+        if (parent_id := self._merges.take_parent(task_id)) is not None:
             if (siblings := self._merges.merge_children_map.get(parent_id)) and (
                 task_id in siblings
             ):
-                siblings.remove(task_id)
+                self._merges.drop_merged_child(parent_id, task_id)
             if (parent := self._tasks.get(parent_id)) and parent.merged_children:
                 parent.merged_children = [
                     child for child in parent.merged_children if child != task_id
@@ -4256,12 +4250,12 @@ class TaskRuntime:
         # TODO(kaiitunnz): Handle usages for cancelled tasks
         self._completed.discard(task_id)
         self._failed.discard(task_id)
-        self._dag.pending_deps.pop(task_id, None)
+        self._dag.forget_pending(task_id)
         self._ready.remove_from_ready_locked(task_id)
         self._ready.merge_bucket_remove(task_id)
-        self._ready.merge_key_by_task.pop(task_id, None)
+        self._ready.forget_merge_key(task_id)
         return self._merges.return_merged_children_locked(
-            self._merges.merge_children_map.pop(task_id, []), unmerge
+            self._merges.take_children(task_id), unmerge
         )
 
     def mark_cancelled(
@@ -4661,11 +4655,11 @@ class TaskRuntime:
             for task_id, record in list(self._tasks.items()):
                 publish = self._fence.publishing.get(task_id)
                 if publish and not publish.recorded and publish.worker_id == worker_id:
-                    self._fence.publishing[task_id] = None
+                    self._fence.mark_publish_lost(task_id)
                     self._terminations.revoke_locked(
                         task_id, worker_id, publish.dispatch_id, node_id
                     )
-                    children = self._merges.merge_children_map.pop(task_id, [])
+                    children = self._merges.take_children(task_id)
                     record.merged_children = None
                     self._committer.commit_locked(
                         *self._merges.return_merged_children_locked(
