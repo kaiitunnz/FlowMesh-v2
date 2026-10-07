@@ -19,6 +19,14 @@ from shared.private_state import (
     PrivateStateAttachment,
     PrivateStateBinding,
 )
+from shared.sandbox import (
+    LocalSandboxCapability,
+    LocalSandboxExecutor,
+    SandboxCommand,
+    SandboxCommandResult,
+    SandboxReapUnproved,
+    SandboxRuntimeProfile,
+)
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.ids import new_private_state_reference_id
@@ -27,6 +35,7 @@ from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.harness import register_adapter
 from worker.private_state import PrivateStateHolder
+from worker.sandbox import SandboxRuntime
 
 _BACKEND = "fake-quiesce"
 
@@ -72,8 +81,9 @@ class _Adapter(HarnessAdapter):
             raise HarnessQuiescenceError("a writer outlived the step")
 
 
-@pytest.fixture
-def episode(tmp_path: Path) -> tuple[AgentEpisodeExecutor, WorkerTaskMessage, Path]:
+def _episode(
+    tmp_path: Path, sandboxed: bool = False
+) -> tuple[AgentEpisodeExecutor, WorkerTaskMessage, Path]:
     binding = PrivateStateBinding(
         reference=ActivationPrivateStateReference(
             reference_id=new_private_state_reference_id(),
@@ -89,6 +99,14 @@ def episode(tmp_path: Path) -> tuple[AgentEpisodeExecutor, WorkerTaskMessage, Pa
         incarnation=1,
         write_epoch=1,
     )
+    sandbox = LocalSandboxCapability(
+        attachment_id=attachment.attachment_id,
+        reference_id=attachment.reference_id,
+        worker_id=attachment.worker_id,
+        incarnation=attachment.incarnation,
+        write_epoch=attachment.write_epoch,
+        profile=SandboxRuntimeProfile(),
+    )
     message = make_worker_task_message(
         {"taskType": "agent"},
         task_type=TaskType.AGENT,
@@ -96,11 +114,17 @@ def episode(tmp_path: Path) -> tuple[AgentEpisodeExecutor, WorkerTaskMessage, Pa
             "backend": {"backend": _BACKEND, "version": "v1"},
             "private_state": binding.model_dump(mode="json"),
             "private_state_attachment": attachment.model_dump(mode="json"),
+            "sandbox": sandbox.model_dump(mode="json") if sandboxed else None,
         },
     )
     root = tmp_path / "private"
     executor = AgentEpisodeExecutor(make_worker_config(private_state_dir=root))
     return executor, message, root / binding.reference.reference_id
+
+
+@pytest.fixture
+def episode(tmp_path: Path) -> tuple[AgentEpisodeExecutor, WorkerTaskMessage, Path]:
+    return _episode(tmp_path)
 
 
 def _use(adapter: _Adapter) -> None:
@@ -229,3 +253,43 @@ def test_a_later_cleanup_retries_an_unproved_teardown(
     adapter._proves = True
     executor.cleanup_after_run()
     assert executor._unended == []
+
+
+class _UnprovedRuntime(SandboxRuntime):
+    name = "unproved"
+
+    def run(
+        self,
+        root: Path,
+        command: SandboxCommand,
+        profile: SandboxRuntimeProfile,
+        egress: bool = False,
+    ) -> SandboxCommandResult:
+        raise SandboxReapUnproved("a command left a process behind")
+
+
+def test_an_unproved_command_fails_the_step_even_when_the_harness_caught_it(
+    tmp_path: Path,
+) -> None:
+    executor, message, _ = _episode(tmp_path, sandboxed=True)
+    executor._sandbox_runtime = _UnprovedRuntime()
+
+    class _Catching(_Adapter):
+        def __init__(self, sandbox: LocalSandboxExecutor) -> None:
+            super().__init__([])
+            self._sandbox = sandbox
+
+        def mediated_facades(self) -> frozenset[MediatedFacade]:
+            return REQUIRED_MEDIATED_FACADES | {MediatedFacade.SANDBOX}
+
+        def start(self, activation_id: str, *, capsule: Any, outcomes: Any) -> Any:
+            try:
+                self._sandbox.execute(SandboxCommand(argv=("make",)))
+            except SandboxReapUnproved:
+                pass
+            return HarnessResult(kind=HarnessResultKind.COMPLETION, value="done")
+
+    register_adapter(_BACKEND, lambda *args: _Catching(args[5]))
+
+    with pytest.raises(ExecutionError, match="quiescence_unproved"):
+        executor.run(message, tmp_path)

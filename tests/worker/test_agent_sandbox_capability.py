@@ -5,7 +5,10 @@ of the attachment that owns the workspace. Several commands run inside one dispa
 local action is not a boundary, so the episode neither yields nor reports between them.
 """
 
+import threading
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,6 +22,7 @@ from shared.sandbox import (
     SandboxCommandResult,
     SandboxDenied,
     SandboxEgressMode,
+    SandboxReapUnproved,
     SandboxRuntimeProfile,
 )
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
@@ -187,3 +191,75 @@ def test_an_egress_minted_capability_relaxes_the_fence(state) -> None:
     sandbox.execute(SandboxCommand(argv=("curl", "https://example.com")))
 
     assert runtime.egress == [True]
+
+
+class _UnprovedRuntime(_RecordingRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reaped = False
+
+    def run(
+        self,
+        root: Path,
+        command: SandboxCommand,
+        profile: SandboxRuntimeProfile,
+        egress: bool = False,
+    ) -> SandboxCommandResult:
+        def retry() -> bool:
+            self.reaped = True
+            return True
+
+        raise SandboxReapUnproved("a command left a process behind", retry=retry)
+
+
+def test_a_closed_sandbox_admits_no_further_command(state) -> None:
+    runtime = _RecordingRuntime()
+    sandbox = AgentSandboxRuntime(_capability(), _ATTACHMENT, state, runtime)
+
+    sandbox.close()
+
+    with pytest.raises(SandboxDenied, match="ended"):
+        sandbox.execute(SandboxCommand(argv=("ls",)))
+    assert runtime.commands == []
+    assert sandbox.drain()
+
+
+def test_the_drain_waits_out_a_command_in_flight(state) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    class _Slow(_RecordingRuntime):
+        def run(self, *args: Any, **kwargs: Any) -> SandboxCommandResult:
+            started.set()
+            release.wait(5)
+            return super().run(*args, **kwargs)
+
+    sandbox = AgentSandboxRuntime(_capability(), _ATTACHMENT, state, _Slow())
+    command = threading.Thread(
+        target=sandbox.execute, args=(SandboxCommand(argv=("ls",)),), daemon=True
+    )
+    command.start()
+    assert started.wait(5)
+    drained: list[bool] = []
+    drainer = threading.Thread(target=lambda: drained.append(sandbox.drain()))
+    drainer.start()
+    time.sleep(0.1)
+    assert drained == []
+
+    release.set()
+    drainer.join(5)
+    assert drained == [True]
+
+
+def test_an_unproved_command_leaves_the_dispatch_unable_to_seal(state) -> None:
+    runtime = _UnprovedRuntime()
+    sandbox = AgentSandboxRuntime(_capability(), _ATTACHMENT, state, runtime)
+
+    with pytest.raises(SandboxReapUnproved):
+        sandbox.execute(SandboxCommand(argv=("make",)))
+    assert sandbox.reap_unproved
+    with pytest.raises(SandboxReapUnproved):
+        sandbox.execute(SandboxCommand(argv=("ls",)))
+
+    # The leftover tree is reaped on the drain, but the dispatch stays unsealable.
+    assert not sandbox.drain()
+    assert runtime.reaped

@@ -9,6 +9,7 @@ the server routes any boundary and re-dispatches with the next capsule and outco
 
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -20,6 +21,7 @@ from shared.harness import (
     EpisodeModelBinding,
     HarnessAdapter,
     HarnessCapsule,
+    HarnessQuiescenceError,
     HarnessResult,
     HarnessResultKind,
     MediatedFacade,
@@ -72,8 +74,8 @@ class AgentEpisodeExecutor(Executor):
         self._episode_task_id: str | None = None
         self._sandbox_runtime: SandboxRuntime | None = None
         self._signals = RunSignals()
-        # Adapters whose teardown was not proved, kept so a later cleanup can finish it.
-        self._unended: list[tuple[str, HarnessAdapter]] = []
+        # Writers whose teardown was not proved, kept so a later cleanup can finish it.
+        self._unended: list[tuple[str, str, Callable[[], bool]]] = []
 
     def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
         with self._signals.running(task.task_id):
@@ -131,11 +133,11 @@ class AgentEpisodeExecutor(Executor):
                         adapter.cancel(task.task_id)
                     except Exception:
                         _LOG.exception("Failed to give up the turn of %s", task.task_id)
-                if not self._end_writers(task.task_id, adapter, holder, state):
+                if not self._end_writers(task.task_id, adapter, sandbox, holder, state):
                     if state is not None:
                         raise self._unproved(state) from exc
                 raise
-            proved = self._end_writers(task.task_id, adapter, holder, state)
+            proved = self._end_writers(task.task_id, adapter, sandbox, holder, state)
         finally:
             self._adapter = None
         capturable = self._is_capturable_boundary(result, dispatch.model_binding)
@@ -235,24 +237,36 @@ class AgentEpisodeExecutor(Executor):
         self,
         task_id: str,
         adapter: HarnessAdapter,
+        sandbox: AgentSandboxRuntime | None,
         holder: PrivateStateHolder | None,
         state: MaterializedState | None,
     ) -> bool:
         """Stop every writer the step bound to its attachment; return whether that was
         proved.
 
-        An unproved teardown keeps the adapter for a later attempt and refuses the
-        lineage from then on.
+        The harness and the sandbox are each ended whether or not the other could be,
+        and the sandbox admits no command from the moment the teardown begins. An
+        unproved teardown keeps what it could not end for a later attempt and refuses
+        the lineage from then on.
         """
+        if sandbox is not None:
+            sandbox.close()
+        proved = self._ended(task_id, "harness", lambda: _quiesced(adapter, task_id))
+        if sandbox is not None:
+            proved = self._ended(task_id, "sandbox", sandbox.drain) and proved
+        if not proved and holder is not None and state is not None:
+            holder.mark_unsealable(state)
+        return proved
+
+    def _ended(self, task_id: str, writer: str, end: Callable[[], bool]) -> bool:
         try:
-            adapter.quiesce(task_id)
+            if end():
+                return True
         except Exception:
-            _LOG.exception("The harness of task %s did not quiesce", task_id)
-            self._unended.append((task_id, adapter))
-            if holder is not None and state is not None:
-                holder.mark_unsealable(state)
-            return False
-        return True
+            _LOG.exception("Ending the %s of task %s failed", writer, task_id)
+        _LOG.error("The %s of task %s was not proved stopped", writer, task_id)
+        self._unended.append((task_id, writer, end))
+        return False
 
     def _unproved(self, state: MaterializedState) -> Exception:
         """The step's failure when its writers were not proved stopped.
@@ -411,12 +425,8 @@ class AgentEpisodeExecutor(Executor):
             facade.unregister_episode(self._episode_task_id)
         self._episode_task_id = None
         unended, self._unended = self._unended, []
-        for task_id, adapter in unended:
-            try:
-                adapter.quiesce(task_id)
-            except Exception:
-                _LOG.warning("The harness of task %s is still not quiesced", task_id)
-                self._unended.append((task_id, adapter))
+        for task_id, writer, end in unended:
+            self._ended(task_id, writer, end)
 
 
 def _give_up(
@@ -432,6 +442,14 @@ def _give_up(
         # or retry it into a fresh held turn.
         if facade is not None:
             facade.release_episode(task_id)
+
+
+def _quiesced(adapter: HarnessAdapter, task_id: str) -> bool:
+    try:
+        adapter.quiesce(task_id)
+    except HarnessQuiescenceError:
+        return False
+    return True
 
 
 def _fence(

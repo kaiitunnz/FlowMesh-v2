@@ -22,6 +22,7 @@ from shared.sandbox import (
     SandboxCommand,
     SandboxCommandResult,
     SandboxDenied,
+    SandboxReapUnproved,
     SandboxUnavailable,
 )
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationPermit
@@ -280,6 +281,46 @@ def test_an_unavailable_runtime_denies_rather_than_failing_the_turn() -> None:
 
     assert output[0]["content"][0]["text"] == "understood"
     assert egress.seen[1][2].body["messages"][-1]["content"].startswith("denied:")
+
+
+class _UnprovedSandbox(_RecordingSandbox):
+    """A sandbox whose command left a tree it could not prove reaped."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unproved = False
+
+    @property
+    def reap_unproved(self) -> bool:
+        return self.unproved
+
+    def execute(self, command: SandboxCommand) -> SandboxCommandResult:
+        self.commands.append(command.argv)
+        self.unproved = True
+        raise SandboxReapUnproved("a command left a process behind")
+
+
+def test_an_unproved_command_ends_the_turn_before_any_further_model_call() -> None:
+    sandbox = _UnprovedSandbox()
+    facade, egress, _, token = _facade(
+        [
+            ModelCompletion(
+                content="",
+                tool_calls=(_call("run_command", {"command": ["make"]}),),
+            ),
+            ModelCompletion(content="never asked"),
+        ],
+        sandbox,
+    )
+
+    with pytest.raises(FacadeTurnError, match="not proved reaped|left a process"):
+        facade.handle_turn(_TASK, token, {"input": "go"})
+    # The harness retrying the turn reaches no model either.
+    with pytest.raises(FacadeTurnError, match="not proved reaped"):
+        facade.handle_turn(_TASK, token, {"input": "go"})
+
+    assert sandbox.commands == [("make",)]
+    assert len(egress.seen) == 1
 
 
 def test_a_turn_runs_no_more_than_the_command_cap() -> None:
