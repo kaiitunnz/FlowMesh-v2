@@ -14,8 +14,8 @@ from .topology import PlanTopology
 
 
 class EmbodimentLedger:
-    """Holds each work item's embodiment selection, input resolution and input
-    preparation."""
+    """Holds and records each work item's embodiment selection, input resolution and
+    input preparation."""
 
     def __init__(
         self,
@@ -34,14 +34,7 @@ class EmbodimentLedger:
         return self.embodiment_selections.get(wi.work_item_id) if wi else None
 
     def embodiment_pinned(self, task_id: str) -> bool:
-        """Whether a resolved embodiment is committed to the run that carries it.
-
-        An embodiment changes only before its candidate-specific issue or delivery. A
-        resident candidate commits at its invocation, after which reconciliation reuses
-        that invocation and its idempotency and credit path rather than running the
-        other embodiment; a local candidate carries no invocation and commits when its
-        attempt is issued, which is where it was delivered to a worker.
-        """
+        """Whether a resolved embodiment is committed to the run that carries it."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.work_item_id not in self.embodiment_selections:
             return False
@@ -50,11 +43,7 @@ class EmbodimentLedger:
     def record_embodiment_selection(
         self, task_id: str, alternative_id: str, selector: str, evidence: str
     ) -> EmbodimentSelection | None:
-        """Bind a task to one embodiment durably, before its worker message goes out.
-
-        A pinned selection is kept: the caller receives the standing one rather than a
-        replacement.
-        """
+        """Bind a task to one embodiment durably, before its worker message goes out."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return None
@@ -89,12 +78,7 @@ class EmbodimentLedger:
     def on_input_preparation_dispatched(
         self, task_id: str, worker_id: str | None
     ) -> None:
-        """Record that a work item's inputs are being resolved on a worker.
-
-        This deliberately mints neither an invocation nor an attempt: both are
-        candidate-specific commitments, and a work item whose inputs are still being
-        resolved has not chosen an embodiment to commit to.
-        """
+        """Record that a work item's inputs are being resolved on a worker."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return
@@ -113,16 +97,7 @@ class EmbodimentLedger:
         binding: InputResolutionBinding,
         reference: ContentReference | None = None,
     ) -> InputResolution | None:
-        """Record how a work item's inputs resolved, before its embodiment runs.
-
-        A standing resolution is kept: a re-drive that reaches the same request records
-        nothing new, and one that reaches a different request leaves the recorded
-        binding in place for the reconciliation that compares against it.
-
-        A resolution carrying its request's reference commits both together, so the
-        request a later run hydrates is durable exactly when the binding proving what it
-        is becomes durable.
-        """
+        """Record how a work item's inputs resolved, before its embodiment runs."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return None

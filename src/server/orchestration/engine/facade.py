@@ -54,9 +54,7 @@ from ...task.v2.representations.operators import (
 from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 from ...task.v2.representations.results import CardinalityKind, ResultDeclaration
 from ..guardrails import ScopeBudget
-from ..outcomes import (
-    check_admissible,
-)
+from ..outcomes import check_admissible
 from ..state import (
     TERMINAL_WORK_ITEM_STATUSES,
     AcceptedInput,
@@ -83,11 +81,7 @@ from ..state import (
     WorkItem,
 )
 from ..telemetry import NULL_SPAN_EMITTER, TelemetrySpanEmitter
-from ..tool_dispatch import (
-    AgentInputPlan,
-    FacadeTurnGroup,
-    ToolInvocationEnvelope,
-)
+from ..tool_dispatch import AgentInputPlan, FacadeTurnGroup, ToolInvocationEnvelope
 from .advance import Advance
 from .attempts import AttemptLifecycle
 from .authority import AuthorityLedger
@@ -98,13 +92,13 @@ from .dataflow import RegionFlow
 from .embodiments import EmbodimentLedger
 from .failures import FailureLedger
 from .inputs import AcceptedInputLedger
-from .ledger import OrchestrationLedger, _control_key
+from .ledger import OrchestrationLedger, control_key
 from .loops import LoopProgress
 from .publications import PublicationLedger
 from .scopes import ScopeProgress
 from .snapshot import SnapshotCodec
 from .spawns import SpawnRegions
-from .topology import _CONTROL_KINDS, PlanTopology, _effect_recovery
+from .topology import CONTROL_KINDS, PlanTopology, effect_recovery
 
 _logger = logging.getLogger("orchestration-engine")
 
@@ -389,15 +383,15 @@ class OrchestrationEngine:
                 and op.operator_id not in child_body_refs
             )
             if not dispatchable:
-                if op.kind in _CONTROL_KINDS:
+                if op.kind in CONTROL_KINDS:
                     continuations.append(
                         Continuation(
-                            work_item_id=_control_key(op.operator_id),
+                            work_item_id=control_key(op.operator_id),
                             waiting_on=set(preds[op.operator_id]),
                         )
                     )
                 continue
-            effect, recovery = _effect_recovery(op)
+            effect, recovery = effect_recovery(op)
             work_item = WorkItem(
                 work_item_id=new_work_item_id(),
                 activation_id=activation.activation_id,
@@ -958,7 +952,7 @@ class OrchestrationEngine:
         return self._cancellation.cancel_scope(scope_id)
 
     # ------------------------------------------------------------------ #
-    # Authority: delegated-grant minting with monotone attenuation
+    # Queries
     # ------------------------------------------------------------------ #
 
     def effective_invoke_face(self, task_id: str) -> tuple[str, ...]:
@@ -973,10 +967,6 @@ class OrchestrationEngine:
         """
         return self._authority.effective_invoke_face(task_id)
 
-    # ------------------------------------------------------------------ #
-    # Readiness, settlement, publication (static path)
-    # ------------------------------------------------------------------ #
-
     def template_closure(
         self,
         template: str,
@@ -986,10 +976,6 @@ class OrchestrationEngine:
         region it declares, however deep; a template ``excluded`` rejects is left out
         together with what is nested under it."""
         return self._ledger.template_closure(template, excluded)
-
-    # ------------------------------------------------------------------ #
-    # Queries
-    # ------------------------------------------------------------------ #
 
     def output_publication(
         self,
@@ -1069,7 +1055,7 @@ class OrchestrationEngine:
         return self._scope_progress.capability(scope_id, axis)
 
     def scope_for(self, region_op: str) -> str | None:
-        return self._ledger.scope_for(region_op)
+        return self._ledger.scope_id_for(region_op)
 
     def region_scope_for(self, agent_activation: str, role: str) -> str | None:
         """The child-init scope an agent's declared role region opened, if entered."""
@@ -1188,7 +1174,7 @@ class OrchestrationEngine:
         return self._ledger.episode_spec(task_id)
 
     def work_item(self, task_id: str) -> WorkItem | None:
-        return self._ledger.work_item(task_id)
+        return self._ledger.work_item_for_task(task_id)
 
     def child_input(self, task_id: str) -> ValueRef | None:
         """The child-init input a spawned child task runs on, if it has one."""
@@ -1288,7 +1274,21 @@ class OrchestrationEngine:
 
     @property
     def instance(self) -> WorkflowInstance:
-        return self._ledger.instance
+        return self._ledger.workflow_instance
+
+    def work_item_id_for_task(self, task_id: str) -> str | None:
+        """The episode (work item) id backing a legacy task id, or None."""
+        return self._ledger.work_item_id_for_task(task_id)
+
+    def latest_attempt_open(self, task_id: str) -> bool:
+        """Whether the work item's latest attempt still expects a terminal report.
+
+        A reroute that re-enqueues an episode closes the attempt that produced the turn,
+        so a completion whose attempt is already closed is a superseded replay —
+        applying it would preempt the live turn. A genuine terminal report lands while
+        its attempt is still issued or running.
+        """
+        return self._attempt_lifecycle.latest_attempt_open(task_id)
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -1325,21 +1325,3 @@ class OrchestrationEngine:
         whose declared inputs have not all been accepted, stays blocked.
         """
         return self._attempt_lifecycle.reconcile_pending(task_id)
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
-
-    def work_item_id_for_task(self, task_id: str) -> str | None:
-        """The episode (work item) id backing a legacy task id, or None."""
-        return self._ledger.work_item_id_for_task(task_id)
-
-    def latest_attempt_open(self, task_id: str) -> bool:
-        """Whether the work item's latest attempt still expects a terminal report.
-
-        A reroute that re-enqueues an episode closes the attempt that produced the turn,
-        so a completion whose attempt is already closed is a superseded replay —
-        applying it would preempt the live turn. A genuine terminal report lands while
-        its attempt is still issued or running.
-        """
-        return self._attempt_lifecycle.latest_attempt_open(task_id)

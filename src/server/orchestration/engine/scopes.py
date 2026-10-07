@@ -1,16 +1,9 @@
 """Scopes and progress capabilities of one workflow instance."""
 
-from shared.utils import (
-    new_scope_id,
-)
+from shared.utils import new_scope_id
 
 from ..guardrails import ScopeBudget
-from ..state import (
-    CapabilityStatus,
-    ProgressAxis,
-    ProgressCapability,
-    Scope,
-)
+from ..state import CapabilityStatus, ProgressAxis, ProgressCapability, Scope
 from .advance import RegionError
 from .authority import AuthorityLedger
 from .failures import FailureLedger
@@ -135,7 +128,7 @@ class ScopeProgress:
         )
         self._ledger.scopes[scope.scope_id] = scope
         self._authority.store_grant(
-            grant.grant_id, grant.model_copy(update={"scope_id": scope.scope_id})
+            grant.model_copy(update={"scope_id": scope.scope_id})
         )
         return scope
 
@@ -167,10 +160,7 @@ class ScopeProgress:
         return self._ledger.capabilities.get((scope_id, axis)) if scope_id else None
 
     def spawn_awaits_children(self, spawn_op: str) -> bool:
-        """Whether a spawn has yet to fan out: unopened, or open and not sealed.
-
-        A failed spawn never fans out.
-        """
+        """Whether a spawn has yet to fan out: unopened, or open and not sealed."""
         if self._failures.region_failed(spawn_op):
             return False
         scope_id = self._ledger.scope_id_for(spawn_op)
@@ -180,12 +170,7 @@ class ScopeProgress:
         return cap.status is CapabilityStatus.OPEN
 
     def spawn_is_open(self, spawn_op: str) -> bool:
-        """Whether a spawn's child-init capability still admits new children.
-
-        False once the spawn has sealed or revoked, or before its child-init scope
-        opens, so a re-driven fan-out over an already-closed spawn is a clean no-op. A
-        read-only query: it never opens a scope.
-        """
+        """Whether a spawn's child-init capability still admits new children."""
         scope_id = self._ledger.scope_id_for(spawn_op)
         if scope_id is None:
             return False

@@ -20,7 +20,7 @@ from server.task.models import EventEffect, SettleOutcome
 from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime
 from server.task.runtime.facade import _HeldWrites, _Unacknowledged
-from server.task.runtime.terminations import _Termination
+from server.task.runtime.terminations import Termination
 from shared.tools.contract import MediatedOperationOutcome
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
@@ -171,7 +171,7 @@ def test_a_replaced_stash_keeps_the_release_it_carries() -> None:
 def test_a_save_under_a_held_report_keeps_its_release_held() -> None:
     scenario = _Scenario()
     runtime = scenario.runtime
-    termination = _Termination([], [], resident_invocation_ids=["inv-x"])
+    termination = Termination([], [], resident_invocation_ids=["inv-x"])
     current = runtime._report_writes.held = _HeldWrites(error=RuntimeError("down"))
     try:
         with runtime._cv:
@@ -195,7 +195,7 @@ def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
     released: list[str] = []
     runtime.set_resident_terminal_hook(lambda inv, _failed: released.append(inv))
     planner = scenario.ids["planner"]
-    termination = _Termination([], [], resident_invocation_ids=["inv-x"])
+    termination = Termination([], [], resident_invocation_ids=["inv-x"])
     with runtime._cv:
         runtime._terminations.hold_termination_locked(scenario.workflow_id, termination)
     runtime._unacknowledged[planner] = _Unacknowledged(
@@ -216,7 +216,7 @@ def _lock_probe(runtime: TaskRuntime) -> list[bool]:
     """Queue a pending termination; records whether each release held the lock."""
     owned: list[bool] = []
 
-    def release(termination: _Termination) -> None:
+    def release(termination: Termination) -> None:
         # A reentrant acquire succeeds on the owning thread, so probe from another.
         def probe() -> None:
             free = runtime._lock.acquire(blocking=False)
@@ -229,7 +229,7 @@ def _lock_probe(runtime: TaskRuntime) -> list[bool]:
         thread.join()
 
     runtime._terminations.release_terminated_work = release  # type: ignore[method-assign]
-    runtime._terminations.pending_terminations.append(_Termination([], []))
+    runtime._terminations.pending_terminations.append(Termination([], []))
     return owned
 
 

@@ -3,16 +3,11 @@
 import logging
 from collections.abc import Sequence
 
-from ...orchestration import (
-    OrchestrationEngine,
-)
+from ...orchestration import OrchestrationEngine
 from ...registries.worker import WorkerRegistry
-from ..models import (
-    TaskRecord,
-    TaskStatus,
-)
+from ..models import TaskRecord, TaskStatus
 from . import episode_dispatch
-from .reports import _membership
+from .reports import membership
 
 
 class WorkerReservations:
@@ -58,7 +53,7 @@ class WorkerReservations:
         self.held_dispatches.update(
             (record.task_id, (record.assigned_worker, record.dispatch_id))
             for record in self._tasks.values()
-            if _membership(record) == TaskStatus.DISPATCHED
+            if membership(record) == TaskStatus.DISPATCHED
             and record.assigned_worker is not None
             and record.dispatch_id is not None
             and not episode_dispatch.dispatch_ended_at_suspension_locked(
@@ -80,7 +75,7 @@ class WorkerReservations:
             record = self._tasks.get(task_id)
             if held is None or (
                 record is not None
-                and _membership(record) == TaskStatus.DISPATCHED
+                and membership(record) == TaskStatus.DISPATCHED
                 and record.dispatch_id == held[1]
                 and not episode_dispatch.dispatch_ended_at_suspension_locked(
                     self._engines, record

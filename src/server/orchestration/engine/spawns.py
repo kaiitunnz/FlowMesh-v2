@@ -1,9 +1,6 @@
 """Spawn children and the regions an agent owns."""
 
-from shared.utils import (
-    new_activation_id,
-    new_work_item_id,
-)
+from shared.utils import new_activation_id, new_work_item_id
 
 from ...task.v2.representations.operators import (
     AgentOperator,
@@ -29,7 +26,7 @@ from .dataflow import RegionFlow
 from .inputs import AcceptedInputLedger
 from .ledger import OrchestrationLedger
 from .scopes import ScopeProgress
-from .topology import _CHILD_INIT_OPENERS, PlanTopology, _effect_recovery
+from .topology import CHILD_INIT_OPENERS, PlanTopology, effect_recovery
 
 
 class SpawnRegions:
@@ -88,16 +85,7 @@ class SpawnRegions:
         return opener_act.activation_id
 
     def spawn_child(self, spawn: str, *, operator_id: str | None = None) -> str:
-        """Materialize one child activation under a spawn/agent's open child scope.
-
-        ``spawn`` is a region handle — an operator id for the non-recursive case, or an
-        opener activation id for a specific recursion level. Rejects a child after a
-        definitive denial, or after the child-init capability is sealed or revoked
-        (late-child prevention). When the child body is itself a scope opener, opens a
-        nested scope owned by the child activation, so grandchildren (and recursive re-
-        entries) attenuate from the child grant at ``depth+1``. Returns the child
-        activation id, which addresses that nested scope.
-        """
+        """Materialize one child activation under a spawn/agent's open child scope."""
         activation, _ = self._create_child(
             spawn, operator_id, dispatchable=False, value_ref=None
         )
@@ -110,14 +98,7 @@ class SpawnRegions:
         operator_id: str | None = None,
         value_ref: ValueRef | None = None,
     ) -> Advance:
-        """Materialize one dispatchable child leaf and admit it as ready work.
-
-        Unlike :meth:`spawn_child`, the child is given a stable dispatchable identity,
-        carries its child-init input as ``value_ref``, and is readied for a physical
-        attempt. The child body must be a leaf, or an agent that itself owns a child-
-        init scope; a spawn/loop child body is not live-dispatchable and stays a trace-
-        level :meth:`spawn_child`.
-        """
+        """Materialize one dispatchable child leaf and admit it as ready work."""
         advance = Advance()
         activation, wi = self._create_child(
             spawn, operator_id, dispatchable=True, value_ref=value_ref
@@ -127,12 +108,7 @@ class SpawnRegions:
         return advance
 
     def create_fanout_child(self, spawn: str, value_ref: ValueRef) -> str:
-        """Create one producer-fanout child (unadmitted) and return its task id.
-
-        The child carries ``value_ref``, a frozen reference to one element of the
-        producer's collection, as its child-init input. It stays blocked on its input
-        manifest until the runtime records the child-entry accepted input.
-        """
+        """Create one producer-fanout child (unadmitted) and return its task id."""
         activation, wi = self._create_child(
             spawn, None, dispatchable=True, value_ref=value_ref
         )
@@ -210,7 +186,7 @@ class SpawnRegions:
                 f"spawn {spawn_op!r} child-init capability is {cap.status.value}; "
                 "no child may be created"
             )
-        body_opens_scope = self._topology.kind(body_ref) in _CHILD_INIT_OPENERS or (
+        body_opens_scope = self._topology.kind(body_ref) in CHILD_INIT_OPENERS or (
             self._topology.kind(body_ref) is OperatorKind.LOOP_CONTEXT
         )
         # A leaf child dispatches directly; an agent child dispatches and owns its own
@@ -240,7 +216,7 @@ class SpawnRegions:
             child_index=index,
         )
         self._ledger.add_activation(activation)
-        effect, recovery = _effect_recovery(body_op)
+        effect, recovery = effect_recovery(body_op)
         child_wi = WorkItem(
             work_item_id=new_work_item_id(),
             activation_id=activation.activation_id,
@@ -329,11 +305,7 @@ class SpawnRegions:
         return advance.extend(self._flow.maybe_release_join(scope_id))
 
     def revoke_spawn(self, spawn: str) -> None:
-        """Revoke a spawn's child-init capability as a progress transition.
-
-        Distinct from sealing: revocation withdraws the capability, while sealing marks
-        a producer done. Both close the child-init axis once outstanding children drain.
-        """
+        """Revoke a spawn's child-init capability as a progress transition."""
         scope_id = self._scope_progress.require_child_init_scope(spawn)
         cap = self._scope_progress.require_capability(scope_id, ProgressAxis.CHILD_INIT)
         if cap.status is CapabilityStatus.OPEN:

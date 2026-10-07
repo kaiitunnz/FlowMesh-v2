@@ -165,11 +165,17 @@ def spawning_agent_bundle() -> PersistedV2Workflow:
     )
 
 
-def recursive_agent_bundle() -> PersistedV2Workflow:
+def recursive_agent_bundle(
+    completion: JoinCompletion = JoinCompletion.ALL_SETTLED,
+    residual_policy: str | None = None,
+    downstream: LeafOperator | None = None,
+) -> PersistedV2Workflow:
     """Agent ``A`` whose ``worker`` region spawns ``A`` again -- a nestable chain.
 
     A child that is the enclosing agent stays dispatchable and owns its own child-init
     scope, so routing one spawn per generation builds a scope tree of arbitrary depth.
+    The region's join takes ``completion`` and ``residual_policy``, and feeds
+    ``downstream`` when one is given.
     """
     spawn = SpawnRegion(
         operator_id="worker:spawn",
@@ -182,7 +188,8 @@ def recursive_agent_bundle() -> PersistedV2Workflow:
         source_ref="worker:spawn:join",
         inputs=(Port(name="children"),),
         outputs=(Port(name="out"),),
-        completion=JoinCompletion.ALL_SETTLED,
+        completion=completion,
+        residual_policy=residual_policy,
     )
     agent = AgentOperator(
         operator_id="A",
@@ -193,11 +200,16 @@ def recursive_agent_bundle() -> PersistedV2Workflow:
         child_region_refs=(ChildRegionRef(name="worker", spawn_ref="worker:spawn"),),
         outputs=(Port(name="out"),),
     )
-    return _bundle(
-        [agent, spawn, join],
-        [TemplateEdge(from_op="worker:spawn", to_op="worker:spawn:join")],
-        (_decl("out:A", "A"),),
-    )
+    operators: list[LogicalOperator] = [agent, spawn, join]
+    edges = [TemplateEdge(from_op="worker:spawn", to_op="worker:spawn:join")]
+    results = [_decl("out:A", "A")]
+    if downstream is not None:
+        operators.append(downstream)
+        edges.append(
+            TemplateEdge(from_op="worker:spawn:join", to_op=downstream.operator_id)
+        )
+        results.append(_decl(f"out:{downstream.operator_id}", downstream.operator_id))
+    return _bundle(operators, edges, tuple(results))
 
 
 def emitter(

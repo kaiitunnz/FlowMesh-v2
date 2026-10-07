@@ -5,12 +5,29 @@ from typing import Any, cast
 
 import pytest
 
-from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.orchestration import OrchestrationEngine
+from server.orchestration.state import (
+    BoundaryEvent,
+    InvocationState,
+    LedgerSnapshot,
+    PublicationOutcome,
+    WorkItemStatus,
+)
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
-from server.task.v2.representations.operators import JoinRegion
+from server.task.v2.compiler.bindings import leaf_profile
+from server.task.v2.representations.operators import (
+    JoinCompletion,
+    JoinRegion,
+    LeafOperator,
+    Port,
+    ResidualPolicy,
+)
 from shared.harness import BoundaryEventKind
+from shared.tasks import TaskType
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.orchestration.helpers import engine as ledger_engine
+from tests.server.orchestration.helpers import recursive_agent_bundle
 from tests.server.task.test_agent_episode_runtime import _SCRIPT, _step
 from tests.server.task.test_resident_origin_loss import (
     _capture_resident_boundary,
@@ -381,3 +398,56 @@ async def test_a_committed_cancelling_task_stays_in_the_dispatched_set() -> None
         runtime._commit_locked(loser)
 
     assert dispatched == [loser]
+
+
+def _spawn_worker(eng: OrchestrationEngine, parent: str, call: str) -> str:
+    """Spawn one ``worker`` child under ``parent`` and return its task id."""
+    return eng.route_boundary_event(
+        parent,
+        BoundaryEvent(
+            kind=BoundaryEventKind.SPAWN,
+            call_correlation=call,
+            child_region_ref="worker",
+        ),
+    ).ready[0]
+
+
+def test_a_join_release_cancels_a_nested_subtree_and_fails_a_denied_admission() -> None:
+    # An any-join that cancels its residual children feeds an external-effect leaf the
+    # root grant does not cover.
+    effect = LeafOperator(
+        operator_id="D",
+        source_ref="D",
+        outputs=(Port(name="out"),),
+        profile=leaf_profile(TaskType.SSH),
+    )
+    eng = ledger_engine(
+        recursive_agent_bundle(JoinCompletion.ANY, ResidualPolicy.CANCEL, effect)
+    )
+    eng.on_dispatched("A", "w1")
+    first = _spawn_worker(eng, "A", "s1")
+    eng.on_dispatched(first, "w2")
+    grandchild = _spawn_worker(eng, first, "g1")
+    second = _spawn_worker(eng, "A", "s2")
+    eng.on_dispatched(second, "w3")
+    eng.on_started(second)
+
+    advance = eng.on_succeeded(second)
+
+    # The first child and the grandchild in the region it entered are cancelled as
+    # residual, and the released join's record reaches D, whose admission is denied.
+    assert set(advance.cancelled) == {first, grandchild}
+    assert advance.failed == ["D"]
+    assert advance.ready == []
+    for task_id in (first, grandchild):
+        wi = eng.work_item(task_id)
+        assert wi is not None and wi.status is WorkItemStatus.CANCELLED
+    denied = eng.work_item("D")
+    assert denied is not None and denied.outcome is PublicationOutcome.DECLARED_FAILURE
+    assert (
+        eng.failure_reason("D")
+        == "authority denied: interface 'D' outside root grant invoke face"
+    )
+    kinds = [event.kind for event in eng._ledger.trace]
+    assert kinds.index("join_released") < kinds.index("scope_cancelled")
+    assert kinds.index("scope_cancelled") < kinds.index("authority_denied")

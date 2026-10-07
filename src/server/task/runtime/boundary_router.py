@@ -4,10 +4,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from server.telemetry.tracing import (
-    ControlPlaneTracer,
-    format_traceparent,
-)
+from server.telemetry.tracing import ControlPlaneTracer, format_traceparent
 from shared.schemas.command import MediatedOpMessage
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from shared.tools.contract import (
@@ -17,20 +14,14 @@ from shared.tools.contract import (
 )
 
 from ...config import WebSearchConfig
-from ...orchestration import (
-    OrchestrationEngine,
-)
-from ...orchestration.tool_dispatch import (
-    MODEL_INTERFACE,
-)
+from ...orchestration import OrchestrationEngine
+from ...orchestration.tool_dispatch import MODEL_INTERFACE
 from ...registries.worker import WorkerRegistry
-from ..models import (
-    TaskRecord,
-)
+from ..models import TaskRecord
 
 
 @dataclass
-class _PendingOp:
+class PendingOp:
     """A worker-originated tool operation whose permit was relayed to its origin
     worker, and when control re-drives it if no outcome has arrived."""
 
@@ -78,12 +69,12 @@ class MediatedBoundaryRouter:
         # worker's egress sidecar, keyed by permit id. Reaps custody on settle or
         # cancel. In-memory and rebuilt on restart from the pending boundary, never
         # durably persisted.
-        self.pending_ops: dict[str, _PendingOp] = {}
+        self.pending_ops: dict[str, PendingOp] = {}
         self.resident_terminal_hook: Callable[[str, bool], None] | None = None
 
     def take_stale_ops(
         self, occurrence: tuple[str, str]
-    ) -> list[tuple[str, _PendingOp]]:
+    ) -> list[tuple[str, PendingOp]]:
         """Drop and return the pending operations of one boundary occurrence."""
         stale = [
             (permit_id, op)
@@ -94,10 +85,10 @@ class MediatedBoundaryRouter:
             del self.pending_ops[permit_id]
         return stale
 
-    def record_issued_op(self, permit_id: str, op: _PendingOp) -> None:
+    def record_issued_op(self, permit_id: str, op: PendingOp) -> None:
         self.pending_ops[permit_id] = op
 
-    def take_settled(self, outcome: MediatedOperationOutcome) -> _PendingOp | None:
+    def take_settled(self, outcome: MediatedOperationOutcome) -> PendingOp | None:
         """Drop and return the pending operation an outcome settles."""
         pending = self.pending_ops.pop(outcome.permit_id, None)
         # A re-mint of the same operation is settled by this outcome too.
@@ -112,8 +103,8 @@ class MediatedBoundaryRouter:
         self,
         worker_id: str,
         now: float,
-        exhausted: list[_PendingOp],
-        redrive: list[tuple[str, _PendingOp]],
+        exhausted: list[PendingOp],
+        redrive: list[tuple[str, PendingOp]],
     ) -> None:
         """Sort a worker's overdue operations into those out of re-drives, which are
         dropped, and those to re-drive, which are charged one."""
@@ -127,7 +118,7 @@ class MediatedBoundaryRouter:
                 op.redrives += 1
                 redrive.append((permit_id, op))
 
-    def discard_op(self, permit_id: str, op: _PendingOp) -> None:
+    def discard_op(self, permit_id: str, op: PendingOp) -> None:
         """Drop a pending operation unless a re-mint replaced it."""
         if self.pending_ops.get(permit_id) is op:
             del self.pending_ops[permit_id]
@@ -279,12 +270,7 @@ class MediatedBoundaryRouter:
 
     def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
         """Install the consumer that releases a resident admission credit on DS
-        terminal.
-
-        The hook receives the settled boundary's ``invocation_id`` and whether the
-        outcome was a failure, so the Admission controller advances the linked claim to
-        terminal on any fenced outcome — the sole normal credit release.
-        """
+        terminal."""
         self.resident_terminal_hook = hook
 
     def release_resident_credit(

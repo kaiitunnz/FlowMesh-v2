@@ -4,15 +4,8 @@ from collections.abc import Sequence
 
 from shared.harness import DeliveredOutcome, OutcomeKind
 
-from ...task.v2.representations.operators import (
-    BoundaryEventKind,
-)
-from ..state import (
-    TERMINAL_INVOCATION_STATES,
-    BoundaryEvent,
-    WorkItem,
-    WorkItemStatus,
-)
+from ...task.v2.representations.operators import BoundaryEventKind
+from ..state import TERMINAL_INVOCATION_STATES, BoundaryEvent, WorkItem, WorkItemStatus
 from ..tool_dispatch import (
     MODEL_INTERFACE,
     FacadeCallMember,
@@ -39,6 +32,8 @@ class BoundaryLedger:
     ) -> None:
         self._ledger = ledger
         self._authority = authority
+        # Mediated boundaries, keyed by (activation, adapter-local call correlation):
+        # the correlation rule that maps a re-driven facade call to its recorded key.
         self.boundary_events: dict[tuple[str, str], BoundaryEvent] = {}
 
     def store_event(self, key: tuple[str, str], event: BoundaryEvent) -> None:
@@ -123,11 +118,8 @@ class BoundaryLedger:
         )
 
     def has_open_facade_group(self, task_id: str) -> bool:
-        """Whether a recorded facade group for this episode still holds the resume gate.
-
-        A group is open only while an await-outcome member is unsettled; a spawn-only
-        group closes at admission, so the fence lets the next turn issue another group.
-        """
+        """Whether a recorded facade group for this episode still holds the resume
+        gate."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return False
@@ -167,14 +159,7 @@ class BoundaryLedger:
         )
 
     def pending_tool_dispatches(self) -> list[ToolInvocationEnvelope]:
-        """Mediated boundaries suspended with no durable outcome, for a restart.
-
-        A model or tool boundary suspends off-lane while its handler settles it; a crash
-        before that settle leaves the work item blocked with an issued invocation and no
-        recorded outcome. Returns each as a full dispatch envelope so the runtime routes
-        it back to its handler by (kind, interface) — a search to the broker, a model to
-        the gateway — never misrouting on the recovered kind.
-        """
+        """Mediated boundaries suspended with no durable outcome, for a restart."""
         pending: list[ToolInvocationEnvelope] = []
         for (activation, corr), env in self.boundary_events.items():
             if env.kind not in _MEDIATED_BOUNDARY_KINDS:
@@ -204,13 +189,7 @@ class BoundaryLedger:
     def pending_tool_dispatch(
         self, task_id: str, call_correlation: str
     ) -> ToolInvocationEnvelope | None:
-        """The dispatch envelope for a still-pending mediated boundary, or None.
-
-        Returns an envelope only while the boundary is suspended with no durable outcome
-        and its work item is blocked, so a held re-drive re-issues exactly the off-lane
-        dispatch a restart would; a settled, terminalized, or cancelled boundary yields
-        nothing.
-        """
+        """The dispatch envelope for a still-pending mediated boundary, or None."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status is not WorkItemStatus.BLOCKED:
             return None
@@ -238,17 +217,7 @@ class BoundaryLedger:
         )
 
     def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:
-        """Whether a mediated settle for this exact boundary is still legal.
-
-        A settle is legal only while the boundary's work item is still BLOCKED — its
-        episode suspended on the mediated call — and the boundary itself is unresolved.
-        A cancelled or otherwise non-blocked work item, or an already-settled or denied
-        boundary, is absorbing: a late or duplicate model, tool, or resident delivery is
-        audit evidence only. It must not stamp an outcome, re-ready the episode, replace
-        the durable correlation, or release a resident credit a second time. Gate on the
-        BLOCKED work item, not a task record's status, since cancellation can leave the
-        record CANCELLING while the work item is already CANCELLED.
-        """
+        """Whether a mediated settle for this exact boundary is still legal."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status is not WorkItemStatus.BLOCKED:
             return False
@@ -268,11 +237,7 @@ class BoundaryLedger:
         )
 
     def suspended_boundary_tasks(self) -> list[str]:
-        """Tasks suspended at an unsettled mediated boundary.
-
-        Such a task's worker released the lane, so it holds no dispatch and returns no
-        terminal; a task mid-step is not among them.
-        """
+        """Tasks suspended at an unsettled mediated boundary."""
         tasks: list[str] = []
         for activation, _ in self.unsettled_invocation_boundaries():
             wi_id = self._ledger.wi_by_activation.get(activation)
@@ -293,12 +258,7 @@ class BoundaryLedger:
     def episode_context(
         self, task_id: str
     ) -> tuple[str | None, tuple[DeliveredOutcome, ...]]:
-        """The durable capsule and pending injected outcome for an agent's next step.
-
-        Rebuilt from the ledger, never in-memory episode state: the capsule is the work
-        item's continuation, and the one pending outcome is reconstructed from its
-        settled boundary envelope, so a re-dispatch after a restart carries it again.
-        """
+        """The durable capsule and pending injected outcome for an agent's next step."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return None, ()
@@ -338,9 +298,5 @@ class BoundaryLedger:
     def boundary_envelope(
         self, activation_id: str, call_correlation: str
     ) -> BoundaryEvent | None:
-        """The durable envelope recorded for one mediated facade call, if any.
-
-        Carries the fabric-assigned idempotency key, the causal invocation id, and the
-        outcome (or denial) the continuation resumes with.
-        """
+        """The durable envelope recorded for one mediated facade call, if any."""
         return self.boundary_events.get((activation_id, call_correlation))

@@ -16,10 +16,7 @@ from shared.inference import (
     canonical_contract,
     element_contract,
 )
-from shared.private_state import (
-    OwnerFence,
-    PrivateStateAttachment,
-)
+from shared.private_state import OwnerFence, PrivateStateAttachment
 from shared.sandbox import (
     SANDBOX_EGRESS_INTERFACE,
     SANDBOX_EXECUTE_INTERFACE,
@@ -34,15 +31,9 @@ from shared.tasks.specs import (
 )
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 
-from ...orchestration import (
-    OrchestrationEngine,
-    WorkItemStatus,
-)
+from ...orchestration import OrchestrationEngine, WorkItemStatus
 from ...orchestration.state import TERMINAL_WORK_ITEM_STATUSES
-from ..models import (
-    TaskRecord,
-    TaskStatus,
-)
+from ..models import TaskRecord, TaskStatus
 from ..v2.compiler.facades import run_command_schema
 from ..v2.representations.admission import ResidentAdmissionBinding
 from ..v2.representations.operators import (
@@ -134,12 +125,7 @@ def _effective_facades(
 def resolve_model_binding(
     tasks: dict[str, TaskRecord], engines: dict[str, OrchestrationEngine], task_id: str
 ) -> AgentModelGatewayBinding | None:
-    """The pinned managed-model binding for a task's agent, for the gateway.
-
-    Returns the effective binding frozen at submission so a mediated invocation
-    resolves its upstream from the activation, never from the request body or a
-    later environment change.
-    """
+    """The pinned managed-model binding for a task's agent, for the gateway."""
     record = tasks.get(task_id)
     engine = engines.get(record.workflow_id) if record else None
     if engine is None:
@@ -151,11 +137,7 @@ def resolve_model_binding(
 def gateway_binding_for(
     tasks: dict[str, TaskRecord], engines: dict[str, OrchestrationEngine], task_id: str
 ) -> tuple[str, AgentModelGatewayBinding] | None:
-    """The task's owning workflow and its pinned model binding, for the gateway.
-
-    The workflow id scopes the credential resolution so a vaulted ref yields a
-    secret only within the workflow that minted it.
-    """
+    """The task's owning workflow and its pinned model binding, for the gateway."""
     record = tasks.get(task_id)
     engine = engines.get(record.workflow_id) if record else None
     if record is None or engine is None:
@@ -169,13 +151,7 @@ def gateway_binding_for(
 def resolve_service_dependency(
     tasks: dict[str, TaskRecord], engines: dict[str, OrchestrationEngine], task_id: str
 ) -> ResidentAdmissionBinding | None:
-    """What the task binds for resident admission, read from its own plan node.
-
-    Resolves for both an agent whose model binding is resident and an inference or
-    embedding leaf that consumes a resident family; a non-resident task resolves to
-    None. The binding's workflow id scopes admission bookkeeping to the submitting
-    workflow.
-    """
+    """What the task binds for resident admission, read from its own plan node."""
     record = tasks.get(task_id)
     engine = engines.get(record.workflow_id) if record else None
     if record is None or engine is None:
@@ -200,11 +176,7 @@ def boundary_settleable(
 def private_state_owner(
     tasks: dict[str, TaskRecord], engines: dict[str, OrchestrationEngine], task_id: str
 ) -> OwnerFence | None:
-    """The holder that must supply a task's bound private state, or None.
-
-    None covers a task with no private state and an agent whose lineage has no
-    sealed generation yet, both of which any eligible worker may run.
-    """
+    """The holder that must supply a task's bound private state, or None."""
     record = tasks.get(task_id)
     engine = engines.get(record.workflow_id) if record else None
     return engine.private_state_owner(task_id) if engine else None
@@ -216,13 +188,7 @@ def agent_episode_dispatch(
     task_id: str,
     holder: OwnerFence,
 ) -> AgentEpisodeDispatch | None:
-    """The agent-episode context to ship with a dispatch, or None for a non-agent.
-
-    The backend key comes from the operator's pinned harness binding, so a later
-    deployment-default change cannot move a live activation. ``holder`` is the
-    selected worker incarnation the dispatch grants private-state authority to; the
-    grant supersedes any prior epoch, fencing a stale holder out of the write.
-    """
+    """The agent-episode context to ship with a dispatch, or None for a non-agent."""
     record = tasks.get(task_id)
     engine = engines.get(record.workflow_id) if record else None
     if engine is None:
@@ -264,16 +230,7 @@ def agent_episode_dispatch(
 def service_episode_dispatch(
     tasks: dict[str, TaskRecord], engines: dict[str, OrchestrationEngine], task_id: str
 ) -> ServiceLeafEpisodeDispatch | None:
-    """The service-episode context for a resident leaf, or None.
-
-    Only a resident-backed inference/embedding leaf takes this path; an agent whose
-    model binding is resident runs its resident boundary through the agent episode.
-    A resume ships the settled outcome to inject; a first dispatch ships none.
-
-    A leaf that admits more than one embodiment names a service dependency for its
-    resident candidate alone, so the resolved embodiment decides this path rather
-    than the dependency's presence.
-    """
+    """The service-episode context for a resident leaf, or None."""
     record = tasks.get(task_id)
     engine = engines.get(record.workflow_id) if record else None
     if engine is None:
@@ -357,23 +314,7 @@ def declared_contract(
     task_id: str,
     spec: TaskSpecBase | None = None,
 ) -> CanonicalInferenceContract | None:
-    """The contract a leaf carries to the worker, for it to resolve and report.
-
-    A leaf that admits more than one embodiment names its contract here rather than
-    in the executor, so every embodiment resolves one request and stores one result
-    shape. A leaf pinned to resident serving names one when it declares a batch,
-    because the conversations a replica serves under its one claim are the
-    contract's, and whenever its prompts come from upstream, because only the worker
-    holding that value can resolve them. It names no embodiment: the worker reads a
-    contract and never learns which one it is running.
-
-    A leaf that admits one embodiment and serves it locally declares none, whether
-    its prompts are literal or come from upstream: it resolves them in its own
-    executor and keeps reporting the native result that embodiment has always
-    reported. So does a pinned single-prompt literal leaf.
-
-    ``spec``, when given, is the dispatched spec with its credentials restored.
-    """
+    """The contract a leaf carries to the worker, for it to resolve and report."""
     record = tasks.get(task_id)
     engine = engines.get(record.workflow_id) if record else None
     if record is None or engine is None:

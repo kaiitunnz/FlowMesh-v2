@@ -10,7 +10,7 @@ from server.orchestration.state import AttemptStatus, WorkItemStatus
 from server.task.models import TaskStatus
 from server.task.results import ResultUnavailable, ResultUnreadable
 from server.task.runtime import TaskRuntime
-from server.task.runtime.boundary_router import _PendingOp
+from server.task.runtime.boundary_router import PendingOp
 from server.task.runtime.facade import _InputCheck
 from shared.content import reference_for
 from shared.schemas.event import TaskEvent, TaskFailureKind
@@ -114,7 +114,7 @@ def test_the_agents_pending_operations_are_reaped() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry(), _Workers())
         workflow_id, writer, _engine, env = await _held_boundary(runtime)
-        runtime._router.pending_ops["mop-held"] = _PendingOp(
+        runtime._router.pending_ops["mop-held"] = PendingOp(
             writer, env.call_correlation, "wkr-1", "box", redrive_at=0.0
         )
 

@@ -15,8 +15,8 @@ from .topology import PlanTopology
 
 
 class PublicationLedger:
-    """Holds the instance's result slots and their publications, and is their only
-    writer."""
+    """Holds the instance's result slots and their publications, and publishes to
+    them."""
 
     def __init__(
         self,
@@ -131,13 +131,8 @@ class PublicationLedger:
     def legacy_task_value(
         self, task_id: str
     ) -> tuple[PublicationOutcome, ValueRef | None] | None:
-        """The settled value a legacy task id reads as, or None while it is unsettled.
-
-        A task compiled from the source resolves its induced output slot. A task the
-        engine materialized at run time — a spawned child, a later loop iteration — has
-        no slot of its own, so it reads as the value its work item settled with. Either
-        way the value is the one bound at settlement and never re-pointed.
-        """
+        """The settled value a legacy task id reads as, or None while it is
+        unsettled."""
         if (publication := self.resolve_legacy_task(task_id)) is not None:
             return publication.outcome, publication.value_ref
         wi = self._ledger.work_item_for_task(task_id)

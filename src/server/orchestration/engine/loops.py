@@ -1,8 +1,6 @@
 """Loop iterations of one workflow instance."""
 
-from shared.utils import (
-    new_activation_id,
-)
+from shared.utils import new_activation_id
 
 from ..guardrails import ScopeBudget
 from ..state import (
@@ -39,12 +37,7 @@ class LoopProgress:
         self._budget = budget
 
     def loop_feedback(self, loop: str, *, value_ref: ValueRef | None = None) -> str:
-        """Re-materialize a loop body at the next loop-time coordinate.
-
-        Enforces well-founded logical time: loop_time strictly increases and stays under
-        the iteration budget, so a finite prefix is acyclic after time unrolling.
-        Returns the iteration activation id.
-        """
+        """Re-materialize a loop body at the next loop-time coordinate."""
         scope_id = self._scope_progress.require_loop_scope(loop)
         loop_op = self._ledger.scopes[
             scope_id

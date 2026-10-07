@@ -278,11 +278,11 @@ def test_agent_suspends_before_a_mediated_model_action() -> None:
     assert env is not None and env.idempotency_key is not None
     # The causal request identity is recorded, and its durable invocation is ISSUED.
     assert env.invocation_id is not None
-    model_inv = eng._ledger.invocations[env.invocation_id]  # type: ignore[attr-defined]
+    model_inv = eng._ledger.invocations[env.invocation_id]
     assert model_inv.state is InvocationState.ISSUED
     assert env.continuation == "after:c0"  # capsule persisted before the lane released
     # The finished attempt is closed, so the work item holds no worker while it waits.
-    attempt = eng._ledger.attempts[wi.attempt_ids[-1]]  # type: ignore[attr-defined]
+    attempt = eng._ledger.attempts[wi.attempt_ids[-1]]
     assert attempt.status.value == "succeeded" and attempt.finished_at is not None
 
 
@@ -380,14 +380,14 @@ def test_redrive_maps_to_the_recorded_idempotency_key() -> None:
     eng.route_boundary_event("A", request)
     env = eng.boundary_envelope(act, "c0")
     assert env is not None
-    key, invocations = env.idempotency_key, len(eng._ledger.invocations)  # type: ignore[attr-defined]
+    key, invocations = env.idempotency_key, len(eng._ledger.invocations)
     # A forced re-drive of the same facade call under a fresh attempt reissues the
     # request; it maps to the recorded key and creates no second target effect.
     eng.on_dispatched("A", "w2")
     eng.route_boundary_event("A", request)
     again = eng.boundary_envelope(act, "c0")
     assert again is not None and again.idempotency_key == key
-    assert len(eng._ledger.invocations) == invocations  # type: ignore[attr-defined]
+    assert len(eng._ledger.invocations) == invocations
     assert "boundary_redriven" in {k for k, _ in eng.contract_trace()}
 
 
@@ -415,7 +415,7 @@ def test_boundary_envelope_survives_rehydration() -> None:
 def test_undeclared_tool_is_denied_without_creating_work() -> None:
     eng = _engine(_solo_agent())
     act = _dispatch_agent(eng)
-    before = len(eng._ledger.invocations)  # type: ignore[attr-defined]
+    before = len(eng._ledger.invocations)
     eng.route_boundary_event(
         "A",
         BoundaryEvent(
@@ -425,7 +425,7 @@ def test_undeclared_tool_is_denied_without_creating_work() -> None:
     env = eng.boundary_envelope(act, "c0")
     # An undeclared tool is a durable typed denial, not a silent no-op — no invocation.
     assert env is not None and env.denial is DenialKind.AUTHORITY
-    assert len(eng._ledger.invocations) == before  # type: ignore[attr-defined]
+    assert len(eng._ledger.invocations) == before
     assert "authority_denied" in {k for k, _ in eng.contract_trace()}
 
 
@@ -436,11 +436,11 @@ def test_denied_boundary_redrive_is_idempotent() -> None:
         kind=BoundaryEventKind.INVOCATION, call_correlation="c0", interface="danger"
     )
     eng.route_boundary_event("A", request)
-    decisions = len(eng._authority.decisions)  # type: ignore[attr-defined]
+    decisions = len(eng._authority.decisions)
     # A re-driven denial maps to the recorded call rather than re-denying it.
     eng.on_dispatched("A", "w2")
     eng.route_boundary_event("A", request)
-    assert len(eng._authority.decisions) == decisions  # type: ignore[attr-defined]
+    assert len(eng._authority.decisions) == decisions
     assert "boundary_redriven" in {k for k, _ in eng.contract_trace()}
 
 
@@ -590,7 +590,7 @@ def test_recursive_agent_child_reuses_the_declared_region() -> None:
     assert lvl2.startswith("act-") and lvl2 != lvl1
     # The template still holds exactly the declared operators: recursion reused the
     # region rather than growing the topology.
-    assert {op.operator_id for op in eng._topology.bundle.template.operators} == {  # type: ignore[attr-defined]
+    assert {op.operator_id for op in eng._topology.bundle.template.operators} == {
         "A",
         "child",
         "worker:spawn",

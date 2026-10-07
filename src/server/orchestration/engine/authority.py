@@ -1,16 +1,9 @@
 """Authority decisions and delegated grants of one workflow instance."""
 
-from shared.utils import (
-    new_authority_grant_id,
-)
+from shared.utils import new_authority_grant_id
 
-from ...task.v2.representations.operators import (
-    AgentOperator,
-    SpawnRegion,
-)
-from ..outcomes import (
-    attenuate,
-)
+from ...task.v2.representations.operators import AgentOperator, SpawnRegion
+from ..outcomes import attenuate
 from ..state import (
     AuthorityDecision,
     AuthorityDecisionKind,
@@ -19,16 +12,15 @@ from ..state import (
     DenialKind,
     WorkItem,
 )
-from ..tool_dispatch import (
-    GrantSnapshot,
-)
+from ..tool_dispatch import GrantSnapshot
 from .ledger import OrchestrationLedger
 from .topology import PlanTopology
 
 
 class AuthorityLedger:
     """Holds the instance's authority decisions, delegated grants and denied spawn
-    sites, and resolves the faces a scope may invoke or delegate."""
+    sites, mints delegated grants, and resolves the faces a scope may invoke or
+    delegate."""
 
     def __init__(
         self,
@@ -44,8 +36,8 @@ class AuthorityLedger:
     def record_decision(self, decision: AuthorityDecision) -> None:
         self.decisions.append(decision)
 
-    def store_grant(self, grant_id: str, grant: DelegatedAuthorityGrant) -> None:
-        self.grants[grant_id] = grant
+    def store_grant(self, grant: DelegatedAuthorityGrant) -> None:
+        self.grants[grant.grant_id] = grant
 
     def grant_snapshot_for(self, wi: WorkItem) -> GrantSnapshot:
         grant_id = self._ledger.workflow_instance.root_grant_id
@@ -79,12 +71,7 @@ class AuthorityLedger:
     def deny_spawn(
         self, spawn_op: str, interface: str, *, kind: DenialKind = DenialKind.AUTHORITY
     ) -> None:
-        """Record a definitive dynamic authorization denial at a spawn site.
-
-        A denial creates no child activation and no resident claim, and is separate from
-        quota/rate/capacity/transport outcomes. It does not seal the child-init
-        capability: grant denial and cardinality sealing stay distinct.
-        """
+        """Record a definitive dynamic authorization denial at a spawn site."""
         self.denied_spawns.add(spawn_op)
         scope_id = self._ledger.scope_id_for(spawn_op)
         self.decisions.append(
@@ -151,15 +138,7 @@ class AuthorityLedger:
         return grant
 
     def effective_invoke_face(self, task_id: str) -> tuple[str, ...]:
-        """The interfaces this agent activation may invoke.
-
-        The same effective face the engine authorizes ordinary boundaries against: the
-        activation's scope grant under its operator ceiling and the policy envelope. A
-        spawned activation reads its own delegated grant, which its parent already
-        attenuated, so an interface an ancestor withheld is absent here even where the
-        operator's own declared ceiling names it. A task that is not an agent invokes
-        nothing through this face.
-        """
+        """The interfaces this agent activation may invoke."""
         wi = self._ledger.work_item_for_task(task_id)
         act = self._ledger.activations.get(wi.activation_id) if wi is not None else None
         op = self._topology.operators.get(wi.operator_id) if wi is not None else None

@@ -11,9 +11,7 @@ from ...task.v2.representations.operators import (
     operator_service_dependency,
 )
 from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
-from ..outcomes import (
-    classify_recovery,
-)
+from ..outcomes import classify_recovery
 from ..private_state import PrivateStateLedger
 from ..state import (
     Activation,
@@ -30,7 +28,6 @@ from ..state import (
     RegionJoinAggregate,
     Scope,
     ValueRef,
-    WorkflowInstance,
     WorkItem,
 )
 from ..telemetry import TelemetrySpanEmitter
@@ -42,7 +39,7 @@ _EVENT_FIELDS = frozenset(
 )
 
 
-def _control_key(operator_id: str) -> str:
+def control_key(operator_id: str) -> str:
     return f"control:{operator_id}"
 
 
@@ -192,9 +189,6 @@ class OrchestrationLedger:
             for e in self.trace
         ]
 
-    def scope_for(self, region_op: str) -> str | None:
-        return self.scope_id_for(region_op)
-
     def region_scope_for(self, agent_activation: str, role: str) -> str | None:
         """The child-init scope an agent's declared role region opened, if entered."""
         agent = self.activations.get(agent_activation)
@@ -216,13 +210,7 @@ class OrchestrationLedger:
         return scope_id in self.released_scopes if scope_id else False
 
     def sealed_region_child_templates(self) -> frozenset[str]:
-        """Child templates of agent-region spawns whose child-init sealed or revoked.
-
-        A child template holds the workflow open until its spawn seals; a producer
-        fanout retires it on materialization, and an agent's dynamic spawn region
-        retires it once the region seals (on ``spawn_agent`` seal or the parent's
-        completion), so the template — never dispatched as a task — stops holding it.
-        """
+        """Child templates of agent-region spawns whose child-init sealed or revoked."""
         sealed: set[str] = set()
         for spawn_op in self._topology.agent_region_spawns:
             template = self._topology.child_template_of(spawn_op)
@@ -270,9 +258,6 @@ class OrchestrationLedger:
                 return node.episode
         return None
 
-    def work_item(self, task_id: str) -> WorkItem | None:
-        return self.work_item_for_task(task_id)
-
     def agent_operator(self, task_id: str) -> AgentOperator | None:
         """The agent operator a dispatched task realizes, resolving its work item."""
         wi = self.work_item_for_task(task_id)
@@ -289,11 +274,8 @@ class OrchestrationLedger:
     def resident_admission_binding(
         self, workflow_id: str, task_id: str
     ) -> ResidentAdmissionBinding | None:
-        """The dependency a task consumes joined with its own plan node's annotations.
-
-        The node is the one the task's operator lowered to; an unresolved embodiment
-        menu carries its resident annotations per candidate, so it contributes none.
-        """
+        """The dependency a task consumes joined with its own plan node's
+        annotations."""
         wi = self.work_item_for_task(task_id)
         operator_id = wi.operator_id if wi is not None else task_id
         dependency = operator_service_dependency(
@@ -321,10 +303,6 @@ class OrchestrationLedger:
         if wi is None or wi.invocation_id is None:
             return None
         return self.invocations.get(wi.invocation_id)
-
-    @property
-    def instance(self) -> WorkflowInstance:
-        return self.workflow_instance
 
     def control_activation(self, operator_id: str) -> str:
         for a in self.activations.values():

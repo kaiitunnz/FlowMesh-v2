@@ -1,4 +1,4 @@
-"""Immutable lookups over a compiled workflow plan's operators and edges."""
+"""Lookups over a compiled workflow plan's operators and edges."""
 
 from ...task.v2.representations.bundle import PersistedV2Workflow
 from ...task.v2.representations.operators import (
@@ -25,13 +25,11 @@ _REGION_KINDS = frozenset(
 # Control operators settle in-ledger and never dispatch. An agent is not control: it is
 # a dispatchable run-to-yield episode that also owns a child-init scope for its
 # spawn_agent children.
-_CONTROL_KINDS = _REGION_KINDS
+CONTROL_KINDS = _REGION_KINDS
+CHILD_INIT_OPENERS = frozenset({OperatorKind.SPAWN, OperatorKind.AGENT})
 
 
-_CHILD_INIT_OPENERS = frozenset({OperatorKind.SPAWN, OperatorKind.AGENT})
-
-
-def _effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryClass]:
+def effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryClass]:
     """A dispatchable operator's effect/recovery: a leaf's profile, else pure/recompute.
 
     An agent episode is itself pure and recomputable; its mediated effects flow through
@@ -45,7 +43,7 @@ def _effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryC
 class PlanTopology:
     """Answers operator, edge and region-structure questions about one compiled plan.
 
-    ``operators`` is read on every lookup, never copied.
+    Every component reads ``operators`` through this object on each lookup.
     """
 
     def __init__(self, bundle: PersistedV2Workflow) -> None:
@@ -100,7 +98,7 @@ class PlanTopology:
         return op.kind if op else None
 
     def is_control(self, operator_id: str) -> bool:
-        return self.kind(operator_id) in _CONTROL_KINDS
+        return self.kind(operator_id) in CONTROL_KINDS
 
     def agent_region_op(self, op: AgentOperator, role: str | None) -> str | None:
         """The spawn region operator a declared role selects, or None if undeclared."""
@@ -111,11 +109,7 @@ class PlanTopology:
         )
 
     def agent_entry_port(self, operator_id: str) -> str | None:
-        """The single declared input port of an agent child body, or None.
-
-        A spawn child agent declares exactly one input port (compile-enforced); a leaf
-        child or an agent with no declared input has no entry port.
-        """
+        """The single declared input port of an agent child body, or None."""
         op = self.operators.get(operator_id)
         if not isinstance(op, AgentOperator) or not op.declared_input_ports:
             return None

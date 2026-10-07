@@ -1,12 +1,7 @@
 """Whole-subtree cancellation and failure of one workflow instance."""
 
-from ...task.v2.representations.operators import (
-    OperatorKind,
-)
-from ..state import (
-    TERMINAL_WORK_ITEM_STATUSES,
-    PublicationOutcome,
-)
+from ...task.v2.representations.operators import OperatorKind
+from ..state import TERMINAL_WORK_ITEM_STATUSES, PublicationOutcome
 from .advance import Advance, RegionError
 from .attempts import AttemptLifecycle
 from .dataflow import RegionFlow
@@ -54,15 +49,7 @@ class ScopeCancellation:
         return advance
 
     def cancel_scope(self, scope_id: str) -> Advance:
-        """Cancel a scope subtree as a durable, recorded-before-terminal event.
-
-        Over the scope and each descendant, in order: record the cancellation; revoke
-        the child-init (and loop-time) capability — a transition distinct from sealing;
-        apply the residual-child policy to materialized children; transition the
-        remaining in-flight work items to ``CANCELLED``; revoke the scope's authority
-        grant — distinct from the child-init revoke; and resolve declared outputs to
-        their cancellation / no-winner outcome.
-        """
+        """Cancel a scope subtree as a durable, recorded-before-terminal event."""
         if scope_id not in self._ledger.scopes:
             raise RegionError(f"{scope_id!r} is no cancellable scope")
         advance = Advance()

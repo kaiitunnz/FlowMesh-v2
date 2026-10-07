@@ -3,9 +3,7 @@
 from collections import Counter
 from collections.abc import Iterable
 
-from ...task.v2.representations.operators import (
-    OperatorKind,
-)
+from ...task.v2.representations.operators import OperatorKind
 from ..state import (
     AuthorityDecisionKind,
     LedgerSnapshot,
@@ -17,7 +15,7 @@ from .attempts import AttemptLifecycle
 from .authority import AuthorityLedger
 from .boundaries import BoundaryLedger
 from .embodiments import EmbodimentLedger
-from .failures import _DECLARED_FAILURE_REASON, FailureLedger
+from .failures import DECLARED_FAILURE_REASON, FailureLedger
 from .inputs import AcceptedInputLedger
 from .ledger import OrchestrationLedger
 from .publications import PublicationLedger
@@ -72,7 +70,6 @@ class SnapshotCodec:
             self._ledger.root_scope.scope_id, self._ledger.root_scope
         )
         self._ledger.activations = {}
-        # Per-scope and dynamic activation counts that number and budget each child.
         self._ledger.scope_population = Counter()
         self._ledger.scope_children = Counter()
         self._ledger.dynamic_activations = 0
@@ -125,15 +122,12 @@ class SnapshotCodec:
         )
         self._ledger.trace = list(snapshot.trace)
 
-        # (agent activation, region operator) -> the synthetic opener activation that
-        # owns that region's child-init scope, rebuilt from the persisted openers.
+        # Rebuilt from the persisted openers.
         self._ledger.region_openers = {
             (a.parent_activation_id, a.operator_id): a.activation_id
             for a in self._ledger.activations.values()
             if a.kind == "region" and a.parent_activation_id
         }
-        # Mediated boundaries, keyed by (activation, adapter-local call correlation):
-        # the correlation rule that maps a re-driven facade call to its recorded key.
         self._boundaries.boundary_events = {
             (b.activation, b.call_correlation): b
             for b in snapshot.boundary_events
@@ -195,19 +189,14 @@ class SnapshotCodec:
         # than re-derived from records: a recursive region's levels share one join/loop
         # operator, so a record could not attribute a release to the right level.
         self._ledger.released_scopes = set(snapshot.released_scopes)
-        # Control operators settled as a declared failure; a late record from another
-        # input never fires one.
         self._failures.failed_regions = set(snapshot.failed_regions)
-        # Child-init scopes a failed agent opened and that had not released: each
-        # one's join never releases.
         self._failures.failed_scopes = set(snapshot.failed_scopes)
-        # Why each task settled as a declared failure: its own reason, or the failure
-        # it depends on. A ledger stored without them names each failed work item's own.
+        # A ledger stored without failure reasons names each failed work item's own.
         self._failures.failure_reasons = dict(snapshot.failure_reasons)
         for wi in self._ledger.work_items.values():
             if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
                 self._failures.failure_reasons.setdefault(
-                    wi.legacy_task_id, wi.failure_reason or _DECLARED_FAILURE_REASON
+                    wi.legacy_task_id, wi.failure_reason or DECLARED_FAILURE_REASON
                 )
         # A spawn-site denial names no work item; an agent's denied boundary names one
         # and never refuses a later spawn.

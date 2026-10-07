@@ -2,11 +2,7 @@
 
 from collections.abc import Callable
 
-from ..models import (
-    SETTLING_TASK_STATUSES,
-    TaskRecord,
-    TaskStatus,
-)
+from ..models import SETTLING_TASK_STATUSES, TaskRecord, TaskStatus
 
 
 class ResidentServeTasks:
@@ -68,28 +64,15 @@ class ResidentServeTasks:
             self.resident_task_updated(task_id)
 
     def set_resident_task_end_hook(self, hook: Callable[[str], None]) -> None:
-        """Install the consumer told when a resident serve task stops serving.
-
-        The hook receives the task id once a dispatched resident serve task loses its
-        dispatch, including to another dispatch, and once one settles or starts
-        cancelling. It runs under the runtime's lock, so it must hand the work
-        off and never call back in.
-        """
+        """Install the consumer told when a resident serve task stops serving."""
         self.resident_task_ended = hook
 
     def set_resident_task_update_hook(self, hook: Callable[[str], None]) -> None:
         """Install the consumer told when a dispatched resident serve task reports an
-        update under its current dispatch, such as its engine endpoint.
-
-        It runs under the runtime's lock, so it must hand the work off and never call
-        back in.
-        """
+        update under its current dispatch, such as its engine endpoint."""
         self.resident_task_updated = hook
 
     def set_resident_yield_hook(self, hook: Callable[[str], None]) -> None:
-        """Install the consumer asked to free a worker a resident serve task occupies.
-
-        The hook receives the serve task's id. It may run on the dispatcher's thread, so
-        it must hand the work off and never call back in.
-        """
+        """Install the consumer asked to free a worker a resident serve task
+        occupies."""
         self.resident_yield_requested = hook

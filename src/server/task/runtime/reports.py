@@ -17,7 +17,7 @@ from ..models import (
 )
 
 
-def _reported_reference(raw: Any) -> ContentReference | None:
+def reported_reference(raw: Any) -> ContentReference | None:
     """A result reference a worker reported, or None when it reported none."""
     if raw is None:
         return None
@@ -27,7 +27,7 @@ def _reported_reference(raw: Any) -> ContentReference | None:
         return None
 
 
-def _reset_to_pending(record: TaskRecord) -> None:
+def reset_to_pending(record: TaskRecord) -> None:
     """Clear what a task's last dispatch left on it, returning it to PENDING."""
     record.status = TaskStatus.PENDING
     record.assigned_worker = None
@@ -39,7 +39,7 @@ def _reset_to_pending(record: TaskRecord) -> None:
     record.error = None
 
 
-def _membership(record: TaskRecord) -> str:
+def membership(record: TaskRecord) -> str:
     """The status set a task's record commits into. A task being cancelled still runs
     on its worker. A child its region's residual policy cancelled settles its workflow
     as a finished task does, never as a cancelled one."""
@@ -50,7 +50,7 @@ def _membership(record: TaskRecord) -> str:
     return record.status
 
 
-def _failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
+def failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
     """Whether a failed task may be requeued: retryable, within the attempt budget,
     and not settling."""
     if record.status in SETTLING_TASK_STATUSES or retryable is False:
@@ -58,7 +58,7 @@ def _failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
     return record.max_attempts < 0 or record.attempts < record.max_attempts
 
 
-def _settle_outcome(
+def settle_outcome(
     effect: EventEffect,
     record: TaskRecord | None,
     merged_children: list[str],
@@ -74,23 +74,23 @@ def _settle_outcome(
     )
 
 
-_LOSS_EFFECTS = {
+LOSS_EFFECTS = {
     DispatchEnd.RETURNED: EventEffect.RETURNED,
     DispatchEnd.FAILED: EventEffect.FAILED,
     DispatchEnd.STALE: EventEffect.STALE,
 }
 
 
-def _reported_child_references(payload: dict[str, Any]) -> dict[str, ContentReference]:
+def reported_child_references(payload: dict[str, Any]) -> dict[str, ContentReference]:
     """The result references a merged dispatch reported for its children, by child."""
     return {
         str(child_id): parsed
         for child_id, raw in (payload.get("child_result_references") or {}).items()
-        if (parsed := _reported_reference(raw)) is not None
+        if (parsed := reported_reference(raw)) is not None
     }
 
 
-def _in_flight_usage(
+def in_flight_usage(
     task_id: str, payload: dict[str, Any]
 ) -> list[tuple[str, TaskUsage]]:
     """The usage row for a dispatch whose task runs on rather than settling."""

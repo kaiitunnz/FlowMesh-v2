@@ -7,10 +7,7 @@ from dataclasses import dataclass, field
 from shared.schemas.command import InterruptMessage, RevokeMessage
 
 from ...registries.worker import WorkerRegistry
-from ..models import (
-    TaskRecord,
-    TaskStatus,
-)
+from ..models import TaskRecord, TaskStatus
 from .boundary_router import MediatedBoundaryRouter
 
 
@@ -23,7 +20,7 @@ class _Revoke:
 
 
 @dataclass
-class _Termination:
+class Termination:
     """What control still owes workers off its lock: interrupts and revokes to send,
     operations to reap, and resident credits to release."""
 
@@ -49,10 +46,10 @@ class TerminationRelease:
         self._tasks = tasks
         self._worker_registry = worker_registry
         self._logger = logger
-        self.pending_terminations: list[_Termination] = []
+        self.pending_terminations: list[Termination] = []
         # Terminations whose workflow's ledger has not been saved since: each releases
         # only after that save succeeds.
-        self.undurable_terminations: dict[str, list[_Termination]] = {}
+        self.undurable_terminations: dict[str, list[Termination]] = {}
 
     def ledger_saved(self, workflow_id: str) -> None:
         """Queue each termination that waited on the workflow's ledger save."""
@@ -61,13 +58,13 @@ class TerminationRelease:
     def has_undurable(self, workflow_id: str) -> bool:
         return workflow_id in self.undurable_terminations
 
-    def take_terminations(self) -> list[_Termination]:
+    def take_terminations(self) -> list[Termination]:
         """Take every termination queued for release."""
         pending, self.pending_terminations = self.pending_terminations, []
         return pending
 
     def hold_termination_locked(
-        self, workflow_id: str, termination: _Termination
+        self, workflow_id: str, termination: Termination
     ) -> None:
         """Hold what a termination releases until the workflow's next ledger save
         succeeds; ``_release_pending_terminations`` releases it after the lock."""
@@ -100,12 +97,12 @@ class TerminationRelease:
             task_id=task_id, worker_id=worker_id, dispatch_id=dispatch_id
         )
         self.pending_terminations.append(
-            _Termination([], [], revokes=[_Revoke(message, node_id)])
+            Termination([], [], revokes=[_Revoke(message, node_id)])
         )
 
     def queue_interrupts_locked(self, interrupts: list[InterruptMessage]) -> None:
         if interrupts:
-            self.pending_terminations.append(_Termination(interrupts, []))
+            self.pending_terminations.append(Termination(interrupts, []))
 
     def cancelling_interrupts_locked(
         self, include: Callable[[TaskRecord], bool]
@@ -128,7 +125,7 @@ class TerminationRelease:
             )
         )
 
-    def release_terminated_work(self, termination: _Termination) -> None:
+    def release_terminated_work(self, termination: Termination) -> None:
         """Send what ``termination`` owes workers, best effort: each resident credit,
         interrupt, revoke, and reap is attempted however the others fare."""
         # The fenced terminal releases each in-flight resident invocation's credit, so a

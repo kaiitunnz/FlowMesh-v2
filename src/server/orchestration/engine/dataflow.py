@@ -29,12 +29,12 @@ from ..state import (
 )
 from .advance import Advance, RegionError, dependency_failed
 from .authority import AuthorityLedger
-from .failures import _DECLARED_FAILURE_REASON, FailureLedger
+from .failures import DECLARED_FAILURE_REASON, FailureLedger
 from .inputs import AcceptedInputLedger
-from .ledger import OrchestrationLedger, _control_key
+from .ledger import OrchestrationLedger, control_key
 from .publications import PublicationLedger
 from .scopes import ScopeProgress
-from .topology import _CHILD_INIT_OPENERS, PlanTopology
+from .topology import CHILD_INIT_OPENERS, PlanTopology
 
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
@@ -175,9 +175,7 @@ class RegionFlow:
         if scope.grant_id and scope.grant_id in self._authority.grants:
             grant = self._authority.grants[scope.grant_id]
             if not grant.revoked:
-                self._authority.store_grant(
-                    scope.grant_id, grant.model_copy(update={"revoked": True})
-                )
+                self._authority.store_grant(grant.model_copy(update={"revoked": True}))
                 self._ledger.emit(
                     "grant_revoked",
                     operator_id=scope.owner_operator_id,
@@ -278,7 +276,7 @@ class RegionFlow:
     def _release_one(self, successor: str, from_op: str, advance: Advance) -> None:
         """Deliver a record to one successor: fire a control op, or admit a leaf."""
         if self._topology.is_control(successor):
-            cont = self._ledger.continuations.get(_control_key(successor))
+            cont = self._ledger.continuations.get(control_key(successor))
             if cont is None or self._failures.region_failed(successor):
                 return
             cont.waiting_on.discard(from_op)
@@ -295,7 +293,7 @@ class RegionFlow:
 
     def _fire_control(self, operator_id: str, advance: Advance) -> None:
         kind = self._topology.kind(operator_id)
-        if kind in _CHILD_INIT_OPENERS:
+        if kind in CHILD_INIT_OPENERS:
             self._scope_progress.open_child_init_scope(
                 self._ledger.control_activation(operator_id)
             )
@@ -652,7 +650,7 @@ class RegionFlow:
                 or op_id in self._topology.agent_region_spawns
             ):
                 continue
-            cont = self._ledger.continuations.get(_control_key(op_id))
+            cont = self._ledger.continuations.get(control_key(op_id))
             if cont is not None and not cont.waiting_on:
                 self._fire_control(op_id, advance)
         return advance
@@ -729,7 +727,7 @@ class RegionFlow:
             if self._topology.kind(operator_id) is OperatorKind.JOIN:
                 return
             if (
-                cont := self._ledger.continuations.get(_control_key(operator_id))
+                cont := self._ledger.continuations.get(control_key(operator_id))
             ) is not None:
                 cont.waiting_on.clear()
             self._ledger.emit("region_skipped", operator_id=operator_id)
@@ -765,8 +763,9 @@ class RegionFlow:
         failure named keeps that reason."""
         if not failed:
             return
-        self._failures.name_failure(
-            primary.legacy_task_id, primary.failure_reason or _DECLARED_FAILURE_REASON
+        self._failures.name_failures(
+            [primary.legacy_task_id],
+            primary.failure_reason or DECLARED_FAILURE_REASON,
         )
         self._failures.name_failures(failed, dependency_failed(primary.legacy_task_id))
 
@@ -909,12 +908,7 @@ class RegionFlow:
         )
 
     def reconcile_failure(self, task_id: str) -> list[str]:
-        """Fail what a task's settled failure left standing downstream of it.
-
-        Returns the legacy task ids newly failed; empty for a task that has not failed,
-        for a spawned child, whose failure drains its scope instead, and once the
-        downstream has already failed.
-        """
+        """Fail what a task's settled failure left standing downstream of it."""
         wi = self._ledger.work_item_for_task(task_id)
         if (
             wi is None
@@ -931,11 +925,7 @@ class RegionFlow:
 
     def fail_undeliverable_region_inputs(self) -> list[str]:
         """Fail each task reading a region of an agent that runs only as a spawned
-        child, and everything downstream of it.
-
-        Every scope of such a region is nested, so its join never delivers at the root
-        and the reader would wait forever. Returns the legacy task ids newly failed.
-        """
+        child, and everything downstream of it."""
         cascade = Advance()
         visited: set[str] = set()
         owners = spawned_only_region_owners(self._topology.operators.values())

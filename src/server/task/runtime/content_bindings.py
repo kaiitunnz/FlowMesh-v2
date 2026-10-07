@@ -6,11 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from shared.content import ContentReference
-from shared.tasks.result_binding import (
-    ResultBinding,
-    ResultElementRef,
-    ResultValueRef,
-)
+from shared.tasks.result_binding import ResultBinding, ResultElementRef, ResultValueRef
 
 from ...orchestration import (
     InputResolution,
@@ -19,10 +15,7 @@ from ...orchestration import (
     ValueRef,
 )
 from ...utils.time import ts_to_iso
-from ..models import (
-    TaskRecord,
-    TaskStatus,
-)
+from ..models import TaskRecord, TaskStatus
 
 
 @dataclass(frozen=True)
@@ -37,7 +30,7 @@ def _settled_at(record: TaskRecord) -> str | None:
     return ts_to_iso(record.finished_ts) if record.finished_ts is not None else None
 
 
-def _element_of(value_ref: ValueRef) -> int | None:
+def element_of(value_ref: ValueRef) -> int | None:
     """The collection member a value reference selects, or None for the whole result."""
     return (
         int(value_ref.collection_key) if value_ref.collection_key is not None else None
@@ -276,7 +269,7 @@ def member_source_locked(
         reference = binding.reference if binding is not None else None
     if reference is None:
         return None
-    return ResultValueRef(reference=reference, element=_element_of(value_ref))
+    return ResultValueRef(reference=reference, element=element_of(value_ref))
 
 
 def consumed_inputs_locked(

@@ -1,14 +1,10 @@
-"""Boundaries an agent episode yields."""
+"""Boundaries an episode yields."""
 
 from collections.abc import Iterable
 
 from shared.outcome import OutcomeManifest
 from shared.tools.contract import MediatedOperationPermit
-from shared.utils import (
-    new_idempotency_key,
-    new_invocation_id,
-    new_mediated_permit_id,
-)
+from shared.utils import new_idempotency_key, new_invocation_id, new_mediated_permit_id
 
 from ...task.v2.representations.operators import (
     AgentOperator,
@@ -17,11 +13,7 @@ from ...task.v2.representations.operators import (
 )
 from ...utils.time import now_iso
 from ..guardrails import ScopeBudget
-from ..outcomes import (
-    is_compensable,
-    is_replayable,
-    next_on_terminal,
-)
+from ..outcomes import is_compensable, is_replayable, next_on_terminal
 from ..state import (
     TERMINAL_INVOCATION_STATES,
     TERMINAL_WORK_ITEM_STATUSES,
@@ -36,11 +28,7 @@ from ..state import (
     WorkItem,
     WorkItemStatus,
 )
-from ..tool_dispatch import (
-    MODEL_INTERFACE,
-    FacadeTurnGroup,
-    ToolOutcomeStatus,
-)
+from ..tool_dispatch import MODEL_INTERFACE, FacadeTurnGroup, ToolOutcomeStatus
 from .advance import Advance, RegionError
 from .authority import AuthorityLedger
 from .boundaries import BoundaryLedger
@@ -60,8 +48,9 @@ _DEDUP_CAPABLE = frozenset(
 
 
 class EpisodeBoundaryRouter:
-    """Validates each boundary an agent episode yields against its signature and
-    authority, records it, suspends the episode on it and settles its outcome."""
+    """Routes each boundary an episode yields into the ledger, validating an agent's
+    against its signature and authority, suspends the episode on it and settles its
+    outcome."""
 
     def __init__(
         self,
@@ -80,20 +69,7 @@ class EpisodeBoundaryRouter:
         self._budget = budget
 
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
-        """Route an episode's boundary request back into the ledger, validated first.
-
-        For an agent operator the engine validates the request against the operator's
-        boundary signature and effective authority before it creates any work; an
-        undeclared event, tool, model interface, or child region settles as a durable
-        typed denial injected into the continuation, never a silent no-op. A recorded
-        (activation, call correlation) is a re-drive: it maps to its fabric-assigned
-        idempotency key and creates no second request, so a fresh harness call id can
-        never duplicate a target effect. A spawn selects one declared region by role and
-        materializes one child under that region's child-init scope; a spawn seal closes
-        that region; an invocation or effect records durable request state before the
-        work item suspends, so waiting holds no worker; a yield persists the capsule; a
-        state access records the declared reference.
-        """
+        """Route an episode's boundary request back into the ledger, validated first."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
@@ -152,19 +128,8 @@ class EpisodeBoundaryRouter:
         return Advance()
 
     def route_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> Advance:
-        """Record a model turn's facade group and route each member kind-specifically.
-
-        Each ordered member is authority-checked and recorded independently under one
-        shared group id and the work item's single continuation. A spawn member admits
-        one child in source order and settles at admission with a deterministic
-        acceptance ack (never a child result); a search member defers as an invocation
-        that holds the resume gate. A per-member budget overflow is a typed quota
-        outcome that leaves an accepted sibling untouched. The lane suspends once when
-        an await-outcome member is still unresolved; a group with none (a spawn-only
-        turn) re-readies at once, injecting the ordered acceptance vector on its next
-        step. A re-drive of the same group reuses its recorded members and creates no
-        duplicate child or invocation.
-        """
+        """Record a model turn's facade group and route each member
+        kind-specifically."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
@@ -292,15 +257,7 @@ class EpisodeBoundaryRouter:
         return self._ledger.scope_children[scope_id]
 
     def deliver_boundary_outcome(self, task_id: str, call_correlation: str) -> Advance:
-        """Re-ready a boundary-suspended work item once its outcome is durable.
-
-        A mediated request's durable outcome — a model or tool result, or a denial —
-        lets the episode resume: the work item returns to READY for a fresh attempt that
-        injects the outcome at its originating call. Only a boundary-suspended work item
-        with a recorded envelope for the call is resumed — a delivery to a running or
-        settled item, or for an unrecorded call, is a no-op. An episode has one
-        outstanding boundary at a time, so the recorded call is the one it awaits.
-        """
+        """Re-ready a boundary-suspended work item once its outcome is durable."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status is not WorkItemStatus.BLOCKED:
             return Advance()
@@ -316,11 +273,8 @@ class EpisodeBoundaryRouter:
         return Advance(ready=[wi.legacy_task_id])
 
     def mark_pending_outcome(self, task_id: str, call_correlation: str | None) -> None:
-        """Record (or clear) the settled boundary whose outcome the next resume injects.
-
-        Cleared as each step is processed, so a step never re-injects a prior step's
-        already-consumed outcome.
-        """
+        """Record (or clear) the settled boundary whose outcome the next resume
+        injects."""
         if (wi := self._ledger.work_item_for_task(task_id)) is not None:
             wi.pending_outcome_call = call_correlation
             if call_correlation is None:
@@ -340,18 +294,7 @@ class EpisodeBoundaryRouter:
         credential: str | None = None,
         deployment_credential: bool = False,
     ) -> MediatedOperationPermit | None:
-        """A one-use permit for a recorded worker-originated boundary, or None.
-
-        The engine owns the durable identity and authority: it fills the invocation,
-        idempotency key, request digest, interface, subject, and the policy epoch the
-        boundary was admitted under. The caller supplies the audience (the agent's
-        worker and its generation), the policy-bounded budget the operation runs in, and
-        the provider credential authority: an optional per-call ``credential`` resolved
-        for a workflow's pinned model key, or ``deployment_credential``, which grants
-        the egressing worker its deployment key.
-        Returns None for a boundary that carries no digest — i.e. one the worker did not
-        originate — so a re-mint never fabricates authorization the boundary lacks.
-        """
+        """A one-use permit for a recorded worker-originated boundary, or None."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return None
@@ -396,18 +339,8 @@ class EpisodeBoundaryRouter:
         credential: str | None = None,
         deployment_credential: bool = False,
     ) -> MediatedOperationPermit | None:
-        """A one-use permit for a held agent's in-turn model egress, or None on denial.
-
-        A harness that holds its lane across a model call has no recorded suspending
-        boundary, so the engine mints from the worker's propose rather than a ledger
-        event: it validates the activation's model-invoke authority against the operator
-        face, mints a fresh invocation identity, fences the permit on the worker's
-        ``request_digest``, and binds the audience to the agent's worker. The permit
-        authorizes one egress and records no resumable state; the turn's durable
-        progress rests on its turn-completion boundaries. A missing activation, or a
-        model invocation outside the operator's face, returns None, which the caller
-        relays as a definitive denial.
-        """
+        """A one-use permit for a held agent's in-turn model egress, or None on
+        denial."""
         wi = self._ledger.work_item_for_task(task_id)
         act = self._ledger.activations.get(wi.activation_id) if wi is not None else None
         op = self._topology.operators.get(act.operator_id) if act is not None else None
@@ -444,12 +377,7 @@ class EpisodeBoundaryRouter:
         value: str | None = None,
         ref: OutcomeManifest | None = None,
     ) -> Advance:
-        """Persist a mediated outcome and re-ready the suspended episode.
-
-        The outcome — an inline ``value`` or a reference-backed ``ref`` manifest — lands
-        durably on the boundary envelope so a re-dispatch injects it and a restart
-        rehydrates it; the item then returns to READY for a fresh attempt.
-        """
+        """Persist a mediated outcome and re-ready the suspended episode."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return Advance()
@@ -482,13 +410,7 @@ class EpisodeBoundaryRouter:
     def terminalize_boundary_invocation(
         self, task_id: str, call_correlation: str
     ) -> str | None:
-        """Record a settled mediated boundary's invocation as terminal in the ledger.
-
-        Returns the durable ``invocation_id`` so a control-plane consumer bound to it —
-        the resident-capacity admission credit — can advance from this fenced ``DS``
-        outcome. The transition is idempotent and never regresses an ambiguity-terminal
-        outcome.
-        """
+        """Record a settled mediated boundary's invocation as terminal in the ledger."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return None
@@ -505,12 +427,7 @@ class EpisodeBoundaryRouter:
         self, task_ids: Iterable[str] | None = None
     ) -> list[str]:
         """Terminalize the unsettled mediated boundary invocations of the given tasks'
-        activations, or of every activation; one already terminal is left as it is.
-
-        Returns the ``invocation_id``s it terminalized so a control-plane consumer bound
-        to them — a resident-capacity admission credit — releases from this fenced
-        terminal.
-        """
+        activations, or of every activation; one already terminal is left as it is."""
         activations = (
             None
             if task_ids is None

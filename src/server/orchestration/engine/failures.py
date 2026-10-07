@@ -1,24 +1,6 @@
 """Declared-failure facts of one workflow instance."""
 
-_DECLARED_FAILURE_REASON = "declared-failure obligation"
-
-
-_DECLARED_FAILURE_REASON = "declared-failure obligation"
-
-
-_DECLARED_FAILURE_REASON = "declared-failure obligation"
-
-
-_DECLARED_FAILURE_REASON = "declared-failure obligation"
-
-
-_DECLARED_FAILURE_REASON = "declared-failure obligation"
-
-
-_DECLARED_FAILURE_REASON = "declared-failure obligation"
-
-
-_DECLARED_FAILURE_REASON = "declared-failure obligation"
+DECLARED_FAILURE_REASON = "declared-failure obligation"
 
 
 class FailureLedger:
@@ -47,10 +29,6 @@ class FailureLedger:
 
     def scope_failed(self, scope_id: str) -> bool:
         return scope_id in self.failed_scopes
-
-    def name_failure(self, task_id: str, reason: str) -> None:
-        """Name why a task failed, unless an earlier failure named it."""
-        self.failure_reasons.setdefault(task_id, reason)
 
     def name_failures(self, failed: list[str], reason: str) -> None:
         for task_id in failed:

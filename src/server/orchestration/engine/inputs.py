@@ -1,19 +1,8 @@
 """Accepted agent inputs of one workflow instance."""
 
-from ...task.v2.representations.operators import (
-    OperatorKind,
-)
-from ..state import (
-    AcceptedInput,
-    PublicationOutcome,
-    ValueRef,
-    WorkItemStatus,
-)
-from ..tool_dispatch import (
-    AgentInputPlan,
-    InputMemberPlan,
-    InputPortPlan,
-)
+from ...task.v2.representations.operators import OperatorKind
+from ..state import AcceptedInput, PublicationOutcome, ValueRef, WorkItemStatus
+from ..tool_dispatch import AgentInputPlan, InputMemberPlan, InputPortPlan
 from .ledger import OrchestrationLedger
 from .topology import PlanTopology
 
@@ -69,14 +58,8 @@ class AcceptedInputLedger:
         return pending
 
     def agent_input_plan(self, task_id: str) -> AgentInputPlan | None:
-        """The engine's per-port input membership for an agent, resolved by the runtime.
-
-        Covers edge-bound ports (a direct producer or a join/merge aggregate) whose
-        sources have settled and are not yet recorded. Membership and ordering are the
-        engine's decision — declared by the edge and the join's child order, never
-        arrival. A fan-out child's inline entry port is minted at materialization and is
-        not returned here.
-        """
+        """The engine's per-port input membership for an agent, resolved by the
+        runtime."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return None

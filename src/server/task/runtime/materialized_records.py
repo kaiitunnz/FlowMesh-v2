@@ -2,10 +2,7 @@
 
 import time
 
-from ..models import (
-    TaskRecord,
-    TaskStatus,
-)
+from ..models import TaskRecord, TaskStatus
 
 
 def synthesize_child_record(template: TaskRecord, child_task_id: str) -> TaskRecord:

@@ -3,10 +3,7 @@
 from dataclasses import dataclass
 
 from shared.content import ContentReference
-from shared.harness import (
-    InputBinding,
-    InputBindingMember,
-)
+from shared.harness import InputBinding, InputBindingMember
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import value_text
 
@@ -18,16 +15,12 @@ from ...orchestration import (
     PublicationOutcome,
     ValueRef,
 )
-from ...orchestration.tool_dispatch import (
-    InputMemberPlan,
-)
-from ..models import (
-    TaskRecord,
-)
+from ...orchestration.tool_dispatch import InputMemberPlan
+from ..models import TaskRecord
 from ..redrive import StoreRedriveScheduler
 from ..results import ResultReader, ResultUnavailable, ResultUnreadable
 from . import content_bindings
-from .content_bindings import _element_of
+from .content_bindings import element_of
 
 
 @dataclass(frozen=True)
@@ -80,7 +73,7 @@ def _member_text(
     envelope = values.get(value_ref.content)
     if not isinstance(envelope, ResultEnvelope):
         return None
-    return value_text(envelope, _element_of(value_ref))
+    return value_text(envelope, element_of(value_ref))
 
 
 def mint_fanout_facet_locked(

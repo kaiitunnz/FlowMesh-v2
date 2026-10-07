@@ -3,10 +3,7 @@
 from enum import Enum, auto
 
 from shared.content import ContentReference
-from shared.utils import (
-    new_attempt_id,
-    new_invocation_id,
-)
+from shared.utils import new_attempt_id, new_invocation_id
 
 from ...utils.time import now_iso
 from ..outcomes import (
@@ -39,8 +36,6 @@ from .publications import PublicationLedger
 from .spawns import SpawnRegions
 
 _OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
-
-
 _AMBIGUITY_TERMINAL_REASON = "ambiguity-terminal effect"
 
 
@@ -66,8 +61,8 @@ _RERUN_ON_LOSS = frozenset({_LossResolution.PREPARE_AGAIN, _LossResolution.RUN_A
 
 
 class AttemptLifecycle:
-    """Records the physical attempts and invocations of dispatchable work items,
-    their effect receipts, and how a lost worker resolves them."""
+    """Records each dispatched work item's attempts, invocations and effect receipts,
+    settles its success, failure and uncertain reports, and resolves a lost worker."""
 
     def __init__(
         self,
@@ -148,7 +143,7 @@ class AttemptLifecycle:
             invocation_id=wi.invocation_id,
         )
 
-    def settle_attempt_terminal(
+    def _settle_attempt_terminal(
         self, wi: WorkItem, outcome: PublicationOutcome
     ) -> None:
         if attempt := self._ledger.latest_attempt(wi):
@@ -174,10 +169,7 @@ class AttemptLifecycle:
 
     def on_returned(self, task_id: str) -> bool:
         """Close an in-flight attempt handed back without an outcome, and re-ready it;
-        returns whether there was one.
-
-        The attempt is not charged: the work item runs again under its invocation.
-        """
+        returns whether there was one."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status is not WorkItemStatus.DISPATCHED:
             return False
@@ -195,11 +187,11 @@ class AttemptLifecycle:
         """Whether the loss of the task's worker runs its work item again, as
         ``on_uncertain`` resolves it, rather than failing it."""
         return (
-            self.resolve_loss(self._ledger.work_item_for_task(task_id))
+            self._resolve_loss(self._ledger.work_item_for_task(task_id))
             in _RERUN_ON_LOSS
         )
 
-    def resolve_loss(self, wi: WorkItem | None) -> _LossResolution:
+    def _resolve_loss(self, wi: WorkItem | None) -> _LossResolution:
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return _LossResolution.NOTHING
         if wi.invocation_id is None:
@@ -229,11 +221,8 @@ class AttemptLifecycle:
         return attempt.worker_id
 
     def close_latest_attempt(self, task_id: str) -> None:
-        """Settle a still-running attempt of a continuing episode, bounding its history.
-
-        A continue-boundary re-dispatches without suspending, so its finished attempt is
-        marked succeeded here rather than left perpetually running.
-        """
+        """Settle a still-running attempt of a continuing episode, bounding its
+        history."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is not None and (attempt := self._ledger.latest_attempt(wi)) is not None:
             if attempt.status in (AttemptStatus.ISSUED, AttemptStatus.RUNNING):
@@ -256,14 +245,7 @@ class AttemptLifecycle:
         )
 
     def reconcile_pending(self, task_id: str) -> bool:
-        """Re-derive readiness for a task whose durable record shows PENDING.
-
-        Returns whether the work item is ready to admit. A work item the snapshot still
-        shows in flight — a crash after a retry persisted the PENDING record but before
-        the ledger caught up — is reset to ready with its lost attempt marked, so the
-        retry is not orphaned; a work item whose predecessors have not all settled, or
-        whose declared inputs have not all been accepted, stays blocked.
-        """
+        """Re-derive readiness for a task whose durable record shows PENDING."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return False
@@ -299,13 +281,7 @@ class AttemptLifecycle:
         return True
 
     def latest_attempt_open(self, task_id: str) -> bool:
-        """Whether the work item's latest attempt still expects a terminal report.
-
-        A reroute that re-enqueues an episode closes the attempt that produced the turn,
-        so a completion whose attempt is already closed is a superseded replay —
-        applying it would preempt the live turn. A genuine terminal report lands while
-        its attempt is still issued or running.
-        """
+        """Whether the work item's latest attempt still expects a terminal report."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None:
             return False
@@ -322,13 +298,7 @@ class AttemptLifecycle:
         empty: bool = False,
         content: ContentReference | None = None,
     ) -> Advance:
-        """Settle a work item on success and release its successors.
-
-        ``empty`` marks a conditional-skip settlement, resolving the declared output to
-        an explicit-empty publication rather than a value. ``content`` is the stored
-        result the settled value is bound to; it binds once, with the settlement, so a
-        later success for the same work item cannot re-point it.
-        """
+        """Settle a work item on success and release its successors."""
         wi = self._ledger.work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
@@ -344,7 +314,7 @@ class AttemptLifecycle:
                 content=content,
             )
         )
-        self.settle_attempt_terminal(wi, outcome)
+        self._settle_attempt_terminal(wi, outcome)
         activation = self._ledger.activations[wi.activation_id]
         # An agent's terminal completion settles every declared child region, so a
         # spawn_agent scope closes even without an explicit SpawnSeal.
@@ -385,13 +355,9 @@ class AttemptLifecycle:
 
     def on_uncertain(self, task_id: str, error: str | None = None) -> Advance:
         """Resolve a lost acknowledgement, route loss, or failure that may follow the
-        work item's external effect.
-
-        ``error`` is the executor's message for a reported failure; the attempt keeps
-        it, and a work item that cannot run again fails with it beside the reason.
-        """
+        work item's external effect."""
         wi = self._ledger.work_item_for_task(task_id)
-        resolution = self.resolve_loss(wi)
+        resolution = self._resolve_loss(wi)
         if wi is None or resolution is _LossResolution.NOTHING:
             return Advance()
         if resolution is _LossResolution.PREPARE_AGAIN:
