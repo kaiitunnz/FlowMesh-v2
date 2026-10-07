@@ -368,4 +368,6 @@ async def test_a_stored_branch_bearing_workflow_rehydrates() -> None:
     assert await restored.rehydrate() == 1
     engine = restored.orchestration_engine(workflow_id)
     assert engine is not None
-    assert any(op.kind.value == "branch" for op in engine._bundle.template.operators)
+    assert any(
+        op.kind.value == "branch" for op in engine._topology.bundle.template.operators
+    )

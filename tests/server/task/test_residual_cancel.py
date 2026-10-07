@@ -219,9 +219,9 @@ def test_an_agents_cancel_residual_releases_a_cancelled_childs_credit() -> None:
         workflow_id, ids = await _register(runtime, _HEAD + _RESIDENT_REVIEWER)
         engine = _engine(runtime, workflow_id)
         join_op = f"{ids['lead']}:reviewer:spawn:join"
-        join = engine._operators[join_op]
+        join = engine._topology.operators[join_op]
         assert isinstance(join, JoinRegion)
-        engine._operators[join_op] = join.model_copy(
+        engine._topology.operators[join_op] = join.model_copy(
             update={"residual_policy": "cancel"}
         )
 
@@ -318,9 +318,9 @@ def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -
         workflow_id, ids = await _register(runtime, _HEAD + _NESTED_REVIEWERS)
         engine = _engine(runtime, workflow_id)
         join_op = f"{ids['lead']}:reviewer:spawn:join"
-        join = engine._operators[join_op]
+        join = engine._topology.operators[join_op]
         assert isinstance(join, JoinRegion)
-        engine._operators[join_op] = join.model_copy(
+        engine._topology.operators[join_op] = join.model_copy(
             update={"residual_policy": "cancel"}
         )
         lead, lead_adapter = ids["lead"], _spawner("reviewer", "done")
@@ -341,7 +341,9 @@ def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -
         assert _status(runtime, reviewer) == TaskStatus.CANCELLED
         sub_wi = engine.work_item(sub)
         assert sub_wi is not None
-        sub_scope = engine._scopes[engine._activations[sub_wi.activation_id].scope_id]
+        sub_scope = engine._ledger.scopes[
+            engine._ledger.activations[sub_wi.activation_id].scope_id
+        ]
         assert (
             sub_scope.grant_id is not None
             and engine._grants[sub_scope.grant_id].revoked

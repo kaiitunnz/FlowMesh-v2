@@ -142,7 +142,7 @@ async def test_a_returned_attempt_keeps_its_outcome() -> None:
     engine = runtime._engines[workflow_id]
     work_item = engine.work_item(side)
     assert work_item is not None
-    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+    assert [engine._ledger.attempts[a].status for a in work_item.attempt_ids] == [
         AttemptStatus.RETURNED
     ]
     assert runtime._tasks[side].status == TaskStatus.FAILED

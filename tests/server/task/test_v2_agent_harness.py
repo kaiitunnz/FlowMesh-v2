@@ -278,11 +278,11 @@ def test_agent_suspends_before_a_mediated_model_action() -> None:
     assert env is not None and env.idempotency_key is not None
     # The causal request identity is recorded, and its durable invocation is ISSUED.
     assert env.invocation_id is not None
-    model_inv = eng._invocations[env.invocation_id]  # type: ignore[attr-defined]
+    model_inv = eng._ledger.invocations[env.invocation_id]  # type: ignore[attr-defined]
     assert model_inv.state is InvocationState.ISSUED
     assert env.continuation == "after:c0"  # capsule persisted before the lane released
     # The finished attempt is closed, so the work item holds no worker while it waits.
-    attempt = eng._attempts[wi.attempt_ids[-1]]  # type: ignore[attr-defined]
+    attempt = eng._ledger.attempts[wi.attempt_ids[-1]]  # type: ignore[attr-defined]
     assert attempt.status.value == "succeeded" and attempt.finished_at is not None
 
 
@@ -380,14 +380,14 @@ def test_redrive_maps_to_the_recorded_idempotency_key() -> None:
     eng.route_boundary_event("A", request)
     env = eng.boundary_envelope(act, "c0")
     assert env is not None
-    key, invocations = env.idempotency_key, len(eng._invocations)  # type: ignore[attr-defined]
+    key, invocations = env.idempotency_key, len(eng._ledger.invocations)  # type: ignore[attr-defined]
     # A forced re-drive of the same facade call under a fresh attempt reissues the
     # request; it maps to the recorded key and creates no second target effect.
     eng.on_dispatched("A", "w2")
     eng.route_boundary_event("A", request)
     again = eng.boundary_envelope(act, "c0")
     assert again is not None and again.idempotency_key == key
-    assert len(eng._invocations) == invocations  # type: ignore[attr-defined]
+    assert len(eng._ledger.invocations) == invocations  # type: ignore[attr-defined]
     assert "boundary_redriven" in {k for k, _ in eng.contract_trace()}
 
 
@@ -415,7 +415,7 @@ def test_boundary_envelope_survives_rehydration() -> None:
 def test_undeclared_tool_is_denied_without_creating_work() -> None:
     eng = _engine(_solo_agent())
     act = _dispatch_agent(eng)
-    before = len(eng._invocations)  # type: ignore[attr-defined]
+    before = len(eng._ledger.invocations)  # type: ignore[attr-defined]
     eng.route_boundary_event(
         "A",
         BoundaryEvent(
@@ -425,7 +425,7 @@ def test_undeclared_tool_is_denied_without_creating_work() -> None:
     env = eng.boundary_envelope(act, "c0")
     # An undeclared tool is a durable typed denial, not a silent no-op — no invocation.
     assert env is not None and env.denial is DenialKind.AUTHORITY
-    assert len(eng._invocations) == before  # type: ignore[attr-defined]
+    assert len(eng._ledger.invocations) == before  # type: ignore[attr-defined]
     assert "authority_denied" in {k for k, _ in eng.contract_trace()}
 
 
@@ -590,7 +590,7 @@ def test_recursive_agent_child_reuses_the_declared_region() -> None:
     assert lvl2.startswith("act-") and lvl2 != lvl1
     # The template still holds exactly the declared operators: recursion reused the
     # region rather than growing the topology.
-    assert {op.operator_id for op in eng._bundle.template.operators} == {  # type: ignore[attr-defined]
+    assert {op.operator_id for op in eng._topology.bundle.template.operators} == {  # type: ignore[attr-defined]
         "A",
         "child",
         "worker:spawn",
@@ -1095,9 +1095,9 @@ def test_a_nested_level_closes_after_its_join_failed_at_the_root() -> None:
 
 def test_a_cancelled_instances_region_delivers_nothing_downstream() -> None:
     eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
-    join = eng._operators["self:spawn:join"]
+    join = eng._topology.operators["self:spawn:join"]
     assert isinstance(join, JoinRegion)
-    eng._operators["self:spawn:join"] = join.model_copy(
+    eng._topology.operators["self:spawn:join"] = join.model_copy(
         update={"residual_policy": "cancel"}
     )
     i1, grandchild = _nested_level(eng)
@@ -1121,7 +1121,7 @@ def test_the_root_level_aggregate_survives_a_later_nested_release() -> None:
     assert eng.route_boundary_event("A", _SELF_SEAL).ready == ["after"]
     root_members = [
         member.child_activation_id
-        for member in eng._aggregate_by_join["self:spawn:join"].members
+        for member in eng._ledger.aggregate_by_join["self:spawn:join"].members
     ]
     assert root_members == [_work_item(eng, i1).activation_id]
 
@@ -1148,7 +1148,7 @@ def test_the_root_level_aggregate_survives_a_later_nested_release() -> None:
     restored = OrchestrationEngine(stored, bundle)
     assert [
         member.child_activation_id
-        for member in restored._aggregate_by_join["self:spawn:join"].members
+        for member in restored._ledger.aggregate_by_join["self:spawn:join"].members
     ] == root_members
 
 
@@ -1190,7 +1190,7 @@ def test_a_child_index_counts_every_activation_in_its_scope_across_a_restart() -
     assert activations[second].child_index == 2
     assert _numbered_by_scope_order(eng)
 
-    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)
+    restored = OrchestrationEngine(eng.to_snapshot(), eng._topology.bundle)
     third = _spawn_in(restored, "A", "c2", "worker")
     activations = {a.activation_id: a for a in restored.to_snapshot().activations}
     assert activations[third].child_index == 3
@@ -1204,7 +1204,7 @@ def test_the_activation_budget_holds_across_a_restart() -> None:
     _dispatch_agent(eng)
     _spawn_in(eng, "A", "c0", "worker")
     restored = OrchestrationEngine(
-        eng.to_snapshot(), eng._bundle, budget=ScopeBudget(max_activations=2)
+        eng.to_snapshot(), eng._topology.bundle, budget=ScopeBudget(max_activations=2)
     )
     _spawn_in(restored, "A", "c1", "worker")
     with pytest.raises(RegionError):
@@ -1214,7 +1214,7 @@ def test_the_activation_budget_holds_across_a_restart() -> None:
 def test_spawning_a_child_never_rescans_every_activation() -> None:
     eng = _engine(_spawning_agent(child=_leaf("child")))
     _dispatch_agent(eng)
-    activations = eng._activations
+    activations = eng._ledger.activations
     scans = 0
 
     def count(_frame: Any, event: str, arg: Any) -> None:
@@ -1247,5 +1247,5 @@ def test_a_restart_restores_only_the_spawn_site_denials() -> None:
     eng.deny_spawn("worker:spawn", "x")
     live = set(eng._denied_spawns)
 
-    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)
+    restored = OrchestrationEngine(eng.to_snapshot(), eng._topology.bundle)
     assert restored._denied_spawns == live == {"worker:spawn"}

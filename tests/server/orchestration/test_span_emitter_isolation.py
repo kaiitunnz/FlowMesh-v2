@@ -147,7 +147,7 @@ def test_a_failing_attach_still_builds_a_restartable_engine(
         ),
     )
     child = next(
-        a.activation_id for a in live._activations.values() if a.kind == "child"
+        a.activation_id for a in live._ledger.activations.values() if a.kind == "child"
     )
     live.on_dispatched(child, "w1")
     live.on_succeeded(child)

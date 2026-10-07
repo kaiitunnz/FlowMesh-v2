@@ -1,0 +1,411 @@
+"""The shared ledger state of one workflow instance and its observation helpers."""
+
+from collections import Counter
+from collections.abc import Callable
+
+from ...task.v2.representations.admission import ResidentAdmissionBinding
+from ...task.v2.representations.operators import (
+    AgentOperator,
+    OperatorKind,
+    ServiceDependency,
+    operator_service_dependency,
+)
+from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
+from ..outcomes import (
+    classify_recovery,
+)
+from ..private_state import PrivateStateLedger
+from ..state import (
+    Activation,
+    Attempt,
+    CapabilityStatus,
+    Continuation,
+    Invocation,
+    LedgerSnapshot,
+    OrchestrationEvent,
+    ProgressAxis,
+    ProgressCapability,
+    Record,
+    RecoveryDisposition,
+    RegionJoinAggregate,
+    Scope,
+    ValueRef,
+    WorkflowInstance,
+    WorkItem,
+)
+from ..telemetry import TelemetrySpanEmitter
+from .failures import FailureLedger
+from .topology import PlanTopology
+
+_EVENT_FIELDS = frozenset(
+    {"operator_id", "work_item_id", "attempt_id", "invocation_id", "slot_key"}
+)
+
+
+class OrchestrationLedger:
+    """Holds one workflow instance's shared work-item, activation, scope, capability,
+    attempt, invocation, record and trace collections, with their indexes, and appends
+    the instance's events.
+
+    Collections are mutated in place and never reassigned once restored: the span
+    emitter and every component read them live.
+    """
+
+    def __init__(
+        self,
+        snapshot: LedgerSnapshot,
+        topology: PlanTopology,
+        failures: FailureLedger,
+        emitter: TelemetrySpanEmitter,
+    ) -> None:
+        self._topology = topology
+        self._failures = failures
+        self.emitter = emitter
+        self.workflow_instance = snapshot.instance
+        self.root_scope = snapshot.root_scope
+        self.root_grant = snapshot.root_grant
+        self.next_seq = snapshot.next_seq
+        self.private_state = PrivateStateLedger(snapshot.private_state)
+        self.scopes: dict[str, Scope] = {}
+        self.activations: dict[str, Activation] = {}
+        # Per-scope and dynamic activation counts that number and budget each child.
+        self.scope_population: Counter[str] = Counter()
+        self.scope_children: Counter[str] = Counter()
+        self.dynamic_activations = 0
+        self.work_items: dict[str, WorkItem] = {}
+        self.continuations: dict[str, Continuation] = {}
+        self.records: list[Record] = []
+        self.region_aggregates: list[RegionJoinAggregate] = []
+        self.aggregate_by_join: dict[str, RegionJoinAggregate] = {}
+        self.invocations: dict[str, Invocation] = {}
+        self.attempts: dict[str, Attempt] = {}
+        self.capabilities: dict[tuple[str, ProgressAxis], ProgressCapability] = {}
+        self.trace: list[OrchestrationEvent] = []
+        # (agent activation, region operator) -> the synthetic opener activation that
+        # owns that region's child-init scope.
+        self.region_openers: dict[tuple[str, str], str] = {}
+        self.wi_by_task: dict[str, str] = {}
+        self.wi_by_operator: dict[str, str] = {}
+        self.wi_by_activation: dict[str, str] = {}
+        self.scope_by_activation: dict[str, str] = {}
+        self.owner_acts_by_operator: dict[str, list[str]] = {}
+        self.loop_time: dict[str, int] = {}
+        self.released_scopes: set[str] = set()
+
+    def is_dynamic_activation(self, activation_id: str) -> bool:
+        act = self.activations.get(activation_id)
+        return act is not None and act.kind in ("child", "iteration")
+
+    def scope_subtree(self, root: str) -> list[str]:
+        order = [root]
+        seen = {root}
+        cursor = 0
+        while cursor < len(order):
+            current = order[cursor]
+            cursor += 1
+            for scope in self.scopes.values():
+                if scope.parent_scope_id == current and scope.scope_id not in seen:
+                    seen.add(scope.scope_id)
+                    order.append(scope.scope_id)
+        return order
+
+    def scope_work_items(
+        self, scope_id: str, *, kinds: tuple[str, ...]
+    ) -> list[WorkItem]:
+        return [
+            wi
+            for a in self.activations.values()
+            if a.scope_id == scope_id
+            and a.kind in kinds
+            and (
+                wi := self.work_items.get(
+                    self.wi_by_activation.get(a.activation_id, "")
+                )
+            )
+            is not None
+        ]
+
+    def root_level(self, scope_id: str) -> bool:
+        return self.scopes[scope_id].parent_scope_id == self.root_scope.scope_id
+
+    def add_activation(self, activation: Activation) -> None:
+        self.activations[activation.activation_id] = activation
+        self.scope_population[activation.scope_id] += 1
+        if activation.kind == "child":
+            self.scope_children[activation.scope_id] += 1
+        if activation.kind in ("child", "iteration"):
+            self.dynamic_activations += 1
+
+    def scope_closed(self, scope_id: str) -> bool:
+        """Whether a scope closed: its join released, or it failed and every child it
+        admitted has settled."""
+        if scope_id in self.released_scopes:
+            return True
+        cap = self.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        return self._failures.scope_failed(scope_id) and cap is not None and cap.closed
+
+    def emit_scope_owner(self, scope_id: str) -> None:
+        if (owner := self.scopes[scope_id].owner_activation_id) is not None:
+            self.emitter.emit_activation(owner)
+
+    def template_closure(
+        self,
+        template: str,
+        excluded: Callable[[str, list[str]], bool] | None = None,
+    ) -> list[str]:
+        """A child template and, under an agent template, the child templates of every
+        region it declares, however deep; a template ``excluded`` rejects is left out
+        together with what is nested under it."""
+        closure: list[str] = []
+        frontier = [template]
+        while frontier:
+            current = frontier.pop()
+            if (
+                current in closure
+                or current in self.wi_by_operator
+                or (excluded is not None and excluded(current, closure))
+            ):
+                continue
+            closure.append(current)
+            if isinstance(op := self._topology.operators.get(current), AgentOperator):
+                frontier.extend(
+                    nested
+                    for ref in op.child_region_refs
+                    if (nested := self._topology.child_template_of(ref.spawn_ref))
+                    is not None
+                )
+        return closure
+
+    def recovery_disposition(self, task_id: str) -> RecoveryDisposition | None:
+        """Whether the task's operation may be recomputed or must be restored."""
+        profile = self._topology.profiles.get(self._operator_for_task(task_id) or "")
+        return classify_recovery(profile) if profile else None
+
+    def contract_trace(self) -> list[tuple[str, str]]:
+        """A compact (kind, subject) projection of the trace for test inspection."""
+        return [
+            (e.kind, e.operator_id or e.slot_key or e.work_item_id or "")
+            for e in self.trace
+        ]
+
+    def scope_for(self, region_op: str) -> str | None:
+        return self.scope_id_for(region_op)
+
+    def region_scope_for(self, agent_activation: str, role: str) -> str | None:
+        """The child-init scope an agent's declared role region opened, if entered."""
+        agent = self.activations.get(agent_activation)
+        op = self._topology.operators.get(agent.operator_id) if agent else None
+        if not isinstance(op, AgentOperator):
+            return None
+        region_op = self._topology.agent_region_op(op, role)
+        opener = self.region_openers.get((agent_activation, region_op or ""))
+        return self.scope_by_activation.get(opener) if opener else None
+
+    def region_closed(self, region_op: str) -> bool:
+        if self._failures.region_failed(region_op):
+            return True
+        scope_id = (
+            self._scope_for_join(region_op)
+            if self._topology.kind(region_op) is OperatorKind.JOIN
+            else self.scope_id_for(region_op)
+        )
+        return scope_id in self.released_scopes if scope_id else False
+
+    def sealed_region_child_templates(self) -> frozenset[str]:
+        """Child templates of agent-region spawns whose child-init sealed or revoked.
+
+        A child template holds the workflow open until its spawn seals; a producer
+        fanout retires it on materialization, and an agent's dynamic spawn region
+        retires it once the region seals (on ``spawn_agent`` seal or the parent's
+        completion), so the template — never dispatched as a task — stops holding it.
+        """
+        sealed: set[str] = set()
+        for spawn_op in self._topology.agent_region_spawns:
+            template = self._topology.child_template_of(spawn_op)
+            if template is None:
+                continue
+            scope_id = self.scope_id_for(spawn_op)
+            cap = (
+                self.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+                if scope_id
+                else None
+            )
+            if cap is not None and cap.status in (
+                CapabilityStatus.SEALED,
+                CapabilityStatus.REVOKED,
+            ):
+                sealed.update(self.template_closure(template))
+        return frozenset(sealed)
+
+    def embodiment_menu(self, task_id: str) -> InferenceEmbodimentMenu | None:
+        """The finite set of embodiments a task's plan node offers, if it offers one."""
+        wi = self.work_item_for_task(task_id)
+        if wi is None:
+            return None
+        return next(
+            (
+                node.embodiment_menu
+                for node in self._topology.bundle.plan.nodes
+                if node.embodiment_menu is not None
+                and node.logical_ref == wi.operator_id
+            ),
+            None,
+        )
+
+    def episode_spec(self, task_id: str) -> EpisodeSpec | None:
+        """The run-to-yield episode a task's operator lowers to, if the plan cut it."""
+        wi = self.work_item_for_task(task_id)
+        if wi is None:
+            return None
+        for node in self._topology.bundle.plan.nodes:
+            if node.episode is None:
+                continue
+            if node.logical_ref == wi.operator_id or (
+                wi.operator_id in node.episode.fused_refs
+            ):
+                return node.episode
+        return None
+
+    def work_item(self, task_id: str) -> WorkItem | None:
+        return self.work_item_for_task(task_id)
+
+    def agent_operator(self, task_id: str) -> AgentOperator | None:
+        """The agent operator a dispatched task realizes, resolving its work item."""
+        wi = self.work_item_for_task(task_id)
+        operator_id = wi.operator_id if wi is not None else task_id
+        op = self._topology.operators.get(operator_id)
+        return op if isinstance(op, AgentOperator) else None
+
+    def service_dependency(self, task_id: str) -> ServiceDependency | None:
+        """The normalized resident dependency a dispatched task consumes, or None."""
+        wi = self.work_item_for_task(task_id)
+        operator_id = wi.operator_id if wi is not None else task_id
+        return operator_service_dependency(self._topology.operators.get(operator_id))
+
+    def resident_admission_binding(
+        self, workflow_id: str, task_id: str
+    ) -> ResidentAdmissionBinding | None:
+        """The dependency a task consumes joined with its own plan node's annotations.
+
+        The node is the one the task's operator lowered to; an unresolved embodiment
+        menu carries its resident annotations per candidate, so it contributes none.
+        """
+        wi = self.work_item_for_task(task_id)
+        operator_id = wi.operator_id if wi is not None else task_id
+        dependency = operator_service_dependency(
+            self._topology.operators.get(operator_id)
+        )
+        if dependency is None:
+            return None
+        node = next(
+            (
+                n
+                for n in self._topology.bundle.plan.nodes
+                if n.logical_ref == operator_id and n.embodiment_menu is None
+            ),
+            None,
+        )
+        return ResidentAdmissionBinding(
+            workflow_id=workflow_id,
+            dependency=dependency,
+            requirement=node.service_family_requirement if node else None,
+            intent=node.residency_intent if node else None,
+        )
+
+    def invocation_for_task(self, task_id: str) -> Invocation | None:
+        wi = self.work_item_for_task(task_id)
+        if wi is None or wi.invocation_id is None:
+            return None
+        return self.invocations.get(wi.invocation_id)
+
+    @property
+    def instance(self) -> WorkflowInstance:
+        return self.workflow_instance
+
+    def control_activation(self, operator_id: str) -> str:
+        for a in self.activations.values():
+            if a.operator_id == operator_id and a.kind not in (
+                "child",
+                "iteration",
+                "region",
+            ):
+                return a.activation_id
+        return operator_id
+
+    def _scope_for_join(self, join_op: str) -> str | None:
+        for edge in self._topology.bundle.template.edges:
+            if (
+                edge.to_op == join_op
+                and self._topology.kind(edge.from_op) is OperatorKind.SPAWN
+            ):
+                return self.scope_id_for(edge.from_op)
+        return None
+
+    def handle_operator(self, handle: str) -> str:
+        """The operator id a region handle names: the handle, or its activation's."""
+        act = self.activations.get(handle)
+        return act.operator_id if act else handle
+
+    def resolve_opener_activation(self, handle: str) -> str | None:
+        """The opener activation a region handle resolves to.
+
+        An activation-id handle is its own opener (a recursive level); an operator-id
+        handle resolves to its scope-owning activation, or, before the scope opens, its
+        control activation.
+        """
+        if handle in self.activations:
+            return handle
+        if acts := self.owner_acts_by_operator.get(handle):
+            return acts[-1]
+        ctrl = self.control_activation(handle)
+        return ctrl if ctrl in self.activations else None
+
+    def scope_id_for(self, handle: str) -> str | None:
+        opener = self.resolve_opener_activation(handle)
+        return self.scope_by_activation.get(opener) if opener else None
+
+    def latest_carried(self, scope_id: str) -> ValueRef | None:
+        latest: ValueRef | None = None
+        best = -1
+        for record in self.records:
+            if record.scope_id == scope_id and record.loop_time >= best:
+                best = record.loop_time
+                latest = record.value_ref
+        return latest
+
+    def emit(
+        self, kind: str, *, detail: dict[str, str] | None = None, **fields: str | None
+    ) -> None:
+        self.trace.append(
+            OrchestrationEvent(
+                seq=self.next_seq,
+                kind=kind,
+                operator_id=fields.get("operator_id"),
+                work_item_id=fields.get("work_item_id"),
+                attempt_id=fields.get("attempt_id"),
+                invocation_id=fields.get("invocation_id"),
+                slot_key=fields.get("slot_key"),
+                detail=detail
+                or {
+                    k: v
+                    for k, v in fields.items()
+                    if k not in _EVENT_FIELDS and v is not None
+                },
+            )
+        )
+        self.next_seq += 1
+
+    def work_item_for_task(self, task_id: str) -> WorkItem | None:
+        wi_id = self.wi_by_task.get(task_id)
+        return self.work_items.get(wi_id) if wi_id else None
+
+    def work_item_id_for_task(self, task_id: str) -> str | None:
+        """The episode (work item) id backing a legacy task id, or None."""
+        return self.wi_by_task.get(task_id)
+
+    def _operator_for_task(self, task_id: str) -> str | None:
+        wi = self.work_item_for_task(task_id)
+        return wi.operator_id if wi else None
+
+    def latest_attempt(self, wi: WorkItem) -> Attempt | None:
+        return self.attempts.get(wi.attempt_ids[-1]) if wi.attempt_ids else None

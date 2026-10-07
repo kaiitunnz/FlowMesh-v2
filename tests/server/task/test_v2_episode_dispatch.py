@@ -217,7 +217,7 @@ def _trace_kinds(eng: OrchestrationEngine) -> set[str]:
 
 def test_invocation_boundary_records_durable_state_before_suspending() -> None:
     eng = _leaf_engine()
-    before = len(eng._invocations)  # type: ignore[attr-defined]
+    before = len(eng._ledger.invocations)  # type: ignore[attr-defined]
     adv = eng.route_boundary_event(
         "solo", BoundaryEvent(kind=BoundaryEventKind.INVOCATION, interface="search")
     )
@@ -227,10 +227,10 @@ def test_invocation_boundary_records_durable_state_before_suspending() -> None:
     # A durable invocation is recorded ISSUED before the work item suspends.
     issued = [
         i
-        for i in eng._invocations.values()  # type: ignore[attr-defined]
+        for i in eng._ledger.invocations.values()  # type: ignore[attr-defined]
         if i.state is InvocationState.ISSUED and i.work_item_id == wi.work_item_id
     ]
-    assert len(eng._invocations) == before + 1  # type: ignore[attr-defined]
+    assert len(eng._ledger.invocations) == before + 1  # type: ignore[attr-defined]
     assert issued
 
 

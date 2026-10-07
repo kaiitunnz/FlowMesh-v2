@@ -363,8 +363,8 @@ def test_loop_time_is_well_founded_and_bounded() -> None:
     eng = _engine(_loop_bundle(), budget=ScopeBudget(max_loop_iterations=2))
     t1 = eng.loop_feedback("L")
     t2 = eng.loop_feedback("L")
-    assert eng._activations[t1].loop_time == 1  # strictly increasing
-    assert eng._activations[t2].loop_time == 2
+    assert eng._ledger.activations[t1].loop_time == 1  # strictly increasing
+    assert eng._ledger.activations[t2].loop_time == 2
     with pytest.raises(RegionError):
         eng.loop_feedback("L")  # exceeds the iteration budget
 

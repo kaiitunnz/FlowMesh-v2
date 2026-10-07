@@ -239,7 +239,7 @@ def rehydrated(
 ) -> OrchestrationEngine:
     return OrchestrationEngine(
         live.to_snapshot(),
-        live._bundle,
+        live._topology.bundle,
         budget=ScopeBudget(),
         emitter=emitter,
     )

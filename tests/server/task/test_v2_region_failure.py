@@ -1078,7 +1078,9 @@ def test_a_fan_out_persists_what_it_failed_before_the_ledger(shape: str) -> None
         if shape == "denied_children":
             # Every child's effect falls outside the grant, so admission denies it.
             engine = _engine(runtime, workflow_id)
-            engine._root_grant = engine._root_grant.model_copy(update={"invoke": ()})
+            engine._ledger.root_grant = engine._ledger.root_grant.model_copy(
+                update={"invoke": ()}
+            )
             items = ["h1", "h2"]
         after = ids["after"]
         writes: list[str] = []

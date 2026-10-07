@@ -191,7 +191,7 @@ async def test_a_v2_return_closes_its_attempt_without_charging_it() -> None:
     work_item = engine.work_item(task_id)
     assert work_item is not None
     assert work_item.status is WorkItemStatus.READY
-    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+    assert [engine._ledger.attempts[a].status for a in work_item.attempt_ids] == [
         AttemptStatus.RETURNED
     ]
     assert runtime._tasks[task_id].attempts == 0
@@ -200,7 +200,7 @@ async def test_a_v2_return_closes_its_attempt_without_charging_it() -> None:
     record_dispatch(runtime, task_id, cast(Any, _worker("wkr-2")), "dsp-2")
     runtime.mark_started(task_id, "wkr-2", {}, _TS, dispatch_id="dsp-2")
     runtime.mark_succeeded(task_id, "wkr-2", {}, _TS, dispatch_id="dsp-2")
-    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+    assert [engine._ledger.attempts[a].status for a in work_item.attempt_ids] == [
         AttemptStatus.RETURNED,
         AttemptStatus.SUCCEEDED,
     ]
@@ -355,7 +355,7 @@ async def test_a_v2_input_missing_at_control_keeps_the_returned_attempt() -> Non
     work_item = engine.work_item(task_id)
     assert work_item is not None
     assert work_item.status is WorkItemStatus.SETTLED
-    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+    assert [engine._ledger.attempts[a].status for a in work_item.attempt_ids] == [
         AttemptStatus.RETURNED
     ]
 
