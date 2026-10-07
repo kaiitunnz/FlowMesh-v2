@@ -3,7 +3,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from opentelemetry.trace import Tracer
@@ -54,7 +54,6 @@ from shared.utils import new_workflow_id
 from shared.utils.redact import credential_scrubber
 
 from ...config import AgentBindingConfig, N8nConfig, OrchestrationConfig
-from ...hooks import SUPPLIER_RESOLVERS
 from ...orchestration import (
     Advance,
     LedgerSnapshot,
@@ -147,9 +146,12 @@ from . import (
     materialized_records,
 )
 from .boundary_router import MediatedBoundaryRouter, PendingOp
-from .commits import HeldWrites, TransitionCommitter
+from .commits import TransitionCommitter
+from .dispatch_fence import DispatchFence, Publish, supplier_id
 from .episode_dispatch import EpisodeFeasibility
 from .fanout import FanoutRead
+from .input_checks import INPUT_VERDICT_REPORT, InputChecks
+from .merges import TaskMerges
 from .record_failures import RecordFailures
 from .reports import (
     LOSS_EFFECTS,
@@ -166,35 +168,7 @@ from .scheduling import EpochFrontier, ReadyQueue
 from .static_dag import StaticDag
 from .terminations import Termination, TerminationRelease
 
-
-@dataclass(frozen=True)
-class _InputCheck:
-    """A task held while control checks the inputs its worker could not read."""
-
-    worker_id: str
-    dispatch_id: str | None
-    references: tuple[ContentReference, ...]
-    # Why control found an input unreadable, once it has; the task then fails as a
-    # report of the dispatch that could not read it.
-    unreadable: str | None = None
-
-
-_INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
 _RESIDUAL_CANCEL_REASON = "cancelled by its region's residual policy"
-
-
-def _input_verdict(task_id: str, check: _InputCheck) -> TaskEvent:
-    """Control's report that a held task's input is unreadable, as the dispatch that
-    could not read it."""
-    return TaskEvent(
-        type="TASK_FAILED",
-        task_id=task_id,
-        worker_id=check.worker_id,
-        dispatch_id=check.dispatch_id,
-        error=f"input_unreadable: {check.unreadable}",
-        retryable=False,
-        failure_kind=TaskFailureKind.INPUT_UNREADABLE,
-    )
 
 
 @dataclass(frozen=True)
@@ -206,26 +180,6 @@ class _StagedRegistration:
     candidate_ready: list[str]
     v2_bundle: PersistedV2Workflow | None
     v2_engine: OrchestrationEngine | None
-
-
-@dataclass
-class _Publish:
-    """A dispatch published to a worker: what recording it takes, and how far its
-    worker's reports have taken it."""
-
-    worker_id: str
-    dispatch_id: str | None
-    supplier_id: str
-    input_preparation: bool
-    recorded: bool = False
-    reported: bool = False
-
-
-def _supplier_id(worker: Worker) -> str:
-    for resolver in SUPPLIER_RESOLVERS:
-        if (resolved := resolver.resolve(worker)) is not None:
-            return resolved
-    return ""
 
 
 def _binding_defaults(
@@ -442,15 +396,6 @@ class TaskRuntime:
         self._original_deps: dict[str, set[str]] = {}
         self._completed: set[str] = set()
         self._failed: set[str] = set()
-        self._merge_children_map: dict[str, list[str]] = defaultdict(list)
-        self._merge_parent_map: dict[str, str] = {}
-        # The dispatch being published for each task, until the dispatcher records it;
-        # None when its worker was lost first.
-        self._publishing: dict[str, _Publish | None] = {}
-        # The last dispatch of each task that ended by returning it to the queue: its
-        # worker and dispatch id, and the tasks the return moved.
-        self._returned_dispatches: dict[str, tuple[str, str | None, list[str]]] = {}
-        self._input_checks: dict[str, _InputCheck] = {}
         self._rehydrated_dispatched: dict[str, float] = {}
         self._engines: dict[str, OrchestrationEngine] = {}
         # Interface-keyed handlers for a mediated boundary, dispatched off the caller's
@@ -512,6 +457,33 @@ class TaskRuntime:
             self._control,
             self._logger,
             self._lock,
+        )
+        self._merges = TaskMerges(
+            self._ready,
+            self._dag,
+            self._committer,
+            self._tasks,
+            self._completed,
+            self._failed,
+            self._logger,
+            self._cv,
+        )
+        self._fence = DispatchFence(
+            self._merges,
+            self._committer,
+            self._ready,
+            self._reservations,
+            self._tasks,
+            self._engines,
+        )
+        self._inputs = InputChecks(
+            self._ready,
+            self._committer,
+            self._tasks,
+            self._results,
+            self._redrive,
+            self._logger,
+            self._cv,
         )
 
     # ------------------------------------------------------------------ #
@@ -907,7 +879,7 @@ class TaskRuntime:
                 self._cv.notify_all()
             restored.append(workflow_id)
         with self._cv:
-            self._restore_merges_locked()
+            self._merges.restore_merges_locked()
             self._resident_tasks.seed_dispatched_resident_locked()
             self._reservations.seed_held_dispatches_locked()
             live = [
@@ -965,35 +937,6 @@ class TaskRuntime:
             return
         await self._credential_vault.store_values(workflow_id, refs.values)
         await self._workflow_registry.save_task_states_async(taken)
-
-    def _restore_merges_locked(self) -> None:
-        """Rebuild the in-flight merges from durable records.
-
-        A merge may span workflows, so it is rebuilt once every workflow is restored.
-        A merge whose parent never dispatched returns its children to the queue, and
-        one whose parent settled returns them to run alone.
-        """
-        for child_id, record in self._tasks.items():
-            if record.merged_parent_id and record.status == TaskStatus.DISPATCHED:
-                self._merge_parent_map[child_id] = record.merged_parent_id
-                self._merge_children_map[record.merged_parent_id].append(child_id)
-        parents = {
-            *self._merge_children_map,
-            *(
-                task_id
-                for task_id, rec in self._tasks.items()
-                if rec.merged_children and rec.status not in TERMINAL_TASK_STATUSES
-            ),
-        }
-        for parent_id in parents:
-            parent = self._tasks.get(parent_id)
-            if parent is None or parent.status in TERMINAL_TASK_STATUSES:
-                children = self._merge_children_map.pop(parent_id, [])
-                self._committer.commit_locked(
-                    *self._return_merged_children_locked(children, unmerge=True)
-                )
-            elif parent.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
-                self._release_merge_locked(parent_id)
 
     def _install_rehydrated_workflow_locked(
         self,
@@ -1318,8 +1261,8 @@ class TaskRuntime:
                 self._ready.remove_from_ready_locked(task_id)
                 self._ready.merge_bucket_remove(task_id)
                 self._ready.merge_key_by_task.pop(task_id, None)
-                returned += self._return_merged_children_locked(
-                    self._merge_children_map.pop(task_id, []), unmerge=True
+                returned += self._merges.return_merged_children_locked(
+                    self._merges.merge_children_map.pop(task_id, []), unmerge=True
                 )
                 impacted.append((task_id, reason))
 
@@ -1982,7 +1925,9 @@ class TaskRuntime:
             engine = self._engines.get(agent.workflow_id) if agent else None
             if agent is None or engine is None:
                 return
-            if not self._dispatch_live_locked(agent, proposer_id, proposal.dispatch_id):
+            if not self._fence.dispatch_live_locked(
+                agent, proposer_id, proposal.dispatch_id
+            ):
                 self._router.deny_model_turn(
                     proposal, proposer_id, "model turn not held"
                 )
@@ -2506,7 +2451,7 @@ class TaskRuntime:
         try:
             with self._lock:
                 record = self._tasks.get(task_id)
-                if record is None or not self._accepts_event_locked(
+                if record is None or not self._fence.accepts_event_locked(
                     record, worker_id, dispatch_id
                 ):
                     return
@@ -2545,7 +2490,7 @@ class TaskRuntime:
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            if record is None or not self._dispatch_live_locked(
+            if record is None or not self._fence.dispatch_live_locked(
                 record, worker_id, dispatch_id
             ):
                 return None
@@ -2568,7 +2513,7 @@ class TaskRuntime:
             return (
                 record is not None
                 and record.status not in TERMINAL_TASK_STATUSES
-                and self._holds_dispatch_locked(record, worker_id, None)
+                and self._fence.holds_dispatch_locked(record, worker_id, None)
                 and content_bindings.consumes_locked(
                     self._tasks, self._engines, self._original_deps, record, reference
                 )
@@ -3007,90 +2952,23 @@ class TaskRuntime:
         with self._lock:
             checks = {
                 task_id: check
-                for task_id, check in self._input_checks.items()
+                for task_id, check in self._inputs.input_checks.items()
                 if (record := self._tasks.get(task_id)) is not None
                 and record.workflow_id == workflow_id
             }
         if not checks:
             return
         verdicts = {
-            task_id: self._verify_inputs(check.references)
+            task_id: self._inputs.verify_inputs(check.references)
             for task_id, check in checks.items()
             if check.unreadable is None
         }
-        failures: list[TaskEvent] = []
         with self._cv:
-            for task_id, check in checks.items():
-                if self._input_checks.get(task_id) is not check:
-                    continue
-                record = self._tasks.get(task_id)
-                if check.unreadable is not None:
-                    if record is not None and (
-                        record.status == TaskStatus.PENDING
-                        or self._verdict_unacknowledged_locked(task_id)
-                    ):
-                        failures.append(_input_verdict(task_id, check))
-                    else:
-                        del self._input_checks[task_id]
-                    continue
-                if record is None or record.status != TaskStatus.PENDING:
-                    del self._input_checks[task_id]
-                    continue
-                verdict = verdicts[task_id]
-                if isinstance(verdict, ResultUnreadable):
-                    self._logger.warning(
-                        "Task %s input is unreadable at control: %s", task_id, verdict
-                    )
-                    check = self._input_checks[task_id] = replace(
-                        check, unreadable=str(verdict)
-                    )
-                    failures.append(_input_verdict(task_id, check))
-                    continue
-                if verdict is not None:
-                    self._logger.warning(
-                        "Task %s waits: control cannot read its inputs either: %s",
-                        task_id,
-                        verdict,
-                    )
-                    self._redrive.schedule(workflow_id)
-                    continue
-                self._logger.info(
-                    "Task %s runs again: control reads the inputs its worker could not",
-                    task_id,
-                )
-                if self._ready.enqueue_ready_locked(task_id, front=False):
-                    self._cv.notify_all()
-                self._committer.commit_locked(task_id)
-                del self._input_checks[task_id]
-            if failures:
-                # A later drive drops each check whose verdict has committed, or
-                # reports it again.
-                self._redrive.recheck(workflow_id)
-            else:
-                self._redrive.reset_recheck(workflow_id)
+            failures = self._inputs.settle_input_checks_locked(
+                workflow_id, checks, verdicts
+            )
         for event in failures:
             self._report_failure(event)
-
-    def _verdict_unacknowledged_locked(self, task_id: str) -> bool:
-        """Whether control's verdict on a task failed a durable write and waits to be
-        handled again."""
-        pending = self._committer.unacknowledged.get(task_id)
-        return pending is not None and pending.report == _INPUT_VERDICT_REPORT
-
-    def _verify_inputs(
-        self, references: tuple[ContentReference, ...]
-    ) -> ResultUnreadable | Exception | None:
-        """Why control cannot read these objects either, or None when it reads them."""
-        pending: Exception | None = None
-        for reference in references:
-            try:
-                self._results.verify(reference)
-            except ResultUnreadable as exc:
-                return exc
-            except Exception as exc:
-                # Unreachable, or an error that says nothing about the content itself.
-                pending = exc
-        return pending
 
     def set_failure_reporter(self, report: Callable[[TaskEvent], None]) -> None:
         """Install the handler a failure control decides on is reported through, so it
@@ -3267,115 +3145,23 @@ class TaskRuntime:
             return []
         try:
             with self._cv:
-                return self._plan_merge_locked(task_id, max_batch_size, assigned_worker)
+                return self._merges.plan_merge_locked(
+                    task_id, max_batch_size, assigned_worker
+                )
         finally:
             self._release_ended_workers()
-
-    def _plan_merge_locked(
-        self, task_id: str, max_batch_size: int, assigned_worker: str
-    ) -> list[str]:
-        record = self._tasks.get(task_id)
-        if not record or record.status != TaskStatus.PENDING:
-            return []
-        if record.merge_key is None:
-            return []
-        if self._merge_children_map.get(task_id):
-            return []
-        if record.selected_worker and assigned_worker not in record.selected_worker:
-            raise ValueError(
-                f"The worker assigned for task {task_id} ({assigned_worker}) "
-                f"is not in selected workers {record.selected_worker}."
-            )
-        bucket = (
-            self._ready.merge_buckets[(record.merge_key, assigned_worker)]
-            + self._ready.merge_buckets[(record.merge_key, None)]
-        )
-        if not bucket or len(bucket) <= 1:
-            return []
-        siblings: list[str] = []
-        for candidate in bucket:
-            if candidate == task_id:
-                continue
-            if len(siblings) >= max_batch_size - 1:
-                break
-            candidate_record = self._tasks.get(candidate)
-            if not candidate_record or candidate_record.status != TaskStatus.PENDING:
-                continue
-            if (
-                candidate_record.selected_worker
-                and assigned_worker not in candidate_record.selected_worker
-            ):
-                continue
-            if candidate not in self._ready.ready_index:
-                continue
-            siblings.append(candidate)
-        if not siblings:
-            return []
-
-        record.merged_children = siblings
-        self._merge_children_map[task_id] = siblings.copy()
-        for sibling in siblings:
-            self._merge_parent_map[sibling] = task_id
-            self._ready.remove_from_ready_locked(sibling)
-            self._ready.merge_bucket_remove(sibling)
-            sibling_record = self._tasks.get(sibling)
-            if sibling_record:
-                sibling_record.status = TaskStatus.DISPATCHED
-                sibling_record.merged_parent_id = task_id
-                sibling_record.assigned_worker = None
-                sibling_record.merge_slice = None
-        self._committer.commit_locked(task_id, *siblings)
-        return siblings
 
     def release_merge(self, task_id: str) -> None:
         try:
             with self._cv:
-                self._release_merge_locked(task_id)
+                self._merges.release_merge_locked(task_id)
         finally:
             self._release_ended_workers()
-
-    def _return_failed_merge_locked(self, record: TaskRecord, worker_id: str) -> bool:
-        """Return a merged dispatch that failed or lost ``worker_id``, if it is one.
-
-        Such a failure belongs to no single task in the batch, so the parent and every
-        child still merged into it go back to the head of the queue to run alone,
-        spending no attempt. Returns whether the report was for a merged dispatch to
-        ``worker_id``.
-        """
-        if (
-            record.merged_dispatch_worker != worker_id
-            or record.status != TaskStatus.DISPATCHED
-        ):
-            return False
-        task_id = record.task_id
-        dispatch_id = record.dispatch_id
-        moved = self._return_merged_children_locked(
-            [task_id, *self._merge_children_map.pop(task_id, [])], unmerge=True
-        )
-        self._returned_dispatches[task_id] = (worker_id, dispatch_id, moved)
-        record.merged_children = None
-        self._committer.commit_locked(*moved)
-        return True
-
-    def _release_merge_locked(self, task_id: str) -> None:
-        if parent := self._tasks.get(task_id):
-            parent.merged_children = None
-        returned = self._return_merged_children_locked(
-            self._merge_children_map.pop(task_id, [])
-        )
-        self._committer.commit_locked(task_id, *returned)
 
     def merged_child_record(self, task_id: str, child_id: str) -> TaskRecord | None:
         """A child's record while it is still merged into ``task_id``'s dispatch."""
         with self._cv:
-            record = self._tasks.get(child_id)
-            if (
-                record is None
-                or record.status != TaskStatus.DISPATCHED
-                or self._merge_parent_map.get(child_id) != task_id
-            ):
-                return None
-            return record
+            return self._merges.merged_child_record(task_id, child_id)
 
     def release_merged_child(
         self, task_id: str, child_id: str, merge_key: str | None
@@ -3384,191 +3170,13 @@ class TaskRuntime:
         merge next under ``merge_key``, or to run alone when it is None."""
         try:
             with self._cv:
-                if parent := self._tasks.get(task_id):
-                    parent.merged_children = [
-                        sibling
-                        for sibling in parent.merged_children or []
-                        if sibling != child_id
-                    ] or None
-                if (siblings := self._merge_children_map.get(task_id)) and (
-                    child_id in siblings
-                ):
-                    siblings.remove(child_id)
-                returned: list[str] = []
-                if self._merge_parent_map.get(child_id) == task_id and (
-                    child := self._tasks.get(child_id)
-                ):
-                    child.merge_key = merge_key
-                    _, selected_worker_hint = self._ready.merge_key_by_task.get(
-                        child_id, (None, None)
-                    )
-                    self._ready.merge_key_by_task[child_id] = (
-                        merge_key,
-                        selected_worker_hint,
-                    )
-                    returned = self._return_merged_children_locked([child_id])
-                self._committer.commit_locked(task_id, *returned)
+                self._merges.release_merged_child(task_id, child_id, merge_key)
         finally:
             self._release_ended_workers()
-
-    def _return_merged_children_locked(
-        self, child_ids: list[str], unmerge: bool = False
-    ) -> list[str]:
-        """Return merged children to the head of the ready queue, spending no attempt.
-
-        ``unmerge`` also drops a child's merge key, so its next dispatch runs it alone
-        rather than merging it into another batch that may again leave it without a
-        result of its own. Returns the children it moved, for the caller to commit.
-        """
-        returned: list[str] = []
-        for child_id in child_ids:
-            self._merge_parent_map.pop(child_id, None)
-            child_record = self._tasks.get(child_id)
-            if not child_record or child_record.status in TERMINAL_TASK_STATUSES:
-                continue
-            reset_to_pending(child_record)
-            child_record.merged_parent_id = None
-            child_record.merge_slice = None
-            if unmerge:
-                child_record.merge_key = None
-                self._ready.merge_key_by_task.pop(child_id, None)
-            self._ready.remove_from_ready_locked(child_id)
-            self._ready.enqueue_ready_locked(child_id, front=True)
-            returned.append(child_id)
-        if returned:
-            self._cv.notify_all()
-        return returned
-
-    def _partition_merged_children_locked(
-        self, child_ids: list[str], child_references: dict[str, ContentReference]
-    ) -> tuple[list[str], list[str]]:
-        """Split merged children into those with a result of their own and the rest.
-
-        A child's result counts as its own only in the scope control gave the child.
-        """
-        settled: list[str] = []
-        unsettled: list[str] = []
-        for child_id in child_ids:
-            record = self._tasks.get(child_id)
-            reference = child_references.get(child_id)
-            if record is not None and content_bindings.accepted_reference(
-                self._logger, record, reference
-            ):
-                settled.append(child_id)
-            else:
-                unsettled.append(child_id)
-        return settled, unsettled
-
-    def _settle_workflows_locked(self, record: TaskRecord) -> list[str]:
-        """The workflows a task's settlement touches: its own and its merged
-        children's."""
-        return list(
-            dict.fromkeys(
-                [
-                    record.workflow_id,
-                    *(
-                        child.workflow_id
-                        for child_id in record.merged_children or []
-                        if (child := self._tasks.get(child_id)) is not None
-                    ),
-                ]
-            )
-        )
-
-    def _finalize_merged_child_success(
-        self,
-        child_id: str,
-        worker_id: str | None,
-        finished_ts: float,
-        started_ts: float | None,
-        usage: TaskUsage | None,
-        reference: ContentReference,
-    ) -> list[str]:
-        ready_children: list[str] = []
-        child_record = self._tasks.get(child_id)
-        if not child_record:
-            return ready_children
-        child_record.status = TaskStatus.DONE
-        content_bindings.bind_result_locked(self._logger, child_record, reference, None)
-        child_record.error = None
-        child_record.finished_ts = finished_ts
-        if started_ts is not None and child_record.started_ts is None:
-            child_record.started_ts = started_ts
-        if worker_id:
-            child_record.assigned_worker = worker_id
-        child_record.merged_parent_id = None
-        child_record.merge_slice = None
-        if usage is not None:
-            child_record.usages.append(usage)
-        self._completed.add(child_id)
-        self._failed.discard(child_id)
-        self._dag.pending_deps.pop(child_id, None)
-        self._merge_parent_map.pop(child_id, None)
-        self._ready.merge_key_by_task.pop(child_id, None)
-        self._ready.remove_from_ready_locked(child_id)
-        self._ready.merge_bucket_remove(child_id)
-        dependents = list(self._dag.dependents.pop(child_id, set()))
-        for dep_id in dependents:
-            pending = self._dag.pending_deps.get(dep_id)
-            if pending is None:
-                continue
-            pending.discard(child_id)
-            if not pending:
-                dep_record = self._tasks.get(dep_id)
-                if dep_record and dep_record.status == TaskStatus.PENDING:
-                    if self._ready.enqueue_ready_locked(dep_id):
-                        ready_children.append(dep_id)
-        return ready_children
 
     # ------------------------------------------------------------------ #
     # State updates (dispatch & events)
     # ------------------------------------------------------------------ #
-
-    def _holds_dispatch_locked(
-        self, record: TaskRecord, worker_id: str | None, dispatch_id: str | None
-    ) -> bool:
-        """Whether an event from ``worker_id`` belongs to the dispatch holding a task.
-
-        A task is held by its recorded dispatch, or by one published and not yet
-        recorded. An event naming no dispatch matches on its worker. A root-internal
-        transition names no worker and is not fenced.
-        """
-        if worker_id is None:
-            return True
-        held = [(record.assigned_worker, record.dispatch_id)]
-        if (publish := self._publishing.get(record.task_id)) and not publish.recorded:
-            held.append((publish.worker_id, publish.dispatch_id))
-        return any(
-            worker_id == held_worker
-            and (dispatch_id is None or dispatch_id == held_dispatch)
-            for held_worker, held_dispatch in held
-        )
-
-    def _dispatch_live_locked(
-        self, record: TaskRecord, worker_id: str, dispatch_id: str | None
-    ) -> bool:
-        """Whether the named dispatch, on ``worker_id``, holds a task still running."""
-        return (
-            dispatch_id is not None
-            and record.status not in TERMINAL_TASK_STATUSES
-            and self._holds_dispatch_locked(record, worker_id, dispatch_id)
-        )
-
-    def _accepts_event_locked(
-        self, record: TaskRecord, worker_id: str | None, dispatch_id: str | None
-    ) -> bool:
-        """Whether an event belongs to the dispatch holding a task.
-
-        The first event of a dispatch published and not yet recorded records it, so
-        the event applies to a recorded dispatch.
-        """
-        if not self._holds_dispatch_locked(record, worker_id, dispatch_id):
-            return False
-        if worker_id is not None and (publish := self._publishing.get(record.task_id)):
-            publish.reported = True
-            if not publish.recorded and record.status == TaskStatus.PENDING:
-                self._record_dispatch_locked(record, publish)
-        return True
 
     def holds_dispatch(
         self, task_id: str, worker_id: str, dispatch_id: str | None
@@ -3576,7 +3184,7 @@ class TaskRuntime:
         """Whether an event from ``worker_id`` belongs to the task's dispatch."""
         with self._lock:
             record = self._tasks.get(task_id)
-            return record is not None and self._holds_dispatch_locked(
+            return record is not None and self._fence.holds_dispatch_locked(
                 record, worker_id, dispatch_id
             )
 
@@ -3592,15 +3200,11 @@ class TaskRuntime:
 
         Returns whether the task is pending and may be published.
         """
-        publish = _Publish(
-            worker.id, dispatch_id, _supplier_id(worker), input_preparation
+        publish = Publish(
+            worker.id, dispatch_id, supplier_id(worker), input_preparation
         )
         with self._cv:
-            record = self._tasks.get(task_id)
-            if record is None or record.status != TaskStatus.PENDING:
-                return False
-            self._publishing[task_id] = publish
-            return True
+            return self._fence.begin_publish(task_id, publish)
 
     def abandon_publish(self, task_id: str) -> bool:
         """Drop the mark of a dispatch whose publish failed.
@@ -3610,7 +3214,7 @@ class TaskRuntime:
         """
         try:
             with self._cv:
-                publish = self._publishing.pop(task_id, None)
+                publish = self._fence.publishing.pop(task_id, None)
                 if publish is None or not publish.recorded:
                     return True
                 record = self._tasks.get(task_id)
@@ -3633,65 +3237,9 @@ class TaskRuntime:
         """
         try:
             with self._cv:
-                publish = self._publishing.pop(task_id, None)
-                if publish is None:
-                    return False
-                record = self._tasks.get(task_id)
-                if publish.recorded:
-                    return (
-                        record is not None
-                        and record.dispatch_id == publish.dispatch_id
-                        and record.status
-                        in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
-                    )
-                if not record or record.status in SETTLING_TASK_STATUSES:
-                    # A replayed or late dispatch must not regress a settling task.
-                    return False
-                self._record_dispatch_locked(record, publish)
-                return True
+                return self._fence.mark_dispatched(task_id)
         finally:
             self._release_ended_workers()
-
-    def _record_dispatch_locked(self, record: TaskRecord, publish: _Publish) -> None:
-        self._take_dispatch_locked(record, publish)
-        self._committer.commit_transition_locked(
-            record.workflow_id,
-            records=self._committer.records_locked(record.task_id),
-            dispatched=[record.task_id],
-        )
-        self._committer.save_ledger_locked(record.workflow_id)
-
-    def _take_dispatch_locked(self, record: TaskRecord, publish: _Publish) -> None:
-        """Record a published dispatch as the one holding its task, in memory."""
-        task_id = record.task_id
-        publish.recorded = True
-        self._returned_dispatches.pop(task_id, None)
-        if (
-            stash := self._committer.unacknowledged.get(task_id)
-        ) and stash.dispatch_id is None:
-            # A report naming no dispatch matches on its worker alone, which the next
-            # dispatch may share.
-            del self._committer.unacknowledged[task_id]
-        record.status = TaskStatus.DISPATCHED
-        record.assigned_worker = publish.worker_id
-        record.dispatch_id = publish.dispatch_id
-        if publish.dispatch_id is not None:
-            held = (publish.worker_id, publish.dispatch_id)
-            self._reservations.hold_dispatch_locked(task_id, held)
-        record.merged_dispatch_worker = (
-            publish.worker_id if self._merge_children_map.get(task_id) else None
-        )
-        record.topic = "tasks"
-        record.dispatched_ts = time.time()
-        record.next_retry_at = None
-        record.supplier_id = publish.supplier_id
-        self._ready.remove_from_ready_locked(task_id)
-        self._ready.merge_bucket_remove(task_id)
-        if engine := self._engines.get(record.workflow_id):
-            if publish.input_preparation:
-                engine.on_input_preparation_dispatched(task_id, publish.worker_id)
-            else:
-                engine.on_dispatched(task_id, publish.worker_id)
 
     def mark_started(
         self,
@@ -3706,7 +3254,7 @@ class TaskRuntime:
         try:
             with self._cv:
                 record = self._tasks.get(task_id)
-                if not record or not self._accepts_event_locked(
+                if not record or not self._fence.accepts_event_locked(
                     record, worker_id, dispatch_id
                 ):
                     return EventEffect.STALE
@@ -3740,7 +3288,7 @@ class TaskRuntime:
         try:
             with self._lock:
                 record = self._tasks.get(task_id)
-                if record is None or not self._accepts_event_locked(
+                if record is None or not self._fence.accepts_event_locked(
                     record, worker_id, dispatch_id
                 ):
                     return EventEffect.STALE
@@ -3831,11 +3379,11 @@ class TaskRuntime:
 
         with self._cv:
             record = self._tasks.get(task_id)
-            if record is not None and not self._accepts_event_locked(
+            if record is not None and not self._fence.accepts_event_locked(
                 record, worker_id, dispatch_id
             ):
                 if worker_id is not None:
-                    self._heal_returned_locked(task_id, worker_id, dispatch_id)
+                    self._fence.heal_returned_locked(task_id, worker_id, dispatch_id)
                     self._reap_stale_captures_locked(record, worker_id, payload)
                 return SettleOutcome(EventEffect.STALE, record.status, [], [])
             effect = (
@@ -3936,7 +3484,7 @@ class TaskRuntime:
                     # Idempotent: a replayed TASK_SUCCEEDED must not re-apply, but
                     # re-persist in case the original completion's write failed
                     # after its in-memory commit.
-                    for workflow_id in self._settle_workflows_locked(record):
+                    for workflow_id in self._merges.settle_workflows_locked(record):
                         self._committer.repersist_terminal_workflow_locked(workflow_id)
                     # Recover a settlement or fan-out lost to a failed commit or a crash
                     # between the producer's terminal persist and its children: both
@@ -3981,7 +3529,9 @@ class TaskRuntime:
             self._failed.discard(task_id)
             self._dag.pending_deps.pop(task_id, None)
             ready_children: list[str] = []
-            merged_children_ids: list[str] = self._merge_children_map.pop(task_id, [])
+            merged_children_ids: list[str] = self._merges.merge_children_map.pop(
+                task_id, []
+            )
             self._ready.merge_key_by_task.pop(task_id, None)
 
             dependents = list(self._dag.dependents.pop(task_id, set()))
@@ -3997,7 +3547,7 @@ class TaskRuntime:
                             ready_children.append(child)
 
             settled_children, unsettled_children = (
-                self._partition_merged_children_locked(
+                self._merges.partition_merged_children_locked(
                     merged_children_ids, child_references
                 )
             )
@@ -4005,7 +3555,7 @@ class TaskRuntime:
                 record.merged_children = settled_children or None
             for merged_child in settled_children:
                 ready_children.extend(
-                    self._finalize_merged_child_success(
+                    self._merges.finalize_merged_child_success(
                         merged_child,
                         worker_id,
                         finished_ts,
@@ -4014,12 +3564,12 @@ class TaskRuntime:
                         child_references[merged_child],
                     )
                 )
-            returned = self._return_merged_children_locked(
+            returned = self._merges.return_merged_children_locked(
                 unsettled_children, unmerge=True
             )
 
             if record is not None:
-                for workflow_id in self._settle_workflows_locked(record):
+                for workflow_id in self._merges.settle_workflows_locked(record):
                     ready_children.extend(
                         self._ready.try_advance_epoch_frontier_locked(workflow_id)
                     )
@@ -4088,7 +3638,7 @@ class TaskRuntime:
         # Control's verdict on a held task's input is a report of its own, so it never
         # replays the worker report of the same dispatch.
         report = (
-            _INPUT_VERDICT_REPORT
+            INPUT_VERDICT_REPORT
             if failure_kind is TaskFailureKind.INPUT_UNREADABLE
             else "TASK_FAILED"
         )
@@ -4130,7 +3680,7 @@ class TaskRuntime:
     ) -> FailureOutcome:
         with self._cv:
             record = self._tasks.get(task_id)
-            if record is not None and self._is_input_verdict_locked(
+            if record is not None and self._inputs.is_input_verdict_locked(
                 record, worker_id, dispatch_id, failure_kind
             ):
                 # The worker's own report of this dispatch, stashed after a failed
@@ -4151,15 +3701,15 @@ class TaskRuntime:
                 return FailureOutcome(
                     DispatchEnd.FAILED, record.attempts, impacted, usages
                 )
-            if record is None or not self._accepts_event_locked(
+            if record is None or not self._fence.accepts_event_locked(
                 record, worker_id, dispatch_id
             ):
-                self._heal_returned_locked(task_id, worker_id, dispatch_id)
+                self._fence.heal_returned_locked(task_id, worker_id, dispatch_id)
                 return FailureOutcome(DispatchEnd.STALE, 0, [], [])
             if record.status in TERMINAL_TASK_STATUSES:
                 self._committer.repersist_terminal_workflow_locked(record.workflow_id)
                 return FailureOutcome(DispatchEnd.SETTLED, record.attempts, [], [])
-            if self._return_failed_merge_locked(record, worker_id):
+            if self._fence.return_failed_merge_locked(record, worker_id):
                 return FailureOutcome(
                     DispatchEnd.MERGE_RETURNED, record.attempts, [], []
                 )
@@ -4180,7 +3730,7 @@ class TaskRuntime:
                     end = self._return_dispatch_locked(
                         record, increment_retry=False, front=False
                     )
-                    self._hold_for_input_check_locked(
+                    self._inputs.hold_for_input_check_locked(
                         record, worker_id, held_dispatch, consumed
                     )
                     return FailureOutcome(end, record.attempts, [], [])
@@ -4236,42 +3786,6 @@ class TaskRuntime:
             self._committer.commit_locked(record.task_id)
         return FailureOutcome(loss.end, record.attempts, list(loss.impacted), usages)
 
-    def _hold_for_input_check_locked(
-        self,
-        record: TaskRecord,
-        worker_id: str,
-        dispatch_id: str | None,
-        references: tuple[ContentReference, ...],
-    ) -> None:
-        """Keep a returned task out of the queue until control has read its inputs."""
-        self._ready.remove_from_ready_locked(record.task_id)
-        self._input_checks[record.task_id] = _InputCheck(
-            worker_id, dispatch_id, references
-        )
-        self._redrive.drive_now(record.workflow_id)
-
-    def _is_input_verdict_locked(
-        self,
-        record: TaskRecord,
-        worker_id: str,
-        dispatch_id: str | None,
-        failure_kind: TaskFailureKind | None,
-    ) -> bool:
-        """Whether a failure is control's verdict that a held task's input is
-        unreadable.
-
-        The held check stands in for the dispatch the task returned from, so the verdict
-        reports as that dispatch.
-        """
-        check = self._input_checks.get(record.task_id)
-        return (
-            failure_kind is TaskFailureKind.INPUT_UNREADABLE
-            and check is not None
-            and check.unreadable is not None
-            and record.status == TaskStatus.PENDING
-            and (check.worker_id, check.dispatch_id) == (worker_id, dispatch_id)
-        )
-
     def return_dispatch(
         self,
         task_id: str,
@@ -4291,11 +3805,11 @@ class TaskRuntime:
         try:
             with self._cv:
                 record = self._tasks.get(task_id)
-                if record is None or not self._holds_dispatch_locked(
+                if record is None or not self._fence.holds_dispatch_locked(
                     record, holder, None
                 ):
                     if holder is not None:
-                        self._heal_returned_locked(task_id, holder, None)
+                        self._fence.heal_returned_locked(task_id, holder, None)
                     return DispatchEnd.STALE
                 if (
                     holder is not None
@@ -4309,7 +3823,7 @@ class TaskRuntime:
                 if record.status == TaskStatus.CANCELLING:
                     self._settle_cancelled_locked(record, time.time(), unmerge=True)
                     return DispatchEnd.CANCELLED
-                if holder is not None and self._return_failed_merge_locked(
+                if holder is not None and self._fence.return_failed_merge_locked(
                     record, holder
                 ):
                     return DispatchEnd.MERGE_RETURNED
@@ -4332,8 +3846,8 @@ class TaskRuntime:
         record.merged_children = None
         moved = [
             task_id,
-            *self._return_merged_children_locked(
-                self._merge_children_map.pop(task_id, [])
+            *self._merges.return_merged_children_locked(
+                self._merges.merge_children_map.pop(task_id, [])
             ),
         ]
         engine = self._engines.get(record.workflow_id)
@@ -4363,7 +3877,7 @@ class TaskRuntime:
         """
         task_id = record.task_id
         if record.assigned_worker is not None:
-            self._returned_dispatches[task_id] = (
+            self._fence.returned_dispatches[task_id] = (
                 record.assigned_worker,
                 record.dispatch_id,
                 moved,
@@ -4381,7 +3895,7 @@ class TaskRuntime:
         A worker that holds the task again may have captured the same boundary anew,
         so its requests are left to that dispatch.
         """
-        if self._holds_dispatch_locked(record, worker_id, None):
+        if self._fence.holds_dispatch_locked(record, worker_id, None):
             return
         step = payload.get("agent_episode")
         carried = payload.get("agent_episode_facade_group")
@@ -4397,19 +3911,6 @@ class TaskRuntime:
                 ),
             ),
         )
-
-    def _heal_returned_locked(
-        self, task_id: str, worker_id: str, dispatch_id: str | None
-    ) -> None:
-        """Commit again what returning a dispatch moved, on a report of that dispatch.
-
-        Such a report may be handled again because the return's commit failed.
-        """
-        if (returned := self._returned_dispatches.get(task_id)) is None:
-            return
-        held_worker, held_dispatch, moved = returned
-        if worker_id == held_worker and dispatch_id in (None, held_dispatch):
-            self._committer.recommit_locked(HeldWrites(moved.copy()))
 
     def mark_failed(
         self,
@@ -4500,7 +4001,7 @@ class TaskRuntime:
             self._completed.discard(task_id)
             self._dag.pending_deps.pop(task_id, None)
             self._ready.remove_from_ready_locked(task_id)
-            merged_children_ids = self._merge_children_map.pop(task_id, [])
+            merged_children_ids = self._merges.merge_children_map.pop(task_id, [])
             self._ready.merge_key_by_task.pop(task_id, None)
 
             impacted = self._record_failures.fail_v1_dependents_locked(task_id)
@@ -4513,7 +4014,7 @@ class TaskRuntime:
                     self._fail_v2_advance_locked(engine, advance, persist=False)
                 )
 
-            returned = self._return_merged_children_locked(
+            returned = self._merges.return_merged_children_locked(
                 merged_children_ids, unmerge=True
             )
 
@@ -4631,15 +4132,15 @@ class TaskRuntime:
         """
         interrupts: list[InterruptMessage] = []
         for record in records:
-            publish = self._publishing.get(record.task_id)
+            publish = self._fence.publishing.get(record.task_id)
             if publish and not publish.recorded and record.status == TaskStatus.PENDING:
                 # The worker may already be running the task.
-                self._take_dispatch_locked(record, publish)
+                self._fence.take_dispatch_locked(record, publish)
             if record.status == TaskStatus.DISPATCHED and (
                 interrupt := self._terminations.interrupt_for(record, reason)
             ):
                 interrupts.append(interrupt)
-            self._input_checks.pop(record.task_id, None)
+            self._inputs.input_checks.pop(record.task_id, None)
             self._epochs.task_epoch_index.pop(record.task_id, None)
         reaps = self._router.take_ops_for_agents_locked([r.task_id for r in records])
         return Termination(interrupts, reaps)
@@ -4738,8 +4239,8 @@ class TaskRuntime:
         failed or was lost, which runs each of them alone.
         """
         task_id = record.task_id
-        if (parent_id := self._merge_parent_map.pop(task_id, None)) is not None:
-            if (siblings := self._merge_children_map.get(parent_id)) and (
+        if (parent_id := self._merges.merge_parent_map.pop(task_id, None)) is not None:
+            if (siblings := self._merges.merge_children_map.get(parent_id)) and (
                 task_id in siblings
             ):
                 siblings.remove(task_id)
@@ -4759,8 +4260,8 @@ class TaskRuntime:
         self._ready.remove_from_ready_locked(task_id)
         self._ready.merge_bucket_remove(task_id)
         self._ready.merge_key_by_task.pop(task_id, None)
-        return self._return_merged_children_locked(
-            self._merge_children_map.pop(task_id, []), unmerge
+        return self._merges.return_merged_children_locked(
+            self._merges.merge_children_map.pop(task_id, []), unmerge
         )
 
     def mark_cancelled(
@@ -4810,7 +4311,7 @@ class TaskRuntime:
 
         with self._cv:
             record = self._tasks.get(task_id)
-            if record is None or not self._accepts_event_locked(
+            if record is None or not self._fence.accepts_event_locked(
                 record, worker_id, dispatch_id
             ):
                 return settle_outcome(EventEffect.STALE, record, [], [])
@@ -4858,7 +4359,9 @@ class TaskRuntime:
             return settle_outcome(
                 LOSS_EFFECTS[loss.end], record, [], usages, loss.impacted
             )
-        if worker_id is None or not self._return_failed_merge_locked(record, worker_id):
+        if worker_id is None or not self._fence.return_failed_merge_locked(
+            record, worker_id
+        ):
             self._return_dispatch_locked(record, increment_retry=False, front=True)
         return settle_outcome(EventEffect.RETURNED, record, [], [])
 
@@ -5156,16 +4659,16 @@ class TaskRuntime:
         resolved: list[LossOutcome] = []
         with self._cv:
             for task_id, record in list(self._tasks.items()):
-                publish = self._publishing.get(task_id)
+                publish = self._fence.publishing.get(task_id)
                 if publish and not publish.recorded and publish.worker_id == worker_id:
-                    self._publishing[task_id] = None
+                    self._fence.publishing[task_id] = None
                     self._terminations.revoke_locked(
                         task_id, worker_id, publish.dispatch_id, node_id
                     )
-                    children = self._merge_children_map.pop(task_id, [])
+                    children = self._merges.merge_children_map.pop(task_id, [])
                     record.merged_children = None
                     self._committer.commit_locked(
-                        *self._return_merged_children_locked(
+                        *self._merges.return_merged_children_locked(
                             [task_id, *children], unmerge=bool(children)
                         )
                     )
@@ -5283,19 +4786,7 @@ class TaskRuntime:
         """Whether a dispatch to a worker is being published or holds its task, and has
         not ended at a suspension."""
         with self._lock:
-            record = self._tasks.get(task_id)
-            if record is None or episode_dispatch.dispatch_ended_at_suspension_locked(
-                self._engines, record
-            ):
-                return False
-            publish = self._publishing.get(task_id)
-            in_flight = record.status in (
-                TaskStatus.DISPATCHED,
-                TaskStatus.CANCELLING,
-            ) or (publish is not None and not publish.recorded)
-            return in_flight and self._dispatch_live_locked(
-                record, worker_id, dispatch_id
-            )
+            return self._fence.dispatch_in_flight(task_id, dispatch_id, worker_id)
 
     def has_rehydrated_in_flight(self, worker_id: str, within_sec: float) -> bool:
         """

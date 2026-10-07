@@ -11,7 +11,7 @@ from server.task.models import TaskStatus
 from server.task.results import ResultUnavailable, ResultUnreadable
 from server.task.runtime import TaskRuntime
 from server.task.runtime.boundary_router import PendingOp
-from server.task.runtime.facade import _InputCheck
+from server.task.runtime.input_checks import _InputCheck
 from shared.content import reference_for
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from tests.server.dispatch_helpers import record_dispatch
@@ -188,11 +188,13 @@ async def test_a_held_input_check_is_dropped() -> None:
     runtime = _live_runtime(FakeRegistry())
     workflow_id, ids = await _register(runtime, _PARALLEL)
     reference = reference_for("org", b"input", media_type="application/json")
-    runtime._input_checks[ids["side"]] = _InputCheck("wkr-1", "dsp-s", (reference,))
+    runtime._inputs.input_checks[ids["side"]] = _InputCheck(
+        "wkr-1", "dsp-s", (reference,)
+    )
 
     _fail(runtime, workflow_id)
 
-    assert runtime._input_checks == {}
+    assert runtime._inputs.input_checks == {}
 
 
 @pytest.mark.anyio

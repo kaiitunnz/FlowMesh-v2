@@ -303,8 +303,8 @@ spec:
     parent.merged_children = [child_id]
     child.status = TaskStatus.DISPATCHED
     child.merged_parent_id = parent_id
-    runtime._merge_children_map[parent_id] = [child_id]
-    runtime._merge_parent_map[child_id] = parent_id
+    runtime._merges.merge_children_map[parent_id] = [child_id]
+    runtime._merges.merge_parent_map[child_id] = parent_id
 
     cancelled = runtime.cancel_workflow(workflow_id)
 
@@ -316,5 +316,5 @@ spec:
     assert updated_parent.status == TaskStatus.CANCELLING
     assert updated_child.status == TaskStatus.CANCELLED
     assert updated_child.merged_parent_id is None
-    assert runtime._merge_children_map[parent_id] == []
+    assert runtime._merges.merge_children_map[parent_id] == []
     assert len(worker_registry.published_interrupts) == 1

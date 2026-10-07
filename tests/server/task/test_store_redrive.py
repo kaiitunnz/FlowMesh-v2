@@ -13,6 +13,7 @@ import pytest
 from server.config import OrchestrationConfig
 from server.orchestration import Advance, PublicationOutcome
 from server.task.redrive import StoreRedriveScheduler
+from server.task.results import ResultReader
 from server.task.runtime import TaskRuntime, agent_inputs, content_bindings, fanout
 from server.task.v2.representations.template import TemplateEdge
 from shared.content import (
@@ -78,11 +79,13 @@ def _no_read_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _runtime(
-    registry: FakeRegistry,
+    registry: FakeRegistry, reader: ResultReader | None = None
 ) -> tuple[TaskRuntime, _FlakyStore, list[StoreRedriveScheduler], _Clock]:
-    reader = make_result_reader()
-    flaky = _FlakyStore(reader.store)
-    reader._store = flaky
+    if reader is None:
+        reader = make_result_reader()
+        reader._store = _FlakyStore(reader.store)
+    flaky = reader._store
+    assert isinstance(flaky, _FlakyStore)
     clock = _Clock()
     schedulers: list[StoreRedriveScheduler] = []
 
@@ -270,8 +273,7 @@ async def test_a_restart_records_the_inputs_a_crash_left_unread() -> None:
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None and not engine.accepted_inputs_for_task(agent)
 
-    restored, _flaky2, (rescheduler,), _clock2 = _runtime(registry)
-    restored._results = runtime._results
+    restored, _flaky2, (rescheduler,), _clock2 = _runtime(registry, runtime._results)
     assert await restored.rehydrate() == 1
     # The agent waits, blocked on its inputs.
     assert agent not in _pop_ready(restored)

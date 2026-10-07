@@ -14,6 +14,7 @@ from server.orchestration.state import (
 )
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from server.task.runtime.dispatch_fence import DispatchFence
 from shared.content import ContentReference, reference_for
 from shared.harness.adapter import DeliveredOutcome
 from shared.outcome import OutcomeManifest
@@ -92,7 +93,6 @@ def _runtime(
     """
     runtime = object.__new__(TaskRuntime)
     runtime._lock = threading.RLock()
-    runtime._publishing = {}
     tasks: dict[str, Any] = {
         "tsk-1": _record(
             "tsk-1", status, assigned=assigned, merged_children=merged_children
@@ -115,6 +115,10 @@ def _runtime(
                 accepted=accepted,
             )
         },
+    )
+    unused = cast(Any, None)
+    runtime._fence = DispatchFence(
+        unused, unused, unused, unused, runtime._tasks, runtime._engines
     )
     return runtime
 

@@ -161,7 +161,7 @@ async def test_a_merged_child_binds_only_its_own_result() -> None:
     parent, own, unreported = ids["a"], ids["b"], "tsk-unreported"
     record = runtime._tasks[own].model_copy(update={"task_id": unreported})
     runtime._tasks[unreported] = record
-    runtime._merge_children_map[parent] = [own, unreported]
+    runtime._merges.merge_children_map[parent] = [own, unreported]
     payload = _stored(runtime, parent, "parent")
     payload["child_result_references"] = {
         own: _stored(runtime, own, "own")["result_reference"]

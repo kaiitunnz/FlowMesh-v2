@@ -823,7 +823,7 @@ async def test_a_cancel_before_the_publish_begins_publishes_nothing() -> None:
 
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
     assert worker_registry.publish_task.call_count == 0
-    assert task_id not in runtime._publishing
+    assert task_id not in runtime._fence.publishing
 
 
 class _FlakyWrites(_Registry):
