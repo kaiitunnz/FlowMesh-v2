@@ -50,6 +50,8 @@ class PrivateStateUnavailableReason(StrEnum):
     CONTAINMENT_VIOLATION = "containment_violation"
     # A step's writers were not proved stopped, so no recoverable capture exists.
     QUIESCENCE_UNPROVED = "quiescence_unproved"
+    # A component declares a capture mode this holder cannot capture or restore.
+    UNSUPPORTED_CAPTURE = "unsupported_capture"
 
 
 class PrivateStateUnavailable(Exception):

@@ -39,6 +39,15 @@ class Exportability(StrEnum):
     EXPORTABLE = "exportable"
 
 
+class CaptureMode(StrEnum):
+    """How a component is captured into a sealed generation and restored from one."""
+
+    # A filesystem tree captured once every writer of the step that produced it is
+    # proved stopped, and restored by verifying that exact tree before a fresh harness
+    # process starts on it. No live process state is part of the capture.
+    QUIESCENT_TREE = "quiescent_tree"
+
+
 class StateComponentSpec(BaseModel):
     """The registered contract of one component kind."""
 
@@ -48,6 +57,7 @@ class StateComponentSpec(BaseModel):
     schema_version: int
     confidentiality: Confidentiality
     exportability: Exportability
+    capture: CaptureMode
 
 
 _SPECS: Mapping[StateComponentKind, StateComponentSpec] = MappingProxyType(
@@ -61,12 +71,14 @@ _SPECS: Mapping[StateComponentKind, StateComponentSpec] = MappingProxyType(
                 schema_version=1,
                 confidentiality=Confidentiality.SECRET_BEARING,
                 exportability=Exportability.LOCAL_ONLY,
+                capture=CaptureMode.QUIESCENT_TREE,
             ),
             StateComponentSpec(
                 kind=StateComponentKind.WORKSPACE_FS,
                 schema_version=1,
                 confidentiality=Confidentiality.SECRET_BEARING,
                 exportability=Exportability.LOCAL_ONLY,
+                capture=CaptureMode.QUIESCENT_TREE,
             ),
         )
     }

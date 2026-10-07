@@ -8,14 +8,17 @@ import pytest
 
 from shared.private_state import (
     ActivationPrivateStateReference,
+    CaptureMode,
     OwnerFence,
     PrivateStateAttachment,
     PrivateStateBinding,
     PrivateStateUnavailable,
     PrivateStateUnavailableReason,
     StateComponentKind,
+    component_spec,
 )
 from shared.utils.ids import new_private_state_reference_id
+from worker import private_state as worker_private_state
 from worker.private_state import MaterializedState, PrivateStateHolder, QuiescenceFence
 
 
@@ -272,3 +275,33 @@ def test_an_unsealable_lineage_refuses_every_later_open(tmp_path: Path) -> None:
     with pytest.raises(PrivateStateUnavailable) as raised:
         holder.open(binding, _attachment(binding, write_epoch=2))
     assert raised.value.reason is PrivateStateUnavailableReason.QUIESCENCE_UNPROVED
+
+
+def test_a_component_the_holder_cannot_capture_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    holder = PrivateStateHolder(tmp_path)
+    binding = _binding()
+    attachment = _attachment(binding)
+    state = holder.open(binding, attachment)
+    spec = component_spec(StateComponentKind.WORKSPACE_FS)
+    unsupported = spec.model_copy(update={"capture": "process_snapshot"})
+    monkeypatch.setattr(
+        worker_private_state,
+        "component_spec",
+        lambda kind: unsupported if kind is spec.kind else component_spec(kind),
+    )
+
+    for refused in (
+        lambda: holder.seal(state, attachment, _fence(state, attachment)),
+        lambda: holder.open(binding, attachment),
+    ):
+        with pytest.raises(PrivateStateUnavailable) as raised:
+            refused()
+        assert raised.value.reason is PrivateStateUnavailableReason.UNSUPPORTED_CAPTURE
+
+
+def test_every_registered_component_is_captured_as_a_quiescent_tree() -> None:
+    assert {component_spec(kind).capture for kind in StateComponentKind} == {
+        CaptureMode.QUIESCENT_TREE
+    }

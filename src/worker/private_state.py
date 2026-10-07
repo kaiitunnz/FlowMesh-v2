@@ -22,6 +22,7 @@ from pathlib import Path
 
 from shared.private_state import (
     BundleProfile,
+    CaptureMode,
     PrivateStateAttachment,
     PrivateStateBinding,
     PrivateStateSealReport,
@@ -29,6 +30,7 @@ from shared.private_state import (
     PrivateStateUnavailableReason,
     StateBundleManifest,
     StateComponentKind,
+    component_spec,
     required_components,
     seal_component,
     verify_component,
@@ -38,6 +40,7 @@ from shared.utils.ids import new_state_bundle_manifest_id
 _PRIVATE_MODE = 0o700
 _EPOCH_FILE = ".attachment"
 _UNSEALABLE_FILE = ".unsealable"
+_SUPPORTED_CAPTURE = frozenset({CaptureMode.QUIESCENT_TREE})
 _OPAQUE_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -111,6 +114,7 @@ class PrivateStateHolder:
                 "the attachment does not authorize the bound generation",
                 reference_id=reference_id,
             )
+        _check_capture(binding.reference.profile, reference_id)
         lineage = self._lineage_root(binding)
         if (lineage / _UNSEALABLE_FILE).exists():
             raise PrivateStateUnavailable(
@@ -156,6 +160,7 @@ class PrivateStateHolder:
                 "the quiescence fence is not this attachment's",
                 reference_id=state.reference_id,
             )
+        _check_capture(state.profile, state.reference_id)
         lineage = self._root / state.reference_id
         _verify_epoch(lineage, attachment)
         generation = state.generation + 1
@@ -196,6 +201,17 @@ class PrivateStateHolder:
                     reference_id=reference_id,
                 )
             verify_component(sealed, path, reference_id=reference_id)
+
+
+def _check_capture(profile: BundleProfile, reference_id: str) -> None:
+    """Refuse a profile with a component this holder cannot capture or restore."""
+    for kind in sorted(required_components(profile)):
+        if (mode := component_spec(kind).capture) not in _SUPPORTED_CAPTURE:
+            raise PrivateStateUnavailable(
+                PrivateStateUnavailableReason.UNSUPPORTED_CAPTURE,
+                f"{kind.value} declares {mode} capture",
+                reference_id=reference_id,
+            )
 
 
 def _private_dir(path: Path, *, parents: bool = False) -> Path:
