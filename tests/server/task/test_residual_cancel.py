@@ -105,7 +105,7 @@ async def test_a_pending_residual_child_is_cancelled_and_never_dispatched() -> N
     runtime, workflow_id, ids, (winner, loser) = await _fanned_out(registry, 2)
     with runtime._cv:
         # The loser waits in the ready queue for a worker.
-        runtime._enqueue_ready_locked(loser)
+        runtime._ready.enqueue_ready_locked(loser)
 
     _win(runtime, winner)
 
@@ -352,7 +352,7 @@ def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -
             record_dispatch(runtime, sub, cast(Any, _worker("wkr-3")))
         else:
             with runtime._cv:
-                runtime._enqueue_ready_locked(sub)
+                runtime._ready.enqueue_ready_locked(sub)
 
         # The lead completes while its reviewer and the reviewer's own child still run.
         _step(runtime, lead_adapter, lead)

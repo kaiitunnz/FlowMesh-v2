@@ -275,7 +275,7 @@ class _Attributing:
 
     def ready(self) -> str | None:
         with self.runtime._cv:
-            return self.runtime._pop_ready_locked()
+            return self.runtime._ready.pop_ready_locked()
 
 
 @pytest.mark.anyio

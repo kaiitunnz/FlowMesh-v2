@@ -146,7 +146,7 @@ async def _register(
 def _next(runtime: TaskRuntime) -> str:
     """The next ready task."""
     with runtime._cv:
-        task_id = runtime._pop_ready_locked()
+        task_id = runtime._ready.pop_ready_locked()
     assert task_id is not None
     return task_id
 
@@ -221,7 +221,7 @@ def _assert_returned(
     assert record.merged_parent_id is None
     assert record.merge_key == merge_key
     assert runtime.result_binding(task_id) is None
-    assert task_id in runtime._ready_index
+    assert task_id in runtime._ready.ready_index
     assert not registry.is_dispatched(task_id)
 
 
@@ -791,7 +791,7 @@ async def test_children_returned_during_the_render_are_left_out_of_it() -> None:
     assert _render(runtime, parent, _resolve) == []
     for child in (b["b1"], b["b2"]):
         assert runtime._tasks[child].status == TaskStatus.PENDING
-        assert child in runtime._ready_index
+        assert child in runtime._ready.ready_index
 
 
 @pytest.mark.anyio
@@ -880,7 +880,7 @@ async def test_a_restart_returns_the_children_of_a_parent_no_longer_running(
         assert record.status == TaskStatus.PENDING
         assert record.merged_parent_id is None
         assert (record.merge_key is not None) is mergeable
-        assert child in restored._ready_index
+        assert child in restored._ready.ready_index
         assert not registry.is_dispatched(child)
 
 

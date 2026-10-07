@@ -37,7 +37,7 @@ async def test_safe_requeue_leaves_the_task_queued_when_its_persist_fails() -> N
         task_id
     )
 
-    assert task_id in runtime._ready_index
+    assert task_id in runtime._ready.ready_index
 
 
 def test_safe_requeue_propagates_non_redis_error(

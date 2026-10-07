@@ -1,4 +1,3 @@
-import heapq
 import logging
 import threading
 import time
@@ -67,7 +66,6 @@ from ...orchestration import (
     ScopeBudget,
     ValueRef,
     WorkItemStatus,
-    dependency_failed,
 )
 from ...orchestration.episode import BoundaryEvent
 from ...orchestration.harness import to_boundary_event
@@ -152,6 +150,7 @@ from . import (
 from .boundary_router import MediatedBoundaryRouter, PendingOp
 from .episode_dispatch import EpisodeFeasibility
 from .fanout import FanoutRead
+from .record_failures import RecordFailures
 from .reports import (
     LOSS_EFFECTS,
     failed_task_can_retry,
@@ -164,6 +163,8 @@ from .reports import (
 )
 from .reservations import WorkerReservations
 from .resident_tasks import ResidentServeTasks
+from .scheduling import EpochFrontier, ReadyQueue
+from .static_dag import StaticDag
 from .terminations import Termination, TerminationRelease
 
 
@@ -474,17 +475,8 @@ class TaskRuntime:
         )
         self._tasks: dict[str, TaskRecord] = {}
         self._original_deps: dict[str, set[str]] = {}
-        self._pending_deps: dict[str, set[str]] = {}
-        self._dependents: dict[str, set[str]] = defaultdict(set)
-        self._ready_by_workflow: dict[str, list[tuple[int, str]]] = {}
-        self._ready_queue: deque[tuple[str, bool]] = (
-            deque()
-        )  # task_id | workflow_id, is_workflow
-        self._ready_index: set[str] = set()
         self._completed: set[str] = set()
         self._failed: set[str] = set()
-        self._merge_key_by_task: dict[str, tuple[str | None, str | None]] = {}
-        self._merge_buckets: dict[tuple[str, str | None], list[str]] = defaultdict(list)
         self._merge_children_map: dict[str, list[str]] = defaultdict(list)
         self._merge_parent_map: dict[str, str] = {}
         # The dispatch being published for each task, until the dispatcher records it;
@@ -496,10 +488,6 @@ class TaskRuntime:
         self._input_checks: dict[str, _InputCheck] = {}
         self._report_writes = _ReportWrites()
         self._unacknowledged: dict[str, _Unacknowledged] = {}
-        self._workflow_epoch_tasks: dict[str, deque[set[str]]] = {}
-        self._workflow_epoch_frontier: dict[str, int] = {}
-        self._workflow_in_epoch_order: dict[str, bool] = {}
-        self._task_epoch_index: dict[str, int] = {}
         self._rehydrated_dispatched: dict[str, float] = {}
         self._engines: dict[str, OrchestrationEngine] = {}
         self._retired_region_templates: dict[str, set[str]] = {}
@@ -523,6 +511,12 @@ class TaskRuntime:
         # turn-completion into the pending boundary rather than settling it.
         self._pending_facade_groups: dict[str, FacadeTurnGroup] = {}
 
+        self._dag = StaticDag()
+        self._epochs = EpochFrontier()
+        self._ready = ReadyQueue(self._epochs, self._dag, self._tasks)
+        self._record_failures = RecordFailures(
+            self._dag, self._ready, self._tasks, self._failed
+        )
         self._router = MediatedBoundaryRouter(
             self._tasks,
             self._engines,
@@ -692,8 +686,8 @@ class TaskRuntime:
                 parsed_workflow.schedule_in_epoch_order
                 and parsed_workflow.epoch_groups is not None
             ):
-                self._ready_by_workflow[workflow_id] = []
-                self._workflow_in_epoch_order[workflow_id] = True
+                self._ready.ready_by_workflow[workflow_id] = []
+                self._epochs.workflow_in_epoch_order[workflow_id] = True
             for entry in specs:
                 task_id = entry.task_id
                 task = entry.task.model_copy(deep=True)
@@ -752,7 +746,10 @@ class TaskRuntime:
                         if record.selected_worker and len(record.selected_worker) == 1
                         else None
                     )
-                    self._merge_key_by_task[task_id] = (merge_key, selected_worker_hint)
+                    self._ready.merge_key_by_task[task_id] = (
+                        merge_key,
+                        selected_worker_hint,
+                    )
 
                 self._tasks[task_id] = record
                 if record.graph_node_name:
@@ -767,9 +764,9 @@ class TaskRuntime:
                 # v2 readiness is owned by the orchestration engine; the legacy
                 # dependency machinery stays unwired so it cannot admit v2 work.
                 if v2_engine is None:
-                    self._pending_deps[task_id] = pending
+                    self._dag.pending_deps[task_id] = pending
                     for dep in original:
-                        self._dependents[dep].add(task_id)
+                        self._dag.dependents[dep].add(task_id)
                     if not pending and record.status == TaskStatus.PENDING:
                         candidate_ready.append(task_id)
 
@@ -791,12 +788,12 @@ class TaskRuntime:
                         if mapped_task_id is None:
                             continue
                         epoch_task_ids.add(mapped_task_id)
-                        self._task_epoch_index[mapped_task_id] = epoch_idx
+                        self._epochs.task_epoch_index[mapped_task_id] = epoch_idx
                         has_epoch_tasks = True
                     epoch_queue.append(epoch_task_ids)
                 if has_epoch_tasks:
-                    self._workflow_epoch_tasks[workflow_id] = epoch_queue
-                    self._workflow_epoch_frontier[workflow_id] = 0
+                    self._epochs.workflow_epoch_tasks[workflow_id] = epoch_queue
+                    self._epochs.workflow_epoch_frontier[workflow_id] = 0
 
         return _StagedRegistration(
             results, task_records, candidate_ready, v2_bundle, v2_engine
@@ -817,8 +814,10 @@ class TaskRuntime:
                 for record in task_records
                 if (item := self._persisted_task_locked(record.task_id))
             ]
-            in_epoch_order = self._workflow_in_epoch_order.get(workflow_id, False)
-            frontier = self._workflow_epoch_frontier.get(workflow_id, 0)
+            in_epoch_order = self._epochs.workflow_in_epoch_order.get(
+                workflow_id, False
+            )
+            frontier = self._epochs.workflow_epoch_frontier.get(workflow_id, 0)
         await self._workflow_registry.save_task_states_async(persisted)
         await self._workflow_registry.save_workflow_sched_async(
             workflow_id, in_epoch_order, frontier
@@ -846,9 +845,9 @@ class TaskRuntime:
                 maybe_record = self._tasks.get(task_id)
                 if not maybe_record or maybe_record.status != TaskStatus.PENDING:
                     continue
-                if self._pending_deps.get(task_id):
+                if self._dag.pending_deps.get(task_id):
                     continue
-                if self._enqueue_ready_locked(task_id):
+                if self._ready.enqueue_ready_locked(task_id):
                     new_ready = True
             if new_ready:
                 self._cv.notify_all()
@@ -1046,9 +1045,12 @@ class TaskRuntime:
                 record.merge_key = credential_merge_key(
                     record.task.spec, record.credential_refs or {}, scope=record.org_id
                 )
-            self._merge_key_by_task[task_id] = (record.merge_key, selected_worker_hint)
+            self._ready.merge_key_by_task[task_id] = (
+                record.merge_key,
+                selected_worker_hint,
+            )
             if persisted.epoch_index is not None:
-                self._task_epoch_index[task_id] = persisted.epoch_index
+                self._epochs.task_epoch_index[task_id] = persisted.epoch_index
                 epoch_members[persisted.epoch_index].add(task_id)
             if record.status == TaskStatus.DONE:
                 self._completed.add(task_id)
@@ -1062,34 +1064,34 @@ class TaskRuntime:
             task_id = record.task_id
             original = self._original_deps.get(task_id) or set()
             for dep in original:
-                self._dependents[dep].add(task_id)
+                self._dag.dependents[dep].add(task_id)
             if record.status in terminal:
                 continue
             # Only completed deps are subtracted, not failed ones: a failure
             # cascade-fails its dependents and persists them FAILED atomically,
             # so a non-terminal task here never has a FAILED dep to clear.
-            self._pending_deps[task_id] = {
+            self._dag.pending_deps[task_id] = {
                 dep for dep in original if dep not in self._completed
             }
 
         if in_epoch_order:
-            self._workflow_in_epoch_order[workflow_id] = True
-            self._ready_by_workflow.setdefault(workflow_id, [])
+            self._epochs.workflow_in_epoch_order[workflow_id] = True
+            self._ready.ready_by_workflow.setdefault(workflow_id, [])
         if epoch_members:
             epoch_queue: deque[set[str]] = deque(
                 epoch_members[idx] for idx in sorted(epoch_members) if idx >= frontier
             )
             if epoch_queue:
-                self._workflow_epoch_tasks[workflow_id] = epoch_queue
-                self._workflow_epoch_frontier[workflow_id] = frontier
+                self._epochs.workflow_epoch_tasks[workflow_id] = epoch_queue
+                self._epochs.workflow_epoch_frontier[workflow_id] = frontier
 
         for persisted in tasks:
             record = persisted.record
             if record.status != TaskStatus.PENDING:
                 continue
-            if self._pending_deps.get(record.task_id):
+            if self._dag.pending_deps.get(record.task_id):
                 continue
-            self._enqueue_ready_locked(record.task_id)
+            self._ready.enqueue_ready_locked(record.task_id)
 
     def _reconcile_failures_locked(
         self, engine: OrchestrationEngine, tasks: list[PersistedTask]
@@ -1216,7 +1218,7 @@ class TaskRuntime:
             if record.status != TaskStatus.PENDING:
                 continue
             if engine.reconcile_pending(record.task_id):
-                self._enqueue_ready_locked(record.task_id)
+                self._ready.enqueue_ready_locked(record.task_id)
             elif (worker_id := engine.suspending_worker(record.task_id)) is not None:
                 # A crash beat the ledger save of a boundary's settle, which had
                 # already returned the record to PENDING. The re-issued boundary
@@ -1273,7 +1275,7 @@ class TaskRuntime:
         return PersistedTask(
             record=record,
             depends_on=self._original_deps.get(task_id) or set(),
-            epoch_index=self._task_epoch_index.get(task_id),
+            epoch_index=self._epochs.task_epoch_index.get(task_id),
         )
 
     def _records_locked(self, *task_ids: str) -> list[PersistedTask]:
@@ -1285,8 +1287,8 @@ class TaskRuntime:
 
     def _sched_locked(self, workflow_id: str) -> WorkflowSched:
         return WorkflowSched(
-            in_epoch_order=self._workflow_in_epoch_order.get(workflow_id, False),
-            epoch_frontier=self._workflow_epoch_frontier.get(workflow_id, 0),
+            in_epoch_order=self._epochs.workflow_in_epoch_order.get(workflow_id, False),
+            epoch_frontier=self._epochs.workflow_epoch_frontier.get(workflow_id, 0),
         )
 
     def _commit_transition_locked(
@@ -1525,154 +1527,6 @@ class TaskRuntime:
     # Ready queue helpers
     # ------------------------------------------------------------------ #
 
-    def _enqueue_ready_locked(self, task_id: str, *, front: bool = False) -> bool:
-        """Add a task to the ready queue if it is pending and not already queued."""
-        record = self._tasks.get(task_id)
-        if not record or record.status != TaskStatus.PENDING:
-            return False
-        if task_id in self._ready_index:
-            return False
-        if not self._is_epoch_ready_locked(record):
-            return False
-        workflow_id = record.workflow_id
-        if (
-            workflow_id in self._workflow_in_epoch_order
-            and task_id in self._task_epoch_index
-        ):
-            queue = self._ready_by_workflow[workflow_id]
-            position_in_epoch = record.position_in_epoch
-            if position_in_epoch is None:
-                raise ValueError(
-                    "Ordered workflow task is missing position_in_epoch "
-                    f"(task_id={task_id})"
-                )
-            heapq.heappush(queue, (position_in_epoch, task_id))
-            ready_entry = (workflow_id, True)
-        else:
-            ready_entry = (task_id, False)
-        if front:
-            self._ready_queue.appendleft(ready_entry)
-        else:
-            self._ready_queue.append(ready_entry)
-        self._ready_index.add(task_id)
-        record.last_queue_ts = time.time()
-        self._merge_bucket_add(task_id)
-        return True
-
-    def _pop_ready_locked(self) -> str | None:
-        while self._ready_queue:
-            task_or_workflow_id, is_workflow = self._ready_queue.popleft()
-            if is_workflow:
-                _, task_id = heapq.heappop(self._ready_by_workflow[task_or_workflow_id])
-            else:
-                task_id = task_or_workflow_id
-            self._ready_index.discard(task_id)
-            record = self._tasks.get(task_id)
-            if not record or record.status != TaskStatus.PENDING:
-                continue
-            return task_id
-        return None
-
-    def _remove_from_ready_locked(self, task_id: str) -> None:
-        if task_id not in self._ready_index:
-            return
-        record = self._tasks.get(task_id)
-        if not record:
-            return
-        workflow_id = record.workflow_id
-        if (
-            workflow_id in self._workflow_in_epoch_order
-            and task_id in self._task_epoch_index
-        ):
-            queue = self._ready_by_workflow[workflow_id]
-            position_in_epoch = record.position_in_epoch
-            if position_in_epoch is None:
-                raise ValueError(
-                    "Ordered workflow task is missing position_in_epoch "
-                    f"(task_id={task_id})"
-                )
-            queue.remove((position_in_epoch, task_id))
-            heapq.heapify(queue)
-            ready_entry = (workflow_id, True)
-        else:
-            ready_entry = (task_id, False)
-        self._ready_queue.remove(ready_entry)
-        self._ready_index.discard(task_id)
-
-    def _merge_bucket_add(self, task_id: str) -> None:
-        key = self._merge_key_by_task.get(task_id)
-        if not key:
-            return
-        merge_key, selected_worker = key
-        if not merge_key:
-            return
-        bucket = self._merge_buckets.setdefault((merge_key, selected_worker), [])
-        if task_id not in bucket:
-            bucket.append(task_id)
-
-    def _merge_bucket_remove(self, task_id: str) -> None:
-        key = self._merge_key_by_task.get(task_id)
-        if not key:
-            return
-        merge_key, selected_worker = key
-        if not merge_key:
-            return
-        bucket = self._merge_buckets.get((merge_key, selected_worker))
-        if not bucket:
-            return
-        try:
-            bucket.remove(task_id)
-        except ValueError:
-            pass
-        if not bucket:
-            self._merge_buckets.pop((merge_key, selected_worker), None)
-
-    def _is_epoch_ready_locked(self, record: TaskRecord) -> bool:
-        epoch_index = self._task_epoch_index.get(record.task_id)
-        if epoch_index is None:
-            return True
-        frontier = self._workflow_epoch_frontier.get(record.workflow_id)
-        if frontier is None:
-            return True
-        return epoch_index == frontier
-
-    def _try_advance_epoch_frontier_locked(self, workflow_id: str) -> list[str]:
-        epoch_tasks = self._workflow_epoch_tasks.get(workflow_id)
-        if not epoch_tasks:
-            return []
-        frontier = self._workflow_epoch_frontier[workflow_id]
-
-        ready: list[str] = []
-        while True:
-            self._workflow_epoch_frontier[workflow_id] = frontier
-            current_tasks = epoch_tasks[0] if epoch_tasks else set()
-            if current_tasks and not all(
-                (task := self._tasks.get(task_id)) is not None
-                and task.status == TaskStatus.DONE
-                for task_id in current_tasks
-            ):
-                break
-
-            if epoch_tasks:
-                epoch_tasks.popleft()
-            frontier += 1
-            self._workflow_epoch_frontier[workflow_id] = frontier
-            if not epoch_tasks:
-                self._workflow_epoch_frontier.pop(workflow_id, None)
-                self._workflow_epoch_tasks.pop(workflow_id, None)
-                break
-
-            for task_id in epoch_tasks[0]:
-                record = self._tasks.get(task_id)
-                if not record or record.status != TaskStatus.PENDING:
-                    continue
-                if self._pending_deps.get(task_id):
-                    continue
-                if self._enqueue_ready_locked(task_id):
-                    ready.append(task_id)
-
-        return ready
-
     def _fail_later_epochs_locked(
         self,
         workflow_id: str,
@@ -1684,10 +1538,10 @@ class TaskRuntime:
         Returns the failed tasks with their reason, and the merged children of any of
         them returned to the queue.
         """
-        epoch_tasks = self._workflow_epoch_tasks.get(workflow_id)
+        epoch_tasks = self._epochs.workflow_epoch_tasks.get(workflow_id)
         if not epoch_tasks:
             return [], []
-        frontier = self._workflow_epoch_frontier[workflow_id]
+        frontier = self._epochs.workflow_epoch_frontier[workflow_id]
 
         impacted: list[tuple[str, str]] = []
         returned: list[str] = []
@@ -1705,10 +1559,10 @@ class TaskRuntime:
                 record.finished_ts = time.time()
                 self._failed.add(task_id)
                 self._completed.discard(task_id)
-                self._pending_deps.pop(task_id, None)
-                self._remove_from_ready_locked(task_id)
-                self._merge_bucket_remove(task_id)
-                self._merge_key_by_task.pop(task_id, None)
+                self._dag.pending_deps.pop(task_id, None)
+                self._ready.remove_from_ready_locked(task_id)
+                self._ready.merge_bucket_remove(task_id)
+                self._ready.merge_key_by_task.pop(task_id, None)
                 returned += self._return_merged_children_locked(
                     self._merge_children_map.pop(task_id, []), unmerge=True
                 )
@@ -1725,7 +1579,7 @@ class TaskRuntime:
         """
         with self._cv:
             while not stop_event.is_set():
-                task_id = self._pop_ready_locked()
+                task_id = self._ready.pop_ready_locked()
                 if task_id:
                     return task_id
                 self._cv.wait(timeout)
@@ -3286,7 +3140,7 @@ class TaskRuntime:
                 or task_id in new
             ):
                 continue
-            self._fail_record_locked(record, reason)
+            self._record_failures.fail_record_locked(record, reason)
             failed.append(task_id)
         if failed:
             self._commit_locked(*failed)
@@ -3325,7 +3179,7 @@ class TaskRuntime:
             advance.extend(staged)
             self._retire_sealed_region_templates_locked(workflow_id, engine)
         for task_id in advance.ready:
-            if self._enqueue_ready_locked(task_id):
+            if self._ready.enqueue_ready_locked(task_id):
                 changed = True
         return changed
 
@@ -3541,7 +3395,7 @@ class TaskRuntime:
                     "Task %s runs again: control reads the inputs its worker could not",
                     task_id,
                 )
-                if self._enqueue_ready_locked(task_id, front=False):
+                if self._ready.enqueue_ready_locked(task_id, front=False):
                     self._cv.notify_all()
                 self._commit_locked(task_id)
                 del self._input_checks[task_id]
@@ -3715,21 +3569,11 @@ class TaskRuntime:
                 # A settling task is already on its way to a terminal; failing it would
                 # overwrite the cancellation a settle path is still waiting to apply.
                 continue
-            self._fail_record_locked(record, reason)
+            self._record_failures.fail_record_locked(record, reason)
             failed_now.append(task_id)
         if persist and failed_now:
             self._commit_locked(*failed_now)
         return failed_now
-
-    def _fail_record_locked(self, record: TaskRecord, reason: str) -> None:
-        task_id = record.task_id
-        record.status = TaskStatus.FAILED
-        record.error = reason
-        record.assigned_worker = None
-        record.finished_ts = time.time()
-        self._failed.add(task_id)
-        self._pending_deps.pop(task_id, None)
-        self._remove_from_ready_locked(task_id)
 
     def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
         """Fail a workflow in its ledger and every non-terminal task of it, and persist
@@ -3752,24 +3596,6 @@ class TaskRuntime:
         self._save_ledger_locked(workflow_id)
         self._reclaim_vault_if_settled_locked(workflow_id)
         self._cv.notify_all()
-
-    def _fail_v1_dependents_locked(self, primary: str) -> list[tuple[str, str]]:
-        """Fail every pending task downstream of a failed v1 task, however deep."""
-        reason = dependency_failed(primary)
-        impacted: list[tuple[str, str]] = []
-        frontier = [primary]
-        while frontier:
-            failed = frontier.pop()
-            for child in self._dependents.pop(failed, set()):
-                if (pending := self._pending_deps.get(child)) is not None:
-                    pending.discard(failed)
-                record = self._tasks.get(child)
-                if not record or record.status != TaskStatus.PENDING:
-                    continue
-                self._fail_record_locked(record, reason)
-                impacted.append((child, reason))
-                frontier.append(child)
-        return impacted
 
     def plan_merge(
         self, task_id: str, max_batch_size: int, assigned_worker: str
@@ -3798,8 +3624,8 @@ class TaskRuntime:
                 f"is not in selected workers {record.selected_worker}."
             )
         bucket = (
-            self._merge_buckets[(record.merge_key, assigned_worker)]
-            + self._merge_buckets[(record.merge_key, None)]
+            self._ready.merge_buckets[(record.merge_key, assigned_worker)]
+            + self._ready.merge_buckets[(record.merge_key, None)]
         )
         if not bucket or len(bucket) <= 1:
             return []
@@ -3817,7 +3643,7 @@ class TaskRuntime:
                 and assigned_worker not in candidate_record.selected_worker
             ):
                 continue
-            if candidate not in self._ready_index:
+            if candidate not in self._ready.ready_index:
                 continue
             siblings.append(candidate)
         if not siblings:
@@ -3827,8 +3653,8 @@ class TaskRuntime:
         self._merge_children_map[task_id] = siblings.copy()
         for sibling in siblings:
             self._merge_parent_map[sibling] = task_id
-            self._remove_from_ready_locked(sibling)
-            self._merge_bucket_remove(sibling)
+            self._ready.remove_from_ready_locked(sibling)
+            self._ready.merge_bucket_remove(sibling)
             sibling_record = self._tasks.get(sibling)
             if sibling_record:
                 sibling_record.status = TaskStatus.DISPATCHED
@@ -3910,10 +3736,10 @@ class TaskRuntime:
                     child := self._tasks.get(child_id)
                 ):
                     child.merge_key = merge_key
-                    _, selected_worker_hint = self._merge_key_by_task.get(
+                    _, selected_worker_hint = self._ready.merge_key_by_task.get(
                         child_id, (None, None)
                     )
-                    self._merge_key_by_task[child_id] = (
+                    self._ready.merge_key_by_task[child_id] = (
                         merge_key,
                         selected_worker_hint,
                     )
@@ -3942,9 +3768,9 @@ class TaskRuntime:
             child_record.merge_slice = None
             if unmerge:
                 child_record.merge_key = None
-                self._merge_key_by_task.pop(child_id, None)
-            self._remove_from_ready_locked(child_id)
-            self._enqueue_ready_locked(child_id, front=True)
+                self._ready.merge_key_by_task.pop(child_id, None)
+            self._ready.remove_from_ready_locked(child_id)
+            self._ready.enqueue_ready_locked(child_id, front=True)
             returned.append(child_id)
         if returned:
             self._cv.notify_all()
@@ -4013,21 +3839,21 @@ class TaskRuntime:
             child_record.usages.append(usage)
         self._completed.add(child_id)
         self._failed.discard(child_id)
-        self._pending_deps.pop(child_id, None)
+        self._dag.pending_deps.pop(child_id, None)
         self._merge_parent_map.pop(child_id, None)
-        self._merge_key_by_task.pop(child_id, None)
-        self._remove_from_ready_locked(child_id)
-        self._merge_bucket_remove(child_id)
-        dependents = list(self._dependents.pop(child_id, set()))
+        self._ready.merge_key_by_task.pop(child_id, None)
+        self._ready.remove_from_ready_locked(child_id)
+        self._ready.merge_bucket_remove(child_id)
+        dependents = list(self._dag.dependents.pop(child_id, set()))
         for dep_id in dependents:
-            pending = self._pending_deps.get(dep_id)
+            pending = self._dag.pending_deps.get(dep_id)
             if pending is None:
                 continue
             pending.discard(child_id)
             if not pending:
                 dep_record = self._tasks.get(dep_id)
                 if dep_record and dep_record.status == TaskStatus.PENDING:
-                    if self._enqueue_ready_locked(dep_id):
+                    if self._ready.enqueue_ready_locked(dep_id):
                         ready_children.append(dep_id)
         return ready_children
 
@@ -4264,8 +4090,8 @@ class TaskRuntime:
         record.dispatched_ts = time.time()
         record.next_retry_at = None
         record.supplier_id = publish.supplier_id
-        self._remove_from_ready_locked(task_id)
-        self._merge_bucket_remove(task_id)
+        self._ready.remove_from_ready_locked(task_id)
+        self._ready.merge_bucket_remove(task_id)
         if engine := self._engines.get(record.workflow_id):
             if publish.input_preparation:
                 engine.on_input_preparation_dispatched(task_id, publish.worker_id)
@@ -4558,21 +4384,21 @@ class TaskRuntime:
 
             self._completed.add(task_id)
             self._failed.discard(task_id)
-            self._pending_deps.pop(task_id, None)
+            self._dag.pending_deps.pop(task_id, None)
             ready_children: list[str] = []
             merged_children_ids: list[str] = self._merge_children_map.pop(task_id, [])
-            self._merge_key_by_task.pop(task_id, None)
+            self._ready.merge_key_by_task.pop(task_id, None)
 
-            dependents = list(self._dependents.pop(task_id, set()))
+            dependents = list(self._dag.dependents.pop(task_id, set()))
             for child in dependents:
-                pending = self._pending_deps.get(child)
+                pending = self._dag.pending_deps.get(child)
                 if pending is None:
                     continue
                 pending.discard(task_id)
                 if not pending:
                     child_record = self._tasks.get(child)
                     if child_record and child_record.status == TaskStatus.PENDING:
-                        if self._enqueue_ready_locked(child):
+                        if self._ready.enqueue_ready_locked(child):
                             ready_children.append(child)
 
             settled_children, unsettled_children = (
@@ -4600,7 +4426,7 @@ class TaskRuntime:
             if record is not None:
                 for workflow_id in self._settle_workflows_locked(record):
                     ready_children.extend(
-                        self._try_advance_epoch_frontier_locked(workflow_id)
+                        self._ready.try_advance_epoch_frontier_locked(workflow_id)
                     )
 
             self._commit_locked(task_id, *settled_children, *returned)
@@ -4823,7 +4649,7 @@ class TaskRuntime:
         references: tuple[ContentReference, ...],
     ) -> None:
         """Keep a returned task out of the queue until control has read its inputs."""
-        self._remove_from_ready_locked(record.task_id)
+        self._ready.remove_from_ready_locked(record.task_id)
         self._input_checks[record.task_id] = _InputCheck(
             worker_id, dispatch_id, references
         )
@@ -4948,7 +4774,7 @@ class TaskRuntime:
                 moved,
             )
         reset_to_pending(record)
-        if self._enqueue_ready_locked(task_id, front=front):
+        if self._ready.enqueue_ready_locked(task_id, front=front):
             self._cv.notify_all()
         self._commit_locked(*moved)
 
@@ -5075,12 +4901,12 @@ class TaskRuntime:
 
             self._failed.add(task_id)
             self._completed.discard(task_id)
-            self._pending_deps.pop(task_id, None)
-            self._remove_from_ready_locked(task_id)
+            self._dag.pending_deps.pop(task_id, None)
+            self._ready.remove_from_ready_locked(task_id)
             merged_children_ids = self._merge_children_map.pop(task_id, [])
-            self._merge_key_by_task.pop(task_id, None)
+            self._ready.merge_key_by_task.pop(task_id, None)
 
-            impacted = self._fail_v1_dependents_locked(task_id)
+            impacted = self._record_failures.fail_v1_dependents_locked(task_id)
 
             engine = self._engines.get(record.workflow_id) if record else None
             advance = Advance()
@@ -5094,7 +4920,7 @@ class TaskRuntime:
                 merged_children_ids, unmerge=True
             )
 
-            failed_epoch = self._task_epoch_index.get(task_id)
+            failed_epoch = self._epochs.task_epoch_index.get(task_id)
             if record and failed_epoch is not None:
                 blocked, blocked_returned = self._fail_later_epochs_locked(
                     record.workflow_id,
@@ -5183,9 +5009,9 @@ class TaskRuntime:
             ],
             reason,
         )
-        self._workflow_epoch_tasks.pop(workflow_id, None)
-        self._workflow_epoch_frontier.pop(workflow_id, None)
-        self._workflow_in_epoch_order.pop(workflow_id, None)
+        self._epochs.workflow_epoch_tasks.pop(workflow_id, None)
+        self._epochs.workflow_epoch_frontier.pop(workflow_id, None)
+        self._epochs.workflow_in_epoch_order.pop(workflow_id, None)
         if (engine := self._engines.get(workflow_id)) is None:
             return termination
         if failure is None:
@@ -5215,7 +5041,7 @@ class TaskRuntime:
             ):
                 interrupts.append(interrupt)
             self._input_checks.pop(record.task_id, None)
-            self._task_epoch_index.pop(record.task_id, None)
+            self._epochs.task_epoch_index.pop(record.task_id, None)
         reaps = self._router.take_ops_for_agents_locked([r.task_id for r in records])
         return Termination(interrupts, reaps)
 
@@ -5363,10 +5189,10 @@ class TaskRuntime:
         # TODO(kaiitunnz): Handle usages for cancelled tasks
         self._completed.discard(task_id)
         self._failed.discard(task_id)
-        self._pending_deps.pop(task_id, None)
-        self._remove_from_ready_locked(task_id)
-        self._merge_bucket_remove(task_id)
-        self._merge_key_by_task.pop(task_id, None)
+        self._dag.pending_deps.pop(task_id, None)
+        self._ready.remove_from_ready_locked(task_id)
+        self._ready.merge_bucket_remove(task_id)
+        self._ready.merge_key_by_task.pop(task_id, None)
         return self._return_merged_children_locked(
             self._merge_children_map.pop(task_id, []), unmerge
         )
@@ -5938,7 +5764,7 @@ class TaskRuntime:
 
     def ready_queue_length(self) -> int:
         with self._cv:
-            return len(self._ready_queue)
+            return len(self._ready.ready_queue)
 
     def queued_gpu_counts(self) -> set[int]:
         """Return the set of distinct GPU counts requested by tasks in the ready queue.
@@ -5948,7 +5774,7 @@ class TaskRuntime:
         """
         counts: set[int] = set()
         with self._cv:
-            for task_id, _ in self._ready_queue:
+            for task_id, _ in self._ready.ready_queue:
                 record = self._tasks.get(task_id)
                 if record is None:
                     continue
@@ -5962,7 +5788,7 @@ class TaskRuntime:
 
     def task_status_counts(self) -> tuple[int, int, int, int, int]:
         with self._cv:
-            queueing = len(self._ready_queue)
+            queueing = len(self._ready.ready_queue)
             dispatched = 0
             pending = 0
             done = 0
@@ -5972,7 +5798,10 @@ class TaskRuntime:
                     dispatched += 1
                 elif status == TaskStatus.DONE:
                     done += 1
-                elif status == TaskStatus.PENDING and task_id not in self._ready_index:
+                elif (
+                    status == TaskStatus.PENDING
+                    and task_id not in self._ready.ready_index
+                ):
                     pending += 1
             total = len(self._tasks)
             return queueing, dispatched, pending, done, total
@@ -5983,10 +5812,10 @@ class TaskRuntime:
             "completed": self._completed.__contains__,
             "failed": self._failed.__contains__,
             "depends_on": lambda task_id: self._original_deps.get(task_id, empty),
-            "pending_dependencies": lambda task_id: self._pending_deps.get(
+            "pending_dependencies": lambda task_id: self._dag.pending_deps.get(
                 task_id, empty
             ),
-            "dependents": lambda task_id: self._dependents.get(task_id, empty),
+            "dependents": lambda task_id: self._dag.dependents.get(task_id, empty),
         }
 
     def _build_task_info_locked(self, task_id: str, record: TaskRecord) -> TaskInfo:
@@ -6006,8 +5835,8 @@ class TaskRuntime:
                 for name, value in record
             },
             "depends_on": sorted(self._original_deps.get(task_id, set())),
-            "pending_dependencies": sorted(self._pending_deps.get(task_id, set())),
-            "dependents": sorted(self._dependents.get(task_id, set())),
+            "pending_dependencies": sorted(self._dag.pending_deps.get(task_id, set())),
+            "dependents": sorted(self._dag.dependents.get(task_id, set())),
             "completed": task_id in self._completed,
             "failed": task_id in self._failed,
             "input_element": (

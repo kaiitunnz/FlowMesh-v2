@@ -313,12 +313,12 @@ async def test_rehydrate_restores_epoch_frontier() -> None:
 
     runtime.mark_succeeded(ids["a"], None, {}, "2026-06-01T00:00:00Z")
     runtime.mark_succeeded(ids["b"], None, {}, "2026-06-01T00:00:01Z")
-    assert runtime._workflow_epoch_frontier[workflow_id] == 1
+    assert runtime._epochs.workflow_epoch_frontier[workflow_id] == 1
 
     restored = _runtime(registry)
     await restored.rehydrate()
 
-    assert restored._workflow_epoch_frontier[workflow_id] == 1
+    assert restored._epochs.workflow_epoch_frontier[workflow_id] == 1
     assert pop_ready(restored) == ids["c"]
 
 
@@ -440,7 +440,7 @@ async def test_mark_succeeded_applies_in_memory_atomically_when_persist_raises(
     # half-done): 'a' is DONE and its dependent 'b' is enqueued.
     record_a = runtime.get_record(a)
     assert record_a is not None and record_a.status == TaskStatus.DONE
-    assert b in runtime._ready_index
+    assert b in runtime._ready.ready_index
 
     # The at-least-once replay re-runs and is a no-op via the idempotency guard.
     monkeypatch.setattr(registry, "commit_transition", lambda *args, **kwargs: None)
