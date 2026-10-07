@@ -2671,11 +2671,7 @@ class TaskRuntime:
             )
         if engine is not None:
             staged = Advance()
-            self._agent_inputs.stage_agent_inputs_locked(
-                workflow_id,
-                engine,
-                staged,
-            )
+            self._agent_inputs.stage_agent_inputs_locked(workflow_id, engine, staged)
             changed |= bool(staged.failed)
             self._fail_v2_advance_locked(engine, staged)
             advance.extend(staged)
@@ -2896,10 +2892,7 @@ class TaskRuntime:
             if engine is None:
                 return
             producers = [
-                (
-                    task_id,
-                    self._content_bindings.result_binding_locked(task_id),
-                )
+                (task_id, self._content_bindings.result_binding_locked(task_id))
                 for task_id, record in self._tasks.items()
                 if record.workflow_id == workflow_id
                 and record.status == TaskStatus.DONE

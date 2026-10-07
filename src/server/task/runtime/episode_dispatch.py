@@ -204,11 +204,7 @@ class EpisodeDispatch:
             return None
         return engine.resident_admission_binding(record.workflow_id, task_id)
 
-    def boundary_settleable(
-        self,
-        task_id: str,
-        call_correlation: str,
-    ) -> bool:
+    def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:
         """Whether a mediated boundary still awaits its outcome."""
         record = self._tasks.get(task_id)
         engine = self._engines.get(record.workflow_id) if record else None
@@ -223,9 +219,7 @@ class EpisodeDispatch:
         return engine.private_state_owner(task_id) if engine else None
 
     def agent_episode_dispatch(
-        self,
-        task_id: str,
-        holder: OwnerFence,
+        self, task_id: str, holder: OwnerFence
     ) -> AgentEpisodeDispatch | None:
         """The agent-episode context to ship with a dispatch, or None for a
         non-agent."""
@@ -308,9 +302,7 @@ class EpisodeDispatch:
         return engine.embodiment_menu(task_id) if engine else None
 
     def declared_contract(
-        self,
-        task_id: str,
-        spec: TaskSpecBase | None = None,
+        self, task_id: str, spec: TaskSpecBase | None = None
     ) -> CanonicalInferenceContract | None:
         """The contract a leaf carries to the worker, for it to resolve and report."""
         record = self._tasks.get(task_id)

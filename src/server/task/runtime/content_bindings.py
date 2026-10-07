@@ -53,11 +53,7 @@ class ContentBindings:
         self._original_deps = original_deps
         self._logger = logger
 
-    def consumes_locked(
-        self,
-        record: TaskRecord,
-        reference: ContentReference,
-    ) -> bool:
+    def consumes_locked(self, record: TaskRecord, reference: ContentReference) -> bool:
         """Whether a task is bound to exactly this object as one of its inputs."""
         if reference.authorization_scope != record.org_id:
             return False
@@ -97,9 +93,7 @@ class ContentBindings:
         return visited
 
     def _upstream_result_is_locked(
-        self,
-        record: TaskRecord,
-        reference: ContentReference,
+        self, record: TaskRecord, reference: ContentReference
     ) -> bool:
         """Whether a settled upstream of the task, or of one merged into its dispatch,
         is bound to exactly this result."""
@@ -121,10 +115,7 @@ class ContentBindings:
         return False
 
     def _frozen_input_is_locked(
-        self,
-        engine: OrchestrationEngine,
-        task_id: str,
-        reference: ContentReference,
+        self, engine: OrchestrationEngine, task_id: str, reference: ContentReference
     ) -> bool:
         """Whether an accepted input of the task, or its fan-out element, is frozen
         to exactly this producer result."""
@@ -239,10 +230,7 @@ class ContentBindings:
         )
         return None
 
-    def member_source_locked(
-        self,
-        value_ref: ValueRef | None,
-    ) -> ResultValueRef | None:
+    def member_source_locked(self, value_ref: ValueRef | None) -> ResultValueRef | None:
         """The stored result an input member reads, when a producer supplies it."""
         if value_ref is None or value_ref.kind != "legacy_task_result":
             return None
@@ -255,9 +243,7 @@ class ContentBindings:
         return ResultValueRef(reference=reference, element=element_of(value_ref))
 
     def consumed_inputs_locked(
-        self,
-        record: TaskRecord,
-        references: Sequence[ContentReference],
+        self, record: TaskRecord, references: Sequence[ContentReference]
     ) -> tuple[ContentReference, ...]:
         """The named objects the task consumes, each once."""
         return tuple(

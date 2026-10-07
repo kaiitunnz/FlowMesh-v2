@@ -139,10 +139,7 @@ class AgentInputs:
         self._input_budget_bytes = input_budget_bytes
 
     def stage_agent_inputs_locked(
-        self,
-        workflow_id: str,
-        engine: OrchestrationEngine,
-        advance: Advance,
+        self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
     ) -> None:
         """Record each edge-bound agent's accepted inputs that need no stored read.
 
@@ -162,9 +159,7 @@ class AgentInputs:
             self._redrive.drive_now(workflow_id)
 
     def agent_input_snapshot_locked(
-        self,
-        engine: OrchestrationEngine,
-        task_id: str,
+        self, engine: OrchestrationEngine, task_id: str
     ) -> _AgentInputSnapshot | None:
         """What an agent's pending input ports resolve from, as the ledger stands.
 
@@ -293,9 +288,7 @@ class AgentInputs:
         advance.extend(engine.reconsider_admission(task_id))
 
     def agent_input_bindings(
-        self,
-        engine: OrchestrationEngine,
-        task_id: str,
+        self, engine: OrchestrationEngine, task_id: str
     ) -> tuple[InputBinding, ...]:
         """The first-turn input bindings for an agent's input ports.
 
