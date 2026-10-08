@@ -9,6 +9,7 @@ unacknowledged while any workflow its handling touched owes writes.
 
 import asyncio
 import logging
+import threading
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -315,3 +316,38 @@ def test_failing_a_task_under_a_held_write_reports_it_and_its_dependents() -> No
     }
     assert failed == {ids["a"], ids["b"], ids["c"]}
     assert workflow_id in runtime._committer.debt
+
+
+def test_an_unregister_revokes_after_its_requeues_whatever_thread_delivers() -> None:
+    store = _Store()
+    runtime = _runtime(store)
+    asyncio.run(_register(runtime, TWO_V1))
+    for _ in range(2):
+        task_id = pop_ready(runtime, 0.05)
+        assert task_id is not None
+        record_dispatch(runtime, task_id, "wkr-1", f"dsp-{task_id}")
+    monitor, _, _ = _monitor(runtime)
+    order: list[str] = []
+    workers = runtime._worker_registry
+    publish, requeue = workers.publish_revoke, monitor._dispatcher.requeue_task
+
+    def revoke(*args: Any) -> int:
+        order.append("revoke")
+        return publish(*args)
+
+    def requeue_while_another_transition_ends(task_id: str, **kwargs: Any) -> Any:
+        if not order:
+            other = threading.Thread(target=runtime.release_merge, args=("tsk-x",))
+            other.start()
+            other.join()
+        order.append("requeue")
+        return requeue(task_id, **kwargs)
+
+    setattr(workers, "publish_revoke", revoke)
+    setattr(monitor._dispatcher, "requeue_task", requeue_while_another_transition_ends)
+
+    monitor._handle_worker_event(
+        WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=False)
+    )
+
+    assert order == ["requeue", "requeue", "revoke", "revoke"]

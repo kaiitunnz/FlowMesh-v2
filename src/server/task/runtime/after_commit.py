@@ -1,5 +1,6 @@
 """What a runtime transition owes workers and other consumers once it is durable."""
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -104,6 +105,11 @@ AfterCommit = (
 )
 
 
+class _Filing(threading.local):
+    # The workflows this thread's open outermost transition filed actions of.
+    filed: set[str] | None = None
+
+
 class AfterCommitActions:
     """Holds each workflow's actions until its transition commits, queues committed
     actions for delivery off the lock, and keeps each action whose delivery failed for
@@ -119,10 +125,29 @@ class AfterCommitActions:
         self.failed: dict[str, list[AfterCommit]] = {}
         # Each cleanup filed and not yet delivered.
         self.cleanups: set[Cleanup] = set()
+        # How many open transitions filed actions of each workflow.
+        self._filing: dict[str, int] = {}
+        self._scope = _Filing()
+
+    def open_scope(self) -> None:
+        """Start an outermost transition on this thread: what it files stays parked
+        until it closes, whichever thread releases."""
+        self._scope.filed = set()
+
+    def close_scope_locked(self) -> None:
+        filed, self._scope.filed = self._scope.filed or set(), None
+        for workflow_id in filed:
+            if (count := self._filing[workflow_id] - 1) > 0:
+                self._filing[workflow_id] = count
+            else:
+                del self._filing[workflow_id]
 
     def file_locked(self, workflow_id: str, *actions: AfterCommit) -> None:
         """Hold actions until the workflow's transition commits, each once."""
         if actions:
+            if (filed := self._scope.filed) is not None and workflow_id not in filed:
+                filed.add(workflow_id)
+                self._filing[workflow_id] = self._filing.get(workflow_id, 0) + 1
             parked = self.parked.setdefault(workflow_id, [])
             for action in actions:
                 if action not in parked and self._owe(action):
@@ -150,8 +175,11 @@ class AfterCommitActions:
         return any(cleanup.task_id == task_id for cleanup in self.cleanups)
 
     def release_locked(self, durable: Callable[[str], bool]) -> None:
-        """Queue each parked action whose workflow ``durable`` reports committed."""
-        for workflow_id in [w for w in self.parked if durable(w)]:
+        """Queue each parked action whose workflow ``durable`` reports committed and
+        no open transition filed for."""
+        for workflow_id in [
+            w for w in self.parked if w not in self._filing and durable(w)
+        ]:
             self.ready.extend(
                 (workflow_id, action) for action in self.parked.pop(workflow_id)
             )

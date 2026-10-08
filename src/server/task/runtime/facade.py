@@ -1219,7 +1219,8 @@ class TaskRuntime:
         itself, so it can read off the lock first. A write the store does not take is
         held for a retry and the transition completes in memory.
         """
-        outermost = self._committer.enter_scope()
+        if outermost := self._committer.enter_scope():
+            self._actions.open_scope()
         try:
             with self._cv if locked else nullcontext():
                 try:
@@ -1235,6 +1236,7 @@ class TaskRuntime:
                 finally:
                     if outermost:
                         with self._cv:
+                            self._actions.close_scope_locked()
                             self._actions.release_locked(self._committer.durable)
         finally:
             held = self._committer.exit_scope()
@@ -1250,7 +1252,7 @@ class TaskRuntime:
     @contextmanager
     def transition(self) -> Iterator[None]:
         """Run several runtime calls as one transition: what any of them owes is
-        delivered once all of them have committed."""
+        delivered once all of them have committed, whichever thread delivers it."""
         with self._transition(locked=False):
             yield
 
