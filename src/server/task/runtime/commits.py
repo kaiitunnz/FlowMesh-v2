@@ -169,8 +169,8 @@ class TransitionCommitter:
     A write the store does not take is held in its workflow's debt, and every later
     write of that workflow is made with the debt, so none lands ahead of it. Every
     write is made from current state, and the debt is made in one order: the task
-    records, then the ledger with the children it materialized, then the records of
-    those children. A ledger that lands therefore never leads the task records it
+    records, then the ledger with the records and status-set membership of the children
+    it materialized. A ledger that lands therefore never leads the task records it
     reflects, and a child's record never lands ahead of the ledger that recorded it.
     """
 
@@ -322,7 +322,11 @@ class TransitionCommitter:
 
     def _make_locked(self, workflow_id: str, owed: _Debt) -> None:
         """Make one pass over what a workflow owes, records before the ledger."""
-        unwritten = self._unwritten_children.get(workflow_id, set())
+        unwritten = (
+            self._unwritten_children.get(workflow_id, set())
+            if workflow_id in self._engines
+            else set()
+        )
         if (ids := [t for t in owed.records if t not in unwritten]) or owed.sched:
             self._commit_records_raw(
                 workflow_id, ids, [t for t in ids if owed.records[t]], owed.sched
@@ -333,18 +337,12 @@ class TransitionCommitter:
         if not (owed.snapshot or owed.retire or owed.records):
             return
         retire = sorted(owed.retire)
-        written = self._save_snapshot_raw(workflow_id, retire)
+        # The ledger writes the children it materialized from their current state,
+        # membership included, so it settles what they owe.
+        for task_id in self._save_snapshot_raw(workflow_id, retire):
+            owed.records.pop(task_id, None)
         owed.snapshot = False
         owed.retire.difference_update(retire)
-        if owed.records:
-            # The owed records of the children the ledger just wrote, which may have
-            # moved since they were materialized.
-            ids = list(owed.records)
-            self._commit_records_raw(
-                workflow_id, ids, [t for t in ids if owed.records[t]], bool(written)
-            )
-            for task_id in ids:
-                del owed.records[task_id]
 
     def _note_held(self, workflow_id: str, error: BaseException) -> None:
         if self.on_debt is not None:
@@ -388,9 +386,7 @@ class TransitionCommitter:
         sched: bool,
     ) -> None:
         """Commit task records of one workflow, the status-set membership of ``moves``
-        and its schedule, as one atomic transaction; then report each resident task it
-        ended, file the completion notice of a terminal, and release the worker of each
-        dispatch it ended."""
+        and its schedule, as one atomic transaction."""
         ids = [
             task_id
             for task_id in dict.fromkeys(task_ids)
@@ -412,10 +408,22 @@ class TransitionCommitter:
             cancelled=by_status[TaskStatus.CANCELLED],
             sched=self._sched_locked(workflow_id) if sched else None,
         )
+        self._after_records_locked(workflow_id, records, by_status)
+
+    def _after_records_locked(
+        self,
+        workflow_id: str,
+        records: Sequence[PersistedTask],
+        by_status: dict[str, list[str]],
+    ) -> None:
+        """Report each committed resident task that ended, file the completion notice
+        of a terminal, and release the worker of each dispatch the commit ended."""
         self._observe_resident_locked(records)
         if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
             self._actions.file_locked(workflow_id, Settled(workflow_id))
-        self._reservations.release_ended_dispatches_locked(ids)
+        self._reservations.release_ended_dispatches_locked(
+            [persisted.record.task_id for persisted in records]
+        )
 
     def _observe_resident_locked(self, records: Sequence[PersistedTask]) -> None:
         """Report each committed resident task that ended or reported an update under
@@ -427,15 +435,29 @@ class TransitionCommitter:
     def _commit_children_raw(
         self, workflow_id: str, retire: Sequence[str]
     ) -> list[str]:
-        """Commit a workflow's unwritten children with its ledger snapshot and the
-        retire, as one atomic transaction; returns the children it wrote."""
+        """Commit a workflow's unwritten children, with their status-set membership and
+        the schedule, with its ledger snapshot and the retire, as one atomic
+        transaction; returns the children it wrote."""
         engine = self._engines.get(workflow_id)
         children = sorted(self._unwritten_children.get(workflow_id, ()))
         if engine is None or not (children or retire):
             return []
+        records = self._records_locked(*children)
+        by_status: dict[str, list[str]] = defaultdict(list)
+        for persisted in records:
+            by_status[membership(persisted.record)].append(persisted.record.task_id)
         self._workflow_registry.commit_dynamic_tasks(
-            workflow_id, self._records_locked(*children), engine.to_snapshot(), retire
+            workflow_id,
+            records,
+            engine.to_snapshot(),
+            retire,
+            dispatched=by_status[TaskStatus.DISPATCHED],
+            done=by_status[TaskStatus.DONE],
+            failed=by_status[TaskStatus.FAILED],
+            cancelled=by_status[TaskStatus.CANCELLED],
+            sched=self._sched_locked(workflow_id) if children else None,
         )
+        self._after_records_locked(workflow_id, records, by_status)
         if unwritten := self._unwritten_children.get(workflow_id):
             unwritten.difference_update(children)
             if not unwritten:

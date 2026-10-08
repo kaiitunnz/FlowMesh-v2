@@ -2,7 +2,8 @@
 
 A held ledger save owed ahead of a held record write is made after it: whichever write
 of the repayment a crash lands after, every work item the durable ledger settled has
-its durable task record settled, and the restored workflow runs to its end.
+its durable task record settled, and the restored workflow runs to its end with its
+durable remaining set empty.
 """
 
 import asyncio
@@ -101,11 +102,20 @@ def _fan_out(runtime: TaskRuntime, ids: dict[str, str], workflow_id: str) -> Non
     )
 
 
+def _fan_out_cancelled(
+    runtime: TaskRuntime, ids: dict[str, str], workflow_id: str
+) -> None:
+    _fan_out(runtime, ids, workflow_id)
+    runtime.cancel_workflow(workflow_id)
+
+
 _SCENARIOS = (
     _Scenario("settle", PAIR, _settle),
     _Scenario("skip", PAIR, _skip),
     _Scenario("cancel", LINEAR, _cancel),
     _Scenario("fan-out", AUTORESEARCH, _fan_out),
+    # Its children settle while their records and the ledger are held.
+    _Scenario("fan-out-cancelled", AUTORESEARCH, _fan_out_cancelled),
 )
 
 
@@ -191,4 +201,5 @@ def test_a_crash_between_repaid_writes_restores_a_workflow_that_settles(
         _run_to_end(restored, workflow_id)
         settlement = restored.workflow_settlement(workflow_id)
         assert settlement.settled, (cut, restored.task_records())
+        assert store.remaining_of(workflow_id) == set(), cut
         restored.shutdown()

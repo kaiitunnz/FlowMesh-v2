@@ -181,10 +181,16 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
             failed=task_ids[1:2],
         )
     )
-    sync.commit_dynamic_tasks(workflow_id, records[:1], snapshot, retire=task_ids[:1])
+    children: dict[str, Any] = {
+        "retire": task_ids[:1],
+        "dispatched": task_ids[:1],
+        "failed": task_ids[1:2],
+        "sched": WorkflowSched(in_epoch_order=True, epoch_frontier=2),
+    }
+    sync.commit_dynamic_tasks(workflow_id, records[:2], snapshot, **children)
     asyncio.run(
         async_.commit_dynamic_tasks_async(
-            workflow_id, records[:1], snapshot, retire=task_ids[:1]
+            workflow_id, records[:2], snapshot, **children
         )
     )
     sync.save_ledger_snapshot(workflow_id, snapshot)

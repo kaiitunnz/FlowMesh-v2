@@ -181,16 +181,26 @@ class FakeRegistry:
         records: Sequence[PersistedTask],
         snapshot: LedgerSnapshot,
         retire: Sequence[str] = (),
+        *,
+        dispatched: Sequence[str] = (),
+        done: Sequence[str] = (),
+        failed: Sequence[str] = (),
+        cancelled: Sequence[str] = (),
+        sched: WorkflowSched | None = None,
     ) -> None:
         remaining = self.remaining.setdefault(workflow_id, set())
+        settled = {*done, *failed, *cancelled}
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
             self.dynamic_task_ids.setdefault(workflow_id, set()).add(
                 item.record.task_id
             )
-            remaining.add(item.record.task_id)
+            if item.record.task_id not in settled:
+                remaining.add(item.record.task_id)
         remaining.difference_update(retire)
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+        if sched is not None:
+            self.sched[workflow_id] = sched.model_dump_json()
 
     async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
         return set(self.dynamic_task_ids.get(workflow_id, set()))

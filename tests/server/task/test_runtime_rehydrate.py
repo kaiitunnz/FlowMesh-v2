@@ -151,6 +151,7 @@ class FakeWorkflowRegistry:
         records: Sequence[PersistedTask],
         snapshot: Any,
         retire: Sequence[str] = (),
+        **membership: Any,
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()

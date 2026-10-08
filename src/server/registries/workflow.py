@@ -362,16 +362,31 @@ def _queue_dynamic_tasks(
     records: Sequence[PersistedTask],
     snapshot: LedgerSnapshot,
     retire: Sequence[str],
+    dispatched: Sequence[str],
+    done: Sequence[str],
+    failed: Sequence[str],
+    cancelled: Sequence[str],
+    sched: WorkflowSched | None,
 ) -> None:
     ids = [item.record.task_id for item in records]
+    settled = {*done, *failed, *cancelled}
     _queue_task_states(pipe, records)
     if ids:
         pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
-        pipe.sadd(workflow_tasks_key(workflow_id), *ids)
+    if remaining := [task_id for task_id in ids if task_id not in settled]:
+        pipe.sadd(workflow_tasks_key(workflow_id), *remaining)
+    if dispatched:
+        pipe.sadd(workflow_dispatched_tasks_key(workflow_id), *dispatched)
+    if failed:
+        pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed)
+    if cancelled:
+        pipe.sadd(workflow_cancelled_tasks_key(workflow_id), *cancelled)
     if retire:
         pipe.srem(workflow_tasks_key(workflow_id), *retire)
     pipe.set(workflow_ds_key(workflow_id), snapshot.model_dump_json())
     pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
+    if sched is not None:
+        pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
 
 
 def _sched_payload(in_epoch_order: bool, epoch_frontier: int) -> str:
@@ -739,23 +754,43 @@ class WorkflowRegistry:
         records: Sequence[PersistedTask],
         snapshot: LedgerSnapshot,
         retire: Sequence[str] = (),
+        *,
+        dispatched: Sequence[str] = (),
+        done: Sequence[str] = (),
+        failed: Sequence[str] = (),
+        cancelled: Sequence[str] = (),
+        sched: WorkflowSched | None = None,
     ) -> None:
         """Persist newly materialized dynamic-child records with the ledger snapshot.
 
-        The child records, their dynamic-tasks set membership, and the ledger snapshot
-        that carries their work items commit in one atomic transaction, so a crash can
-        never leave the ledger's dynamic children without their durable task records or
-        vice versa. The ids join the dynamic-tasks set so restart rehydration reloads
-        them alongside the statically registered tasks. ``retire`` drops tasks from the
-        remaining set as the spawn seals — the child template that has finished
-        instantiating children and no longer holds the workflow short of completion —
-        so the children replace the template atomically and never leave it transiently
-        empty.
+        The child records, their dynamic-tasks and status-set membership, and the ledger
+        snapshot that carries their work items commit in one atomic transaction, so a
+        crash can never leave the ledger's dynamic children without their durable task
+        records or vice versa. The ids join the dynamic-tasks set so restart rehydration
+        reloads them alongside the statically registered tasks. Each child joins the
+        status set its record is in: the remaining set unless it is listed in ``done``,
+        ``failed`` or ``cancelled``, and the dispatched set when listed in
+        ``dispatched``. ``retire`` drops tasks from the remaining set as the spawn seals
+        — the child template that has finished instantiating children and no longer
+        holds the workflow short of completion — so the children replace the template
+        atomically and never leave it transiently empty. ``sched`` snapshots the
+        schedule when present.
         """
         if not records and not retire:
             return
         with self._rds.sync.control_pipeline() as pipe:
-            _queue_dynamic_tasks(pipe, workflow_id, records, snapshot, retire)
+            _queue_dynamic_tasks(
+                pipe,
+                workflow_id,
+                records,
+                snapshot,
+                retire,
+                dispatched,
+                done,
+                failed,
+                cancelled,
+                sched,
+            )
             pipe.execute()
 
     async def commit_dynamic_tasks_async(
@@ -764,12 +799,29 @@ class WorkflowRegistry:
         records: Sequence[PersistedTask],
         snapshot: LedgerSnapshot,
         retire: Sequence[str] = (),
+        *,
+        dispatched: Sequence[str] = (),
+        done: Sequence[str] = (),
+        failed: Sequence[str] = (),
+        cancelled: Sequence[str] = (),
+        sched: WorkflowSched | None = None,
     ) -> None:
         """Persist dynamic-child records as ``commit_dynamic_tasks`` does."""
         if not records and not retire:
             return
         async with self._rds.asyncio.control_pipeline() as pipe:
-            _queue_dynamic_tasks(pipe, workflow_id, records, snapshot, retire)
+            _queue_dynamic_tasks(
+                pipe,
+                workflow_id,
+                records,
+                snapshot,
+                retire,
+                dispatched,
+                done,
+                failed,
+                cancelled,
+                sched,
+            )
             await pipe.execute()
 
     def get_dynamic_task_ids(self, workflow_id: str) -> set[str]:
