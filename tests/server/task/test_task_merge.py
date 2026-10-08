@@ -14,8 +14,7 @@ from server.dispatcher.base import Dispatcher
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
-from server.task.runtime import TaskRuntime
-from server.task.runtime.commits import TransitionNotDurable
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.schemas.event import TaskEvent, WorkerEvent
 from shared.tasks.specs.common import ConditionSpec
 from tests.server.credential_vault_helpers import InMemoryCredentialVault

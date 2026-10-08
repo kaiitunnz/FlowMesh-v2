@@ -17,9 +17,8 @@ import pytest
 from server.config import OrchestrationConfig
 from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.results import ResultUnreadable
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from server.task.runtime.after_commit import AfterCommit, CreditRelease
-from server.task.runtime.commits import TransitionNotDurable
 from shared.tools.contract import MediatedOperationOutcome
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch

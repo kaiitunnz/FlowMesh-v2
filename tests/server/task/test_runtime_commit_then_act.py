@@ -10,7 +10,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration import OrchestrationEngine
-from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.orchestration.state import InvocationState
 from server.registries.workflow import PersistedTask
 from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
@@ -18,7 +18,12 @@ from shared.inference import InputResolutionBinding, UpstreamProvenance
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
-from tests.server.runtime_helpers import manual_durability_retry
+from tests.server.runtime_helpers import (
+    accept_ledger_saves,
+    durable_invocation,
+    manual_durability_retry,
+    refuse_ledger_saves,
+)
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
@@ -51,18 +56,6 @@ def _runtime(registry: FakeRegistry, results: Any = None) -> TaskRuntime:
     )
 
 
-def _durable_invocation(
-    registry: FakeRegistry, workflow_id: str, invocation_id: str
-) -> InvocationState | None:
-    if (blob := registry.ledger_blobs.get(workflow_id)) is None:
-        return None
-    snapshot = LedgerSnapshot.model_validate_json(blob)
-    return next(
-        (i.state for i in snapshot.invocations if i.invocation_id == invocation_id),
-        None,
-    )
-
-
 class _Resident:
     """A resident agent boundary issued to resident admission, with every credit
     release recorded beside the durable state of its invocation at that moment."""
@@ -76,7 +69,6 @@ class _Resident:
         self.runtime.set_resident_terminal_hook(self._release)
         self.workflow_id, ids = asyncio.run(_register(self.runtime, _RESIDENT_WF))
         self.writer = ids["writer"]
-        self._save = self.registry.save_ledger_snapshot
 
     def _originate(self, env: Any) -> bool:
         self.issued.append((env, self._durable(env.invocation_id)))
@@ -86,7 +78,9 @@ class _Resident:
         self.releases.append((invocation_id, failed, self._durable(invocation_id)))
 
     def _durable(self, invocation_id: str) -> InvocationState | None:
-        return _durable_invocation(self.registry, self.workflow_id, invocation_id)
+        return durable_invocation(
+            self.registry.ledger_blobs, self.workflow_id, invocation_id
+        )
 
     def capture(self) -> Any:
         _capture_resident_boundary(self.runtime, self.writer)
@@ -94,13 +88,10 @@ class _Resident:
         return env
 
     def ledger_down(self) -> None:
-        def down(*_: Any, **__: Any) -> None:
-            raise ConnectionError("control redis unavailable")
-
-        self.registry.save_ledger_snapshot = down  # type: ignore[method-assign]
+        refuse_ledger_saves(self.registry)
 
     def ledger_up(self) -> None:
-        self.registry.save_ledger_snapshot = self._save  # type: ignore[method-assign]
+        accept_ledger_saves(self.registry)
 
 
 @pytest.mark.parametrize("error", [None, "upstream failed"])
@@ -242,18 +233,13 @@ async def test_a_recorded_input_resolution_survives_a_restart() -> None:
 async def test_an_input_resolution_is_acknowledged_only_once_durable() -> None:
     registry = FakeRegistry()
     runtime, task_id = await _resolving(registry)
-    save = registry.save_ledger_snapshot
-
-    def down(*_: Any, **__: Any) -> None:
-        raise ConnectionError("control redis unavailable")
-
-    registry.save_ledger_snapshot = down  # type: ignore[method-assign]
+    refuse_ledger_saves(registry)
     with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.record_input_resolution(task_id, "wkr-1", _binding("req", 2), "dsp-1")
     # The equal report handed over again is not acknowledged while the store is down.
     with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.record_input_resolution(task_id, "wkr-1", _binding("req", 2), "dsp-1")
-    registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+    accept_ledger_saves(registry)
 
     runtime.record_input_resolution(task_id, "wkr-1", _binding("req", 2), "dsp-1")
 
@@ -373,13 +359,13 @@ def test_a_held_initial_advance_leaves_its_registration_standing() -> None:
     def down(*_: Any, **__: Any) -> None:
         raise ConnectionError("control redis unavailable")
 
-    registry.commit_transition = down  # type: ignore[method-assign]
+    setattr(registry, "commit_transition", down)
     workflow_id, ids = asyncio.run(_register(runtime, _DENIED_ROOT))
 
     assert workflow_id in registry.workflow_task_ids
     assert workflow_id in registry.ledger_blobs
     assert runtime._durability.pending(workflow_id)
-    registry.commit_transition = commit  # type: ignore[method-assign]
+    setattr(registry, "commit_transition", commit)
 
     assert runtime._durability.run_due() == [workflow_id]
 
@@ -405,7 +391,6 @@ class _Settling:
         self._fail(self.call, "dsp-0")
         self.notified: list[str] = []
         self.runtime.set_completion_notifier(self.notified.append)
-        self._save = self.registry.save_ledger_snapshot
 
     def build(self) -> TaskRuntime:
         return TaskRuntime(
@@ -427,13 +412,10 @@ class _Settling:
         self._fail(self.shell, "dsp-1")
 
     def ledger_down(self) -> None:
-        def down(*_: Any, **__: Any) -> None:
-            raise ConnectionError("control redis unavailable")
-
-        self.registry.save_ledger_snapshot = down  # type: ignore[method-assign]
+        refuse_ledger_saves(self.registry)
 
     def ledger_up(self) -> None:
-        self.registry.save_ledger_snapshot = self._save  # type: ignore[method-assign]
+        accept_ledger_saves(self.registry)
 
     def vaulted(self) -> bool:
         return bool(self.vault.redis.hashes)
@@ -468,7 +450,7 @@ def test_a_failed_purge_is_retried() -> None:
             raise refusals.pop()
         purge(workflow_id)
 
-    settling.vault.purge = flaky  # type: ignore[method-assign]
+    setattr(settling.vault, "purge", flaky)
     settling.fail_last()
     assert settling.vaulted()
     assert settling.runtime._durability.pending(settling.workflow_id)
@@ -486,11 +468,11 @@ def test_a_crash_before_a_settled_workflow_purges_drops_its_credentials() -> Non
         raise ConnectionError("vault unavailable")
 
     purge = settling.vault.purge
-    settling.vault.purge = down  # type: ignore[method-assign,assignment]
+    setattr(settling.vault, "purge", down)
     settling.fail_last()
     assert settling.vaulted()
     settling.runtime.shutdown()
-    settling.vault.purge = purge  # type: ignore[method-assign]
+    setattr(settling.vault, "purge", purge)
 
     assert asyncio.run(settling.build().rehydrate()) == 1
 

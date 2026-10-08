@@ -35,6 +35,7 @@ from server.task.runtime.after_commit import (
     Settled,
 )
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.runtime_helpers import durable_invocation
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
@@ -185,7 +186,7 @@ def _observe(runtime: TaskRuntime, observer: _Observer) -> None:
         observer.check(action)
         deliver(workflow_id, action)
 
-    runtime._deliver = checked  # type: ignore[method-assign]
+    setattr(runtime, "_deliver", checked)
 
 
 class _Resident:
@@ -399,7 +400,11 @@ def test_a_crash_at_a_faulted_cut_restores_without_an_early_or_lost_release(
             resident.registry.fail_from = resident.registry.writes + cut
             _run(resident, transition)
             released_before = list(resident.released)
-            invocation = _durable_invocation(resident, claim.invocation_id)
+            invocation = durable_invocation(
+                resident.registry.ledger_blobs,
+                resident.workflow_id,
+                claim.invocation_id,
+            )
             writer = resident.registry.record(resident.writer)
             # A durably settled agent terminalizes its boundary when restored.
             durable = invocation is InvocationState.TERMINAL or (
@@ -424,20 +429,6 @@ def test_a_crash_at_a_faulted_cut_restores_without_an_early_or_lost_release(
                 claim.invocation_id
             ], f"cut {cut}"
             resident.assert_durable_matches_memory()
-
-
-def _durable_invocation(
-    resident: _Resident, invocation_id: str
-) -> InvocationState | None:
-    ledger = resident.registry.ledger(resident.workflow_id)
-    return next(
-        (
-            i.state
-            for i in (ledger.invocations if ledger else [])
-            if i.invocation_id == invocation_id
-        ),
-        None,
-    )
 
 
 def test_the_observer_catches_an_action_delivered_before_its_cause_is_durable(
@@ -476,7 +467,7 @@ def test_a_failed_interrupt_is_retried_without_repeating_its_credit_release(
                 raise ConnectionError("dispatch channel unavailable")
             return int(publish(*args))
 
-        stub.publish_interrupt = flaky  # type: ignore[method-assign,assignment]
+        setattr(stub, "publish_interrupt", flaky)
         resident.observer.delivered.clear()
         _run(resident, _TRANSITIONS[2])
         assert resident.released == [claim.replica_id]

@@ -108,7 +108,6 @@ def test_a_multi_step_episode_counts_one_completion() -> None:
     ]
     for step in steps:
         monitor.handle_task_event(_succeeded(task_id, step))
-        record_dispatch(runtime, task_id)
     assert metrics.record_task_event.call_count == 1
 
 

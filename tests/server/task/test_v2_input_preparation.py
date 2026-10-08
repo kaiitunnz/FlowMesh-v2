@@ -6,9 +6,8 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
-from server.task.models import EventEffect, SettleOutcome, TaskStatus
-from server.task.runtime import TaskRuntime
-from server.task.runtime.commits import TransitionNotDurable
+from server.task.models import EventEffect, PublishGate, SettleOutcome, TaskStatus
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.content import ContentReference
 from shared.inference import (
     RESOLVED_INPUT_MEDIA_TYPE,
@@ -70,8 +69,13 @@ def _next(runtime: TaskRuntime) -> str | None:
     return pop_ready(runtime)
 
 
-def _report(runtime: TaskRuntime, task_id: str, **kwargs: Any) -> SettleOutcome:
-    record_dispatch(runtime, task_id, input_preparation=True)
+def _report(
+    runtime: TaskRuntime,
+    task_id: str,
+    expect: PublishGate = PublishGate.PUBLISH,
+    **kwargs: Any,
+) -> SettleOutcome:
+    record_dispatch(runtime, task_id, input_preparation=True, expect=expect)
     return runtime.mark_succeeded(
         task_id,
         "wkr-1",
@@ -204,7 +208,9 @@ async def test_a_preparation_success_does_not_revive_a_cancelled_task() -> None:
     assert record is not None
     record.status = TaskStatus.CANCELLED
 
-    assert _report(runtime, task_id).effect is EventEffect.SETTLED
+    assert (
+        _report(runtime, task_id, PublishGate.NOT_PENDING).effect is EventEffect.SETTLED
+    )
     assert record.status == TaskStatus.CANCELLED
     assert runtime.recorded_input_reference(task_id) is None
 
@@ -222,7 +228,7 @@ async def test_a_preparation_success_settles_a_cancelling_task() -> None:
     assert record is not None
     record.status = TaskStatus.CANCELLING
 
-    _report(runtime, task_id)
+    _report(runtime, task_id, PublishGate.NOT_PENDING)
 
     assert record.status == TaskStatus.CANCELLED
     assert runtime.recorded_input_reference(task_id) is None
@@ -243,7 +249,7 @@ async def test_a_replayed_preparation_success_does_not_redispatch_the_leaf() -> 
     assert record is not None and record.status == TaskStatus.PENDING
     record.status = TaskStatus.DISPATCHED
 
-    _report(runtime, task_id)
+    _report(runtime, task_id, PublishGate.NOT_PENDING)
 
     assert record.status == TaskStatus.DISPATCHED
 

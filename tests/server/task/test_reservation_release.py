@@ -10,8 +10,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.registries.worker import WorkerRegistry
-from server.task.runtime import TaskRuntime
-from server.task.runtime.commits import TransitionNotDurable
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader

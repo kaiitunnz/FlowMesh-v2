@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import threading
-import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -31,6 +30,7 @@ from tests.server.task.test_v2_orchestration import (
     _worker,
     _WorkerRegistryStub,
 )
+from tests.support.waiting import until
 
 
 class _GatedStore(FabricObjectStore):
@@ -96,9 +96,7 @@ async def test_session_restore_reads_a_snapshot_while_the_redrive_adds_children(
         async def register(task_id: str, *_args: Any) -> None:
             # Binding the port awaits while the store answers the re-drive.
             gated.gate.set()
-            deadline = time.monotonic() + 5
-            while len(restored._tasks) == size_before and time.monotonic() < deadline:
-                await asyncio.sleep(0.01)
+            await until(lambda: len(restored._tasks) != size_before, timeout=5)
             registered.append(task_id)
 
         service = SimpleNamespace(

@@ -13,7 +13,7 @@ from server.clients.redis import AsyncRedisClient, SyncRedisClient
 from server.registries.workflow import WorkflowRegistry, WorkflowSched
 from server.utils.query import QueryFilter
 from tests.server.redis_helpers import fake_redis_client
-from tests.server.task.test_v2_orchestration import AUTORESEARCH
+from tests.server.task.test_v2_orchestration import AUTORESEARCH, _bundle
 from tests.server.test_workflow_listing import _Fabric, _seed
 
 # Both clients hand out their pipeline synchronously; the caller awaits its execute.
@@ -192,6 +192,7 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
     sync.save_workflow_sched(workflow_id, True, 3)
     asyncio.run(async_.save_workflow_sched_async(workflow_id, True, 3))
     registration: dict[str, Any] = {
+        "v2": _bundle(AUTORESEARCH, "wfl-new"),
         "ledger": snapshot,
         "submitted_at": "2026-10-08T00:00:00+00:00",
     }

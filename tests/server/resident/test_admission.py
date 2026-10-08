@@ -6,6 +6,8 @@ a replica, an accepted credit releases only from a fenced terminal fact consumed
 in-flight claim rather than minting a successor before that terminal.
 """
 
+import pytest
+
 from server.resident import (
     AdmissionController,
     ClaimState,
@@ -188,10 +190,8 @@ def test_a_terminal_whose_persist_failed_is_finished_by_its_replay():
     persisted.clear()
 
     down[0] = True
-    try:
+    with pytest.raises(ConnectionError):
         ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.FAILED)
-    except ConnectionError:
-        pass
     assert claim.state is ClaimState.TERMINAL
     assert released == []
     down[0] = False

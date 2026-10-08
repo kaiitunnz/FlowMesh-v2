@@ -5,6 +5,7 @@ from typing import cast
 
 from server.orchestration import Advance, OrchestrationEngine
 from server.registries.worker import Worker
+from server.task.models import PublishGate
 from server.task.runtime import TaskRuntime
 from server.task.v2.representations.operators import ResolvedEmbodiment
 
@@ -15,12 +16,15 @@ def record_dispatch(
     worker: str | Worker = "wkr-1",
     dispatch_id: str | None = None,
     input_preparation: bool = False,
+    expect: PublishGate = PublishGate.PUBLISH,
 ) -> bool:
+    """Publish and record a dispatch, asserting the publish gate answers ``expect``."""
     if isinstance(worker, str):
         worker = cast(Worker, SimpleNamespace(id=worker, node_id="nde-1"))
-    runtime.begin_publish(
+    gate = runtime.begin_publish(
         task_id, worker, dispatch_id, input_preparation=input_preparation
     )
+    assert gate is expect, gate
     return runtime.mark_dispatched(task_id)
 
 

@@ -19,8 +19,7 @@ from server.task.models import (
     TaskStatus,
     WorkerRecovery,
 )
-from server.task.runtime import TaskRuntime
-from server.task.runtime.commits import TransitionNotDurable
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.schemas.event import TaskEvent, WorkerEvent, parse_event
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.server.dispatch_helpers import record_dispatch

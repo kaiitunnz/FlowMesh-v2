@@ -16,7 +16,7 @@ from server.services.monitoring import (
     EventMonitor,
     _stream_id_tuple,
 )
-from server.task.runtime.commits import TransitionNotDurable
+from server.task.runtime import TransitionNotDurable
 from shared.schemas.event import Event, TaskEvent
 
 

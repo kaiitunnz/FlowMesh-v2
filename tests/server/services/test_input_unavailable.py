@@ -16,8 +16,7 @@ from server.services.task_events import TaskEventPublisher
 from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultUnavailable, ResultUnreadable
-from server.task.runtime import TaskRuntime
-from server.task.runtime.commits import TransitionNotDurable
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.content import ContentReference, reference_for
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from tests.server.credential_vault_helpers import InMemoryCredentialVault

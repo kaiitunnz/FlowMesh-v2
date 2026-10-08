@@ -11,8 +11,7 @@ import pytest
 
 from server.resident.state import ClaimState, ClaimTerminalReason, ResidentSnapshot
 from server.startup import rehydrate_root_state
-from server.task.runtime import TaskRuntime
-from server.task.runtime.commits import TransitionNotDurable
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from tests.server.resident.test_service import _admission, _build, _env
 from tests.server.task.test_agent_episode_runtime import _held_boundary
 from tests.server.task.test_held_termination_release import _Scenario

@@ -10,7 +10,7 @@ import pytest
 from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
-from server.task.models import TaskStatus
+from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
@@ -415,7 +415,7 @@ async def test_terminal_task_does_not_regress_on_replayed_dispatch_or_start() ->
 
     # A replayed dispatch / start / progress update must not move a's status
     # back to DISPATCHED.
-    record_dispatch(runtime, a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker), expect=PublishGate.NOT_PENDING)
     runtime.mark_started(a, "wkr-1", {}, "2026-06-01T00:00:01Z")
     runtime.mark_updated(a, "wkr-1", {"note": "stale"})
 
