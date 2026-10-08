@@ -2211,19 +2211,21 @@ class TaskRuntime:
         proposer_id: str,
         parked: AuthorizeTurn | None,
     ) -> None:
-        if (frame := self._authorize_model_turn(proposal, proposer_id, parked)) is None:
-            return
-        worker, frame_kind, payload = frame
-        self._worker_registry.publish_mediated_op(
-            worker,
-            MediatedOpMessage(
-                worker_id=worker.id, frame_kind=frame_kind, payload=payload
-            ),
-        )
+        if (
+            frame := self._authorize_model_turn(proposal, proposer_id, parked)
+        ) is not None:
+            worker, frame_kind, payload = frame
+            self._worker_registry.publish_mediated_op(
+                worker,
+                MediatedOpMessage(
+                    worker_id=worker.id, frame_kind=frame_kind, payload=payload
+                ),
+            )
         if parked is not None:
+            # Answered or dropped; parked again, it is a new action.
             with self._lock:
                 key = (proposal.agent_task_id, proposal.call_correlation)
-                if self._parked_turns.get(key) == parked:
+                if self._parked_turns.get(key) is parked:
                     del self._parked_turns[key]
 
     def _authorize_model_turn(

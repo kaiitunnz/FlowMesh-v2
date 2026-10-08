@@ -3,7 +3,7 @@
 A turn proposed while its workflow's writes are held gets no frame; its authorization
 waits for the writes to commit and then runs again in full, relaying one permit, or
 nothing once its permit deadline passed, a later proposal superseded it, or its task
-was cancelled.
+was cancelled. Either way the turn is no longer tracked as parked.
 """
 
 import asyncio
@@ -75,6 +75,7 @@ def test_a_turn_is_authorized_once_its_writes_commit_before_its_deadline() -> No
     (permit,) = _permit_frames(runtime)
     assert MediatedOperationPermit.model_validate(permit).request_digest == "deadbeef"
     assert _deny_frames(runtime) == []
+    assert runtime._parked_turns == {}
 
 
 def test_a_turn_whose_deadline_passed_while_held_is_never_authorized() -> None:
@@ -86,6 +87,7 @@ def test_a_turn_whose_deadline_passed_while_held_is_never_authorized() -> None:
     runtime._retry_durability(workflow_id)
 
     assert _permit_frames(runtime) == [] and _deny_frames(runtime) == []
+    assert runtime._parked_turns == {}
 
 
 def test_a_turn_cancelled_before_its_writes_commit_is_never_authorized() -> None:
@@ -97,6 +99,7 @@ def test_a_turn_cancelled_before_its_writes_commit_is_never_authorized() -> None
     runtime._retry_durability(workflow_id)
 
     assert _permit_frames(runtime) == []
+    assert runtime._parked_turns == {}
 
 
 def test_a_later_proposal_of_the_turn_supersedes_the_parked_one() -> None:
@@ -109,6 +112,7 @@ def test_a_later_proposal_of_the_turn_supersedes_the_parked_one() -> None:
 
     (permit,) = _permit_frames(runtime)
     assert MediatedOperationPermit.model_validate(permit).request_digest == "second"
+    assert runtime._parked_turns == {}
 
 
 def test_a_parked_authorization_whose_relay_fails_is_retried() -> None:
@@ -126,7 +130,8 @@ def test_a_parked_authorization_whose_relay_fails_is_retried() -> None:
     setattr(workers, "publish_mediated_op", flaky)
     store.down = False
     runtime._retry_durability(workflow_id)
-    assert _permit_frames(runtime) == []
+    assert _permit_frames(runtime) == [] and runtime._parked_turns
 
     runtime._retry_durability(workflow_id)
     assert len(_permit_frames(runtime)) == 1
+    assert runtime._parked_turns == {}
