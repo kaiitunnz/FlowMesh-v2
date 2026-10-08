@@ -47,4 +47,5 @@ def stage_agent_inputs(
     runtime: TaskRuntime, workflow_id: str, engine: OrchestrationEngine
 ) -> None:
     """Stage an engine's agent inputs as the runtime does after an advance."""
-    runtime._agent_inputs.stage_agent_inputs_locked(workflow_id, engine, Advance())
+    with runtime._lock:
+        runtime._agent_inputs.stage_agent_inputs_locked(workflow_id, engine, Advance())

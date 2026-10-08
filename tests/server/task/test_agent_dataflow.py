@@ -401,7 +401,8 @@ def test_an_input_records_the_producer_result_it_was_read_from(
     assert member.value_ref is not None
     bound = runtime._test_bindings["P"]  # type: ignore[attr-defined]
     assert member.value_ref.content == bound.reference
-    (binding,) = runtime._agent_inputs.agent_input_bindings(engine, "M")
+    with runtime._lock:
+        (binding,) = runtime._agent_inputs.agent_input_bindings(engine, "M")
     (delivered,) = binding.members
     assert delivered.value is None
     assert delivered.source is not None
@@ -476,8 +477,9 @@ def test_input_bindings_projection_is_deterministic() -> None:
     engine.record_accepted_input(
         _accepted(activation, "reviews", ValueRef(kind="inline", literal="grounded")),
     )
-    first = runtime._agent_inputs.agent_input_bindings(engine, "M")
-    second = runtime._agent_inputs.agent_input_bindings(engine, "M")
+    with runtime._lock:
+        first = runtime._agent_inputs.agent_input_bindings(engine, "M")
+        second = runtime._agent_inputs.agent_input_bindings(engine, "M")
     assert first == second  # stable projection over the durable manifest
     assert first[0].port == "reviews" and first[0].members[0].value == "grounded"
 
