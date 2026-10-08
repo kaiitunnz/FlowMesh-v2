@@ -38,7 +38,13 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.credentials import credential_merge_key
 from ..task.metadata import extract_model_dataset_names
-from ..task.models import SERVE_TASK_TYPES, DispatchEnd, TaskRecord, TaskStatus
+from ..task.models import (
+    SERVE_TASK_TYPES,
+    DispatchEnd,
+    PublishGate,
+    TaskRecord,
+    TaskStatus,
+)
 from ..task.results import ResultUnavailable
 from ..task.runtime import TaskRuntime, TransitionNotDurable
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
@@ -818,10 +824,18 @@ class Dispatcher:
         )
 
         # 8. Give the task what it reads and writes its content under, then publish it
-        if not self._runtime.begin_publish(
+        gate = self._runtime.begin_publish(
             task_id, worker, dispatch_id, input_preparation=preparing
-        ):
+        )
+        if gate is PublishGate.NOT_PENDING:
             return True
+        if gate is PublishGate.NOT_DURABLE:
+            # What the dispatch would carry is not durable yet: nothing is published,
+            # and the task waits behind the rest of the queue without spending an
+            # attempt while the runtime retries its writes.
+            self._runtime.release_merge(task_id)
+            self.requeue_task(task_id, reason="not_durable", count_retry=False)
+            return False
         # The worker is reserved BUSY for this dispatch before it can start the task,
         # so only the IDLE that ends this dispatch frees it.
         if not self._reserve_worker(worker, task_id, dispatch_id):

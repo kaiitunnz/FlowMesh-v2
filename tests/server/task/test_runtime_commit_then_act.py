@@ -8,7 +8,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration.state import InvocationState, LedgerSnapshot
-from server.task.models import TaskStatus
+from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from server.task.workflow_retry import WorkflowRetryScheduler
 from shared.inference import InputResolutionBinding, UpstreamProvenance
@@ -21,8 +21,16 @@ from tests.server.task.test_resident_origin_loss import (
 )
 from tests.server.task.test_v2_embodiment_fence import _menu_task
 from tests.server.task.test_v2_embodiment_fence import _runtime as _menu_runtime
-from tests.server.task.test_v2_orchestration import FakeRegistry, _register
+from tests.server.task.test_v2_orchestration import (
+    _TS,
+    AUTORESEARCH,
+    FakeRegistry,
+    _planned,
+    _register,
+    _worker,
+)
 from tests.server.task.test_worker_originated_boundary import _WorkerStub
+from tests.support.waiting import pop_ready
 
 
 def _runtime(registry: FakeRegistry) -> TaskRuntime:
@@ -250,3 +258,47 @@ async def test_an_input_resolution_is_acknowledged_only_once_durable() -> None:
     assert await restored.rehydrate() == 1
     standing = restored.input_resolution_binding(task_id)
     assert standing is not None and standing.request_digest == "req"
+
+
+class _ChildrenDown(FakeRegistry):
+    """Refuses every spawned-children commit while ``down``."""
+
+    down = False
+
+    def commit_dynamic_tasks(self, workflow_id: str, *args: Any, **kwargs: Any) -> None:
+        if self.down:
+            raise ConnectionError("control redis unavailable")
+        super().commit_dynamic_tasks(workflow_id, *args, **kwargs)
+
+
+@pytest.mark.anyio
+async def test_a_child_whose_materialization_is_held_is_not_published() -> None:
+    registry = _ChildrenDown()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    assert pop_ready(runtime) == planner
+    record_dispatch(runtime, planner, "wkr-1", "dsp-1")
+    registry.down = True
+    with pytest.raises(TransitionNotDurable):
+        runtime.mark_succeeded(
+            planner, "wkr-1", _planned(runtime, planner, ["h1", "h2"]), _TS, "dsp-1"
+        )
+    child, sibling = pop_ready(runtime), pop_ready(runtime)
+    assert child is not None and sibling is not None
+    assert child not in registry.task_blobs
+
+    worker = cast(Any, _worker("wkr-2"))
+    assert runtime.begin_publish(child, worker, "dsp-2") is PublishGate.NOT_DURABLE
+    assert child not in runtime._fence.publishing
+    # Another workflow's work publishes meanwhile.
+    _, other = await _register(runtime, AUTORESEARCH)
+    assert pop_ready(runtime) == other["planner"]
+    assert (
+        runtime.begin_publish(other["planner"], worker, "dsp-3") is PublishGate.PUBLISH
+    )
+    registry.down = False
+
+    assert runtime.begin_publish(child, worker, "dsp-2") is PublishGate.PUBLISH
+    assert child in registry.dynamic_task_ids[workflow_id]
+    assert child in registry.task_blobs

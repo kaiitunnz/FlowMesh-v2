@@ -117,6 +117,16 @@ class DispatchEnd(StrEnum):
     CANCELLED = "cancelled"
 
 
+class PublishGate(StrEnum):
+    """Whether a dispatch may be published: its task is pending and everything the
+    dispatch carries is durable, its task no longer waits, or what it carries is not
+    durable yet."""
+
+    PUBLISH = "publish"
+    NOT_PENDING = "not_pending"
+    NOT_DURABLE = "not_durable"
+
+
 class SettleOutcome(NamedTuple):
     """What a worker's success or cancellation report did to its task; ``spent``
     when the task returned to the queue spending an attempt."""

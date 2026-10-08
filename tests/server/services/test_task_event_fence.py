@@ -12,7 +12,13 @@ from server.orchestration import WorkItemStatus
 from server.registries.worker import Worker
 from server.services.monitoring import EventMonitor
 from server.services.watchdog import WorkerWatchdog
-from server.task.models import DispatchEnd, EventEffect, TaskStatus, WorkerRecovery
+from server.task.models import (
+    DispatchEnd,
+    EventEffect,
+    PublishGate,
+    TaskStatus,
+    WorkerRecovery,
+)
 from server.task.runtime import TaskRuntime
 from server.task.runtime.commits import TransitionNotDurable
 from shared.schemas.event import TaskEvent, WorkerEvent, parse_event
@@ -1000,7 +1006,9 @@ async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> No
         monitor.handle_task_event(failure)
     registry.down = False
     assert _next(runtime) == task_id
-    assert runtime.begin_publish(task_id, _worker("wkr-1"), "dsp-2")
+    assert (
+        runtime.begin_publish(task_id, _worker("wkr-1"), "dsp-2") is PublishGate.PUBLISH
+    )
     monitor.handle_task_event(failure)
 
     requeued = [
@@ -1010,3 +1018,27 @@ async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> No
     ]
     assert len(requeued) == 1
     assert task_id not in runtime._committer.unacknowledged
+
+
+@pytest.mark.anyio
+async def test_a_dispatch_whose_task_is_not_durable_publishes_nothing() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    _, task_id = await _solo(runtime)
+    dispatcher, worker_registry = _fast_worker_dispatcher(runtime, _monitor(runtime))
+    attempts = runtime._tasks[task_id].attempts
+    registry.down = True
+    with runtime._transition(raises=False):
+        runtime._committer.persist_locked(task_id)
+
+    assert dispatcher.dispatch_once(task_id) is False
+
+    worker_registry.publish_task.assert_not_called()
+    record = runtime._tasks[task_id]
+    assert record.status == TaskStatus.PENDING
+    assert record.attempts == attempts
+    assert _next(runtime) == task_id
+    registry.down = False
+
+    assert dispatcher.dispatch_once(task_id) is True
+    worker_registry.publish_task.assert_called_once()

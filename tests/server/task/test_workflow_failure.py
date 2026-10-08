@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from server.orchestration.state import AttemptStatus, WorkItemStatus
-from server.task.models import TaskStatus
+from server.task.models import PublishGate, TaskStatus
 from server.task.results import ResultUnavailable, ResultUnreadable
 from server.task.runtime import TaskRuntime
 from server.task.runtime.input_checks import _InputCheck
@@ -209,7 +209,10 @@ async def test_a_task_being_published_is_interrupted() -> None:
     _, ids = await _register(runtime, _PARALLEL)
     _pop_ready(runtime)
     side = ids["side"]
-    assert runtime.begin_publish(side, cast(Any, _worker("wkr-2")), "dsp-s")
+    assert (
+        runtime.begin_publish(side, cast(Any, _worker("wkr-2")), "dsp-s")
+        is PublishGate.PUBLISH
+    )
 
     _fail_by_unreadable_fanout(runtime, ids["planner"])
 
@@ -286,7 +289,10 @@ async def _publishing_when_failed(
     _, ids = await _register(runtime, _PARALLEL)
     _pop_ready(runtime)
     record_dispatch(runtime, ids["planner"], cast(Any, _worker()), "dsp-p")
-    assert runtime.begin_publish(ids["side"], cast(Any, _worker("wkr-2")), "dsp-s")
+    assert (
+        runtime.begin_publish(ids["side"], cast(Any, _worker("wkr-2")), "dsp-s")
+        is PublishGate.PUBLISH
+    )
     if isinstance(registry, _RefusesDispatchedWrite):
         registry.armed = True
     return runtime, ids, interrupts

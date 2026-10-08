@@ -105,6 +105,7 @@ from ..models import (
     EventEffect,
     FailureOutcome,
     LossOutcome,
+    PublishGate,
     SettleOutcome,
     TaskInfo,
     TaskInputElement,
@@ -3311,16 +3312,30 @@ class TaskRuntime:
         dispatch_id: str | None,
         *,
         input_preparation: bool = False,
-    ) -> bool:
+    ) -> PublishGate:
         """Mark a dispatch as being published, so its worker's earliest events apply.
 
-        Returns whether the task is pending and may be published.
+        Everything the dispatch carries is made durable first: the held writes of its
+        task's workflow and of each workflow a merged child belongs to. A dispatch whose
+        writes stay held is not marked.
         """
         publish = Publish(
             worker.id, dispatch_id, supplier_id(worker), input_preparation
         )
-        with self._cv:
-            return self._fence.begin_publish_locked(task_id, publish)
+        with self._transition(raises=False):
+            spanned = {
+                record.workflow_id
+                for spanned_id in (
+                    task_id,
+                    *self._merges.merge_children_map.get(task_id, ()),
+                )
+                if (record := self._tasks.get(spanned_id)) is not None
+            }
+            if not all([self._committer.close_locked(w) for w in sorted(spanned)]):
+                return PublishGate.NOT_DURABLE
+            if not self._fence.begin_publish_locked(task_id, publish):
+                return PublishGate.NOT_PENDING
+            return PublishGate.PUBLISH
 
     def abandon_publish(self, task_id: str) -> bool:
         """Drop the mark of a dispatch whose publish failed.
