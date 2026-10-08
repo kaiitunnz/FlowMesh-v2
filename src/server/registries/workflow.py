@@ -373,8 +373,13 @@ def _queue_dynamic_tasks(
     _queue_task_states(pipe, records)
     if ids:
         pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
+    # Exact membership, so a child an ambiguous earlier write left behind converges.
     if remaining := [task_id for task_id in ids if task_id not in settled]:
         pipe.sadd(workflow_tasks_key(workflow_id), *remaining)
+    if settled:
+        pipe.srem(workflow_tasks_key(workflow_id), *settled)
+    if idle := [task_id for task_id in ids if task_id not in dispatched]:
+        pipe.srem(workflow_dispatched_tasks_key(workflow_id), *idle)
     if dispatched:
         pipe.sadd(workflow_dispatched_tasks_key(workflow_id), *dispatched)
     if failed:
@@ -767,14 +772,14 @@ class WorkflowRegistry:
         snapshot that carries their work items commit in one atomic transaction, so a
         crash can never leave the ledger's dynamic children without their durable task
         records or vice versa. The ids join the dynamic-tasks set so restart rehydration
-        reloads them alongside the statically registered tasks. Each child joins the
-        status set its record is in: the remaining set unless it is listed in ``done``,
-        ``failed`` or ``cancelled``, and the dispatched set when listed in
-        ``dispatched``. ``retire`` drops tasks from the remaining set as the spawn seals
-        — the child template that has finished instantiating children and no longer
-        holds the workflow short of completion — so the children replace the template
-        atomically and never leave it transiently empty. ``sched`` snapshots the
-        schedule when present.
+        reloads them alongside the statically registered tasks. Each child is in the
+        status sets its record is in and leaves the others: the remaining set unless
+        listed in ``done``, ``failed`` or ``cancelled``, and the dispatched set only
+        when listed in ``dispatched``. ``retire`` drops tasks from the remaining set as
+        the spawn seals — the child template that has finished instantiating children
+        and no longer holds the workflow short of completion — so the children replace
+        the template atomically and never leave it transiently empty. ``sched``
+        snapshots the schedule when present.
         """
         if not records and not retire:
             return

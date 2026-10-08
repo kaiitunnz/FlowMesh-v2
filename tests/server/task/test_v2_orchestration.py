@@ -195,7 +195,9 @@ class FakeRegistry:
             self.dynamic_task_ids.setdefault(workflow_id, set()).add(
                 item.record.task_id
             )
-            if item.record.task_id not in settled:
+            if item.record.task_id in settled:
+                remaining.discard(item.record.task_id)
+            else:
                 remaining.add(item.record.task_id)
         remaining.difference_update(retire)
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()

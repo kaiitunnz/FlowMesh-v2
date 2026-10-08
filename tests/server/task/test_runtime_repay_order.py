@@ -203,3 +203,55 @@ def test_a_crash_between_repaid_writes_restores_a_workflow_that_settles(
         assert settlement.settled, (cut, restored.task_records())
         assert store.remaining_of(workflow_id) == set(), cut
         restored.shutdown()
+
+
+class _Ambiguous(_FaultyRegistry):
+    """Applies one child seam and loses its reply, then refuses every write while
+    ``down``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ambiguous_seams = 0
+        self.down = False
+
+    def commit_transition(self, workflow_id: str, **kwargs: Any) -> None:
+        if self.down:
+            raise ConnectionError("down")
+        super().commit_transition(workflow_id, **kwargs)
+
+    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+        if self.down:
+            raise ConnectionError("down")
+        super().save_ledger_snapshot(workflow_id, snapshot)
+
+    def commit_dynamic_tasks(self, workflow_id: str, *args: Any, **kwargs: Any) -> None:
+        if self.down:
+            raise ConnectionError("down")
+        super().commit_dynamic_tasks(workflow_id, *args, **kwargs)
+        if self.ambiguous_seams:
+            self.ambiguous_seams -= 1
+            self.down = True
+            raise ConnectionError("reply lost after EXEC")
+
+
+def test_children_settled_after_an_ambiguous_seam_leave_the_remaining_set() -> None:
+    store = _Ambiguous()
+    runtime = _runtime(store)
+    workflow_id, ids = asyncio.run(_register(runtime, AUTORESEARCH))
+    planner = ids["planner"]
+    assert pop_ready(runtime, 0.05) == planner
+    record_dispatch(runtime, planner, "wkr-1", "dsp-planner")
+    store.ambiguous_seams = 1
+    runtime.mark_succeeded(
+        planner, "wkr-1", _planned(runtime, planner, ["h1", "h2"]), _TS, "dsp-planner"
+    )
+    children = runtime._committer._unwritten_children[workflow_id].copy()
+    assert children <= store.remaining_of(workflow_id)
+
+    runtime.cancel_workflow(workflow_id)
+    store.down = False
+    runtime._retry_durability(workflow_id)
+
+    assert workflow_id not in runtime._committer.debt
+    assert runtime.workflow_settlement(workflow_id).settled
+    assert not children & store.remaining_of(workflow_id)
