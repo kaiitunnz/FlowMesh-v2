@@ -49,6 +49,17 @@ _OP_REDRIVE_LIMIT = 5
 _MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
 
 
+def deny_model_turn_payload(
+    proposal: AgentModelTurnProposal, reason: str
+) -> dict[str, Any]:
+    """The payload of a deny frame that fails a held turn before its deadline."""
+    return {
+        "agent_task_id": proposal.agent_task_id,
+        "call_correlation": proposal.call_correlation,
+        "reason": reason,
+    }
+
+
 class MediatedOperations:
     """Holds each mediated operation whose permit was relayed to its origin worker,
     sizes and stamps permits, relays reaps and denials to workers, and releases a
@@ -181,25 +192,6 @@ class MediatedOperations:
                 derived_span_id(SpanIdKind.INVOCATION, permit.invocation_id),
             )
         return permit.model_copy(update=stamp).model_dump(mode="json")
-
-    def deny_model_turn(
-        self, proposal: AgentModelTurnProposal, worker_id: str, reason: str
-    ) -> None:
-        """Relay a deny frame that fails a held turn before its deadline."""
-        if (worker := self._worker_registry.get_worker(worker_id)) is None:
-            return
-        self._worker_registry.publish_mediated_op(
-            worker,
-            MediatedOpMessage(
-                worker_id=worker_id,
-                frame_kind="deny",
-                payload={
-                    "agent_task_id": proposal.agent_task_id,
-                    "call_correlation": proposal.call_correlation,
-                    "reason": reason,
-                },
-            ),
-        )
 
     def reap_mediated_op(
         self, worker_id: str | None, agent_task_id: str, call: str

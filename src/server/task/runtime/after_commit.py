@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from shared.schemas.command import InterruptMessage, RevokeMessage
+from shared.tools.contract import AgentModelTurnProposal
 
 from ..models import TaskRecord, TaskStatus
 
@@ -78,8 +79,27 @@ class Cleanup:
     run: Callable[[], None] = field(compare=False)
 
 
+@dataclass(frozen=True)
+class AuthorizeTurn:
+    """Authorize a held model turn proposed while its workflow's writes were held,
+    unless a later proposal of the turn superseded it or ``deadline_epoch`` passed."""
+
+    proposal: AgentModelTurnProposal
+    proposer_id: str
+    incarnation: int
+    deadline_epoch: float
+
+
 AfterCommit = (
-    CreditRelease | Reap | Interrupt | Revoke | Issue | Purge | Settled | Cleanup
+    CreditRelease
+    | Reap
+    | Interrupt
+    | Revoke
+    | Issue
+    | Purge
+    | Settled
+    | Cleanup
+    | AuthorizeTurn
 )
 
 

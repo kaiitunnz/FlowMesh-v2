@@ -152,6 +152,7 @@ from . import (
 from .after_commit import (
     AfterCommit,
     AfterCommitActions,
+    AuthorizeTurn,
     Cleanup,
     CreditRelease,
     Interrupt,
@@ -168,7 +169,12 @@ from .dispatch_fence import DispatchFence, Publish, supplier_id
 from .episode_dispatch import EpisodeDispatch, EpisodeFeasibility
 from .fanout import FanoutRead
 from .input_checks import INPUT_VERDICT_REPORT, InputChecks
-from .mediated_ops import MediatedOperations, PendingOp, ResidentTerminalHook
+from .mediated_ops import (
+    MediatedOperations,
+    PendingOp,
+    ResidentTerminalHook,
+    deny_model_turn_payload,
+)
 from .merges import TaskMerges
 from .record_failures import RecordFailures
 from .reports import (
@@ -397,6 +403,9 @@ class TaskRuntime:
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
         self._pending_facade_groups: dict[str, FacadeTurnGroup] = {}
+        # Each held model turn's latest authorization waiting on its workflow's writes,
+        # by agent task and call correlation.
+        self._parked_turns: dict[tuple[str, str], AuthorizeTurn] = {}
 
         self._dag = StaticDag()
         self._epochs = EpochFrontier()
@@ -1382,6 +1391,8 @@ class TaskRuntime:
                 self._credential_vault.purge(purged)
             case Settled(workflow_id=settled):
                 self._committer.notify_terminal_transition(settled)
+            case AuthorizeTurn(proposal=proposal, proposer_id=proposer_id):
+                self._answer_model_turn(proposal, proposer_id, action)
             case Cleanup(task_id=task_id, dispatch_id=dispatch_id):
                 with self._lock:
                     record = self._tasks.get(task_id)
@@ -2184,58 +2195,119 @@ class TaskRuntime:
         worker whose stream relayed the proposal, is authorized; any other proposer is
         denied.
         """
-        with self._cv:
+        self._answer_model_turn(proposal, proposer_id, None)
+
+    def _answer_model_turn(
+        self,
+        proposal: AgentModelTurnProposal,
+        proposer_id: str,
+        parked: AuthorizeTurn | None,
+    ) -> None:
+        if (frame := self._authorize_model_turn(proposal, proposer_id, parked)) is None:
+            return
+        worker, frame_kind, payload = frame
+        self._worker_registry.publish_mediated_op(
+            worker,
+            MediatedOpMessage(
+                worker_id=worker.id, frame_kind=frame_kind, payload=payload
+            ),
+        )
+        if parked is not None:
+            with self._lock:
+                key = (proposal.agent_task_id, proposal.call_correlation)
+                if self._parked_turns.get(key) == parked:
+                    del self._parked_turns[key]
+
+    def _authorize_model_turn(
+        self,
+        proposal: AgentModelTurnProposal,
+        proposer_id: str,
+        parked: AuthorizeTurn | None,
+    ) -> tuple[Worker, str, dict[str, Any]] | None:
+        """The permit or deny frame answering a model-turn proposal, and the worker to
+        relay it to; None when none is relayed.
+
+        Nothing is authorized from state not yet durable: while the agent's workflow
+        holds writes, the authorization is parked until they commit, and the proposal
+        gets no frame before then. A parked authorization relays nothing once its
+        permit deadline passed, a later proposal of the turn superseded it, its worker
+        changed incarnation, or its task no longer runs.
+        """
+        key = (proposal.agent_task_id, proposal.call_correlation)
+        if (worker := self._worker_registry.get_worker(proposer_id)) is None:
+            # A gone origin worker cannot receive a relay: the held turn fails on its
+            # own permit deadline.
+            return None
+        with self._transition():
+            if parked is not None and (
+                self._parked_turns.get(key) != parked
+                or time.time() >= parked.deadline_epoch
+                or worker.incarnation != parked.incarnation
+            ):
+                return None
             agent = self._tasks.get(proposal.agent_task_id)
             engine = self._engines.get(agent.workflow_id) if agent else None
             if agent is None or engine is None:
-                return
+                return None
+            if parked is not None and agent.status != TaskStatus.DISPATCHED:
+                return None
             if not self._fence.dispatch_live_locked(
                 agent, proposer_id, proposal.dispatch_id
             ):
-                self._mediated_ops.deny_model_turn(
-                    proposal, proposer_id, "model turn not held"
+                return (
+                    worker,
+                    "deny",
+                    deny_model_turn_payload(proposal, "model turn not held"),
                 )
-                return
-            worker_id = proposer_id
-            worker = self._worker_registry.get_worker(worker_id)
-            if worker is None:
-                # A gone origin worker cannot receive a relay: the held turn fails on
-                # its own permit deadline.
-                return
+            _, timeout_sec, result_char_cap = self._mediated_ops.op_permit_budget(
+                MODEL_INTERFACE
+            )
+            if not self._committer.close_locked(agent.workflow_id):
+                again = AuthorizeTurn(
+                    proposal,
+                    proposer_id,
+                    worker.incarnation,
+                    (
+                        parked.deadline_epoch
+                        if parked is not None
+                        else time.time() + timeout_sec
+                    ),
+                )
+                self._parked_turns[key] = again
+                self._actions.file_locked(agent.workflow_id, again)
+                return None
+            if parked is None:
+                # A proposal of the turn answered now supersedes one parked before.
+                self._parked_turns.pop(key, None)
             binding = self.resolve_model_binding(proposal.agent_task_id)
-            permit = None
             reason = "model turn egress denied"
-            if binding is not None and binding.mode is ModelBindingMode.OPENAI:
-                op_credential = self._model_credential(agent, binding)
-                if isinstance(op_credential, _MissingCredential):
-                    reason = op_credential.reason
-                else:
-                    _, timeout_sec, result_char_cap = (
-                        self._mediated_ops.op_permit_budget(MODEL_INTERFACE)
-                    )
-                    deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
-                    permit = engine.authorize_model_turn(
-                        proposal.agent_task_id,
-                        proposal.call_correlation,
-                        proposal.request_digest,
-                        target_id=worker_id,
-                        target_generation=worker.incarnation,
-                        timeout_sec=timeout_sec,
-                        result_char_cap=result_char_cap,
-                        deadline_epoch=deadline,
-                        credential=op_credential.credential,
-                        deployment_credential=op_credential.deployment_credential,
-                    )
+            if binding is None or binding.mode is not ModelBindingMode.OPENAI:
+                return worker, "deny", deny_model_turn_payload(proposal, reason)
+            op_credential = self._model_credential(agent, binding)
+            if isinstance(op_credential, _MissingCredential):
+                return (
+                    worker,
+                    "deny",
+                    deny_model_turn_payload(proposal, op_credential.reason),
+                )
+            permit = engine.authorize_model_turn(
+                proposal.agent_task_id,
+                proposal.call_correlation,
+                proposal.request_digest,
+                target_id=proposer_id,
+                target_generation=worker.incarnation,
+                timeout_sec=timeout_sec,
+                result_char_cap=result_char_cap,
+                deadline_epoch=time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC,
+                credential=op_credential.credential,
+                deployment_credential=op_credential.deployment_credential,
+            )
             if permit is None:
-                self._mediated_ops.deny_model_turn(proposal, worker_id, reason)
-                return
-            self._worker_registry.publish_mediated_op(
+                return worker, "deny", deny_model_turn_payload(proposal, reason)
+            return (
                 worker,
-                MediatedOpMessage(
-                    worker_id=worker_id,
-                    frame_kind="permit",
-                    payload=self._mediated_ops.stamped_permit_payload(permit, agent),
-                ),
+                "permit",
+                self._mediated_ops.stamped_permit_payload(permit, agent),
             )
 
     def settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
