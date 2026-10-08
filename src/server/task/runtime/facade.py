@@ -1537,8 +1537,8 @@ class TaskRuntime:
             return
         capsule = hr.capsule.blob if hr.capsule is not None else None
         wi = engine.work_item(task_id)
-        if wi is not None and capsule is not None:
-            wi.continuation_ref = capsule
+        if capsule is not None:
+            engine.record_continuation(task_id, capsule)
         # The outcome that drove this step was consumed by its dispatch; clear it so a
         # later step never re-injects it.
         engine.mark_pending_outcome(task_id, None)
@@ -1614,9 +1614,8 @@ class TaskRuntime:
         engine = self._engines.get(record.workflow_id) if record else None
         if record is None or engine is None:
             return
-        wi = engine.work_item(task_id)
-        if wi is not None and capsule is not None:
-            wi.continuation_ref = capsule.blob
+        if capsule is not None:
+            engine.record_continuation(task_id, capsule.blob)
         engine.mark_pending_outcome(task_id, None)
         advance = engine.route_facade_turn_group(task_id, group)
         self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
