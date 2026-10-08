@@ -26,6 +26,7 @@ from shared.harness import (
     HarnessAdapter,
     HarnessBackendKey,
     HarnessCapsule,
+    HarnessQuiescenceError,
     HarnessResult,
     HarnessResultKind,
     MediatedFacade,
@@ -84,6 +85,14 @@ class CodexAppServerTransport(Protocol):
     def next_event(self, thread_id: str, turn_id: str) -> CodexEvent: ...
     def cancel(self, thread_id: str | None) -> None:
         """Abandon the thread's turn, or with no thread yet, the start opening one."""
+        ...
+
+    def quiesce(self) -> bool:
+        """End the app-server's whole tree; return whether its reap was proved."""
+        ...
+
+    def abandon(self) -> None:
+        """Release the app-server without ending it."""
         ...
 
 
@@ -159,6 +168,15 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
             self._cancelled.add(activation_id)
             thread_id = self._threads.get(activation_id)
         self._transport.cancel(thread_id)
+
+    def quiesce(self, activation_id: str) -> None:
+        if not self._transport.quiesce():
+            raise HarnessQuiescenceError(
+                f"the Codex app-server of {activation_id} was not proved stopped"
+            )
+
+    def abandon(self, activation_id: str) -> None:
+        self._transport.abandon()
 
     def _inject(self, state: _CodexState, outcomes: Sequence[DeliveredOutcome]) -> None:
         items: list[CodexInjectItem] = []

@@ -15,6 +15,7 @@ from .attachment import (
 )
 from .binding import OwnerFence, PrivateStateBinding, PrivateStateRecoveryMode
 from .manifest import (
+    CaptureMode,
     Confidentiality,
     Exportability,
     SealedComponent,
@@ -34,6 +35,7 @@ from .seal import seal_component, verify_component
 __all__ = [
     "ActivationPrivateStateReference",
     "BundleProfile",
+    "CaptureMode",
     "Confidentiality",
     "Exportability",
     "OwnerFence",

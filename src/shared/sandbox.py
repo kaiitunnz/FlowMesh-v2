@@ -10,6 +10,7 @@ becomes durable at the agent's ordinary boundary seal.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -128,6 +129,25 @@ class SandboxUnavailable(Exception):
     """
 
 
+class SandboxReapUnproved(Exception):
+    """A command's process tree was not proved reaped.
+
+    The action is unsettled: the turn that ran it ends and the dispatch cannot seal its
+    private state. ``retry`` reattempts the reap and returns whether it was proved;
+    ``abandon`` releases what the reap holds without ending the tree.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        retry: Callable[[], bool] | None = None,
+        abandon: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retry = retry
+        self.abandon = abandon
+
+
 class LocalSandboxExecutor(ABC):
     """The seam a harness adapter hands a local code action to.
 
@@ -138,3 +158,8 @@ class LocalSandboxExecutor(ABC):
     @abstractmethod
     def execute(self, command: SandboxCommand) -> SandboxCommandResult:
         """Run one command under the dispatch's capability and return its result."""
+
+    @property
+    def reap_unproved(self) -> bool:
+        """Whether a command of this dispatch was not proved reaped."""
+        return False

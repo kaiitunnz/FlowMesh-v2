@@ -16,12 +16,15 @@ at 0700 and unreachable once the holder's incarnation ends, since no later incar
 satisfies an owner fence.
 """
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 from shared.private_state import (
     BundleProfile,
+    CaptureMode,
     PrivateStateAttachment,
     PrivateStateBinding,
     PrivateStateSealReport,
@@ -29,14 +32,18 @@ from shared.private_state import (
     PrivateStateUnavailableReason,
     StateBundleManifest,
     StateComponentKind,
+    component_spec,
     required_components,
     seal_component,
     verify_component,
 )
 from shared.utils.ids import new_state_bundle_manifest_id
 
+_LOG = logging.getLogger("private-state")
 _PRIVATE_MODE = 0o700
 _EPOCH_FILE = ".attachment"
+_UNSEALABLE_FILE = ".unsealable"
+_SUPPORTED_CAPTURE = frozenset({CaptureMode.QUIESCENT_TREE})
 _OPAQUE_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -56,6 +63,28 @@ class MaterializedState:
     @property
     def workspace(self) -> Path:
         return self.components[StateComponentKind.WORKSPACE_FS]
+
+
+@dataclass(frozen=True)
+class QuiescenceFence:
+    """Proof that every writer bound to one attachment stopped before its seal; a seal
+    accepts it only for the state and attachment it names."""
+
+    reference_id: str
+    profile: BundleProfile
+    generation: int
+    attachment_id: str
+    write_epoch: int
+
+    @classmethod
+    def of(cls, state: MaterializedState, attachment: PrivateStateAttachment) -> Self:
+        return cls(
+            reference_id=state.reference_id,
+            profile=state.profile,
+            generation=state.generation,
+            attachment_id=attachment.attachment_id,
+            write_epoch=attachment.write_epoch,
+        )
 
 
 class PrivateStateHolder:
@@ -94,7 +123,14 @@ class PrivateStateHolder:
                 "the attachment does not authorize the bound generation",
                 reference_id=reference_id,
             )
+        _check_capture(binding.reference.profile, reference_id)
         lineage = self._lineage_root(binding)
+        if (lineage / _UNSEALABLE_FILE).exists():
+            raise PrivateStateUnavailable(
+                PrivateStateUnavailableReason.QUIESCENCE_UNPROVED,
+                "a step on this lineage ended without proving its writers stopped",
+                reference_id=reference_id,
+            )
         _claim_epoch(lineage, attachment)
         kinds = sorted(required_components(binding.reference.profile))
         if binding.manifest is None:
@@ -111,9 +147,23 @@ class PrivateStateHolder:
         )
 
     def seal(
-        self, state: MaterializedState, attachment: PrivateStateAttachment
+        self,
+        state: MaterializedState,
+        attachment: PrivateStateAttachment,
+        fence: QuiescenceFence,
     ) -> PrivateStateSealReport:
-        """Seal every component of the lineage as the next coherent generation."""
+        """Seal every component of the lineage as the next coherent generation.
+
+        The fence must name this state and attachment: a generation is captured only
+        once the writers of the step that produced it are proved stopped.
+        """
+        if fence != QuiescenceFence.of(state, attachment):
+            raise PrivateStateUnavailable(
+                PrivateStateUnavailableReason.QUIESCENCE_UNPROVED,
+                "the quiescence fence is not this attachment's",
+                reference_id=state.reference_id,
+            )
+        _check_capture(state.profile, state.reference_id)
         lineage = self._root / state.reference_id
         _verify_epoch(lineage, attachment)
         generation = state.generation + 1
@@ -133,6 +183,15 @@ class PrivateStateHolder:
             manifest=manifest, write_epoch=attachment.write_epoch
         )
 
+    def mark_unsealable(self, state: MaterializedState) -> None:
+        """Mark a lineage whose step could not prove its writers stopped, so every later
+        open of it fails as ``quiescence_unproved``."""
+        marker = self._root / state.reference_id / _UNSEALABLE_FILE
+        try:
+            marker.touch(mode=0o600, exist_ok=True)
+        except OSError:
+            _LOG.exception("Could not mark lineage %s unsealable", state.reference_id)
+
     @staticmethod
     def _restore(
         manifest: StateBundleManifest,
@@ -148,6 +207,17 @@ class PrivateStateHolder:
                     reference_id=reference_id,
                 )
             verify_component(sealed, path, reference_id=reference_id)
+
+
+def _check_capture(profile: BundleProfile, reference_id: str) -> None:
+    """Refuse a profile with a component this holder cannot capture or restore."""
+    for kind in sorted(required_components(profile)):
+        if (mode := component_spec(kind).capture) not in _SUPPORTED_CAPTURE:
+            raise PrivateStateUnavailable(
+                PrivateStateUnavailableReason.UNSUPPORTED_CAPTURE,
+                f"{kind.value} declares {mode} capture",
+                reference_id=reference_id,
+            )
 
 
 def _private_dir(path: Path, *, parents: bool = False) -> Path:

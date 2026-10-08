@@ -3,11 +3,13 @@
 A runtime executes a command against the activation's own workspace and returns its
 bounded result. The fence is kernel-enforced and unprivileged, so it holds in an
 ordinary worker container: Landlock denies every path outside the workspace and the
-read-only runtime, a seccomp filter denies IP sockets and io_uring, the envelope's
-resource limits bound the command, and its process group is killed and reaped before
-the action completes. A dispatch whose capability carries the egress opt-in relaxes the
-two network layers and nothing else: the workspace confinement, the envelope, and the
-reaping bound it as they bound any other command.
+read-only runtime, a seccomp filter denies IP sockets and io_uring, and the envelope's
+resource limits bound the command. Each command runs under its own supervisor, outside
+the fence, which reaps everything the command started, including a process in a session
+of its own, before the action completes; a tree it cannot prove reaped fails the
+command. A dispatch whose capability carries the egress opt-in relaxes the two network
+layers and nothing else: the workspace confinement, the envelope, and the reaping bound
+it as they bound any other command.
 
 What the fence does not provide, because an unprivileged container cannot: no mount
 namespace or private root view, no PID or IPC isolation (processes on one worker remain
@@ -23,7 +25,6 @@ import json
 import logging
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -36,17 +37,26 @@ from shared.sandbox import (
     SandboxCommand,
     SandboxCommandResult,
     SandboxDenied,
+    SandboxReapUnproved,
     SandboxRuntimeProfile,
     SandboxUnavailable,
 )
 
-from ..utils.process import signal_process_group
+from ..utils.subreaper import (
+    DEFAULT_GRACE_SEC,
+    UNSUPPORTED,
+    end_supervised,
+    read_receipt,
+    supervised_argv,
+    wait_supervisor,
+)
 
 _LOG = logging.getLogger("sandbox-runtime")
-# A drain that outlives its reaped process group is a lost thread, not a lost result.
+# A drain that outlives its reaped tree is a lost thread, not a lost result.
 _DRAIN_JOIN_SEC = 5.0
 _DRAIN_CHUNK_CHARS = 8192
-_REAP_WAIT_SEC = 5.0
+# How long a command's supervisor may take to reap what the command left behind.
+_REAP_BUDGET_SEC = 10.0
 _LAUNCHER = Path(__file__).with_name("_launcher.py")
 _LANDLOCK_CREATE_RULESET = {"x86_64": 444, "aarch64": 444}
 
@@ -116,8 +126,15 @@ class PosixProcessSandbox(SandboxRuntime):
 
     name = "posix_process"
 
-    def __init__(self, abi: int | None = None) -> None:
+    def __init__(
+        self,
+        abi: int | None = None,
+        reap_grace_sec: float = DEFAULT_GRACE_SEC,
+        reap_budget_sec: float = _REAP_BUDGET_SEC,
+    ) -> None:
         self._abi = landlock_abi() if abi is None else abi
+        self._reap_grace_sec = reap_grace_sec
+        self._reap_budget_sec = reap_budget_sec
         _LOG.info(
             "sandbox fence: %s, seccomp egress denial, envelope limits",
             (
@@ -153,8 +170,10 @@ class PosixProcessSandbox(SandboxRuntime):
             "file_size_bytes": profile.file_size_bytes,
             "open_files": profile.open_files,
         }
-        argv = [
+        launcher = [
             sys.executable,
+            "-I",
+            "-S",
             _LAUNCHER.as_posix(),
             json.dumps(spec),
             program,
@@ -162,9 +181,11 @@ class PosixProcessSandbox(SandboxRuntime):
         ]
         limit = profile.command_timeout_sec
         deadline = min(command.timeout_sec or limit, limit)
+        receipt, receipt_end = os.pipe()
+        argv = supervised_argv(
+            launcher, receipt_fd=receipt_end, grace_sec=self._reap_grace_sec
+        )
         try:
-            # Its own session makes the command's descendants one killable group, so the
-            # tree is reaped before the action completes rather than outliving it.
             proc = subprocess.Popen(  # nosec B603 - argv list, no shell, absolute program via shutil.which()
                 argv,
                 cwd=root,
@@ -174,38 +195,79 @@ class PosixProcessSandbox(SandboxRuntime):
                 stderr=subprocess.PIPE,
                 text=True,
                 start_new_session=True,
+                pass_fds=(receipt_end,),
             )
         except OSError as exc:
+            os.close(receipt)
             raise SandboxUnavailable(f"the sandbox could not start a command: {exc}")
-        streams = _Streams(proc)
-        try:
-            proc.wait(timeout=deadline)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            timed_out = True
         finally:
-            # The command itself has finished, so anything still holding its pipes is a
-            # process it left behind: kill the group, which also ends the drain.
-            _reap(proc)
-            # A killed group normally reaps at once; a child stuck in the kernel would
-            # otherwise hold this lane, and the result is already decided either way.
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(_REAP_WAIT_SEC)
+            os.close(receipt_end)
+        budget = self._reap_budget_sec
+        pending = _PendingReap(proc, budget, receipt)
+        try:
+            streams = _Streams(proc)
+            expired = not wait_supervisor(proc, deadline)
+            # The supervisor has drained what the command left behind by the time it
+            # exits; one still running past the deadline is told to end the command.
+            proved = end_supervised(proc, budget)
+        except Exception as exc:
+            # The tree may be running; it keeps its owner for a later reap.
+            raise SandboxReapUnproved(
+                f"the sandbox lost track of {command.argv[0]!r}: {exc}",
+                retry=pending.retry,
+                abandon=pending.abandon,
+            ) from exc
+        if not proved:
+            raise SandboxReapUnproved(
+                f"the command {command.argv[0]!r} left processes it could not prove "
+                "reaped",
+                retry=pending.retry,
+                abandon=pending.abandon,
+            )
+        if proc.returncode == UNSUPPORTED:
+            os.close(receipt)
+            raise SandboxUnavailable("the kernel cannot supervise a command's tree")
+        outcome = read_receipt(receipt)
         stdout, stderr = streams.collect()
+        # The supervisor ended the command only past its deadline; one it never forked
+        # leaves no receipt.
+        timed_out = outcome.ended if outcome is not None else expired
+        status = outcome.status if outcome is not None else None
         return SandboxCommandResult(
-            exit_code=-1 if timed_out else proc.returncode,
+            exit_code=-1 if timed_out or status is None else status,
             stdout=stdout,
             stderr=stderr,
             timed_out=timed_out,
         )
 
 
+class _PendingReap:
+    """An unproved command's supervisor and the receipt pipe it still holds."""
+
+    def __init__(self, proc: subprocess.Popen[str], budget_sec: float, receipt: int):
+        self._proc = proc
+        self._budget_sec = budget_sec
+        self._receipt: int | None = receipt
+
+    def retry(self) -> bool:
+        """Try the reap again, releasing the receipt once proved."""
+        if not end_supervised(self._proc, self._budget_sec):
+            return False
+        self.abandon()
+        return True
+
+    def abandon(self) -> None:
+        """Release the receipt without ending the tree."""
+        if (receipt := self._receipt) is not None:
+            self._receipt = None
+            os.close(receipt)
+
+
 class _Streams:
     """Drain a command's pipes off the waiting thread and keep a bounded prefix.
 
-    Waiting on the process rather than on end-of-pipe is what keeps a stray background
-    writer from holding the episode open to the deadline; draining concurrently is what
-    keeps a chatty command from blocking on a full pipe before it can exit.
+    Draining concurrently keeps a chatty command from blocking on a full pipe before it
+    can exit.
     """
 
     def __init__(self, proc: subprocess.Popen[str]) -> None:
@@ -249,14 +311,6 @@ class _Streams:
             return
         with contextlib.suppress(OSError):
             pipe.close()
-
-
-def _reap(proc: subprocess.Popen[str]) -> None:
-    """Kill the command's whole process group, including anything it left running."""
-    try:
-        signal_process_group(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 def build_sandbox_runtime() -> SandboxRuntime:

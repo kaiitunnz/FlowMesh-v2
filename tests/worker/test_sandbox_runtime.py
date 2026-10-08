@@ -1,5 +1,8 @@
 """The worker-local sandbox fence: what a command may touch, and what it may not."""
 
+import os
+import resource
+import signal
 import socket
 import struct
 import sys
@@ -13,8 +16,11 @@ from shared.sandbox import (
     MAX_STREAM_CHARS,
     SandboxCommand,
     SandboxDenied,
+    SandboxReapUnproved,
     SandboxRuntimeProfile,
 )
+from tests.worker.processes import recorded_pids, running
+from worker.sandbox import runtime as sandbox_runtime
 from worker.sandbox._launcher import _NR, _filter_program
 from worker.sandbox.runtime import (
     _DRAIN_CHUNK_CHARS,
@@ -397,3 +403,144 @@ def test_io_uring_stays_denied_in_both_modes(runtime, profile, tmp_path, egress)
 
     # EACCES is the filter's own denial; a reachable io_uring_setup fails differently.
     assert result.stdout.strip() == "errno 13"
+
+
+# Holds the command until its background process has armed itself.
+_READY = "while [ ! -s ready ]; do sleep 0.01; done; "
+
+
+def test_a_command_completes_only_once_a_detached_writer_is_reaped(
+    runtime, profile, tmp_path
+):
+    result = run(
+        runtime,
+        profile,
+        tmp_path,
+        "sh",
+        "-c",
+        "setsid sh -c 'echo x >> log; echo > ready; while :; do echo x >> log; "
+        f"sleep 0.02; done' & echo $! > pids; {_READY}exit 0",
+    )
+
+    assert result.exit_code == 0
+    assert not any(running(pid) for pid in recorded_pids(tmp_path / "pids"))
+    size = (tmp_path / "log").stat().st_size
+    time.sleep(0.2)
+    assert (tmp_path / "log").stat().st_size == size
+
+
+def test_a_timed_out_command_ignoring_term_is_reaped(profile, tmp_path):
+    runtime = PosixProcessSandbox(reap_grace_sec=0.3)
+
+    result = run(
+        runtime,
+        profile,
+        tmp_path,
+        "sh",
+        "-c",
+        "trap '' TERM; setsid sh -c 'trap \"\" TERM; echo $$ >> pids; exec sleep 30' &"
+        " echo $$ >> pids; sleep 30",
+        timeout_sec=0.5,
+    )
+
+    assert result.timed_out
+    assert not any(running(pid) for pid in recorded_pids(tmp_path / "pids"))
+
+
+def test_a_command_whose_tree_is_not_proved_reaped_fails(profile, tmp_path):
+    runtime = PosixProcessSandbox(reap_grace_sec=30.0, reap_budget_sec=0.3)
+
+    with pytest.raises(SandboxReapUnproved) as raised:
+        run(
+            runtime,
+            profile,
+            tmp_path,
+            "sh",
+            "-c",
+            'setsid sh -c \'trap "" TERM; echo $$ > pids; echo > ready; '
+            "exec sleep 30' & "
+            f"{_READY}exit 0",
+            timeout_sec=0.5,
+        )
+    retry = raised.value.retry
+    assert retry is not None
+    assert not retry()
+    for pid in recorded_pids(tmp_path / "pids"):
+        os.kill(pid, signal.SIGKILL)
+    assert retry()
+
+
+@_needs_landlock
+def test_a_supervised_command_still_cannot_read_proc(runtime, profile, tmp_path):
+    result = run(runtime, profile, tmp_path, "cat", "/proc/self/status")
+
+    assert result.exit_code != 0
+    assert "Pid:" not in result.stdout
+
+
+def test_a_command_finished_before_its_deadline_is_not_timed_out(profile, tmp_path):
+    runtime = PosixProcessSandbox(reap_grace_sec=1.0)
+
+    # The supervisor is draining a TERM-ignoring leftover when the deadline passes.
+    result = run(
+        runtime,
+        profile,
+        tmp_path,
+        "sh",
+        "-c",
+        "setsid sh -c 'trap \"\" TERM; echo > ready; exec sleep 30' & "
+        f"{_READY}exit 0",
+        timeout_sec=0.3,
+    )
+
+    assert not result.timed_out
+    assert result.exit_code == 0
+
+
+@pytest.mark.parametrize(
+    "script, status",
+    [
+        ("trap 'kill 0' EXIT; echo done; exit 0", -signal.SIGTERM),
+        ("kill -HUP 0; exit 0", -signal.SIGHUP),
+        ("kill -USR1 $PPID; kill -ALRM $PPID; kill -TERM $PPID; exit 0", 0),
+    ],
+)
+def test_a_command_signalling_its_group_or_parent_does_not_end_its_supervisor(
+    runtime, profile, tmp_path, script, status
+):
+    result = run(runtime, profile, tmp_path, "sh", "-c", script)
+
+    assert not result.timed_out
+    assert result.exit_code == status
+
+
+def test_a_failure_after_the_command_started_keeps_its_tree_owned(
+    runtime, profile, tmp_path, monkeypatch
+):
+    def lost(proc):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(sandbox_runtime, "_Streams", lost)
+
+    with pytest.raises(SandboxReapUnproved, match="lost track") as raised:
+        run(runtime, profile, tmp_path, "sh", "-c", "exit 0")
+    assert raised.value.retry is not None
+    assert raised.value.retry()
+
+
+def test_a_command_runs_while_the_worker_holds_more_than_fd_setsize_fds(
+    runtime, profile, tmp_path
+):
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 2048:
+        pytest.skip("the hard open-file limit is below 2048")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (2048, hard))
+    held = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
+    try:
+        result = run(runtime, profile, tmp_path, "true")
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    assert result.exit_code == 0

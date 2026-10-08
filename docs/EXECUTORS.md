@@ -86,6 +86,16 @@ generation to resume and the `PrivateStateAttachment` authorizing this worker in
 to write it; the executor materializes the bound generation before building the adapter
 and seals the components together when the step yields.
 
+A step seals only once every writer it started on that state is proved stopped: the
+adapter ends its harness, for `codex` the app-server and every process it started, and
+the dispatch's sandbox admits no further command and waits out those in flight. The next
+step resumes on a fresh harness process from the sealed generation and its capsule. A
+step whose writers are not proved stopped seals nothing and fails without a retry as
+`PrivateStateUnavailable: quiescence_unproved`, or settles as cancelled when its
+cancellation was requested; every later dispatch on its lineage fails the same way. The
+worker retries ending such a step's processes at its next few cleanups and then leaves
+them running.
+
 The holder verifies every required component against its seal before the harness starts,
 refuses an attachment whose write epoch a later dispatch superseded, and keeps each
 lineage under its own `0700` root keyed by the opaque state reference. Attaching to a
@@ -113,8 +123,11 @@ tools only from its allowlist, so a native shell or any tool it does not name is
 dropped, and an agent without a sandbox is offered no executable tool.
 
 Commands mutate `workspace_fs` and become durable at the episode's ordinary seal, so a
-worker loss before it leaves the last sealed generation intact. Egress is denied by
-default — reaching a model, tool, or external effect takes the mediated boundary.
+worker loss before it leaves the last sealed generation intact. A command completes only
+once everything it started is reaped, including a process that detached into its own
+session; a command whose tree is not proved reaped ends the turn that ran it, and the
+step fails as `quiescence_unproved`. Egress is denied by default — reaching a model,
+tool, or external effect takes the mediated boundary.
 
 Declaring the separate `sandbox.egress` interface, on a deployment that sets
 `AGENT_SANDBOX_EGRESS_ENABLED`, relaxes the network fence for the agent's own commands;

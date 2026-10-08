@@ -238,6 +238,10 @@ class ServiceLeafEpisodeDispatch(BaseModel):
     delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
 
 
+class HarnessQuiescenceError(RuntimeError):
+    """A backend could not prove that everything its step started has stopped."""
+
+
 class HarnessResultKind(StrEnum):
     """What a harness step returned."""
 
@@ -293,6 +297,18 @@ class HarnessAdapter(ABC):
     @abstractmethod
     def cancel(self, activation_id: str) -> None:
         """Cancel the harness session for an activation."""
+
+    @abstractmethod
+    def quiesce(self, activation_id: str) -> None:
+        """End every process and writer the step started on the activation's state.
+
+        Return only once nothing the backend launched can still write the activation's
+        private state, or raise :class:`HarnessQuiescenceError` when that is not proved
+        within the backend's bound. The adapter is spent afterwards.
+        """
+
+    def abandon(self, activation_id: str) -> None:
+        """Release what an unproved :meth:`quiesce` left behind without ending it."""
 
     def mediated_facades(self) -> frozenset[MediatedFacade]:
         """The capability classes this backend fully mediates through a fabric facade.

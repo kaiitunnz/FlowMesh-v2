@@ -126,6 +126,11 @@ class ScriptedHarnessAdapter(HarnessAdapter):
     def cancel(self, activation_id: str) -> None:
         return None
 
+    def quiesce(self, activation_id: str) -> None:
+        # The script writes only within ``start``; its commands run in the sandbox,
+        # which the executor fences on its own.
+        return None
+
     def _run(self, step: ScriptedStep, state: "_ScriptedState") -> None:
         if self._sandbox is None:
             raise SandboxDenied("this agent declares no sandbox to run a command in")

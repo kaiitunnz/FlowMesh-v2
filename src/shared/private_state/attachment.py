@@ -40,7 +40,7 @@ class PrivateStateSealReport(BaseModel):
 
 
 class PrivateStateUnavailableReason(StrEnum):
-    """Why a bound generation could not be supplied to a resuming holder."""
+    """Why a generation cannot be safely captured or supplied."""
 
     OWNER_LOST = "owner_lost"
     INCARNATION_MISMATCH = "incarnation_mismatch"
@@ -48,14 +48,14 @@ class PrivateStateUnavailableReason(StrEnum):
     COMPONENT_MISSING = "component_missing"
     COMPONENT_MISMATCH = "component_mismatch"
     CONTAINMENT_VIOLATION = "containment_violation"
+    # A step's writers were not proved stopped, so no recoverable capture exists.
+    QUIESCENCE_UNPROVED = "quiescence_unproved"
+    UNSUPPORTED_CAPTURE = "unsupported_capture"
 
 
 class PrivateStateUnavailable(Exception):
-    """Raised when a bound generation cannot be supplied in full.
-
-    The continuation fails closed rather than resuming against a fresh, partial, or
-    foreign generation.
-    """
+    """Raised when a generation cannot be safely captured or supplied in full; the
+    continuation fails closed."""
 
     def __init__(
         self, reason: PrivateStateUnavailableReason, detail: str, *, reference_id: str

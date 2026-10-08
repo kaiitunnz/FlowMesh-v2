@@ -25,6 +25,7 @@ from shared.sandbox import (
     LocalSandboxExecutor,
     SandboxCommand,
     SandboxDenied,
+    SandboxReapUnproved,
     SandboxUnavailable,
 )
 from shared.tools.facade import FacadeDescriptor, FacadeTurnGroup
@@ -252,6 +253,12 @@ class ResponsesFacade:
         descriptors = list(ctx.descriptors)
         ran = 0
         for round_index in range(_MAX_TURN_COMMANDS + 1):
+            if ctx.sandbox is not None and ctx.sandbox.reap_unproved:
+                # A command may still be writing the workspace, so nothing it produced
+                # reaches another model call, however the harness retries the turn.
+                raise FacadeTurnError(
+                    "a command of this dispatch was not proved reaped"
+                )
             completion = self._egress_turn(
                 task_id, ctx, messages, tools, base, round_index
             )
@@ -308,6 +315,8 @@ class ResponsesFacade:
             # A command the runtime will not run is a declared terminal outcome of the
             # action: the model is told, and the turn carries on.
             return f"denied: {exc}"
+        except SandboxReapUnproved as exc:
+            raise FacadeTurnError(str(exc)) from exc
         return json.dumps(
             {
                 "exit_code": result.exit_code,
