@@ -107,6 +107,12 @@ class TaskMerges:
                 continue
             if candidate not in self._ready.ready_index:
                 continue
+            # A task waits for the handling of its report as its own dispatch does.
+            if (
+                self._committer.reporting(candidate)
+                or candidate in self._committer.unacknowledged
+            ):
+                continue
             siblings.append(candidate)
         if not siblings:
             return []

@@ -1229,8 +1229,9 @@ class TaskRuntime:
                 with self._cv if locked else nullcontext():
                     try:
                         yield
-                    except BaseException:
-                        if outermost:
+                    except BaseException as exc:
+                        # A refused entry stopped after its writes, not partway.
+                        if outermost and not isinstance(exc, TransitionNotDurable):
                             with self._cv:
                                 # A transition that stopped partway may have changed
                                 # state no write carried; all of it is owed before any
@@ -1280,6 +1281,7 @@ class TaskRuntime:
         took up is not dispatched again until the handling ends.
         """
         outermost = self._committer.open_acknowledging()
+        acknowledged = False
         try:
             try:
                 with self._transition(locked=False):
@@ -1292,16 +1294,17 @@ class TaskRuntime:
                 raise
             if outermost and (held := self._committer.close_acknowledging()):
                 raise TransitionNotDurable(held)
+            acknowledged = True
         finally:
             if outermost:
                 self._committer.close_acknowledging()
-                self._end_reports()
+                self._end_reports(acknowledged)
 
-    def _end_reports(self) -> None:
+    def _end_reports(self, acknowledged: bool) -> None:
         """Release the reports this thread's handling took up, and queue again each
         task whose publication waited for them."""
         with self._transition():
-            for task_id in self._committer.end_reports_locked():
+            for task_id in self._committer.end_reports_locked(acknowledged):
                 if task_id in self._awaiting_reports:
                     self._awaiting_reports.discard(task_id)
                     if (record := self._tasks.get(task_id)) is not None and (

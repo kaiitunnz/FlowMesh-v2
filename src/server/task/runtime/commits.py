@@ -266,12 +266,15 @@ class TransitionCommitter:
         """Whether an acknowledging caller is handling a report of the task."""
         return task_id in self._reports
 
-    def end_reports_locked(self) -> list[str]:
-        """Release the reports this thread's handling took up; returns the tasks no
+    def end_reports_locked(self, acknowledged: bool) -> list[str]:
+        """Release the reports this thread's handling took up, and when the caller
+        acknowledged it, what each waits to be handled again; returns the tasks no
         handling holds any more."""
         guarded, self._scope.guarded = self._scope.guarded, set()
         ended = []
         for task_id in guarded:
+            if acknowledged:
+                self.unacknowledged.pop(task_id, None)
             if (count := self._reports[task_id] - 1) > 0:
                 self._reports[task_id] = count
             else:
@@ -746,9 +749,9 @@ class TransitionCommitter:
                     self.close_locked(workflow_id)
                 if not (held := {w for w in pending.workflows if w in self.debt}):
                     del self.unacknowledged[task_id]
-                else:
-                    pending.workflows = held
-                return cast(O, pending.outcome)
+                    return cast(O, pending.outcome)
+                pending.workflows = held
+                raise self._not_durable(held)
         self._scope.reporting = True
         try:
             outcome = transition()
@@ -757,10 +760,22 @@ class TransitionCommitter:
         with self._lock:
             held = {w for w in self._scope.held if w in self.debt}
             if held and acknowledging:
+                # Refused in the same lock hold, so no thread that makes the writes
+                # durable meanwhile leaves the report acknowledged with its stash.
                 self.unacknowledged[task_id] = _Unacknowledged(
                     report, worker_id, dispatch_id, held, outcome
                 )
+                raise self._not_durable(held)
         return outcome
+
+    def _not_durable(self, workflows: set[str]) -> TransitionNotDurable:
+        return TransitionNotDurable(
+            {
+                workflow_id: self._scope.held.get(workflow_id)
+                or ConnectionError("store unavailable")
+                for workflow_id in sorted(workflows)
+            }
+        )
 
     def drop_unacknowledged(self, task_id: str) -> None:
         del self.unacknowledged[task_id]

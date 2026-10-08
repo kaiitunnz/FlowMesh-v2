@@ -444,3 +444,123 @@ def test_an_unregister_revokes_after_its_requeues_whatever_thread_delivers() -> 
     )
 
     assert order == ["requeue", "requeue", "revoke", "revoke"]
+
+
+def test_a_report_held_when_another_thread_makes_it_durable_is_redelivered() -> None:
+    store, runtime, workflow_id, task_id = _dispatched(TWO_V1)
+    monitor, _, forward = _monitor(runtime)
+    failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
+    committer = runtime._committer
+    still_held = committer._still_held
+
+    def made_durable_meanwhile(held: dict[str, BaseException]) -> Any:
+        # Another thread closes the workflow before the entry's exit decides.
+        if task_id in committer.unacknowledged and store.all_down:
+            store.all_down = False
+
+            def close() -> None:
+                with runtime._lock:
+                    committer.close_locked(workflow_id)
+
+            closing = threading.Thread(target=close)
+            closing.start()
+            closing.join()
+        return still_held(held)
+
+    setattr(committer, "_still_held", made_durable_meanwhile)
+    store.all_down = True
+
+    assert _consume(monitor, failure) == "0-0"
+    forward.unregister_task.assert_not_called()
+    assert _consume(monitor, failure) == _ENTRY
+    forward.unregister_task.assert_called_once_with(task_id)
+    assert task_id not in committer.unacknowledged
+    assert _pop(runtime, task_id)
+    assert runtime.begin_publish(task_id, _worker("wkr-2"), "dsp-2") is (
+        PublishGate.PUBLISH
+    )
+
+
+def test_an_acknowledged_handling_of_a_task_drops_what_its_report_left_held() -> None:
+    store, runtime, workflow_id, task_id = _dispatched(TWO_V1)
+    monitor, _, _ = _monitor(runtime)
+    store.all_down = True
+    _consume(monitor, _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1"))
+    store.all_down = False
+    runtime._retry_durability(workflow_id)
+    assert task_id in runtime._committer.unacknowledged
+
+    # A different report of the task, handled and acknowledged.
+    late = _event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1")
+    assert _consume(monitor, late) == _ENTRY
+
+    assert task_id not in runtime._committer.unacknowledged
+
+
+def test_a_held_handling_owes_nothing_of_another_threads_workflow() -> None:
+    store = _Store()
+    runtime = _runtime(store)
+    workflow_id, ids = asyncio.run(_register(runtime, TWO_V1))
+    other_id, _ = asyncio.run(_register(runtime, TWO_V1))
+    task_id = ids["a"]
+    assert _pop(runtime, task_id)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    filed, release = threading.Event(), threading.Event()
+
+    def composite() -> None:
+        with runtime.transition():
+            runtime.cancel_workflow(other_id)
+            filed.set()
+            release.wait(5)
+
+    other = threading.Thread(target=composite)
+    other.start()
+    assert filed.wait(5)
+    store.down = {workflow_id}
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
+        runtime.mark_started(task_id, "wkr-1", {}, _TS, "dsp-1")
+    owed = runtime._committer.debt.get(other_id)
+    release.set()
+    other.join()
+
+    assert owed is None
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["handled", "held"])
+def test_a_task_whose_report_is_pending_is_not_merged_into_another_dispatch(
+    held: bool,
+) -> None:
+    store = _Store()
+    runtime = _runtime(store)
+    workflow_id, ids = asyncio.run(_register(runtime, _siblings(names=("a", "b"))))
+    a, b = ids["a"], ids["b"]
+    assert pop_ready(runtime, 0.05) == a
+    record_dispatch(runtime, a, "wkr-1", "dsp-1")
+    monitor, _, _ = _monitor(runtime)
+    failure = _event("TASK_FAILED", runtime, a, "wkr-1", "dsp-1")
+    merged: list[list[str]] = []
+    if held:
+        store.all_down = True
+        assert _consume(monitor, failure) == "0-0"
+        store.all_down = False
+        runtime._retry_durability(workflow_id)
+        # Refused for its held report, a waits behind b in the queue.
+        assert pop_ready(runtime, 0.05) == a
+        assert runtime.begin_publish(a, _worker("wkr-2"), "dsp-x") is (
+            PublishGate.NOT_DURABLE
+        )
+        monitor._dispatcher.requeue_task(a, reason="not_durable", count_retry=False)
+        assert pop_ready(runtime, 0.05) == b
+        merged.append(runtime.plan_merge(b, 8, "wkr-2"))
+    else:
+        assert _pop(runtime, b)
+        release = monitor._release_task
+
+        def merging_mid_handling(released: str) -> None:
+            merged.append(runtime.plan_merge(b, 8, "wkr-2"))
+            release(released)
+
+        setattr(monitor, "_release_task", merging_mid_handling)
+        assert _consume(monitor, failure) == _ENTRY
+
+    assert merged == [[]]
