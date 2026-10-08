@@ -830,9 +830,8 @@ class Dispatcher:
         if gate is PublishGate.NOT_PENDING:
             return True
         if gate is PublishGate.NOT_DURABLE:
-            # What the dispatch would carry is not durable yet: nothing is published,
-            # and the task waits behind the rest of the queue without spending an
-            # attempt while the runtime retries its writes.
+            # The task waits behind the queue, spending no attempt, while the runtime
+            # makes what the dispatch would carry durable.
             self._runtime.release_merge(task_id)
             self.requeue_task(task_id, reason="not_durable", count_retry=False)
             return False

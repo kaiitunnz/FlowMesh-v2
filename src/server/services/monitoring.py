@@ -87,8 +87,8 @@ _GIVEN_UP_ENDS = {
 }
 
 TASK_EVENT_HANDLER_MAX_ATTEMPTS = 5
-# The backoff of a task event whose transition applied but is not durable yet, doubling
-# to the cap while it stays so.
+# The backoff of a task event whose transition is not durable, doubling to the cap on
+# each try.
 _NOT_DURABLE_BACKOFF_SEC = 0.5
 _NOT_DURABLE_BACKOFF_MAX_SEC = 30.0
 # Consecutive tries after which a task event still not durable is logged as an error.

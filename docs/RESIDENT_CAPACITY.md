@@ -78,9 +78,9 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
   and consumed by `invocation_id`; a stream close or a telemetry report alone never releases
   it. The release follows the terminal's durable commit, and consuming the same terminal
   again finishes a release that failed partway without releasing twice. A pre-acceptance
-  cancellation, known enqueue failure, or expiry records a terminal
-  transition directly. An invocation whose agent failed or was cancelled is terminal, and
-  so is one whose origin worker was lost. On a root restart, a workflow claim whose
+  cancellation, known enqueue failure, or expiry records a terminal transition directly.
+  An invocation whose agent failed or was cancelled is terminal, and so is one whose
+  origin worker was lost. On a root restart, a workflow claim whose
   invocation is terminal in the restored ledger releases from that terminal; one whose
   invocation is still open keeps its credit. A gated serve request has the root as its
   origin, so one in flight at a restart fails and releases its credit; the replica ends

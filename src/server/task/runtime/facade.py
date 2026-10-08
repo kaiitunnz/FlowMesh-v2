@@ -588,9 +588,8 @@ class TaskRuntime:
         return workflow_id, staged.results
 
     async def _discard_registration(self, workflow_id: str) -> None:
-        """Remove what a failed submission may have written; its credentials go only
-        once nothing of the workflow can remain, else the startup sweep reclaims
-        them."""
+        """Remove what a failed submission may have written, and its credentials once
+        nothing of the workflow remains; otherwise the startup sweep reclaims them."""
         try:
             await self._workflow_registry.unregister_workflows_async(workflow_id)
         except Exception:
@@ -1228,8 +1227,8 @@ class TaskRuntime:
                 except BaseException:
                     if outermost:
                         with self._cv:
-                            # What a transition that stopped partway applied is written
-                            # whole before anything it owes is delivered.
+                            # A transition that stopped partway may have changed state
+                            # no write carried; all of it is owed before any action.
                             for workflow_id in list(self._actions.parked):
                                 self._committer.mark_dirty_locked(workflow_id)
                     raise
@@ -1911,8 +1910,8 @@ class TaskRuntime:
         self, task_id: str, call_correlation: str, invocation_id: str | None
     ) -> Callable[[], Any] | None:
         """Prepare the handoff of a still-pending boundary to its handler; with an
-        ``invocation_id``, only under that invocation. A boundary no longer pending
-        makes its workflow's held writes durable instead."""
+        ``invocation_id``, only under that invocation. For a boundary that is not
+        pending, make its workflow's held writes durable."""
         record = self._tasks.get(task_id)
         engine = self._engines.get(record.workflow_id) if record else None
         if record is None or engine is None:
@@ -3400,12 +3399,9 @@ class TaskRuntime:
         return failed_now
 
     def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
-        """Fail a workflow in its ledger and every non-terminal task of it, and persist
-        the terminal facts.
-
-        What its work held is delivered off the lock once the terminal ledger is
-        durable.
-        """
+        """Fail a workflow in its ledger and every non-terminal task of it, persist the
+        terminal facts, and file what its work held for delivery once they are
+        durable."""
         owed = self._terminate_workflow_locked(workflow_id, reason, reason)
         non_terminal = [
             task_id
@@ -3473,7 +3469,7 @@ class TaskRuntime:
         Everything the dispatch carries is made durable first: the held writes of its
         task's workflow and of each workflow a merged child belongs to. A dispatch whose
         writes stay held, or whose task's previous dispatch is still being torn down,
-        is not marked.
+        is not marked and returns ``NOT_DURABLE``.
         """
         publish = Publish(
             worker.id, dispatch_id, supplier_id(worker), input_preparation
@@ -4361,8 +4357,8 @@ class TaskRuntime:
         interrupted with every other running task, the agents' mediated operations are
         taken for reaping, the pending re-drive and held input checks are dropped, and
         every unsettled boundary invocation is terminalized. It writes nothing: the
-        caller's terminal commit persists it, and files what it returns to be delivered
-        once that commit is durable.
+        caller's terminal commit persists it, and the caller files what it returns for
+        delivery once that commit is durable.
         """
         self._redrive.settle(workflow_id)
         owed = self._take_task_work_locked(
@@ -4821,8 +4817,7 @@ class TaskRuntime:
 
         Read under the scheduler lock, so a caller never observes the moment inside a
         settle in which a producer's tasks have gone terminal but the children they
-        fan out do not exist yet. A settlement whose writes are held reads as
-        unsettled until they are durable.
+        fan out do not exist yet.
         """
         with self._lock:
             if not self._committer.durable(workflow_id):
@@ -4882,7 +4877,7 @@ class TaskRuntime:
     # ------------------------------------------------------------------ #
 
     def task_records(self) -> list[TaskRecord]:
-        """A detached copy of every task record, taken at once under the lock."""
+        """Copy every task record, detached, at one moment under the lock."""
         with self._lock:
             return [
                 record.model_copy(
@@ -4896,7 +4891,7 @@ class TaskRuntime:
             ]
 
     def work_item_id(self, task_id: str) -> str | None:
-        """The id of the ledger work item a v2 task realizes, if it has one."""
+        """Return the id of the ledger work item a v2 task realizes, if it has one."""
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None

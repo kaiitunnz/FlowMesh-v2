@@ -104,8 +104,8 @@ class _Records:
 
 @dataclass(frozen=True)
 class _Snapshot:
-    """A write of the workflow's ledger, through the child seam with any child it has
-    not written, retiring ``retire`` from its remaining set."""
+    """A write of the workflow's ledger, with the records of the children it
+    materialized and has not written, removing ``retire`` from its remaining set."""
 
     retire: tuple[str, ...] = ()
 
@@ -389,7 +389,8 @@ class TransitionCommitter:
     ) -> None:
         """Commit task records of one workflow, the status-set membership of ``moves``
         and its schedule, as one atomic transaction; then report each resident task it
-        ended, note a terminal, and release the worker of each dispatch it ended."""
+        ended, file the completion notice of a terminal, and release the worker of each
+        dispatch it ended."""
         ids = [
             task_id
             for task_id in dict.fromkeys(task_ids)
@@ -584,15 +585,9 @@ class TransitionCommitter:
             self.commit_locked(*failed)
 
     def repersist_terminal_workflow_locked(self, workflow_id: str) -> None:
-        """Re-commit the workflow's already-terminal tasks and schedule state.
-
-        The idempotency guard calls this on a replayed terminal event: the original
-        transition may have failed its persist after committing in memory, so re-
-        committing makes the durable state current before the consumer's cursor advances
-        past the event (else the task re-runs after a restart). It covers the whole
-        workflow, not just the replayed task, because a cascade's other affected tasks
-        aren't identifiable here. Idempotent; only on a rare duplicate replay.
-        """
+        """Re-commit a workflow's terminal tasks and its schedule, so a replayed
+        terminal event leaves its durable state current; a cascade's other tasks are
+        not known from the replay, so it covers the whole workflow."""
         terminal_ids = [
             task_id
             for task_id, record in self._tasks.items()

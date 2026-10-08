@@ -29,7 +29,7 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 | GET | `/api/v1/workflows/{id}` | Workflow details + per-task summary. |
 | GET | `/api/v1/workflows/{id}/logs` | Query logs (`limit`, `before`/`after` cursors). |
 | GET | `/api/v1/workflows/{id}/logs/stream` | SSE log stream. |
-| POST | `/api/v1/workflows/{id}/cancel` | Cancel a workflow and all in-flight tasks. A `503` with `Retry-After` means the cancel applied but is not yet durable; repeating it completes it. |
+| POST | `/api/v1/workflows/{id}/cancel` | Cancel a workflow and all in-flight tasks. A `503` with `Retry-After` means the cancel applied but is not durable yet; repeat it. |
 | GET | `/api/v1/workflows/{id}/outputs` | List published outputs. |
 | GET | `/api/v1/workflows/{id}/outputs/{name}` | Get one published output's value. |
 

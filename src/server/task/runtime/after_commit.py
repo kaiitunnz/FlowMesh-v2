@@ -11,8 +11,7 @@ from ..models import TaskRecord, TaskStatus
 
 @dataclass(frozen=True)
 class CreditRelease:
-    """Release the resident credit of a boundary invocation whose terminal is
-    committed, with that terminal's outcome."""
+    """Release a committed invocation terminal's resident credit."""
 
     invocation_id: str
     failed: bool
@@ -20,8 +19,7 @@ class CreditRelease:
 
 @dataclass(frozen=True)
 class Reap:
-    """Tell a worker to drop the request it holds for a boundary that will not run
-    again: a mediated operation's custody, or a captured resident request."""
+    """Tell a worker to drop a request it holds for a boundary that will not run."""
 
     worker_id: str
     task_id: str
@@ -31,14 +29,17 @@ class Reap:
 
 @dataclass(frozen=True)
 class Interrupt:
+    """Interrupt a task on its worker."""
+
     message: InterruptMessage
 
 
 @dataclass(frozen=True)
 class Revoke:
+    """Revoke a dispatch on its worker."""
+
     message: RevokeMessage
-    # The node the dispatch went to, when known apart from the worker's record, which
-    # the worker's unregister deletes.
+    # The dispatch's node, which outlives the worker's record.
     node_id: str | None = None
 
 
@@ -54,7 +55,7 @@ class Issue:
 
 @dataclass(frozen=True)
 class Purge:
-    """Purge a workflow's vaulted credentials, only once it has settled when
+    """Purge a workflow's vaulted credentials, once it has settled when
     ``settled_only``."""
 
     workflow_id: str
@@ -190,7 +191,7 @@ class AfterCommitActions:
     def revoke_for(
         task_id: str, worker_id: str, dispatch_id: str | None, node_id: str | None
     ) -> Revoke | None:
-        """The revocation of a dispatch that resolved without its worker ending it."""
+        """Build the revocation of a dispatch resolved without its worker ending it."""
         if dispatch_id is None:
             return None
         return Revoke(
@@ -203,8 +204,8 @@ class AfterCommitActions:
     def cancelling_interrupts_locked(
         self, include: Callable[[TaskRecord], bool]
     ) -> list[tuple[str, Interrupt]]:
-        """An interrupt for each task being cancelled that ``include`` selects, with
-        its workflow."""
+        """Build an interrupt for each task being cancelled that ``include`` selects,
+        with its workflow."""
         return [
             (record.workflow_id, interrupt)
             for record in self._tasks.values()

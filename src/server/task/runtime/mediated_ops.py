@@ -21,8 +21,8 @@ from ...registries.worker import WorkerRegistry
 from ..models import TaskRecord
 from .after_commit import Reap
 
-# Releases an invocation's resident credit on its committed terminal, reporting the
-# consumption when it completes elsewhere.
+# Releases an invocation's resident credit on its committed terminal, returning the
+# consumption when it completes on the resident event loop.
 ResidentTerminalHook = Callable[[str, bool], Future[Any] | None]
 
 
@@ -52,7 +52,7 @@ _MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
 def deny_model_turn_payload(
     proposal: AgentModelTurnProposal, reason: str
 ) -> dict[str, Any]:
-    """The payload of a deny frame that fails a held turn before its deadline."""
+    """Build the payload of a deny frame that fails a held turn before its deadline."""
     return {
         "agent_task_id": proposal.agent_task_id,
         "call_correlation": proposal.call_correlation,
@@ -210,8 +210,8 @@ class MediatedOperations:
     def reap_captured_request_locked(
         self, worker_id: str | None, task_id: str, call: str, interface: str | None
     ) -> Reap | None:
-        """The reap of a request the worker captured for a boundary that will never
-        run."""
+        """Build the reap of a request the worker captured for a boundary that will
+        never run."""
         if not worker_id:
             return None
         record = self._tasks.get(task_id)
@@ -267,8 +267,8 @@ class MediatedOperations:
         task_id: str,
         captures: list[tuple[str, str | None]],
     ) -> list[Reap]:
-        """The reaps of the requests a step captured for boundaries control never
-        runs."""
+        """Build the reaps of the requests a step captured for boundaries control
+        never runs."""
         return [
             reap
             for call, interface in captures

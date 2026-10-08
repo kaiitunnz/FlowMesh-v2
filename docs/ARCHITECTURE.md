@@ -660,18 +660,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   ledger. Off by default; enable with `SERVER_METRICS_TELEMETRY_LEVEL`. See
   [`TELEMETRY.md`](TELEMETRY.md).
 - **Durable transitions.** A runtime transition commits its task records and ledger before
-  anything it owes runs: a resident credit release, a worker interrupt, revoke or reap, a
-  boundary handed to its handler, a credential purge, or a completion notice. A write the
-  control store refuses is held for its workflow, and every later write of that workflow
-  makes it first, so none lands ahead of it; a background retry makes it and repeats any
-  delivery that failed. A held transition completes in memory, and what depends on it
-  waits: its task event stays unacknowledged on the stream, a cancel answers `503`, a
-  dispatch carrying it is not published, and its workflow does not close. A submission
-  registers its workflow, tasks and initial ledger in one write before any of its work
-  runs.
+  any side effect it causes runs, such as a resident credit release, a worker interrupt,
+  revoke or reap, a boundary handoff, a model-turn permit, a credential purge, or the end
+  of a task's log stream. A write that fails is held, the workflow's later writes land
+  after it, and a background retry lands it and redelivers any side effect whose delivery
+  failed. What depends on a held transition waits for it: its task event is acknowledged
+  and a dispatch carrying it publishes only once it is durable, and a cancel answers
+  `503` meanwhile. A submission registers its workflow, tasks and initial ledger in one
+  write before any of its work runs.
 - **Workflow completion.** A workflow closes once, through one serialized finalizer:
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
-  settled. The span's end is the last durable finish among its tasks, so a workflow that
+  durably settled. The span's end is the last durable finish among its tasks, so a workflow that
   closes again after a restart closes the same way it did the first time.
 - **Redis channels.** The runtime uses two Redis endpoints (separate instances in the
   stack):

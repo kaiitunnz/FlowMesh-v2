@@ -118,9 +118,12 @@ class DispatchEnd(StrEnum):
 
 
 class PublishGate(StrEnum):
-    """Whether a dispatch may be published: its task is pending and everything the
-    dispatch carries is durable, its task no longer waits, or what it carries is not
-    durable yet."""
+    """Whether a dispatch may be published.
+
+    ``PUBLISH``: its task is pending and everything the dispatch carries is durable.
+    ``NOT_PENDING``: its task is not waiting for a dispatch. ``NOT_DURABLE``: what the
+    dispatch carries, or the teardown of its task's previous dispatch, is still owed.
+    """
 
     PUBLISH = "publish"
     NOT_PENDING = "not_pending"
