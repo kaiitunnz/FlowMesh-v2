@@ -4,8 +4,8 @@ import logging
 import threading
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from typing import Any, cast
+from dataclasses import dataclass, field
+from typing import cast
 
 from redis.exceptions import (
     BusyLoadingError,
@@ -94,8 +94,8 @@ class TransitionNotDurable(Exception):
 
 @dataclass(frozen=True)
 class _Records:
-    """Commit task records, with their status-set moves when ``membership``, and the
-    workflow's schedule when ``sched``."""
+    """A write of task records, with their status-set moves when ``membership``, and
+    the workflow's schedule when ``sched``."""
 
     task_ids: tuple[str, ...]
     membership: bool = True
@@ -104,13 +104,41 @@ class _Records:
 
 @dataclass(frozen=True)
 class _Snapshot:
-    """Save the workflow's ledger, through the child seam with any child it has not
-    written, retiring ``retire`` from its remaining set."""
+    """A write of the workflow's ledger, through the child seam with any child it has
+    not written, retiring ``retire`` from its remaining set."""
 
     retire: tuple[str, ...] = ()
 
 
 _Write = _Records | _Snapshot
+
+
+@dataclass
+class _Debt:
+    """What a workflow's writes the store has not taken still owe. Each is made from
+    current state, so a write owed twice is made once."""
+
+    # Each owed task record, and whether its status-set membership is owed with it.
+    records: dict[str, bool] = field(default_factory=dict)
+    sched: bool = False
+    snapshot: bool = False
+    retire: set[str] = field(default_factory=set)
+
+    def owe(self, write: _Write) -> None:
+        match write:
+            case _Records(task_ids=task_ids, membership=moves, sched=sched):
+                for task_id in task_ids:
+                    self.records[task_id] = self.records.get(task_id, False) or moves
+                self.sched |= sched
+            case _Snapshot(retire=retire):
+                self.snapshot = True
+                self.retire.update(retire)
+
+    def copy(self) -> "_Debt":
+        return _Debt(dict(self.records), self.sched, self.snapshot, set(self.retire))
+
+    def __bool__(self) -> bool:
+        return bool(self.records or self.sched or self.snapshot or self.retire)
 
 
 class _Scope(threading.local):
@@ -135,9 +163,12 @@ class _Unacknowledged:
 class TransitionCommitter:
     """Commits task records, their status-set moves and each workflow's ledger.
 
-    A write the store does not take is held in its workflow's ordered debt, and every
-    later write of that workflow repays the debt first, so no write overtakes one held
-    before it. The writes are state-derived, so repaying one writes current state.
+    A write the store does not take is held in its workflow's debt, and every later
+    write of that workflow is made with the debt, so none lands ahead of it. Every
+    write is made from current state, and the debt is made in one order: the task
+    records, then the ledger with the children it materialized, then the records of
+    those children. A ledger that lands therefore never leads the task records it
+    reflects, and a child's record never lands ahead of the ledger that recorded it.
     """
 
     def __init__(
@@ -168,10 +199,10 @@ class TransitionCommitter:
         self._logger = logger
         self._lock = lock
         self._scope = _Scope()
-        # Each workflow's writes the store has not taken, in the order they were made.
-        self.debt: dict[str, list[_Write]] = {}
+        # What each workflow's writes the store has not taken owe.
+        self.debt: dict[str, _Debt] = {}
         self.held_errors: dict[str, BaseException] = {}
-        self._repaying: set[str] = set()
+        self._making: set[str] = set()
         # Children materialized in memory whose records the ledger seam has not written.
         self.unwritten_children: dict[str, set[str]] = {}
         self.unacknowledged: dict[str, _Unacknowledged] = {}
@@ -210,25 +241,26 @@ class TransitionCommitter:
         return workflow_id not in self.debt
 
     def close_locked(self, workflow_id: str) -> bool:
-        """Repay a workflow's held writes; returns whether it is durable."""
-        if workflow_id not in self.debt:
+        """Make a workflow's held writes; returns whether it is durable."""
+        if (owed := self.debt.get(workflow_id)) is None:
             return True
-        if self._repay_locked(workflow_id):
-            return True
-        self._note_held(workflow_id, self.held_errors[workflow_id])
-        return False
+        return self._make_debt_locked(workflow_id, owed.copy())
 
     def mark_dirty_locked(self, workflow_id: str) -> None:
         """Owe a write of every record and the ledger of a workflow whose in-memory
         state may hold changes no write carried."""
-        if workflow_id in self.debt:
-            return
-        task_ids = tuple(
-            task_id
-            for task_id, record in self._tasks.items()
-            if record.workflow_id == workflow_id
+        owed = self.debt.setdefault(workflow_id, _Debt())
+        owed.owe(
+            _Records(
+                tuple(
+                    task_id
+                    for task_id, record in self._tasks.items()
+                    if record.workflow_id == workflow_id
+                ),
+                sched=True,
+            )
         )
-        self.debt[workflow_id] = [_Records(task_ids, sched=True), _Snapshot()]
+        owed.owe(_Snapshot())
         if self.on_debt is not None:
             self.on_debt(workflow_id)
 
@@ -238,33 +270,72 @@ class TransitionCommitter:
         self.unwritten_children.pop(workflow_id, None)
         self.retired_region_templates.pop(workflow_id, None)
 
-    def _write_locked(
-        self, workflow_id: str, entry: _Write, write: Callable[[], Any]
-    ) -> bool:
-        """Make one durable write of a workflow after the writes it holds, or hold it
-        behind them; returns whether it was made."""
-        if workflow_id in self._repaying:
-            write()
+    def _write_locked(self, workflow_id: str, write: _Write) -> bool:
+        """Make one durable write of a workflow with the writes it holds, or hold it
+        with them; returns whether it was made."""
+        if workflow_id in self._making:
+            # The writes being made pick it up.
+            self.debt[workflow_id].owe(write)
             return True
-        if workflow_id in self.debt and not self._repay_locked(workflow_id):
-            self._hold(workflow_id, entry, self.held_errors[workflow_id])
-            return False
+        before = self.debt.get(workflow_id)
+        owed = before.copy() if before is not None else _Debt()
+        owed.owe(write)
+        self.debt[workflow_id] = owed
+        return self._make_debt_locked(workflow_id, before)
+
+    def _make_debt_locked(self, workflow_id: str, before: _Debt | None) -> bool:
+        """Make what a workflow owes; returns whether all of it was made.
+
+        A write the store cannot take for now stays owed and is held. Any other error
+        is the transition's own: the debt is restored to ``before`` and the error
+        raised.
+        """
+        owed = self.debt[workflow_id]
+        self._making.add(workflow_id)
         try:
-            write()
+            while owed:
+                self._make_locked(workflow_id, owed)
         except Exception as exc:
             if not store_unavailable(exc):
+                if before is None:
+                    self.debt.pop(workflow_id, None)
+                else:
+                    self.debt[workflow_id] = before
                 raise
-            self._hold(workflow_id, entry, exc)
+            self.held_errors[workflow_id] = exc
+            self._note_held(workflow_id, exc)
             return False
+        finally:
+            self._making.discard(workflow_id)
+        del self.debt[workflow_id]
+        self.held_errors.pop(workflow_id, None)
         return True
 
-    def _hold(self, workflow_id: str, entry: _Write, error: BaseException) -> None:
-        held = self.debt.setdefault(workflow_id, [])
-        # Repaying a write writes current state, so a write already owed is owed once.
-        if entry not in held:
-            held.append(entry)
-        self.held_errors[workflow_id] = error
-        self._note_held(workflow_id, error)
+    def _make_locked(self, workflow_id: str, owed: _Debt) -> None:
+        """Make one pass over what a workflow owes, records before the ledger."""
+        unwritten = self.unwritten_children.get(workflow_id, set())
+        if (ids := [t for t in owed.records if t not in unwritten]) or owed.sched:
+            self._commit_records_raw(
+                workflow_id, ids, [t for t in ids if owed.records[t]], owed.sched
+            )
+            for task_id in ids:
+                del owed.records[task_id]
+            owed.sched = False
+        if not (owed.snapshot or owed.retire or owed.records):
+            return
+        retire = sorted(owed.retire)
+        written = self._save_snapshot_raw(workflow_id, retire)
+        owed.snapshot = False
+        owed.retire.difference_update(retire)
+        if owed.records:
+            # The owed records of the children the ledger just wrote, which may have
+            # moved since they were materialized.
+            ids = list(owed.records)
+            self._commit_records_raw(
+                workflow_id, ids, [t for t in ids if owed.records[t]], bool(written)
+            )
+            for task_id in ids:
+                del owed.records[task_id]
 
     def _note_held(self, workflow_id: str, error: BaseException) -> None:
         if self.on_debt is not None:
@@ -272,34 +343,6 @@ class TransitionCommitter:
         if not self._scope.depth:
             raise TransitionNotDurable({workflow_id: error})
         self._scope.held[workflow_id] = error
-
-    def _repay_locked(self, workflow_id: str) -> bool:
-        """Make a workflow's held writes in order; returns whether all were made."""
-        held = self.debt[workflow_id]
-        self._repaying.add(workflow_id)
-        try:
-            while held:
-                entry = held[0]
-                if isinstance(entry, _Records):
-                    self._commit_records_raw(
-                        workflow_id, entry.task_ids, entry.membership, entry.sched
-                    )
-                    held.pop(0)
-                elif written := self._save_snapshot_raw(workflow_id, entry.retire):
-                    # The children may have moved since they were materialized.
-                    held[0] = _Records(tuple(written), sched=True)
-                else:
-                    held.pop(0)
-        except Exception as exc:
-            if not store_unavailable(exc):
-                raise
-            self.held_errors[workflow_id] = exc
-            return False
-        finally:
-            self._repaying.discard(workflow_id)
-        del self.debt[workflow_id]
-        self.held_errors.pop(workflow_id, None)
-        return True
 
     # ------------------------------------------------------------------ #
     # Writes
@@ -332,24 +375,21 @@ class TransitionCommitter:
         self,
         workflow_id: str,
         task_ids: Sequence[str],
-        with_membership: bool,
+        moves: Sequence[str],
         sched: bool,
     ) -> None:
-        """Commit task records of one workflow, with their membership and its schedule,
-        as one atomic transaction; then report each resident task it ended, note a
-        terminal, and release the worker of each dispatch it ended."""
+        """Commit task records of one workflow, the status-set membership of ``moves``
+        and its schedule, as one atomic transaction; then report each resident task it
+        ended, note a terminal, and release the worker of each dispatch it ended."""
         ids = [
             task_id
             for task_id in dict.fromkeys(task_ids)
             if (record := self._tasks.get(task_id)) is not None
             and record.workflow_id == workflow_id
         ]
-        if self.unwritten_children.get(workflow_id, set()) & set(ids):
-            # A child's own record never lands before the seam that records it.
-            self._commit_children_raw(workflow_id, ())
         by_status: dict[str, list[str]] = defaultdict(list)
-        if with_membership:
-            for task_id in ids:
+        for task_id in dict.fromkeys(moves):
+            if task_id in ids:
                 by_status[membership(self._tasks[task_id])].append(task_id)
         records = self.records_locked(*ids)
         self._workflow_registry.commit_transition(
@@ -422,11 +462,9 @@ class TransitionCommitter:
     ) -> bool:
         """Commit task records of one workflow, with their status-set membership and
         the workflow schedule when asked; returns whether the write was made."""
-        ids = tuple(dict.fromkeys(task_ids))
         return self._write_locked(
             workflow_id,
-            _Records(ids, with_membership, sched),
-            lambda: self._commit_records_raw(workflow_id, ids, with_membership, sched),
+            _Records(tuple(dict.fromkeys(task_ids)), with_membership, sched),
         )
 
     def persist_locked(self, *task_ids: str) -> None:
@@ -457,11 +495,7 @@ class TransitionCommitter:
             self._persist_declared_failures_locked(engine)
         elif workflow_id not in self.debt:
             return
-        self._write_locked(
-            workflow_id,
-            _Snapshot(),
-            lambda: self._save_snapshot_raw(workflow_id, ()),
-        )
+        self._write_locked(workflow_id, _Snapshot())
 
     def note_child_locked(self, workflow_id: str, child_task_id: str) -> None:
         """Mark a child materialized in memory, so the ledger snapshot that carries its
@@ -489,12 +523,7 @@ class TransitionCommitter:
         for child_task_id in child_task_ids:
             self.note_child_locked(workflow_id, child_task_id)
         self._persist_declared_failures_locked(engine, child_task_ids)
-        retired = tuple(retire)
-        self._write_locked(
-            workflow_id,
-            _Snapshot(retired),
-            lambda: self._commit_children_raw(workflow_id, retired),
-        )
+        self._write_locked(workflow_id, _Snapshot(tuple(retire)))
         if retire:
             self.retired_region_templates.setdefault(workflow_id, set()).update(retire)
             # A retire drains the remaining set as a terminal does, and can drain its
@@ -522,32 +551,7 @@ class TransitionCommitter:
     ) -> None:
         """Commit the tasks a cancel moved, then the merged children it returned to the
         queue."""
-
-        def commit() -> None:
-            records = self.records_locked(*touched)
-            self._workflow_registry.commit_transition(
-                workflow_id,
-                records=records,
-                dispatched=[
-                    task_id
-                    for task_id in touched
-                    if membership(self._tasks[task_id]) == TaskStatus.DISPATCHED
-                ],
-                done=[
-                    task_id
-                    for task_id in touched
-                    if membership(self._tasks[task_id]) == TaskStatus.DONE
-                ],
-                cancelled=[
-                    task_id
-                    for task_id in touched
-                    if membership(self._tasks[task_id]) == TaskStatus.CANCELLED
-                ],
-                sched=self._sched_locked(workflow_id),
-            )
-            self._observe_resident_locked(records)
-
-        self._write_locked(workflow_id, _Records(tuple(touched), sched=True), commit)
+        self.commit_locked(*touched)
         self.commit_locked(*(task_id for task_id in returned if task_id not in touched))
 
     def _persist_declared_failures_locked(

@@ -85,9 +85,12 @@ class AfterCommitActions:
         self.failed: dict[str, list[AfterCommit]] = {}
 
     def file_locked(self, workflow_id: str, *actions: AfterCommit) -> None:
-        """Hold actions until the workflow's transition commits."""
+        """Hold actions until the workflow's transition commits, each once."""
         if actions:
-            self.parked.setdefault(workflow_id, []).extend(actions)
+            parked = self.parked.setdefault(workflow_id, [])
+            for action in actions:
+                if action not in parked:
+                    parked.append(action)
 
     def queue_locked(self, *actions: AfterCommit) -> None:
         """Queue actions whose cause is already durable for delivery."""

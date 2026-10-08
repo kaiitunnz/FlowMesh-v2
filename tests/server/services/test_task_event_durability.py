@@ -45,6 +45,7 @@ class _Store(_Registry):
         super().__init__()
         self.error: BaseException | None = None
         self.done_commits: list[str] = []
+        self.writes: list[str] = []
 
     def commit_transition(
         self, workflow_id: str, *, done: Sequence[str] = (), **kwargs: Any
@@ -53,6 +54,13 @@ class _Store(_Registry):
             raise self.error
         super().commit_transition(workflow_id, done=done, **kwargs)
         self.done_commits += done
+        self.writes.append("records")
+
+    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+        if self.error is not None:
+            raise self.error
+        super().save_ledger_snapshot(workflow_id, snapshot)
+        self.writes.append("ledger")
 
     def record(self, task_id: str) -> Any:
         return PersistedTask.model_validate_json(self.task_blobs[task_id]).record
@@ -222,9 +230,14 @@ def test_a_redelivered_event_owes_its_writes_once() -> None:
     monitor, _ = _consumer(runtime, event)
     store.error = redis.exceptions.ReadOnlyError("read-only replica")
     _consume(monitor)
-    owed = list(runtime._committer.debt[runtime._tasks[task_id].workflow_id])
+    workflow_id = runtime._tasks[task_id].workflow_id
+    owed = runtime._committer.debt[workflow_id].copy()
 
     for _ in range(TASK_EVENT_HANDLER_MAX_ATTEMPTS):
         _consume(monitor)
 
-    assert runtime._committer.debt[runtime._tasks[task_id].workflow_id] == owed
+    assert runtime._committer.debt[workflow_id] == owed
+    store.error = None
+    store.writes.clear()
+    runtime._retry_durability(workflow_id)
+    assert store.writes == ["records", "ledger"]
