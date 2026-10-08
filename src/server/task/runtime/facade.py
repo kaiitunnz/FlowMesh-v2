@@ -901,7 +901,7 @@ class TaskRuntime:
                 )
                 self._cv.notify_all()
             restored.append(workflow_id)
-        with self._cv:
+        with self._transition():
             self._merges.restore_merges_locked()
             self._resident_tasks.seed_dispatched_resident_locked()
             self._reservations.seed_held_dispatches_locked()
