@@ -1141,8 +1141,8 @@ def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
             raise ConnectionError("crash before the ledger save")
 
         registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
-        with pytest.raises(ConnectionError):
-            _report(runtime, writer, "m0", "sunny")
+        _report(runtime, writer, "m0", "sunny")
+        runtime.shutdown()
         registry.save_ledger_snapshot = save  # type: ignore[method-assign]
 
         restored = runtime_on(registry)

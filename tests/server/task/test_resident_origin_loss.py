@@ -146,17 +146,14 @@ def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
         save = registry.save_ledger_snapshot
 
         def down(workflow_id: str, snapshot: LedgerSnapshot) -> None:
-            raise RuntimeError("control redis unavailable")
+            raise ConnectionError("control redis unavailable")
 
         registry.save_ledger_snapshot = down  # type: ignore[method-assign]
-        with pytest.raises(RuntimeError):
-            runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
+        runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
         assert releases == []
 
         registry.save_ledger_snapshot = save  # type: ignore[method-assign]
-        with runtime._cv:
-            runtime._committer.save_ledger_locked(workflow_id)
-        runtime._release_pending_terminations()
+        runtime._retry_durability(workflow_id)
         assert releases == [env.invocation_id]
 
     asyncio.run(run())
@@ -212,8 +209,8 @@ def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again(
             raise ConnectionError("crash before the ledger save")
 
         registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
-        with pytest.raises(ConnectionError):
-            runtime.settle_episode_invocation(writer, env.call_correlation, "done")
+        assert runtime.settle_episode_invocation(writer, env.call_correlation, "done")
+        runtime.shutdown()
         registry.save_ledger_snapshot = save  # type: ignore[method-assign]
 
         restored = TaskRuntime(

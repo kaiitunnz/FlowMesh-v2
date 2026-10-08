@@ -24,6 +24,7 @@ from server.orchestration.tool_dispatch import (
 from server.registries.worker import Worker
 from server.task.models import EventEffect, TaskStatus
 from server.task.runtime import TaskRuntime
+from server.task.runtime.commits import TransitionNotDurable
 from shared.harness import (
     BoundaryEventKind,
     HarnessAdapter,
@@ -933,9 +934,10 @@ def test_a_first_report_handled_again_after_its_record_failed_opens_the_attempt(
         assert dispatch is not None
         runtime.begin_publish(writer, _WORKER, "dsp-1")
 
-        registry.fail_next = True
-        with pytest.raises(ConnectionError):
+        registry.down = True
+        with pytest.raises(TransitionNotDurable):
             runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1")
+        registry.down = False
         assert runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1") is (
             EventEffect.APPLIED
         )

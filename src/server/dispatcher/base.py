@@ -40,7 +40,7 @@ from ..task.credentials import credential_merge_key
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import SERVE_TASK_TYPES, DispatchEnd, TaskRecord, TaskStatus
 from ..task.results import ResultUnavailable
-from ..task.runtime import TaskRuntime
+from ..task.runtime import TaskRuntime, TransitionNotDurable
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
 from .embodiment import (
@@ -930,6 +930,14 @@ class Dispatcher:
                 success = self.dispatch_once(task_id)
                 if not success:
                     time.sleep(_NO_WORKER_BACKOFF_SEC)
+            except TransitionNotDurable as exc:
+                # The transition applied; the runtime retries its writes until durable,
+                # so the task is not returned as if nothing happened.
+                self._logger.warning(
+                    "Dispatching %s applied a transition not yet durable: %s",
+                    task_id,
+                    exc,
+                )
             except REDIS_CONN_ERRORS as exc:
                 # Control Redis dropped. The connection pool reconnects on the next
                 # command, so back off and keep the loop alive rather than letting the
@@ -1565,6 +1573,12 @@ class Dispatcher:
                     "condition_expected": condition.equals,
                     "condition_actual": str(actual_value),
                 },
+            )
+            return True
+        except TransitionNotDurable as exc:
+            # The skip applied; the runtime retries its writes until durable.
+            self._logger.warning(
+                "Skipping task %s is not durable yet: %s", task_id, exc
             )
             return True
         except StageReferenceNotReady as exc:

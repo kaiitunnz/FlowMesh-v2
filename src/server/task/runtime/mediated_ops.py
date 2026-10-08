@@ -1,6 +1,7 @@
 """Worker-originated mediated operations whose permits control has relayed."""
 
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,11 @@ from ...orchestration import OrchestrationEngine
 from ...orchestration.tool_dispatch import MODEL_INTERFACE
 from ...registries.worker import WorkerRegistry
 from ..models import TaskRecord
+from .after_commit import Reap
+
+# Releases an invocation's resident credit on its committed terminal, reporting the
+# consumption when it completes elsewhere.
+ResidentTerminalHook = Callable[[str, bool], Future[Any] | None]
 
 
 @dataclass
@@ -70,7 +76,7 @@ class MediatedOperations:
         # cancel. In-memory and rebuilt on restart from the pending boundary, never
         # durably persisted.
         self.pending_ops: dict[str, PendingOp] = {}
-        self.resident_terminal_hook: Callable[[str, bool], None] | None = None
+        self.resident_terminal_hook: ResidentTerminalHook | None = None
 
     def take_stale_ops(
         self, occurrence: tuple[str, str]
@@ -215,19 +221,19 @@ class MediatedOperations:
 
     def reap_captured_request_locked(
         self, worker_id: str | None, task_id: str, call: str, interface: str | None
-    ) -> None:
-        """Relay a reap for a request the worker captured for a boundary that will
-        never run, from whichever store holds it."""
+    ) -> Reap | None:
+        """The reap of a request the worker captured for a boundary that will never
+        run, from whichever store holds it."""
+        if not worker_id:
+            return None
         record = self._tasks.get(task_id)
         engine = self._engines.get(record.workflow_id) if record else None
-        if (
+        resident = (
             interface == MODEL_INTERFACE
             and engine is not None
             and engine.service_dependency(task_id) is not None
-        ):
-            self.relay_resident_reap(worker_id, task_id, call)
-        else:
-            self.reap_mediated_op(worker_id, task_id, call)
+        )
+        return Reap(worker_id, task_id, call, resident=resident)
 
     def relay_resident_reap(
         self, worker_id: str | None, task_id: str, call: str
@@ -247,12 +253,14 @@ class MediatedOperations:
             ),
         )
 
-    def reap_ops_for_agents_locked(self, agent_task_ids: Sequence[str]) -> None:
-        """Reap pending tool operations whose agent boundary just failed clean."""
-        for worker_id, agent_task_id, call in self.take_ops_for_agents_locked(
-            agent_task_ids
-        ):
-            self.reap_mediated_op(worker_id, agent_task_id, call)
+    def reap_ops_for_agents_locked(self, agent_task_ids: Sequence[str]) -> list[Reap]:
+        """Take the agents' pending tool operations, returning the reap of each."""
+        return [
+            Reap(worker_id, agent_task_id, call)
+            for worker_id, agent_task_id, call in self.take_ops_for_agents_locked(
+                agent_task_ids
+            )
+        ]
 
     def take_ops_for_agents_locked(
         self, agent_task_ids: Sequence[str]
@@ -267,23 +275,34 @@ class MediatedOperations:
                 taken.append((op.worker_id, op.agent_task_id, op.call_correlation))
         return taken
 
-    def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
+    def set_resident_terminal_hook(self, hook: ResidentTerminalHook) -> None:
         """Install the consumer that releases a resident admission credit on DS
         terminal."""
         self.resident_terminal_hook = hook
 
     def release_resident_credit(
-        self, invocation_id: str | None, *, failed: bool
-    ) -> None:
-        if invocation_id is not None and self.resident_terminal_hook is not None:
-            self.resident_terminal_hook(invocation_id, failed)
+        self, invocation_id: str, *, failed: bool
+    ) -> Future[Any] | None:
+        """Hand a committed terminal to the credit consumer; returns its consumption
+        when the consumer reports one."""
+        if self.resident_terminal_hook is None:
+            return None
+        return self.resident_terminal_hook(invocation_id, failed)
 
     def reap_captures_locked(
         self,
         worker_id: str | None,
         task_id: str,
         captures: list[tuple[str, str | None]],
-    ) -> None:
-        """Reap the requests a step captured for boundaries control never runs."""
-        for call, interface in captures:
-            self.reap_captured_request_locked(worker_id, task_id, call, interface)
+    ) -> list[Reap]:
+        """The reaps of the requests a step captured for boundaries control never
+        runs."""
+        return [
+            reap
+            for call, interface in captures
+            if (
+                reap := self.reap_captured_request_locked(
+                    worker_id, task_id, call, interface
+                )
+            )
+        ]

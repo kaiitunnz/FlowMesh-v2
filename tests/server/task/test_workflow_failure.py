@@ -49,9 +49,8 @@ spec:
 
 
 def _fail(runtime: TaskRuntime, workflow_id: str) -> None:
-    with runtime._cv:
+    with runtime._transition():
         runtime._fail_workflow_locked(workflow_id, "fan-out producer unreadable")
-    runtime._release_pending_terminations()
 
 
 def _fail_by_unreadable_fanout(runtime: TaskRuntime, planner: str) -> None:
@@ -259,7 +258,7 @@ async def test_a_release_error_stays_out_of_the_report_that_failed_the_workflow(
     assert events == ["TASK_SUCCEEDED"]
     assert attempted == [side]
     assert runtime._tasks[side].status == TaskStatus.FAILED
-    assert runtime._terminations.pending_terminations == []
+    assert runtime._actions.ready == []
 
 
 class _RefusesDispatchedWrite(FakeRegistry):

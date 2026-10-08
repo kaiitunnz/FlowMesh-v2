@@ -10,6 +10,7 @@ from server.orchestration.tool_dispatch import (
     SEARCH_INTERFACE,
     ToolInvocationEnvelope,
 )
+from server.task.runtime import TaskRuntime
 from shared.harness import BoundaryEventKind
 from tests.server.task.test_v2_orchestration import FakeRegistry, _runtime
 
@@ -25,6 +26,13 @@ def _env(interface: str) -> ToolInvocationEnvelope:
     )
 
 
+def _dispatch(runtime: TaskRuntime, env: ToolInvocationEnvelope) -> None:
+    with runtime._transition(raises=False):
+        handoff = runtime._boundary_handoff_locked(env)
+    if handoff is not None:
+        handoff()
+
+
 def test_dispatch_routes_by_exact_kind_and_interface() -> None:
     runtime = _runtime(FakeRegistry())
     model: list[ToolInvocationEnvelope] = []
@@ -32,11 +40,11 @@ def test_dispatch_routes_by_exact_kind_and_interface() -> None:
     runtime.set_model_settler(model.append)
     runtime.set_tool_broker(broker.append)
 
-    runtime._dispatch_boundary(_env(MODEL_INTERFACE))
-    runtime._dispatch_boundary(_env(SEARCH_INTERFACE))
+    _dispatch(runtime, _env(MODEL_INTERFACE))
+    _dispatch(runtime, _env(SEARCH_INTERFACE))
     # An unknown interface routes to neither handler (a typed unavailable settle instead
     # of a misroute to the model settler).
-    runtime._dispatch_boundary(_env("mystery/v1"))
+    _dispatch(runtime, _env("mystery/v1"))
 
     assert [e.interface for e in model] == [MODEL_INTERFACE]
     assert [e.interface for e in broker] == [SEARCH_INTERFACE]
@@ -47,5 +55,5 @@ def test_a_search_interface_never_reaches_the_model_settler() -> None:
     model: list[ToolInvocationEnvelope] = []
     runtime.set_model_settler(model.append)
     # No broker installed: a search boundary must still not fall through to the model.
-    runtime._dispatch_boundary(_env(SEARCH_INTERFACE))
+    _dispatch(runtime, _env(SEARCH_INTERFACE))
     assert model == []

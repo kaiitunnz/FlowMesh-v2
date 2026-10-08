@@ -11,6 +11,7 @@ import pytest
 from server.config import OrchestrationConfig
 from server.registries.worker import WorkerRegistry
 from server.task.runtime import TaskRuntime
+from server.task.runtime.commits import TransitionNotDurable
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
@@ -130,9 +131,10 @@ def test_a_redispatch_releases_the_earlier_reservation_it_ends(
     assert pop_ready(runtime) == task_id
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     # The failure's commit is lost, so its release waits for the next dispatch.
-    workflows.fail_next = True
-    with pytest.raises(ConnectionError):
+    workflows.down = True
+    with pytest.raises(TransitionNotDurable):
         runtime.fail_dispatch(task_id, "wkr-1", {}, _TS, "dsp-1", retryable=True)
+    workflows.down = False
     registry.release_worker.reset_mock()
     assert runtime.ready_queue_length() == 1
     assert pop_ready(runtime) == task_id

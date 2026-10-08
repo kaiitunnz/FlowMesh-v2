@@ -14,6 +14,7 @@ from server.services.monitoring import EventMonitor
 from server.services.watchdog import WorkerWatchdog
 from server.task.models import DispatchEnd, EventEffect, TaskStatus, WorkerRecovery
 from server.task.runtime import TaskRuntime
+from server.task.runtime.commits import TransitionNotDurable
 from shared.schemas.event import TaskEvent, WorkerEvent, parse_event
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.server.dispatch_helpers import record_dispatch
@@ -315,9 +316,10 @@ async def test_a_failure_handled_again_after_its_commit_failed_is_committed_once
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable):
         monitor.handle_task_event(failure)
+    registry.down = False
     monitor.handle_task_event(failure)
 
     record = runtime._tasks[task_id]
@@ -595,11 +597,12 @@ async def test_a_late_report_of_a_returned_merged_batch_commits_its_return() -> 
     assert runtime.plan_merge(parent, 8, "wkr-1")
     record_dispatch(runtime, parent, "wkr-1", "dsp-1")
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable):
         monitor.handle_task_event(
             _event("TASK_FAILED", runtime, parent, "wkr-1", "dsp-1")
         )
+    registry.down = False
     monitor.handle_task_event(
         _event("TASK_SUCCEEDED", runtime, parent, "wkr-1", "dsp-1")
     )
@@ -729,9 +732,10 @@ async def test_a_v2_failure_handled_again_after_its_commit_failed_retries_once()
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable):
         monitor.handle_task_event(failure)
+    registry.down = False
     monitor.handle_task_event(failure)
 
     engine = runtime.orchestration_engine(workflow_id)
@@ -771,9 +775,10 @@ async def test_a_report_handled_again_after_its_commit_failed_counts_once(
         mock.patch.object(monitor, "_unregister_port_forward") as unregister,
         mock.patch.object(monitor, "_close_task_log_stream") as close_log,
     ):
-        registry.fail_next = True
-        with pytest.raises(ConnectionError):
+        registry.down = True
+        with pytest.raises(TransitionNotDurable):
             monitor.handle_task_event(event)
+        registry.down = False
         monitor.handle_task_event(event)
         monitor.handle_task_event(event)
 
@@ -794,9 +799,10 @@ async def test_a_v2_success_handled_again_after_its_commit_failed_settles_it() -
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     success = _event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1")
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable):
         monitor.handle_task_event(success)
+    registry.down = False
     monitor.handle_task_event(success)
 
     engine = runtime.orchestration_engine(workflow_id)
@@ -827,12 +833,13 @@ async def test_a_cancel_before_the_publish_begins_publishes_nothing() -> None:
 
 
 class _FlakyWrites(_Registry):
-    """Fails its Nth ledger save from now, or its next spawned-children commit, once."""
+    """Fails its Nth ledger save from now, once, or every spawned-children commit
+    while ``children_down``."""
 
     def __init__(self) -> None:
         super().__init__()
         self.ledger_saves_to_failure = 0
-        self.fail_children_next = False
+        self.children_down = False
 
     def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
         if self.ledger_saves_to_failure:
@@ -842,8 +849,7 @@ class _FlakyWrites(_Registry):
         super().save_ledger_snapshot(workflow_id, snapshot)
 
     def commit_dynamic_tasks(self, workflow_id: str, *args: Any, **kwargs: Any) -> None:
-        if self.fail_children_next:
-            self.fail_children_next = False
+        if self.children_down:
             raise ConnectionError("children commit failed")
         super().commit_dynamic_tasks(workflow_id, *args, **kwargs)
 
@@ -867,10 +873,11 @@ async def test_a_v2_success_whose_writes_fail_counts_once(
     success = _event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1")
 
     for commit_fails, ledger_save_fails in failures:
-        registry.fail_next = commit_fails
+        registry.down = commit_fails
         registry.ledger_saves_to_failure = ledger_save_fails
-        with pytest.raises(ConnectionError):
+        with pytest.raises(TransitionNotDurable):
             monitor.handle_task_event(success)
+        registry.down = False
     monitor.handle_task_event(success)
     monitor.handle_task_event(success)
 
@@ -891,9 +898,10 @@ async def test_a_retry_redispatched_before_its_failure_replays_counts_once() -> 
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable):
         monitor.handle_task_event(failure)
+    registry.down = False
     assert _next(runtime) == task_id
     record_dispatch(runtime, task_id, "wkr-2", "dsp-2")
     monitor.handle_task_event(failure)
@@ -929,9 +937,10 @@ async def test_a_fan_out_replayed_after_its_children_commit_failed_commits_them(
         ts=_TS,
     )
 
-    registry.fail_children_next = True
-    with pytest.raises(ConnectionError):
+    registry.children_down = True
+    with pytest.raises(TransitionNotDurable):
         monitor.handle_task_event(success)
+    registry.children_down = False
     monitor.handle_task_event(success)
 
     assert registry.durable_status(planner) == TaskStatus.DONE
@@ -963,9 +972,10 @@ async def test_a_spawn_replayed_after_its_children_were_cancelled_closes() -> No
         ts=_TS,
     )
 
-    registry.fail_children_next = True
-    with pytest.raises(ConnectionError):
+    registry.children_down = True
+    with pytest.raises(TransitionNotDurable):
         monitor.handle_task_event(spawn)
+    registry.children_down = False
     runtime.cancel_workflow(workflow_id)
     monitor.handle_task_event(spawn)
 
@@ -985,9 +995,10 @@ async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> No
     record_dispatch(runtime, task_id, "wkr-1")
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1")
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable):
         monitor.handle_task_event(failure)
+    registry.down = False
     assert _next(runtime) == task_id
     assert runtime.begin_publish(task_id, _worker("wkr-1"), "dsp-2")
     monitor.handle_task_event(failure)

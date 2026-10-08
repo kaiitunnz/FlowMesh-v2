@@ -4,7 +4,9 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import Future
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,7 +43,7 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.schemas.command import InterruptMessage, MediatedOpMessage
+from shared.schemas.command import MediatedOpMessage
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.tasks import TaskEnvelopeTemplate
@@ -140,19 +142,31 @@ from ..v2.policy import PolicySurface
 from ..v2.representations.admission import ResidentAdmissionBinding
 from ..v2.representations.operators import AgentModelGatewayBinding
 from ..v2.representations.plan import InferenceEmbodimentMenu
+from ..workflow_retry import WorkflowRetryScheduler
 from . import (
     agent_inputs,
     fanout,
     materialized_records,
 )
+from .after_commit import (
+    AfterCommit,
+    AfterCommitActions,
+    CreditRelease,
+    Interrupt,
+    Issue,
+    Purge,
+    Reap,
+    Revoke,
+    Settled,
+)
 from .agent_inputs import AgentInputs
-from .commits import TransitionCommitter
+from .commits import TransitionCommitter, TransitionNotDurable
 from .content_bindings import ContentBindings
 from .dispatch_fence import DispatchFence, Publish, supplier_id
 from .episode_dispatch import EpisodeDispatch, EpisodeFeasibility
 from .fanout import FanoutRead
 from .input_checks import INPUT_VERDICT_REPORT, InputChecks
-from .mediated_ops import MediatedOperations, PendingOp
+from .mediated_ops import MediatedOperations, PendingOp, ResidentTerminalHook
 from .merges import TaskMerges
 from .record_failures import RecordFailures
 from .reports import (
@@ -168,9 +182,28 @@ from .reservations import WorkerReservations
 from .resident_tasks import ResidentServeTasks
 from .scheduling import EpochFrontier, ReadyQueue
 from .static_dag import StaticDag
-from .terminations import Termination, TerminationRelease
 
 _RESIDUAL_CANCEL_REASON = "cancelled by its region's residual policy"
+
+
+class _Drain(threading.local):
+    active = False
+
+
+def _issue(env: ToolInvocationEnvelope) -> Issue:
+    return Issue(env.task_id, env.call_correlation, env.invocation_id)
+
+
+def _failed_credits(invocation_ids: Iterable[str]) -> list[AfterCommit]:
+    return [
+        CreditRelease(invocation_id, failed=True) for invocation_id in invocation_ids
+    ]
+
+
+def _durability_retry(
+    fire: Callable[[str], None], logger: logging.Logger
+) -> WorkflowRetryScheduler:
+    return WorkflowRetryScheduler(fire, logger, thread_name="durability-retry")
 
 
 @dataclass(frozen=True)
@@ -291,12 +324,17 @@ class TaskRuntime:
         redrive: Callable[
             [Callable[[str], None], logging.Logger], StoreRedriveScheduler
         ] = StoreRedriveScheduler,
+        durability_retry: Callable[
+            [Callable[[str], None], logging.Logger], WorkflowRetryScheduler
+        ] = _durability_retry,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
         self._results = results
         self._redrive = redrive(self._drive_workflow, logger)
+        self._durability = durability_retry(self._retry_durability, logger)
+        self._draining = _Drain()
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._credential_vault = credential_vault
@@ -358,9 +396,7 @@ class TaskRuntime:
             content_scope_authority,
             self._control,
         )
-        self._terminations = TerminationRelease(
-            self._mediated_ops, self._tasks, self._worker_registry, self._logger
-        )
+        self._actions = AfterCommitActions(self._tasks)
         self._resident_tasks = ResidentServeTasks(self._tasks)
         self._content_bindings = ContentBindings(
             self._tasks, self._engines, self._original_deps, self._logger
@@ -387,17 +423,17 @@ class TaskRuntime:
             self._epochs,
             self._resident_tasks,
             self._reservations,
-            self._terminations,
+            self._actions,
             self._record_failures,
             self._tasks,
             self._original_deps,
             self._engines,
             self._workflow_registry,
-            self._credential_vault,
             self._control,
             self._logger,
             self._lock,
         )
+        self._committer.on_debt = self._durability.schedule
         self._merges = TaskMerges(
             self._ready,
             self._dag,
@@ -791,7 +827,7 @@ class TaskRuntime:
                 if snapshot is not None
                 else None
             )
-            with self._cv:
+            with self._transition():
                 # A non-terminal record the remaining set no longer lists was
                 # retired before the crash, and nothing will ever dispatch it; the
                 # durable set is what carries that fact across a restart.
@@ -811,12 +847,21 @@ class TaskRuntime:
                     self._install_rehydrated_workflow_locked(
                         workflow_id, tasks, sched, rehydrated_at
                     )
-                self._terminations.interrupt_cancelling_locked(workflow_id)
-                # A workflow whose last task settled just before the crash has no
-                # event left to close it: replay the completion notification for
-                # every restored workflow, and let the finalizer reject the ones
-                # still running or already closed.
-                self._committer.notify_terminal_transition(workflow_id)
+                # A task a restart found still being cancelled may never have had its
+                # interrupt delivered. A workflow whose last task settled just before
+                # the crash has no event left to close it: replay the completion
+                # notification for every restored workflow, and let the finalizer
+                # reject the ones still running or already closed.
+                self._actions.file_locked(
+                    workflow_id,
+                    *(
+                        interrupt
+                        for _, interrupt in self._actions.cancelling_interrupts_locked(
+                            lambda record: record.workflow_id == workflow_id
+                        )
+                    ),
+                    Settled(workflow_id),
+                )
                 self._cv.notify_all()
             restored.append(workflow_id)
         with self._cv:
@@ -828,7 +873,6 @@ class TaskRuntime:
                 for workflow_id in restored
                 if not self._committer.workflow_settlement_locked(workflow_id).settled
             ]
-        self._release_pending_terminations()
         # Rehydrate completes before the API accepts a submission, so no workflow is
         # between vaulting its credentials and registering.
         await self._credential_vault.retain_only(live)
@@ -1106,8 +1150,9 @@ class TaskRuntime:
         # durable outcome: the handler ran on an in-memory executor a crash discarded,
         # so nothing else resumes the agent. The durable envelope routes it to the same
         # handler (a search to the broker, a model to the gateway) it was recorded for.
-        for envelope in engine.pending_tool_dispatches():
-            self._dispatch_boundary(envelope)
+        self._actions.file_locked(
+            workflow_id, *map(_issue, engine.pending_tool_dispatches())
+        )
         # The replayed terminals can seal a region whose retire a crash lost.
         self._committer.retire_sealed_region_templates_locked(workflow_id, engine)
         self._committer.save_ledger_locked(workflow_id)
@@ -1127,16 +1172,177 @@ class TaskRuntime:
             engine.on_dispatched(task_id, worker_id)
 
     # ------------------------------------------------------------------ #
-    # Worker reservations and revokes
+    # Transitions and what they owe once durable
     # ------------------------------------------------------------------ #
 
-    def _release_ended_workers(self) -> None:
-        """Release, off the lock, each worker reserved for a dispatch that ended."""
+    @contextmanager
+    def _transition(
+        self, *, raises: bool = True, locked: bool = True
+    ) -> Iterator[None]:
+        """Run a transition, then deliver off the lock what it owes once durable.
+
+        The transition runs under the lock, or takes it itself where it reads off it
+        when not ``locked``. A write the store does not take is held for a retry and
+        the transition completes in memory. The outermost scope then raises
+        ``TransitionNotDurable`` when ``raises``, for a caller that acknowledges the
+        transition or has it redelivered, and logs it otherwise.
+        """
+        outermost = self._committer.enter_scope()
+        try:
+            with self._cv if locked else nullcontext():
+                try:
+                    yield
+                except BaseException:
+                    if outermost:
+                        with self._cv:
+                            # What a transition that stopped partway applied is written
+                            # whole before anything it owes is delivered.
+                            for workflow_id in list(self._actions.parked):
+                                self._committer.mark_dirty_locked(workflow_id)
+                    raise
+                finally:
+                    if outermost:
+                        with self._cv:
+                            self._actions.release_locked(self._committer.durable)
+        finally:
+            held = self._committer.exit_scope()
+            if outermost:
+                self._act_after_commit()
+        if held:
+            if raises:
+                raise TransitionNotDurable(held)
+            self._logger.warning(
+                "Writes of workflow(s) %s are held for a retry: %s",
+                ", ".join(sorted(held)),
+                next(iter(held.values())),
+            )
+
+    def _file_locked(self, task_id: str, *actions: AfterCommit | None) -> None:
+        """Hold actions until the transition of the task's workflow commits."""
+        present = [action for action in actions if action is not None]
+        if (record := self._tasks.get(task_id)) is not None:
+            self._actions.file_locked(record.workflow_id, *present)
+        else:
+            self._actions.queue_locked(*present)
+
+    def _act_after_commit(self) -> None:
+        """Deliver every committed action and release each worker whose dispatch
+        ended, off the lock.
+
+        A delivery that files actions of its own leaves them to this drain.
+        """
+        if self._draining.active:
+            return
+        self._draining.active = True
+        try:
+            while True:
+                with self._lock:
+                    ready = self._actions.take_ready()
+                    ended = self._reservations.take_ended()
+                if failed := self._reservations.release_workers(ended):
+                    with self._lock:
+                        self._reservations.requeue_ended(failed)
+                if not ready:
+                    return
+                for workflow_id, action in ready:
+                    try:
+                        self._deliver(workflow_id, action)
+                    except Exception:
+                        self._logger.exception(
+                            "Delivering %s failed", type(action).__name__
+                        )
+                        self._retain(workflow_id, action)
+        finally:
+            self._draining.active = False
+
+    def _retain(self, workflow_id: str | None, action: AfterCommit) -> None:
+        """Keep an action whose delivery failed for its workflow's retry."""
+        if workflow_id is None:
+            return
         with self._lock:
-            ended = self._reservations.take_ended()
-        if failed := self._reservations.release_workers(ended):
-            with self._lock:
-                self._reservations.requeue_ended(failed)
+            self._actions.retain_failed_locked(workflow_id, action)
+        self._durability.schedule(workflow_id)
+
+    def _deliver(self, workflow_id: str | None, action: AfterCommit) -> None:
+        match action:
+            case CreditRelease(invocation_id=invocation_id, failed=failed):
+                consumed = self._mediated_ops.release_resident_credit(
+                    invocation_id, failed=failed
+                )
+                if consumed is not None:
+                    consumed.add_done_callback(
+                        lambda done: self._credit_consumed(workflow_id, action, done)
+                    )
+            case Reap(worker_id=worker_id, task_id=task_id, call_correlation=call):
+                if action.resident:
+                    self._mediated_ops.relay_resident_reap(worker_id, task_id, call)
+                else:
+                    self._mediated_ops.reap_mediated_op(worker_id, task_id, call)
+            case Interrupt(message=interrupt):
+                worker = self._worker_registry.get_worker(interrupt.worker_id)
+                if worker is None:
+                    self._logger.warning(
+                        "Cannot publish interrupt for %s; worker %s missing",
+                        interrupt.task_id,
+                        interrupt.worker_id,
+                    )
+                else:
+                    self._worker_registry.publish_interrupt(worker, interrupt)
+            case Revoke(message=message, node_id=node_id):
+                if node_id is None and (
+                    worker := self._worker_registry.get_worker(message.worker_id)
+                ):
+                    node_id = worker.node_id
+                if node_id is None:
+                    self._logger.warning(
+                        "Cannot revoke dispatch %s of %s; worker %s missing",
+                        message.dispatch_id,
+                        message.task_id,
+                        message.worker_id,
+                    )
+                else:
+                    self._worker_registry.publish_revoke(node_id, message)
+            case Issue():
+                self._issue(action)
+            case Purge(workflow_id=purged, settled_only=settled_only):
+                with self._lock:
+                    if (
+                        settled_only
+                        and not self._committer.workflow_settlement_locked(
+                            purged
+                        ).settled
+                    ):
+                        return
+                self._credential_vault.purge(purged)
+            case Settled(workflow_id=settled):
+                self._committer.notify_terminal_transition(settled)
+
+    def _credit_consumed(
+        self, workflow_id: str | None, action: AfterCommit, consumed: Future[Any]
+    ) -> None:
+        if consumed.cancelled() or consumed.exception() is not None:
+            self._logger.warning(
+                "Releasing a resident credit failed; keeping it for a retry: %s",
+                None if consumed.cancelled() else consumed.exception(),
+            )
+            self._retain(workflow_id, action)
+
+    def _retry_durability(self, workflow_id: str) -> None:
+        """Make a workflow's held writes durable and deliver what failed to deliver,
+        keeping the workflow scheduled while either remains."""
+        with self._transition(raises=False):
+            self._committer.close_locked(workflow_id)
+            self._actions.retry_failed_locked(workflow_id)
+        with self._lock:
+            pending = not self._committer.durable(
+                workflow_id
+            ) or self._actions.has_failed(workflow_id)
+        if pending:
+            self._durability.schedule(workflow_id)
+
+    # ------------------------------------------------------------------ #
+    # Worker reservations and revokes
+    # ------------------------------------------------------------------ #
 
     def release_ended_reservations(self) -> None:
         """Release every worker reserved for a dispatch not in flight, such as one
@@ -1148,19 +1354,30 @@ class TaskRuntime:
                 reservation.task_id, reservation.dispatch_id, reservation.worker_id
             )
         ]
-        with self._lock:
-            for r in ended:
-                self._terminations.revoke_locked(r.task_id, r.worker_id, r.dispatch_id)
-        self._release_pending_terminations()
+        with self._transition(raises=False):
+            self._actions.queue_locked(
+                *(
+                    revoke
+                    for r in ended
+                    if (
+                        revoke := self._actions.revoke(
+                            r.task_id, r.worker_id, r.dispatch_id, None
+                        )
+                    )
+                )
+            )
         self._reservations.release_workers(
             [(r.worker_id, r.dispatch_id) for r in ended]
         )
 
     def revoke_dispatch(self, task_id: str, worker_id: str, dispatch_id: str) -> None:
         """Revoke one dispatch on its worker, which control does not hold."""
-        with self._lock:
-            self._terminations.revoke_locked(task_id, worker_id, dispatch_id)
-        self._release_pending_terminations()
+        with self._transition(raises=False):
+            self._actions.queue_locked(
+                *filter(
+                    None, [self._actions.revoke(task_id, worker_id, dispatch_id, None)]
+                )
+            )
 
     # ------------------------------------------------------------------ #
     # Ready queue helpers
@@ -1265,23 +1482,18 @@ class TaskRuntime:
         child it materializes, applies the advance, and writes the ledger snapshot after
         the task records so the ledger never leads durable state.
         """
-        try:
-            with self._cv:
-                record = self._tasks.get(task_id)
-                engine = self._engines.get(record.workflow_id) if record else None
-                if record is None or engine is None:
-                    return False
-                advance = engine.route_boundary_event(task_id, event)
-                self._synthesize_ready_children_locked(
-                    record.workflow_id, engine, advance
-                )
-                changed = self._apply_advance_locked(record.workflow_id, advance)
-                self._committer.save_ledger_locked(record.workflow_id)
-                if changed:
-                    self._cv.notify_all()
-                return changed
-        finally:
-            self._release_pending_terminations()
+        with self._transition(raises=False):
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return False
+            advance = engine.route_boundary_event(task_id, event)
+            self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
+            changed = self._apply_advance_locked(record.workflow_id, advance)
+            self._committer.save_ledger_locked(record.workflow_id)
+            if changed:
+                self._cv.notify_all()
+            return changed
 
     def _apply_episode_step_locked(
         self, task_id: str, hr: HarnessResult, group: FacadeTurnGroup | None = None
@@ -1299,11 +1511,12 @@ class TaskRuntime:
         if record is None or engine is None:
             return
         worker_id = record.assigned_worker
+        captures = self._mediated_ops.reap_captures_locked(
+            worker_id, task_id, _captured_calls(hr, group)
+        )
         if record.status == TaskStatus.CANCELLING:
+            self._file_locked(task_id, *captures)
             self._settle_cancelled_locked(record, time.time())
-            self._mediated_ops.reap_captures_locked(
-                worker_id, task_id, _captured_calls(hr, group)
-            )
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
             record.pending_facade_group = None
@@ -1316,10 +1529,8 @@ class TaskRuntime:
                 record.workflow_id, engine.on_failed(task_id, reason, retryable=False)
             ):
                 self._cv.notify_all()
+            self._file_locked(task_id, *captures)
             self._committer.save_ledger_locked(record.workflow_id)
-            self._mediated_ops.reap_captures_locked(
-                worker_id, task_id, _captured_calls(hr, group)
-            )
             return
         request = hr.request
         if request is None:
@@ -1342,10 +1553,14 @@ class TaskRuntime:
             else None
         )
         handled = False
-        denied_capture: tuple[str | None, str] | None = None
         if corr is not None and env is not None and env.denial is not None:
             if request.request_digest is not None:
-                denied_capture = (record.assigned_worker, corr)
+                self._file_locked(
+                    task_id,
+                    self._mediated_ops.reap_captured_request_locked(
+                        worker_id, task_id, corr, request.interface
+                    ),
+                )
             engine.mark_pending_outcome(task_id, corr)
             engine.deliver_boundary_outcome(task_id, corr)
             self._reenqueue_episode_locked(task_id)
@@ -1366,7 +1581,7 @@ class TaskRuntime:
             # off-lane; the durable envelope routes it by exact (kind, interface).
             envelope = engine.tool_dispatch_envelope(task_id, corr)
             if envelope is not None:
-                self._dispatch_boundary(envelope)
+                self._file_locked(task_id, _issue(envelope))
                 handled = True
         if not handled:
             # A blocked boundary no branch re-readied or handed off (a denial lacking a
@@ -1376,11 +1591,6 @@ class TaskRuntime:
                 self._reenqueue_episode_locked(task_id)
                 changed = True
         self._committer.save_ledger_locked(record.workflow_id)
-        if denied_capture is not None:
-            worker_id, call = denied_capture
-            self._mediated_ops.reap_captured_request_locked(
-                worker_id, task_id, call, request.interface
-            )
         if changed:
             self._cv.notify_all()
 
@@ -1416,7 +1626,7 @@ class TaskRuntime:
             engine.group_dispatch_envelopes(task_id, group.group_id)
         ):
             if index < cap:
-                self._dispatch_boundary(envelope)
+                self._file_locked(task_id, _issue(envelope))
             else:
                 overflow = ToolOutcome(
                     status=ToolOutcomeStatus.QUOTA,
@@ -1471,12 +1681,10 @@ class TaskRuntime:
         boundary terminally, so a gateway failure never resumes the agent as a phantom
         empty success.
         """
-        try:
+        with self._transition(raises=False):
             return self._settle_episode_invocation(
                 task_id, call_correlation, value, error=error, ref=ref
             )
-        finally:
-            self._release_pending_terminations()
 
     def _settle_episode_invocation(
         self,
@@ -1500,6 +1708,8 @@ class TaskRuntime:
                 # re-ready the episode, or release the resident credit a second time
                 # (cancellation already terminalized and released it). This precedes the
                 # credit hook so a late success cannot win the claim's terminal reason.
+                # A retry absorbed here still makes the first settle durable.
+                self._committer.close_locked(record.workflow_id)
                 return False
             # A resident request's reap follows its credit release; see the resident
             # terminal hook.
@@ -1522,13 +1732,12 @@ class TaskRuntime:
                     task_id, call_correlation
                 )
                 changed = self._apply_advance_locked(record.workflow_id, advance)
-                self._committer.save_ledger_locked(record.workflow_id)
                 # A fenced failure terminal releases the resident credit just as a
                 # completion does; nothing else may release an accepted credit.
-                self._mediated_ops.release_resident_credit(invocation_id, failed=True)
-                self._mediated_ops.reap_mediated_op(
-                    captured_on, task_id, call_correlation
+                self._file_settled_boundary_locked(
+                    task_id, call_correlation, invocation_id, captured_on, failed=True
                 )
+                self._committer.save_ledger_locked(record.workflow_id)
                 if changed:
                     self._cv.notify_all()
                 return changed
@@ -1544,11 +1753,36 @@ class TaskRuntime:
                 self._reenqueue_episode_locked(task_id)
             else:
                 self._apply_advance_locked(record.workflow_id, advance)
+            self._file_settled_boundary_locked(
+                task_id, call_correlation, invocation_id, captured_on, failed=False
+            )
             self._committer.save_ledger_locked(record.workflow_id)
-            self._mediated_ops.release_resident_credit(invocation_id, failed=False)
-            self._mediated_ops.reap_mediated_op(captured_on, task_id, call_correlation)
             self._cv.notify_all()
             return True
+
+    def _file_settled_boundary_locked(
+        self,
+        task_id: str,
+        call_correlation: str,
+        invocation_id: str | None,
+        captured_on: str | None,
+        *,
+        failed: bool,
+    ) -> None:
+        """Owe a settled boundary's credit release and the reap of its request."""
+        self._file_locked(
+            task_id,
+            (
+                CreditRelease(invocation_id, failed)
+                if invocation_id is not None
+                else None
+            ),
+            (
+                Reap(captured_on, task_id, call_correlation)
+                if captured_on is not None
+                else None
+            ),
+        )
 
     def redispatch_episode_invocation(
         self, task_id: str, call_correlation: str
@@ -1561,21 +1795,44 @@ class TaskRuntime:
         terminalizing. A boundary that already settled, terminalized, or cancelled is a
         no-op, so a late re-drive neither re-runs the handler nor releases a credit.
         """
-        try:
-            with self._cv:
-                record = self._tasks.get(task_id)
-                engine = self._engines.get(record.workflow_id) if record else None
-                if record is None or engine is None:
-                    return False
-                if record.status in TERMINAL_TASK_STATUSES:
-                    return False
-                envelope = engine.pending_tool_dispatch(task_id, call_correlation)
-                if envelope is None:
-                    return False
-                self._dispatch_boundary(envelope)
-            return True
-        finally:
-            self._release_pending_terminations()
+        with self._transition(raises=False):
+            handoff = self._prepare_issue_locked(task_id, call_correlation, None)
+        if handoff is None:
+            return False
+        handoff()
+        return True
+
+    def _issue(self, issue: Issue) -> None:
+        """Hand a recorded boundary to its handler, if it still awaits the invocation
+        it was recorded with."""
+        with self._transition(raises=False):
+            handoff = self._prepare_issue_locked(
+                issue.task_id, issue.call_correlation, issue.invocation_id
+            )
+        if handoff is not None:
+            handoff()
+
+    def _prepare_issue_locked(
+        self, task_id: str, call_correlation: str, invocation_id: str | None
+    ) -> Callable[[], Any] | None:
+        """Prepare the handoff of a still-pending boundary to its handler; with an
+        ``invocation_id``, only under that invocation. A boundary no longer pending
+        makes its workflow's held writes durable instead."""
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        if record is None or engine is None:
+            return None
+        envelope = (
+            engine.pending_tool_dispatch(task_id, call_correlation)
+            if record.status not in TERMINAL_TASK_STATUSES
+            else None
+        )
+        if envelope is None or (
+            invocation_id is not None and envelope.invocation_id != invocation_id
+        ):
+            self._committer.close_locked(record.workflow_id)
+            return None
+        return self._boundary_handoff_locked(envelope)
 
     def redeliver_to_worker(self, worker_id: str) -> None:
         """Re-relay what control holds for a worker whose task stream attached.
@@ -1585,14 +1842,12 @@ class TaskRuntime:
         drops one it already runs; each task being cancelled there is interrupted
         again, keyed to its dispatch. A lost task dispatch resolves as lost.
         """
-        with self._cv:
+        with self._transition(raises=False):
             pending = self._mediated_ops.pending_for_worker(worker_id)
-            self._terminations.queue_interrupts_locked(
-                self._terminations.cancelling_interrupts_locked(
-                    lambda record: record.assigned_worker == worker_id
-                )
-            )
-        self._release_pending_terminations()
+            for workflow_id, interrupt in self._actions.cancelling_interrupts_locked(
+                lambda record: record.assigned_worker == worker_id
+            ):
+                self._actions.file_locked(workflow_id, interrupt)
         for task_id, call in sorted(pending):
             self.redispatch_episode_invocation(task_id, call)
 
@@ -1607,7 +1862,7 @@ class TaskRuntime:
         now = time.time()
         with self._cv:
             exhausted, redrive = self._mediated_ops.take_overdue(worker_id, now)
-        try:
+        with self._transition(raises=False):
             for op in exhausted:
                 self._logger.warning(
                     "No outcome arrived for tool operation %s of %s after %d "
@@ -1621,8 +1876,6 @@ class TaskRuntime:
                     op.call_correlation,
                     error="tool operation outcome never arrived",
                 )
-        finally:
-            self._release_pending_terminations()
         for permit_id, op in redrive:
             if not self.redispatch_episode_invocation(
                 op.agent_task_id, op.call_correlation
@@ -1632,8 +1885,11 @@ class TaskRuntime:
                 with self._cv:
                     self._mediated_ops.discard_op(permit_id, op)
 
-    def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
-        """Route a recorded mediated boundary to its handler by exact (kind, interface).
+    def _boundary_handoff_locked(
+        self, env: ToolInvocationEnvelope
+    ) -> Callable[[], Any] | None:
+        """Prepare a recorded mediated boundary's handoff to its handler by exact
+        (kind, interface), to run off the lock.
 
         A recorded request digest marks a boundary the worker originated and holds its
         raw request privately: an external ``model`` runs off-lane on that worker's
@@ -1649,22 +1905,22 @@ class TaskRuntime:
             and env.interface == MODEL_INTERFACE
         ):
             if env.request_digest is not None:
-                if self._is_resident_env(env):
-                    self._dispatch_resident_op(env)
-                else:
-                    self._dispatch_worker_originated_op(env)
-            elif self._model_settler is not None:
-                self._model_settler(env)
-            return
+                engine = self._engines.get(self._tasks[env.task_id].workflow_id)
+                if engine is not None and engine.service_dependency(env.task_id):
+                    return lambda: self._originate_resident(env)
+                return self._worker_originated_handoff_locked(env)
+            if (settler := self._model_settler) is not None:
+                return lambda: settler(env)
+            return None
         if (
             env.kind is BoundaryEventKind.INVOCATION
             and env.interface == SEARCH_INTERFACE
         ):
             if env.request_digest is not None:
-                self._dispatch_worker_originated_op(env)
-            elif self._tool_broker is not None:
-                self._tool_broker(env)
-            return
+                return self._worker_originated_handoff_locked(env)
+            if (broker := self._tool_broker) is not None:
+                return lambda: broker(env)
+            return None
         outcome = ToolOutcome(
             status=ToolOutcomeStatus.UNAVAILABLE,
             value=f"no fabric handler for interface {env.interface!r}",
@@ -1672,17 +1928,9 @@ class TaskRuntime:
         self._settle_episode_invocation(
             env.task_id, env.call_correlation, outcome.model_dump_json()
         )
+        return None
 
-    def _is_resident_env(self, env: ToolInvocationEnvelope) -> bool:
-        """Whether the task consumes a resident dependency, without reading its plan."""
-        with self._lock:
-            record = self._tasks.get(env.task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if record is None or engine is None:
-                return False
-            return engine.service_dependency(env.task_id) is not None
-
-    def _dispatch_resident_op(self, env: ToolInvocationEnvelope) -> None:
+    def _originate_resident(self, env: ToolInvocationEnvelope) -> None:
         """Originate a worker-captured resident boundary through resident admission."""
         if self._resident_originate is None:
             error = "resident-capacity control is not enabled"
@@ -1690,14 +1938,16 @@ class TaskRuntime:
             error = "resident-capacity control is not running"
         else:
             return
-        with self._lock:
+        with self._transition(raises=False):
             worker_id = self._assigned_worker_locked(env.task_id)
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error=error
             )
-            self._mediated_ops.relay_resident_reap(
-                worker_id, env.task_id, env.call_correlation
-            )
+            if worker_id:
+                self._file_locked(
+                    env.task_id,
+                    Reap(worker_id, env.task_id, env.call_correlation, resident=True),
+                )
 
     def on_resident_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None:
         """Consume an origin worker's resident bootstrap-phase report."""
@@ -1752,8 +2002,11 @@ class TaskRuntime:
             )
         )
 
-    def _dispatch_worker_originated_op(self, env: ToolInvocationEnvelope) -> None:
-        """Mint a permit and relay a boundary's egress operation to its origin worker.
+    def _worker_originated_handoff_locked(
+        self, env: ToolInvocationEnvelope
+    ) -> Callable[[], Any] | None:
+        """Mint a permit for a boundary's egress operation and prepare its relay to the
+        origin worker.
 
         The permit is audience-bound to the agent's own worker and relayed there as an
         ordinary control message on the authenticated attachment, never the raw request
@@ -1764,7 +2017,7 @@ class TaskRuntime:
         agent = self._tasks.get(env.task_id)
         engine = self._engines.get(agent.workflow_id) if agent else None
         if agent is None or engine is None:
-            return
+            return None
         worker_id = agent.assigned_worker
         worker = self._worker_registry.get_worker(worker_id) if worker_id else None
         if worker_id is None or worker is None:
@@ -1776,7 +2029,7 @@ class TaskRuntime:
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error="origin worker unavailable"
             )
-            return
+            return None
         occurrence = (env.task_id, env.call_correlation)
         stale = self._mediated_ops.take_stale_ops(occurrence)
         if any(op.node_alias != worker.node_alias for _, op in stale):
@@ -1789,13 +2042,13 @@ class TaskRuntime:
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error="origin worker unavailable"
             )
-            return
+            return None
         op_credential = self._resolve_op_credential(agent, env.interface)
         if isinstance(op_credential, _MissingCredential):
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error=op_credential.reason
             )
-            return
+            return None
         max_results, timeout_sec, result_char_cap = self._mediated_ops.op_permit_budget(
             env.interface
         )
@@ -1816,7 +2069,7 @@ class TaskRuntime:
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error="could not mint a permit"
             )
-            return
+            return None
         # A re-drive re-mints under a fresh permit id, keeping one pending op per
         # occurrence and its re-drive count.
         redrives = max((op.redrives for _, op in stale), default=0)
@@ -1831,14 +2084,12 @@ class TaskRuntime:
                 redrives=redrives,
             ),
         )
-        self._worker_registry.publish_mediated_op(
-            worker,
-            MediatedOpMessage(
-                worker_id=worker_id,
-                frame_kind="permit",
-                payload=self._mediated_ops.stamped_permit_payload(permit, agent),
-            ),
+        message = MediatedOpMessage(
+            worker_id=worker_id,
+            frame_kind="permit",
+            payload=self._mediated_ops.stamped_permit_payload(permit, agent),
         )
+        return lambda: self._worker_registry.publish_mediated_op(worker, message)
 
     def authorize_model_turn(
         self, proposal: AgentModelTurnProposal, proposer_id: str
@@ -1919,10 +2170,8 @@ class TaskRuntime:
         lost report leaves the boundary pending for a same-idempotency-key re-drive. A
         duplicate or late report is absorbing at the boundary.
         """
-        try:
+        with self._transition(raises=False):
             self._settle_mediated_operation(outcome)
-        finally:
-            self._release_pending_terminations()
 
     def _settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         with self._cv:
@@ -1938,8 +2187,13 @@ class TaskRuntime:
             engine = self._engines.get(record.workflow_id) if record else None
             if engine is None or not engine.boundary_settleable(agent_task_id, call):
                 # No settle follows a duplicate or late report, so the request its
-                # worker holds is reaped here.
-                self._mediated_ops.reap_mediated_op(worker_id, agent_task_id, call)
+                # worker holds is reaped here, once the terminal it lost to is durable.
+                if record is not None:
+                    self._committer.close_locked(record.workflow_id)
+                if worker_id:
+                    self._file_locked(
+                        agent_task_id, Reap(worker_id, agent_task_id, call)
+                    )
                 return
             if outcome.error is not None:
                 self._settle_episode_invocation(
@@ -2013,7 +2267,7 @@ class TaskRuntime:
         """
         self._resident_tasks.set_resident_yield_hook(hook)
 
-    def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
+    def set_resident_terminal_hook(self, hook: ResidentTerminalHook) -> None:
         """Install the consumer that releases a resident admission credit on DS
         terminal.
 
@@ -2221,21 +2475,18 @@ class TaskRuntime:
         loss between publication and the attempt bookkeeping that follows it. A pinned
         selection is kept and returned unchanged.
         """
-        try:
-            with self._lock:
-                record = self._tasks.get(task_id)
-                engine = self._engines.get(record.workflow_id) if record else None
-                if engine is None or record is None:
-                    return None
-                selection = engine.record_embodiment_selection(
-                    task_id, alternative_id, selector, evidence
-                )
-                if selection is None:
-                    return None
-                self._committer.save_ledger_locked(record.workflow_id)
-                return selection.alternative_id
-        finally:
-            self._release_ended_workers()
+        with self._transition(raises=False):
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None or record is None:
+                return None
+            selection = engine.record_embodiment_selection(
+                task_id, alternative_id, selector, evidence
+            )
+            if selection is None:
+                return None
+            self._committer.save_ledger_locked(record.workflow_id)
+            return selection.alternative_id
 
     def _synthesize_ready_children_locked(
         self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
@@ -2258,6 +2509,7 @@ class TaskRuntime:
             template, child_task_id
         )
         self._original_deps[child_task_id] = set()
+        self._committer.note_child_locked(template.workflow_id, child_task_id)
 
     def episode_feasible(self, task_id: str) -> bool:
         """Whether a ready episode's declared alternative can be placed now.
@@ -2362,17 +2614,14 @@ class TaskRuntime:
                 "[fabric] a task reported an unreadable input resolution: %s", task_id
             )
             return
-        try:
-            with self._lock:
-                record = self._tasks.get(task_id)
-                if record is None or not self._fence.accepts_event_locked(
-                    record, worker_id, dispatch_id
-                ):
-                    return
-                if (engine := self._engines.get(record.workflow_id)) is not None:
-                    engine.record_input_resolution(task_id, binding)
-        finally:
-            self._release_ended_workers()
+        with self._transition():
+            record = self._tasks.get(task_id)
+            if record is None or not self._fence.accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                return
+            if (engine := self._engines.get(record.workflow_id)) is not None:
+                engine.record_input_resolution(task_id, binding)
 
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
         """The binding a task's recorded resolution carries, if one was recorded."""
@@ -2619,11 +2868,8 @@ class TaskRuntime:
         attempt; a non-replayable one becomes ambiguity-terminal and never silently
         retries or reports success.
         """
-        try:
-            with self._cv:
-                return self._resolve_uncertain_locked(task_id)
-        finally:
-            self._release_pending_terminations()
+        with self._transition(raises=False):
+            return self._resolve_uncertain_locked(task_id)
 
     def _resolve_uncertain_locked(
         self, task_id: str, error: str | None = None
@@ -2642,12 +2888,11 @@ class TaskRuntime:
             # follows.
             if self._apply_advance_locked(record.workflow_id, advance):
                 self._cv.notify_all()
-            self._mediated_ops.reap_ops_for_agents_locked(advance.failed)
-            if invocation_ids := engine.terminalize_unsettled_invocations([task_id]):
-                self._terminations.hold_termination_locked(
-                    record.workflow_id,
-                    Termination([], [], resident_invocation_ids=invocation_ids),
-                )
+            self._actions.file_locked(
+                record.workflow_id,
+                *_failed_credits(engine.terminalize_unsettled_invocations([task_id])),
+                *self._mediated_ops.reap_ops_for_agents_locked(advance.failed),
+            )
         self._committer.save_ledger_locked(record.workflow_id)
         return advance
 
@@ -2818,12 +3063,7 @@ class TaskRuntime:
                 "Checking the held inputs of workflow %s failed", workflow_id
             )
             self._redrive.schedule(workflow_id)
-        try:
-            self._redrive_workflow(workflow_id)
-        finally:
-            # A fan-out read here that finds its collection unreadable fails the
-            # workflow.
-            self._release_pending_terminations()
+        self._redrive_workflow(workflow_id)
 
     def _check_unavailable_inputs(self, workflow_id: str) -> None:
         """Read each held task's unreadable inputs from here, off the lock.
@@ -2851,7 +3091,7 @@ class TaskRuntime:
             for task_id, check in checks.items()
             if check.unreadable is None
         }
-        with self._cv:
+        with self._transition(raises=False):
             failures = self._inputs.settle_input_checks_locked(
                 workflow_id, checks, verdicts
             )
@@ -2915,7 +3155,7 @@ class TaskRuntime:
             for task_id, binding in producers
         }
         values = agent_inputs.read_input_values(self._results, snapshots)
-        with self._cv:
+        with self._transition(raises=False):
             if (engine := self._engines.get(workflow_id)) is None:
                 return
             advance = Advance()
@@ -2999,12 +3239,10 @@ class TaskRuntime:
         """Fail a workflow in its ledger and every non-terminal task of it, and persist
         the terminal facts.
 
-        What its work held is released once the caller leaves the lock, through
-        ``_release_pending_terminations``, and only once the terminal ledger is
-        durable: a report whose writes are held keeps it until its replay saves the
-        ledger.
+        What its work held is delivered off the lock once the terminal ledger is
+        durable.
         """
-        termination = self._terminate_workflow_locked(workflow_id, reason, reason)
+        owed = self._terminate_workflow_locked(workflow_id, reason, reason)
         non_terminal = [
             task_id
             for task_id, record in self._tasks.items()
@@ -3012,7 +3250,7 @@ class TaskRuntime:
             and record.status not in TERMINAL_TASK_STATUSES
         ]
         self._fail_v2_records_locked(non_terminal, reason, persist=True)
-        self._terminations.hold_termination_locked(workflow_id, termination)
+        self._actions.file_locked(workflow_id, *owed)
         self._committer.save_ledger_locked(workflow_id)
         self._committer.reclaim_vault_if_settled_locked(workflow_id)
         self._cv.notify_all()
@@ -3022,20 +3260,14 @@ class TaskRuntime:
     ) -> list[str]:
         if max_batch_size <= 1:
             return []
-        try:
-            with self._cv:
-                return self._merges.plan_merge_locked(
-                    task_id, max_batch_size, assigned_worker
-                )
-        finally:
-            self._release_ended_workers()
+        with self._transition(raises=False):
+            return self._merges.plan_merge_locked(
+                task_id, max_batch_size, assigned_worker
+            )
 
     def release_merge(self, task_id: str) -> None:
-        try:
-            with self._cv:
-                self._merges.release_merge_locked(task_id)
-        finally:
-            self._release_ended_workers()
+        with self._transition(raises=False):
+            self._merges.release_merge_locked(task_id)
 
     def merged_child_record(self, task_id: str, child_id: str) -> TaskRecord | None:
         """A child's record while it is still merged into ``task_id``'s dispatch."""
@@ -3047,11 +3279,8 @@ class TaskRuntime:
     ) -> None:
         """Take one child out of a task's merge and return it to the ready queue, to
         merge next under ``merge_key``, or to run alone when it is None."""
-        try:
-            with self._cv:
-                self._merges.release_merged_child_locked(task_id, child_id, merge_key)
-        finally:
-            self._release_ended_workers()
+        with self._transition(raises=False):
+            self._merges.release_merged_child_locked(task_id, child_id, merge_key)
 
     # ------------------------------------------------------------------ #
     # State updates (dispatch & events)
@@ -3091,22 +3320,19 @@ class TaskRuntime:
         Returns whether the task still needs returning: a dispatch its worker reported
         on stands, and one a cancel recorded settles CANCELLED.
         """
-        try:
-            with self._cv:
-                publish = self._fence.take_publish(task_id)
-                if publish is None or not publish.recorded:
-                    return True
-                record = self._tasks.get(task_id)
-                if (
-                    not publish.reported
-                    and record is not None
-                    and record.status == TaskStatus.CANCELLING
-                    and record.dispatch_id == publish.dispatch_id
-                ):
-                    self._settle_cancelled_locked(record, time.time())
-                return False
-        finally:
-            self._release_ended_workers()
+        with self._transition(raises=False):
+            publish = self._fence.take_publish(task_id)
+            if publish is None or not publish.recorded:
+                return True
+            record = self._tasks.get(task_id)
+            if (
+                not publish.reported
+                and record is not None
+                and record.status == TaskStatus.CANCELLING
+                and record.dispatch_id == publish.dispatch_id
+            ):
+                self._settle_cancelled_locked(record, time.time())
+            return False
 
     def mark_dispatched(self, task_id: str) -> bool:
         """Record the publish `begin_publish` marked; returns whether it holds the task.
@@ -3114,11 +3340,8 @@ class TaskRuntime:
         A dispatch an event of its worker recorded first is not recorded again, and one
         that ended before its record, or whose task already settles, records nothing.
         """
-        try:
-            with self._cv:
-                return self._fence.mark_dispatched_locked(task_id)
-        finally:
-            self._release_ended_workers()
+        with self._transition(raises=False):
+            return self._fence.mark_dispatched_locked(task_id)
 
     def mark_started(
         self,
@@ -3130,31 +3353,24 @@ class TaskRuntime:
     ) -> EventEffect:
         """Record that a task's worker started it."""
         started_ts = parse_iso_ts(str(payload.get("started_at") or ts))
-        try:
-            with self._cv:
-                record = self._tasks.get(task_id)
-                if not record or not self._fence.accepts_event_locked(
-                    record, worker_id, dispatch_id
-                ):
-                    return EventEffect.STALE
-                if record.status in SETTLING_TASK_STATUSES:
-                    # A replayed or late start must not regress a settling task.
-                    return EventEffect.SETTLED
-                record.status = TaskStatus.DISPATCHED
-                record.started_ts = started_ts
-                if record.first_started_ts is None and payload.get("executing", True):
-                    record.first_started_ts = time.time()
-                self._committer.commit_transition_locked(
-                    record.workflow_id,
-                    records=self._committer.records_locked(task_id),
-                    dispatched=[task_id],
-                )
-                if engine := self._engines.get(record.workflow_id):
-                    engine.on_started(task_id)
-                    self._committer.save_ledger_locked(record.workflow_id)
-                return EventEffect.APPLIED
-        finally:
-            self._release_ended_workers()
+        with self._transition():
+            record = self._tasks.get(task_id)
+            if not record or not self._fence.accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                return EventEffect.STALE
+            if record.status in SETTLING_TASK_STATUSES:
+                # A replayed or late start must not regress a settling task.
+                return EventEffect.SETTLED
+            record.status = TaskStatus.DISPATCHED
+            record.started_ts = started_ts
+            if record.first_started_ts is None and payload.get("executing", True):
+                record.first_started_ts = time.time()
+            self._committer.commit_records_locked(record.workflow_id, [task_id])
+            if engine := self._engines.get(record.workflow_id):
+                engine.on_started(task_id)
+                self._committer.save_ledger_locked(record.workflow_id)
+            return EventEffect.APPLIED
 
     def mark_updated(
         self,
@@ -3164,22 +3380,19 @@ class TaskRuntime:
         dispatch_id: str | None = None,
     ) -> EventEffect:
         """Store a task's latest progress update."""
-        try:
-            with self._lock:
-                record = self._tasks.get(task_id)
-                if record is None or not self._fence.accepts_event_locked(
-                    record, worker_id, dispatch_id
-                ):
-                    return EventEffect.STALE
-                if record.status in TERMINAL_TASK_STATUSES:
-                    # A replayed or late progress update must not touch a terminal task.
-                    return EventEffect.SETTLED
-                record.latest_update = payload
-                record.latest_update_dispatch_id = record.dispatch_id
-                self._committer.persist_locked(task_id)
-                return EventEffect.APPLIED
-        finally:
-            self._release_ended_workers()
+        with self._transition():
+            record = self._tasks.get(task_id)
+            if record is None or not self._fence.accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                return EventEffect.STALE
+            if record.status in TERMINAL_TASK_STATUSES:
+                # A replayed or late progress update must not touch a terminal task.
+                return EventEffect.SETTLED
+            record.latest_update = payload
+            record.latest_update_dispatch_id = record.dispatch_id
+            self._committer.persist_locked(task_id)
+            return EventEffect.APPLIED
 
     def rewrite_update(
         self, task_id: str, previous: dict[str, Any], payload: dict[str, Any]
@@ -3221,7 +3434,7 @@ class TaskRuntime:
         The success binds the result reference it reports, once, at the commit that
         makes the task DONE; a success that does not settle the task binds nothing.
         """
-        try:
+        with self._transition(locked=False):
             return self._committer.reported(
                 "TASK_SUCCEEDED",
                 task_id,
@@ -3231,9 +3444,6 @@ class TaskRuntime:
                     task_id, worker_id, payload, ts, dispatch_id, skip
                 ),
             )
-        finally:
-            # A success whose fan-out cannot be read fails its workflow.
-            self._release_pending_terminations()
 
     def _apply_success(
         self,
@@ -3293,10 +3503,13 @@ class TaskRuntime:
                 if record.status in TERMINAL_TASK_STATUSES:
                     # A late report of a dispatch its task already settled routes
                     # nothing it carries, so its worker drops what it holds for it.
-                    self._mediated_ops.reap_captures_locked(
-                        worker_id,
+                    self._file_locked(
                         task_id,
-                        _captured_calls(harness_result, carried_group),
+                        *self._mediated_ops.reap_captures_locked(
+                            worker_id,
+                            task_id,
+                            _captured_calls(harness_result, carried_group),
+                        ),
                     )
                     if harness_result.kind is not HarnessResultKind.COMPLETION:
                         return settle_outcome(effect, record, [], [])
@@ -3324,11 +3537,14 @@ class TaskRuntime:
                 if record.status == TaskStatus.CANCELLING:
                     # A completion racing the cancel settles it before routing a
                     # captured facade group or consulting the reroute guard.
+                    self._file_locked(
+                        task_id,
+                        *self._mediated_ops.reap_captures_locked(
+                            worker_id, task_id, _captured_calls(harness_result, group)
+                        ),
+                    )
                     usages = self._settle_cancelled_usage_locked(
                         record, payload, finished_ts, started_ts
-                    )
-                    self._mediated_ops.reap_captures_locked(
-                        worker_id, task_id, _captured_calls(harness_result, group)
                     )
                     return settle_outcome(effect, record, [], usages)
                 if group is not None:
@@ -3452,7 +3668,7 @@ class TaskRuntime:
             self._committer.commit_locked(task_id, *settled_children, *returned)
 
             notify = bool(ready_children)
-            if record is not None and not self._committer.writes_held():
+            if record is not None:
                 notify |= self._finish_success_locked(record, fanout)
             if notify:
                 self._cv.notify_all()
@@ -3517,7 +3733,7 @@ class TaskRuntime:
             if failure_kind is TaskFailureKind.INPUT_UNREADABLE
             else "TASK_FAILED"
         )
-        try:
+        with self._transition(locked=False):
             return self._committer.reported(
                 report,
                 task_id,
@@ -3536,9 +3752,6 @@ class TaskRuntime:
                     ambiguous,
                 ),
             )
-        finally:
-            # A replayed report's recommit makes a held terminal ledger durable.
-            self._release_pending_terminations()
 
     def _apply_failure(
         self,
@@ -3567,7 +3780,7 @@ class TaskRuntime:
                     and stash.worker_id == worker_id
                     and stash.dispatch_id in (None, dispatch_id)
                 ):
-                    self._committer.recommit_locked(stash.held)
+                    self._committer.close_locked(record.workflow_id)
                     self._committer.drop_unacknowledged(task_id)
                 record.last_error = error
                 impacted, usages = self._mark_failed(
@@ -3674,36 +3887,31 @@ class TaskRuntime:
         settles CANCELLED, its merged children returning to run alone. A task whose
         last attempt this would spend is left for the caller to fail.
         """
-        try:
-            with self._cv:
-                record = self._tasks.get(task_id)
-                if record is None or not self._fence.holds_dispatch_locked(
-                    record, holder, None
-                ):
-                    if holder is not None:
-                        self._fence.heal_returned_locked(task_id, holder, None)
-                    return DispatchEnd.STALE
-                if (
-                    holder is not None
-                    and self._episode_dispatch.dispatch_ended_at_suspension_locked(
-                        record
-                    )
-                ):
-                    return DispatchEnd.STALE
-                if record.status in TERMINAL_TASK_STATUSES:
-                    return DispatchEnd.SETTLED
-                if record.status == TaskStatus.CANCELLING:
-                    self._settle_cancelled_locked(record, time.time(), unmerge=True)
-                    return DispatchEnd.CANCELLED
-                if holder is not None and self._fence.return_failed_merge_locked(
-                    record, holder
-                ):
-                    return DispatchEnd.MERGE_RETURNED
-                return self._return_dispatch_locked(
-                    record, increment_retry=increment_retry, front=front
-                )
-        finally:
-            self._release_ended_workers()
+        with self._transition(raises=False):
+            record = self._tasks.get(task_id)
+            if record is None or not self._fence.holds_dispatch_locked(
+                record, holder, None
+            ):
+                if holder is not None:
+                    self._fence.heal_returned_locked(task_id, holder, None)
+                return DispatchEnd.STALE
+            if (
+                holder is not None
+                and self._episode_dispatch.dispatch_ended_at_suspension_locked(record)
+            ):
+                return DispatchEnd.STALE
+            if record.status in TERMINAL_TASK_STATUSES:
+                return DispatchEnd.SETTLED
+            if record.status == TaskStatus.CANCELLING:
+                self._settle_cancelled_locked(record, time.time(), unmerge=True)
+                return DispatchEnd.CANCELLED
+            if holder is not None and self._fence.return_failed_merge_locked(
+                record, holder
+            ):
+                return DispatchEnd.MERGE_RETURNED
+            return self._return_dispatch_locked(
+                record, increment_retry=increment_retry, front=front
+            )
 
     def _return_dispatch_locked(
         self, record: TaskRecord, *, increment_retry: bool, front: bool
@@ -3769,7 +3977,7 @@ class TaskRuntime:
             return
         step = payload.get("agent_episode")
         carried = payload.get("agent_episode_facade_group")
-        self._mediated_ops.reap_captures_locked(
+        reaps = self._mediated_ops.reap_captures_locked(
             worker_id,
             record.task_id,
             _captured_calls(
@@ -3781,6 +3989,7 @@ class TaskRuntime:
                 ),
             ),
         )
+        self._file_locked(record.task_id, *reaps)
 
     def mark_failed(
         self,
@@ -3798,10 +4007,8 @@ class TaskRuntime:
 
         Returns (impacted_dependents, usages).
         """
-        try:
+        with self._transition():
             return self._mark_failed(task_id, worker_id, payload, ts, error=error)
-        finally:
-            self._release_pending_terminations()
 
     def _mark_failed(
         self,
@@ -3922,9 +4129,14 @@ class TaskRuntime:
     # ------------------------------------------------------------------ #
 
     def cancel_workflow(self, workflow_id: str, reason: str = "cancelled") -> list[str]:
+        """Cancel every unsettled task of a workflow, returning the tasks it moved.
+
+        Raises ``TransitionNotDurable`` when the cancel applied but is not durable yet;
+        cancelling again makes it durable.
+        """
         touched: list[str] = []
         returned: list[str] = []
-        with self._cv:
+        with self._transition():
             workflow_tasks = [
                 item
                 for item in self._tasks.items()
@@ -3932,7 +4144,7 @@ class TaskRuntime:
             ]
             if not workflow_tasks:
                 return touched  # Unknown workflow: no records to move
-            termination = self._terminate_workflow_locked(workflow_id, reason, None)
+            owed = self._terminate_workflow_locked(workflow_id, reason, None)
             for task_id, record in workflow_tasks:
                 if (moved := self._cancel_record_locked(record, reason)) is None:
                     continue
@@ -3949,16 +4161,17 @@ class TaskRuntime:
             # per-task terminal persist, so it notifies for itself. A cancel that leaves
             # tasks CANCELLING settles nothing yet; the finalizer reads that and waits
             # for their own terminals.
-            self._committer.notify_terminal_transition(workflow_id)
-
-        self._terminations.release_terminated_work(termination)
-        self._release_ended_workers()
-        self._credential_vault.purge(workflow_id)
+            self._actions.file_locked(
+                workflow_id,
+                *owed,
+                Settled(workflow_id),
+                Purge(workflow_id, settled_only=False),
+            )
         return touched
 
     def _terminate_workflow_locked(
         self, workflow_id: str, reason: str, failure: str | None
-    ) -> Termination:
+    ) -> list[AfterCommit]:
         """Settle a workflow's ledger terminally and take what its work still holds.
 
         Runs before the caller moves the task records. A cancel (``failure`` None)
@@ -3967,12 +4180,11 @@ class TaskRuntime:
         interrupted with every other running task, the agents' mediated operations are
         taken for reaping, the pending re-drive and held input checks are dropped, and
         every unsettled boundary invocation is terminalized. It writes nothing: the
-        caller's terminal commit persists it, and
-        ``TerminationRelease.release_terminated_work`` releases what it returns once
-        that commit is made.
+        caller's terminal commit persists it, and files what it returns to be delivered
+        once that commit is durable.
         """
         self._redrive.settle(workflow_id)
-        termination = self._take_task_work_locked(
+        owed = self._take_task_work_locked(
             [
                 record
                 for record in self._tasks.values()
@@ -3982,48 +4194,38 @@ class TaskRuntime:
         )
         self._epochs.forget_workflow(workflow_id)
         if (engine := self._engines.get(workflow_id)) is None:
-            return termination
+            return owed
         if failure is None:
             engine.cancel_instance()
         else:
             engine.fail_instance(failure)
-        termination.resident_invocation_ids = engine.terminalize_unsettled_invocations()
-        return termination
+        return [*_failed_credits(engine.terminalize_unsettled_invocations()), *owed]
 
     def _take_task_work_locked(
         self, records: list[TaskRecord], reason: str
-    ) -> Termination:
+    ) -> list[AfterCommit]:
         """Take what the given tasks' work still holds, before a cancel moves them.
 
         A dispatch being published is recorded so its worker is interrupted with every
         other running task, the agents' mediated operations are taken for reaping, and
         the held input checks are dropped. It writes nothing.
         """
-        interrupts: list[InterruptMessage] = []
+        owed: list[AfterCommit] = []
         for record in records:
             publish = self._fence.publishing.get(record.task_id)
             if publish and not publish.recorded and record.status == TaskStatus.PENDING:
                 # The worker may already be running the task.
                 self._fence.take_dispatch_locked(record, publish)
             if record.status == TaskStatus.DISPATCHED and (
-                interrupt := self._terminations.interrupt_for(record, reason)
+                interrupt := self._actions.interrupt_for(record, reason)
             ):
-                interrupts.append(interrupt)
+                owed.append(interrupt)
             self._inputs.drop_check(record.task_id)
             self._epochs.forget_task(record.task_id)
-        reaps = self._mediated_ops.take_ops_for_agents_locked(
+        owed += self._mediated_ops.reap_ops_for_agents_locked(
             [r.task_id for r in records]
         )
-        return Termination(interrupts, reaps)
-
-    def _release_pending_terminations(self) -> None:
-        """Release, off the lock, what control queued under it, and each worker
-        reserved for a dispatch that ended."""
-        with self._lock:
-            pending = self._terminations.take_terminations()
-        for termination in pending:
-            self._terminations.release_terminated_work(termination)
-        self._release_ended_workers()
+        return owed
 
     def _settle_suspended_cancels_locked(self, engine: OrchestrationEngine) -> None:
         """Settle each cancelled episode suspended at a mediated boundary: it has no
@@ -4051,7 +4253,7 @@ class TaskRuntime:
         ]
         if not records:
             return False
-        termination = self._take_task_work_locked(records, _RESIDUAL_CANCEL_REASON)
+        owed = self._take_task_work_locked(records, _RESIDUAL_CANCEL_REASON)
         touched: list[str] = []
         returned: list[str] = []
         for record in records:
@@ -4062,13 +4264,13 @@ class TaskRuntime:
             touched.append(record.task_id)
             returned += moved
         self._committer.commit_cancelled_locked(workflow_id, touched, returned)
-        if not self._committer.writes_held():
-            self._committer.notify_terminal_transition(workflow_id)
         self._settle_suspended_cancels_locked(engine)
-        termination.resident_invocation_ids = engine.terminalize_unsettled_invocations(
-            touched
+        self._actions.file_locked(
+            workflow_id,
+            Settled(workflow_id),
+            *_failed_credits(engine.terminalize_unsettled_invocations(touched)),
+            *owed,
         )
-        self._terminations.hold_termination_locked(workflow_id, termination)
         return bool(touched)
 
     def _cancel_record_locked(
@@ -4150,7 +4352,7 @@ class TaskRuntime:
         without spending an attempt, or fails as on its worker's loss when it is a v2
         task that cannot safely re-run.
         """
-        try:
+        with self._transition(locked=False):
             return self._committer.reported(
                 "TASK_CANCELLED",
                 task_id,
@@ -4160,9 +4362,6 @@ class TaskRuntime:
                     task_id, worker_id, payload, ts, dispatch_id
                 ),
             )
-        finally:
-            # A replayed report's recommit makes a held terminal ledger durable.
-            self._release_pending_terminations()
 
     def _apply_cancellation(
         self,
@@ -4300,14 +4499,14 @@ class TaskRuntime:
                 f"{record.max_attempts} attempts"
             ),
         )
-        self._mediated_ops.reap_ops_for_agents_locked(
+        reaps = self._mediated_ops.reap_ops_for_agents_locked(
             [record.task_id, *(task_id for task_id, _ in failed)]
         )
-        if invocation_ids := engine.terminalize_unsettled_invocations([record.task_id]):
-            self._terminations.hold_termination_locked(
-                record.workflow_id,
-                Termination([], [], resident_invocation_ids=invocation_ids),
-            )
+        invocation_ids = engine.terminalize_unsettled_invocations([record.task_id])
+        self._actions.file_locked(
+            record.workflow_id, *_failed_credits(invocation_ids), *reaps
+        )
+        if invocation_ids:
             self._committer.save_ledger_locked(record.workflow_id)
         return LossOutcome(record.task_id, DispatchEnd.FAILED, tuple(failed))
 
@@ -4434,14 +4633,17 @@ class TaskRuntime:
         self._committer.set_completion_notifier(notify)
 
     def workflow_settlement(self, workflow_id: str) -> WorkflowSettlement:
-        """Whether every task of a workflow has settled, and the last of their
+        """Whether every task of a workflow has durably settled, and the last of their
         finishes.
 
         Read under the scheduler lock, so a caller never observes the moment inside a
         settle in which a producer's tasks have gone terminal but the children they
-        fan out do not exist yet.
+        fan out do not exist yet. A settlement whose writes are held reads as
+        unsettled until they are durable.
         """
         with self._lock:
+            if not self._committer.durable(workflow_id):
+                return WorkflowSettlement(settled=False, finished_ts=None)
             return self._committer.workflow_settlement_locked(workflow_id)
 
     def describe_task(self, task_id: str) -> TaskInfo | None:
@@ -4533,10 +4735,8 @@ class TaskRuntime:
         worker originated that boundary and holds its request. ``node_id`` names the
         worker's node when its record is already gone.
         """
-        try:
+        with self._transition(raises=False):
             return self._recover_tasks_for_worker(worker_id, spend_attempt, node_id)
-        finally:
-            self._release_pending_terminations()
 
     def _recover_tasks_for_worker(
         self, worker_id: str, spend_attempt: bool, node_id: str | None
@@ -4548,8 +4748,11 @@ class TaskRuntime:
                 publish = self._fence.publishing.get(task_id)
                 if publish and not publish.recorded and publish.worker_id == worker_id:
                     self._fence.mark_publish_lost(task_id)
-                    self._terminations.revoke_locked(
-                        task_id, worker_id, publish.dispatch_id, node_id
+                    self._file_locked(
+                        task_id,
+                        self._actions.revoke(
+                            task_id, worker_id, publish.dispatch_id, node_id
+                        ),
                     )
                     children = self._merges.take_children(task_id)
                     record.merged_children = None
@@ -4574,8 +4777,11 @@ class TaskRuntime:
                     continue
                 self._rehydrated_dispatched.pop(task_id, None)
                 if not record.merged_parent_id:
-                    self._terminations.revoke_locked(
-                        task_id, worker_id, record.dispatch_id, node_id
+                    self._file_locked(
+                        task_id,
+                        self._actions.revoke(
+                            task_id, worker_id, record.dispatch_id, node_id
+                        ),
                     )
                 if (
                     record.status == TaskStatus.DISPATCHED
@@ -4608,41 +4814,39 @@ class TaskRuntime:
         it, and its return spends an attempt. Returns None when the dispatch does not
         resolve.
         """
-        try:
-            with self._cv:
-                record = self._tasks.get(task_id)
-                if (
-                    record is None
-                    or record.status
-                    not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
-                    or record.assigned_worker != worker_id
-                    or record.dispatch_id != dispatch_id
-                    or record.started_ts is not None
-                    or not self._episode_dispatch.awaits_its_dispatch_locked(record)
-                ):
-                    return None
-                since = max(
-                    record.dispatched_ts or 0.0,
-                    self._rehydrated_dispatched.get(task_id, 0.0),
-                )
-                if time.time() - since < bound_sec:
-                    return None
-                self._terminations.revoke_locked(task_id, worker_id, dispatch_id)
-                if worker_id not in record.failed_workers:
-                    record.failed_workers.append(worker_id)
-                record.last_error = (
-                    f"Worker {worker_id} kept reporting it does not hold dispatch "
-                    f"{dispatch_id}"
-                )
-                if record.status == TaskStatus.CANCELLING:
-                    self._settle_cancelled_locked(record, time.time(), unmerge=True)
-                    return settle_outcome(EventEffect.APPLIED, record, [], [])
-                engine = self._engines.get(record.workflow_id)
-                if engine is not None and engine.private_state_owner(task_id):
-                    return self._retry_on_owner_locked(record, worker_id)
-                return self._return_given_up_locked(record, worker_id, {})
-        finally:
-            self._release_pending_terminations()
+        with self._transition(raises=False):
+            record = self._tasks.get(task_id)
+            if (
+                record is None
+                or record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
+                or record.assigned_worker != worker_id
+                or record.dispatch_id != dispatch_id
+                or record.started_ts is not None
+                or not self._episode_dispatch.awaits_its_dispatch_locked(record)
+            ):
+                return None
+            since = max(
+                record.dispatched_ts or 0.0,
+                self._rehydrated_dispatched.get(task_id, 0.0),
+            )
+            if time.time() - since < bound_sec:
+                return None
+            self._file_locked(
+                task_id, self._actions.revoke(task_id, worker_id, dispatch_id, None)
+            )
+            if worker_id not in record.failed_workers:
+                record.failed_workers.append(worker_id)
+            record.last_error = (
+                f"Worker {worker_id} kept reporting it does not hold dispatch "
+                f"{dispatch_id}"
+            )
+            if record.status == TaskStatus.CANCELLING:
+                self._settle_cancelled_locked(record, time.time(), unmerge=True)
+                return settle_outcome(EventEffect.APPLIED, record, [], [])
+            engine = self._engines.get(record.workflow_id)
+            if engine is not None and engine.private_state_owner(task_id):
+                return self._retry_on_owner_locked(record, worker_id)
+            return self._return_given_up_locked(record, worker_id, {})
 
     def _retry_on_owner_locked(
         self, record: TaskRecord, worker_id: str
@@ -4702,6 +4906,7 @@ class TaskRuntime:
 
     def shutdown(self) -> None:
         self._redrive.stop()
+        self._durability.stop()
         with self._cv:
             self._cv.notify_all()
 

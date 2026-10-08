@@ -53,7 +53,7 @@ from ...schemas.workflow import (
     WorkflowValidateTaskEntry,
 )
 from ...services.metrics import MetricsRecorder
-from ...task.runtime import TaskRuntime
+from ...task.runtime import TaskRuntime, TransitionNotDurable
 from ...task.v2 import CompileError, Diagnostic
 from ...utils.cursors import InvalidCursor, decode_position, encode_cursor
 from ._listing import (
@@ -539,7 +539,14 @@ async def cancel_workflow(
     await require_permission(
         principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.CANCEL, logger
     )
-    runtime.cancel_workflow(workflow_id)
+    try:
+        runtime.cancel_workflow(workflow_id)
+    except TransitionNotDurable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"The cancel is not durable yet; retry it: {exc}",
+            headers={"Retry-After": "1"},
+        ) from exc
     workflow = await registry.get_workflow_async(workflow_id)
     if not workflow:
         raise HTTPException(

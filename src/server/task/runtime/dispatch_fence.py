@@ -12,7 +12,7 @@ from ..models import (
     TaskRecord,
     TaskStatus,
 )
-from .commits import HeldWrites, TransitionCommitter
+from .commits import TransitionCommitter
 from .episode_dispatch import EpisodeDispatch
 from .merges import TaskMerges
 from .reservations import WorkerReservations
@@ -166,11 +166,7 @@ class DispatchFence:
 
     def _record_dispatch_locked(self, record: TaskRecord, publish: Publish) -> None:
         self.take_dispatch_locked(record, publish)
-        self._committer.commit_transition_locked(
-            record.workflow_id,
-            records=self._committer.records_locked(record.task_id),
-            dispatched=[record.task_id],
-        )
+        self._committer.commit_records_locked(record.workflow_id, [record.task_id])
         self._committer.save_ledger_locked(record.workflow_id)
 
     def take_dispatch_locked(self, record: TaskRecord, publish: Publish) -> None:
@@ -216,7 +212,7 @@ class DispatchFence:
             return
         held_worker, held_dispatch, moved = returned
         if worker_id == held_worker and dispatch_id in (None, held_dispatch):
-            self._committer.recommit_locked(HeldWrites(moved.copy()))
+            self._committer.commit_locked(*moved)
 
     def dispatch_in_flight_locked(
         self, task_id: str, dispatch_id: str, worker_id: str

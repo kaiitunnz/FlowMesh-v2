@@ -9,6 +9,7 @@ a synthetic owner no principal can authenticate as.
 
 import json
 import logging
+from contextlib import suppress
 from typing import Any
 
 from flowmesh_hook import ResourceKind
@@ -24,7 +25,7 @@ from shared.tasks.task_type import TaskType
 
 from ..auth import register_resource
 from ..config import ResidentCapacityConfig
-from ..task.runtime import TaskRuntime
+from ..task.runtime import TaskRuntime, TransitionNotDurable
 from .state import ReplicaIncarnation, ServiceFamily
 
 
@@ -107,7 +108,8 @@ async def materialize_resident_replica(
     except BaseException:
         # The caller learns no serve task id from a failed cold start, so nothing else
         # would ever reap the one registered here.
-        runtime.cancel_workflow(workflow_id, reason="resident cold start failed")
+        with suppress(TransitionNotDurable):
+            runtime.cancel_workflow(workflow_id, reason="resident cold start failed")
         raise
     return entries[0].task_id
 
