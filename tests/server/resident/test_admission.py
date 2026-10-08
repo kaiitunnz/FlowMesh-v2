@@ -166,3 +166,45 @@ def test_persist_hook_fires_on_mutation():
     ctl.on_stream_started(claim)
     ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.COMPLETED)
     assert len(calls) >= 4
+
+
+def test_a_terminal_whose_persist_failed_is_finished_by_its_replay():
+    stores = warm_stores()
+    persisted = []
+    down = [True]
+
+    def persist():
+        if down[0]:
+            raise ConnectionError("control redis unavailable")
+        persisted.extend(c.state for c in stores.claims.by_invocation("inv-1"))
+
+    ctl = AdmissionController(stores, persist)
+    released = []
+    ctl.set_release_hook(released.append)
+    down[0] = False
+    claim = _raise(ctl)
+    ctl.admit(claim, PROFILE, idempotency_key="idm-x")
+    ctl.accept_and_authorize(claim, idempotency_key="idm-x", origin_id="rog-1")
+    persisted.clear()
+
+    down[0] = True
+    try:
+        ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.FAILED)
+    except ConnectionError:
+        pass
+    assert claim.state is ClaimState.TERMINAL
+    assert released == []
+    down[0] = False
+
+    # The replay persists the terminal and tells the replica once, keeping the first
+    # terminal's reason.
+    assert ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.COMPLETED)
+    assert claim.terminal_reason is ClaimTerminalReason.FAILED
+    assert persisted == [ClaimState.TERMINAL]
+    assert released == ["rpl-1"]
+    assert stores.credit_ledger.held("rpl-1") == 0
+
+    # A terminal handed over after its consumption finished does nothing more.
+    assert not ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.COMPLETED)
+    assert persisted == [ClaimState.TERMINAL]
+    assert released == ["rpl-1"]

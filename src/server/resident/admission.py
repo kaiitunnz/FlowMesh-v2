@@ -50,6 +50,9 @@ class AdmissionController:
         self._persist = persist or (lambda: None)
         self._strategies: dict[str, SelectionStrategy] = {}
         self._on_release: Callable[[str], None] = lambda _replica_id: None
+        # The replicas of each invocation whose release a terminal began and a failed
+        # persist or release hook left unfinished.
+        self._unfinished: dict[str, list[str | None]] = {}
 
     def set_release_hook(self, on_release: Callable[[str], None]) -> None:
         """Call ``on_release`` with a replica's id when a claim on it releases."""
@@ -378,7 +381,8 @@ class AdmissionController:
         subject's fact is the orchestration engine's ``DS`` outcome; an external
         subject's is a durable external status-terminal fact. The controller consumes
         either by ``invocation_id``, tolerant of the claim's source state; it never
-        assumes a ``DS`` record exists. Return whether any claim released.
+        assumes a ``DS`` record exists. Return whether any claim released, now or in
+        the earlier consumption this one finishes.
         """
         released: list[str | None] = []
         for claim in self._stores.claims.by_invocation(invocation_id):
@@ -387,9 +391,17 @@ class AdmissionController:
                 self._stores.demand.remove(claim.claim_id)
                 self._touch_replica(claim)
                 released.append(claim.replica_id)
-        if released:
-            self._persist()
-        for replica_id in released:
-            if replica_id is not None:
+        unfinished = self._unfinished.get(invocation_id)
+        if not released and unfinished is None:
+            return False
+        # A terminal handed over again finishes a release an earlier one began, so the
+        # claim is persisted and each replica hears of its release once.
+        pending = self._unfinished.setdefault(invocation_id, [])
+        pending += released
+        self._persist()
+        while pending:
+            if (replica_id := pending[0]) is not None:
                 self._on_release(replica_id)
-        return bool(released)
+            pending.pop(0)
+        del self._unfinished[invocation_id]
+        return True

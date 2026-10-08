@@ -10,9 +10,10 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration.state import InvocationState, LedgerSnapshot
-from server.resident import ClaimState
+from server.resident import ClaimState, ClaimTerminalReason
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from server.task.workflow_retry import WorkflowRetryScheduler
 from shared.harness import HarnessCapsule
 from shared.private_state import PrivateStateSealReport
 from shared.resident.reports import ResidentBootstrapAck, ResidentBootstrapOutcome
@@ -449,3 +450,58 @@ def test_a_cancel_during_a_cold_start_ends_the_origination(
     )
     assert not [record for record in caplog.records if record.levelname == "ERROR"]
     assert "resident_handoff" not in [kind for _, kind, _ in delivery.relays]
+
+
+def test_a_credit_release_the_admission_store_refused_is_finished_once(
+    tmp_path: Path,
+) -> None:
+    runtime = TaskRuntime(
+        cast(Any, FakeRegistry()),
+        cast(Any, _WorkerStub()),
+        OrchestrationConfig(),
+        make_result_reader(),
+        logging.getLogger("resident-test"),
+        credential_vault=InMemoryCredentialVault(),
+        durability_retry=lambda fire, logger: WorkflowRetryScheduler(
+            fire, logger, base_delay_sec=0.0, run_thread=False
+        ),
+    )
+    svc, stores, _, loop, originated = _wire_resident_service(runtime)
+    admission = svc._admission
+    persist = admission._persist
+    told: list[str] = []
+    on_release = admission._on_release
+
+    def released(replica_id: str) -> None:
+        told.append(replica_id)
+        on_release(replica_id)
+
+    def refused() -> None:
+        raise ConnectionError("control redis unavailable")
+
+    admission._on_release = released
+    try:
+        workflow_id, ids = loop.run_until_complete(_register(runtime, _RESIDENT_WF))
+        writer = ids["writer"]
+        _capture_resident_boundary(runtime, writer, seal_in=tmp_path)
+        loop.run_until_complete(asyncio.sleep(0.05))
+        (env,) = originated
+        (claim,) = stores.claims.by_invocation(env.invocation_id)
+        assert claim.holds_credit
+
+        admission._persist = refused
+        assert runtime.settle_episode_invocation(writer, env.call_correlation, "done")
+        loop.run_until_complete(asyncio.sleep(0.05))
+        assert told == []
+        assert runtime._durability.pending(workflow_id)
+        admission._persist = persist
+
+        assert runtime._durability.run_due() == [workflow_id]
+        loop.run_until_complete(asyncio.sleep(0.05))
+    finally:
+        loop.close()
+
+    assert claim.state is ClaimState.TERMINAL
+    assert claim.terminal_reason is ClaimTerminalReason.COMPLETED
+    assert told == [claim.replica_id]
+    assert not stores.credit_ledger.held(claim.replica_id)
