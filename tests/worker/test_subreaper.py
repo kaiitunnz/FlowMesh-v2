@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import psutil
 import pytest
 
 from tests.worker.processes import recorded_pids, running
@@ -266,3 +267,47 @@ def test_a_pid_whose_pidfd_cannot_be_opened_is_still_signalled() -> None:
     finally:
         if child.poll() is None:
             child.kill()
+
+
+def test_a_kernel_without_child_lists_still_drains_the_tree(tmp_path: Path) -> None:
+    runner = (
+        "import importlib.util, pathlib, sys\n"
+        "read = pathlib.Path.read_text\n"
+        "def no_children(self, *args, **kwargs):\n"
+        "    if self.name == 'children':\n"
+        "        raise FileNotFoundError(self)\n"
+        "    return read(self, *args, **kwargs)\n"
+        "pathlib.Path.read_text = no_children\n"
+        f"spec = importlib.util.spec_from_file_location('s', {subreaper.__file__!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        f"sys.argv = ['subreaper', '--grace', '0.3', '--', {_SH!r}, '-c',\n"
+        "    'sleep 30 & setsid sleep 30 & exit 0']\n"
+        "module.main()\n"
+    )
+    proc = subprocess.run(  # nosec B603 - argv list built by the test
+        [sys.executable, "-I", "-c", runner], capture_output=True, timeout=30
+    )
+
+    assert proc.returncode == REAPED
+
+
+def test_orphans_that_exit_while_the_command_runs_are_reaped_at_once(
+    tmp_path: Path,
+) -> None:
+    script = "for i in $(seq 40); do (sleep 0 &); done; echo > ready; sleep 3"
+    proc, receipt = _supervise(script, tmp_path)
+    deadline = time.monotonic() + 10
+    while not (tmp_path / "ready").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.5)
+
+    zombies = [
+        child
+        for child in psutil.Process(proc.pid).children()
+        if child.status() == psutil.STATUS_ZOMBIE
+    ]
+    proc.wait(30)
+    os.close(receipt)
+
+    assert len(zombies) < 5

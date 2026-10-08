@@ -26,7 +26,8 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Iterable
+from collections import defaultdict
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
@@ -42,6 +43,9 @@ _WAIT_STEP_SEC = 0.05
 _SYS_PIDFD_SEND_SIGNAL = 424
 _SYS_PIDFD_OPEN = 434
 _SCRIPT = Path(__file__).resolve()
+# Whether children are read from per-task files or found in a scan of every process;
+# a kernel built without the files is scanned. Probed when the supervisor starts.
+_CHILDREN_FILES = True
 # Held blocked in the supervisor: SIGCHLD and SIGTERM it waits on, the rest it would
 # otherwise die of when the command signals its parent.
 _HELD = frozenset(
@@ -121,7 +125,9 @@ def wait_supervisor(proc: subprocess.Popen[Any], timeout_sec: float) -> bool:
             proc.wait(timeout_sec)
         return proc.poll() is not None
     try:
-        select.select([fd], [], [], timeout_sec)
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        poller.poll(timeout_sec * 1000)
     finally:
         os.close(fd)
     # A pidfd is readable once the process exits, which a reap may briefly trail.
@@ -180,8 +186,20 @@ def _process_table() -> dict[int, tuple[int, int]]:
     return table
 
 
+def _children_files_available() -> bool:
+    """Return whether this kernel lists a task's children under ``/proc``."""
+    me = os.getpid()
+    try:
+        Path(f"/proc/{me}/task/{me}/children").read_text()
+    except OSError:
+        return False
+    return True
+
+
 def _children(pid: int) -> set[int]:
     """Return a process's direct children, read from each of its threads."""
+    if not _CHILDREN_FILES:
+        return {child for child, (ppid, _) in _process_table().items() if ppid == pid}
     found: set[int] = set()
     with contextlib.suppress(OSError):
         for task in os.listdir(f"/proc/{pid}/task"):
@@ -196,10 +214,16 @@ def _children(pid: int) -> set[int]:
 
 
 def _descendants() -> set[int]:
+    children: Callable[[int], set[int]] = _children
+    if not _CHILDREN_FILES:
+        by_parent: defaultdict[int, set[int]] = defaultdict(set)
+        for child, (ppid, _) in _process_table().items():
+            by_parent[ppid].add(child)
+        children = by_parent.__getitem__
     found: set[int] = set()
     frontier = [os.getpid()]
     while frontier:
-        for child in _children(frontier.pop()) - found:
+        for child in children(frontier.pop()) - found:
             found.add(child)
             frontier.append(child)
     return found
@@ -266,6 +290,7 @@ class _Supervisor:
         launcher = os.getppid()
         while True:
             got = signal.sigtimedwait({signal.SIGCHLD, signal.SIGTERM}, 1.0)
+            self.reap_others()
             if self.primary_exited():
                 return
             if (
@@ -333,6 +358,8 @@ def main() -> None:
     argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
     if not argv:
         parser.error("a command to supervise is required")
+    global _CHILDREN_FILES
+    _CHILDREN_FILES = _children_files_available()
     libc = ctypes.CDLL(None, use_errno=True)
     if not _become_subreaper(libc):
         os.write(2, b"subreaper: the kernel refused PR_SET_CHILD_SUBREAPER\n")

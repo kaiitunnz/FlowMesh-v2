@@ -1,6 +1,7 @@
 """The worker-local sandbox fence: what a command may touch, and what it may not."""
 
 import os
+import resource
 import signal
 import socket
 import struct
@@ -525,3 +526,21 @@ def test_a_failure_after_the_command_started_keeps_its_tree_owned(
         run(runtime, profile, tmp_path, "sh", "-c", "exit 0")
     assert raised.value.retry is not None
     assert raised.value.retry()
+
+
+def test_a_command_runs_while_the_worker_holds_more_than_fd_setsize_fds(
+    runtime, profile, tmp_path
+):
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 2048:
+        pytest.skip("the hard open-file limit is below 2048")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (2048, hard))
+    held = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
+    try:
+        result = run(runtime, profile, tmp_path, "true")
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    assert result.exit_code == 0
