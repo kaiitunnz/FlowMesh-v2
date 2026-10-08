@@ -11,12 +11,16 @@ from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from server.task.workflow_retry import WorkflowRetryScheduler
+from shared.inference import InputResolutionBinding, UpstreamProvenance
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
 )
+from tests.server.task.test_v2_embodiment_fence import _menu_task
+from tests.server.task.test_v2_embodiment_fence import _runtime as _menu_runtime
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register
 from tests.server.task.test_worker_originated_boundary import _WorkerStub
 
@@ -184,3 +188,65 @@ def test_a_crash_after_a_held_routing_leaves_no_claim_behind() -> None:
     assert resident.issued == []
     record = restored.get_record(resident.writer)
     assert record is not None and record.status == TaskStatus.PENDING
+
+
+def _binding(request_digest: str, cardinality: int) -> Any:
+    return InputResolutionBinding(
+        source_digest="src",
+        resolver_version="1",
+        request_digest=request_digest,
+        cardinality=cardinality,
+        upstream=(UpstreamProvenance(node="up", content_digest="c1"),),
+    ).model_dump(mode="json")
+
+
+async def _resolving(registry: FakeRegistry) -> tuple[TaskRuntime, str]:
+    runtime = _menu_runtime(registry)
+    task_id, primary = await _menu_task(runtime, "self_contained")
+    assert runtime.record_embodiment_selection(task_id, primary, "primary", "e")
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    return runtime, task_id
+
+
+@pytest.mark.anyio
+async def test_a_recorded_input_resolution_survives_a_restart() -> None:
+    registry = FakeRegistry()
+    runtime, task_id = await _resolving(registry)
+
+    runtime.record_input_resolution(task_id, "wkr-1", _binding("req", 2), "dsp-1")
+
+    restored = _menu_runtime(registry)
+    assert await restored.rehydrate() == 1
+    standing = restored.input_resolution_binding(task_id)
+    assert standing is not None and standing.request_digest == "req"
+    # A re-drive that resolves to a different request leaves the recorded one.
+    restored.record_input_resolution(
+        task_id, "wkr-1", _binding("other", 9), restored._tasks[task_id].dispatch_id
+    )
+    kept = restored.input_resolution_binding(task_id)
+    assert kept is not None and kept.request_digest == "req"
+
+
+@pytest.mark.anyio
+async def test_an_input_resolution_is_acknowledged_only_once_durable() -> None:
+    registry = FakeRegistry()
+    runtime, task_id = await _resolving(registry)
+    save = registry.save_ledger_snapshot
+
+    def down(*_: Any, **__: Any) -> None:
+        raise ConnectionError("control redis unavailable")
+
+    registry.save_ledger_snapshot = down  # type: ignore[method-assign]
+    with pytest.raises(TransitionNotDurable):
+        runtime.record_input_resolution(task_id, "wkr-1", _binding("req", 2), "dsp-1")
+    # The equal report handed over again is not acknowledged while the store is down.
+    with pytest.raises(TransitionNotDurable):
+        runtime.record_input_resolution(task_id, "wkr-1", _binding("req", 2), "dsp-1")
+    registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+
+    runtime.record_input_resolution(task_id, "wkr-1", _binding("req", 2), "dsp-1")
+
+    restored = _menu_runtime(registry)
+    assert await restored.rehydrate() == 1
+    standing = restored.input_resolution_binding(task_id)
+    assert standing is not None and standing.request_digest == "req"

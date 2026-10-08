@@ -2600,11 +2600,13 @@ class TaskRuntime:
         binding_payload: Any,
         dispatch_id: str | None = None,
     ) -> None:
-        """Record how a task's inputs resolved on its origin worker.
+        """Record how a task's inputs resolved on its origin worker, and save it.
 
         The worker reports this before either embodiment reaches a model, so the
         resolution is durable ahead of a local generation or a resident service issue,
         and the admission that follows is sized from the cardinality that materialized.
+        A resolution already recorded stands, and a different one leaves it in place.
+        Raises ``TransitionNotDurable`` while the resolution is not durable.
         """
         try:
             binding = InputResolutionBinding.model_validate(binding_payload)
@@ -2619,8 +2621,15 @@ class TaskRuntime:
                 record, worker_id, dispatch_id
             ):
                 return
-            if (engine := self._engines.get(record.workflow_id)) is not None:
-                engine.record_input_resolution(task_id, binding)
+            if (engine := self._engines.get(record.workflow_id)) is None:
+                return
+            recorded = engine.input_resolution(task_id) is not None
+            engine.record_input_resolution(task_id, binding)
+            if not recorded and engine.input_resolution(task_id) is not None:
+                self._committer.save_ledger_locked(record.workflow_id)
+            else:
+                # A replay acknowledges only once what it replays is durable.
+                self._committer.close_locked(record.workflow_id)
 
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
         """The binding a task's recorded resolution carries, if one was recorded."""
