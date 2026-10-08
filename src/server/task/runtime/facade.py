@@ -1230,8 +1230,11 @@ class TaskRuntime:
                     try:
                         yield
                     except BaseException as exc:
-                        # A refused entry stopped after its writes, not partway.
-                        if outermost and not isinstance(exc, TransitionNotDurable):
+                        # A refusal alone stopped after its writes, not partway.
+                        if outermost and not (
+                            isinstance(exc, TransitionNotDurable)
+                            and not exc.stopped_partway
+                        ):
                             with self._cv:
                                 # A transition that stopped partway may have changed
                                 # state no write carried; all of it is owed before any
@@ -1252,7 +1255,7 @@ class TaskRuntime:
             raise
         except Exception as exc:
             if refused:
-                raise TransitionNotDurable(refused) from exc
+                raise TransitionNotDurable(refused, stopped_partway=True) from exc
             raise
         if held:
             self._logger.warning(
@@ -1290,7 +1293,7 @@ class TaskRuntime:
                 raise
             except Exception as exc:
                 if outermost and (held := self._committer.close_acknowledging()):
-                    raise TransitionNotDurable(held) from exc
+                    raise TransitionNotDurable(held, stopped_partway=True) from exc
                 raise
             if outermost and (held := self._committer.close_acknowledging()):
                 raise TransitionNotDurable(held)

@@ -564,3 +564,47 @@ def test_a_task_whose_report_is_pending_is_not_merged_into_another_dispatch(
         assert _consume(monitor, failure) == _ENTRY
 
     assert merged == [[]]
+
+
+class _FaultingStore(_Store):
+    """Raises a fault of the transition itself on the next record commit of
+    ``fault``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fault: str | None = None
+
+    def commit_transition(self, workflow_id: str, **kwargs: Any) -> None:
+        if workflow_id == self.fault:
+            self.fault = None
+            raise ValueError("a fault in the transition itself")
+        super().commit_transition(workflow_id, **kwargs)
+
+
+@pytest.mark.parametrize("hold", [False, True], ids=["nothing-held", "other-held"])
+def test_an_entry_that_stops_partway_owes_a_rewrite_whatever_else_is_held(
+    hold: bool,
+) -> None:
+    store = _FaultingStore()
+    runtime = _runtime(store)
+    held_id, _ = asyncio.run(_register(runtime, TWO_V1))
+    workflow_id, ids = asyncio.run(_register(runtime, TWO_V1))
+    task_id = ids["a"]
+    assert _pop(runtime, task_id)
+    record_dispatch(runtime, task_id, "wkr-2", "dsp-2")
+    if hold:
+        store.down = {held_id}
+
+    with pytest.raises(Exception) as raised, runtime.acknowledging():
+        with runtime.transition():
+            runtime.cancel_workflow(workflow_id)
+            if hold:
+                runtime.cancel_workflow(held_id)
+            store.fault = workflow_id
+            # Settles in memory, then its commit faults.
+            runtime.mark_cancelled(task_id, "wkr-2", {}, _TS, "dsp-2")
+
+    assert isinstance(raised.value, TransitionNotDurable) is hold
+    assert runtime.get_record(task_id).status == TaskStatus.CANCELLED  # type: ignore[union-attr]
+    assert store.status(task_id) != TaskStatus.CANCELLED
+    assert workflow_id in runtime._committer.debt

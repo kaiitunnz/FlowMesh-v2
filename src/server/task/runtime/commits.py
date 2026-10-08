@@ -86,8 +86,12 @@ class TransitionNotDurable(Exception):
     handled again finds it applied, and makes what it holds durable.
     """
 
-    def __init__(self, held: dict[str, BaseException]) -> None:
+    def __init__(
+        self, held: dict[str, BaseException], stopped_partway: bool = False
+    ) -> None:
         self.held = held
+        # Whether the handling also stopped partway on an error of its own.
+        self.stopped_partway = stopped_partway
         first = next(iter(held.values()))
         super().__init__(
             f"writes of workflow(s) {', '.join(sorted(held))} are not durable: {first}"
