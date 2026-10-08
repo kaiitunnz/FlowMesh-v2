@@ -32,13 +32,19 @@ class FakeWorkflowRegistry:
     async def register_workflow_async(
         self,
         workflow_id: str,
-        tasks: list[Any],
+        tasks: Sequence[PersistedTask],
+        sched: WorkflowSched,
         v2: Any = None,
+        ledger: Any = None,
         submitted_at: str | None = None,
     ) -> None:
-        self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
+        self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
+        self.save_task_states(tasks)
+        self.sched[workflow_id] = sched.model_dump_json()
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
+        if ledger is not None:
+            self.save_ledger_snapshot(workflow_id, ledger)
 
     async def get_v2_workflow_async(self, workflow_id: str) -> Any:
         from server.task.v2 import PersistedV2Workflow
@@ -84,7 +90,7 @@ class FakeWorkflowRegistry:
     async def get_workflow_record_async(self, workflow_id: str) -> Any:
         return self.get_workflow_record(workflow_id)
 
-    def save_task_states(self, items: list[PersistedTask]) -> None:
+    def save_task_states(self, items: Sequence[PersistedTask]) -> None:
         for item in items:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
 

@@ -213,9 +213,23 @@ class _StagedRegistration:
 
     results: list[TaskParsingResult]
     task_records: list[TaskRecord]
-    candidate_ready: list[str]
+    depends_on: dict[str, set[str]]
+    merge_keys: dict[str, tuple[str | None, str | None]]
+    task_epoch_index: dict[str, int]
+    epoch_queue: deque[set[str]] | None
+    in_epoch_order: bool
     v2_bundle: PersistedV2Workflow | None
     v2_engine: OrchestrationEngine | None
+
+    def persisted(self) -> list[PersistedTask]:
+        return [
+            PersistedTask(
+                record=record,
+                depends_on=self.depends_on[record.task_id],
+                epoch_index=self.task_epoch_index.get(record.task_id),
+            )
+            for record in self.task_records
+        ]
 
 
 def _binding_defaults(
@@ -529,8 +543,6 @@ class TaskRuntime:
         # only an opaque ref reaches the template, the plan and the records.
         credentials = take_inline_credentials(parsed_workflow)
         await self._credential_vault.store_values(workflow_id, credentials.values)
-        # Once the durable write is attempted the workflow may exist, so a later failure
-        # keeps its credentials; the startup sweep reclaims a vault no workflow owns.
         try:
             staged = self._stage_registration(
                 owner_id,
@@ -545,9 +557,38 @@ class TaskRuntime:
         except BaseException:
             self._discard_credentials(workflow_id)
             raise
-        return workflow_id, await self._commit_registration(
-            workflow_id, submitted_at, staged
-        )
+        try:
+            await self._workflow_registry.register_workflow_async(
+                workflow_id,
+                staged.persisted(),
+                WorkflowSched(in_epoch_order=staged.in_epoch_order),
+                v2=staged.v2_bundle,
+                ledger=(
+                    staged.v2_engine.to_snapshot()
+                    if staged.v2_engine is not None
+                    else None
+                ),
+                submitted_at=submitted_at,
+            )
+        except BaseException:
+            await self._discard_registration(workflow_id)
+            raise
+        self._install_registration(workflow_id, staged)
+        return workflow_id, staged.results
+
+    async def _discard_registration(self, workflow_id: str) -> None:
+        """Remove what a failed submission may have written; its credentials go only
+        once nothing of the workflow can remain, else the startup sweep reclaims
+        them."""
+        try:
+            await self._workflow_registry.unregister_workflows_async(workflow_id)
+        except Exception:
+            self._logger.exception(
+                "Failed to remove the failed registration of workflow %s",
+                workflow_id,
+            )
+            return
+        self._discard_credentials(workflow_id)
 
     def _discard_credentials(self, workflow_id: str) -> None:
         try:
@@ -573,7 +614,6 @@ class TaskRuntime:
         yaml_text = redact_source_text(payload, format)
         results: list[TaskParsingResult] = []
         task_records: list[TaskRecord] = []
-        candidate_ready: list[str] = []
         graph_task_ids: dict[str, str] = {}
 
         v2_bundle: PersistedV2Workflow | None = None
@@ -607,150 +647,146 @@ class TaskRuntime:
                     ),
                 )
 
-        with self._cv:
-            if (
-                parsed_workflow.schedule_in_epoch_order
-                and parsed_workflow.epoch_groups is not None
-            ):
+        in_epoch_order = bool(
+            parsed_workflow.schedule_in_epoch_order
+            and parsed_workflow.epoch_groups is not None
+        )
+        depends: dict[str, set[str]] = {}
+        merge_keys: dict[str, tuple[str | None, str | None]] = {}
+        task_epoch_index: dict[str, int] = {}
+        epoch_queue: deque[set[str]] | None = None
+        for entry in specs:
+            task_id = entry.task_id
+            task = entry.task.model_copy(deep=True)
+            task_credentials = credentials.tasks.get(task_id, TaskCredentials())
+            depends_on = entry.depends_on.copy()
+            depends[task_id] = set(depends_on)
+
+            task_type = task.spec.taskType
+            category = categorize_task_type(task_type)
+
+            selected_worker_raw = entry.selected_worker
+            selected_worker: list[str] | None
+            if isinstance(selected_worker_raw, list):
+                normalized_workers = [
+                    str(worker_id).strip()
+                    for worker_id in selected_worker_raw
+                    if str(worker_id).strip()
+                ]
+                selected_worker = list(dict.fromkeys(normalized_workers)) or None
+            elif isinstance(selected_worker_raw, str):
+                selected_worker = (
+                    [selected_worker_raw.strip()]
+                    if selected_worker_raw.strip()
+                    else None
+                )
+            else:
+                selected_worker = None
+
+            record = TaskRecord(
+                task_id=task_id,
+                workflow_id=workflow_id,
+                owner_id=owner_id,
+                org_id=org_id,
+                raw_yaml=yaml_text,
+                task=task,
+                local_name=entry.local_name,
+                graph_node_name=entry.graph_node_name,
+                load=entry.load,
+                position_in_epoch=entry.position_in_epoch,
+                selected_worker=selected_worker,
+                task_type=task_type,
+                category=category,
+                resident=resident,
+                credential_refs=task_credentials.refs,
+            )
+            task_records.append(record)
+            record.last_queue_ts = record.submitted_ts
+            if v2_engine is None:
+                # A merged dispatch stores every result under its parent's
+                # authorization scope, so only tasks of one scope merge.
+                merge_key = task_credentials.merge_key(task.spec, scope=org_id)
+                record.merge_key = merge_key
+                selected_worker_hint = (
+                    record.selected_worker[0]
+                    if record.selected_worker and len(record.selected_worker) == 1
+                    else None
+                )
+                merge_keys[task_id] = (merge_key, selected_worker_hint)
+
+            if record.graph_node_name:
+                graph_task_ids[record.graph_node_name] = task_id
+
+            results.append(
+                TaskParsingResult(
+                    task_id=task_id,
+                    graph_node_name=entry.graph_node_name,
+                    depends_on=depends_on,
+                )
+            )
+        epoch_groups = parsed_workflow.epoch_groups
+        if epoch_groups and v2_engine is None:
+            queue: deque[set[str]] = deque()
+            has_epoch_tasks = False
+            for epoch_idx, epoch_nodes in enumerate(epoch_groups):
+                epoch_task_ids: set[str] = set()
+                for node_name in epoch_nodes:
+                    mapped_task_id = graph_task_ids.get(node_name)
+                    if mapped_task_id is None:
+                        continue
+                    epoch_task_ids.add(mapped_task_id)
+                    task_epoch_index[mapped_task_id] = epoch_idx
+                    has_epoch_tasks = True
+                queue.append(epoch_task_ids)
+            if has_epoch_tasks:
+                epoch_queue = queue
+
+        return _StagedRegistration(
+            results,
+            task_records,
+            depends,
+            merge_keys,
+            task_epoch_index,
+            epoch_queue,
+            in_epoch_order,
+            v2_bundle,
+            v2_engine,
+        )
+
+    def _install_registration(
+        self, workflow_id: str, staged: _StagedRegistration
+    ) -> None:
+        """Make a durably registered workflow live: install its records and schedule,
+        then apply its initial advance."""
+        v2_engine = staged.v2_engine
+        with self._transition(raises=False):
+            if staged.in_epoch_order:
                 self._ready.ready_by_workflow[workflow_id] = []
                 self._epochs.workflow_in_epoch_order[workflow_id] = True
-            for entry in specs:
-                task_id = entry.task_id
-                task = entry.task.model_copy(deep=True)
-                task_credentials = credentials.tasks.get(task_id, TaskCredentials())
-                depends_on = entry.depends_on.copy()
-                original = set(depends_on)
-                pending = {dep for dep in depends_on if dep not in self._completed}
-
-                task_type = task.spec.taskType
-                category = categorize_task_type(task_type)
-
-                selected_worker_raw = entry.selected_worker
-                selected_worker: list[str] | None
-                if isinstance(selected_worker_raw, list):
-                    normalized_workers = [
-                        str(worker_id).strip()
-                        for worker_id in selected_worker_raw
-                        if str(worker_id).strip()
-                    ]
-                    selected_worker = list(dict.fromkeys(normalized_workers)) or None
-                elif isinstance(selected_worker_raw, str):
-                    selected_worker = (
-                        [selected_worker_raw.strip()]
-                        if selected_worker_raw.strip()
-                        else None
-                    )
-                else:
-                    selected_worker = None
-
-                record = TaskRecord(
-                    task_id=task_id,
-                    workflow_id=workflow_id,
-                    owner_id=owner_id,
-                    org_id=org_id,
-                    raw_yaml=yaml_text,
-                    task=task,
-                    local_name=entry.local_name,
-                    graph_node_name=entry.graph_node_name,
-                    load=entry.load,
-                    position_in_epoch=entry.position_in_epoch,
-                    selected_worker=selected_worker,
-                    task_type=task_type,
-                    category=category,
-                    resident=resident,
-                    credential_refs=task_credentials.refs,
-                )
-                task_records.append(record)
-                record.last_queue_ts = record.submitted_ts
-                if v2_engine is None:
-                    # A merged dispatch stores every result under its parent's
-                    # authorization scope, so only tasks of one scope merge.
-                    merge_key = task_credentials.merge_key(task.spec, scope=org_id)
-                    record.merge_key = merge_key
-                    selected_worker_hint = (
-                        record.selected_worker[0]
-                        if record.selected_worker and len(record.selected_worker) == 1
-                        else None
-                    )
-                    self._ready.merge_key_by_task[task_id] = (
-                        merge_key,
-                        selected_worker_hint,
-                    )
-
+            if staged.epoch_queue is not None:
+                self._epochs.task_epoch_index.update(staged.task_epoch_index)
+                self._epochs.workflow_epoch_tasks[workflow_id] = staged.epoch_queue
+                self._epochs.workflow_epoch_frontier[workflow_id] = 0
+            self._ready.merge_key_by_task.update(staged.merge_keys)
+            candidate_ready: list[str] = []
+            for record in staged.task_records:
+                task_id = record.task_id
+                original = staged.depends_on[task_id]
                 self._tasks[task_id] = record
-                if record.graph_node_name:
-                    graph_task_ids[record.graph_node_name] = task_id
                 self._original_deps[task_id] = original
                 self._failed.discard(task_id)
-                if record.status == TaskStatus.DONE:
-                    self._completed.add(task_id)
-                else:
-                    self._completed.discard(task_id)
-
+                self._completed.discard(task_id)
                 # v2 readiness is owned by the orchestration engine; the legacy
                 # dependency machinery stays unwired so it cannot admit v2 work.
                 if v2_engine is None:
+                    pending = {dep for dep in original if dep not in self._completed}
                     self._dag.pending_deps[task_id] = pending
                     for dep in original:
                         self._dag.dependents[dep].add(task_id)
-                    if not pending and record.status == TaskStatus.PENDING:
+                    if not pending:
                         candidate_ready.append(task_id)
 
-                results.append(
-                    TaskParsingResult(
-                        task_id=task_id,
-                        graph_node_name=entry.graph_node_name,
-                        depends_on=depends_on,
-                    )
-                )
-            epoch_groups = parsed_workflow.epoch_groups
-            if epoch_groups and v2_engine is None:
-                epoch_queue: deque[set[str]] = deque()
-                has_epoch_tasks = False
-                for epoch_idx, epoch_nodes in enumerate(epoch_groups):
-                    epoch_task_ids: set[str] = set()
-                    for node_name in epoch_nodes:
-                        mapped_task_id = graph_task_ids.get(node_name)
-                        if mapped_task_id is None:
-                            continue
-                        epoch_task_ids.add(mapped_task_id)
-                        self._epochs.task_epoch_index[mapped_task_id] = epoch_idx
-                        has_epoch_tasks = True
-                    epoch_queue.append(epoch_task_ids)
-                if has_epoch_tasks:
-                    self._epochs.workflow_epoch_tasks[workflow_id] = epoch_queue
-                    self._epochs.workflow_epoch_frontier[workflow_id] = 0
-
-        return _StagedRegistration(
-            results, task_records, candidate_ready, v2_bundle, v2_engine
-        )
-
-    async def _commit_registration(
-        self, workflow_id: str, submitted_at: str, staged: _StagedRegistration
-    ) -> list[TaskParsingResult]:
-        task_records = staged.task_records
-        v2_engine = staged.v2_engine
-        await self._workflow_registry.register_workflow_async(
-            workflow_id, task_records, v2=staged.v2_bundle, submitted_at=submitted_at
-        )
-
-        with self._cv:
-            persisted = [
-                item
-                for record in task_records
-                if (item := self._committer.persisted_task_locked(record.task_id))
-            ]
-            in_epoch_order = self._epochs.workflow_in_epoch_order.get(
-                workflow_id, False
-            )
-            frontier = self._epochs.workflow_epoch_frontier.get(workflow_id, 0)
-        await self._workflow_registry.save_task_states_async(persisted)
-        await self._workflow_registry.save_workflow_sched_async(
-            workflow_id, in_epoch_order, frontier
-        )
-
-        new_ready = False
-        with self._cv:
+            new_ready = False
             if v2_engine is not None:
                 self._engines[workflow_id] = v2_engine
                 with self._control.workflow_stage(
@@ -758,27 +794,16 @@ class TaskRuntime:
                     ControlPlaneWindow.SUBMIT,
                     workflow_id,
                 ):
-                    advance_applied = self._apply_advance_locked(
+                    if self._apply_advance_locked(
                         workflow_id, v2_engine.initial_advance()
-                    )
-                if advance_applied:
-                    new_ready = True
-                # Saved under the lock after the initial advance persists any
-                # authority-denied roots, so the ledger never leads durable task state
-                # and no later save lands before it.
+                    ):
+                        new_ready = True
                 self._committer.save_ledger_locked(workflow_id)
-            for task_id in staged.candidate_ready:
-                maybe_record = self._tasks.get(task_id)
-                if not maybe_record or maybe_record.status != TaskStatus.PENDING:
-                    continue
-                if self._dag.pending_deps.get(task_id):
-                    continue
+            for task_id in candidate_ready:
                 if self._ready.enqueue_ready_locked(task_id):
                     new_ready = True
             if new_ready:
                 self._cv.notify_all()
-
-        return staged.results
 
     # ------------------------------------------------------------------ #
     # Rehydration

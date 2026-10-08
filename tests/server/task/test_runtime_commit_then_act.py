@@ -2,12 +2,16 @@
 
 import asyncio
 import logging
+from collections.abc import Iterator
 from typing import Any, cast
+from unittest import mock
 
 import pytest
 
 from server.config import OrchestrationConfig
+from server.orchestration import OrchestrationEngine
 from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.registries.workflow import PersistedTask
 from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from server.task.workflow_retry import WorkflowRetryScheduler
@@ -302,3 +306,84 @@ async def test_a_child_whose_materialization_is_held_is_not_published() -> None:
     assert runtime.begin_publish(child, worker, "dsp-2") is PublishGate.PUBLISH
     assert child in registry.dynamic_task_ids[workflow_id]
     assert child in registry.task_blobs
+
+
+_DENIED_ROOT = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: denied-root}
+spec:
+  graph:
+    nodes:
+      - name: caller
+        spec:
+          taskType: api
+          api: {url: 'http://x', method: GET}
+      - name: after
+        dependsOn: [caller]
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+"""
+
+
+@pytest.fixture
+def denied_root() -> Iterator[None]:
+    """Build every engine under an empty root grant, so the initial advance fails the
+    root and everything downstream of it."""
+    build = OrchestrationEngine.build
+
+    def denying(*args: Any, **kwargs: Any) -> OrchestrationEngine:
+        return build(*args, **{**kwargs, "granted_interfaces": frozenset()})
+
+    with mock.patch.object(OrchestrationEngine, "build", side_effect=denying):
+        yield
+
+
+def _durable_statuses(registry: FakeRegistry, ids: dict[str, str]) -> dict[str, Any]:
+    return {
+        name: PersistedTask.model_validate_json(registry.task_blobs[task_id]).record
+        for name, task_id in ids.items()
+    }
+
+
+@pytest.mark.usefixtures("denied_root")
+def test_a_crash_before_a_registration_goes_live_restores_its_initial_advance() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    with mock.patch.object(TaskRuntime, "_install_registration"):
+        workflow_id, ids = asyncio.run(_register(runtime, _DENIED_ROOT))
+    runtime.shutdown()
+
+    restored = _runtime(registry)
+    assert asyncio.run(restored.rehydrate()) == 1
+
+    assert restored.orchestration_engine(workflow_id) is not None
+    durable = _durable_statuses(registry, ids)
+    assert durable["caller"].status == TaskStatus.FAILED
+    assert durable["caller"].error is not None
+    assert "authority denied" in durable["caller"].error
+    assert durable["after"].status == TaskStatus.FAILED
+    assert pop_ready(restored) is None
+
+
+@pytest.mark.usefixtures("denied_root")
+def test_a_held_initial_advance_leaves_its_registration_standing() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    commit = registry.commit_transition
+
+    def down(*_: Any, **__: Any) -> None:
+        raise ConnectionError("control redis unavailable")
+
+    registry.commit_transition = down  # type: ignore[method-assign]
+    workflow_id, ids = asyncio.run(_register(runtime, _DENIED_ROOT))
+
+    assert workflow_id in registry.workflow_task_ids
+    assert workflow_id in registry.ledger_blobs
+    assert runtime._durability.pending(workflow_id)
+    registry.commit_transition = commit  # type: ignore[method-assign]
+
+    assert runtime._durability.run_due() == [workflow_id]
+
+    durable = _durable_statuses(registry, ids)
+    assert {record.status for record in durable.values()} == {TaskStatus.FAILED}
+    assert not runtime._durability.pending(workflow_id)

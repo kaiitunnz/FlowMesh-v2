@@ -10,7 +10,7 @@ import pytest
 from starlette.datastructures import QueryParams
 
 from server.clients.redis import AsyncRedisClient, SyncRedisClient
-from server.registries.workflow import WorkflowRegistry
+from server.registries.workflow import WorkflowRegistry, WorkflowSched
 from server.utils.query import QueryFilter
 from tests.server.redis_helpers import fake_redis_client
 from tests.server.task.test_v2_orchestration import AUTORESEARCH
@@ -191,6 +191,16 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
     asyncio.run(async_.save_ledger_snapshot_async(workflow_id, snapshot))
     sync.save_workflow_sched(workflow_id, True, 3)
     asyncio.run(async_.save_workflow_sched_async(workflow_id, True, 3))
+    registration: dict[str, Any] = {
+        "ledger": snapshot,
+        "submitted_at": "2026-10-08T00:00:00+00:00",
+    }
+    sync.register_workflow("wfl-new", records, WorkflowSched(), **registration)
+    asyncio.run(
+        async_.register_workflow_async(
+            "wfl-new", records, WorkflowSched(), **registration
+        )
+    )
 
     assert twins.stores()[0] == twins.stores()[1]
     sched = sync.load_workflow_sched(workflow_id)

@@ -298,6 +298,33 @@ def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> No
         pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
 
 
+def _queue_registration(
+    pipe: _AnyPipeline,
+    workflow_id: str,
+    tasks: Sequence[PersistedTask],
+    sched: WorkflowSched,
+    v2: PersistedV2Workflow | None,
+    ledger: LedgerSnapshot | None,
+    submitted_at: str | None,
+) -> None:
+    record, remaining_tasks, failed_tasks = _create_workflow_record(
+        workflow_id, [item.record for item in tasks], submitted_at
+    )
+    pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
+    pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, {_record_member(record): 0})
+    pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
+    if remaining_tasks:
+        pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
+    if failed_tasks:
+        pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed_tasks)
+    _queue_task_states(pipe, tasks)
+    pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
+    if v2 is not None:
+        pipe.set(workflow_v2_key(workflow_id), v2.model_dump_json())
+    if ledger is not None:
+        pipe.set(workflow_ds_key(workflow_id), ledger.model_dump_json())
+
+
 def _queue_transition(
     pipe: _AnyPipeline,
     workflow_id: str,
@@ -360,45 +387,34 @@ class WorkflowRegistry:
     def register_workflow(
         self,
         workflow_id: str,
-        tasks: list[TaskRecord],
+        tasks: Sequence[PersistedTask],
+        sched: WorkflowSched,
         v2: PersistedV2Workflow | None = None,
+        ledger: LedgerSnapshot | None = None,
         submitted_at: str | None = None,
     ) -> None:
-        record, remaining_tasks, failed_tasks = _create_workflow_record(
-            workflow_id, tasks, submitted_at
-        )
+        """Register a workflow with its task states, schedule, plan and ledger as one
+        atomic transaction."""
         with self._rds.sync.control_pipeline() as pipe:
-            pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
-            pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, {_record_member(record): 0})
-            pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
-            if remaining_tasks:
-                pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
-            if failed_tasks:
-                pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed_tasks)
-            if v2 is not None:
-                pipe.set(workflow_v2_key(workflow_id), v2.model_dump_json())
+            _queue_registration(
+                pipe, workflow_id, tasks, sched, v2, ledger, submitted_at
+            )
             pipe.execute()
 
     async def register_workflow_async(
         self,
         workflow_id: str,
-        tasks: list[TaskRecord],
+        tasks: Sequence[PersistedTask],
+        sched: WorkflowSched,
         v2: PersistedV2Workflow | None = None,
+        ledger: LedgerSnapshot | None = None,
         submitted_at: str | None = None,
     ) -> None:
-        record, remaining_tasks, failed_tasks = _create_workflow_record(
-            workflow_id, tasks, submitted_at
-        )
+        """Register a workflow as ``register_workflow`` does."""
         async with self._rds.asyncio.control_pipeline() as pipe:
-            pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
-            pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, {_record_member(record): 0})
-            pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
-            if remaining_tasks:
-                pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
-            if failed_tasks:
-                pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed_tasks)
-            if v2 is not None:
-                pipe.set(workflow_v2_key(workflow_id), v2.model_dump_json())
+            _queue_registration(
+                pipe, workflow_id, tasks, sched, v2, ledger, submitted_at
+            )
             await pipe.execute()
 
     def unregister_workflows(self, *workflow_ids: str) -> None:

@@ -71,18 +71,32 @@ class FakeRegistry:
     async def register_workflow_async(
         self,
         workflow_id: str,
-        tasks: list[Any],
+        tasks: Sequence[PersistedTask],
+        sched: WorkflowSched,
         v2: Any = None,
+        ledger: LedgerSnapshot | None = None,
         submitted_at: str | None = None,
     ) -> None:
-        self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
+        self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
         self.remaining[workflow_id] = {
-            t.task_id
+            t.record.task_id
             for t in tasks
-            if t.status not in (TaskStatus.DONE, TaskStatus.FAILED)
+            if t.record.status not in (TaskStatus.DONE, TaskStatus.FAILED)
         }
+        for item in tasks:
+            self.task_blobs[item.record.task_id] = item.model_dump_json()
+        self.sched[workflow_id] = sched.model_dump_json()
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
+        if ledger is not None:
+            self.ledger_blobs[workflow_id] = ledger.model_dump_json()
+
+    async def unregister_workflows_async(self, *workflow_ids: str) -> None:
+        for workflow_id in workflow_ids:
+            for task_id in self.workflow_task_ids.pop(workflow_id, []):
+                self.task_blobs.pop(task_id, None)
+            for store in (self.remaining, self.sched, self.v2_blobs, self.ledger_blobs):
+                store.pop(workflow_id, None)
 
     async def get_workflow_ids_async(self) -> set[str]:
         return set(self.workflow_task_ids)

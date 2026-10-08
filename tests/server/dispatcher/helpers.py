@@ -33,8 +33,10 @@ class WorkflowRegistryStub:
     async def register_workflow_async(
         self,
         workflow_id: str,
-        tasks: list[Any],
+        tasks: Sequence[PersistedTask],
+        sched: WorkflowSched,
         v2: Any = None,
+        ledger: Any = None,
         submitted_at: str | None = None,
     ) -> None:
         return None
@@ -50,10 +52,6 @@ class WorkflowRegistryStub:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
-    ) -> None: ...
-    async def save_task_states_async(self, items: Any) -> None: ...
-    async def save_workflow_sched_async(
-        self, wid: str, in_epoch_order: bool, frontier: int
     ) -> None: ...
 
 

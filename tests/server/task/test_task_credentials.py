@@ -190,18 +190,39 @@ def test_a_credential_under_a_non_string_key_is_vaulted_and_restored(
 
 
 @pytest.mark.parametrize("api_version", ["flowmesh/v1", "flowmesh/v2"])
-def test_a_failure_after_the_durable_write_keeps_the_credentials(api_version):
+def test_a_failed_registration_write_removes_the_workflow_and_its_credentials(
+    api_version,
+):
     registry = FakeRegistry()
     vault = InMemoryCredentialVault()
     runtime = _runtime(registry, vault)
-    boom = RuntimeError("redis unavailable")
+    boom = ConnectionError("redis unavailable")
 
-    with mock.patch.object(registry, "save_task_states_async", side_effect=boom):
-        with pytest.raises(RuntimeError, match="redis unavailable"):
+    with mock.patch.object(registry, "register_workflow_async", side_effect=boom):
+        with pytest.raises(ConnectionError, match="redis unavailable"):
+            _register(runtime, _api_workflow(api_version))
+
+    assert not vault.redis.hashes
+    assert runtime.task_records() == []
+
+
+@pytest.mark.parametrize("api_version", ["flowmesh/v1", "flowmesh/v2"])
+def test_a_registration_that_may_have_landed_keeps_its_credentials(api_version):
+    registry = FakeRegistry()
+    vault = InMemoryCredentialVault()
+    runtime = _runtime(registry, vault)
+    boom = ConnectionError("redis unavailable")
+
+    with (
+        mock.patch.object(registry, "register_workflow_async", side_effect=boom),
+        mock.patch.object(registry, "unregister_workflows_async", side_effect=boom),
+    ):
+        with pytest.raises(ConnectionError, match="redis unavailable"):
             _register(runtime, _api_workflow(api_version))
 
     [vaulted] = vault.redis.hashes.values()
     assert _AUTH in json.dumps(list(vaulted.values()))
+    assert runtime.task_records() == []
 
 
 @pytest.mark.parametrize("original", [ValueError("refused"), asyncio.CancelledError()])
