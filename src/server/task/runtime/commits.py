@@ -5,6 +5,7 @@ import threading
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import cast
 
 from redis.exceptions import (
     BusyLoadingError,
@@ -145,23 +146,30 @@ class _Debt:
 class _Scope(threading.local):
     depth: int = 0
     held: dict[str, BaseException]
-    # The writes held while an acknowledging caller's handling runs, by workflow.
+    # The writes held while an acknowledging caller's handling runs, by workflow, and
+    # the scope depth that handling started at.
     acknowledging: dict[str, BaseException] | None = None
+    acknowledging_depth: int = 0
+    # The tasks whose reports that handling took up.
+    guarded: set[str]
     reporting: bool = False
 
     def __init__(self) -> None:
         self.held = {}
+        self.guarded = set()
 
 
 @dataclass
 class _Unacknowledged:
     """A report its caller has not acknowledged because writes of its handling are
-    held: the workflows owing them, made by the report handled again."""
+    held: the workflows owing them, and what the handling answered, made and answered
+    again by the report handled again."""
 
     report: str
     worker_id: str
     dispatch_id: str | None
     workflows: set[str]
+    outcome: SettleOutcome | FailureOutcome
 
 
 class TransitionCommitter:
@@ -209,6 +217,8 @@ class TransitionCommitter:
         # Children materialized in memory whose records the ledger seam has not written.
         self._unwritten_children: dict[str, set[str]] = {}
         self.unacknowledged: dict[str, _Unacknowledged] = {}
+        # How many acknowledging handlings have taken up a report of each task.
+        self._reports: dict[str, int] = {}
         self.retired_region_templates: dict[str, set[str]] = {}
         self.on_workflow_settled: Callable[[str], None] | None = None
         self.on_debt: Callable[[str], None] | None = None
@@ -222,14 +232,20 @@ class TransitionCommitter:
         self._scope.depth += 1
         return self._scope.depth == 1
 
-    def exit_scope(self) -> dict[str, BaseException]:
+    def exit_scope(self) -> tuple[dict[str, BaseException], dict[str, BaseException]]:
         """Close a transition scope, returning the errors of the writes the outermost
-        one held, by workflow."""
+        one held, by workflow, and, when it is a runtime entry an acknowledging caller
+        made, those of the writes its handling holds still."""
+        entry = (
+            self._scope.acknowledging is not None
+            and self._scope.depth == self._scope.acknowledging_depth + 2
+        )
         self._scope.depth -= 1
+        refused = self._still_held(self._scope.acknowledging or {}) if entry else {}
         if self._scope.depth:
-            return {}
+            return {}, refused
         held, self._scope.held = self._scope.held, {}
-        return self._still_held(held)
+        return self._still_held(held), refused
 
     def open_acknowledging(self) -> bool:
         """Start collecting the writes this thread's handling holds, for a caller that
@@ -237,6 +253,7 @@ class TransitionCommitter:
         if self._scope.acknowledging is not None:
             return False
         self._scope.acknowledging = {}
+        self._scope.acknowledging_depth = self._scope.depth
         return True
 
     def close_acknowledging(self) -> dict[str, BaseException]:
@@ -244,6 +261,23 @@ class TransitionCommitter:
         are still not durable, by workflow."""
         held, self._scope.acknowledging = self._scope.acknowledging or {}, None
         return self._still_held(held)
+
+    def reporting(self, task_id: str) -> bool:
+        """Whether an acknowledging caller is handling a report of the task."""
+        return task_id in self._reports
+
+    def end_reports_locked(self) -> list[str]:
+        """Release the reports this thread's handling took up; returns the tasks no
+        handling holds any more."""
+        guarded, self._scope.guarded = self._scope.guarded, set()
+        ended = []
+        for task_id in guarded:
+            if (count := self._reports[task_id] - 1) > 0:
+                self._reports[task_id] = count
+            else:
+                del self._reports[task_id]
+                ended.append(task_id)
+        return ended
 
     def _still_held(self, held: dict[str, BaseException]) -> dict[str, BaseException]:
         # A write held and made later within the same handling left nothing owed.
@@ -679,21 +713,25 @@ class TransitionCommitter:
         worker_id: str | None,
         dispatch_id: str | None,
         transition: Callable[[], O],
-        handled: O,
     ) -> O:
         """Apply a worker's report to its task through ``transition``.
 
-        A handling an acknowledging caller does not acknowledge, because writes it made
-        are held, is remembered with the workflows owing them. The report handled again
-        is not applied again: it makes those writes and answers ``handled``, and is
-        acknowledged once none is held. ``transition`` runs in the caller's transition
-        scope.
+        A report an acknowledging caller handles holds its task's next publication
+        until the handling ends, so what the caller does after the report runs before
+        the task can be dispatched again. A handling whose writes are held is
+        remembered with the workflows owing them and its answer. The report handled
+        again is not applied again: it makes those writes and gives the same answer.
+        ``transition`` runs in the caller's transition scope.
         """
         # A report naming no worker has nothing to replay against, and a nested one
         # runs under the outer report.
         if worker_id is None or self._scope.reporting:
             return transition()
+        acknowledging = self._scope.acknowledging is not None
         with self._lock:
+            if acknowledging and task_id not in self._scope.guarded:
+                self._scope.guarded.add(task_id)
+                self._reports[task_id] = self._reports.get(task_id, 0) + 1
             # A stash matches only the same report from the same worker, naming its
             # dispatch or none.
             pending = self.unacknowledged.get(task_id)
@@ -710,7 +748,7 @@ class TransitionCommitter:
                     del self.unacknowledged[task_id]
                 else:
                     pending.workflows = held
-                return handled
+                return cast(O, pending.outcome)
         self._scope.reporting = True
         try:
             outcome = transition()
@@ -718,9 +756,9 @@ class TransitionCommitter:
             self._scope.reporting = False
         with self._lock:
             held = {w for w in self._scope.held if w in self.debt}
-            if held and self._scope.acknowledging is not None:
+            if held and acknowledging:
                 self.unacknowledged[task_id] = _Unacknowledged(
-                    report, worker_id, dispatch_id, held
+                    report, worker_id, dispatch_id, held, outcome
                 )
         return outcome
 

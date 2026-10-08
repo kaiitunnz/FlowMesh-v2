@@ -1,10 +1,11 @@
 """What the event monitor does after a runtime transition waits for its commit.
 
-A task's log stream closes, and what its dispatch exposed is torn down, only once the
-transition that ended the dispatch is durable; a report handled again never repeats
-that teardown on a later dispatch. A caller that handles a report internally gets its
-outcome while the writes are held, and a report acknowledged by the stream stays
-unacknowledged while any workflow its handling touched owes writes.
+A task's log stream closes, its usage is emitted, and what its dispatch exposed is torn
+down, once, after the transition that ended the dispatch is durable, and before the
+task can be dispatched again; a report handled again never repeats that teardown on a
+later dispatch. A caller that handles a report internally gets its outcome while the
+writes are held, and a report acknowledged by the stream stays unacknowledged while any
+workflow its handling touched owes writes.
 """
 
 import asyncio
@@ -25,6 +26,7 @@ from shared.schemas.event import TaskEvent, WorkerEvent
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.services.test_task_event_fence import _ECHO_V2, _event
 from tests.server.task.test_runtime_commit_then_act import _runtime
+from tests.server.task.test_runtime_durability_faults import _restarted
 from tests.server.task.test_task_merge import (
     _WORKER,
     _merged_success,
@@ -138,34 +140,95 @@ def _dispatched(template: str) -> tuple[_Store, TaskRuntime, str, str]:
     return store, runtime, workflow_id, task_id
 
 
+def _pop(runtime: TaskRuntime, task_id: str) -> bool:
+    """Take the task off the ready queue, passing over any other task."""
+    while (ready := pop_ready(runtime, 0.05)) is not None:
+        if ready == task_id:
+            return True
+    return False
+
+
+def _with_usage(event: TaskEvent) -> TaskEvent:
+    payload = {
+        **event.payload,
+        "started_at": _TS,
+        "finished_at": _TS,
+        "runtime_sec": 1.0,
+        "hardware": {
+            "gpu": {"driver_version": None, "cuda_version": None, "devices": []}
+        },
+        "cost_per_hour": 2.0,
+        "total_cost": 0.5,
+    }
+    return event.model_copy(update={"payload": payload})
+
+
+def _usage_spy(monitor: EventMonitor) -> list[Any]:
+    emitted: list[Any] = []
+    setattr(monitor, "_schedule_emit_usage", emitted.extend)
+    return emitted
+
+
 def test_a_held_settlement_closes_no_log_and_tears_nothing_down_until_durable() -> None:
     store, runtime, workflow_id, task_id = _dispatched(_ECHO_V2)
     monitor, telemetry, forward = _monitor(runtime)
-    success = _event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1")
+    emitted = _usage_spy(monitor)
+    success = _with_usage(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1"))
     store.all_down = True
 
     assert _consume(monitor, success) == "0-0"
 
     assert telemetry.acknowledged == []
     assert runtime.get_record(task_id).status == TaskStatus.DONE  # type: ignore[union-attr]
-    assert telemetry.sealed == []
+    assert telemetry.sealed == [] and emitted == []
     forward.unregister_task.assert_not_called()
 
     store.all_down = False
     runtime._retry_durability(workflow_id)
     assert store.status(task_id) == TaskStatus.DONE
-    assert len(telemetry.sealed) == 1
-    forward.unregister_task.assert_called_once_with(task_id)
+    assert telemetry.sealed == [] and emitted == []
 
     assert _consume(monitor, success) == _ENTRY
     assert telemetry.acknowledged == [_ENTRY]
-    assert len(telemetry.sealed) == 1
+    assert len(telemetry.sealed) == 1 and len(emitted) == 1
     forward.unregister_task.assert_called_once_with(task_id)
 
 
-def test_a_redelivered_failure_does_not_tear_down_the_next_dispatch() -> None:
+def test_a_healthy_settlement_emits_its_usage_once() -> None:
+    _, runtime, _, task_id = _dispatched(_ECHO_V2)
+    monitor, telemetry, _ = _monitor(runtime)
+    emitted = _usage_spy(monitor)
+    success = _with_usage(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1"))
+
+    assert _consume(monitor, success) == _ENTRY
+
+    assert [task for task, _ in emitted] == [task_id]
+    assert len(telemetry.sealed) == 1
+
+
+def test_a_settlement_lost_to_a_crash_emits_its_usage_once_on_replay() -> None:
+    store, runtime, _, task_id = _dispatched(_ECHO_V2)
+    monitor, _, _ = _monitor(runtime)
+    emitted = _usage_spy(monitor)
+    success = _with_usage(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1"))
+    store.all_down = True
+    assert _consume(monitor, success) == "0-0"
+    runtime.shutdown()
+
+    store.all_down = False
+    restored = _restarted(runtime, store)
+    asyncio.run(restored.rehydrate())
+    replaying, _, _ = _monitor(restored)
+    setattr(replaying, "_schedule_emit_usage", emitted.extend)
+    assert _consume(replaying, success) == _ENTRY
+
+    assert [task for task, _ in emitted] == [task_id]
+    assert store.status(task_id) == TaskStatus.DONE
+
+
+def test_a_held_failure_is_torn_down_once_and_never_on_the_next_dispatch() -> None:
     store, runtime, workflow_id, task_id = _dispatched(TWO_V1)
-    monitor, telemetry, forward = _monitor(runtime)
+    monitor, _, forward = _monitor(runtime)
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
     store.all_down = True
     assert _consume(monitor, failure) == "0-0"
@@ -173,74 +236,104 @@ def test_a_redelivered_failure_does_not_tear_down_the_next_dispatch() -> None:
 
     store.all_down = False
     runtime._retry_durability(workflow_id)
+    forward.unregister_task.assert_not_called()
+    # The task waits for its report to be handled again before it is dispatched.
+    assert _pop(runtime, task_id)
+    gate = runtime.begin_publish(task_id, _worker("wkr-2"), "dsp-2")
+    assert gate is PublishGate.NOT_DURABLE
+    monitor._dispatcher.requeue_task(task_id, reason="not_durable", count_retry=False)
+
+    assert _consume(monitor, failure) == _ENTRY
     forward.unregister_task.assert_called_once_with(task_id)
-    assert pop_ready(runtime, 0.05) is not None
+    assert _pop(runtime, task_id)
     record_dispatch(runtime, task_id, "wkr-2", "dsp-2")
     forward.reset_mock()
 
+    # The stream delivers the failure once more.
     assert _consume(monitor, failure) == _ENTRY
-
     record = runtime.get_record(task_id)
     assert record is not None
     assert (record.status, record.dispatch_id) == (TaskStatus.DISPATCHED, "dsp-2")
     forward.unregister_task.assert_not_called()
 
 
-def test_a_task_does_not_publish_again_while_its_teardown_is_owed() -> None:
+@pytest.mark.parametrize("held", [False, True], ids=["healthy", "redelivered"])
+def test_a_task_is_not_dispatched_again_until_its_report_is_handled(
+    held: bool,
+) -> None:
     store, runtime, workflow_id, task_id = _dispatched(TWO_V1)
     monitor, _, forward = _monitor(runtime)
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
-    store.all_down = True
-    _consume(monitor, failure)
-    store.all_down = False
-    assert pop_ready(runtime, 0.05) == task_id
+    if held:
+        store.all_down = True
+        assert _consume(monitor, failure) == "0-0"
+        store.all_down = False
+        runtime._retry_durability(workflow_id)
+    gates: list[PublishGate] = []
+    release = monitor._release_task
 
-    # Publishing makes the failure durable and delivers its teardown, not the
-    # dispatch.
-    gate = runtime.begin_publish(task_id, _worker("wkr-2"), "dsp-2")
-    assert gate is PublishGate.NOT_DURABLE
+    def paused_before_release(released: str) -> None:
+        # The consumer has its answer from the runtime and has not yet torn down.
+        assert _pop(runtime, task_id)
+        gates.append(runtime.begin_publish(task_id, _worker("wkr-2"), "dsp-2"))
+        release(released)
+
+    setattr(monitor, "_release_task", paused_before_release)
+    assert _consume(monitor, failure) == _ENTRY
+
+    assert gates == [PublishGate.REPORTING]
     forward.unregister_task.assert_called_once_with(task_id)
+    assert _pop(runtime, task_id)
     assert runtime.begin_publish(task_id, _worker("wkr-2"), "dsp-2") is (
         PublishGate.PUBLISH
     )
 
 
-def test_a_teardown_runs_once_and_never_on_a_later_dispatch() -> None:
+def test_a_failing_post_step_leaves_the_task_free_to_dispatch() -> None:
+    _, runtime, _, task_id = _dispatched(TWO_V1)
+    monitor, _, _ = _monitor(runtime)
+    failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
+
+    def broken(_task_id: str) -> None:
+        raise RuntimeError("forward service down")
+
+    setattr(monitor, "_release_task", broken)
+    assert _consume(monitor, failure) == "0-0"
+
+    assert not runtime._committer.reporting(task_id)
+    assert _pop(runtime, task_id)
+    assert runtime.begin_publish(task_id, _worker("wkr-2"), "dsp-2") is (
+        PublishGate.PUBLISH
+    )
+
+
+def test_an_entry_raises_at_its_exit_before_the_handler_acts_on_it() -> None:
     store, runtime, workflow_id, task_id = _dispatched(TWO_V1)
-    torn: list[str] = []
     store.all_down = True
+    after: list[str] = []
+
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
+        runtime.mark_started(task_id, "wkr-1", {}, _TS, "dsp-1")
+        after.append("post-step")
+
+    assert after == []
+    # An internal caller gets its answer while the write is held.
     runtime.mark_started(task_id, "wkr-1", {}, _TS, "dsp-1")
-    runtime.file_cleanup(task_id, "dsp-0", "release", lambda: torn.append("dsp-0"))
-    runtime.file_cleanup(task_id, "dsp-1", "release", lambda: torn.append("dsp-1"))
-    runtime.file_cleanup(task_id, "dsp-1", "release", lambda: torn.append("again"))
-    assert torn == []
-
-    store.all_down = False
-    runtime._retry_durability(workflow_id)
-    assert torn == ["dsp-1"]
+    assert workflow_id in runtime._committer.debt
 
 
-def test_a_failed_teardown_is_retried_with_its_workflow() -> None:
+def test_a_handling_that_fails_with_a_write_held_is_not_durable() -> None:
     store, runtime, workflow_id, task_id = _dispatched(TWO_V1)
-    attempts: list[int] = []
-
-    def flaky() -> None:
-        attempts.append(1)
-        if len(attempts) == 1:
-            raise ConnectionError("telemetry down")
-
     store.all_down = True
-    runtime.mark_succeeded(task_id, "wkr-1", {}, _TS, "dsp-1")
-    runtime.file_cleanup(task_id, "dsp-1", "close-log", flaky)
-    assert attempts == []
 
-    store.all_down = False
-    runtime._retry_durability(workflow_id)
-    assert attempts == [1]
-    assert runtime._durability.pending(workflow_id)
-    runtime._retry_durability(workflow_id)
-    assert attempts == [1, 1]
-    assert not runtime._actions.cleanup_owed(task_id)
+    with pytest.raises(TransitionNotDurable) as raised:
+        with runtime.acknowledging():
+            with runtime.transition():
+                runtime.mark_started(task_id, "wkr-1", {}, _TS, "dsp-1")
+                raise ValueError("handler bug")
+
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert set(raised.value.held) == {workflow_id}
 
 
 def test_a_replay_waits_for_every_workflow_its_first_handling_held() -> None:

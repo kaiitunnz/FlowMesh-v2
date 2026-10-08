@@ -122,12 +122,15 @@ class PublishGate(StrEnum):
 
     ``PUBLISH``: its task is pending and everything the dispatch carries is durable.
     ``NOT_PENDING``: its task is not waiting for a dispatch. ``NOT_DURABLE``: what the
-    dispatch carries, or the teardown of its task's previous dispatch, is still owed.
+    dispatch carries is still owed, or its task's last report waits to be handled
+    again. ``REPORTING``: a report of its task is being handled; the task is queued
+    again once it is.
     """
 
     PUBLISH = "publish"
     NOT_PENDING = "not_pending"
     NOT_DURABLE = "not_durable"
+    REPORTING = "reporting"
 
 
 class SettleOutcome(NamedTuple):

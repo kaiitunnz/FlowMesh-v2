@@ -153,7 +153,6 @@ from .after_commit import (
     AfterCommit,
     AfterCommitActions,
     AuthorizeTurn,
-    Cleanup,
     CreditRelease,
     Interrupt,
     Issue,
@@ -181,7 +180,6 @@ from .reports import (
     LOSS_EFFECTS,
     failed_task_can_retry,
     in_flight_usage,
-    membership,
     reported_child_references,
     reported_reference,
     reset_to_pending,
@@ -406,6 +404,8 @@ class TaskRuntime:
         # Each held model turn's latest authorization waiting on its workflow's writes,
         # by agent task and call correlation.
         self._parked_turns: dict[tuple[str, str], AuthorizeTurn] = {}
+        # Tasks taken off the queue while a report of theirs is being handled.
+        self._awaiting_reports: set[str] = set()
 
         self._dag = StaticDag()
         self._epochs = EpochFrontier()
@@ -1217,37 +1217,50 @@ class TaskRuntime:
 
         The transition runs under the lock, or, when not ``locked``, takes the lock
         itself, so it can read off the lock first. A write the store does not take is
-        held for a retry and the transition completes in memory.
+        held for a retry and the transition completes in memory. A runtime entry an
+        acknowledging caller makes raises ``TransitionNotDurable`` at its exit while a
+        write its handling made is held, before the caller acts on its answer.
         """
         if outermost := self._committer.enter_scope():
             self._actions.open_scope()
+        refused: dict[str, BaseException] = {}
         try:
-            with self._cv if locked else nullcontext():
-                try:
-                    yield
-                except BaseException:
-                    if outermost:
-                        with self._cv:
-                            # A transition that stopped partway may have changed state
-                            # no write carried; all of it is owed before any action.
-                            for workflow_id in list(self._actions.parked):
-                                self._committer.mark_dirty_locked(workflow_id)
-                    raise
-                finally:
-                    if outermost:
-                        with self._cv:
-                            self._actions.close_scope_locked()
-                            self._actions.release_locked(self._committer.durable)
-        finally:
-            held = self._committer.exit_scope()
-            if outermost:
-                self._act_after_commit()
+            try:
+                with self._cv if locked else nullcontext():
+                    try:
+                        yield
+                    except BaseException:
+                        if outermost:
+                            with self._cv:
+                                # A transition that stopped partway may have changed
+                                # state no write carried; all of it is owed before any
+                                # action.
+                                for workflow_id in list(self._actions.parked):
+                                    self._committer.mark_dirty_locked(workflow_id)
+                        raise
+                    finally:
+                        if outermost:
+                            with self._cv:
+                                self._actions.close_scope_locked()
+                                self._actions.release_locked(self._committer.durable)
+            finally:
+                held, refused = self._committer.exit_scope()
+                if outermost:
+                    self._act_after_commit()
+        except TransitionNotDurable:
+            raise
+        except Exception as exc:
+            if refused:
+                raise TransitionNotDurable(refused) from exc
+            raise
         if held:
             self._logger.warning(
                 "Writes of workflow(s) %s are held for a retry: %s",
                 ", ".join(sorted(held)),
                 next(iter(held.values())),
             )
+        if refused:
+            raise TransitionNotDurable(refused)
 
     @contextmanager
     def transition(self) -> Iterator[None]:
@@ -1260,38 +1273,44 @@ class TaskRuntime:
     def acknowledging(self) -> Iterator[None]:
         """Run the handling of a request its caller acknowledges, as one transition.
 
-        Raises ``TransitionNotDurable`` once the handling ends with a write it made
-        still held, so the caller leaves the request unacknowledged and handles it
-        again.
+        A runtime entry the handling makes raises ``TransitionNotDurable`` at its exit
+        while a write the handling made is held, and so does the handling itself when
+        it ends with one held, whatever else it raised, so the caller leaves the
+        request unacknowledged and handles it again. A task whose report the handling
+        took up is not dispatched again until the handling ends.
         """
         outermost = self._committer.open_acknowledging()
         try:
-            with self._transition(locked=False):
-                yield
-        except BaseException:
+            try:
+                with self._transition(locked=False):
+                    yield
+            except TransitionNotDurable:
+                raise
+            except Exception as exc:
+                if outermost and (held := self._committer.close_acknowledging()):
+                    raise TransitionNotDurable(held) from exc
+                raise
+            if outermost and (held := self._committer.close_acknowledging()):
+                raise TransitionNotDurable(held)
+        finally:
             if outermost:
                 self._committer.close_acknowledging()
-            raise
-        if outermost and (held := self._committer.close_acknowledging()):
-            raise TransitionNotDurable(held)
+                self._end_reports()
 
-    def file_cleanup(
-        self,
-        task_id: str,
-        dispatch_id: str | None,
-        name: str,
-        cleanup: Callable[[], None],
-    ) -> None:
-        """Run a caller's teardown of what a task's dispatch exposed, off the lock once
-        the task's workflow has committed.
-
-        A teardown filed again while one of its name for the same dispatch is owed is
-        not filed twice, one that fails is retried with the workflow's held writes, and
-        none runs once a later dispatch holds the task. The task publishes no later
-        dispatch while one is owed.
-        """
+    def _end_reports(self) -> None:
+        """Release the reports this thread's handling took up, and queue again each
+        task whose publication waited for them."""
         with self._transition():
-            self._file_locked(task_id, Cleanup(task_id, dispatch_id, name, cleanup))
+            for task_id in self._committer.end_reports_locked():
+                if task_id in self._awaiting_reports:
+                    self._awaiting_reports.discard(task_id)
+                    if (record := self._tasks.get(task_id)) is not None and (
+                        record.status == TaskStatus.PENDING
+                    ):
+                        self._return_dispatch_locked(
+                            record, increment_retry=False, front=True
+                        )
+                        self._cv.notify_all()
 
     def _file_locked(self, task_id: str, *actions: AfterCommit | None) -> None:
         """Hold actions until the transition of the task's workflow commits."""
@@ -1400,18 +1419,6 @@ class TaskRuntime:
                 self._committer.notify_terminal_transition(settled)
             case AuthorizeTurn(proposal=proposal, proposer_id=proposer_id):
                 self._answer_model_turn(proposal, proposer_id, action)
-            case Cleanup(task_id=task_id, dispatch_id=dispatch_id):
-                with self._lock:
-                    record = self._tasks.get(task_id)
-                    superseded = (
-                        record is not None
-                        and membership(record) == TaskStatus.DISPATCHED
-                        and record.dispatch_id != dispatch_id
-                    )
-                if not superseded:
-                    action.run()
-                with self._lock:
-                    self._actions.cleanup_delivered_locked(action)
 
     def _credit_consumed(
         self, workflow_id: str | None, action: AfterCommit, consumed: Future[Any]
@@ -3474,8 +3481,9 @@ class TaskRuntime:
 
         Everything the dispatch carries is made durable first: the held writes of its
         task's workflow and of each workflow a merged child belongs to. A dispatch whose
-        writes stay held, or whose task's previous dispatch is still being torn down,
-        is not marked and returns ``NOT_DURABLE``.
+        writes stay held, or whose task's last report waits to be handled again, is not
+        marked and returns ``NOT_DURABLE``. One whose task's report is being handled
+        returns ``REPORTING``, and the task is queued again once the handling ends.
         """
         publish = Publish(
             worker.id, dispatch_id, supplier_id(worker), input_preparation
@@ -3493,8 +3501,11 @@ class TaskRuntime:
             closed = [self._committer.close_locked(w) for w in sorted(spanned)]
             if not all(closed):
                 return PublishGate.NOT_DURABLE
-            if self._actions.cleanup_owed(task_id):
+            if task_id in self._committer.unacknowledged:
                 return PublishGate.NOT_DURABLE
+            if self._committer.reporting(task_id):
+                self._awaiting_reports.add(task_id)
+                return PublishGate.REPORTING
             if not self._fence.begin_publish_locked(task_id, publish):
                 return PublishGate.NOT_PENDING
             return PublishGate.PUBLISH
@@ -3628,7 +3639,6 @@ class TaskRuntime:
                 lambda: self._apply_success(
                     task_id, worker_id, payload, ts, dispatch_id, skip
                 ),
-                SettleOutcome(EventEffect.STALE, None, [], []),
             )
 
     def _apply_success(
@@ -3937,7 +3947,6 @@ class TaskRuntime:
                     unavailable_inputs,
                     ambiguous,
                 ),
-                FailureOutcome(DispatchEnd.STALE, 0, [], []),
             )
 
     def _apply_failure(
@@ -4544,7 +4553,6 @@ class TaskRuntime:
                 lambda: self._apply_cancellation(
                     task_id, worker_id, payload, ts, dispatch_id
                 ),
-                SettleOutcome(EventEffect.STALE, None, [], []),
             )
 
     def _apply_cancellation(

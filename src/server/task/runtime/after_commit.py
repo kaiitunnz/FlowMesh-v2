@@ -2,7 +2,7 @@
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from shared.schemas.command import InterruptMessage, RevokeMessage
 from shared.tools.contract import AgentModelTurnProposal
@@ -71,17 +71,6 @@ class Settled:
 
 
 @dataclass(frozen=True)
-class Cleanup:
-    """Run a caller's teardown of what a task's dispatch exposed, unless a later
-    dispatch holds the task by then."""
-
-    task_id: str
-    dispatch_id: str | None
-    name: str
-    run: Callable[[], None] = field(compare=False)
-
-
-@dataclass(frozen=True)
 class AuthorizeTurn:
     """Authorize a held model turn proposed while its workflow's writes were held,
     unless a later proposal of the turn superseded it or ``deadline_epoch`` passed."""
@@ -93,15 +82,7 @@ class AuthorizeTurn:
 
 
 AfterCommit = (
-    CreditRelease
-    | Reap
-    | Interrupt
-    | Revoke
-    | Issue
-    | Purge
-    | Settled
-    | Cleanup
-    | AuthorizeTurn
+    CreditRelease | Reap | Interrupt | Revoke | Issue | Purge | Settled | AuthorizeTurn
 )
 
 
@@ -123,8 +104,6 @@ class AfterCommitActions:
         self.ready: list[tuple[str | None, AfterCommit]] = []
         # Committed actions whose delivery failed, kept for the workflow's retry.
         self.failed: dict[str, list[AfterCommit]] = {}
-        # Each cleanup filed and not yet delivered.
-        self.cleanups: set[Cleanup] = set()
         # How many open transitions filed actions of each workflow.
         self._filing: dict[str, int] = {}
         self._scope = _Filing()
@@ -150,29 +129,12 @@ class AfterCommitActions:
                 self._filing[workflow_id] = self._filing.get(workflow_id, 0) + 1
             parked = self.parked.setdefault(workflow_id, [])
             for action in actions:
-                if action not in parked and self._owe(action):
+                if action not in parked:
                     parked.append(action)
 
     def queue_locked(self, *actions: AfterCommit) -> None:
         """Queue actions whose cause is already durable for delivery."""
-        self.ready.extend((None, action) for action in actions if self._owe(action))
-
-    def _owe(self, action: AfterCommit) -> bool:
-        """Note a cleanup as owed; returns whether the action is to be held, which a
-        cleanup already owed is not."""
-        if not isinstance(action, Cleanup):
-            return True
-        if action in self.cleanups:
-            return False
-        self.cleanups.add(action)
-        return True
-
-    def cleanup_delivered_locked(self, cleanup: Cleanup) -> None:
-        self.cleanups.discard(cleanup)
-
-    def cleanup_owed(self, task_id: str) -> bool:
-        """Whether a cleanup of the task is filed and not yet delivered."""
-        return any(cleanup.task_id == task_id for cleanup in self.cleanups)
+        self.ready.extend((None, action) for action in actions)
 
     def release_locked(self, durable: Callable[[str], bool]) -> None:
         """Queue each parked action whose workflow ``durable`` reports committed and

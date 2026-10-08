@@ -35,6 +35,7 @@ from tests.server.task.test_task_merge import (
     _siblings,
 )
 from tests.server.task.test_v2_orchestration import _TS, AUTORESEARCH, _planned
+from tests.support.waiting import pop_ready
 from worker.executors.harness.scripted import ScriptedHarnessAdapter
 
 _ECHO = """
@@ -894,7 +895,7 @@ async def test_a_v2_success_whose_writes_fail_counts_once(
 
 
 @pytest.mark.anyio
-async def test_a_retry_redispatched_before_its_failure_replays_counts_once() -> None:
+async def test_a_retry_waits_for_its_failure_to_replay_and_counts_once() -> None:
     registry = _Registry()
     runtime = _runtime(registry)
     monitor = _monitor(runtime)
@@ -909,8 +910,12 @@ async def test_a_retry_redispatched_before_its_failure_replays_counts_once() -> 
     registry.down = False
     runtime._retry_durability(workflow_id)
     assert _next(runtime) == task_id
-    record_dispatch(runtime, task_id, "wkr-2", "dsp-2")
+    # The retry waits for the failure's replay.
+    record_dispatch(runtime, task_id, "wkr-2", "dsp-2", expect=PublishGate.NOT_DURABLE)
     monitor.handle_task_event(failure)
+    runtime.return_dispatch(task_id, None, increment_retry=False, front=True)
+    assert _next(runtime) == task_id
+    record_dispatch(runtime, task_id, "wkr-2", "dsp-2")
     monitor.handle_task_event(failure)
 
     requeued = [
@@ -992,7 +997,7 @@ async def test_a_spawn_replayed_after_its_children_were_cancelled_closes() -> No
 
 
 @pytest.mark.anyio
-async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> None:
+async def test_a_tokenless_replay_before_a_new_publish_counts_once() -> None:
     registry = _Registry()
     runtime = _runtime(registry)
     monitor = _monitor(runtime)
@@ -1008,9 +1013,15 @@ async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> No
     runtime._retry_durability(workflow_id)
     assert _next(runtime) == task_id
     assert (
-        runtime.begin_publish(task_id, _worker("wkr-1"), "dsp-2") is PublishGate.PUBLISH
+        runtime.begin_publish(task_id, _worker("wkr-1"), "dsp-2")
+        is PublishGate.NOT_DURABLE
     )
     monitor.handle_task_event(failure)
+    runtime.return_dispatch(task_id, None, increment_retry=False, front=True)
+    assert _next(runtime) == task_id
+    assert (
+        runtime.begin_publish(task_id, _worker("wkr-1"), "dsp-2") is PublishGate.PUBLISH
+    )
 
     requeued = [
         call.args[0]
@@ -1019,6 +1030,39 @@ async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> No
     ]
     assert len(requeued) == 1
     assert task_id not in runtime._committer.unacknowledged
+
+
+@pytest.mark.anyio
+async def test_a_dispatch_waits_out_its_tasks_report_handling_without_backing_off() -> (
+    None
+):
+    registry = _Registry()
+    runtime = _runtime(registry)
+    workflow_id, task_id = await _solo(runtime)
+    monitor = _monitor(runtime)
+    dispatcher, worker_registry = _fast_worker_dispatcher(runtime, monitor)
+    worker_registry.idle_satisfying_pool.return_value = [_worker("wkr-2")]
+    worker_registry.satisfying_workers.return_value = [_worker("wkr-2")]
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
+    answered: list[bool] = []
+    release = monitor._release_task
+
+    def dispatched_mid_handling(released: str) -> None:
+        assert _next(runtime) == task_id
+        answered.append(dispatcher.dispatch_once(task_id))
+        assert pop_ready(runtime, 0.02) is None
+        release(released)
+
+    setattr(monitor, "_release_task", dispatched_mid_handling)
+    with runtime.acknowledging():
+        monitor.handle_task_event(failure)
+
+    assert answered == [True]
+    worker_registry.publish_task.assert_not_called()
+    assert _next(runtime) == task_id
+    assert dispatcher.dispatch_once(task_id) is True
+    worker_registry.publish_task.assert_called_once()
 
 
 @pytest.mark.anyio

@@ -829,6 +829,10 @@ class Dispatcher:
         )
         if gate is PublishGate.NOT_PENDING:
             return True
+        if gate is PublishGate.REPORTING:
+            # The runtime queues the task again once its report is handled.
+            self._runtime.release_merge(task_id)
+            return True
         if gate is PublishGate.NOT_DURABLE:
             # The task waits behind the queue, spending no attempt, while the runtime
             # makes what the dispatch would carry durable.
