@@ -218,7 +218,8 @@ class TransitionCommitter:
 
     def _hold(self, workflow_id: str, entry: _Write, error: BaseException) -> None:
         held = self.debt.setdefault(workflow_id, [])
-        if not held or held[-1] != entry:
+        # Repaying a write writes current state, so a write already owed is owed once.
+        if entry not in held:
             held.append(entry)
         self.held_errors[workflow_id] = error
         self._note_held(workflow_id, error)
