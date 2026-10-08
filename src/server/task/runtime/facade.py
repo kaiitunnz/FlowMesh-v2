@@ -4692,26 +4692,6 @@ class TaskRuntime:
         with self._cv:
             return len(self._ready.ready_queue)
 
-    def queued_gpu_counts(self) -> set[int]:
-        """Return the set of distinct GPU counts requested by tasks in the ready queue.
-
-        0 represents a CPU-only task.  Used to match each candidate server to the best
-        worker it can create for the current queue.
-        """
-        counts: set[int] = set()
-        with self._cv:
-            for task_id, _ in self._ready.ready_queue:
-                record = self._tasks.get(task_id)
-                if record is None:
-                    continue
-                gpu = record.task.spec.gpu_requirements()
-                if gpu:
-                    # Default to 1 if a GPU is required but count is unspecified
-                    counts.add(int(gpu.count) if gpu.count else 1)
-                else:
-                    counts.add(0)
-        return counts
-
     def task_status_counts(self) -> tuple[int, int, int, int, int]:
         with self._cv:
             queueing = len(self._ready.ready_queue)
