@@ -308,6 +308,10 @@ class _Supervisor:
         while True:
             others = self.reap_others()
             if not self.primary_reaped and not others and self.primary_exited():
+                # A snapshot can miss a member forking its successor; the zombie still
+                # holds the group id, so one last group kill catches whatever it missed.
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(self.primary, signal.SIGKILL)
                 os.waitpid(self.primary, 0)
                 self.primary_reaped = True
             if self.primary_reaped:

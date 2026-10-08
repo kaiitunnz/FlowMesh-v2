@@ -269,7 +269,8 @@ def test_a_pid_whose_pidfd_cannot_be_opened_is_still_signalled() -> None:
             child.kill()
 
 
-def test_a_kernel_without_child_lists_still_drains_the_tree(tmp_path: Path) -> None:
+def _run_without_child_lists(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+    """Run a supervisor over ``argv`` as on a kernel that lists no task's children."""
     runner = (
         "import importlib.util, pathlib, sys\n"
         "read = pathlib.Path.read_text\n"
@@ -281,15 +282,31 @@ def test_a_kernel_without_child_lists_still_drains_the_tree(tmp_path: Path) -> N
         f"spec = importlib.util.spec_from_file_location('s', {subreaper.__file__!r})\n"
         "module = importlib.util.module_from_spec(spec)\n"
         "spec.loader.exec_module(module)\n"
-        f"sys.argv = ['subreaper', '--grace', '0.3', '--', {_SH!r}, '-c',\n"
-        "    'sleep 30 & setsid sleep 30 & exit 0']\n"
+        f"sys.argv = ['subreaper', '--grace', '0.3', '--', *{argv!r}]\n"
         "module.main()\n"
     )
-    proc = subprocess.run(  # nosec B603 - argv list built by the test
-        [sys.executable, "-I", "-c", runner], capture_output=True, timeout=30
+    return subprocess.run(  # nosec B603 - argv list built by the test
+        [sys.executable, "-I", "-c", runner], capture_output=True, timeout=60
     )
 
+
+def test_a_kernel_without_child_lists_still_drains_the_tree() -> None:
+    proc = _run_without_child_lists([_SH, "-c", "sleep 30 & setsid sleep 30 & exit 0"])
+
     assert proc.returncode == REAPED
+
+
+def test_a_pid_hopping_group_is_ended_without_child_lists() -> None:
+    # Each generation forks its successor and exits at once, for 3000 generations;
+    # bash, since dash caps the recursion at 1000.
+    hopper = (
+        "i=0; hop() { i=$((i+1)); [ $i -lt 3000 ] && { hop & }; exit 0; }; hop & exit 0"
+    )
+    started = time.monotonic()
+    proc = _run_without_child_lists(["/bin/bash", "-c", hopper])
+
+    assert proc.returncode == REAPED
+    assert time.monotonic() - started < 5
 
 
 def test_orphans_that_exit_while_the_command_runs_are_reaped_at_once(
