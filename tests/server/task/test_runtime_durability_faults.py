@@ -26,6 +26,8 @@ from server.task.models import TERMINAL_TASK_STATUSES, PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime
 from server.task.runtime.after_commit import (
     AfterCommit,
+    AuthorizeTurn,
+    Cleanup,
     CreditRelease,
     Interrupt,
     Issue,
@@ -163,6 +165,11 @@ class _Observer:
                     else (*TERMINAL_TASK_STATUSES, TaskStatus.CANCELLING)
                 )
                 ok = all(r is not None and r.status in done for r in records)
+            case Cleanup(task_id=task_id, dispatch_id=dispatch_id):
+                ok = self._settled(task_id, dispatch_id)
+            case AuthorizeTurn(proposal=proposal):
+                record = self.registry.record(proposal.agent_task_id)
+                ok = record is not None and record.dispatch_id == proposal.dispatch_id
             case Settled():
                 ok = True
         if not ok:

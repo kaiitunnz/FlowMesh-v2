@@ -1414,12 +1414,14 @@ class TaskRuntime:
     def _credit_consumed(
         self, workflow_id: str | None, action: AfterCommit, consumed: Future[Any]
     ) -> None:
-        if consumed.cancelled() or (error := consumed.exception()) is not None:
-            self._logger.warning(
-                "Releasing a resident credit failed; keeping it for a retry: %s",
-                "cancelled" if consumed.cancelled() else error,
-            )
-            self._retain(workflow_id, action)
+        if consumed.cancelled():
+            error: BaseException | str | None = "cancelled"
+        elif (error := consumed.exception()) is None:
+            return
+        self._logger.warning(
+            "Releasing a resident credit failed; keeping it for a retry: %s", error
+        )
+        self._retain(workflow_id, action)
 
     def _retry_durability(self, workflow_id: str) -> None:
         """Make a workflow's held writes durable and deliver what failed to deliver,
