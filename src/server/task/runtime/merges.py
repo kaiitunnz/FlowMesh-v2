@@ -84,10 +84,11 @@ class TaskMerges:
                 f"The worker assigned for task {task_id} ({assigned_worker}) "
                 f"is not in selected workers {record.selected_worker}."
             )
-        bucket = (
-            self._ready.merge_buckets[(record.merge_key, assigned_worker)]
-            + self._ready.merge_buckets[(record.merge_key, None)]
-        )
+        buckets = self._ready.merge_buckets
+        bucket = [
+            *buckets.get((record.merge_key, assigned_worker), ()),
+            *buckets.get((record.merge_key, None), ()),
+        ]
         if not bucket or len(bucket) <= 1:
             return []
         siblings: list[str] = []

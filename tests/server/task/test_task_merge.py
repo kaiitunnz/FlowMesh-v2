@@ -978,3 +978,16 @@ async def test_a_merged_child_of_a_cancelled_workflow_stays_cancelled() -> None:
         assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
     for task_id in first_ids.values():
         assert runtime._tasks[task_id].status == TaskStatus.DONE
+
+
+@pytest.mark.anyio
+async def test_planning_a_merge_adds_no_bucket_for_a_worker_it_looked_up() -> None:
+    runtime = _runtime(_Registry())
+    await _register(runtime, _siblings(names=("a",)))
+    a = _next(runtime)
+    before = dict(runtime._ready.merge_buckets)
+
+    for worker_id in ("wkr-1", "wkr-2", "wkr-3"):
+        assert runtime.plan_merge(a, 8, worker_id) == []
+
+    assert runtime._ready.merge_buckets == before
