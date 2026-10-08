@@ -144,6 +144,9 @@ class _WorkerStub:
     def publish_interrupt(self, *args: Any) -> int:
         return 0
 
+    def publish_revoke(self, *args: Any) -> int:
+        return 0
+
     def publish_mediated_op(self, worker: Any, payload: Any) -> int:
         self.frames.append((worker.id, payload.frame_kind, payload.payload))
         if payload.frame_kind == "reap":

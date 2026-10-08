@@ -310,6 +310,11 @@ def install() -> None:
     facade.TaskRuntime.__init__ = bound_init  # type: ignore[method-assign]
 
 
+def runtimes() -> list[Any]:
+    """Every live runtime built since the contract was installed."""
+    return list(_runtimes)
+
+
 def take_trips() -> list[Trip]:
     with _trips_lock:
         taken = list(_trips)

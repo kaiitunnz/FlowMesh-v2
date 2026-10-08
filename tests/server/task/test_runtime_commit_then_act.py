@@ -14,11 +14,11 @@ from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.registries.workflow import PersistedTask
 from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
-from server.task.workflow_retry import WorkflowRetryScheduler
 from shared.inference import InputResolutionBinding, UpstreamProvenance
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
@@ -47,9 +47,7 @@ def _runtime(registry: FakeRegistry, results: Any = None) -> TaskRuntime:
         results or make_result_reader(),
         logging.getLogger("commit-then-act"),
         credential_vault=InMemoryCredentialVault(),
-        durability_retry=lambda fire, logger: WorkflowRetryScheduler(
-            fire, logger, base_delay_sec=0.0, run_thread=False
-        ),
+        durability_retry=manual_durability_retry,
     )
 
 
@@ -417,9 +415,7 @@ class _Settling:
             make_result_reader(),
             logging.getLogger("settling"),
             credential_vault=self.vault,
-            durability_retry=lambda fire, logger: WorkflowRetryScheduler(
-                fire, logger, base_delay_sec=0.0, run_thread=False
-            ),
+            durability_retry=manual_durability_retry,
         )
 
     def _fail(self, task_id: str, dispatch_id: str) -> None:

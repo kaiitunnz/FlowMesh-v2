@@ -20,11 +20,11 @@ from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime
 from server.task.runtime.after_commit import AfterCommit, CreditRelease
 from server.task.runtime.commits import TransitionNotDurable
-from server.task.workflow_retry import WorkflowRetryScheduler
 from shared.tools.contract import MediatedOperationOutcome
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
+from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.task.test_agent_episode_runtime import _MODEL_HELD_SCRIPT, _step
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
@@ -72,9 +72,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         make_result_reader(),
         logging.getLogger("held-termination"),
         credential_vault=InMemoryCredentialVault(),
-        durability_retry=lambda fire, logger: WorkflowRetryScheduler(
-            fire, logger, base_delay_sec=0.0, run_thread=False
-        ),
+        durability_retry=manual_durability_retry,
     )
 
 

@@ -13,7 +13,6 @@ from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.resident import ClaimState, ClaimTerminalReason
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
-from server.task.workflow_retry import WorkflowRetryScheduler
 from shared.harness import HarnessCapsule
 from shared.private_state import PrivateStateSealReport
 from shared.resident.reports import ResidentBootstrapAck, ResidentBootstrapOutcome
@@ -21,6 +20,7 @@ from shared.schemas.event import WorkerEvent
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.resident.test_service import _build
 from tests.server.result_store import make_result_reader
+from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.task.test_private_state_ledger import _manifest
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import (
@@ -462,9 +462,7 @@ def test_a_credit_release_the_admission_store_refused_is_finished_once(
         make_result_reader(),
         logging.getLogger("resident-test"),
         credential_vault=InMemoryCredentialVault(),
-        durability_retry=lambda fire, logger: WorkflowRetryScheduler(
-            fire, logger, base_delay_sec=0.0, run_thread=False
-        ),
+        durability_retry=manual_durability_retry,
     )
     svc, stores, _, loop, originated = _wire_resident_service(runtime)
     admission = svc._admission

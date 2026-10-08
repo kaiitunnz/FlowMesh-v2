@@ -19,6 +19,16 @@ def _host_without_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _stop_durability_retries() -> Iterator[None]:
+    """Stop the durability retry of every runtime a test built, so none fires in a
+    later test."""
+    before = set(lock_contract.runtimes())
+    yield
+    for runtime in set(lock_contract.runtimes()) - before:
+        runtime._durability.stop()
+
+
+@pytest.fixture(autouse=True)
 def _runtime_lock_contract() -> Iterator[None]:
     """Fail a test in which runtime source breaks the runtime's lock contract."""
     lock_contract.take_trips()

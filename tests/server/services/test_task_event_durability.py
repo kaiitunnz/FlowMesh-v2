@@ -20,11 +20,11 @@ from server.services import monitoring
 from server.services.monitoring import TASK_EVENT_HANDLER_MAX_ATTEMPTS, EventMonitor
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
-from server.task.workflow_retry import WorkflowRetryScheduler
 from shared.schemas.event import TaskEvent
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.services.test_task_event_fence import _ECHO_V2, _event
 from tests.server.task.test_task_merge import (
     _monitor,
@@ -82,9 +82,7 @@ def _runtime(store: _Store) -> TaskRuntime:
         make_result_reader(),
         logging.getLogger("event-durability"),
         credential_vault=InMemoryCredentialVault(),
-        durability_retry=lambda fire, logger: WorkflowRetryScheduler(
-            fire, logger, base_delay_sec=0.0, run_thread=False
-        ),
+        durability_retry=manual_durability_retry,
     )
 
 
