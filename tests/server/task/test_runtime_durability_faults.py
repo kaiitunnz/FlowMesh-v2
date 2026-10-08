@@ -14,14 +14,15 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.registries.workflow import PersistedTask
 from server.resident import ClaimState, ClaimTerminalReason
-from server.task.models import TERMINAL_TASK_STATUSES, TaskStatus
+from server.task.models import TERMINAL_TASK_STATUSES, PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from server.task.runtime.after_commit import (
     AfterCommit,
@@ -33,13 +34,21 @@ from server.task.runtime.after_commit import (
     Revoke,
     Settled,
 )
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
     _wire_resident_service,
 )
 from tests.server.task.test_runtime_commit_then_act import _runtime
-from tests.server.task.test_v2_orchestration import FakeRegistry, _register
+from tests.server.task.test_v2_orchestration import (
+    _TS,
+    AUTORESEARCH,
+    FakeRegistry,
+    _planned,
+    _register,
+)
+from tests.support.waiting import pop_ready
 
 
 class _FaultyRegistry(FakeRegistry):
@@ -483,3 +492,108 @@ def test_a_failed_interrupt_is_retried_without_repeating_its_credit_release(
             {"CreditRelease": 1, "Interrupt": 2}
         )
         assert resident.released == [claim.replica_id]
+
+
+class _Spawning:
+    """A producer whose success fans out two children."""
+
+    def __init__(self) -> None:
+        self.registry = _FaultyRegistry()
+        self.runtime = _runtime(self.registry)
+        self.workflow_id, ids = asyncio.run(_register(self.runtime, AUTORESEARCH))
+        self.planner = ids["planner"]
+        assert pop_ready(self.runtime) == self.planner
+        record_dispatch(self.runtime, self.planner, "wkr-1", "dsp-1")
+        self.payload = _planned(self.runtime, self.planner, ["h1", "h2"])
+
+    def succeed(self) -> None:
+        try:
+            self.runtime.mark_succeeded(
+                self.planner, "wkr-1", self.payload, _TS, "dsp-1"
+            )
+        except TransitionNotDurable:
+            pass
+
+    def assert_consistent(self) -> None:
+        """The durable children are the ledger's, each with its record, once."""
+        engine = self.runtime.orchestration_engine(self.workflow_id)
+        assert engine is not None
+        assert self.registry.ledger(self.workflow_id) == engine.to_snapshot()
+        children = self.registry.dynamic_task_ids.get(self.workflow_id, set())
+        assert len(children) == 2
+        for child in children:
+            assert self.registry.record(child) is not None
+            assert engine.work_item(child) is not None
+        assert self.registry.record(self.planner).status == TaskStatus.DONE
+
+
+def _restarted(runtime: TaskRuntime, registry: FakeRegistry) -> TaskRuntime:
+    """A new runtime over the same durable state and shared content store."""
+    return _runtime(registry, runtime._results)
+
+
+def _spawn_writes() -> int:
+    spawning = _Spawning()
+    before = spawning.registry.writes
+    spawning.succeed()
+    return spawning.registry.writes - before
+
+
+@pytest.mark.parametrize("crash", [False, True], ids=["heal", "crash"])
+@pytest.mark.parametrize("applied", [False, True], ids=["refused", "applied"])
+def test_a_faulted_fan_out_keeps_its_children_whole(applied: bool, crash: bool) -> None:
+    writes = _spawn_writes()
+    assert writes > 1
+    for cut in _cuts(writes):
+        spawning = _Spawning()
+        spawning.registry.applied = applied
+        spawning.registry.fail_from = spawning.registry.writes + cut
+        spawning.succeed()
+        # Nothing it materialized is published while its records may be lost.
+        for task_id in iter(lambda: pop_ready(spawning.runtime), None):
+            assert (
+                spawning.runtime.begin_publish(
+                    task_id, cast(Any, SimpleNamespace(id="wkr-2", node_id="n")), "d"
+                )
+                is PublishGate.NOT_DURABLE
+            ), f"cut {cut}"
+        spawning.registry.heal()
+        if crash:
+            spawning.runtime.shutdown()
+            spawning.runtime = _restarted(spawning.runtime, spawning.registry)
+            assert asyncio.run(spawning.runtime.rehydrate()) == 1
+            # The success was never acknowledged, so its stream redelivers it.
+            spawning.succeed()
+        for _ in range(5):
+            spawning.runtime._durability.run_due()
+        assert not spawning.runtime._durability.pending(spawning.workflow_id)
+        spawning.assert_consistent()
+        spawning.runtime.shutdown()
+
+
+def test_an_issue_a_cancel_overtook_is_not_delivered(tmp_path: Path) -> None:
+    with _resident(tmp_path) as resident:
+        resident.capture()
+        env = resident.env
+        with resident.runtime._lock:
+            resident.runtime._actions.queue_locked(
+                Issue(resident.writer, env.call_correlation, env.invocation_id)
+            )
+        resident.runtime.cancel_workflow(resident.workflow_id)
+        resident.settle_loop()
+
+        assert resident.originated == [env]
+
+
+def test_a_success_after_a_cancel_keeps_the_released_credit(tmp_path: Path) -> None:
+    with _resident(tmp_path) as resident:
+        resident.capture()
+        claim = resident.claim()
+        _run(resident, _TRANSITIONS[2])
+        assert claim.terminal_reason is ClaimTerminalReason.FAILED
+
+        _run(resident, _TRANSITIONS[0])
+
+        assert claim.terminal_reason is ClaimTerminalReason.FAILED
+        assert resident.released == [claim.replica_id]
+        assert resident.observer.violations == []

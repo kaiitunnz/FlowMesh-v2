@@ -38,13 +38,13 @@ from tests.server.task.test_worker_originated_boundary import _WorkerStub
 from tests.support.waiting import pop_ready
 
 
-def _runtime(registry: FakeRegistry) -> TaskRuntime:
+def _runtime(registry: FakeRegistry, results: Any = None) -> TaskRuntime:
     """A runtime whose durability retry runs only when a test drives it."""
     return TaskRuntime(
         cast(Any, registry),
         cast(Any, _WorkerStub()),
         OrchestrationConfig(),
-        make_result_reader(),
+        results or make_result_reader(),
         logging.getLogger("commit-then-act"),
         credential_vault=InMemoryCredentialVault(),
         durability_retry=lambda fire, logger: WorkflowRetryScheduler(
