@@ -23,6 +23,7 @@ from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
 )
+from tests.server.task.test_task_credentials import _api_workflow
 from tests.server.task.test_v2_embodiment_fence import _menu_task
 from tests.server.task.test_v2_embodiment_fence import _runtime as _menu_runtime
 from tests.server.task.test_v2_orchestration import (
@@ -387,3 +388,114 @@ def test_a_held_initial_advance_leaves_its_registration_standing() -> None:
     durable = _durable_statuses(registry, ids)
     assert {record.status for record in durable.values()} == {TaskStatus.FAILED}
     assert not runtime._durability.pending(workflow_id)
+
+
+class _Settling:
+    """A workflow holding inline credentials whose last task is about to fail."""
+
+    def __init__(self) -> None:
+        self.registry = FakeRegistry()
+        self.vault = InMemoryCredentialVault()
+        self.runtime = self.build()
+        self.workflow_id, ids = asyncio.run(
+            _register(self.runtime, _api_workflow("flowmesh/v2"))
+        )
+        self.call, self.shell = ids["call"], ids["shell"]
+        for n, task_id in enumerate((self.call, self.shell)):
+            assert pop_ready(self.runtime) is not None
+            record_dispatch(self.runtime, task_id, "wkr-1", f"dsp-{n}")
+        self._fail(self.call, "dsp-0")
+        self.notified: list[str] = []
+        self.runtime.set_completion_notifier(self.notified.append)
+        self._save = self.registry.save_ledger_snapshot
+
+    def build(self) -> TaskRuntime:
+        return TaskRuntime(
+            cast(Any, self.registry),
+            cast(Any, _WorkerStub()),
+            OrchestrationConfig(),
+            make_result_reader(),
+            logging.getLogger("settling"),
+            credential_vault=self.vault,
+            durability_retry=lambda fire, logger: WorkflowRetryScheduler(
+                fire, logger, base_delay_sec=0.0, run_thread=False
+            ),
+        )
+
+    def _fail(self, task_id: str, dispatch_id: str) -> None:
+        self.runtime.fail_dispatch(
+            task_id, "wkr-1", {}, _TS, dispatch_id, error="boom", retryable=False
+        )
+
+    def fail_last(self) -> None:
+        self._fail(self.shell, "dsp-1")
+
+    def ledger_down(self) -> None:
+        def down(*_: Any, **__: Any) -> None:
+            raise ConnectionError("control redis unavailable")
+
+        self.registry.save_ledger_snapshot = down  # type: ignore[method-assign]
+
+    def ledger_up(self) -> None:
+        self.registry.save_ledger_snapshot = self._save  # type: ignore[method-assign]
+
+    def vaulted(self) -> bool:
+        return bool(self.vault.redis.hashes)
+
+
+def test_a_settlement_whose_last_save_is_held_does_not_close_or_purge() -> None:
+    settling = _Settling()
+    settling.ledger_down()
+
+    with pytest.raises(TransitionNotDurable):
+        settling.fail_last()
+
+    assert not settling.runtime.workflow_settlement(settling.workflow_id).settled
+    assert settling.notified == []
+    assert settling.vaulted()
+    settling.ledger_up()
+
+    assert settling.runtime._durability.run_due() == [settling.workflow_id]
+
+    assert settling.runtime.workflow_settlement(settling.workflow_id).settled
+    assert settling.notified == [settling.workflow_id]
+    assert not settling.vaulted()
+
+
+def test_a_failed_purge_is_retried() -> None:
+    settling = _Settling()
+    purge = settling.vault.purge
+    refusals = [ConnectionError("vault unavailable")]
+
+    def flaky(workflow_id: str) -> None:
+        if refusals:
+            raise refusals.pop()
+        purge(workflow_id)
+
+    settling.vault.purge = flaky  # type: ignore[method-assign]
+    settling.fail_last()
+    assert settling.vaulted()
+    assert settling.runtime._durability.pending(settling.workflow_id)
+
+    assert settling.runtime._durability.run_due() == [settling.workflow_id]
+
+    assert not settling.vaulted()
+    assert not settling.runtime._durability.pending(settling.workflow_id)
+
+
+def test_a_crash_before_a_settled_workflow_purges_drops_its_credentials() -> None:
+    settling = _Settling()
+
+    def down(_workflow_id: str) -> None:
+        raise ConnectionError("vault unavailable")
+
+    purge = settling.vault.purge
+    settling.vault.purge = down  # type: ignore[method-assign,assignment]
+    settling.fail_last()
+    assert settling.vaulted()
+    settling.runtime.shutdown()
+    settling.vault.purge = purge  # type: ignore[method-assign]
+
+    assert asyncio.run(settling.build().rehydrate()) == 1
+
+    assert not settling.vaulted()
