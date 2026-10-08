@@ -370,7 +370,7 @@ def _pre_vault_registry() -> tuple[FakeRegistry, dict[str, Any]]:
 def _task_named(runtime: TaskRuntime, workflow_id: str, name: str) -> str:
     return next(
         record.task_id
-        for record in runtime.tasks.values()
+        for record in runtime._tasks.values()
         if record.workflow_id == workflow_id and record.graph_node_name == name
     )
 
@@ -385,7 +385,7 @@ def test_a_restart_vaults_credentials_stored_before_they_were_vaulted():
 
     blobs = "".join(registry.task_blobs.values())
     assert not any(secret in blobs for secret in _LEGACY)
-    for task_id in runtime.tasks:
+    for task_id in runtime._tasks:
         info = runtime.describe_task(task_id)
         assert info is not None
         assert not any(secret in info.model_dump_json() for secret in _LEGACY)

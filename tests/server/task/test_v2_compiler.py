@@ -218,7 +218,7 @@ async def test_compile_error_leaves_no_orphan_state() -> None:
     with pytest.raises(CompileError):
         await runtime.register("owner", "org", _BAD_V2, format="native")
     # The failed submission mutated no in-memory scheduler state.
-    assert runtime.tasks == {}
+    assert runtime._tasks == {}
 
 
 def test_old_parser_path_still_selectable() -> None:

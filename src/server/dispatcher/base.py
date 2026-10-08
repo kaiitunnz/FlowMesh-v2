@@ -431,14 +431,7 @@ class Dispatcher:
         if not self._control.enabled:
             return self._dispatch_once_impl(task_id)
         record = self._runtime.get_record(task_id)
-        engine = (
-            self._runtime.orchestration_engine(record.workflow_id)
-            if record is not None
-            else None
-        )
-        work_item_id = (
-            engine.work_item_id_for_task(task_id) if engine is not None else None
-        )
+        work_item_id = self._runtime.work_item_id(task_id)
         if record is None or work_item_id is None:
             return self._dispatch_once_impl(task_id)
         with self._control.episode_stage(

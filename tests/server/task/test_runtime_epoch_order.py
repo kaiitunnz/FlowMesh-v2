@@ -253,7 +253,7 @@ spec:
         taskType: ssh
 """
     workflow_id, _ = _register(runtime, payload)
-    task_id = next(iter(runtime.tasks))
+    task_id = next(iter(runtime._tasks))
     record_dispatch(runtime, task_id)
 
     cancelled = runtime.cancel_workflow(workflow_id)
@@ -289,7 +289,7 @@ spec:
     workflow_id, _ = _register(runtime, payload)
     task_ids = [
         task_id
-        for task_id, record in runtime.tasks.items()
+        for task_id, record in runtime._tasks.items()
         if record.workflow_id == workflow_id
     ]
     parent_id, child_id = task_ids

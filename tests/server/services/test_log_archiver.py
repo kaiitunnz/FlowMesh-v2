@@ -128,7 +128,7 @@ def test_a_tick_builds_no_task_info(
         archiver._tick()
 
     assert built == []
-    assert sorted(tracked) == sorted(runtime.tasks)
+    assert sorted(tracked) == sorted(runtime._tasks)
 
 
 def _flush_within(archiver: TaskLogArchiver, task_id: str, bound: float) -> bool:

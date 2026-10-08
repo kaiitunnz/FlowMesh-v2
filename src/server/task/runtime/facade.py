@@ -4496,9 +4496,26 @@ class TaskRuntime:
     # Misc helpers
     # ------------------------------------------------------------------ #
 
-    @property
-    def tasks(self) -> dict[str, TaskRecord]:
-        return self._tasks
+    def task_records(self) -> list[TaskRecord]:
+        """A detached copy of every task record, taken at once under the lock."""
+        with self._lock:
+            return [
+                record.model_copy(
+                    update={
+                        name: value.copy()
+                        for name, value in record
+                        if isinstance(value, (list, dict))
+                    }
+                )
+                for record in self._tasks.values()
+            ]
+
+    def work_item_id(self, task_id: str) -> str | None:
+        """The id of the ledger work item a v2 task realizes, if it has one."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            return engine.work_item_id_for_task(task_id) if engine else None
 
     def recover_tasks_for_worker(
         self, worker_id: str, *, spend_attempt: bool, node_id: str | None = None

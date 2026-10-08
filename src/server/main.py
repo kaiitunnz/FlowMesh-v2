@@ -692,7 +692,7 @@ async def _lifespan(_: FastAPI):
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
                 if RUNTIME is not None:
-                    await PORT_FORWARD_SERVICE.restore_sessions(RUNTIME.tasks.values())
+                    await PORT_FORWARD_SERVICE.restore_sessions(RUNTIME.task_records())
             _start_root_threads()
             if FLEET_SAMPLER is not None:
                 FLEET_SAMPLER.start(asyncio.get_running_loop())
