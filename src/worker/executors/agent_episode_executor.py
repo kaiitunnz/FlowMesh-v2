@@ -10,7 +10,7 @@ the server routes any boundary and re-dispatches with the next capsule and outco
 import logging
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -72,6 +72,7 @@ class _Unended:
     task_id: str
     writer: str
     end: Callable[[], bool | None]
+    abandon: Callable[[], None]
     attempts: int = 0
 
 
@@ -259,10 +260,20 @@ class AgentEpisodeExecutor(Executor):
         stopped."""
         if sandbox is not None:
             sandbox.close()
-        proved = self._ended(task_id, "harness", lambda: adapter.quiesce(task_id))
+        proved = self._ended(
+            _Unended(
+                task_id,
+                "harness",
+                lambda: adapter.quiesce(task_id),
+                lambda: adapter.abandon(task_id),
+            )
+        )
         if sandbox is not None:
             drained = self._ended(
-                task_id, "sandbox", sandbox.drain, sandbox.finish_reaps
+                _Unended(
+                    task_id, "sandbox", sandbox.finish_reaps, sandbox.abandon_reaps
+                ),
+                sandbox.drain,
             )
             proved = drained and proved
         if not proved:
@@ -274,33 +285,38 @@ class AgentEpisodeExecutor(Executor):
         return QuiescenceFence.of(state, _attachment(dispatch))
 
     def _ended(
-        self,
-        task_id: str,
-        writer: str,
-        end: Callable[[], bool | None],
-        retry: Callable[[], bool | None] | None = None,
-        attempts: int = 0,
+        self, writer: _Unended, end: Callable[[], bool | None] | None = None
     ) -> bool:
-        """Run one writer's teardown, which reports an unproved stop by returning False
-        or raising; keep ``retry`` (or ``end``) for a later cleanup when unproved, until
-        the attempts run out."""
+        """Run a writer's teardown (``end``, or else its own), which reports an
+        unproved stop by returning False or raising; keep the writer for a later cleanup
+        when unproved, and abandon it once its attempts run out."""
+        task_id = writer.task_id
         try:
-            if end() is not False:
+            if (end or writer.end)() is not False:
                 return True
             reason = "its reap was not proved"
         except HarnessQuiescenceError as exc:
             reason = str(exc)
         except Exception as exc:
-            _LOG.exception("Ending the %s of task %s failed", writer, task_id)
+            _LOG.exception("Ending the %s of task %s failed", writer.writer, task_id)
             reason = repr(exc)
         _LOG.error(
-            "The %s of task %s was not proved stopped: %s", writer, task_id, reason
+            "The %s of task %s was not proved stopped: %s",
+            writer.writer,
+            task_id,
+            reason,
         )
-        if attempts < _UNENDED_ATTEMPTS:
-            self._unended.append(_Unended(task_id, writer, retry or end, attempts))
-        else:
-            _LOG.error(
-                "Giving up the %s of task %s, left without an owner", writer, task_id
+        if writer.attempts < _UNENDED_ATTEMPTS:
+            self._unended.append(writer)
+            return False
+        _LOG.error(
+            "Giving up the %s of task %s, left without an owner", writer.writer, task_id
+        )
+        try:
+            writer.abandon()
+        except Exception:
+            _LOG.exception(
+                "Abandoning the %s of task %s failed", writer.writer, task_id
             )
         return False
 
@@ -460,10 +476,8 @@ class AgentEpisodeExecutor(Executor):
             facade.unregister_episode(self._episode_task_id)
         self._episode_task_id = None
         unended, self._unended = self._unended, []
-        for entry in unended:
-            self._ended(
-                entry.task_id, entry.writer, entry.end, attempts=entry.attempts + 1
-            )
+        for writer in unended:
+            self._ended(replace(writer, attempts=writer.attempts + 1))
 
     def _facade(self) -> ResponsesFacade | None:
         return self._lifecycle.responses_facade if self._lifecycle else None

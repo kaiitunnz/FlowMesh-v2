@@ -264,3 +264,53 @@ def test_an_unproved_command_leaves_the_dispatch_unable_to_seal(state) -> None:
     assert not sandbox.drain()
     assert runtime.reaped
     assert sandbox.finish_reaps()
+
+
+class _FlakyRetryRuntime(_RecordingRuntime):
+    """A command left unproved whose first reap retry raises."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.retries = 0
+        self.abandoned = 0
+
+    def run(
+        self,
+        root: Path,
+        command: SandboxCommand,
+        profile: SandboxRuntimeProfile,
+        egress: bool = False,
+    ) -> SandboxCommandResult:
+        def retry() -> bool:
+            self.retries += 1
+            if self.retries == 1:
+                raise OSError("the supervisor's pipe is gone")
+            return True
+
+        def abandon() -> None:
+            self.abandoned += 1
+
+        raise SandboxReapUnproved("left behind", retry=retry, abandon=abandon)
+
+
+def test_a_reap_whose_retry_raises_is_kept_for_the_next_retry(state) -> None:
+    runtime = _FlakyRetryRuntime()
+    sandbox = AgentSandboxRuntime(_capability(), _ATTACHMENT, state, runtime)
+    with pytest.raises(SandboxReapUnproved):
+        sandbox.execute(SandboxCommand(argv=("make",)))
+
+    assert not sandbox.finish_reaps()
+    assert sandbox.finish_reaps()
+    assert runtime.retries == 2
+
+
+def test_abandoning_releases_every_unproved_reap(state) -> None:
+    runtime = _FlakyRetryRuntime()
+    sandbox = AgentSandboxRuntime(_capability(), _ATTACHMENT, state, runtime)
+    with pytest.raises(SandboxReapUnproved):
+        sandbox.execute(SandboxCommand(argv=("make",)))
+
+    sandbox.abandon_reaps()
+
+    assert runtime.abandoned == 1
+    assert sandbox.finish_reaps()

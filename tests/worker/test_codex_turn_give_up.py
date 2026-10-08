@@ -125,6 +125,9 @@ class _AppServer:
         self.closed.set()
         return True
 
+    def abandon(self) -> None:
+        pass
+
 
 def _codex_runner(
     tmp_path: Path, backend: str
@@ -280,6 +283,9 @@ class _SearchingAppServer:
 
     def quiesce(self) -> bool:
         return True
+
+    def abandon(self) -> None:
+        pass
 
 
 def _permit(interface: str, task_id: str, call_correlation: str) -> dict[str, Any]:

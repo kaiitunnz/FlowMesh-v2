@@ -2,7 +2,6 @@
 
 import logging
 import threading
-from collections.abc import Callable
 
 from shared.private_state import PrivateStateAttachment
 from shared.sandbox import (
@@ -55,7 +54,7 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
         self._open = True
         self._running = 0
         self._unproved = False
-        self._unreaped: list[Callable[[], bool]] = []
+        self._unreaped: list[SandboxReapUnproved] = []
 
     @property
     def reap_unproved(self) -> bool:
@@ -82,10 +81,18 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
         """Retry each unproved reap; return whether nothing is left running."""
         with self._admission:
             unreaped, self._unreaped = self._unreaped, []
-        still = [retry for retry in unreaped if not retry()]
+        still = [reap for reap in unreaped if not _retried(reap)]
         with self._admission:
             self._unreaped.extend(still)
             return not self._unreaped and self._running == 0
+
+    def abandon_reaps(self) -> None:
+        """Release every unproved reap's handle without ending its tree."""
+        with self._admission:
+            unreaped, self._unreaped = self._unreaped, []
+        for reap in unreaped:
+            if reap.abandon is not None:
+                reap.abandon()
 
     def execute(self, command: SandboxCommand) -> SandboxCommandResult:
         with self._admission:
@@ -102,7 +109,7 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
             with self._admission:
                 self._unproved = True
                 if exc.retry is not None:
-                    self._unreaped.append(exc.retry)
+                    self._unreaped.append(exc)
             raise
         finally:
             with self._admission:
@@ -156,3 +163,13 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
             raise SandboxDenied(
                 "the sandbox capability is not this dispatch's write authority"
             )
+
+
+def _retried(reap: SandboxReapUnproved) -> bool:
+    """Retry one unproved reap, counting a retry that raises as still unproved."""
+    assert reap.retry is not None
+    try:
+        return reap.retry()
+    except Exception:
+        _LOG.exception("Retrying a sandbox reap failed")
+        return False

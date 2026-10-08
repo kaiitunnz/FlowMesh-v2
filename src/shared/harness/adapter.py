@@ -307,6 +307,9 @@ class HarnessAdapter(ABC):
         within the backend's bound. The adapter is spent afterwards.
         """
 
+    def abandon(self, activation_id: str) -> None:
+        """Release what an unproved :meth:`quiesce` left behind without ending it."""
+
     def mediated_facades(self) -> frozenset[MediatedFacade]:
         """The capability classes this backend fully mediates through a fabric facade.
 

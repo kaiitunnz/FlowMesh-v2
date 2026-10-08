@@ -133,12 +133,19 @@ class SandboxReapUnproved(Exception):
     """A command's process tree was not proved reaped.
 
     The action is unsettled: the turn that ran it ends and the dispatch cannot seal its
-    private state. ``retry`` reattempts the reap and returns whether it was proved.
+    private state. ``retry`` reattempts the reap and returns whether it was proved;
+    ``abandon`` releases what the reap holds without ending the tree.
     """
 
-    def __init__(self, message: str, retry: Callable[[], bool] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        retry: Callable[[], bool] | None = None,
+        abandon: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__(message)
         self.retry = retry
+        self.abandon = abandon
 
 
 class LocalSandboxExecutor(ABC):

@@ -78,6 +78,9 @@ class _Adapter(HarnessAdapter):
     def cancel(self, activation_id: str) -> None:
         self._log.append("cancel")
 
+    def abandon(self, activation_id: str) -> None:
+        self._log.append("abandon")
+
     def quiesce(self, activation_id: str) -> None:
         self._log.append("quiesce")
         if not self._proves:
@@ -267,6 +270,7 @@ def test_a_teardown_that_never_proves_is_given_up_after_its_attempts(
         executor.cleanup_after_run()
 
     assert log.count("quiesce") == 1 + aee._UNENDED_ATTEMPTS
+    assert log.count("abandon") == 1
 
 
 def test_a_cancel_closes_the_sandbox_to_later_commands(

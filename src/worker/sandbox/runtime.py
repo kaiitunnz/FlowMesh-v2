@@ -203,6 +203,7 @@ class PosixProcessSandbox(SandboxRuntime):
         finally:
             os.close(receipt_end)
         budget = self._reap_budget_sec
+        pending = _PendingReap(proc, budget, receipt)
         try:
             streams = _Streams(proc)
             expired = not wait_supervisor(proc, deadline)
@@ -213,13 +214,15 @@ class PosixProcessSandbox(SandboxRuntime):
             # The tree may be running; it keeps its owner for a later reap.
             raise SandboxReapUnproved(
                 f"the sandbox lost track of {command.argv[0]!r}: {exc}",
-                retry=lambda: _finish_reap(proc, budget, receipt),
+                retry=pending.retry,
+                abandon=pending.abandon,
             ) from exc
         if not proved:
             raise SandboxReapUnproved(
                 f"the command {command.argv[0]!r} left processes it could not prove "
                 "reaped",
-                retry=lambda: _finish_reap(proc, budget, receipt),
+                retry=pending.retry,
+                abandon=pending.abandon,
             )
         if proc.returncode == UNSUPPORTED:
             os.close(receipt)
@@ -238,12 +241,26 @@ class PosixProcessSandbox(SandboxRuntime):
         )
 
 
-def _finish_reap(proc: subprocess.Popen[str], budget_sec: float, receipt: int) -> bool:
-    """Try an unproved command's reap again, releasing its receipt once proved."""
-    if not end_supervised(proc, budget_sec):
-        return False
-    os.close(receipt)
-    return True
+class _PendingReap:
+    """An unproved command's supervisor and the receipt pipe it still holds."""
+
+    def __init__(self, proc: subprocess.Popen[str], budget_sec: float, receipt: int):
+        self._proc = proc
+        self._budget_sec = budget_sec
+        self._receipt: int | None = receipt
+
+    def retry(self) -> bool:
+        """Try the reap again, releasing the receipt once proved."""
+        if not end_supervised(self._proc, self._budget_sec):
+            return False
+        self.abandon()
+        return True
+
+    def abandon(self) -> None:
+        """Release the receipt without ending the tree."""
+        if (receipt := self._receipt) is not None:
+            self._receipt = None
+            os.close(receipt)
 
 
 class _Streams:

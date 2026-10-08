@@ -422,6 +422,15 @@ class RealCodexAppServerTransport:
     def quiesce(self) -> bool:
         return self.close()
 
+    def abandon(self) -> None:
+        # The tree is left running: tearing it down at collection would block whatever
+        # thread drops the transport.
+        with self._lock:
+            self._spawned = None
+            if (finalizer := self._finalizer) is not None:
+                finalizer.detach()
+                self._finalizer = None
+
     def close(self) -> bool:
         """End the app-server's tree; return whether its supervisor proved it reaped.
 

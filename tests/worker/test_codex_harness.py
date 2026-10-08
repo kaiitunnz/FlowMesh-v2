@@ -80,6 +80,9 @@ class FakeCodexAppServer:
     def quiesce(self) -> bool:
         return True
 
+    def abandon(self) -> None:
+        pass
+
 
 def _outcome(corr: str, value: str = "child") -> DeliveredOutcome:
     """A settled child outcome the fabric delivers back at its originating call."""

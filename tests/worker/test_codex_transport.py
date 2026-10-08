@@ -5,6 +5,7 @@ process after the supervisor that runs the app-server; no process is started or
 signalled.
 """
 
+import gc
 import subprocess
 import threading
 import time
@@ -214,3 +215,34 @@ def _wait_for(condition: Any) -> bool:
             return False
         time.sleep(0.005)
     return True
+
+
+def test_an_abandoned_tree_is_not_torn_down_when_its_transport_is_dropped(
+    transport: RealCodexAppServerTransport, tmp_path: Path
+) -> None:
+    # A transport of the test's own, so dropping it leaves no other reference.
+    transport = RealCodexAppServerTransport(
+        CodexTransportConfig(
+            base_url="http://127.0.0.1:1",
+            model="m",
+            codex_home=tmp_path / "abandoned",
+            initial_input="task",
+            task_id="tsk-2",
+            exit_grace_sec=0.2,
+            reap_budget_sec=0.2,
+        )
+    )
+    _Proc.proves = False
+    _Client.proceed.set()
+    transport.thread_start()
+    client = _Client.made[-1]
+    proc = client._proc
+    assert proc is not None
+    assert not transport.quiesce()
+    proc.signalled.clear()
+
+    transport.abandon()
+    del transport
+    gc.collect()
+
+    assert not proc.signalled.is_set()
