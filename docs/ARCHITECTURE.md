@@ -659,6 +659,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   embodiment selection, dispatch or recovery, and it writes nothing to the orchestration
   ledger. Off by default; enable with `SERVER_METRICS_TELEMETRY_LEVEL`. See
   [`TELEMETRY.md`](TELEMETRY.md).
+- **Durable transitions.** A runtime transition commits its task records and ledger before
+  anything it owes runs: a resident credit release, a worker interrupt, revoke or reap, a
+  boundary handed to its handler, a credential purge, or a completion notice. A write the
+  control store refuses is held for its workflow, and every later write of that workflow
+  makes it first, so none lands ahead of it; a background retry makes it and repeats any
+  delivery that failed. A held transition completes in memory, and what depends on it
+  waits: its task event stays unacknowledged on the stream, a cancel answers `503`, a
+  dispatch carrying it is not published, and its workflow does not close. A submission
+  registers its workflow, tasks and initial ledger in one write before any of its work
+  runs.
 - **Workflow completion.** A workflow closes once, through one serialized finalizer:
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
   settled. The span's end is the last durable finish among its tasks, so a workflow that
