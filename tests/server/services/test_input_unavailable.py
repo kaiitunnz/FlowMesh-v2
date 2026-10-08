@@ -503,7 +503,8 @@ class _Stream:
     def pump(self) -> None:
         while self.entries:
             try:
-                self._monitor.handle_task_event(self.entries[0])
+                with self._monitor._runtime.acknowledging():
+                    self._monitor.handle_task_event(self.entries[0])
             except TransitionNotDurable:
                 return
             self.entries.pop(0)
@@ -547,7 +548,7 @@ async def test_a_verdict_whose_write_failed_is_handled_again_and_finalizes_once(
 
 
 @pytest.mark.anyio
-async def test_a_verdict_applied_directly_after_a_failed_write_is_reported_again() -> (
+async def test_a_verdict_applied_directly_after_a_failed_write_is_made_durable() -> (
     None
 ):
     registry = _Registry()
@@ -565,7 +566,7 @@ async def test_a_verdict_applied_directly_after_a_failed_write_is_reported_again
     registry.fail_next = True
     fixture.scheduler.run_due()
     assert registry.durable_status(task_id) != TaskStatus.FAILED
-    fixture.scheduler.run_due()
+    runtime._retry_durability(runtime._tasks[task_id].workflow_id)
 
     assert registry.durable_status(task_id) == TaskStatus.FAILED
     assert _finalized(fixture).count(task_id) == 1
@@ -579,7 +580,7 @@ async def test_a_verdict_is_never_answered_with_the_workers_stashed_report() -> 
     task_id, reference = await _consumer(runtime)
     report = _unavailable(task_id, [reference])
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), fixture.runtime.acknowledging():
         fixture.report(report)  # the stream hands this over again later
     registry.down = False
     fixture.probe.error = ResultUnreadable("no content")
@@ -609,7 +610,7 @@ async def test_a_verdict_applied_directly_supersedes_the_workers_stashed_report(
     task_id, reference = await _consumer(runtime)
     report = _unavailable(task_id, [reference])
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), fixture.runtime.acknowledging():
         fixture.report(report)
     registry.down = False
     fixture.probe.error = ResultUnreadable("no content")

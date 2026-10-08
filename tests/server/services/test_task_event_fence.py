@@ -323,7 +323,7 @@ async def test_a_failure_handled_again_after_its_commit_failed_is_committed_once
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(failure)
     registry.down = False
     monitor.handle_task_event(failure)
@@ -604,7 +604,7 @@ async def test_a_late_report_of_a_returned_merged_batch_commits_its_return() -> 
     record_dispatch(runtime, parent, "wkr-1", "dsp-1")
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(
             _event("TASK_FAILED", runtime, parent, "wkr-1", "dsp-1")
         )
@@ -739,7 +739,7 @@ async def test_a_v2_failure_handled_again_after_its_commit_failed_retries_once()
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(failure)
     registry.down = False
     monitor.handle_task_event(failure)
@@ -782,7 +782,7 @@ async def test_a_report_handled_again_after_its_commit_failed_counts_once(
         mock.patch.object(monitor, "_close_task_log_stream") as close_log,
     ):
         registry.down = True
-        with pytest.raises(TransitionNotDurable):
+        with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
             monitor.handle_task_event(event)
         registry.down = False
         monitor.handle_task_event(event)
@@ -806,7 +806,7 @@ async def test_a_v2_success_handled_again_after_its_commit_failed_settles_it() -
     success = _event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1")
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(success)
     registry.down = False
     monitor.handle_task_event(success)
@@ -863,7 +863,7 @@ class _FlakyWrites(_Registry):
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "failures",
-    [[(False, 1)], [(True, 0), (False, 2)]],
+    [[(False, 1)], [(True, 0), (False, 1)]],
     ids=["ledger", "commit-then-replayed-ledger"],
 )
 async def test_a_v2_success_whose_writes_fail_counts_once(
@@ -881,7 +881,7 @@ async def test_a_v2_success_whose_writes_fail_counts_once(
     for commit_fails, ledger_save_fails in failures:
         registry.down = commit_fails
         registry.ledger_saves_to_failure = ledger_save_fails
-        with pytest.raises(TransitionNotDurable):
+        with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
             monitor.handle_task_event(success)
         registry.down = False
     monitor.handle_task_event(success)
@@ -900,14 +900,15 @@ async def test_a_retry_redispatched_before_its_failure_replays_counts_once() -> 
     runtime = _runtime(registry)
     monitor = _monitor(runtime)
     monitor._metrics = mock.MagicMock()
-    _, task_id = await _solo(runtime)
+    workflow_id, task_id = await _solo(runtime)
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(failure)
     registry.down = False
+    runtime._retry_durability(workflow_id)
     assert _next(runtime) == task_id
     record_dispatch(runtime, task_id, "wkr-2", "dsp-2")
     monitor.handle_task_event(failure)
@@ -944,7 +945,7 @@ async def test_a_fan_out_replayed_after_its_children_commit_failed_commits_them(
     )
 
     registry.children_down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(success)
     registry.children_down = False
     monitor.handle_task_event(success)
@@ -979,7 +980,7 @@ async def test_a_spawn_replayed_after_its_children_were_cancelled_closes() -> No
     )
 
     registry.children_down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(spawn)
     registry.children_down = False
     runtime.cancel_workflow(workflow_id)
@@ -997,14 +998,15 @@ async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> No
     runtime = _runtime(registry)
     monitor = _monitor(runtime)
     monitor._metrics = mock.MagicMock()
-    _, task_id = await _solo(runtime)
+    workflow_id, task_id = await _solo(runtime)
     record_dispatch(runtime, task_id, "wkr-1")
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1")
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(failure)
     registry.down = False
+    runtime._retry_durability(workflow_id)
     assert _next(runtime) == task_id
     assert (
         runtime.begin_publish(task_id, _worker("wkr-1"), "dsp-2") is PublishGate.PUBLISH
@@ -1028,7 +1030,7 @@ async def test_a_dispatch_whose_task_is_not_durable_publishes_nothing() -> None:
     dispatcher, worker_registry = _fast_worker_dispatcher(runtime, _monitor(runtime))
     attempts = runtime._tasks[task_id].attempts
     registry.down = True
-    with runtime._transition(raises=False):
+    with runtime._transition():
         runtime._committer.persist_locked(task_id)
 
     assert dispatcher.dispatch_once(task_id) is False

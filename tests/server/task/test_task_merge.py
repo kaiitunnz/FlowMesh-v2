@@ -352,7 +352,7 @@ async def test_a_replayed_merged_failure_is_absorbed(retryable: bool) -> None:
     event = _failed(ids["a"], "batch rejected", retryable=retryable)
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(event)
     registry.down = False
     monitor.handle_task_event(event)
@@ -582,7 +582,7 @@ async def test_a_replayed_success_heals_a_merged_childs_other_workflow() -> None
     payload = _merged_success(runtime, parent, b["b1"])
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.mark_succeeded(parent, "wkr-1", payload, _TS)
     registry.down = False
     assert registry.durable_status(b["b1"]) == TaskStatus.DISPATCHED
@@ -605,7 +605,7 @@ async def test_a_failed_commit_leaves_a_parent_failure_whole_for_its_replay() ->
     record_dispatch(runtime, parent, _WORKER)
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.mark_failed(parent, "wkr-1", {}, _TS, error="bad input")
     registry.down = False
     runtime.mark_failed(parent, "wkr-1", {}, _TS, error="bad input")
@@ -630,7 +630,7 @@ async def test_a_failed_commit_leaves_a_parent_success_whole_for_its_replay() ->
     payload = _merged_success(runtime, parent)
 
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.mark_succeeded(parent, "wkr-1", payload, _TS)
     registry.down = False
     runtime.mark_succeeded(parent, "wkr-1", payload, _TS)

@@ -136,9 +136,10 @@ class _Scenario:
 
     def report_success(self) -> Exception | None:
         try:
-            self.runtime.mark_succeeded(
-                self.ids["planner"], "wkr-1", self.payload, _TS, "dsp-p"
-            )
+            with self.runtime.acknowledging():
+                self.runtime.mark_succeeded(
+                    self.ids["planner"], "wkr-1", self.payload, _TS, "dsp-p"
+                )
         except TransitionNotDurable as exc:
             return exc
         return None
@@ -191,7 +192,7 @@ def test_a_later_report_of_the_same_dispatch_keeps_the_release_held() -> None:
     planner = scenario.ids["planner"]
     scenario.fail_writes_after(1)
     assert scenario.report_success() is not None
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), scenario.runtime.acknowledging():
         scenario.runtime.fail_dispatch(planner, "wkr-1", {}, _TS, "dsp-p", error="late")
     assert scenario.releases == []
     scenario.heal_writes()

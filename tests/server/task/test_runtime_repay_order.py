@@ -7,7 +7,6 @@ its durable task record settled, and the restored workflow runs to its end.
 
 import asyncio
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,7 +14,7 @@ import pytest
 
 from server.orchestration.state import TERMINAL_WORK_ITEM_STATUSES
 from server.task.models import SETTLING_TASK_STATUSES, TaskStatus
-from server.task.runtime import TaskRuntime, TransitionNotDurable
+from server.task.runtime import TaskRuntime
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_runtime_commit_then_act import _runtime
 from tests.server.task.test_runtime_durability_faults import (
@@ -126,13 +125,9 @@ def _indebted(scenario: _Scenario) -> tuple[_Store, TaskRuntime, str]:
         record_dispatch(runtime, task_id, "wkr-1", f"dsp-{names[task_id]}")
         dispatched.append(task_id)
     store.refused = {"ledger"}
-    with suppress(TransitionNotDurable):
-        runtime.mark_started(
-            dispatched[0], "wkr-1", {}, _TS, f"dsp-{names[dispatched[0]]}"
-        )
+    runtime.mark_started(dispatched[0], "wkr-1", {}, _TS, f"dsp-{names[dispatched[0]]}")
     store.refused = {"ledger", "records"}
-    with suppress(TransitionNotDurable):
-        scenario.act(runtime, ids, workflow_id)
+    scenario.act(runtime, ids, workflow_id)
     assert runtime._committer.debt[workflow_id]
     store.refused = set()
     return store, runtime, workflow_id

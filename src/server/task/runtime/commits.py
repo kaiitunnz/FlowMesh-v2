@@ -5,7 +5,6 @@ import threading
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import cast
 
 from redis.exceptions import (
     BusyLoadingError,
@@ -78,10 +77,11 @@ def store_unavailable(error: BaseException) -> bool:
 
 
 class TransitionNotDurable(Exception):
-    """A transition applied in memory whose durable writes are held for a retry.
+    """Raised to a caller that acknowledges a request when writes its handling made
+    are held for a retry.
 
-    The transition is not to be applied again: a retry of the same request finds it
-    applied and makes it durable.
+    The handling applied in memory and is not to be applied again: the same request
+    handled again finds it applied, and makes what it holds durable.
     """
 
     def __init__(self, held: dict[str, BaseException]) -> None:
@@ -144,6 +144,9 @@ class _Debt:
 class _Scope(threading.local):
     depth: int = 0
     held: dict[str, BaseException]
+    # The writes held while an acknowledging caller's handling runs, by workflow.
+    acknowledging: dict[str, BaseException] | None = None
+    reporting: bool = False
 
     def __init__(self) -> None:
         self.held = {}
@@ -151,13 +154,13 @@ class _Scope(threading.local):
 
 @dataclass
 class _Unacknowledged:
-    """A report whose transition applied in memory with writes still held: what it did
-    to the task, answered to the report handled again."""
+    """A report its caller has not acknowledged because writes of its handling are
+    held: the workflows owing them, made by the report handled again."""
 
     report: str
     worker_id: str
     dispatch_id: str | None
-    outcome: SettleOutcome | FailureOutcome
+    workflows: set[str]
 
 
 class TransitionCommitter:
@@ -226,15 +229,30 @@ class TransitionCommitter:
         if self._scope.depth:
             return {}
         held, self._scope.held = self._scope.held, {}
-        # A write held and repaid within the same transition left nothing owed.
-        return {
-            workflow_id: error
-            for workflow_id, error in held.items()
-            if workflow_id in self.debt
-        }
+        return self._still_held(held)
 
-    def in_scope(self) -> bool:
-        return self._scope.depth > 0
+    def open_acknowledging(self) -> bool:
+        """Start collecting the writes this thread's handling holds, for a caller that
+        acknowledges it; returns whether this is the outermost such handling."""
+        if self._scope.acknowledging is not None:
+            return False
+        self._scope.acknowledging = {}
+        return True
+
+    def close_acknowledging(self) -> dict[str, BaseException]:
+        """Stop collecting, returning the errors of the writes the handling held that
+        are still not durable, by workflow."""
+        held, self._scope.acknowledging = self._scope.acknowledging or {}, None
+        return self._still_held(held)
+
+    def _still_held(self, held: dict[str, BaseException]) -> dict[str, BaseException]:
+        # A write held and made later within the same handling left nothing owed.
+        with self._lock:
+            return {
+                workflow_id: error
+                for workflow_id, error in held.items()
+                if workflow_id in self.debt
+            }
 
     def durable(self, workflow_id: str) -> bool:
         """Whether every write of the workflow made so far is durable."""
@@ -340,9 +358,9 @@ class TransitionCommitter:
     def _note_held(self, workflow_id: str, error: BaseException) -> None:
         if self.on_debt is not None:
             self.on_debt(workflow_id)
-        if not self._scope.depth:
-            raise TransitionNotDurable({workflow_id: error})
         self._scope.held[workflow_id] = error
+        if self._scope.acknowledging is not None:
+            self._scope.acknowledging[workflow_id] = error
 
     # ------------------------------------------------------------------ #
     # Writes
@@ -654,18 +672,19 @@ class TransitionCommitter:
         worker_id: str | None,
         dispatch_id: str | None,
         transition: Callable[[], O],
+        handled: O,
     ) -> O:
         """Apply a worker's report to its task through ``transition``.
 
-        A transition whose durable write the store does not take completes in memory,
-        holds that write, and raises ``TransitionNotDurable``. The report handled again
-        makes what was held and returns what the first handling did; it keeps doing so
-        until one handling leaves nothing held. ``transition`` runs in the caller's
-        transition scope.
+        A handling an acknowledging caller does not acknowledge, because writes it made
+        are held, is remembered with the workflows owing them. The report handled again
+        is not applied again: it makes those writes and answers ``handled``, and is
+        acknowledged once none is held. ``transition`` runs in the caller's transition
+        scope.
         """
         # A report naming no worker has nothing to replay against, and a nested one
         # runs under the outer report.
-        if worker_id is None or self._scope.depth > 1:
+        if worker_id is None or self._scope.reporting:
             return transition()
         with self._lock:
             # A stash matches only the same report from the same worker, naming its
@@ -677,21 +696,25 @@ class TransitionCommitter:
                 or dispatch_id not in (None, pending.dispatch_id)
             ):
                 pending = None
-            if pending is not None and (record := self._tasks.get(task_id)):
-                self.close_locked(record.workflow_id)
-        outcome = transition()
-        # A replay sees its own event as stale, so it answers with what the first
-        # handling did.
-        if pending is not None:
-            outcome = cast(O, pending.outcome)
+            if pending is not None:
+                for workflow_id in sorted(pending.workflows):
+                    self.close_locked(workflow_id)
+                if not (held := {w for w in pending.workflows if w in self.debt}):
+                    del self.unacknowledged[task_id]
+                else:
+                    pending.workflows = held
+                return handled
+        self._scope.reporting = True
+        try:
+            outcome = transition()
+        finally:
+            self._scope.reporting = False
         with self._lock:
-            if any(workflow_id in self.debt for workflow_id in self._scope.held):
-                if pending is None:
-                    self.unacknowledged[task_id] = _Unacknowledged(
-                        report, worker_id, dispatch_id, outcome
-                    )
-            elif pending is not None and self.unacknowledged.get(task_id) is pending:
-                del self.unacknowledged[task_id]
+            held = {w for w in self._scope.held if w in self.debt}
+            if held and self._scope.acknowledging is not None:
+                self.unacknowledged[task_id] = _Unacknowledged(
+                    report, worker_id, dispatch_id, held
+                )
         return outcome
 
     def drop_unacknowledged(self, task_id: str) -> None:

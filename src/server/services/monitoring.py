@@ -373,7 +373,8 @@ class EventMonitor:
 
             if isinstance(event, TaskEvent):
                 try:
-                    self.handle_task_event(event)
+                    with self._runtime.acknowledging():
+                        self.handle_task_event(event)
                 except REDIS_CONN_ERRORS:
                     # Propagate so the loop backs off and replays from this cursor.
                     raise
@@ -547,11 +548,11 @@ class EventMonitor:
                 if success.status == TaskStatus.CANCELLED:
                     self._record_cancellation(event, success.usages)
                     return
-                self._release_task(event.task_id)
+                self._release_task(event.task_id, event.dispatch_id)
                 if settles:
                     self._metrics.record_task_event(event)
                 self._schedule_emit_usage(success.usages)
-                self._close_task_log_stream(event.task_id)
+                self._close_task_log_stream(event.task_id, event.dispatch_id)
                 try:
                     queueing, dispatched, pending, done, total = (
                         self._runtime.task_status_counts()
@@ -578,7 +579,7 @@ class EventMonitor:
                         ts=event.ts,
                     )
                     self._metrics.record_task_event(child_event)
-                    self._close_task_log_stream(child_id)
+                    self._close_task_log_stream(child_id, event.dispatch_id)
                     self._finalizer.close_task_workflow(child_id)
                 try:
                     record = self._runtime.get_record(event.task_id)
@@ -648,7 +649,7 @@ class EventMonitor:
                     event.error,
                 )
             case DispatchEnd.RETURNED:
-                self._release_task(event.task_id)
+                self._release_task(event.task_id, event.dispatch_id)
                 self._logger.warning(
                     "Retrying task %s after failure (attempt %d)",
                     event.task_id,
@@ -678,11 +679,11 @@ class EventMonitor:
     ) -> None:
         """Apply the side effects of a task that settled FAILED, and of each dependent
         that failed with it."""
-        self._release_task(event.task_id)
+        self._release_task(event.task_id, event.dispatch_id)
         self._metrics.record_task_event(event)
         self._schedule_emit_usage(usages)
         self._metrics.finalize_task_failure(event.task_id)
-        self._close_task_log_stream(event.task_id)
+        self._close_task_log_stream(event.task_id, event.dispatch_id)
         for task_id, reason in impacted:
             derived = TaskEvent(
                 type="TASK_FAILED",
@@ -692,7 +693,7 @@ class EventMonitor:
             )
             self._metrics.record_task_event(derived)
             self._metrics.finalize_task_failure(task_id)
-            self._close_task_log_stream(task_id)
+            self._close_task_log_stream(task_id, None)
             self._finalizer.close_task_workflow(task_id)
         self._finalizer.close_task_workflow(event.task_id)
 
@@ -721,7 +722,7 @@ class EventMonitor:
                     worker_id,
                     dispatch_id,
                 )
-                self._release_task(loss.task_id)
+                self._release_task(loss.task_id, dispatch_id)
                 if loss.spent:
                     self._metrics.record_task_event(
                         TaskEvent(
@@ -758,13 +759,13 @@ class EventMonitor:
     ) -> None:
         """Apply the side effects of a task that settled CANCELLED, whatever the event
         that settled it reported."""
-        self._release_task(event.task_id)
+        self._release_task(event.task_id, event.dispatch_id)
         self._metrics.record_task_event(
             event.model_copy(update={"type": "TASK_CANCELLED", "error": None})
         )
         self._schedule_emit_usage(usages)
         self._metrics.finalize_task_cancellation(event.task_id)
-        self._close_task_log_stream(event.task_id)
+        self._close_task_log_stream(event.task_id, event.dispatch_id)
         self._finalizer.close_task_workflow(event.task_id)
 
     def _unapplied(self, event: TaskEvent, effect: EventEffect) -> bool:
@@ -1127,34 +1128,41 @@ class EventMonitor:
         """
         requeued: list[str] = []
         ts = now_iso()
-        recovery = self._runtime.recover_tasks_for_worker(
-            worker_id, spend_attempt=not graceful, node_id=node_id
-        )
-        self.record_worker_losses(worker_id, recovery.resolved, "worker_unregistered")
-        for task_id in recovery.lost:
-            end = self._dispatcher.requeue_task(
-                task_id,
-                reason="worker_unregistered",
-                front=True,
-                holder=worker_id,
-                count_retry=not graceful,
-                extra_payload={"worker": worker_id},
+        # What the recovery and each return owe is delivered once all have committed.
+        with self._runtime.transition():
+            recovery = self._runtime.recover_tasks_for_worker(
+                worker_id, spend_attempt=not graceful, node_id=node_id
             )
-            if end is DispatchEnd.CANCELLED:
-                self._record_cancellation(
-                    TaskEvent(
-                        type="TASK_CANCELLED",
-                        task_id=task_id,
-                        worker_id=worker_id,
-                        ts=ts,
-                    ),
-                    [],
+            self.record_worker_losses(
+                worker_id, recovery.resolved, "worker_unregistered"
+            )
+            for task_id in recovery.lost:
+                record = self._runtime.get_record(task_id)
+                dispatch_id = record.dispatch_id if record is not None else None
+                end = self._dispatcher.requeue_task(
+                    task_id,
+                    reason="worker_unregistered",
+                    front=True,
+                    holder=worker_id,
+                    count_retry=not graceful,
+                    extra_payload={"worker": worker_id},
                 )
-                continue
-            if end not in (DispatchEnd.STALE, DispatchEnd.SETTLED):
-                self._release_task(task_id)
-            if end is DispatchEnd.RETURNED:
-                requeued.append(task_id)
+                if end is DispatchEnd.CANCELLED:
+                    self._record_cancellation(
+                        TaskEvent(
+                            type="TASK_CANCELLED",
+                            task_id=task_id,
+                            worker_id=worker_id,
+                            dispatch_id=dispatch_id,
+                            ts=ts,
+                        ),
+                        [],
+                    )
+                    continue
+                if end not in (DispatchEnd.STALE, DispatchEnd.SETTLED):
+                    self._release_task(task_id, dispatch_id)
+                if end is DispatchEnd.RETURNED:
+                    requeued.append(task_id)
         if requeued:
             self._logger.info(
                 "Requeued %d task(s) after worker %s unregistered: %s",
@@ -1354,10 +1362,16 @@ class EventMonitor:
                 lambda: self._runtime.holds_dispatch(task_id, worker_id, dispatch_id),
             )
 
-    def _release_task(self, task_id: str) -> None:
-        """Release what a task's dispatch exposed, once it ends or returns to the queue:
-        its forward listener, its relayed SSH connections, and its serve binding, which
-        a re-run registers afresh."""
+    def _release_task(self, task_id: str, dispatch_id: str | None) -> None:
+        """Release what a task's dispatch exposed once the transition that ended it or
+        returned it to the queue has committed."""
+        self._runtime.file_cleanup(
+            task_id, dispatch_id, "release", lambda: self._release_exposure(task_id)
+        )
+
+    def _release_exposure(self, task_id: str) -> None:
+        """Release a task's forward listener, its relayed SSH connections, and its
+        serve binding, which a re-run registers afresh."""
         self._unregister_port_forward(task_id)
         if self._ssh_relay is not None:
             self._ssh_relay.close_task(task_id)
@@ -1586,7 +1600,17 @@ class EventMonitor:
         except Exception:
             pass
 
-    def _close_task_log_stream(self, task_id: str) -> None:
+    def _close_task_log_stream(self, task_id: str, dispatch_id: str | None) -> None:
+        """Close a task's log stream once the transition that settled it has
+        committed."""
+        self._runtime.file_cleanup(
+            task_id,
+            dispatch_id,
+            "close-log",
+            lambda: self._seal_task_log_stream(task_id),
+        )
+
+    def _seal_task_log_stream(self, task_id: str) -> None:
         record = self._runtime.get_record(task_id)
         if not record:
             return
@@ -1602,24 +1626,19 @@ class EventMonitor:
         payload = event.model_dump(exclude_none=True)
         payload["type"] = "LOG_STREAM_CLOSED"
         encoded = json.dumps(payload, ensure_ascii=False)
-        try:
-            self._redis_client.xadd_telemetry(
-                task_log_stream_key(task_id),
-                {
-                    "payload": encoded,
-                    "workflow_id": record.workflow_id,
-                    "task_id": task_id,
-                },
+        self._redis_client.xadd_telemetry(
+            task_log_stream_key(task_id),
+            {
+                "payload": encoded,
+                "workflow_id": record.workflow_id,
+                "task_id": task_id,
+            },
+        )
+        self._redis_client.set_value(task_log_closed_key(task_id), "1")
+        if self._log_stream_ttl_sec:
+            self._redis_client.expire_telemetry(
+                task_log_stream_key(task_id), self._log_stream_ttl_sec
             )
-            self._redis_client.set_value(task_log_closed_key(task_id), "1")
-            if self._log_stream_ttl_sec:
-                self._redis_client.expire_telemetry(
-                    task_log_stream_key(task_id), self._log_stream_ttl_sec
-                )
-                self._redis_client.expire(
-                    task_log_closed_key(task_id), self._log_stream_ttl_sec
-                )
-        except Exception as exc:
-            self._logger.debug(
-                "Failed to append log sentinel for task %s: %s", task_id, exc
+            self._redis_client.expire(
+                task_log_closed_key(task_id), self._log_stream_ttl_sec
             )

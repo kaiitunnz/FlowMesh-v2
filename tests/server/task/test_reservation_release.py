@@ -132,7 +132,7 @@ def test_a_redispatch_releases_the_earlier_reservation_it_ends(
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     # The failure's commit is lost, so its release waits for the next dispatch.
     workflows.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.fail_dispatch(task_id, "wkr-1", {}, _TS, "dsp-1", retryable=True)
     workflows.down = False
     registry.release_worker.reset_mock()

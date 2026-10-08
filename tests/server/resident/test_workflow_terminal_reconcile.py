@@ -107,7 +107,7 @@ def test_a_restart_releases_a_credit_whose_cancel_only_its_records_hold() -> Non
     runtime, workflow_id, env = _held(registry)
     snapshot = _admit(workflow_id, env.invocation_id)
     _crash_before_ledger_save(registry)
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.cancel_workflow(workflow_id)
     runtime.shutdown()
     del registry.save_ledger_snapshot

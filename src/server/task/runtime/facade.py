@@ -152,6 +152,7 @@ from . import (
 from .after_commit import (
     AfterCommit,
     AfterCommitActions,
+    Cleanup,
     CreditRelease,
     Interrupt,
     Issue,
@@ -174,6 +175,7 @@ from .reports import (
     LOSS_EFFECTS,
     failed_task_can_retry,
     in_flight_usage,
+    membership,
     reported_child_references,
     reported_reference,
     reset_to_pending,
@@ -759,7 +761,7 @@ class TaskRuntime:
         """Make a durably registered workflow live: install its records and schedule,
         then apply its initial advance."""
         v2_engine = staged.v2_engine
-        with self._transition(raises=False):
+        with self._transition():
             if staged.in_epoch_order:
                 self._ready.ready_by_workflow[workflow_id] = []
                 self._epochs.workflow_in_epoch_order[workflow_id] = True
@@ -1202,16 +1204,12 @@ class TaskRuntime:
     # ------------------------------------------------------------------ #
 
     @contextmanager
-    def _transition(
-        self, *, raises: bool = True, locked: bool = True
-    ) -> Iterator[None]:
+    def _transition(self, *, locked: bool = True) -> Iterator[None]:
         """Run a transition, then deliver off the lock what it owes once durable.
 
-        The transition runs under the lock, or takes it itself where it reads off it
-        when not ``locked``. A write the store does not take is held for a retry and
-        the transition completes in memory. The outermost scope then raises
-        ``TransitionNotDurable`` when ``raises``, for a caller that acknowledges the
-        transition or has it redelivered, and logs it otherwise.
+        The transition runs under the lock, or, when not ``locked``, takes the lock
+        itself, so it can read off the lock first. A write the store does not take is
+        held for a retry and the transition completes in memory.
         """
         outermost = self._committer.enter_scope()
         try:
@@ -1235,13 +1233,55 @@ class TaskRuntime:
             if outermost:
                 self._act_after_commit()
         if held:
-            if raises:
-                raise TransitionNotDurable(held)
             self._logger.warning(
                 "Writes of workflow(s) %s are held for a retry: %s",
                 ", ".join(sorted(held)),
                 next(iter(held.values())),
             )
+
+    @contextmanager
+    def transition(self) -> Iterator[None]:
+        """Run several runtime calls as one transition: what any of them owes is
+        delivered once all of them have committed."""
+        with self._transition(locked=False):
+            yield
+
+    @contextmanager
+    def acknowledging(self) -> Iterator[None]:
+        """Run the handling of a request its caller acknowledges, as one transition.
+
+        Raises ``TransitionNotDurable`` once the handling ends with a write it made
+        still held, so the caller leaves the request unacknowledged and handles it
+        again.
+        """
+        outermost = self._committer.open_acknowledging()
+        try:
+            with self._transition(locked=False):
+                yield
+        except BaseException:
+            if outermost:
+                self._committer.close_acknowledging()
+            raise
+        if outermost and (held := self._committer.close_acknowledging()):
+            raise TransitionNotDurable(held)
+
+    def file_cleanup(
+        self,
+        task_id: str,
+        dispatch_id: str | None,
+        name: str,
+        cleanup: Callable[[], None],
+    ) -> None:
+        """Run a caller's teardown of what a task's dispatch exposed, off the lock once
+        the task's workflow has committed.
+
+        A teardown filed again while one of its name for the same dispatch is owed is
+        not filed twice, one that fails is retried with the workflow's held writes, and
+        none runs once a later dispatch holds the task. The task publishes no later
+        dispatch while one is owed.
+        """
+        with self._transition():
+            self._file_locked(task_id, Cleanup(task_id, dispatch_id, name, cleanup))
 
     def _file_locked(self, task_id: str, *actions: AfterCommit | None) -> None:
         """Hold actions until the transition of the task's workflow commits."""
@@ -1342,6 +1382,18 @@ class TaskRuntime:
                 self._credential_vault.purge(purged)
             case Settled(workflow_id=settled):
                 self._committer.notify_terminal_transition(settled)
+            case Cleanup(task_id=task_id, dispatch_id=dispatch_id):
+                with self._lock:
+                    record = self._tasks.get(task_id)
+                    superseded = (
+                        record is not None
+                        and membership(record) == TaskStatus.DISPATCHED
+                        and record.dispatch_id != dispatch_id
+                    )
+                if not superseded:
+                    action.run()
+                with self._lock:
+                    self._actions.cleanup_delivered_locked(action)
 
     def _credit_consumed(
         self, workflow_id: str | None, action: AfterCommit, consumed: Future[Any]
@@ -1356,7 +1408,7 @@ class TaskRuntime:
     def _retry_durability(self, workflow_id: str) -> None:
         """Make a workflow's held writes durable and deliver what failed to deliver,
         keeping the workflow scheduled while either remains."""
-        with self._transition(raises=False):
+        with self._transition():
             self._committer.close_locked(workflow_id)
             self._actions.retry_failed_locked(workflow_id)
         with self._lock:
@@ -1380,7 +1432,7 @@ class TaskRuntime:
                 reservation.task_id, reservation.dispatch_id, reservation.worker_id
             )
         ]
-        with self._transition(raises=False):
+        with self._transition():
             self._actions.queue_locked(
                 *(
                     revoke
@@ -1398,7 +1450,7 @@ class TaskRuntime:
 
     def revoke_dispatch(self, task_id: str, worker_id: str, dispatch_id: str) -> None:
         """Revoke one dispatch on its worker, which control does not hold."""
-        with self._transition(raises=False):
+        with self._transition():
             self._actions.queue_locked(
                 *filter(
                     None, [self._actions.revoke(task_id, worker_id, dispatch_id, None)]
@@ -1508,7 +1560,7 @@ class TaskRuntime:
         child it materializes, applies the advance, and writes the ledger snapshot after
         the task records so the ledger never leads durable state.
         """
-        with self._transition(raises=False):
+        with self._transition():
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if record is None or engine is None:
@@ -1706,7 +1758,7 @@ class TaskRuntime:
         boundary terminally, so a gateway failure never resumes the agent as a phantom
         empty success.
         """
-        with self._transition(raises=False):
+        with self._transition():
             return self._settle_episode_invocation(
                 task_id, call_correlation, value, error=error, ref=ref
             )
@@ -1820,7 +1872,7 @@ class TaskRuntime:
         terminalizing. A boundary that already settled, terminalized, or cancelled is a
         no-op, so a late re-drive neither re-runs the handler nor releases a credit.
         """
-        with self._transition(raises=False):
+        with self._transition():
             handoff = self._prepare_issue_locked(task_id, call_correlation, None)
         if handoff is None:
             return False
@@ -1830,7 +1882,7 @@ class TaskRuntime:
     def _issue(self, issue: Issue) -> None:
         """Hand a recorded boundary to its handler, if it still awaits the invocation
         it was recorded with."""
-        with self._transition(raises=False):
+        with self._transition():
             handoff = self._prepare_issue_locked(
                 issue.task_id, issue.call_correlation, issue.invocation_id
             )
@@ -1867,7 +1919,7 @@ class TaskRuntime:
         drops one it already runs; each task being cancelled there is interrupted
         again, keyed to its dispatch. A lost task dispatch resolves as lost.
         """
-        with self._transition(raises=False):
+        with self._transition():
             pending = self._mediated_ops.pending_for_worker(worker_id)
             for workflow_id, interrupt in self._actions.cancelling_interrupts_locked(
                 lambda record: record.assigned_worker == worker_id
@@ -1887,7 +1939,7 @@ class TaskRuntime:
         now = time.time()
         with self._cv:
             exhausted, redrive = self._mediated_ops.take_overdue(worker_id, now)
-        with self._transition(raises=False):
+        with self._transition():
             for op in exhausted:
                 self._logger.warning(
                     "No outcome arrived for tool operation %s of %s after %d "
@@ -1963,7 +2015,7 @@ class TaskRuntime:
             error = "resident-capacity control is not running"
         else:
             return
-        with self._transition(raises=False):
+        with self._transition():
             worker_id = self._assigned_worker_locked(env.task_id)
             self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error=error
@@ -2195,7 +2247,7 @@ class TaskRuntime:
         lost report leaves the boundary pending for a same-idempotency-key re-drive. A
         duplicate or late report is absorbing at the boundary.
         """
-        with self._transition(raises=False):
+        with self._transition():
             self._settle_mediated_operation(outcome)
 
     def _settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
@@ -2323,7 +2375,7 @@ class TaskRuntime:
         completion still routes it. At most one group is open per episode; a second one
         while one holds the gate is refused by the busy fence, not stored here.
         """
-        with self._lock:
+        with self._transition():
             self._pending_facade_groups[task_id] = group
             if (record := self._tasks.get(task_id)) is not None:
                 record.pending_facade_group = group
@@ -2500,7 +2552,7 @@ class TaskRuntime:
         loss between publication and the attempt bookkeeping that follows it. A pinned
         selection is kept and returned unchanged.
         """
-        with self._transition(raises=False):
+        with self._transition():
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if engine is None or record is None:
@@ -2632,7 +2684,6 @@ class TaskRuntime:
         resolution is durable ahead of a local generation or a resident service issue,
         and the admission that follows is sized from the cardinality that materialized.
         A resolution already recorded stands, and a different one leaves it in place.
-        Raises ``TransitionNotDurable`` while the resolution is not durable.
         """
         try:
             binding = InputResolutionBinding.model_validate(binding_payload)
@@ -2902,7 +2953,7 @@ class TaskRuntime:
         attempt; a non-replayable one becomes ambiguity-terminal and never silently
         retries or reports success.
         """
-        with self._transition(raises=False):
+        with self._transition():
             return self._resolve_uncertain_locked(task_id)
 
     def _resolve_uncertain_locked(
@@ -3125,7 +3176,7 @@ class TaskRuntime:
             for task_id, check in checks.items()
             if check.unreadable is None
         }
-        with self._transition(raises=False):
+        with self._transition():
             failures = self._inputs.settle_input_checks_locked(
                 workflow_id, checks, verdicts
             )
@@ -3189,7 +3240,7 @@ class TaskRuntime:
             for task_id, binding in producers
         }
         values = agent_inputs.read_input_values(self._results, snapshots)
-        with self._transition(raises=False):
+        with self._transition():
             if (engine := self._engines.get(workflow_id)) is None:
                 return
             advance = Advance()
@@ -3294,13 +3345,13 @@ class TaskRuntime:
     ) -> list[str]:
         if max_batch_size <= 1:
             return []
-        with self._transition(raises=False):
+        with self._transition():
             return self._merges.plan_merge_locked(
                 task_id, max_batch_size, assigned_worker
             )
 
     def release_merge(self, task_id: str) -> None:
-        with self._transition(raises=False):
+        with self._transition():
             self._merges.release_merge_locked(task_id)
 
     def merged_child_record(self, task_id: str, child_id: str) -> TaskRecord | None:
@@ -3313,7 +3364,7 @@ class TaskRuntime:
     ) -> None:
         """Take one child out of a task's merge and return it to the ready queue, to
         merge next under ``merge_key``, or to run alone when it is None."""
-        with self._transition(raises=False):
+        with self._transition():
             self._merges.release_merged_child_locked(task_id, child_id, merge_key)
 
     # ------------------------------------------------------------------ #
@@ -3342,12 +3393,13 @@ class TaskRuntime:
 
         Everything the dispatch carries is made durable first: the held writes of its
         task's workflow and of each workflow a merged child belongs to. A dispatch whose
-        writes stay held is not marked.
+        writes stay held, or whose task's previous dispatch is still being torn down,
+        is not marked.
         """
         publish = Publish(
             worker.id, dispatch_id, supplier_id(worker), input_preparation
         )
-        with self._transition(raises=False):
+        with self._transition():
             spanned = {
                 record.workflow_id
                 for spanned_id in (
@@ -3357,6 +3409,8 @@ class TaskRuntime:
                 if (record := self._tasks.get(spanned_id)) is not None
             }
             if not all([self._committer.close_locked(w) for w in sorted(spanned)]):
+                return PublishGate.NOT_DURABLE
+            if self._actions.cleanup_owed(task_id):
                 return PublishGate.NOT_DURABLE
             if not self._fence.begin_publish_locked(task_id, publish):
                 return PublishGate.NOT_PENDING
@@ -3368,7 +3422,7 @@ class TaskRuntime:
         Returns whether the task still needs returning: a dispatch its worker reported
         on stands, and one a cancel recorded settles CANCELLED.
         """
-        with self._transition(raises=False):
+        with self._transition():
             publish = self._fence.take_publish(task_id)
             if publish is None or not publish.recorded:
                 return True
@@ -3388,7 +3442,7 @@ class TaskRuntime:
         A dispatch an event of its worker recorded first is not recorded again, and one
         that ended before its record, or whose task already settles, records nothing.
         """
-        with self._transition(raises=False):
+        with self._transition():
             return self._fence.mark_dispatched_locked(task_id)
 
     def mark_started(
@@ -3451,7 +3505,7 @@ class TaskRuntime:
         ``previous`` is still the latest update, so a worker update that landed since is
         never relabelled. Returns whether it applied.
         """
-        with self._lock:
+        with self._transition():
             record = self._tasks.get(task_id)
             if (
                 record is None
@@ -3491,6 +3545,7 @@ class TaskRuntime:
                 lambda: self._apply_success(
                     task_id, worker_id, payload, ts, dispatch_id, skip
                 ),
+                SettleOutcome(EventEffect.STALE, None, [], []),
             )
 
     def _apply_success(
@@ -3799,6 +3854,7 @@ class TaskRuntime:
                     unavailable_inputs,
                     ambiguous,
                 ),
+                FailureOutcome(DispatchEnd.STALE, 0, [], []),
             )
 
     def _apply_failure(
@@ -3935,7 +3991,7 @@ class TaskRuntime:
         settles CANCELLED, its merged children returning to run alone. A task whose
         last attempt this would spend is left for the caller to fail.
         """
-        with self._transition(raises=False):
+        with self._transition():
             record = self._tasks.get(task_id)
             if record is None or not self._fence.holds_dispatch_locked(
                 record, holder, None
@@ -4177,11 +4233,7 @@ class TaskRuntime:
     # ------------------------------------------------------------------ #
 
     def cancel_workflow(self, workflow_id: str, reason: str = "cancelled") -> list[str]:
-        """Cancel every unsettled task of a workflow, returning the tasks it moved.
-
-        Raises ``TransitionNotDurable`` when the cancel applied but is not durable yet;
-        cancelling again makes it durable.
-        """
+        """Cancel every unsettled task of a workflow, returning the tasks it moved."""
         touched: list[str] = []
         returned: list[str] = []
         with self._transition():
@@ -4409,6 +4461,7 @@ class TaskRuntime:
                 lambda: self._apply_cancellation(
                     task_id, worker_id, payload, ts, dispatch_id
                 ),
+                SettleOutcome(EventEffect.STALE, None, [], []),
             )
 
     def _apply_cancellation(
@@ -4783,7 +4836,7 @@ class TaskRuntime:
         worker originated that boundary and holds its request. ``node_id`` names the
         worker's node when its record is already gone.
         """
-        with self._transition(raises=False):
+        with self._transition():
             return self._recover_tasks_for_worker(worker_id, spend_attempt, node_id)
 
     def _recover_tasks_for_worker(
@@ -4862,7 +4915,7 @@ class TaskRuntime:
         it, and its return spends an attempt. Returns None when the dispatch does not
         resolve.
         """
-        with self._transition(raises=False):
+        with self._transition():
             record = self._tasks.get(task_id)
             if (
                 record is None

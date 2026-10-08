@@ -9,7 +9,6 @@ principal so an operator reads its logs through the normal owner-scoped path.
 
 import logging
 from collections.abc import Callable
-from contextlib import suppress
 from typing import Any
 
 from lumid_hooks import PrincipalContext
@@ -29,7 +28,7 @@ from ..task.models import (
     TaskStatus,
     serve_engine_reported,
 )
-from ..task.runtime import TaskRuntime, TransitionNotDurable
+from ..task.runtime import TaskRuntime
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .materializer import materialize_resident_replica
@@ -77,11 +76,9 @@ def build_resident_capacity(
     def stop(serve_task_id: str) -> None:
         record = runtime.get_record(serve_task_id)
         if record is not None and record.status not in SETTLING_TASK_STATUSES:
-            # A cancel not yet durable is applied; the runtime retries its writes.
-            with suppress(TransitionNotDurable):
-                runtime.cancel_workflow(
-                    record.workflow_id, reason="resident replica teardown"
-                )
+            runtime.cancel_workflow(
+                record.workflow_id, reason="resident replica teardown"
+            )
 
     lifecycle = LifecycleScaleManager(
         stores,

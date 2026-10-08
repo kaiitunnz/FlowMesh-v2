@@ -23,7 +23,7 @@ from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.registries.workflow import PersistedTask
 from server.resident import ClaimState, ClaimTerminalReason
 from server.task.models import TERMINAL_TASK_STATUSES, PublishGate, TaskStatus
-from server.task.runtime import TaskRuntime, TransitionNotDurable
+from server.task.runtime import TaskRuntime
 from server.task.runtime.after_commit import (
     AfterCommit,
     CreditRelease,
@@ -327,10 +327,7 @@ _TRANSITIONS = (
 
 
 def _run(resident: _Resident, transition: _Transition) -> None:
-    try:
-        transition.run(resident)
-    except TransitionNotDurable:
-        pass
+    transition.run(resident)
     resident.settle_loop()
 
 
@@ -507,12 +504,7 @@ class _Spawning:
         self.payload = _planned(self.runtime, self.planner, ["h1", "h2"])
 
     def succeed(self) -> None:
-        try:
-            self.runtime.mark_succeeded(
-                self.planner, "wkr-1", self.payload, _TS, "dsp-1"
-            )
-        except TransitionNotDurable:
-            pass
+        self.runtime.mark_succeeded(self.planner, "wkr-1", self.payload, _TS, "dsp-1")
 
     def assert_consistent(self) -> None:
         """The durable children are the ledger's, each with its record, once."""

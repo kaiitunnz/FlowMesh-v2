@@ -27,7 +27,7 @@ def _env(interface: str) -> ToolInvocationEnvelope:
 
 
 def _dispatch(runtime: TaskRuntime, env: ToolInvocationEnvelope) -> None:
-    with runtime._transition(raises=False):
+    with runtime._transition():
         handoff = runtime._boundary_handoff_locked(env)
     if handoff is not None:
         handoff()

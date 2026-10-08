@@ -3,6 +3,8 @@ task-event consumer."""
 
 import logging
 import threading
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -92,6 +94,7 @@ class _ConsumerMonitor(EventMonitor):
         not_durable_times: dict[str, int] | None = None,
     ) -> None:
         self._redis_client = cast(Any, redis)
+        self._runtime = cast(Any, SimpleNamespace(acknowledging=nullcontext))
         self._stop_event = threading.Event()
         self._logger = logging.getLogger("consumer-test")
         self._event_handler_attempts: dict[str, int] = {}

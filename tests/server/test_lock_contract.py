@@ -85,7 +85,7 @@ def test_a_delivery_after_the_transition_runs_off_the_lock() -> None:
     runtime, workflow_id, _ = _registered()
 
     with lock_contract.recorded() as trips:
-        with runtime._transition(raises=False):
+        with runtime._transition():
             runtime._actions.file_locked(workflow_id, Settled(workflow_id))
 
     assert trips == []

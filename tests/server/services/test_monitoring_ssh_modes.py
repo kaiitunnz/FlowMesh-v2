@@ -129,6 +129,6 @@ def test_a_direct_session_passes_through() -> None:
 
 def test_releasing_a_task_ends_its_relayed_connections() -> None:
     world = _make_monitor()
-    world.monitor._release_task("tsk-1")
+    world.monitor._release_exposure("tsk-1")
     assert world.relay is not None
     world.relay.close_task.assert_called_once_with("tsk-1")

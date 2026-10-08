@@ -320,7 +320,7 @@ async def test_a_preparation_handled_again_after_its_save_failed_readies_the_lea
     payload = {"input_materialization": _materialization().model_dump(mode="json")}
 
     registry.fail_ledger = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.mark_succeeded(task_id, "wkr-1", payload, now_iso(), "dsp-prep")
     runtime.mark_succeeded(task_id, "wkr-1", payload, now_iso(), "dsp-prep")
 

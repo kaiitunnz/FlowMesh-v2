@@ -935,7 +935,7 @@ def test_a_first_report_handled_again_after_its_record_failed_opens_the_attempt(
         runtime.begin_publish(writer, _WORKER, "dsp-1")
 
         registry.down = True
-        with pytest.raises(TransitionNotDurable):
+        with pytest.raises(TransitionNotDurable), runtime.acknowledging():
             runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1")
         registry.down = False
         assert runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1") is (

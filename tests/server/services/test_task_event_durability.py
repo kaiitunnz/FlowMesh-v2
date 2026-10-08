@@ -216,7 +216,7 @@ def test_a_transition_not_durable_reaches_the_consumer_as_its_own_signal() -> No
     store, runtime, task_id, event = _succeeding()
     store.error = redis.exceptions.ReadOnlyError("read-only replica")
 
-    with pytest.raises(TransitionNotDurable) as raised:
+    with pytest.raises(TransitionNotDurable) as raised, runtime.acknowledging():
         runtime.mark_succeeded(task_id, "wkr-1", event.payload, event.ts, "dsp-1")
 
     assert set(raised.value.held) == {runtime._tasks[task_id].workflow_id}

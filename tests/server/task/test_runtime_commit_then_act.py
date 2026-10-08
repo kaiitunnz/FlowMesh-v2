@@ -156,7 +156,7 @@ def test_a_settle_inside_a_held_report_releases_nothing_before_its_save() -> Non
     env = resident.capture()
 
     resident.ledger_down()
-    with resident.runtime._transition(raises=False):
+    with resident.runtime._transition():
         resident.runtime._settle_episode_invocation(
             resident.writer, env.call_correlation, "a completion"
         )
@@ -169,7 +169,7 @@ def test_a_boundary_issues_to_its_handler_only_once_its_routing_is_durable() -> 
     resident = _Resident()
 
     resident.ledger_down()
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), resident.runtime.acknowledging():
         _capture_resident_boundary(resident.runtime, resident.writer)
 
     # Nothing reached resident admission for an invocation the ledger may lose.
@@ -186,7 +186,7 @@ def test_a_boundary_issues_to_its_handler_only_once_its_routing_is_durable() -> 
 def test_a_crash_after_a_held_routing_leaves_no_claim_behind() -> None:
     resident = _Resident()
     resident.ledger_down()
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), resident.runtime.acknowledging():
         _capture_resident_boundary(resident.runtime, resident.writer)
     resident.runtime.shutdown()
     resident.ledger_up()
@@ -250,10 +250,10 @@ async def test_an_input_resolution_is_acknowledged_only_once_durable() -> None:
         raise ConnectionError("control redis unavailable")
 
     registry.save_ledger_snapshot = down  # type: ignore[method-assign]
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.record_input_resolution(task_id, "wkr-1", _binding("req", 2), "dsp-1")
     # The equal report handed over again is not acknowledged while the store is down.
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.record_input_resolution(task_id, "wkr-1", _binding("req", 2), "dsp-1")
     registry.save_ledger_snapshot = save  # type: ignore[method-assign]
 
@@ -285,7 +285,7 @@ async def test_a_child_whose_materialization_is_held_is_not_published() -> None:
     assert pop_ready(runtime) == planner
     record_dispatch(runtime, planner, "wkr-1", "dsp-1")
     registry.down = True
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.mark_succeeded(
             planner, "wkr-1", _planned(runtime, planner, ["h1", "h2"]), _TS, "dsp-1"
         )
@@ -447,7 +447,7 @@ def test_a_settlement_whose_last_save_is_held_does_not_close_or_purge() -> None:
     settling = _Settling()
     settling.ledger_down()
 
-    with pytest.raises(TransitionNotDurable):
+    with pytest.raises(TransitionNotDurable), settling.runtime.acknowledging():
         settling.fail_last()
 
     assert not settling.runtime.workflow_settlement(settling.workflow_id).settled
