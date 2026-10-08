@@ -38,6 +38,11 @@ def _queued(reply: str) -> ResponseError:
         ResponseError("BUSY Redis is busy running a script."),
         _queued("NOREPLICAS Not enough good replicas to write."),
         _queued("READONLY You can't write against a read only replica."),
+        ResponseError(
+            "MISCONF Redis is configured to save RDB snapshots, but it's currently"
+            " unable to persist to disk."
+        ),
+        _queued("MISCONF Errors writing to the AOF file: No space left on device"),
     ],
     ids=type,
 )

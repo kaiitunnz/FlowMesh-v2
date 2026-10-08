@@ -50,6 +50,7 @@ _UNAVAILABLE_REPLIES = frozenset(
         "CLUSTERDOWN",
         "LOADING",
         "MASTERDOWN",
+        "MISCONF",
         "NOREPLICAS",
         "OOM",
         "READONLY",
