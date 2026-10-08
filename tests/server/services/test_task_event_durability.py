@@ -168,11 +168,23 @@ def test_a_crash_while_an_event_is_held_replays_it_from_its_cursor() -> None:
     assert durable.result_reference == reference
 
 
-def test_a_programming_error_inside_a_write_is_not_held() -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        TypeError("unserializable record"),
+        redis.exceptions.DataError("Invalid input of type: 'NoneType'."),
+        redis.exceptions.ResponseError(
+            "Command # 2 (SADD k x) of pipeline caused error: WRONGTYPE Operation "
+            "against a key holding the wrong kind of value"
+        ),
+    ],
+    ids=type,
+)
+def test_a_programming_error_inside_a_write_is_not_held(error: Exception) -> None:
     store, runtime, task_id, event = _succeeding()
-    store.error = TypeError("unserializable record")
+    store.error = error
 
-    with pytest.raises(TypeError):
+    with pytest.raises(type(error)):
         runtime.mark_succeeded(task_id, "wkr-1", event.payload, event.ts, "dsp-1")
 
     assert runtime._committer.debt == {}

@@ -7,10 +7,18 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from redis.exceptions import RedisError
+from redis.exceptions import (
+    BusyLoadingError,
+    ClusterDownError,
+    OutOfMemoryError,
+    ReadOnlyError,
+    ResponseError,
+    TryAgainError,
+)
 
 from server.telemetry.tracing import ControlPlaneTracer
 
+from ...clients.redis import REDIS_CONN_ERRORS
 from ...orchestration import OrchestrationEngine
 from ...registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..models import (
@@ -29,12 +37,44 @@ from .reservations import WorkerReservations
 from .resident_tasks import ResidentServeTasks
 from .scheduling import EpochFrontier
 
-# What a durable write raises when the store did not take it. Anything else a write
-# raises is a fault in the transition itself.
-PERSISTENCE_ERRORS: tuple[type[BaseException], ...] = (
-    RedisError,
-    OSError,
+_UNAVAILABLE_ERRORS: tuple[type[BaseException], ...] = (
+    *REDIS_CONN_ERRORS,
+    BusyLoadingError,
+    ClusterDownError,
+    OutOfMemoryError,
+    ReadOnlyError,
+    TryAgainError,
 )
+_UNAVAILABLE_REPLIES = frozenset(
+    {
+        "BUSY",
+        "CLUSTERDOWN",
+        "LOADING",
+        "MASTERDOWN",
+        "NOREPLICAS",
+        "OOM",
+        "READONLY",
+        "TRYAGAIN",
+    }
+)
+
+_PIPELINE_ERROR_NOTE = "caused error: "
+
+
+def store_unavailable(error: BaseException) -> bool:
+    """Whether a write failed because the store could not take writes for now.
+
+    Any other error a write raises, an argument the client cannot encode or a reply
+    the command always gets, is a fault in the transition itself. A transaction the
+    store discarded raises the reply of the command that discarded it, after the
+    pipeline's note of which command that was.
+    """
+    if isinstance(error, _UNAVAILABLE_ERRORS):
+        return True
+    if not isinstance(error, ResponseError):
+        return False
+    reply = str(error).rpartition(_PIPELINE_ERROR_NOTE)[2]
+    return reply.split(" ", 1)[0] in _UNAVAILABLE_REPLIES
 
 
 class TransitionNotDurable(Exception):
@@ -211,7 +251,9 @@ class TransitionCommitter:
             return False
         try:
             write()
-        except PERSISTENCE_ERRORS as exc:
+        except Exception as exc:
+            if not store_unavailable(exc):
+                raise
             self._hold(workflow_id, entry, exc)
             return False
         return True
@@ -248,7 +290,9 @@ class TransitionCommitter:
                     held[0] = _Records(tuple(written), sched=True)
                 else:
                     held.pop(0)
-        except PERSISTENCE_ERRORS as exc:
+        except Exception as exc:
+            if not store_unavailable(exc):
+                raise
             self.held_errors[workflow_id] = exc
             return False
         finally:
