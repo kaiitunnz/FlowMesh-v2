@@ -6,8 +6,8 @@ import threading
 import time
 from collections.abc import Callable
 
-_BASE_DELAY_SEC = 1.0
-_MAX_DELAY_SEC = 30.0
+DEFAULT_BASE_DELAY_SEC = 1.0
+DEFAULT_MAX_DELAY_SEC = 30.0
 
 
 class WorkflowRetryScheduler:
@@ -24,8 +24,8 @@ class WorkflowRetryScheduler:
         fire: Callable[[str], None],
         logger: logging.Logger,
         *,
-        base_delay_sec: float = _BASE_DELAY_SEC,
-        max_delay_sec: float = _MAX_DELAY_SEC,
+        base_delay_sec: float = DEFAULT_BASE_DELAY_SEC,
+        max_delay_sec: float = DEFAULT_MAX_DELAY_SEC,
         clock: Callable[[], float] = time.monotonic,
         run_thread: bool = True,
         thread_name: str = "workflow-retry",
@@ -67,7 +67,7 @@ class WorkflowRetryScheduler:
             self._enqueue_locked(workflow_id, self._clock())
 
     def settle(self, workflow_id: str) -> None:
-        """Drop a workflow's pending retry and backoff; it no longer waits."""
+        """Drop a workflow's pending retry and backoff."""
         with self._cv:
             self._due.pop(workflow_id, None)
             self._streak.pop(workflow_id, None)

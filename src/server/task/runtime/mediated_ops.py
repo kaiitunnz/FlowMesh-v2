@@ -193,12 +193,8 @@ class MediatedOperations:
             )
         return permit.model_copy(update=stamp).model_dump(mode="json")
 
-    def reap_mediated_op(
-        self, worker_id: str | None, agent_task_id: str, call: str
-    ) -> None:
+    def reap_mediated_op(self, worker_id: str, agent_task_id: str, call: str) -> None:
         """Relay a best-effort reap so the origin worker drops the request custody."""
-        if not worker_id:
-            return
         worker = self._worker_registry.get_worker(worker_id)
         if worker is None:
             return
@@ -215,7 +211,7 @@ class MediatedOperations:
         self, worker_id: str | None, task_id: str, call: str, interface: str | None
     ) -> Reap | None:
         """The reap of a request the worker captured for a boundary that will never
-        run, from whichever store holds it."""
+        run."""
         if not worker_id:
             return None
         record = self._tasks.get(task_id)
@@ -227,12 +223,8 @@ class MediatedOperations:
         )
         return Reap(worker_id, task_id, call, resident=resident)
 
-    def relay_resident_reap(
-        self, worker_id: str | None, task_id: str, call: str
-    ) -> None:
+    def relay_resident_reap(self, worker_id: str, task_id: str, call: str) -> None:
         """Relay a best-effort reap so the worker drops a captured resident request."""
-        if not worker_id:
-            return
         worker = self._worker_registry.get_worker(worker_id)
         if worker is None:
             return
@@ -247,25 +239,13 @@ class MediatedOperations:
 
     def reap_ops_for_agents_locked(self, agent_task_ids: Sequence[str]) -> list[Reap]:
         """Take the agents' pending tool operations, returning the reap of each."""
-        return [
-            Reap(worker_id, agent_task_id, call)
-            for worker_id, agent_task_id, call in self.take_ops_for_agents_locked(
-                agent_task_ids
-            )
-        ]
-
-    def take_ops_for_agents_locked(
-        self, agent_task_ids: Sequence[str]
-    ) -> list[tuple[str, str, str]]:
-        """Drop the agents' pending tool operations, returning each one's worker, agent
-        and call for reaping."""
         agents = set(agent_task_ids)
-        taken: list[tuple[str, str, str]] = []
+        reaps: list[Reap] = []
         for permit_id, op in list(self.pending_ops.items()):
             if op.agent_task_id in agents:
                 del self.pending_ops[permit_id]
-                taken.append((op.worker_id, op.agent_task_id, op.call_correlation))
-        return taken
+                reaps.append(Reap(op.worker_id, op.agent_task_id, op.call_correlation))
+        return reaps
 
     def set_resident_terminal_hook(self, hook: ResidentTerminalHook) -> None:
         """Install the consumer that releases a resident admission credit on DS

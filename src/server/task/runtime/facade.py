@@ -753,15 +753,15 @@ class TaskRuntime:
                 epoch_queue = queue
 
         return _StagedRegistration(
-            results,
-            task_records,
-            depends,
-            merge_keys,
-            task_epoch_index,
-            epoch_queue,
-            in_epoch_order,
-            v2_bundle,
-            v2_engine,
+            results=results,
+            task_records=task_records,
+            depends_on=depends,
+            merge_keys=merge_keys,
+            task_epoch_index=task_epoch_index,
+            epoch_queue=epoch_queue,
+            in_epoch_order=in_epoch_order,
+            v2_bundle=v2_bundle,
+            v2_engine=v2_engine,
         )
 
     def _install_registration(
@@ -1331,7 +1331,13 @@ class TaskRuntime:
             self._draining.active = False
 
     def _retain(self, workflow_id: str | None, action: AfterCommit) -> None:
-        """Keep an action whose delivery failed for its workflow's retry."""
+        """Keep an action whose delivery failed for its workflow's retry.
+
+        An action filed for no workflow concerns a task the runtime no longer holds,
+        such as the revoke of a dispatch control does not hold, which the worker's next
+        report of itself busy on that dispatch revokes again, so a failed one is
+        dropped.
+        """
         if workflow_id is None:
             return
         with self._lock:
@@ -1409,10 +1415,10 @@ class TaskRuntime:
     def _credit_consumed(
         self, workflow_id: str | None, action: AfterCommit, consumed: Future[Any]
     ) -> None:
-        if consumed.cancelled() or consumed.exception() is not None:
+        if consumed.cancelled() or (error := consumed.exception()) is not None:
             self._logger.warning(
                 "Releasing a resident credit failed; keeping it for a retry: %s",
-                None if consumed.cancelled() else consumed.exception(),
+                "cancelled" if consumed.cancelled() else error,
             )
             self._retain(workflow_id, action)
 
@@ -1449,7 +1455,7 @@ class TaskRuntime:
                     revoke
                     for r in ended
                     if (
-                        revoke := self._actions.revoke(
+                        revoke := self._actions.revoke_for(
                             r.task_id, r.worker_id, r.dispatch_id, None
                         )
                     )
@@ -1464,7 +1470,8 @@ class TaskRuntime:
         with self._transition():
             self._actions.queue_locked(
                 *filter(
-                    None, [self._actions.revoke(task_id, worker_id, dispatch_id, None)]
+                    None,
+                    [self._actions.revoke_for(task_id, worker_id, dispatch_id, None)],
                 )
             )
 
@@ -3480,7 +3487,9 @@ class TaskRuntime:
                 )
                 if (record := self._tasks.get(spanned_id)) is not None
             }
-            if not all([self._committer.close_locked(w) for w in sorted(spanned)]):
+            # Every spanned workflow is closed, whether or not an earlier one is.
+            closed = [self._committer.close_locked(w) for w in sorted(spanned)]
+            if not all(closed):
                 return PublishGate.NOT_DURABLE
             if self._actions.cleanup_owed(task_id):
                 return PublishGate.NOT_DURABLE
@@ -4799,11 +4808,12 @@ class TaskRuntime:
         return record.submitted_at if record is not None else None
 
     def set_completion_notifier(self, notify: Callable[[str], None]) -> None:
-        """Install the callback that a terminal transition notifies.
+        """Install the callback that a terminal transition notifies once durable.
 
-        The callback must be cheap and non-blocking: it runs under the scheduler lock.
+        The callback must be cheap and non-blocking: it runs on the thread that
+        delivers the transition's actions.
         """
-        self._committer.set_completion_notifier(notify)
+        self._committer.on_workflow_settled = notify
 
     def workflow_settlement(self, workflow_id: str) -> WorkflowSettlement:
         """Whether every task of a workflow has durably settled, and the last of their
@@ -4923,7 +4933,7 @@ class TaskRuntime:
                     self._fence.mark_publish_lost(task_id)
                     self._file_locked(
                         task_id,
-                        self._actions.revoke(
+                        self._actions.revoke_for(
                             task_id, worker_id, publish.dispatch_id, node_id
                         ),
                     )
@@ -4952,7 +4962,7 @@ class TaskRuntime:
                 if not record.merged_parent_id:
                     self._file_locked(
                         task_id,
-                        self._actions.revoke(
+                        self._actions.revoke_for(
                             task_id, worker_id, record.dispatch_id, node_id
                         ),
                     )
@@ -5005,7 +5015,7 @@ class TaskRuntime:
             if time.time() - since < bound_sec:
                 return None
             self._file_locked(
-                task_id, self._actions.revoke(task_id, worker_id, dispatch_id, None)
+                task_id, self._actions.revoke_for(task_id, worker_id, dispatch_id, None)
             )
             if worker_id not in record.failed_workers:
                 record.failed_workers.append(worker_id)

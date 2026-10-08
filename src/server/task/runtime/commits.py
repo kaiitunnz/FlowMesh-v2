@@ -204,10 +204,9 @@ class TransitionCommitter:
         self._scope = _Scope()
         # What each workflow's writes the store has not taken owe.
         self.debt: dict[str, _Debt] = {}
-        self.held_errors: dict[str, BaseException] = {}
         self._making: set[str] = set()
         # Children materialized in memory whose records the ledger seam has not written.
-        self.unwritten_children: dict[str, set[str]] = {}
+        self._unwritten_children: dict[str, set[str]] = {}
         self.unacknowledged: dict[str, _Unacknowledged] = {}
         self.retired_region_templates: dict[str, set[str]] = {}
         self.on_workflow_settled: Callable[[str], None] | None = None
@@ -282,12 +281,6 @@ class TransitionCommitter:
         if self.on_debt is not None:
             self.on_debt(workflow_id)
 
-    def forget_workflow_locked(self, workflow_id: str) -> None:
-        self.debt.pop(workflow_id, None)
-        self.held_errors.pop(workflow_id, None)
-        self.unwritten_children.pop(workflow_id, None)
-        self.retired_region_templates.pop(workflow_id, None)
-
     def _write_locked(self, workflow_id: str, write: _Write) -> bool:
         """Make one durable write of a workflow with the writes it holds, or hold it
         with them; returns whether it was made."""
@@ -320,18 +313,16 @@ class TransitionCommitter:
                 else:
                     self.debt[workflow_id] = before
                 raise
-            self.held_errors[workflow_id] = exc
             self._note_held(workflow_id, exc)
             return False
         finally:
             self._making.discard(workflow_id)
         del self.debt[workflow_id]
-        self.held_errors.pop(workflow_id, None)
         return True
 
     def _make_locked(self, workflow_id: str, owed: _Debt) -> None:
         """Make one pass over what a workflow owes, records before the ledger."""
-        unwritten = self.unwritten_children.get(workflow_id, set())
+        unwritten = self._unwritten_children.get(workflow_id, set())
         if (ids := [t for t in owed.records if t not in unwritten]) or owed.sched:
             self._commit_records_raw(
                 workflow_id, ids, [t for t in ids if owed.records[t]], owed.sched
@@ -366,7 +357,7 @@ class TransitionCommitter:
     # Writes
     # ------------------------------------------------------------------ #
 
-    def persisted_task_locked(self, task_id: str) -> PersistedTask | None:
+    def _persisted_task_locked(self, task_id: str) -> PersistedTask | None:
         record = self._tasks.get(task_id)
         if record is None:
             return None
@@ -376,11 +367,11 @@ class TransitionCommitter:
             epoch_index=self._epochs.task_epoch_index.get(task_id),
         )
 
-    def records_locked(self, *task_ids: str) -> list[PersistedTask]:
+    def _records_locked(self, *task_ids: str) -> list[PersistedTask]:
         return [
             persisted
             for task_id in dict.fromkeys(task_ids)
-            if (persisted := self.persisted_task_locked(task_id))
+            if (persisted := self._persisted_task_locked(task_id))
         ]
 
     def _sched_locked(self, workflow_id: str) -> WorkflowSched:
@@ -409,7 +400,7 @@ class TransitionCommitter:
         for task_id in dict.fromkeys(moves):
             if task_id in ids:
                 by_status[membership(self._tasks[task_id])].append(task_id)
-        records = self.records_locked(*ids)
+        records = self._records_locked(*ids)
         self._workflow_registry.commit_transition(
             workflow_id,
             records=records,
@@ -438,16 +429,16 @@ class TransitionCommitter:
         """Commit a workflow's unwritten children with its ledger snapshot and the
         retire, as one atomic transaction; returns the children it wrote."""
         engine = self._engines.get(workflow_id)
-        children = sorted(self.unwritten_children.get(workflow_id, ()))
+        children = sorted(self._unwritten_children.get(workflow_id, ()))
         if engine is None or not (children or retire):
             return []
         self._workflow_registry.commit_dynamic_tasks(
-            workflow_id, self.records_locked(*children), engine.to_snapshot(), retire
+            workflow_id, self._records_locked(*children), engine.to_snapshot(), retire
         )
-        if unwritten := self.unwritten_children.get(workflow_id):
+        if unwritten := self._unwritten_children.get(workflow_id):
             unwritten.difference_update(children)
             if not unwritten:
-                del self.unwritten_children[workflow_id]
+                del self._unwritten_children[workflow_id]
         return children
 
     def _save_snapshot_raw(self, workflow_id: str, retire: Sequence[str]) -> list[str]:
@@ -455,7 +446,7 @@ class TransitionCommitter:
         engine = self._engines.get(workflow_id)
         if engine is None:
             return []
-        if retire or self.unwritten_children.get(workflow_id):
+        if retire or self._unwritten_children.get(workflow_id):
             return self._commit_children_raw(workflow_id, retire)
         with self._control.ledger_snapshot(workflow_id):
             self._workflow_registry.save_ledger_snapshot(
@@ -518,7 +509,7 @@ class TransitionCommitter:
     def note_child_locked(self, workflow_id: str, child_task_id: str) -> None:
         """Mark a child materialized in memory, so the ledger snapshot that carries its
         work item also writes its record."""
-        self.unwritten_children.setdefault(workflow_id, set()).add(child_task_id)
+        self._unwritten_children.setdefault(workflow_id, set()).add(child_task_id)
 
     def commit_new_children_locked(
         self,
@@ -625,6 +616,8 @@ class TransitionCommitter:
             self._actions.file_locked(workflow_id, Purge(workflow_id))
 
     def workflow_settlement_locked(self, workflow_id: str) -> WorkflowSettlement:
+        """Whether every task of a workflow has settled in memory, durable or not, and
+        the last of their finishes."""
         # A retired task -- a sealed spawn's child template, replaced by the children it
         # instantiated -- no longer holds the workflow open, and its record stays
         # PENDING forever because it is never dispatched. Counting it would leave every
@@ -656,10 +649,6 @@ class TransitionCommitter:
             self._logger.debug(
                 "Failed to notify workflow completion for %s: %s", workflow_id, exc
             )
-
-    def set_completion_notifier(self, notify: Callable[[str], None]) -> None:
-        """Install the callback that a terminal transition notifies."""
-        self.on_workflow_settled = notify
 
     # ------------------------------------------------------------------ #
     # Reports

@@ -16,20 +16,22 @@ import logging
 import time
 from collections.abc import Callable
 
-from .workflow_retry import WorkflowRetryScheduler
+from .workflow_retry import (
+    DEFAULT_BASE_DELAY_SEC,
+    DEFAULT_MAX_DELAY_SEC,
+    WorkflowRetryScheduler,
+)
 
 # Consecutive re-drives after which a workflow still waiting on the store is reported.
 _WARN_AFTER = 5
 
 
 class StoreRedriveScheduler(WorkflowRetryScheduler):
-    """At most one pending re-drive per workflow, on one daemon thread.
+    """Re-drives each workflow waiting on the content store.
 
-    Each workflow backs off from ``base_delay_sec`` doubling to ``max_delay_sec`` for as
-    long as its re-drives keep finding the store unreachable, and returns to the base
-    delay once one gets through. A workflow still waiting after ``warn_after`` re-drives
-    is logged at warning on every re-drive, so a store that is not coming back — or an
-    error that never clears — is visible rather than a quiet stall.
+    A workflow still waiting after ``warn_after`` re-drives is logged at warning on
+    every re-drive, so a store that is not coming back, or an error that never clears,
+    is visible.
     """
 
     def __init__(
@@ -37,8 +39,8 @@ class StoreRedriveScheduler(WorkflowRetryScheduler):
         fire: Callable[[str], None],
         logger: logging.Logger,
         *,
-        base_delay_sec: float = 1.0,
-        max_delay_sec: float = 30.0,
+        base_delay_sec: float = DEFAULT_BASE_DELAY_SEC,
+        max_delay_sec: float = DEFAULT_MAX_DELAY_SEC,
         warn_after: int = _WARN_AFTER,
         clock: Callable[[], float] = time.monotonic,
         run_thread: bool = True,
@@ -70,7 +72,7 @@ class StoreRedriveScheduler(WorkflowRetryScheduler):
             self._enqueue_locked(workflow_id, self._clock() + self._delay(streak))
 
     def settle(self, workflow_id: str) -> None:
-        """Drop a workflow's pending re-drive and backoff; it no longer waits."""
+        """Drop a workflow's pending re-drive and backoff."""
         with self._cv:
             super().settle(workflow_id)
             self._recheck_streak.pop(workflow_id, None)

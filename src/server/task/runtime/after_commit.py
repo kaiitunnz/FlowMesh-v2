@@ -159,15 +159,9 @@ class AfterCommitActions:
         ready, self.ready = self.ready, []
         return ready
 
-    def retain_failed_locked(
-        self, workflow_id: str | None, action: AfterCommit
-    ) -> None:
-        """Keep an action whose delivery failed for its workflow's retry; one with no
-        workflow is queued again."""
-        if workflow_id is None:
-            self.ready.append((None, action))
-        else:
-            self.failed.setdefault(workflow_id, []).append(action)
+    def retain_failed_locked(self, workflow_id: str, action: AfterCommit) -> None:
+        """Keep an action whose delivery failed for its workflow's retry."""
+        self.failed.setdefault(workflow_id, []).append(action)
 
     def retry_failed_locked(self, workflow_id: str) -> None:
         """Queue the workflow's failed actions for delivery again."""
@@ -177,10 +171,6 @@ class AfterCommitActions:
 
     def has_failed(self, workflow_id: str) -> bool:
         return workflow_id in self.failed
-
-    def forget_workflow_locked(self, workflow_id: str) -> None:
-        self.parked.pop(workflow_id, None)
-        self.failed.pop(workflow_id, None)
 
     @staticmethod
     def interrupt_for(record: TaskRecord, reason: str) -> Interrupt | None:
@@ -197,7 +187,7 @@ class AfterCommitActions:
         )
 
     @staticmethod
-    def revoke(
+    def revoke_for(
         task_id: str, worker_id: str, dispatch_id: str | None, node_id: str | None
     ) -> Revoke | None:
         """The revocation of a dispatch that resolved without its worker ending it."""
