@@ -515,3 +515,49 @@ async def test_a_fan_out_read_again_that_settles_its_workflow_closes_it(
     run.runtime._redrive_workflow(run.workflow_id)
 
     assert run.settled() and closed == [run.workflow_id]
+
+
+_PUBLISHED_FAN = f"""
+      - name: plan
+        spec: {_ECHO}
+      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [plan]
+        region: {{kind: spawn, child: kid, result: {{visibility: published}}}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+      - name: after
+        dependsOn: [collect]
+        spec: {_ECHO}
+"""
+
+
+def _published(run: _Run) -> list[tuple[str, str | None, str]]:
+    listed = run.runtime.published_outputs(run.workflow_id)
+    assert listed is not None
+    return sorted(
+        (m.name, m.key, m.publication.outcome.value if m.publication else "pending")
+        for m in listed.members
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("children", [[], ["x"]])
+async def test_a_cancel_of_a_settled_workflow_changes_nothing(
+    children: list[str],
+) -> None:
+    run = await _Run().start(_workflow(_PUBLISHED_FAN))
+    run.run("plan", {"items": children})
+    for _ in children:
+        run.run("kid")
+    run.run("after")
+    assert run.settled()
+    published = _published(run)
+
+    run.runtime.cancel_workflow(run.workflow_id)
+
+    assert _durable_status(run.registry, run.workflow_id) == "done"
+    assert run.registry.control[run.workflow_id].cancelled is False
+    assert _published(run) == published

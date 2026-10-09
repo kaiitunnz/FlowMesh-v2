@@ -106,7 +106,7 @@ class TransitionNotDurable(Exception):
 
 def _control(engine: OrchestrationEngine) -> WorkflowControl:
     return WorkflowControl(
-        open=engine.has_unsettled_tasks() or engine.awaits_control_reads(),
+        open=engine.is_open(),
         failure=engine.control_failure(),
         cancelled=engine.instance_cancelled(),
     )

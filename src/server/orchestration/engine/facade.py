@@ -945,6 +945,11 @@ class OrchestrationEngine:
         input."""
         return self._flow.awaiting_fanouts()
 
+    def is_open(self) -> bool:
+        """Whether any of the instance's work is still to settle: a task, or a value
+        read a branch or spawn waits on."""
+        return self.has_unsettled_tasks() or self.awaits_control_reads()
+
     def awaits_control_reads(self) -> bool:
         """Whether the instance still waits on a value read to route a branch or fan
         out a spawn, which no task of its own holds open."""
@@ -1102,7 +1107,12 @@ class OrchestrationEngine:
     # ------------------------------------------------------------------ #
 
     def cancel_instance(self) -> Advance:
-        """Cancel the whole workflow instance: the root scope and every descendant."""
+        """Cancel the whole workflow instance: the root scope and every descendant.
+
+        An instance with nothing left open has settled, so cancelling it changes
+        nothing it reached or published."""
+        if not self.is_open():
+            return Advance()
         self._failures.instance_cancelled = True
         advance = self.cancel_scope(self._ledger.root_scope.scope_id)
         self._publication.publish_unresolved(PublicationOutcome.EXPLICIT_EMPTY)
