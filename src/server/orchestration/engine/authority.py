@@ -40,12 +40,14 @@ class AuthorityLedger:
         self.grants[grant.grant_id] = grant
 
     def grant_snapshot_for(self, wi: WorkItem) -> GrantSnapshot:
-        grant_id = self._ledger.workflow_instance.root_grant_id
-        if (act := self._ledger.activations.get(wi.activation_id)) is not None:
-            if (scope := self._ledger.scopes.get(act.scope_id)) is not None:
-                grant_id = scope.grant_id or grant_id
+        act = self._ledger.activations.get(wi.activation_id)
+        grant = (
+            self.grant_for_scope(act.scope_id)
+            if act is not None
+            else self._ledger.root_grant
+        )
         return GrantSnapshot(
-            grant_id=grant_id,
+            grant_id=grant.grant_id,
             policy_envelope=self._ledger.workflow_instance.policy_envelope,
         )
 

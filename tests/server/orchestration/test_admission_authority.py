@@ -2,7 +2,8 @@
 
 import pytest
 
-from server.orchestration.state import AuthorityDecisionKind, ValueRef
+from server.orchestration.state import AuthorityDecisionKind, BoundaryEvent, ValueRef
+from shared.harness.boundary import BoundaryEventKind
 
 from .control_flow import ECHO, Driver, workflow
 
@@ -160,6 +161,33 @@ def test_a_child_agent_runs_under_its_delegated_face_beside_an_admitted_leaf() -
     assert "search" not in face
     assert run.ops["act"] not in face
     assert face == ()
+
+
+def test_an_agent_in_a_child_definition_reports_its_delegated_grant() -> None:
+    nodes = _DEFINITION_NODES.replace(
+        "child: one", "child: team, authority: {invoke: [search], delegate: [search]}"
+    )
+    run = Driver(workflow(nodes, _TEAM))
+    run.run_one("plan")
+    run.apply(
+        run.engine.enter_definition_child("fan", ValueRef(kind="inline", literal="e"))
+    )
+    run.run(run.ready[0])
+    (helper,) = run.ready
+    run.engine.on_dispatched(helper, "w1")
+    run.engine.route_boundary_event(
+        helper,
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface="search",
+            request_payload="{}",
+        ),
+    )
+    envelope = run.engine.tool_dispatch_envelope(helper, "c0")
+    assert envelope is not None and envelope.grant_snapshot is not None
+    (delegated,) = run.engine.to_snapshot().delegated_grants
+    assert envelope.grant_snapshot.grant_id == delegated.grant_id
 
 
 def test_a_dead_child_entry_mints_no_grant() -> None:
