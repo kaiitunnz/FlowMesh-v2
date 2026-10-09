@@ -29,12 +29,14 @@ from shared.inference import (
     UpstreamProvenance,
 )
 from shared.schemas.event import TaskFailureKind
-from shared.schemas.result import RESULT_MEDIA_TYPE, ResultEnvelope
+from shared.schemas.result import RESULT_MEDIA_TYPE, ResultEnvelope, RoutedValue
 from shared.schemas.result.binding import collection_elements, value_text
 from shared.tasks import MergedChildTaskStrict
 from shared.tasks.result_binding import (
+    BindingKind,
     ResultBinding,
     ResultElementRef,
+    ResultMember,
     ResultValueRef,
 )
 from shared.tasks.worker_message import WorkerTaskMessage
@@ -44,6 +46,7 @@ from worker.content.access import ContentBackendUnsupported
 from worker.content.inputs import TaskInputHydrator
 from worker.executors.base_executor import ExecutionError
 from worker.executors.inference.resolution import resolve_task_contract
+from worker.executors.utils.expressions import project_expression
 
 _SCOPE = "org"
 _PRODUCED = {
@@ -498,3 +501,59 @@ def test_an_upstream_with_nothing_bound_is_left_out(plane: FakeContentPlane) -> 
 
     assert hydrated.task == inline.task
     assert hydrated.upstream_envelope("e") is None
+
+
+def _routed(producer: ResultBinding) -> dict[str, Any]:
+    """Each kind of value an input inside a region definition carries, by name, with
+    the value its reader sees."""
+    nested = producer.model_copy(update={"path": ("nested", 1)})
+    member = producer.model_copy(update={"element": 2})
+    return {
+        "nested": (nested, "y"),
+        "element": (member, {"n": 2}),
+        "members": (
+            ResultBinding(
+                kind=BindingKind.MEMBERS,
+                members=(
+                    ResultMember(key="0", outcome="success", binding=member),
+                    ResultMember(key="1", outcome="declared_failure"),
+                ),
+            ),
+            [
+                {"key": "0", "outcome": "success", "value": {"n": 2}},
+                {"key": "1", "outcome": "declared_failure", "value": None},
+            ],
+        ),
+        "bundle": (
+            ResultBinding(
+                kind=BindingKind.BUNDLE,
+                members=(ResultMember(key="a", outcome="success", binding=nested),),
+            ),
+            {"a": "y"},
+        ),
+        "literal": (ResultBinding(kind=BindingKind.LITERAL, literal="draft"), "draft"),
+        "empty": (ResultBinding(kind=BindingKind.EMPTY), None),
+    }
+
+
+def test_a_routed_value_hydrates_to_the_value_its_reader_sees(
+    plane: FakeContentPlane,
+) -> None:
+    producer = _store(plane, "tsk-p", {**_PRODUCED, "nested": ["x", "y"]})
+    routed = _routed(producer)
+    spec = {"taskType": "echo", "data": {"type": "list", "items": ["x"]}}
+
+    hydrated = _hydrate(
+        plane,
+        _message(
+            spec,
+            upstream_results={name: binding for name, (binding, _) in routed.items()},
+        ),
+    )
+
+    upstream = hydrated.task.spec.upstreamResults or {}
+    for name, (_, value) in routed.items():
+        assert isinstance(upstream[name], RoutedValue)
+        assert project_expression(name, upstream) == value
+        # Only a whole result carries envelope bytes a raw consumer can read.
+        assert hydrated.upstream_envelope(name) is None

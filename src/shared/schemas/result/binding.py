@@ -6,21 +6,27 @@ reads the same wherever it is read.
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from shared.tasks.result_binding import ResultBinding, ResultElementRef
+from shared.tasks.result_binding import BindingKind, ResultBinding, ResultElementRef
 
 from ._base import BaseExecutorResult
 from .catalog import ResultEnvelope
+from .routed import RoutedValue
+
+# The outcome of an aggregate member that carries a value.
+_SUCCESS = "success"
 
 
 def skip_envelope(binding: ResultBinding) -> ResultEnvelope:
     """The envelope a task that settled without running reads as."""
     envelope = ResultEnvelope(
-        task_id=binding.task_id, result=BaseExecutorResult(), metadata=binding.skip
+        task_id=binding.task_id or "",
+        result=BaseExecutorResult(),
+        metadata=binding.skip,
     )
     if binding.settled_at is not None:
         envelope.received_at = binding.settled_at
@@ -78,6 +84,8 @@ def dig(value: Any, steps: Sequence[str | int]) -> Any:
     list. A step that finds nothing yields None."""
     current = value
     for step in steps:
+        if isinstance(current, RoutedValue):
+            current = current.routed_value
         match current:
             case dict():
                 current = current.get(str(step))
@@ -110,6 +118,60 @@ def element_value(envelope: ResultEnvelope, ref: ResultElementRef) -> Any:
     return value
 
 
+def scoped_value(
+    binding: ResultBinding, envelope_of: Callable[[ResultBinding], ResultEnvelope]
+) -> Any:
+    """The value an input binding reads as, reading each result through
+    ``envelope_of``; raises ``IndexError`` when a result holds no element it selects.
+
+    A whole result reads as the result itself. A part of one, an aggregate's members
+    ``{key, outcome, value}`` (``value`` null unless the member succeeded), a bundle's
+    named values, a literal, and an explicit empty (null) read as plain values, and
+    ``path`` reads into whichever the rest names.
+    """
+    match binding.kind:
+        case BindingKind.RESULT:
+            envelope = envelope_of(binding)
+            value: Any = (
+                collection_element(envelope, binding.element)
+                if binding.element is not None
+                else envelope.result
+            )
+        case BindingKind.MEMBERS:
+            value = [
+                {
+                    "key": member.key,
+                    "outcome": member.outcome,
+                    "value": (
+                        _member_value(member.binding, envelope_of)
+                        if member.outcome == _SUCCESS
+                        else None
+                    ),
+                }
+                for member in binding.members
+            ]
+        case BindingKind.BUNDLE:
+            value = {
+                member.key: _member_value(member.binding, envelope_of)
+                for member in binding.members
+            }
+        case BindingKind.LITERAL:
+            value = binding.literal
+        case BindingKind.EMPTY:
+            value = None
+    return dig(value, binding.path) if binding.path else value
+
+
+def _member_value(
+    binding: ResultBinding | None,
+    envelope_of: Callable[[ResultBinding], ResultEnvelope],
+) -> Any:
+    if binding is None:
+        return None
+    value = scoped_value(binding, envelope_of)
+    return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+
+
 def value_text(envelope: ResultEnvelope, element: int | None) -> str | None:
     """The string a consumer reads as one value of a result, or None when absent.
 
@@ -139,6 +201,7 @@ __all__ = [
     "collection_element",
     "collection_elements",
     "result_envelope",
+    "scoped_value",
     "skip_envelope",
     "skip_envelope_bytes",
     "value_text",

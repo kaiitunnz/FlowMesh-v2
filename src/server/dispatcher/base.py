@@ -1,6 +1,7 @@
 import datetime
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from shared.schemas.result import (
     BaseExecutorResult,
     ResultEnvelope,
 )
+from shared.schemas.result.binding import scoped_value
 from shared.tasks import (
     MergedChildTaskStrict,
     TaskEnvelope,
@@ -22,7 +24,7 @@ from shared.tasks import (
     TaskSpecStrict,
 )
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
-from shared.tasks.result_binding import ResultBinding
+from shared.tasks.result_binding import BindingKind, ResultBinding
 from shared.tasks.specs import (
     ConditionSpec,
     SSHSpecStrict,
@@ -46,7 +48,7 @@ from ..task.models import (
     TaskStatus,
 )
 from ..task.results import ResultUnavailable
-from ..task.runtime import TaskRuntime
+from ..task.runtime import ScopedInput, TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
 from .embodiment import (
@@ -711,10 +713,14 @@ class Dispatcher:
             self._fail_credential_not_retained(task_id)
             return True
         task, scrub = credentialed
-        context = self._build_stage_context(record)
+        context: dict[str, TaskRecord] = {}
+        scoped: dict[str, ScopedInput] | None = None
         try:
+            scoped = self._runtime.scoped_inputs(task_id)
+            if scoped is None:
+                context = self._build_stage_context(record)
             rendered_task, upstream_results = self._resolve_stage_references(
-                task_id, task, context
+                task_id, task, context, scoped
             )
         except StageReferenceNotReady as exc:
             self._logger.debug(
@@ -764,11 +770,11 @@ class Dispatcher:
             return True
 
         # Conditional execution: skip dispatch if condition not met
-        if self._evaluate_condition_skip(task_id, rendered_task, record):
+        if self._evaluate_condition_skip(task_id, rendered_task, record, scoped):
             return True
 
         try:
-            self._validate_ssh_inputs(record, rendered_task.spec, context)
+            self._validate_ssh_inputs(record, rendered_task.spec, context, scoped)
         except StageReferenceNotReady as exc:
             self._logger.debug(
                 "Task %s waiting on SSH input stages: %s", task_id, scrub(str(exc))
@@ -1320,41 +1326,84 @@ class Dispatcher:
         task_id: str,
         task: TaskEnvelopeTemplate,
         context: dict[str, TaskRecord],
+        scoped: dict[str, ScopedInput] | None = None,
     ) -> tuple[TaskEnvelopeStrict, dict[str, ResultBinding] | None]:
-        """Render a task's placeholders and name each upstream result it receives.
+        """Render a task's placeholders and name each upstream value it receives.
 
         Placeholders render here, against the upstream values they name; the upstream
-        results themselves travel as bindings the worker hydrates.
+        values themselves travel as bindings the worker hydrates. A task inside a
+        region definition reads the values its scope routes to it; a root task reads
+        its upstream tasks.
         """
         resolved_task: TaskEnvelopeTemplate = task
-        if context and task.has_placeholder():
-            resolved_task = self._resolve_placeholders(task, context)
-        upstream = self._upstream_bindings(context, task_id) if context else {}
+        if scoped is not None:
+            if task.has_placeholder():
+                resolved_task = self._resolve_placeholders(
+                    task, lambda expr: self._resolve_scoped_reference(expr, scoped)
+                )
+            upstream = {name: entry.binding for name, entry in scoped.items()}
+        else:
+            if context and task.has_placeholder():
+                resolved_task = self._resolve_placeholders(
+                    task, lambda expr: self._resolve_reference(expr, context)
+                )
+            upstream = self._upstream_bindings(context, task_id) if context else {}
         return TaskEnvelopeStrict.model_validate(resolved_task), upstream or None
 
-    def _resolve_placeholders(self, value: Any, context: dict[str, TaskRecord]) -> Any:
+    def _resolve_placeholders(self, value: Any, resolve: Callable[[str], Any]) -> Any:
         if isinstance(value, str):
             exact = PLACEHOLDER_PATTERN.fullmatch(value)
             if exact:
-                return self._resolve_reference(exact.group(1), context)
-            return PLACEHOLDER_PATTERN.sub(
-                lambda m: str(self._resolve_reference(m.group(1), context)),
-                value,
-            )
+                return resolve(exact.group(1))
+            return PLACEHOLDER_PATTERN.sub(lambda m: str(resolve(m.group(1))), value)
         if isinstance(value, dict):
-            return {k: self._resolve_placeholders(v, context) for k, v in value.items()}
+            return {k: self._resolve_placeholders(v, resolve) for k, v in value.items()}
         if isinstance(value, list):
-            return [self._resolve_placeholders(item, context) for item in value]
+            return [self._resolve_placeholders(item, resolve) for item in value]
         if isinstance(value, tuple):
-            return tuple(self._resolve_placeholders(item, context) for item in value)
+            return tuple(self._resolve_placeholders(item, resolve) for item in value)
         if isinstance(value, BaseModel):
             updates: dict[str, Any] = {}
             for key, current in value:
-                transformed = self._resolve_placeholders(current, context)
+                transformed = self._resolve_placeholders(current, resolve)
                 if transformed is not current:
                     updates[key] = transformed
             return value.model_copy(update=updates) if updates else value
         return value
+
+    def _resolve_scoped_reference(
+        self, expr: str, scoped: dict[str, ScopedInput]
+    ) -> Any:
+        """The value a placeholder reads from a scoped input: ``${name}`` the value
+        whole, ``${name.path}`` a part of it, and ``${name.task_id}`` the identity of
+        the task whose whole result it is."""
+        name, dot, path = expr.strip().partition(".")
+        entry = scoped.get(name.strip())
+        if entry is None:
+            raise ValueError(f"Unknown stage reference '{name.strip()}'")
+        if dot and path.strip() == "task_id" and entry.task_id is not None:
+            return entry.task_id
+        value = self._scoped_value(entry.binding)
+        if not dot:
+            return (
+                value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+            )
+        value = self._dig_result_path(value, path.split("."))
+        if value is None:
+            raise ValueError(f"Missing value for reference '{expr.strip()}'")
+        if entry.binding.kind is BindingKind.RESULT and (
+            rendered := self._render_artifact_ref(
+                value, self._runtime.read_binding(entry.binding)
+            )
+        ):
+            return rendered
+        return value
+
+    def _scoped_value(self, binding: ResultBinding) -> Any:
+        try:
+            return scoped_value(binding, self._runtime.read_binding)
+        except IndexError as exc:
+            raise StageResultMissing(str(exc)) from exc
 
     def _build_stage_context(self, record: TaskRecord) -> dict[str, TaskRecord]:
         """Collect upstream dependency records keyed by stage identity."""
@@ -1463,15 +1512,28 @@ class Dispatcher:
         return bindings
 
     def _validate_ssh_inputs(
-        self, record: TaskRecord, spec: TaskSpecStrict, context: dict[str, TaskRecord]
+        self,
+        record: TaskRecord,
+        spec: TaskSpecStrict,
+        context: dict[str, TaskRecord],
+        scoped: dict[str, ScopedInput] | None = None,
     ) -> None:
-        """Check that each SSH input names a settled upstream stage of the task."""
+        """Check that each SSH input names a settled upstream stage of the task, or
+        inside a region definition an input carrying a task's result."""
         if not isinstance(spec, SSHSpecStrict) or not spec.inputs:
             return
         for entry in spec.inputs:
             stage_name = entry.stage.strip()
             if not stage_name:
                 raise ValueError("SSH input stage names must be non-empty")
+            if scoped is not None:
+                scoped_input = scoped.get(stage_name)
+                if scoped_input is None or scoped_input.binding.task_id is None:
+                    raise ValueError(
+                        f"SSH input stage '{stage_name}' of task {record.task_id} "
+                        "names no input carrying a task's result"
+                    )
+                continue
             upstream = context.get(stage_name)
             if upstream is None:
                 raise ValueError(
@@ -1522,8 +1584,22 @@ class Dispatcher:
             return None
         return current
 
-    def _condition_actual(self, record: TaskRecord, condition: ConditionSpec) -> Any:
+    def _condition_actual(
+        self,
+        record: TaskRecord,
+        condition: ConditionSpec,
+        scoped: dict[str, ScopedInput] | None = None,
+    ) -> Any:
         """The upstream value a task's condition compares against."""
+        if scoped is not None:
+            if (entry := scoped.get(condition.node)) is None:
+                raise ValueError(
+                    f"Condition references unknown node '{condition.node}'; "
+                    f"known nodes: {list(scoped)}"
+                )
+            return self._dig_result_path(
+                self._scoped_value(entry.binding), condition.field.split(".")
+            )
         stage_context = self._build_stage_context(record)
         upstream_record = stage_context.get(condition.node)
         if upstream_record is None:
@@ -1544,6 +1620,7 @@ class Dispatcher:
         task_id: str,
         rendered_task: TaskEnvelopeStrict,
         record: TaskRecord,
+        scoped: dict[str, ScopedInput] | None = None,
     ) -> bool:
         """Evaluate a task's condition and skip it if the condition is not met.
 
@@ -1555,7 +1632,7 @@ class Dispatcher:
             return False
 
         try:
-            actual_value = self._condition_actual(record, condition)
+            actual_value = self._condition_actual(record, condition, scoped)
             if str(actual_value) == condition.equals:
                 return False  # Condition met — proceed with dispatch
 

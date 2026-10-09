@@ -1,12 +1,18 @@
 """Which content a task is bound to read, and the result it is bound to."""
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from shared.content import ContentReference
-from shared.tasks.result_binding import ResultBinding, ResultElementRef, ResultValueRef
+from shared.tasks.result_binding import (
+    BindingKind,
+    ResultBinding,
+    ResultElementRef,
+    ResultMember,
+    ResultValueRef,
+)
 
 from ...orchestration import (
     InputResolution,
@@ -26,6 +32,19 @@ class _InputElement:
     ref: ResultElementRef
 
 
+@dataclass(frozen=True)
+class ScopedInput:
+    """One value a task inside a region definition reads: what it binds to, and
+    the task whose whole result it is, when a ``task_id`` read may name one."""
+
+    binding: ResultBinding
+    task_id: str | None = None
+
+
+class UnreadableInput(ValueError):
+    """An input carrying a value a task cannot read."""
+
+
 def _settled_at(record: TaskRecord) -> str | None:
     return ts_to_iso(record.finished_ts) if record.finished_ts is not None else None
 
@@ -35,6 +54,15 @@ def element_of(value_ref: ValueRef) -> int | None:
     return (
         int(value_ref.collection_key) if value_ref.collection_key is not None else None
     )
+
+
+def _references(binding: ResultBinding) -> Iterator[ContentReference]:
+    """Every stored object a binding reads, its members' included."""
+    if binding.reference is not None:
+        yield binding.reference
+    for member in binding.members:
+        if member.binding is not None:
+            yield from _references(member.binding)
 
 
 class ContentBindings:
@@ -62,6 +90,8 @@ class ContentBindings:
         if resolution is not None and resolution.reference == reference:
             return True
         if self._upstream_result_is_locked(record, reference):
+            return True
+        if self._scoped_input_is_locked(task_id, reference):
             return True
         engine = self._engines.get(record.workflow_id)
         if engine is None:
@@ -114,6 +144,19 @@ class ContentBindings:
                     return True
         return False
 
+    def _scoped_input_is_locked(
+        self, task_id: str, reference: ContentReference
+    ) -> bool:
+        """Whether a value the task reads inside a region definition reads exactly
+        this object."""
+        try:
+            inputs = self.scoped_inputs_locked(task_id)
+        except UnreadableInput:
+            return False
+        return any(
+            reference in _references(entry.binding) for entry in (inputs or {}).values()
+        )
+
     def _frozen_input_is_locked(
         self, engine: OrchestrationEngine, task_id: str, reference: ContentReference
     ) -> bool:
@@ -154,6 +197,85 @@ class ContentBindings:
                 path=child_input.projection,
             ),
         )
+
+    def scoped_inputs_locked(self, task_id: str) -> dict[str, ScopedInput] | None:
+        """The values a task inside a region definition reads, by name; None for a
+        root task, which reads its upstream tasks by their names.
+
+        Raises ``UnreadableInput`` for a value no binding can carry.
+        """
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        inputs = engine.occurrence_inputs(task_id) if engine else None
+        if inputs is None:
+            return None
+        return {
+            entry.name: ScopedInput(
+                self._value_binding_locked(entry.value), entry.task_id
+            )
+            for entry in inputs
+        }
+
+    def _value_binding_locked(self, value: ValueRef) -> ResultBinding:
+        """The binding a worker reads one input value through."""
+        match value.kind:
+            case "legacy_task_result":
+                result = (
+                    self.result_binding_locked(value.legacy_task_id)
+                    if value.legacy_task_id is not None
+                    else None
+                )
+                reference = value.content or (result.reference if result else None)
+                selects = value.collection_key is not None or bool(value.projection)
+                if reference is None and (result is None or result.skip is None):
+                    if not selects:
+                        # Named with nothing bound, so the task's identity still
+                        # reaches its reader.
+                        return ResultBinding(task_id=value.legacy_task_id)
+                    raise UnreadableInput(
+                        f"task {value.legacy_task_id} has no bound result to read"
+                    )
+                return ResultBinding(
+                    task_id=value.legacy_task_id,
+                    reference=reference,
+                    skip=(
+                        None if reference is not None or result is None else result.skip
+                    ),
+                    settled_at=result.settled_at if result is not None else None,
+                    element=element_of(value),
+                    path=value.projection,
+                )
+            case "aggregate" | "bundle":
+                return ResultBinding(
+                    kind=(
+                        BindingKind.MEMBERS
+                        if value.kind == "aggregate"
+                        else BindingKind.BUNDLE
+                    ),
+                    members=tuple(
+                        ResultMember(
+                            key=member.key,
+                            outcome=member.outcome.value,
+                            binding=(
+                                self._value_binding_locked(member.value_ref)
+                                if member.value_ref is not None
+                                and member.outcome is PublicationOutcome.SUCCESS
+                                else None
+                            ),
+                        )
+                        for member in value.members
+                    ),
+                    path=value.projection,
+                )
+            case "inline":
+                return ResultBinding(
+                    kind=BindingKind.LITERAL,
+                    literal=value.literal,
+                    path=value.projection,
+                )
+            case "empty":
+                return ResultBinding(kind=BindingKind.EMPTY)
+        raise UnreadableInput(f"a {value.kind} value is not readable as a task input")
 
     def input_resolution_locked(self, task_id: str) -> InputResolution | None:
         record = self._tasks.get(task_id)

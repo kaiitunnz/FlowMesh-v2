@@ -672,6 +672,20 @@ class OccurrencePlace(BaseModel):
     time: tuple[tuple[str, int], ...] = ()
 
 
+class OccurrenceInput(BaseModel):
+    """One value an occurrence reads, by a name its spec reads it through.
+
+    ``task_id`` is the task of the sibling occurrence whose whole result the value is,
+    which a ``task_id`` read names; None for a value no sibling task produced.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    value: ValueRef
+    task_id: str | None = None
+
+
 class Occurrence(BaseModel):
     """One tagged occurrence of a template operator in a child context and time.
 

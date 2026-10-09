@@ -148,6 +148,17 @@ class PlanTopology:
             ):
                 self.incoming[edge.to_op].append(edge)
                 self.outgoing[edge.from_op].append(edge)
+        sources = {e.logical_ref: e.source_id for e in bundle.template.source_map}
+        # The name a spec reads each operator's value by within its scope; a call's
+        # join carries the call's name.
+        self.scope_names: dict[str, str] = {
+            op: source.rpartition("/")[2] for op, source in sources.items()
+        }
+        for edge in bundle.template.edges:
+            if self._is_spawn_join_edge(edge.from_op, edge.to_op) and (
+                name := self.scope_names.get(edge.from_op)
+            ):
+                self.scope_names.setdefault(edge.to_op, name)
 
     def _build_topology(self) -> dict[str, list[str]]:
         """Forward successor edges, excluding feedback and spawn->join binding edges."""

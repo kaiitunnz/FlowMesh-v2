@@ -1,11 +1,12 @@
 """Projecting a value out of an upstream-result context by a dotted path.
 
-One walker serves every consumer of an upstream projection. An expression names a root
-upstream node and then indexes into its result: each dotted token reads an attribute or
-key and may carry bracket indexes, and a token applied to a list distributes over its
-elements. ``frames`` admits the table-shaped steps; a consumer whose contract covers
-only scalar and structured values leaves them out, so a table reaches it as an
-unprojectable input rather than as a silently different value.
+One walker serves every consumer of an upstream projection. An expression names an
+upstream input and then indexes into its value, a whole result or a value routed to the
+task: each dotted token reads an attribute or key and may carry bracket indexes, and a
+token applied to a list distributes over its elements. ``frames`` admits the
+table-shaped steps; a consumer whose contract covers only scalar and structured values
+leaves them out, so a table reaches it as an unprojectable input rather than as a
+silently different value.
 """
 
 from typing import Any
@@ -14,6 +15,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result.routed import routed_root
 
 from ...utils.serialization import try_deserialize_dataframe
 from ..base_executor import ExecutionError
@@ -34,7 +36,7 @@ def project_expression(
     if result is None:
         return None
 
-    value: Any = result
+    value: Any = routed_root(result)
     for token in parts[1:]:
         if not token:
             continue

@@ -1,10 +1,11 @@
 import json
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
 from ...schemas.result import BaseExecutorResult
+from ...schemas.result.routed import RoutedValue
 from .._base import RetiredFieldsModel, StrictBaseModel, TemplateBaseModel
 from ..components import (
     AdapterConfig,
@@ -62,6 +63,13 @@ def validate_resident_only_binding(
             f"a {leaf} leaf supports only a resident service binding; local_eligible "
             "is available for inference leaves."
         )
+
+
+# A routed value is tried first, so one survives re-validation rather than reading as
+# a permissive result.
+type UpstreamValue = SerializeAsAny[
+    Annotated[RoutedValue | BaseExecutorResult, Field(union_mode="left_to_right")]
+]
 
 
 class InferenceEmbodimentKind(StrEnum):
@@ -175,7 +183,7 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
     shard: ShardSpec | None = None
 
     # Server-injected stage context (reserve the user-facing key `_upstreamResults`)
-    upstreamResults: dict[str, SerializeAsAny[BaseExecutorResult]] | None = Field(
+    upstreamResults: dict[str, UpstreamValue] | None = Field(
         default=None, alias="_upstreamResults"
     )
 
@@ -240,7 +248,7 @@ class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
     condition: ConditionSpec | None = None
     shard: ShardSpecTemplate | None = None
 
-    upstreamResults: dict[str, SerializeAsAny[BaseExecutorResult]] | None = Field(
+    upstreamResults: dict[str, UpstreamValue] | None = Field(
         default=None, alias="_upstreamResults"
     )
 

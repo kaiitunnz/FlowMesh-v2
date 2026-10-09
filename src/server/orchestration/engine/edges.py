@@ -18,6 +18,7 @@ from ...task.v2.representations.template import (
 from ..state import (
     ControlStatus,
     Occurrence,
+    OccurrenceInput,
     PublicationOutcome,
     ValueRef,
     WorkItem,
@@ -108,6 +109,56 @@ class EdgeResolver:
                 )
             )
         return resolved
+
+    def inputs(self, key: str) -> list[OccurrenceInput]:
+        """The values a definition member's occurrence reads, by name.
+
+        A named input or definition input reads the value its edge delivers. An
+        upstream member also reads by its own name as the value it delivers whole, and
+        a task member's whole result carries that task's identity. The first binding
+        of a name holds.
+        """
+        occurrence = self._ledger.occurrence(key)
+        inputs: dict[str, OccurrenceInput] = {}
+        for incoming in self.incoming(key):
+            if incoming.state not in (EdgeState.LIVE, EdgeState.EMPTY):
+                continue
+            edge = incoming.edge
+            value = incoming.value or ValueRef(kind="empty")
+            if edge.boundary is BoundaryKind.ENTRY:
+                if name := edge.to_port or edge.from_port:
+                    inputs.setdefault(name, OccurrenceInput(name=name, value=value))
+                continue
+            source = self.sibling(occurrence, edge.from_op)
+            task_id = self._task_of(source)
+            if edge.to_port:
+                inputs.setdefault(
+                    edge.to_port,
+                    OccurrenceInput(
+                        name=edge.to_port,
+                        value=value,
+                        task_id=None if edge.projection else task_id,
+                    ),
+                )
+            if (name := self._topology.scope_names.get(edge.from_op)) is None:
+                continue
+            state, whole = self.source_state(source, edge.from_port)
+            if state in (EdgeState.LIVE, EdgeState.EMPTY):
+                inputs.setdefault(
+                    name,
+                    OccurrenceInput(
+                        name=name,
+                        value=whole or ValueRef(kind="empty"),
+                        task_id=task_id,
+                    ),
+                )
+        return list(inputs.values())
+
+    def _task_of(self, key: str) -> str | None:
+        """The task a task member's occurrence runs as; None for a control."""
+        wi_id = self._ledger.wi_by_occurrence.get(key)
+        wi = self._ledger.work_items.get(wi_id) if wi_id else None
+        return wi.legacy_task_id if wi is not None else None
 
     def return_bundles(
         self, key: str, *kinds: BoundaryKind

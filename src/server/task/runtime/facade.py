@@ -175,7 +175,7 @@ from .after_commit import (
 )
 from .agent_inputs import AgentInputs
 from .commits import TransitionCommitter, TransitionNotDurable, store_unavailable
-from .content_bindings import ContentBindings
+from .content_bindings import ContentBindings, ScopedInput
 from .dispatch_fence import DispatchFence, Publish, supplier_id
 from .episode_dispatch import EpisodeDispatch, EpisodeFeasibility
 from .fanout import FanoutRead
@@ -2959,9 +2959,10 @@ class TaskRuntime:
         Read-only evidence for the content authority: the worker must be the one
         running the task, and the task must already be bound to exactly this reference
         — the request it was prepared with, an outcome the engine delivered into its
-        episode, the settled result of an upstream task it depends on, or the producer
-        result one of its accepted inputs or its fan-out element is frozen to. Naming an
-        object it merely knows of authorizes nothing.
+        episode, the settled result of an upstream task it depends on, a value it reads
+        inside a region definition, or the producer result one of its accepted inputs
+        or its fan-out element is frozen to. Naming an object it merely knows of
+        authorizes nothing.
         """
         with self._lock:
             record = self._tasks.get(task_id)
@@ -3136,6 +3137,19 @@ class TaskRuntime:
         """
         with self._lock:
             return self._content_bindings.result_binding_locked(task_id)
+
+    def scoped_inputs(self, task_id: str) -> dict[str, ScopedInput] | None:
+        """The values a task inside a region definition reads, by the names its spec
+        reads them through; None for a root task.
+
+        Raises ``UnreadableInput`` for a value no binding can carry.
+        """
+        with self._lock:
+            return self._content_bindings.scoped_inputs_locked(task_id)
+
+    def read_binding(self, binding: ResultBinding) -> ResultEnvelope:
+        """The result envelope a binding reads; raises when unreadable."""
+        return self._results.read(binding)
 
     def read_result(self, task_id: str) -> ResultEnvelope | None:
         """A task's result envelope, None when it has none; raises when unreadable."""

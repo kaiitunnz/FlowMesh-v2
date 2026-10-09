@@ -701,6 +701,7 @@ def _wire_dependencies(
         if str(region.region.get("kind", "")).strip() == "branch"
     )
     names = {scope: build_name_map(parsed, scope) for scope in _scopes(parsed)}
+    regions = frozenset(value_ops.get(r.name, r.name) for r in parsed.regions)
     by_id = {op.operator_id: idx for idx, op in enumerate(acc.operators)}
     for task in parsed.tasks:
         bindings = _input_bindings(task, names[task.definition])
@@ -712,6 +713,7 @@ def _wire_dependencies(
             value_ops,
             ancestors[task.task_id],
             routed,
+            regions,
         )
         source_kind, source_id = _task_source(task)
         if classification.unresolved:
@@ -722,6 +724,16 @@ def _wire_dependencies(
                 + " name no upstream node this task can read; a ${name.path} "
                 "reference names a dependency, an ancestor reached through task "
                 "dependencies, or a named input",
+                source_id,
+                source_kind,
+            )
+        if classification.identityless:
+            raise compile_error(
+                "reads.task-id-of-value",
+                "${name.task_id} reads "
+                + ", ".join(repr(name) for name in classification.identityless)
+                + ", which carry a value rather than a task's result; read task_id "
+                "through the name of the task that produced it",
                 source_id,
                 source_kind,
             )

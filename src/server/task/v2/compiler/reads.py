@@ -3,8 +3,10 @@
 A task reads an upstream value through a ``${name.path}`` placeholder rendered at
 dispatch, a ``data.expr``/``data.node`` projection or ``graph_template`` column
 resolved on its worker, its guard's ``condition.node``, or an SSH ``inputs[].stage``.
-``${name.task_id}`` reads only the upstream's identity. Extraction follows those
-grammars without evaluating any of them.
+Inside a region definition every input is a value, so ``${name}`` reads one whole.
+``${name.task_id}`` reads only the upstream's identity, which a task's result has and
+a value routed through a definition input, a projection, or a region does not.
+Extraction follows those grammars without evaluating any of them.
 """
 
 import re
@@ -35,11 +37,12 @@ def spec_reads(task: ParsedTask) -> SpecReads:
     values: set[str] = set()
     identities: set[str] = set()
     malformed: list[str] = []
+    scoped = task.definition is not None
     for text in _strings(task.task.model_dump(mode="python")):
         for match in PLACEHOLDER_PATTERN.finditer(text):
             expr = match.group(1).strip()
             name, dot, path = expr.partition(".")
-            if not dot or not name.strip():
+            if not name.strip() or not (dot or scoped):
                 malformed.append(match.group(0))
             elif path.strip() == "task_id":
                 identities.add(name.strip())
@@ -93,6 +96,8 @@ class ReadClassification:
     unresolved: tuple[str, ...]
     # Input names that would hide a different node of the task's scope.
     shadowing: tuple[str, ...]
+    # Names read for a task identity that carry a value with none.
+    identityless: tuple[str, ...] = ()
 
 
 def binding_name(dep: ParsedDependency) -> str | None:
@@ -110,16 +115,19 @@ def classify_reads(
     value_op: Mapping[str, str],
     ancestors: frozenset[str],
     routed: frozenset[str],
+    regions: frozenset[str],
 ) -> ReadClassification:
     """Classify each of a task's dependencies by what its spec needs from it.
 
     ``names`` maps the names visible in the task's scope to operators; each
     dependency's binding name is visible too. ``ancestors`` are the operators an
-    upstream name may resolve through, and ``routed`` the operators whose outputs are
-    branch arms. A dependency the spec reads, or one with a named input, is a required
-    value; an identity read or an unread branch arm is a required route; any other is
-    ordering only. An ancestor read by name but not depended on directly is a derived
-    requirement of the same kind.
+    upstream name may resolve through, ``routed`` the operators whose outputs are
+    branch arms, and ``regions`` the operators producing a region's value. A
+    dependency the spec reads, or one with a named input, is a required value; an
+    identity read or an unread branch arm is a required route; any other is ordering
+    only. An ancestor read by name but not depended on directly is a derived
+    requirement of the same kind. Inside a region definition, an identity read of a
+    definition input, a projected input, or a region's value is identityless.
     """
     reads = spec_reads(task)
     aliases = {
@@ -154,7 +162,12 @@ def classify_reads(
                 value_deps |= indexes
             case str() as op:
                 derived[op] = DependencyUse.VALUE_REQUIRED
+    identityless: list[str] = []
     for name in sorted(reads.identities):
+        if task.definition is not None and _identityless(
+            name, aliases, dependencies, names, regions
+        ):
+            identityless.append(name)
         match _resolve(name):
             case set() as indexes:
                 identity_deps |= indexes
@@ -179,4 +192,20 @@ def classify_reads(
         derived=tuple(sorted(derived.items())),
         unresolved=tuple(dict.fromkeys(unresolved)),
         shadowing=tuple(sorted(shadowing)),
+        identityless=tuple(identityless),
     )
+
+
+def _identityless(
+    name: str,
+    aliases: Mapping[str, int],
+    dependencies: list[ParsedDependency],
+    names: Mapping[str, str],
+    regions: frozenset[str],
+) -> bool:
+    """Whether a name inside a region definition reads a value no task's result is:
+    a definition input, a projected input, or a region's value."""
+    if (index := aliases.get(name)) is not None:
+        dep = dependencies[index]
+        return dep.source == INGRESS or bool(dep.project)
+    return names.get(name) in regions

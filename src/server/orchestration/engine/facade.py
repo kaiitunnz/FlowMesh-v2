@@ -79,6 +79,7 @@ from ..state import (
     LedgerSnapshot,
     LoopInstance,
     Occurrence,
+    OccurrenceInput,
     OccurrencePlace,
     ProgressAxis,
     ProgressCapability,
@@ -1060,6 +1061,14 @@ class OrchestrationEngine:
             context=occurrence.context_id or None,
             time=tuple(time),
         )
+
+    def occurrence_inputs(self, task_id: str) -> list[OccurrenceInput] | None:
+        """The values a task inside a region definition reads, by the names its spec
+        reads them through; None at the root, where a task reads its upstream tasks."""
+        occurrence = self.occurrence_of(task_id)
+        if occurrence is None:
+            return None
+        return self._flow.edges.inputs(occurrence.key)
 
     def legacy_control_regions(self) -> list[str]:
         """Branch and loop operators stored before they had a runnable contract."""
