@@ -7,10 +7,12 @@ from ...task.v2.representations.operators import (
     BranchRegion,
     JoinCompletion,
     JoinRegion,
+    LoopContextRegion,
     MergeCombination,
     MergeRegion,
     OperatorKind,
     ResidualPolicy,
+    SelectionRule,
     SpawnRegion,
     spawned_only_region_owners,
 )
@@ -36,7 +38,12 @@ from ..state import (
     WorkItem,
     WorkItemStatus,
 )
-from .advance import Advance, Materialization, dependency_failed
+from .advance import (
+    Advance,
+    Materialization,
+    dependency_failed,
+    legacy_control_unsupported,
+)
 from .authority import AuthorityLedger
 from .edges import EdgeResolver, EdgeState, Incoming
 from .failures import DECLARED_FAILURE_REASON, FailureLedger
@@ -530,8 +537,18 @@ class RegionFlow:
         match op:
             case MergeRegion():
                 self._combine(key, op, inputs, advance)
-            case BranchRegion():
-                self._await_selection(key, op, inputs, advance)
+            case BranchRegion(rule=None):
+                self.fail_control(
+                    key,
+                    legacy_control_unsupported(op.operator_id, "a selection rule"),
+                    advance,
+                )
+            case LoopContextRegion() if op.body_ref is None:
+                self.fail_control(
+                    key, legacy_control_unsupported(op.operator_id, "a body"), advance
+                )
+            case BranchRegion(rule=SelectionRule() as rule):
+                self._await_selection(key, op, rule, inputs, advance)
             case SpawnRegion():
                 if any(i.state is EdgeState.DEAD for i in required):
                     self.mark_dead(key, advance)
@@ -622,10 +639,13 @@ class RegionFlow:
         self.propagate(key, advance, value=value)
 
     def _await_selection(
-        self, key: str, op: BranchRegion, inputs: list[Incoming], advance: Advance
+        self,
+        key: str,
+        op: BranchRegion,
+        rule: SelectionRule,
+        inputs: list[Incoming],
+        advance: Advance,
     ) -> None:
-        if op.rule is None:
-            return
         if any(
             i.state is EdgeState.DEAD
             for i in inputs
@@ -634,7 +654,7 @@ class RegionFlow:
             self.mark_dead(key, advance)
             return
         selected = next(
-            (i for i in inputs if i.port == op.rule.input),
+            (i for i in inputs if i.port == rule.input),
             inputs[0] if len(inputs) == 1 else None,
         )
         if (
@@ -647,7 +667,7 @@ class RegionFlow:
             )
             return
         state = self._ledger.control_state(key)
-        state.inputs[op.rule.input] = selected.value
+        state.inputs[rule.input] = selected.value
         self._ledger.emit("branch_awaiting_selection", operator_id=op.operator_id)
 
     def _open_spawn(
