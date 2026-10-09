@@ -59,7 +59,7 @@ spec:
 schedules each stage once all of its dependencies are `DONE`. A stage's
 `dependsOn` names an earlier stage of the same workflow.
 A placeholder `${stage.path}` reads into an upstream stage's result, which the
-server renders before the stage is dispatched.
+server renders before the stage dispatches.
 
 ## Graph DAG
 
@@ -212,8 +212,8 @@ and everything downstream of it, as a failed dependency fails a task.
 
 A `dependsOn` entry is a node name or a mapping
 `{ node, port, input, project }`: `port` names the output it reads (a branch arm,
-a loop's carried value, a call's return), `input` names the value for the
-consumer, and `project` selects a part of it by field names and list indexes.
+a loop's carried value, a call's return), `input` is the name the consumer reads
+it by, and `project` selects a part of it by field names and list indexes.
 
 A `join` `completion` is `all_settled`, `all_succeed`, `any`, `first_k` (with
 `k`), or `predicate` (with `predicate: { min_qualifiers, monotone }`). An early
@@ -248,14 +248,15 @@ A consumer depends on the arm it takes:
         spec: { taskType: echo, ... }
 ```
 
-Case values are strings, so quote any that YAML would read otherwise. A value that
-is not a string, or matches no case or port, fails the branch. Work on an arm the
-branch did not take settles without running, and so does everything that needs
-it. A `merge` joins arms back together: `combination: one_live` forwards the one
-live arm's value, and `concat`, the default, collects every live input in
-declared order. A branch selects on, and a spawn fans out over, a `one_live`
-merge only when each of its arms carries one value rather than a join's or a
-`concat` merge's aggregate.
+Case values are strings, so quote any that YAML would read otherwise. A value
+that is not a string, or matches no case or port, fails the branch. A task on an
+arm the branch did not take finishes `DONE` without running, with a skipped
+result (`reason: route_not_taken`), and so does everything that needs it. A
+`merge` joins arms back together: `combination: one_live` forwards the one live
+arm's value, and `concat`, the default, collects every live input in declared
+order. A branch selects on, and a spawn fans out over, a `one_live` merge only
+when each of its arms carries one value rather than a join's or a `concat`
+merge's aggregate.
 
 #### Graph templates
 
@@ -263,7 +264,7 @@ merge only when each of its arms carries one value rather than a join's or a
 body and spawns or calls run per child. A template declares its `inputs`, each
 with a `role` (`carried` or `invariant` for a loop body, `param` for a child's
 element or call argument, `capture` for a parent value a child reads), its
-`returns` for a call, its `nodes`, and `edges` out of it. Inside a template a
+`returns` for a call, its `nodes`, and its boundary `edges`. Inside a template a
 node reads a template input by depending on `$ingress`, and an edge leaves
 through `$feedback` (the next loop iteration), `$egress` (the loop's exit), or
 `$return` (a call's result). An edge may carry a `project`.
@@ -319,7 +320,8 @@ several. An iteration starts as soon as the previous one feeds back, while work
 of earlier iterations it does not depend on may still run, and the loop exits
 only once all of it settles; dependencies alone order work across iterations.
 `ORCHESTRATOR_MAX_LOOP_ITERATIONS` bounds how many iterations a loop runs, its
-first included, and a body that feeds back past them fails the loop.
+first included, and a body that feeds back past them fails the loop with
+`LoopIterationBudgetExceeded`.
 [`refine_loop_echo.yaml`](../examples/templates/refine_loop_echo.yaml) runs a
 two-iteration loop with echo tasks.
 

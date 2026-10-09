@@ -1029,8 +1029,8 @@ class RegionFlow:
         )
 
     def adopt_stored_controls(self) -> None:
-        """Give each root control a ledger stored before control states existed the
-        state its stored ledger shows it reached.
+        """Give each root control with no control state the state its ledger shows
+        it reached.
 
         A failed region failed; a merge holding a record fired over its inputs; a
         spawn whose scope opened is live with the values it captured; a join whose

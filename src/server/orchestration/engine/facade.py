@@ -1061,10 +1061,7 @@ class OrchestrationEngine:
     def task_inputs(self, task_id: str) -> list[OccurrenceInput] | None:
         """The values a task reads through its incoming edges, by the names its spec
         reads them through; None for a root task that reads only tasks' whole results
-        by their names, which its upstream tasks' results answer the same way.
-
-        A task inside a region definition, and a root task reading a region's value or
-        a named input, read every input through its edges.
+        by their names.
         """
         if (occurrence := self.occurrence_of(task_id)) is not None:
             return self._flow.edges.inputs(occurrence.key)
@@ -1076,7 +1073,8 @@ class OrchestrationEngine:
         return self._flow.edges.inputs(task_id)
 
     def legacy_control_regions(self) -> list[str]:
-        """Branch and loop operators stored before they had a runnable contract."""
+        """Branch and loop operators with no runnable contract: a branch with no
+        selection rule, or a loop with no body."""
         return [
             op.operator_id
             for op in self._topology.operators.values()

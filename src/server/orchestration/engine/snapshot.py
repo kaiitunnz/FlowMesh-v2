@@ -152,9 +152,8 @@ class SnapshotCodec:
             for w in self._ledger.work_items.values()
             if w.legacy_task_id
         }
-        # The operator index resolves a static leaf's forward-record successor; a
-        # dispatched child or iteration shares its body operator across instances, so it
-        # is addressed by task or activation, never by operator.
+        # An operator inside a region definition runs once per occurrence, so its work
+        # is addressed by occurrence, task or activation, never by operator alone.
         self._ledger.occurrences = {}
         self._ledger.occurrences_by_scope = {}
         self._ledger.open_occurrences = {}

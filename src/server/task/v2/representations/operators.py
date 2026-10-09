@@ -600,7 +600,7 @@ class BranchRegion(_OperatorBase):
     """Routes the record on its input to the one output port its rule selects."""
 
     kind: Literal[OperatorKind.BRANCH] = OperatorKind.BRANCH
-    selection: str | None = None  # an unrunnable pre-rule selection, kept to decode
+    selection: str | None = None  # a selection with no rule; such a branch never runs
     rule: SelectionRule | None = None
 
 
@@ -613,8 +613,7 @@ class MergeRegion(_OperatorBase):
     @field_validator("combination", mode="before")
     @classmethod
     def _tolerate_unknown_combination(cls, value: Any) -> Any:
-        # A stored merge may carry any string; one this contract does not name keeps
-        # its all-inputs behavior.
+        # A combination this contract does not name combines every input.
         if isinstance(value, str) and value not in MergeCombination:
             return None
         return value

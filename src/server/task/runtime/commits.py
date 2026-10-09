@@ -358,7 +358,7 @@ class TransitionCommitter:
         A write the store cannot take for now stays owed and is held. Any other error
         is the transition's own and is raised. The workflow's in-memory state may then
         hold what no write carried, so a rewrite of all of it is owed, made with the
-        workflow's next write rather than retried on its own, so a fault that recurs
+        workflow's next write rather than retried on its own, so a recurring fault
         never spins.
         """
         owed = self.debt[workflow_id]

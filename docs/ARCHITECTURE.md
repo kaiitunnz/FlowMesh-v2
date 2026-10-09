@@ -167,19 +167,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   join fails whatever its completion rule. A failed agent fails the regions it declares
   the same way; children it already spawned follow their region's residual policy. A join
   that resolves as a failure fails everything downstream of it too.
-- **Branches, loops and templates.** A branch reads its selector off the lock from the
-  stored result reaching it, routes exactly one arm, and settles the work on every other
-  arm without running it. A loop runs its body template once per iteration, each
-  iteration's members materialized from task blueprints as their own occurrences of the
-  template, and a spawn or call can run a template per child. An iteration starts as soon
-  as the previous one feeds back, beside earlier work it does not depend on, and the loop
-  exits once all of it settles. Every control decision is recorded in the ledger before
-  what it releases runs, so a restart resumes each loop at the iteration it reached. A
-  task inside a template, or one reading a region's value or a named input, receives each
-  input as the value its incoming edge delivers, named by reference for its worker to
-  hydrate; any other task reads its upstream tasks' results by their names. A stored
-  workflow with a branch or loop from before these regions ran fails on restart with a
-  typed reason.
+- **Branches, loops and templates.** A branch reads its selector from the stored result
+  reaching it, routes exactly one arm, and settles the work on every other arm without
+  running it. A loop runs its body template once per iteration, and a spawn or call can
+  run a template per child; each runs the template's members as tasks of their own. An
+  iteration starts as soon as the previous one feeds back, beside earlier work it does
+  not depend on, and the loop exits once all of it settles. Every control decision is
+  recorded in the ledger before what it releases runs, so a restart resumes each loop at
+  the iteration it reached. A task inside a template, or one reading a region's value or
+  a named input, receives each input as the value its incoming edge delivers, named by
+  reference for its worker to hydrate; any other task reads its upstream tasks' results
+  by their names.
 - **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
   a durable semantic event, so the ledger stays consistent with the task records and a
   cancelled workflow survives a restart without re-admitting cancelled work. A worker

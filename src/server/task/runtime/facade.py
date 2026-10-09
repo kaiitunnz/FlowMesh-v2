@@ -1233,8 +1233,8 @@ class TaskRuntime:
         materialized = materialized_operators(engine.template)
         prototypes = [p.record for p in tasks if p.record.task_id in materialized]
         tasks = [p for p in tasks if p.record.task_id not in materialized]
-        # A workflow stored before blueprints made a recursive agent's children from
-        # the agent's own root task.
+        # A workflow holding no blueprints makes a recursive agent's children from the
+        # agent's own root task.
         covered = {record.task_id for record in [*prototypes, *blueprints]}
         roots = [
             p.record
@@ -1354,8 +1354,8 @@ class TaskRuntime:
         if withdrawn := sorted(p.task_id for p in prototypes if p.task_id in remaining):
             self._committer.retire_locked(workflow_id, withdrawn)
         self._committer.save_ledger_locked(workflow_id)
-        # A branch or loop stored before it had a runnable contract may already have
-        # run, so nothing re-evaluates it: a workflow still running through one fails.
+        # A branch or loop with no runnable contract may already have run, so nothing
+        # re-evaluates it: a workflow still running through one fails.
         if (
             legacy := engine.legacy_control_regions()
         ) and not self._committer.workflow_settlement_locked(workflow_id).settled:

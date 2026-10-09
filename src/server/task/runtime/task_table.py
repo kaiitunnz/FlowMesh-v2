@@ -7,8 +7,7 @@ from ..models import TERMINAL_TASK_STATUSES, TaskRecord
 
 class TaskTable(dict[str, TaskRecord]):
     """Task records by task id, with each workflow's task ids kept beside them in the
-    order they were added, so a question about one workflow reads its own tasks
-    rather than every task.
+    order they were added.
 
     A terminal status is final for a record, so each workflow also keeps the tasks
     not yet seen terminal, dropped as they are found terminal, with the last finish
