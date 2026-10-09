@@ -42,7 +42,7 @@ spec:
           type: list
           items:
             - - role: user
-                content: "Extract entities from: {{input}}"
+                content: "Extract the entities from this report: ..."
     - name: summarize
       dependsOn: [extract]
       spec:
@@ -52,14 +52,14 @@ spec:
           type: list
           items:
             - - role: user
-                content: "Summarize: {{extract.output}}"
+                content: "Summarize: ${extract.items.0.output}"
 ```
 
 `spec.stages[].dependsOn` declares the DAG edges; the dispatcher
 schedules each stage once all of its dependencies are `DONE`. A stage's
 `dependsOn` names an earlier stage of the same workflow.
-Substitutions like `{{extract.output}}` are resolved against the
-upstream stage's result.
+A placeholder `${stage.path}` reads into an upstream stage's result, which the
+server renders before the stage is dispatched.
 
 ## Graph DAG
 
@@ -251,7 +251,8 @@ Case values are strings, so quote any that YAML would read otherwise. A value th
 is not a string, or matches no case or port, fails the branch. Work on an arm the
 branch did not take settles without running, and so does everything that needs
 it. A `merge` joins arms back together: `combination: one_live` forwards the one
-live arm's value, and `concat` collects every live input in declared order.
+live arm's value, and `concat`, the default, collects every live input in
+declared order.
 
 #### Graph templates
 
@@ -312,8 +313,11 @@ spec:
 A loop's value is the carried value its body exits with, and a consumer names
 the carried port it reads. A loop declaring `result: { visibility: published }`
 publishes one carried port, which `result.source_port` names when it has
-several. `ORCHESTRATOR_MAX_LOOP_ITERATIONS` bounds the iterations of one loop, and
-a loop that reaches it fails.
+several. An iteration starts as soon as the previous one feeds back, while work
+of earlier iterations it does not depend on may still run, and the loop exits
+only once all of it settles; dependencies alone order work across iterations.
+`ORCHESTRATOR_MAX_LOOP_ITERATIONS` bounds how many iterations a loop runs, its
+first included, and a body that feeds back past them fails the loop.
 [`refine_loop_echo.yaml`](../examples/templates/refine_loop_echo.yaml) runs a
 two-iteration loop with echo tasks.
 

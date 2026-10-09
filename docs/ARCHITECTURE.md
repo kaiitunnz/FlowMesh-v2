@@ -171,13 +171,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   stored result reaching it, routes exactly one arm, and settles the work on every other
   arm without running it. A loop runs its body template once per iteration, each
   iteration's members materialized from task blueprints as their own occurrences of the
-  template, and a spawn or call can run a template per child. Every control decision is
-  recorded in the ledger before what it releases runs, so a restart resumes each loop at
-  the iteration it reached. A task inside a template, or one reading a region's value,
-  receives each input as the value its incoming edge delivers, named by reference for
-  its worker to hydrate; a task fed only by tasks reads their results by name. A stored
-  workflow with a branch or loop from before these regions ran fails on restart rather
-  than resuming on a guess.
+  template, and a spawn or call can run a template per child. An iteration starts as soon
+  as the previous one feeds back, beside earlier work it does not depend on, and the loop
+  exits once all of it settles. Every control decision is recorded in the ledger before
+  what it releases runs, so a restart resumes each loop at the iteration it reached. A
+  task inside a template, or one reading a region's value or a named input, receives each
+  input as the value its incoming edge delivers, named by reference for its worker to
+  hydrate; any other task reads its upstream tasks' results by their names. A stored
+  workflow with a branch or loop from before these regions ran fails on restart with a
+  typed reason.
 - **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
   a durable semantic event, so the ledger stays consistent with the task records and a
   cancelled workflow survives a restart without re-admitting cancelled work. A worker

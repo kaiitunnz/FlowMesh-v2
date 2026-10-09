@@ -500,7 +500,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "ORCHESTRATOR_MAX_LOOP_ITERATIONS",
                     "1000",
-                    description="Max logical times one loop instance may run.",
+                    description="Max iterations one loop instance may run.",
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
