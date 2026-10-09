@@ -372,7 +372,7 @@ def test_loops_inside_two_spawned_children_keep_their_contexts_apart() -> None:
     (after,) = run.ready_named("after")
     collect = run.engine.control_state("collect")
     assert collect is not None and collect.status is ControlStatus.LIVE
-    members = collect.outputs[""].members
+    members = collect.outputs["out"].members
     assert [m.outcome for m in members] == [PublicationOutcome.SUCCESS] * 2
     run.run(after)
 

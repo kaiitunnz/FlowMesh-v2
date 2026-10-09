@@ -92,6 +92,31 @@ _EARLY_JOINS = frozenset(
 )
 
 
+def _port_outputs(op: MergeRegion | JoinRegion, value: ValueRef) -> dict[str, ValueRef]:
+    """A merge's or join's value under each output port it declares.
+
+    A join declaring several ports is a call returning a bundle: each port carries
+    its own member of the one child's returned bundle.
+    """
+    ports = [port.name for port in op.outputs]
+    if len(ports) == 1:
+        return {ports[0]: value}
+    bundle = (
+        value.members[0].value_ref
+        if value.kind == "aggregate" and len(value.members) == 1
+        else None
+    )
+    members = (
+        {member.key: member.value_ref for member in bundle.members}
+        if bundle is not None and bundle.kind == "bundle"
+        else {}
+    )
+    return {
+        port: members.get(port) or (bundle if bundle is not None else value)
+        for port in ports
+    }
+
+
 class RegionFlow:
     """Delivers records to their successors and admits ready work, releases joins
     under their completion and residual rules, and settles declared failures and
@@ -334,7 +359,7 @@ class RegionFlow:
         state = self._ledger.control_state(join_key)
         if state.status is ControlStatus.PENDING:
             state.status = ControlStatus.LIVE
-            state.outputs[""] = empty
+            state.outputs = _port_outputs(join, empty)
         self._publish_control(join_key, outcome, empty)
         self.propagate(join_key, advance, value=empty)
         return advance
@@ -550,7 +575,7 @@ class RegionFlow:
             )
         state = self._ledger.control_state(key)
         state.status = ControlStatus.LIVE
-        state.outputs[""] = value
+        state.outputs = _port_outputs(op, value)
         self._ledger.emit("merge_combined", operator_id=op.operator_id)
         self._publish_control(key, PublicationOutcome.SUCCESS, value)
         self.propagate(key, advance, value=value)
@@ -849,7 +874,7 @@ class RegionFlow:
             )
         state = self._ledger.control_state(join_key)
         state.status = ControlStatus.LIVE
-        state.outputs[""] = value_ref or ValueRef(kind="empty")
+        state.outputs = _port_outputs(join, value_ref or ValueRef(kind="empty"))
         self._publish_control(join_key, outcome, value_ref)
         advance = Advance()
         self.propagate(join_key, advance, value=value_ref)

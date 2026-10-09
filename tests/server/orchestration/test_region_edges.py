@@ -5,6 +5,7 @@ import pytest
 from server.orchestration.state import (
     ControlStatus,
     PublicationOutcome,
+    ValueRef,
     WorkItemStatus,
 )
 
@@ -253,7 +254,7 @@ def test_a_concat_merge_freezes_its_live_members_in_input_order() -> None:
     run.run_one("b")
     state = run.engine.control_state("both")
     assert state is not None and state.status is ControlStatus.LIVE
-    aggregate = state.outputs[""]
+    aggregate = state.outputs["out"]
     assert [m.key for m in aggregate.members] == ["second", "first"]
 
 
@@ -386,3 +387,124 @@ def test_a_join_on_a_dead_route_is_dead(fan_input: str, join_deps: str) -> None:
     collect = run.engine.control_state("collect")
     assert collect is not None and collect.status is ControlStatus.DEAD
     assert run.status("after") is WorkItemStatus.SKIPPED
+
+
+def test_a_branch_reads_a_merge_through_its_named_port() -> None:
+    nodes = f"""
+      - name: a
+        spec: {ECHO}
+      - name: b
+        spec: {ECHO}
+      - name: both
+        dependsOn: [{{node: a, input: x}}, {{node: b, input: y}}]
+        region: {{kind: merge, combination: concat}}
+      - name: decide
+        dependsOn: [{{node: both, port: out, input: input}}]
+        region:
+          kind: branch
+          inputs: [{{name: input}}]
+          outputs: [{{name: l}}, {{name: r}}]
+          selection: {{input: input}}
+      - name: on_l
+        dependsOn: [{{node: decide, port: l}}]
+        spec: {ECHO}
+"""
+    run = Driver(workflow(nodes))
+    run.run_one("a")
+    run.run_one("b")
+    ((key, value),) = run.engine.pending_branch_reads()
+    assert key == "decide" and value.kind == "aggregate"
+
+
+def test_a_merge_forwards_a_join_read_through_its_named_port() -> None:
+    templates = f"""
+    templates:
+      - name: one
+        inputs: [{{name: e, role: param}}]
+        returns: [{{name: out}}]
+        nodes:
+          - name: kidwork
+            dependsOn: [{{node: $ingress, port: e, input: e}}]
+            spec: {ECHO}
+        edges:
+          - from: {{node: kidwork}}
+            to: {{node: $return, port: out}}
+"""
+    nodes = f"""
+      - name: plan
+        spec: {ECHO}
+      - name: fan
+        dependsOn: [plan]
+        region: {{kind: spawn, child: one}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+      - name: m
+        dependsOn: [{{node: collect, port: out, input: all}}]
+        region: {{kind: merge, combination: one_live}}
+      - name: after
+        dependsOn: [{{node: m, input: x}}]
+        spec: {ECHO}
+"""
+    run = Driver(workflow(nodes, templates))
+    run.run_one("plan")
+    element = ValueRef(kind="inline", literal="e")
+    run.apply(run.engine.enter_definition_child("fan", element))
+    run.apply(run.engine.seal_spawn("fan"))
+    run.run_one("kidwork")
+    m = run.engine.control_state("m")
+    assert m is not None and m.status is ControlStatus.LIVE
+    assert m.outputs["out"].kind == "aggregate"
+    run.run_one("after")
+
+
+def test_an_agent_takes_a_merge_read_through_its_named_port() -> None:
+    templates = f"""
+    templates:
+      - name: body
+        inputs: [{{name: state, role: carried}}]
+        nodes:
+          - name: a
+            dependsOn: [{{node: $ingress, port: state, input: s}}]
+            spec: {ECHO}
+          - name: b
+            dependsOn: [{{node: $ingress, port: state, input: s}}]
+            spec: {ECHO}
+          - name: both
+            dependsOn: [{{node: a, input: x}}, {{node: b, input: y}}]
+            region: {{kind: merge, combination: concat}}
+          - name: think
+            dependsOn: [{{node: both, port: out, input: findings}}]
+            spec:
+              taskType: agent
+              task: think
+              harness: {{backend: scripted, version: v1, params: {{script: []}}}}
+          - name: route
+            dependsOn: [{{node: think, input: input}}]
+            region:
+              kind: branch
+              inputs: [{{name: input}}]
+              outputs: [{{name: continue}}, {{name: finish}}]
+              selection: {{input: input}}
+        edges:
+          - from: {{node: route, port: continue}}
+            to: {{node: $feedback, port: state}}
+          - from: {{node: route, port: finish}}
+            to: {{node: $egress, port: state}}
+"""
+    nodes = f"""
+      - name: seed
+        spec: {ECHO}
+      - name: refine
+        dependsOn: [{{node: seed, input: state}}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{{name: state}}]
+"""
+    run = Driver(workflow(nodes, templates))
+    run.run_one("seed")
+    run.run_one("a")
+    run.run_one("b")
+    assert run.ready_named("think") != []

@@ -159,11 +159,14 @@ class EdgeResolver:
             decision = self._ledger.branch_decisions.get(source)
             if decision is None or decision.port != port:
                 return EdgeState.DEAD, None
-            return EdgeState.LIVE, project(state.outputs.get(port or ""), steps)
+        if port is None and op is not None and len(op.outputs) == 1:
+            port = op.outputs[0].name
         value = state.outputs.get(port or "")
-        if value is None and state.outputs and port is None:
-            value = next(iter(state.outputs.values()))
-        if value is not None and value.kind == "empty":
+        if value is None:
+            # A live control that stored nothing under the port it was read through
+            # carries no value to substitute.
+            return EdgeState.FAILED, None
+        if value.kind == "empty":
             return EdgeState.EMPTY, value
         return EdgeState.LIVE, project(value, steps)
 
