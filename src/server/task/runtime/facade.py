@@ -1814,6 +1814,7 @@ class TaskRuntime:
             advance = engine.route_boundary_event(task_id, event)
             changed = self._apply_advance_locked(record.workflow_id, advance)
             self._committer.save_ledger_locked(record.workflow_id)
+            self._committer.settle_if_done_locked(record.workflow_id)
             if changed:
                 self._cv.notify_all()
             return changed
@@ -1854,6 +1855,7 @@ class TaskRuntime:
                 self._cv.notify_all()
             self._file_locked(task_id, *captures)
             self._committer.save_ledger_locked(record.workflow_id)
+            self._committer.settle_if_done_locked(record.workflow_id)
             return
         request = hr.request
         if request is None:
@@ -2058,6 +2060,7 @@ class TaskRuntime:
                     task_id, call_correlation, invocation_id, captured_on, failed=True
                 )
                 self._committer.save_ledger_locked(record.workflow_id)
+                self._committer.settle_if_done_locked(record.workflow_id)
                 if changed:
                     self._cv.notify_all()
                 return changed
@@ -3140,6 +3143,7 @@ class TaskRuntime:
         ):
             self._cv.notify_all()
         self._committer.save_ledger_locked(record.workflow_id)
+        self._committer.settle_if_done_locked(record.workflow_id)
 
     def published_outputs(
         self, workflow_id: str, name: str | None = None
@@ -3282,6 +3286,7 @@ class TaskRuntime:
                 *self._mediated_ops.reap_ops_for_agents_locked(advance.failed),
             )
         self._committer.save_ledger_locked(record.workflow_id)
+        self._committer.settle_if_done_locked(record.workflow_id)
         return advance
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:

@@ -14,6 +14,7 @@ from server.task.models import TaskStatus
 from server.task.runtime import control_reads
 from server.task.runtime import facade as runtime_facade
 from server.task.v2 import PersistedV2Workflow
+from shared.harness import HarnessResult, HarnessResultKind
 from shared.harness.boundary import BoundaryEventKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
@@ -581,3 +582,35 @@ async def test_a_ledger_stored_without_its_control_failure_keeps_failing() -> No
 
     assert _durable_status(run.registry, run.workflow_id) == "failed"
     assert run.registry.control[run.workflow_id].failure == failure
+
+
+_SOLO_AGENT = """
+      - name: solo
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+"""
+
+
+@pytest.mark.anyio
+async def test_an_agent_failing_its_workflow_purges_its_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = await _Run().start(_workflow(_SOLO_AGENT))
+    purged: list[str] = []
+    monkeypatch.setattr(run.runtime._credential_vault, "purge", purged.append)
+    (solo,) = run.ready
+    run.ready.clear()
+    record_dispatch(run.runtime, solo, cast(Any, _worker()))
+    failure = HarnessResult(kind=HarnessResultKind.FAILURE, error="agent blew up")
+
+    run.runtime.mark_succeeded(
+        solo, "wkr-1", {"agent_episode": failure.model_dump(mode="json")}, _TS
+    )
+    run.runtime._act_after_commit()
+
+    assert run.settled()
+    assert purged == [run.workflow_id]
