@@ -618,3 +618,23 @@ async def test_an_artifact_ref_in_a_part_of_a_result_resolves_alike_on_both_side
     assert spec["data"]["items"] == [worker]
     assert worker == "http://fm.example/api/v1/results/tsk-producer/files/img.png"
     assert DataMixin()._extract_source_data_ids(message.task.spec) == ["tsk-producer"]
+
+
+@pytest.mark.anyio
+async def test_a_root_node_named_with_a_slash_reads_by_its_own_name() -> None:
+    run = await _Run().start(_workflow(f"""
+      - name: b
+        spec: {_ECHO}
+      - name: a/b
+        spec: {_ECHO}
+      - name: use
+        dependsOn: [{{node: b, input: one}}, {{node: a/b, input: two}}]
+        spec:
+          taskType: echo
+          data: {{type: list, items: ["${{b.x}}", "${{a/b.x}}"]}}
+"""))
+    run.run("b", {"x": "from-b"})
+    run.run("a/b", {"x": "from-a-b"})
+
+    spec, _ = _dispatch(run, "use")
+    assert spec["data"]["items"] == ["from-b", "from-a-b"]

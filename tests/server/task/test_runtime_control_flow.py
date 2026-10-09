@@ -441,6 +441,48 @@ async def test_a_spawn_fans_out_over_its_param_never_its_capture(
     assert [run.name(t) for t in run.ready] == ["work", "work"]
 
 
+@pytest.mark.anyio
+async def test_a_spawn_fans_out_over_an_input_named_in() -> None:
+    nodes = _CAPTURE_FAN.replace(
+        "dependsOn: [plan, ", "dependsOn: [{node: plan, input: in}, "
+    )
+    assert nodes != _CAPTURE_FAN
+    run = await _Run().start(_workflow(nodes, _CAPTURING))
+    run.run("dataset_source", {"items": ["d1", "d2", "d3"]})
+    run.run("plan", {"items": ["t1", "t2"]})
+    assert [run.name(t) for t in run.ready] == ["work", "work"]
+
+
+_INGRESS_BRANCH = """
+    templates:
+      - name: body
+        inputs: [{name: state, role: carried}]
+        nodes:
+          - name: route
+            dependsOn: [{node: $ingress, port: state}]
+            region:
+              kind: branch
+              outputs: [{name: again}, {name: done}]
+              selection: {field: [route]}
+          - name: step
+            dependsOn: [{node: route, port: again, input: s}]
+            spec: {taskType: echo, data: {type: list, items: [x]}}
+        edges:
+          - {from: {node: step}, to: {node: $feedback, port: state}}
+          - {from: {node: route, port: done}, to: {node: $egress, port: state}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_branch_fed_only_by_a_template_input_routes_on_it() -> None:
+    run = await _Run().start(_workflow(_CONSUMED, _INGRESS_BRANCH))
+    run.run("seed", {"route": "again"})
+    run.run("step", {"route": "done"})
+    run.run("consume")
+    assert run.succeeded == ["seed", "step", "consume"]
+    assert run.settled()
+
+
 _PROJECTED_FAN = f"""
       - name: plan
         spec: {_ECHO}

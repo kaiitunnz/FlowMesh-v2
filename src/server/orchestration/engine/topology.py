@@ -11,6 +11,7 @@ from ...task.v2.representations.operators import (
     OperatorKind,
     RecoveryClass,
     SpawnRegion,
+    is_spawn_fanout_port,
 )
 from ...task.v2.representations.results import ResultDeclaration
 from ...task.v2.representations.template import (
@@ -35,9 +36,6 @@ _REGION_KINDS = frozenset(
 # spawn_agent children.
 CONTROL_KINDS = _REGION_KINDS
 CHILD_INIT_OPENERS = frozenset({OperatorKind.SPAWN, OperatorKind.AGENT})
-# The input ports a spawn fans out over; any other input is a value its children
-# capture.
-SPAWN_FANOUT_PORTS = frozenset({"", "in"})
 
 
 def effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryClass]:
@@ -149,10 +147,16 @@ class PlanTopology:
                 self.incoming[edge.to_op].append(edge)
                 self.outgoing[edge.from_op].append(edge)
         sources = {e.logical_ref: e.source_id for e in bundle.template.source_map}
-        # The name a spec reads each operator's value by within its scope; a call's
-        # join carries the call's name.
+        # The name a spec reads each operator's value by within its scope: a
+        # definition member's name inside its definition, any other operator's authored
+        # name; a call's join carries the call's name.
         self.scope_names: dict[str, str] = {
-            op: source.rpartition("/")[2] for op, source in sources.items()
+            op: (
+                source.removeprefix(f"{definition}/")
+                if (definition := self.definition_of.get(op)) is not None
+                else source
+            )
+            for op, source in sources.items()
         }
         for edge in bundle.template.edges:
             if self._is_spawn_join_edge(edge.from_op, edge.to_op) and (
@@ -234,7 +238,7 @@ class PlanTopology:
                 and self.kind(edge.to_op) is OperatorKind.SPAWN
                 and edge.to_op not in self.definition_of
                 and edge.to_op not in self.agent_region_spawns
-                and (edge.to_port or "") in SPAWN_FANOUT_PORTS
+                and is_spawn_fanout_port(edge.to_port)
                 and not edge.projection
             ):
                 return edge.to_op

@@ -509,7 +509,7 @@ def _lower_region(
 ) -> None:
     kind = str(region.region.get("kind", "")).strip()
     name = region.authored_name
-    has_input = bool(region.depends_on)
+    has_input = bool(region.dependencies)
     # A loop's unnamed input only orders it and a join's inputs only route or order
     # it, so a projection there selects nothing anyone reads.
     if (
@@ -728,7 +728,7 @@ def _ports_field(region: ParsedRegion, key: str) -> tuple[Port, ...]:
 
 def _branch(region: ParsedRegion) -> BranchRegion:
     name = region.authored_name
-    inputs = _ports_field(region, "inputs") or _inputs(bool(region.depends_on))
+    inputs = _ports_field(region, "inputs") or _inputs(bool(region.dependencies))
     outputs = _ports_field(region, "outputs")
     if len(outputs) < 2:
         raise compile_error(
@@ -1050,7 +1050,7 @@ def _lower_call(
     spawn = SpawnRegion(
         operator_id=spawn_id,
         source_ref=region.name,
-        inputs=_spawn_inputs(region, bool(region.depends_on)),
+        inputs=_spawn_inputs(region, bool(region.dependencies)),
         outputs=(Port(name="child"),),
         child_template_ref=child_ref,
         child_definition_ref=definition_ref,

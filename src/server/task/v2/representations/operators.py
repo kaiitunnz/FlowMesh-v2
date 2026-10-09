@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -585,6 +585,17 @@ class SelectionRule(BaseModel):
     version: int = 1
 
 
+def branch_selection_index(
+    ports: Sequence[str | None], selection_input: str
+) -> int | None:
+    """Which of a branch's incoming edges, given by their input ports, it selects on:
+    the one bound to its selection input, or its only incoming edge."""
+    return next(
+        (index for index, port in enumerate(ports) if port == selection_input),
+        0 if len(ports) == 1 else None,
+    )
+
+
 class BranchRegion(_OperatorBase):
     """Routes the record on its input to the one output port its rule selects."""
 
@@ -620,6 +631,15 @@ class SpawnRegion(_OperatorBase):
     child_template_ref: str | None = None
     child_definition_ref: str | None = None
     authority: AuthorityCeiling = AuthorityCeiling()
+
+
+_SPAWN_FANOUT_PORTS = frozenset({"", "in"})
+
+
+def is_spawn_fanout_port(port: str | None) -> bool:
+    """Whether a spawn input bound on ``port`` is the one it fans out over; any other
+    input binds a capture."""
+    return (port or "") in _SPAWN_FANOUT_PORTS
 
 
 class JoinPredicate(BaseModel):

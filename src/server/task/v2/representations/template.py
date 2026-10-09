@@ -1,3 +1,4 @@
+from collections import Counter
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -248,7 +249,14 @@ class LogicalWorkflowTemplate(BaseModel):
     def _validate_ownership_links(self) -> "LogicalWorkflowTemplate":
         ids = self.operator_ids
         if len(ids) != len(self.operators):
-            raise ValueError("Duplicate operator_id in logical template.")
+            duplicated = sorted(
+                op_id
+                for op_id, count in Counter(
+                    op.operator_id for op in self.operators
+                ).items()
+                if count > 1
+            )
+            raise ValueError(f"Duplicate operator_id in logical template: {duplicated}")
         for edge in self.edges:
             for ref in (edge.from_op, edge.to_op):
                 if ref not in ids and not (

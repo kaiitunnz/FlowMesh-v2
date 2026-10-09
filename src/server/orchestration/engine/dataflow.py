@@ -14,6 +14,8 @@ from ...task.v2.representations.operators import (
     ResidualPolicy,
     SelectionRule,
     SpawnRegion,
+    branch_selection_index,
+    is_spawn_fanout_port,
     spawned_only_region_owners,
 )
 from ...task.v2.representations.template import DependencyUse
@@ -689,10 +691,8 @@ class RegionFlow:
         ):
             self.mark_dead(key, advance)
             return
-        selected = next(
-            (i for i in inputs if i.port == rule.input),
-            inputs[0] if len(inputs) == 1 else None,
-        )
+        index = branch_selection_index([i.port for i in inputs], rule.input)
+        selected = inputs[index] if index is not None else None
         if (
             selected is None
             or selected.state is EdgeState.EMPTY
@@ -756,7 +756,14 @@ class RegionFlow:
         state = self._ledger.control_states.get(key)
         if state is None or state.status is not ControlStatus.LIVE:
             return None
-        return state.inputs.get("") or state.inputs.get("in")
+        return next(
+            (
+                value
+                for port, value in sorted(state.inputs.items())
+                if is_spawn_fanout_port(port)
+            ),
+            None,
+        )
 
     def mark_dead(self, key: str, advance: Advance) -> None:
         """Settle an occurrence no record can reach, and resolve its routes dead.

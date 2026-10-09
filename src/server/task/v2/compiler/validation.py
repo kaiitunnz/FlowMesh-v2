@@ -15,12 +15,12 @@ from ..representations.operators import (
     JoinRegion,
     LeafOperator,
     LogicalOperator,
-    LoopContextRegion,
-    MergeCombination,
     MergeRegion,
     RecoveryClass,
     ResidualPolicy,
     SpawnRegion,
+    branch_selection_index,
+    is_spawn_fanout_port,
     spawned_only_region_owners,
 )
 from ..representations.plan import PhysicalExecutionPlan
@@ -33,7 +33,7 @@ from ..representations.template import (
     TemplateEdge,
 )
 from .diagnostics import Diagnostic, Severity, SourceLocation
-from .region_checks import check_control_flow
+from .region_checks import check_control_flow, releases_one_value
 from .sandbox import egress_authorized, egress_requested
 
 _DETERMINISTIC = (
@@ -600,10 +600,14 @@ def _check_region_inputs(
 ) -> list[Diagnostic]:
     """A spawn (a call included) fans out over one released value, a branch selects
     on one, and a join releases over a spawn's children: a released value is a task's
-    result, a branch arm, a one_live merge's value, a loop's exit value or a definition
-    input, never an aggregate, and a join needs a spawn among its inputs. A spawn's
-    named captures are bound once at entry and may read any value."""
+    result, a branch arm, a loop's exit value, a definition input or a one_live merge
+    over arms that each release one, never an aggregate, and a join needs a spawn among
+    its inputs. A spawn's named captures are bound once at entry and may read any
+    value."""
     op_by_id = {op.operator_id: op for op in template.operators}
+    incoming: dict[str, list[TemplateEdge]] = defaultdict(list)
+    for edge in template.edges:
+        incoming[edge.to_op].append(edge)
     fed_by_spawn: set[str] = set()
     diags: list[Diagnostic] = []
     for edge in template.edges:
@@ -612,9 +616,9 @@ def _check_region_inputs(
             fed_by_spawn.add(edge.to_op)
         if (
             isinstance(target, SpawnRegion)
-            and edge.to_port is None
+            and is_spawn_fanout_port(edge.to_port)
             and edge.boundary is not BoundaryKind.ENTRY
-            and not _releases_one_value(source)
+            and not releases_one_value(edge.from_op, op_by_id, incoming)
         ):
             diags.append(
                 _region_input(
@@ -627,7 +631,11 @@ def _check_region_inputs(
     for op in template.operators:
         if not isinstance(op, BranchRegion) or op.rule is None:
             continue
-        selected = _selection_edge(template, op.operator_id, op.rule.input)
+        branch_inputs = incoming.get(op.operator_id, [])
+        index = branch_selection_index(
+            [edge.to_port for edge in branch_inputs], op.rule.input
+        )
+        selected = branch_inputs[index] if index is not None else None
         if selected is None:
             diags.append(
                 _region_input(
@@ -636,8 +644,8 @@ def _check_region_inputs(
                     loc,
                 )
             )
-        elif selected.boundary is not BoundaryKind.ENTRY and not _releases_one_value(
-            op_by_id.get(selected.from_op)
+        elif selected.boundary is not BoundaryKind.ENTRY and not releases_one_value(
+            selected.from_op, op_by_id, incoming
         ):
             diags.append(
                 _region_input(
@@ -653,28 +661,6 @@ def _check_region_inputs(
         if isinstance(op, JoinRegion) and op.operator_id not in fed_by_spawn
     )
     return diags
-
-
-def _selection_edge(
-    template: LogicalWorkflowTemplate, branch: str, port: str
-) -> TemplateEdge | None:
-    """The edge a branch selects on: the one bound to its selection input, or its
-    only incoming edge."""
-    incoming = [edge for edge in template.edges if edge.to_op == branch]
-    return next(
-        (edge for edge in incoming if edge.to_port == port),
-        incoming[0] if len(incoming) == 1 else None,
-    )
-
-
-def _releases_one_value(source: LogicalOperator | None) -> bool:
-    match source:
-        case LeafOperator() | AgentOperator() | BranchRegion() | LoopContextRegion():
-            return True
-        case MergeRegion():
-            return source.combination is MergeCombination.ONE_LIVE
-        case _:
-            return False
 
 
 def _region_input(

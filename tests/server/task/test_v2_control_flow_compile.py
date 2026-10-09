@@ -1,6 +1,7 @@
 """Compilation of branch, merge and loop regions and the region definitions they
 enter: the finite structure, dependency classification and the refused shapes."""
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -31,6 +32,9 @@ from server.task.v2.representations.template import (
 
 _BINDINGS = AgentBindingDefaults(default_backend="codex")
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
+
+
+_EXAMPLES = Path(__file__).resolve().parents[3] / "examples" / "templates"
 
 
 def _compile(text: str) -> LogicalWorkflowTemplate:
@@ -1170,4 +1174,303 @@ def test_a_spawn_of_a_task_fans_out_over_one_unnamed_input(dependency: str) -> N
         dependsOn: [fan]
         region: {{kind: join, completion: all_settled}}
 """
-    assert _codes(_workflow(nodes)) == ["spawn.param"]
+    with pytest.raises(CompileError) as caught:
+        _compile(_workflow(nodes))
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "spawn.param"
+    assert "child task 'kid'" in diagnostic.message
+
+
+def test_a_spawn_of_a_template_fans_out_over_an_input_named_in() -> None:
+    nodes = _FANOUT.replace("dependsOn: [plan]", "dependsOn: [{node: plan, input: in}]")
+    template = _compile(_workflow(nodes, _CHILD))
+    fan = _op(template, "fan").operator_id
+    (fan_in,) = [e for e in template.edges if e.to_op == fan]
+    assert fan_in.to_port == "in"
+
+
+_SIBLING_READER = f"""
+    templates:
+      - name: body
+        inputs: [{{name: state, role: carried}}]
+        nodes:
+          - name: step
+            dependsOn: [{{node: $ingress, port: state, input: state}}]
+            spec: {_ECHO}
+          - name: lonely
+            spec: {{taskType: echo, data: {{type: list, items: ["${{READ.value}}"]}}}}
+          - name: route
+            dependsOn: [{{node: step, input: input}}, lonely]
+            region:
+              kind: branch
+              inputs: [{{name: input}}]
+              outputs: [{{name: again}}, {{name: done}}]
+              selection: {{input: input, field: [route]}}
+        edges:
+          - from: {{node: route, port: again}}
+            to: {{node: $feedback, port: state}}
+          - from: {{node: route, port: done}}
+            to: {{node: $egress, port: state}}
+"""
+
+_ONE_CARRIED_LOOP = f"""
+      - name: seed
+        spec: {_ECHO}
+      - name: refine
+        dependsOn: [{{node: seed, input: state}}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{{name: state}}]
+"""
+
+
+@pytest.mark.parametrize("read", ["step", "state"])
+def test_a_template_member_without_dependencies_reading_a_name_is_refused(
+    read: str,
+) -> None:
+    text = _workflow(_ONE_CARRIED_LOOP, _SIBLING_READER.replace("READ", read))
+    assert _codes(text) == ["reads.unresolved"]
+
+
+_TWO_CARRIED_BODY = """
+    templates:
+      - name: body
+        inputs: [{name: state, role: carried}, {name: other, role: carried}]
+        nodes:
+          - name: step
+            dependsOn:
+              - {node: $ingress, port: state, input: state}
+              - {node: $ingress, port: other, input: other}
+            spec: {taskType: echo, data: {type: list, items: [x]}}
+          - name: route
+            dependsOn: [{node: step, input: input}]
+            region:
+              kind: branch
+              inputs: [{name: input}]
+              outputs: [{name: again}, {name: done}]
+              selection: {input: input, field: [route]}
+        edges:
+          - {from: {node: route, port: again}, to: {node: $feedback, port: state}}
+          - {from: {node: route, port: again}, to: {node: $feedback, port: other}}
+          - {from: {node: route, port: done}, to: {node: $egress, port: state}}
+          - {from: {node: route, port: done}, to: {node: $egress, port: other}}
+"""
+
+
+@pytest.mark.parametrize(
+    "dependencies",
+    [
+        "{node: refine, port: other, input: o}, {node: refine, port: state, input: s}",
+        "{node: refine, port: state, input: s}, {node: refine, port: other, input: o}",
+        "{node: refine, port: state, input: s}",
+    ],
+)
+def test_a_node_name_read_of_a_region_with_several_outputs_is_refused(
+    dependencies: str,
+) -> None:
+    nodes = f"""
+      - name: seed
+        spec: {_ECHO}
+      - name: refine
+        dependsOn: [{{node: seed, input: state}}, {{node: seed, input: other}}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{{name: state}}, {{name: other}}]
+      - name: consume
+        dependsOn: [{dependencies}]
+        spec: {{taskType: echo, data: {{type: list, items: ["${{refine.v}}"]}}}}
+"""
+    assert _codes(_workflow(nodes, _TWO_CARRIED_BODY)) == ["ports.ambiguous-output"]
+
+
+_ONE_LIVE_OVER = f"""
+      - name: classify
+        spec: {_ECHO}
+      - name: route
+        dependsOn: [{{node: classify, input: input}}]
+        region:
+          kind: branch
+          inputs: [{{name: input}}]
+          outputs: [{{name: work}}, {{name: fan}}]
+          selection: {{input: input, field: [label]}}
+      - name: simple
+        dependsOn: [{{node: route, port: work, input: in}}]
+        spec: {_ECHO}
+      - name: a
+        dependsOn: [{{node: route, port: fan, input: in}}]
+        spec: {_ECHO}
+      - name: b
+        dependsOn: [{{node: route, port: fan, input: in}}]
+        spec: {_ECHO}
+AGGREGATE
+      - name: either
+        dependsOn: [{{node: simple, input: w}}, {{node: SOURCE, input: s}}]
+        region: {{kind: merge, combination: one_live}}
+      - name: decide
+        dependsOn: [{{node: either, input: input}}]
+        region:
+          kind: branch
+          inputs: [{{name: input}}]
+          outputs: [{{name: x}}, {{name: y}}]
+          selection: {{input: input, field: [label]}}
+      - name: on_x
+        dependsOn: [{{node: decide, port: x}}]
+        spec: {_ECHO}
+"""
+
+
+@pytest.mark.parametrize(
+    ("aggregate", "source"),
+    [
+        (
+            f"""      - name: kid
+        spec: {_ECHO}
+      - name: spawn
+        dependsOn: [a]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [spawn]
+        region: {{kind: join, completion: all_settled}}""",
+            "collect",
+        ),
+        (
+            """      - name: both
+        dependsOn: [{node: a, input: x}, {node: b, input: y}]
+        region: {kind: merge, combination: concat}""",
+            "both",
+        ),
+    ],
+    ids=["join-arm", "concat-arm"],
+)
+def test_a_branch_over_a_one_live_merge_with_an_aggregate_arm_is_refused(
+    aggregate: str, source: str
+) -> None:
+    text = _workflow(
+        _ONE_LIVE_OVER.replace("AGGREGATE", aggregate).replace("SOURCE", source)
+    )
+    assert _codes(text) == ["dataflow.region-input"]
+
+
+def test_a_branch_over_a_one_live_merge_of_task_arms_compiles() -> None:
+    assert _compile(
+        _workflow(_ONE_LIVE_OVER.replace("AGGREGATE\n", "").replace("SOURCE", "a"))
+    )
+
+
+_INGRESS_BRANCH_BODY = """
+    templates:
+      - name: body
+        inputs: [{name: state, role: carried}]
+        nodes:
+          - name: route
+            dependsOn: [{node: $ingress, port: state}]
+            region:
+              kind: branch
+              outputs: [{name: again}, {name: done}]
+              selection: {field: [route]}
+          - name: step
+            dependsOn: [{node: route, port: again, input: s}]
+            spec: {taskType: echo, data: {type: list, items: [x]}}
+        edges:
+          - {from: {node: step}, to: {node: $feedback, port: state}}
+          - {from: {node: route, port: done}, to: {node: $egress, port: state}}
+"""
+
+
+def test_a_branch_fed_only_by_a_template_input_selects_on_it() -> None:
+    template = _compile(_workflow(_ONE_CARRIED_LOOP, _INGRESS_BRANCH_BODY))
+    assert _op(template, "body/route").rule.input == "in"
+
+
+_SSH_STAGE_BODY = """
+    templates:
+      - name: body
+        inputs: [{name: state, role: carried}]
+        nodes:
+          - name: step
+            dependsOn: [{node: $ingress, port: state, input: state}]
+            spec: {taskType: echo, data: {type: list, items: [x]}}
+          - name: other
+            dependsOn: [{node: $ingress, port: state, input: state}]
+            spec: {taskType: echo, data: {type: list, items: [x]}}
+          - name: both
+            dependsOn: [{node: step, input: x}, {node: other, input: y}]
+            region: {kind: merge, combination: concat}
+          - name: mount
+            dependsOn: [DEPENDENCY]
+            spec:
+              taskType: ssh
+              interactive: false
+              image: alpine:3
+              command: ["true"]
+              inputs: [{stage: STAGE}]
+          - name: route
+            dependsOn: [{node: mount, input: input}]
+            region:
+              kind: branch
+              inputs: [{name: input}]
+              outputs: [{name: again}, {name: done}]
+              selection: {input: input, field: [route]}
+        edges:
+          - {from: {node: route, port: again}, to: {node: $feedback, port: state}}
+          - {from: {node: route, port: done}, to: {node: $egress, port: state}}
+"""
+
+
+@pytest.mark.parametrize(
+    ("dependency", "stage"),
+    [("{node: both, input: pair}", "pair"), ("both", "both")],
+    ids=["input-name", "node-name"],
+)
+def test_an_ssh_stage_naming_an_aggregate_in_a_template_is_refused(
+    dependency: str, stage: str
+) -> None:
+    body = _SSH_STAGE_BODY.replace("DEPENDENCY", dependency).replace("STAGE", stage)
+    assert _codes(_workflow(_ONE_CARRIED_LOOP, body)) == ["reads.stage-without-task"]
+
+
+def test_an_ssh_stage_naming_a_task_in_a_template_compiles() -> None:
+    body = _SSH_STAGE_BODY.replace("DEPENDENCY", "{node: step, input: s}").replace(
+        "STAGE", "s"
+    )
+    assert _compile(_workflow(_ONE_CARRIED_LOOP, body))
+
+
+def test_a_spawn_child_task_reading_a_parent_value_is_refused() -> None:
+    nodes = f"""
+      - name: ctx
+        spec: {_ECHO}
+      - name: plan
+        dependsOn: [ctx]
+        spec: {_ECHO}
+      - name: kid
+        dependsOn: [ctx]
+        spec: {{taskType: echo, data: {{type: list, items: ["${{ctx.label}}"]}}}}
+      - name: fan
+        dependsOn: [plan]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+"""
+    assert _codes(_workflow(nodes)) == ["spawn.child-reads"]
+
+
+def test_a_root_node_colliding_with_a_template_member_names_the_id() -> None:
+    text = (
+        (_EXAMPLES / "refine_loop_echo.yaml")
+        .read_text(encoding="utf-8")
+        .replace(
+            "      - name: consume\n",
+            "      - name: refine_body/judge\n"
+            "        dependsOn: [{node: seed, input: a}]\n"
+            "        region: {kind: merge, combination: concat}\n"
+            "      - name: consume\n",
+        )
+    )
+    with pytest.raises(CompileError, match=r"refine_body/judge"):
+        _compile(text)

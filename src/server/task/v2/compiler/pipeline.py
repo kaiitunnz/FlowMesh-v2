@@ -23,6 +23,7 @@ from .episodes import lower_to_episodes
 from .facades import pin_agent_facades
 from .project import (
     LoweringAccumulator,
+    check_named_reads,
     induce_effect_boundaries,
     lower_tasks,
 )
@@ -116,6 +117,7 @@ def compile_workflow(
     ):
         lower_tasks(parsed, acc, defaults, secret_refs or {}, policies)
         lower_frontend_v2(parsed, acc)
+        check_named_reads(acc)
         induce_effect_boundaries(acc)
         pin_agent_sandbox(acc, defaults.sandbox_enabled)
         pin_agent_facades(acc)

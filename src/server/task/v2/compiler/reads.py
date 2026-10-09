@@ -30,12 +30,15 @@ class SpecReads:
     identities: frozenset[str] = frozenset()
     # Placeholders naming no ``stage.path``, which render to nothing.
     malformed: tuple[str, ...] = ()
+    # SSH ``inputs[].stage`` names, which mount a task's result; also in ``values``.
+    stages: frozenset[str] = frozenset()
 
 
 def spec_reads(task: ParsedTask) -> SpecReads:
     """Collect the upstream names a task's spec reads."""
     values: set[str] = set()
     identities: set[str] = set()
+    stages: set[str] = set()
     malformed: list[str] = []
     scoped = task.definition is not None
     for text in _strings(task.task.model_dump(mode="python")):
@@ -55,8 +58,11 @@ def spec_reads(task: ParsedTask) -> SpecReads:
             values.add(node.strip())
     for entry in spec.get("inputs") or ():
         if isinstance(entry, dict) and isinstance(stage := entry.get("stage"), str):
-            values.add(stage.strip())
-    return SpecReads(frozenset(values), frozenset(identities), tuple(malformed))
+            stages.add(stage.strip())
+    values.update(stages)
+    return SpecReads(
+        frozenset(values), frozenset(identities), tuple(malformed), frozenset(stages)
+    )
 
 
 def _strings(value: Any) -> Iterable[str]:
@@ -98,6 +104,11 @@ class ReadClassification:
     shadowing: tuple[str, ...]
     # Names read for a task identity that carry a value with none.
     identityless: tuple[str, ...] = ()
+    # Each upstream node read by its node name rather than an input name, with the
+    # operator producing its value.
+    node_reads: tuple[tuple[str, str], ...] = ()
+    # Each SSH input stage read from an operator, with that operator.
+    stage_reads: tuple[tuple[str, str], ...] = ()
 
 
 def binding_name(dep: ParsedDependency) -> str | None:
@@ -150,7 +161,9 @@ def classify_reads(
         if (name := binding_name(dep)) is not None
     }
     sources = [value_op.get(dep.source, dep.source) for dep in dependencies]
-    unresolved: list[str] = list(reads.malformed) if dependencies else []
+    # A root task without dependencies may carry ``${...}`` text that is not a read.
+    checked = bool(dependencies) or task.definition is not None
+    unresolved: list[str] = list(reads.malformed) if checked else []
 
     def _resolve(name: str) -> set[int] | str | None:
         """The dependencies a name reads, or the ancestor it reads past them."""
@@ -163,7 +176,7 @@ def classify_reads(
                 if source == op and dep.source != INGRESS
             }
             return direct or op
-        if dependencies:
+        if checked:
             unresolved.append(name)
         return None
 
@@ -199,13 +212,42 @@ def classify_reads(
         for name, index in aliases.items()
         if (node := names.get(name)) is not None and node != sources[index]
     ]
+    node_reads = [
+        (name, node_op)
+        for name in sorted(reads.values)
+        if name not in aliases
+        and (node_op := names.get(name)) is not None
+        and node_op in ancestors
+    ]
+    stage_reads = [
+        (name, stage_op)
+        for name in sorted(reads.stages)
+        if (stage_op := _stage_source(name, aliases, dependencies, sources, names))
+        is not None
+    ]
     return ReadClassification(
         uses=tuple(uses),
         derived=tuple(sorted(derived.items())),
         unresolved=tuple(dict.fromkeys(unresolved)),
         shadowing=tuple(sorted(shadowing)),
         identityless=tuple(identityless),
+        node_reads=tuple(node_reads),
+        stage_reads=tuple(stage_reads),
     )
+
+
+def _stage_source(
+    name: str,
+    aliases: Mapping[str, int],
+    dependencies: list[ParsedDependency],
+    sources: list[str],
+    names: Mapping[str, str],
+) -> str | None:
+    """The operator an SSH input stage reads; None for a definition input or a name
+    that resolves to nothing."""
+    if (index := aliases.get(name)) is not None:
+        return None if dependencies[index].source == INGRESS else sources[index]
+    return names.get(name)
 
 
 def _identityless(

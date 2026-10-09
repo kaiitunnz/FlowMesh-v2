@@ -206,8 +206,9 @@ normalizes to a `spawn`/`join` pair). A spawn or call fans out over its one
 unnamed input: a task's result, a part of one, or a branch arm carrying one. A
 join collects a spawn's children, so one of its inputs is a spawn. Only a join may
 depend on a spawn, and a node that depends on a call reads the call's join. A
-failed input fails the region and everything downstream of it, as a failed
-dependency fails a task.
+spawn's child task reads only the element it is spawned with; a child template
+reads parent values through its `capture` inputs. A failed input fails the region
+and everything downstream of it, as a failed dependency fails a task.
 
 A `dependsOn` entry is a node name or a mapping
 `{ node, port, input, project }`: `port` names the output it reads (a branch arm,
@@ -252,7 +253,9 @@ is not a string, or matches no case or port, fails the branch. Work on an arm th
 branch did not take settles without running, and so does everything that needs
 it. A `merge` joins arms back together: `combination: one_live` forwards the one
 live arm's value, and `concat`, the default, collects every live input in
-declared order.
+declared order. A branch selects on, and a spawn fans out over, a `one_live`
+merge only when each of its arms carries one value rather than a join's or a
+`concat` merge's aggregate.
 
 #### Graph templates
 
@@ -328,7 +331,10 @@ task result, the part a `project` selects, a fan-out element, a region's value,
 a literal, or `null` for an empty value. An aggregate, as a join or a `concat`
 merge delivers, reads as a list of `{key, outcome, value}`, where `value` is
 `null` unless the member succeeded. A task reads an input by its `input` name, and
-an upstream node by that node's name as the node's whole value. Inside a
+an upstream node by that node's name as the node's whole value; a node with
+several output ports, as a branch or a loop carrying several values, is read by
+the `input` name of a dependency naming one port. An SSH task's `inputs[].stage`
+names a task's result, never an aggregate. Inside a
 template, `${name}` reads a value whole, and `${name.task_id}` names the task
 another node of the template ran as in the same iteration and child. A template
 input, a projected input, or a region's value has no task, so `${name.task_id}`

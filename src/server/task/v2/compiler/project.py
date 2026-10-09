@@ -31,6 +31,7 @@ from ..policy.lowering import (
     screen_service_family,
 )
 from ..representations.operators import (
+    REGION_OPERATOR_KINDS,
     AgentOperator,
     BindingKey,
     ConditionGuard,
@@ -97,7 +98,8 @@ from .embodiment import (
     replica_unfit_reason,
     unproven_reason,
 )
-from .reads import classify_reads, unnamed_projection
+from .reads import classify_reads, spec_reads, unnamed_projection
+from .region_checks import releases_one_value
 
 _SERVICE_BACKED_SPECS = (
     InferenceSpecStrict,
@@ -490,6 +492,16 @@ def _agent_operator(
     )
 
 
+@dataclass(frozen=True)
+class NamedRead:
+    """A value a task's spec reads by a name, from the operator producing it."""
+
+    name: str
+    source: str
+    reader_kind: SourceKind
+    reader_id: str
+
+
 @dataclass
 class LoweringAccumulator:
     """Mutable collector the compiler fills from tasks and structured regions."""
@@ -505,6 +517,10 @@ class LoweringAccumulator:
     nodes: list[PhysicalNode] = field(default_factory=list)
     sandbox_egress_requests: dict[str, SandboxEgressMode] = field(default_factory=dict)
     definitions: list[RegionDefinition] = field(default_factory=list)
+    # Reads checked once every operator is lowered: each node read by its node name,
+    # and each SSH input stage.
+    node_reads: list[NamedRead] = field(default_factory=list)
+    stage_reads: list[NamedRead] = field(default_factory=list)
 
     @property
     def operator_ids(self) -> set[str]:
@@ -702,6 +718,7 @@ def _wire_dependencies(
     )
     names = {scope: build_name_map(parsed, scope) for scope in _scopes(parsed)}
     regions = frozenset(value_ops.get(r.name, r.name) for r in parsed.regions)
+    children = _operator_children(parsed, names)
     by_id = {op.operator_id: idx for idx, op in enumerate(acc.operators)}
     for task in parsed.tasks:
         bindings = _input_bindings(task, names[task.definition])
@@ -756,6 +773,26 @@ def _wire_dependencies(
                 source_id,
                 source_kind,
             )
+        if task.task_id in children and (
+            read := sorted((reads := spec_reads(task)).values | reads.identities)
+        ):
+            raise compile_error(
+                "spawn.child-reads",
+                "spawn child reads "
+                + ", ".join(repr(name) for name in read)
+                + "; a child task reads only the element it is spawned with, and a "
+                "child template reads parent values through its captures",
+                source_id,
+                source_kind,
+            )
+        acc.node_reads.extend(
+            NamedRead(name, source, source_kind, source_id)
+            for name, source in classification.node_reads
+        )
+        acc.stage_reads.extend(
+            NamedRead(name, source, source_kind, source_id)
+            for name, source in classification.stage_reads
+        )
         for index, (dep, use) in enumerate(
             zip(dependencies, classification.uses, strict=True)
         ):
@@ -842,6 +879,50 @@ def _input_bindings(
 def agent_region_join_id(agent_op: str, role: str) -> str:
     """The join collecting an agent's declared child region ``role``."""
     return f"{agent_op}:{role}:spawn:join"
+
+
+def _operator_children(
+    parsed: ParsedWorkflow, names: Mapping[str | None, Mapping[str, str]]
+) -> frozenset[str]:
+    """The operators a spawn or call runs as its child task rather than a template."""
+    definitions = {definition.name for definition in parsed.definitions}
+    return frozenset(
+        op
+        for region in parsed.regions
+        if str(region.region.get("kind", "")).strip() in ("spawn", "call")
+        and (child := str(region.region.get("child") or "")) not in definitions
+        and (op := names[region.definition].get(child)) is not None
+    )
+
+
+def check_named_reads(acc: LoweringAccumulator) -> None:
+    """Refuse a read the lowered operators cannot serve: a node-name read of a region
+    with several outputs, which names none of them, and an SSH input stage over a
+    value no single task produced."""
+    ops = {op.operator_id: op for op in acc.operators}
+    for read in acc.node_reads:
+        op = ops.get(read.source)
+        if op is not None and op.kind in REGION_OPERATOR_KINDS and len(op.outputs) > 1:
+            raise compile_error(
+                "ports.ambiguous-output",
+                f"a read of {read.name!r} by its node name names none of its output "
+                f"ports {sorted(p.name for p in op.outputs)}; read it through the "
+                "input name of a dependency naming one port",
+                read.reader_id,
+                read.reader_kind,
+            )
+    incoming: dict[str, list[TemplateEdge]] = {}
+    for edge in acc.edges:
+        incoming.setdefault(edge.to_op, []).append(edge)
+    for read in acc.stage_reads:
+        if not releases_one_value(read.source, ops, incoming):
+            raise compile_error(
+                "reads.stage-without-task",
+                f"SSH input stage {read.name!r} names a value no single task produced; "
+                "a stage names a task's result",
+                read.reader_id,
+                read.reader_kind,
+            )
 
 
 def _scopes(parsed: ParsedWorkflow) -> set[str | None]:

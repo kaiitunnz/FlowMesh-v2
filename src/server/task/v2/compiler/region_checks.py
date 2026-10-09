@@ -5,18 +5,20 @@ runs only when every arm its required inputs hang from is selected, so two arms 
 one branch never both hold.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from ..representations.operators import (
     AgentOperator,
     BranchRegion,
     JoinRegion,
+    LeafOperator,
     LogicalOperator,
     LoopContextRegion,
     MergeCombination,
     MergeRegion,
     SpawnRegion,
+    is_spawn_fanout_port,
 )
 from ..representations.template import (
     BOUNDARY_NODES,
@@ -105,6 +107,34 @@ def check_control_flow(
         )
     diags.extend(_check_definition_nesting(template, ops, definitions, loc))
     return diags
+
+
+def releases_one_value(
+    op_id: str,
+    ops: Mapping[str, LogicalOperator],
+    incoming: Mapping[str, Sequence[TemplateEdge]],
+) -> bool:
+    """Whether an operator releases one value rather than an aggregate: a task's
+    result, a branch arm, a loop's exit value, or a one_live merge each of whose arms
+    releases one; ``incoming`` holds each operator's incoming edges."""
+
+    def _one(current: str, seen: frozenset[str]) -> bool:
+        match ops.get(current):
+            case (
+                LeafOperator() | AgentOperator() | BranchRegion() | LoopContextRegion()
+            ):
+                return True
+            case MergeRegion(combination=MergeCombination.ONE_LIVE):
+                return all(
+                    edge.boundary is BoundaryKind.ENTRY
+                    or edge.from_op in seen
+                    or _one(edge.from_op, seen | {current})
+                    for edge in incoming.get(current, ())
+                )
+            case _:
+                return False
+
+    return _one(op_id, frozenset())
 
 
 def _error(code: str, message: str, location: SourceLocation | None) -> Diagnostic:
@@ -449,13 +479,15 @@ def _check_operator_child_entry(
     op: SpawnRegion, template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
     incoming = [e for e in template.edges if e.to_op == op.operator_id]
-    if len(incoming) == 1 and (incoming[0].to_port or "") in ("", "in"):
+    if len(incoming) == 1 and is_spawn_fanout_port(incoming[0].to_port):
         return []
+    child = loc.get(op.child_template_ref or "")
     return [
         _error(
             "spawn.param",
             f"spawn {op.operator_id!r} fans out over exactly one unnamed input; a "
-            f"child task {op.child_template_ref!r} reads no other input",
+            f"child task {child.source_id if child else op.child_template_ref!r} "
+            "reads no other input",
             loc.get(op.operator_id),
         )
     ]
@@ -482,7 +514,11 @@ def _check_child_entry(
     diags: list[Diagnostic] = []
     captures = {p.name for p in child.inputs if p.role is EntryRole.CAPTURE}
     incoming = [e for e in template.edges if e.to_op == op.operator_id]
-    bound = [e.to_port for e in incoming if e.to_port is not None]
+    bound = [
+        e.to_port
+        for e in incoming
+        if e.to_port is not None and not is_spawn_fanout_port(e.to_port)
+    ]
     if sorted(bound) != sorted(captures):
         diags.append(
             _error(
@@ -494,7 +530,7 @@ def _check_child_entry(
                 location,
             )
         )
-    if sum(e.to_port is None for e in incoming) != 1:
+    if sum(is_spawn_fanout_port(e.to_port) for e in incoming) != 1:
         diags.append(
             _error(
                 "spawn.param",
