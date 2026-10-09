@@ -84,11 +84,15 @@ class SpawnRegions:
         )
         self._ledger.add_activation(opener_act)
         self._ledger.region_openers[key] = opener_act.activation_id
-        self._scope_progress.open_child_init_scope(
+        scope_id = self._scope_progress.open_child_init_scope(
             opener_act.activation_id,
             parent_scope_id=agent.scope_id,
             parent_delegate=agent_delegate,
         )
+        # An agent occurring in a region definition releases its region's join in its
+        # own context and time.
+        if occurrence := self._ledger.occurrence_by_activation.get(agent_activation):
+            self._ledger.scope_occurrence[scope_id] = occurrence
         return opener_act.activation_id
 
     def spawn_child(self, spawn: str, *, operator_id: str | None = None) -> str:

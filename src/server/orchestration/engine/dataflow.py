@@ -340,8 +340,9 @@ class RegionFlow:
         return advance
 
     def _join_key(self, scope_id: str, join_op: str) -> str | None:
-        """The join occurrence a child-init scope releases into, or None for a nested
-        level of an agent's recursive region, which delivers nothing."""
+        """The join occurrence a child-init scope releases into: the one in the context
+        and time of the occurrence that opened the scope, or None for a nested level of
+        an agent's recursive region, which delivers nothing."""
         if (spawn_key := self._ledger.scope_occurrence.get(scope_id)) is not None:
             return self.edges.sibling(self._ledger.occurrence(spawn_key), join_op)
         return join_op if self._ledger.root_level(scope_id) else None
@@ -635,7 +636,8 @@ class RegionFlow:
         """Settle an occurrence no record can reach, and resolve its routes dead.
 
         A leaf or agent settles without running, publishing its declared output
-        empty; a dead spawn creates no child and its join is dead with it.
+        empty, and a dead agent's child regions are dead with it; a dead spawn creates
+        no child and its join is dead with it.
         """
         occurrence = self._ledger.occurrence(key)
         operator_id = occurrence.operator_id
@@ -656,6 +658,14 @@ class RegionFlow:
             self._ledger.emitter.emit_work_item(wi)
             self._ledger.emitter.emit_activation(wi.activation_id)
             self._ledger.private_state.release(wi.activation_id)
+            if isinstance(
+                op := self._topology.operators.get(operator_id), AgentOperator
+            ):
+                for ref in op.child_region_refs:
+                    if (
+                        join := self._topology.join_for_spawn(ref.spawn_ref)
+                    ) is not None:
+                        self.mark_dead(self.edges.sibling(occurrence, join), advance)
             if root:
                 self._publication.publish(
                     operator_id,

@@ -131,7 +131,7 @@ class OrchestrationLedger:
         # Loop instances and definition children not yet closed.
         self.active_loops: set[str] = set()
         self.active_contexts: set[str] = set()
-        # The control occurrence that opened each scope it opened.
+        # The occurrence that opened each scope it opened.
         self.scope_occurrence: dict[str, str] = {}
 
     def occurrence(self, key: str) -> Occurrence:

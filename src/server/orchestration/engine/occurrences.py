@@ -43,9 +43,13 @@ class OccurrenceFactory:
         refused entry leaves no partial time or child behind.
         """
         definition = self._topology.definitions[definition_id]
-        # A spawn's single-operator child occurs only as that spawn's child.
+        # A spawn's single-operator child occurs only as that spawn's child, and an
+        # agent's child region opens only as its agent spawns into it.
         members = [
-            m for m in definition.members if m not in self._topology.child_templates
+            m
+            for m in definition.members
+            if m not in self._topology.child_templates
+            and m not in self._topology.agent_region_spawns
         ]
         self._scope_progress.charge_activations(len(members))
         keys: list[str] = []

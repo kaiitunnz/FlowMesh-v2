@@ -203,16 +203,30 @@ class SnapshotCodec:
                 self._ledger.owner_acts_by_operator.setdefault(
                     s.owner_operator_id, []
                 ).append(s.owner_activation_id)
-        # The control occurrence owning each scope it opened: a root control through its
-        # control activation, an occurrence through its own activation.
+        # The occurrence owning each scope it opened: a root control through its
+        # control activation, an occurrence through its own activation, and an agent
+        # occurrence's region through the region's opener.
         self._ledger.scope_occurrence = {}
         for scope in self._ledger.scopes.values():
             owner_act, owner_op = scope.owner_activation_id, scope.owner_operator_id
             if owner_act is None or owner_op is None:
                 continue
+            owner = self._ledger.activations.get(owner_act)
             if (
                 key := self._ledger.occurrence_by_activation.get(owner_act)
             ) is not None:
+                self._ledger.scope_occurrence[scope.scope_id] = key
+            elif (
+                owner is not None
+                and owner.kind == "region"
+                and owner.parent_activation_id is not None
+                and (
+                    key := self._ledger.occurrence_by_activation.get(
+                        owner.parent_activation_id
+                    )
+                )
+                is not None
+            ):
                 self._ledger.scope_occurrence[scope.scope_id] = key
             elif self._topology.is_control(owner_op) and (
                 owner_act == self._ledger.control_activation(owner_op)
