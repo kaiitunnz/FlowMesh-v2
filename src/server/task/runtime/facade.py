@@ -3273,7 +3273,7 @@ class TaskRuntime:
             element = _element(value, index)
             try:
                 if region.child_definition_ref is not None:
-                    advance.extend(engine.enter_definition_child(spawn, element))
+                    advance.extend(engine.enter_definition_child(spawn, index, element))
                     continue
                 assert template is not None
                 if child_is_agent:

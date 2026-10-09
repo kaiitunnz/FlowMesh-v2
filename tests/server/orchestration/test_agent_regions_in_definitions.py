@@ -114,10 +114,10 @@ _FAN = f"""
 def test_an_agent_region_in_a_child_definition_releases_in_its_child() -> None:
     run = Driver(workflow(_FAN, _CHILD))
     run.run_one("plan")
-    for element in ("a", "b"):
+    for index, element in enumerate(("a", "b")):
         run.apply(
             run.engine.enter_definition_child(
-                "fan", ValueRef(kind="inline", literal=element)
+                "fan", index, ValueRef(kind="inline", literal=element)
             )
         )
     run.apply(run.engine.seal_spawn("fan"))

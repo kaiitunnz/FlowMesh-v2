@@ -335,8 +335,12 @@ class SpawnRegions:
         wi = self._ledger.work_items[self._ledger.wi_by_activation[child_activation_id]]
         return self._flow.settle_child_wi(wi, activation, outcome, value_ref)
 
-    def enter_definition_child(self, spawn_key: str, element: ValueRef) -> Advance:
-        """Create one child of a spawn whose child is a region definition.
+    def enter_definition_child(
+        self, spawn_key: str, index: int, element: ValueRef
+    ) -> Advance:
+        """Create the child of a spawn whose child is a region definition for the
+        element at ``index`` of its fan-out; an element already entered is left as it
+        is.
 
         The child is a new activation context: its members occur once in it, at the
         spawn's own time, entered with the spawned element as the definition's param
@@ -352,6 +356,11 @@ class SpawnRegions:
             occurrence.operator_id
         )
         scope_id = self._ledger.scope_by_activation.get(opener)
+        if scope_id is not None and any(
+            self._ledger.activations[child].child_index == index
+            for child in self._ledger.children_by_scope.get(scope_id, ())
+        ):
+            return advance
         cap = self._scope_progress.capability(scope_id, ProgressAxis.CHILD_INIT)
         if scope_id is None or cap is None or cap.status is not CapabilityStatus.OPEN:
             raise RegionError(f"spawn {spawn_key!r} admits no further child")
@@ -363,7 +372,7 @@ class SpawnRegions:
             scope_id=scope_id,
             operator_id=occurrence.operator_id,
             kind="child",
-            child_index=self._ledger.scope_population[scope_id],
+            child_index=index,
         )
         self._ledger.add_activation(activation)
         wi = WorkItem(

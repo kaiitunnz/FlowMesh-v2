@@ -449,7 +449,7 @@ def test_a_merge_forwards_a_join_read_through_its_named_port() -> None:
     run = Driver(workflow(nodes, templates))
     run.run_one("plan")
     element = ValueRef(kind="inline", literal="e")
-    run.apply(run.engine.enter_definition_child("fan", element))
+    run.apply(run.engine.enter_definition_child("fan", 0, element))
     run.apply(run.engine.seal_spawn("fan"))
     run.run_one("kidwork")
     m = run.engine.control_state("m")
@@ -541,7 +541,9 @@ _ONE = f"""
 
 def _close_children(run: Driver) -> None:
     run.apply(
-        run.engine.enter_definition_child("fan", ValueRef(kind="inline", literal="x"))
+        run.engine.enter_definition_child(
+            "fan", 0, ValueRef(kind="inline", literal="x")
+        )
     )
     run.apply(run.engine.seal_spawn("fan"))
     run.run_one("work")

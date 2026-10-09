@@ -101,7 +101,7 @@ def _act_decisions(where: str, granted: frozenset[str] | None) -> list[str]:
         case "definition":
             run = Driver(workflow(_DEFINITION_NODES, _DEFINITION), granted=granted)
             run.run_one("plan")
-            run.apply(run.engine.enter_definition_child("fan", element))
+            run.apply(run.engine.enter_definition_child("fan", 0, element))
         case _:
             run = Driver(workflow(_LOOP_NODES, _LOOP), granted=granted)
             run.run_one("seed")
@@ -150,7 +150,9 @@ def test_a_child_agent_runs_under_its_delegated_face_beside_an_admitted_leaf() -
     run = Driver(workflow(nodes, _TEAM))
     run.run_one("plan")
     run.apply(
-        run.engine.enter_definition_child("fan", ValueRef(kind="inline", literal="e"))
+        run.engine.enter_definition_child(
+            "fan", 0, ValueRef(kind="inline", literal="e")
+        )
     )
     (act,) = run.ready
     run.run(act)
@@ -170,7 +172,9 @@ def test_an_agent_in_a_child_definition_reports_its_delegated_grant() -> None:
     run = Driver(workflow(nodes, _TEAM))
     run.run_one("plan")
     run.apply(
-        run.engine.enter_definition_child("fan", ValueRef(kind="inline", literal="e"))
+        run.engine.enter_definition_child(
+            "fan", 0, ValueRef(kind="inline", literal="e")
+        )
     )
     run.run(run.ready[0])
     (helper,) = run.ready

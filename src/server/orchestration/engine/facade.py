@@ -990,9 +990,14 @@ class OrchestrationEngine:
         return self._contexts.sweep(advance)
 
     @_ds_drive(ControlPlaneWindow.POST_START)
-    def enter_definition_child(self, spawn: str, element: ValueRef) -> Advance:
-        """Create one child of a spawn that enters a region definition."""
-        return self._contexts.sweep(self._spawns.enter_definition_child(spawn, element))
+    def enter_definition_child(
+        self, spawn: str, index: int, element: ValueRef
+    ) -> Advance:
+        """Create the child of a spawn that enters a region definition for the element
+        at ``index`` of its fan-out, once."""
+        return self._contexts.sweep(
+            self._spawns.enter_definition_child(spawn, index, element)
+        )
 
     def loop_instance(self, loop: str) -> LoopInstance | None:
         """The loop instance a loop occurrence entered, if it entered."""

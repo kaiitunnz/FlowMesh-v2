@@ -339,10 +339,10 @@ _SPAWN = f"""
 def test_loops_inside_two_spawned_children_keep_their_contexts_apart() -> None:
     run = Driver(workflow(_SPAWN, _CHILD))
     run.run_one("plan")
-    for element in ("a", "b"):
+    for index, element in enumerate(("a", "b")):
         run.apply(
             run.engine.enter_definition_child(
-                "fan", ValueRef(kind="inline", literal=element)
+                "fan", index, ValueRef(kind="inline", literal=element)
             )
         )
     run.apply(run.engine.seal_spawn("fan"))
@@ -377,6 +377,25 @@ def test_loops_inside_two_spawned_children_keep_their_contexts_apart() -> None:
     run.run(after)
 
 
+def test_a_redelivered_element_enters_its_definition_child_once() -> None:
+    run = Driver(workflow(_SPAWN, _CHILD))
+    run.run_one("plan")
+    for index, element in ((0, "a"), (1, "b"), (0, "a")):
+        run.apply(
+            run.engine.enter_definition_child(
+                "fan", index, ValueRef(kind="inline", literal=element)
+            )
+        )
+    assert len(run.ready_named("step")) == 2
+    run.apply(run.engine.seal_spawn("fan"))
+    run.apply(
+        run.engine.enter_definition_child(
+            "fan", 1, ValueRef(kind="inline", literal="b")
+        )
+    )
+    assert len(run.ready_named("step")) == 2
+
+
 def test_a_cancel_residual_withdraws_a_definition_childs_whole_context() -> None:
     run = Driver(
         workflow(
@@ -387,10 +406,10 @@ def test_a_cancel_residual_withdraws_a_definition_childs_whole_context() -> None
         )
     )
     run.run_one("plan")
-    for element in ("a", "b"):
+    for index, element in enumerate(("a", "b")):
         run.apply(
             run.engine.enter_definition_child(
-                "fan", ValueRef(kind="inline", literal=element)
+                "fan", index, ValueRef(kind="inline", literal=element)
             )
         )
     run.apply(run.engine.seal_spawn("fan"))
@@ -428,7 +447,9 @@ def test_cancelling_the_workflow_withdraws_definition_children_by_their_tasks() 
     run = Driver(workflow(_SPAWN, _CHILD))
     run.run_one("plan")
     run.apply(
-        run.engine.enter_definition_child("fan", ValueRef(kind="inline", literal="a"))
+        run.engine.enter_definition_child(
+            "fan", 0, ValueRef(kind="inline", literal="a")
+        )
     )
     (step,) = run.ready_named("step")
     run.apply(run.engine.cancel_instance())
@@ -684,7 +705,7 @@ def _effect_admission(nodes: str, templates: str, *, definition: bool) -> list[s
     run.run_one("plan")
     element = ValueRef(kind="inline", literal="e")
     if definition:
-        run.apply(run.engine.enter_definition_child("fan", element))
+        run.apply(run.engine.enter_definition_child("fan", 0, element))
     else:
         run.apply(run.engine.materialize_child("fan", value_ref=element))
     run.apply(run.engine.seal_spawn("fan"))
