@@ -340,11 +340,12 @@ each loop around it.
 
 ### Dry-run inspection
 
-`POST /api/v1/workflows/validate` parses a workflow without executing it. For a
-`flowmesh/v2` submission it also compiles the workflow and returns the logical
-template, physical plan, and validation diagnostics in the `inspection` field;
-compilation errors return `422` with readable source locations. For any other
-`apiVersion` it returns the parsed task list with no `inspection`.
+`POST /api/v1/workflows/validate` parses a workflow without executing it and lists
+the tasks a submission registers. For a `flowmesh/v2` submission it also compiles
+the workflow and returns the logical template, physical plan, and validation
+diagnostics in the `inspection` field; compilation errors return `422` with
+readable source locations. For any other `apiVersion` it returns the parsed task
+list with no `inspection`.
 
 ## data_retrieval: type lumid
 

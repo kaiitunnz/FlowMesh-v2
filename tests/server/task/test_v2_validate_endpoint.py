@@ -156,6 +156,66 @@ def test_v2_region_bearing_is_inspectable(client: TestClient) -> None:
     assert data["inspection"]["region_bearing"] is True
 
 
+_V2_TEMPLATES = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    templates:
+      - name: body
+        inputs: [{name: state, role: carried}]
+        nodes:
+          - name: step
+            dependsOn: [{node: $ingress, port: state, input: state}]
+            spec: {taskType: echo, data: {type: list, items: ["${state.output}", done]}}
+          - name: judge
+            dependsOn: [{node: step, input: input}]
+            region:
+              kind: branch
+              inputs: [{name: input}]
+              outputs: [{name: again}, {name: done}]
+              selection: {input: input, field: [items, 0, output]}
+        edges:
+          - from: {node: judge, port: again}
+            to: {node: $feedback, port: state}
+            project: [items, 1]
+          - from: {node: judge, port: done}
+            to: {node: $egress, port: state}
+    nodes:
+      - name: seed
+        spec: {taskType: echo, data: {type: list, items: [again, b]}}
+      - name: refine
+        dependsOn: [{node: seed, input: state, project: [items, 0]}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{name: state}]
+      - name: kid
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: fan
+        dependsOn: [seed]
+        region: {kind: spawn, child: kid}
+      - name: collect
+        dependsOn: [fan]
+        region: {kind: join, completion: all_settled}
+"""
+
+
+def test_v2_validate_lists_only_the_tasks_a_submission_registers(
+    client: TestClient,
+) -> None:
+    resp = _post(client, _V2_TEMPLATES)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [task["graph_node_name"] for task in data["tasks"]] == ["seed"]
+    assert data["count"] == 1
+    template = data["inspection"]["template"]
+    operators = {op["operator_id"] for op in template["operators"]}
+    assert {task["task_id"] for task in data["tasks"]} <= operators
+
+
 def test_v2_invalid_returns_422_with_diagnostics(client: TestClient) -> None:
     resp = _post(client, _V2_BAD)
     assert resp.status_code == 422

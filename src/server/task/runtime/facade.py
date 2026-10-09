@@ -534,21 +534,30 @@ class TaskRuntime:
     def _parse(self, payload: str, format: str) -> ParsedWorkflow:
         return parse_workflow(payload, format, self._n8n_credential_password)
 
-    def validate(self, payload: str, format: str = "native") -> list[TaskParsingResult]:
+    def validate(
+        self, payload: str, format: str = "native"
+    ) -> tuple[list[TaskParsingResult], InspectionReport | None]:
+        """Parse a submission without executing it into the tasks it registers, and
+        for a v2 submission compile its inspection report.
+
+        A v2 workflow's tasks exclude the blueprints its regions materialize work
+        from, as a submission does. Structural frontend errors raise
+        ``CompileError``; semantic findings ride on the report's diagnostics.
+        """
         parsed_workflow = self._parse(payload, format)
-        specs = parsed_workflow.tasks
-        results: list[TaskParsingResult] = []
-        for entry in specs:
-            task_id = entry.task_id
-            depends_on = entry.depends_on.copy()
-            results.append(
-                TaskParsingResult(
-                    task_id=task_id,
-                    graph_node_name=entry.graph_node_name,
-                    depends_on=depends_on,
-                )
+        results = [
+            TaskParsingResult(
+                task_id=entry.task_id,
+                graph_node_name=entry.graph_node_name,
+                depends_on=entry.depends_on.copy(),
             )
-        return results
+            for entry in parsed_workflow.tasks
+        ]
+        inspection = self._inspect_parsed(parsed_workflow, payload, format)
+        if inspection is not None:
+            blueprints = materialized_operators(inspection.template)
+            results = [entry for entry in results if entry.task_id not in blueprints]
+        return results, inspection
 
     def inspect_v2(
         self, payload: str, format: str = "native"
@@ -558,7 +567,11 @@ class TaskRuntime:
         Returns ``None`` for a non-v2 submission. Structural frontend errors raise
         ``CompileError``; semantic findings ride on the report's diagnostics.
         """
-        parsed_workflow = self._parse(payload, format)
+        return self._inspect_parsed(self._parse(payload, format), payload, format)
+
+    def _inspect_parsed(
+        self, parsed_workflow: ParsedWorkflow, payload: str, format: str
+    ) -> InspectionReport | None:
         if not ExecutionMode.is_v2(parsed_workflow.api_version):
             return None
         # A dry run never vaults; drop any inline credential and redact the source so
