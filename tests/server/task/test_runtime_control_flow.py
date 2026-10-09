@@ -534,3 +534,71 @@ async def test_a_loop_whose_exit_settles_its_workflow_purges_its_credentials(
     run.run("step", {"route": "done"})
 
     assert run.settled() and purged == [run.workflow_id]
+
+
+@pytest.mark.anyio
+async def test_a_loop_failed_by_its_body_task_records_no_control_failure() -> None:
+    run = await _Run().start(_workflow(_LOOP_NODES, _LOOP))
+    run.run("seed")
+    step = next(t for t in run.ready if run.name(t) == "step")
+    record_dispatch(run.runtime, step, cast(Any, _worker()))
+    run.runtime.fail_dispatch(step, "wkr-1", {}, _TS, error="boom", retryable=False)
+    run.drive()
+
+    assert run.settled()
+    control = run.registry.control[run.workflow_id]
+    assert control.failure is None
+
+
+_ROUTE_BODY = f"""
+    templates:
+      - name: body
+        inputs: [{{name: state, role: carried}}]
+        nodes:
+          - name: route
+            dependsOn: [{{node: $ingress, port: state, input: input}}]
+            region:
+              kind: branch
+              inputs: [{{name: input}}]
+              outputs: [{{name: again}}, {{name: done}}]
+              selection: {{input: input, field: [route]}}
+          - name: step
+            dependsOn: [{{node: route, port: again, input: s}}]
+            spec: {_ECHO}
+        edges:
+          - from: {{node: step}}
+            to: {{node: $feedback, port: state}}
+          - from: {{node: route, port: done}}
+            to: {{node: $egress, port: state}}
+"""
+
+_SEEDED_FROM_A_JOIN = f"""
+      - name: plan
+        spec: {_ECHO}
+      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [plan]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+      - name: refine
+        dependsOn: [{{node: collect, input: state}}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{{name: state}}]
+"""
+
+
+@pytest.mark.anyio
+async def test_a_branch_selecting_on_a_loops_aggregate_seed_fails_typed() -> None:
+    run = await _Run().start(_workflow(_SEEDED_FROM_A_JOIN, _ROUTE_BODY))
+    run.run("plan", {"items": ["p"]})
+    run.run("kid", {"route": "done"})
+
+    assert run.settled()
+    failure = run.registry.control[run.workflow_id].failure
+    assert failure is not None and failure.startswith("BranchSelectionInvalid: ")

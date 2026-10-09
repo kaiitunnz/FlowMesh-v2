@@ -68,7 +68,6 @@ from ..state import (
     BranchDecision,
     Continuation,
     ControlState,
-    ControlStatus,
     DelegatedAuthorityGrant,
     DenialKind,
     EmbodimentSelection,
@@ -970,20 +969,9 @@ class OrchestrationEngine:
         return [wi for wi in self._ledger.work_items.values() if wi.legacy_task_id]
 
     def control_failure(self) -> str | None:
-        """Why the instance failed outside any task, if it has: the whole instance, or
-        a control occurrence, failed."""
-        if (reason := self._failures.instance_failure) is not None:
-            return reason
-        failed = sorted(
-            (key, state.reason or "control failed")
-            for key, state in self._ledger.control_states.items()
-            if state.status is ControlStatus.FAILED
-        )
-        if failed:
-            return failed[0][1]
-        if self._failures.failed_regions:
-            return f"region {min(self._failures.failed_regions)} failed"
-        return None
+        """Why the instance failed outside any task, if it has: the whole instance
+        failed, or a control occurrence faulted."""
+        return self._failures.instance_failure or self._failures.control_failure
 
     def spawn_handle(self, spawn: str) -> str:
         """The handle a spawn occurrence's children are created and sealed under."""
@@ -1000,7 +988,7 @@ class OrchestrationEngine:
         """Settle a pending control occurrence as a declared failure, as an input it
         could not read fails it."""
         advance = Advance()
-        self._flow.fail_control(occurrence, reason, advance)
+        self._flow.fail_control(occurrence, reason, advance, fault=True)
         return self._contexts.sweep(advance)
 
     @_ds_drive(ControlPlaneWindow.POST_START)

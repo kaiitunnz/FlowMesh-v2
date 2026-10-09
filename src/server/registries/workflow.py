@@ -206,6 +206,10 @@ class Workflow(BaseModel):
     completed_tasks: list[str] = Field(description="Completed task identifiers.")
     failed_tasks: list[str] = Field(description="Failed task identifiers.")
     cancelled_tasks: list[str] = Field(description="Cancelled task identifiers.")
+    failure: str | None = Field(
+        default=None,
+        description="Why the workflow failed outside any of its tasks, when it did.",
+    )
 
 
 def workflow_order(submitted_at: str, workflow_id: str) -> WorkflowOrder:
@@ -1087,6 +1091,7 @@ class WorkflowRegistry:
             completed_tasks=list(completed_tasks),
             failed_tasks=list(failed_tasks),
             cancelled_tasks=list(cancelled_tasks),
+            failure=record.control_failure or None,
         )
 
     def _built_workflows(self, replies: Sequence[Any]) -> list[Workflow]:

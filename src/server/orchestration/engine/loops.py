@@ -95,7 +95,7 @@ class LoopProgress:
         """Materialize the body at one logical time and admit what its inputs allow."""
         loop_op = self._ledger.occurrence(instance.occurrence).operator_id
         if time >= self.max_iterations:
-            self.fail(
+            self.fault(
                 instance,
                 f"LoopIterationBudgetExceeded: loop {loop_op} may run "
                 f"{self.max_iterations} iterations",
@@ -104,7 +104,7 @@ class LoopProgress:
             return
         loop = self._topology.operators[loop_op]
         if not isinstance(loop, LoopContextRegion) or loop.body_ref is None:
-            self.fail(instance, legacy_control_unsupported(loop_op, "a body"), advance)
+            self.fault(instance, legacy_control_unsupported(loop_op, "a body"), advance)
             return
         frame = TimeFrame(loop=instance.scope_id, iteration=time)
         try:
@@ -115,7 +115,7 @@ class LoopProgress:
                 instance.scope_id,
             )
         except RegionError as exc:
-            self.fail(instance, f"ScopeBudgetExceeded: {exc}", advance)
+            self.fault(instance, f"ScopeBudgetExceeded: {exc}", advance)
             return
         instance.times = time + 1
         if (cap := self._capability(instance)) is not None:
@@ -158,7 +158,7 @@ class LoopProgress:
         existing = self._ledger.iterations.get((instance.scope_id, time))
         if existing is not None:
             if existing.kind is not kind:
-                self.fail(
+                self.fault(
                     instance,
                     f"LoopControlViolation: time {time} resolved both "
                     f"{existing.kind.value} and {kind.value}",
@@ -221,13 +221,24 @@ class LoopProgress:
         if (instance.scope_id, time) in self._ledger.iterations:
             return
         if self._scope_progress.scope_drained(instance.scope_id):
-            self.fail(
+            self.fault(
                 instance,
                 f"LoopControlViolation: time {time} routed neither feedback nor exit",
                 advance,
             )
 
-    def fail(self, instance: LoopInstance, reason: str, advance: Advance) -> None:
+    def fault(self, instance: LoopInstance, reason: str, advance: Advance) -> None:
+        """Fail a loop for a fault of its own, which is the instance's control failure
+        when it is the first."""
+        self.fail(instance, reason, advance, fault=True)
+
+    def fail(
+        self,
+        instance: LoopInstance,
+        reason: str,
+        advance: Advance,
+        fault: bool = False,
+    ) -> None:
         """Fail a loop: withdraw its later times, cancel its outstanding body work,
         and fail the loop occurrence itself."""
         if instance.status in (LoopInstanceStatus.FAILED, LoopInstanceStatus.CANCELLED):
@@ -247,7 +258,7 @@ class LoopProgress:
         for scope_id in self._ledger.scope_subtree(instance.scope_id):
             advance.extend(self._flow.cancel_one_scope(scope_id))
         self._ledger.released_scopes.add(instance.scope_id)
-        self._flow.fail_control(instance.occurrence, reason, advance)
+        self._flow.fail_control(instance.occurrence, reason, advance, fault)
 
     def cancelled(self, scope_id: str) -> None:
         """Withdraw a loop whose scope a cancellation reached."""

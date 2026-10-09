@@ -19,8 +19,13 @@ class FailureLedger:
         self.failure_reasons: dict[str, str] = {}
         # Why the whole instance failed, once it has.
         self.instance_failure: str | None = None
+        # The first fault of a control occurrence's own, once one has faulted.
+        self.control_failure: str | None = None
         # Whether the whole instance was cancelled.
         self.instance_cancelled = False
+
+    def note_control_failure(self, reason: str) -> None:
+        self.control_failure = self.control_failure or reason
 
     def mark_region_failed(self, operator_id: str) -> None:
         self.failed_regions.add(operator_id)

@@ -844,6 +844,8 @@ class LedgerSnapshot(BaseModel):
     failed_scopes: list[str] = Field(default_factory=list)
     failure_reasons: dict[str, str] = Field(default_factory=dict)
     instance_failure: str | None = None
+    # The first fault of a control occurrence's own.
+    control_failure: str | None = None
     instance_cancelled: bool = False
     next_seq: int = 0
     occurrences: list[Occurrence] = Field(default_factory=list)

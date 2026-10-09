@@ -4,8 +4,10 @@ Server runs at `http://localhost:8000` by default. The router source of
 truth is `src/server/routers/v1/*.py`.
 
 Workflow and task statuses (used in payloads and filters):
-`PENDING`, `DISPATCHED`, `FAILED`, `CANCELLED`, `DONE`. Worker statuses:
-`STARTING`, `IDLE`, `BUSY`, `STOPPING`, `STOPPED`.
+`PENDING`, `DISPATCHED`, `FAILED`, `CANCELLED`, `DONE`. A workflow that failed
+outside any of its tasks, as a loop past its iteration budget does, carries the
+typed reason as its `failure`. Worker statuses: `STARTING`, `IDLE`, `BUSY`,
+`STOPPING`, `STOPPED`.
 
 ## Authentication
 

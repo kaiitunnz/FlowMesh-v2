@@ -308,7 +308,9 @@ class RegionFlow:
             (None, None, error) if error else selected_port(branch, value)
         )
         if port is None:
-            self.fail_control(key, f"branch selection invalid: {reason}", advance)
+            self.fail_control(
+                key, f"BranchSelectionInvalid: {reason}", advance, fault=True
+            )
             return advance
         selected = state.inputs[branch.rule.input]
         self._ledger.branch_decisions[key] = BranchDecision(
@@ -560,10 +562,14 @@ class RegionFlow:
                     key,
                     legacy_control_unsupported(op.operator_id, "a selection rule"),
                     advance,
+                    fault=True,
                 )
             case LoopContextRegion() if op.body_ref is None:
                 self.fail_control(
-                    key, legacy_control_unsupported(op.operator_id, "a body"), advance
+                    key,
+                    legacy_control_unsupported(op.operator_id, "a body"),
+                    advance,
+                    fault=True,
                 )
             case BranchRegion(rule=SelectionRule() as rule):
                 self._await_selection(key, op, rule, inputs, advance)
@@ -646,6 +652,7 @@ class RegionFlow:
                 key,
                 f"one_live merge {op.operator_id} received {len(live)} live inputs",
                 advance,
+                fault=True,
             )
             return
         value = _merged_value(op, inputs)
@@ -692,7 +699,10 @@ class RegionFlow:
             or selected.value is None
         ):
             self.fail_control(
-                key, "branch selection invalid: its selection input is empty", advance
+                key,
+                "BranchSelectionInvalid: its selection input is empty",
+                advance,
+                fault=True,
             )
             return
         state = self._ledger.control_state(key)
@@ -804,8 +814,12 @@ class RegionFlow:
                 self.mark_dead(self.edges.sibling(occurrence, join), advance)
         self.propagate(key, advance)
 
-    def fail_control(self, key: str, reason: str, advance: Advance) -> None:
-        """Settle a control occurrence as a declared failure.
+    def fail_control(
+        self, key: str, reason: str, advance: Advance, fault: bool = False
+    ) -> None:
+        """Settle a control occurrence as a declared failure; a ``fault`` is one of
+        the control's own, not of an input, and the first one is the instance's
+        control failure.
 
         At the root it fails everything downstream of it; inside a region definition
         it fails the loop or child running it.
@@ -816,6 +830,8 @@ class RegionFlow:
             return
         state.status = ControlStatus.FAILED
         state.reason = reason
+        if fault:
+            self._failures.note_control_failure(reason)
         if occurrence.context_id or occurrence.time:
             self._ledger.emit(
                 "region_failed",
@@ -1064,21 +1080,6 @@ class RegionFlow:
         of a scope nested under a spawned child fails only that scope, since sibling
         scopes share its operator.
         """
-        join_key = self._join_key(scope_id, join_op)
-        if join_key is not None and join_key != join_op:
-            self._failures.mark_scope_failed(scope_id)
-            advance = Advance()
-            self.fail_control(join_key, f"join {join_op} resolved a failure", advance)
-            return advance
-        if join_key is None:
-            self._failures.mark_scope_failed(scope_id)
-            self._ledger.emit(
-                "region_failed", operator_id=join_op, detail={"scope": scope_id}
-            )
-            return Advance()
-        cascade = Advance()
-        self._settle_region_failed(join_op)
-        self._fail_downstream(join_op, cascade, {join_op})
         failed_child = next(
             (
                 wi
@@ -1092,15 +1093,35 @@ class RegionFlow:
             ),
             None,
         )
+        join_key = self._join_key(scope_id, join_op)
+        if join_key is not None and join_key != join_op:
+            self._failures.mark_scope_failed(scope_id)
+            advance = Advance()
+            self.fail_control(
+                join_key,
+                f"join {join_op} resolved a failure",
+                advance,
+                fault=failed_child is None,
+            )
+            return advance
+        if join_key is None:
+            self._failures.mark_scope_failed(scope_id)
+            self._ledger.emit(
+                "region_failed", operator_id=join_op, detail={"scope": scope_id}
+            )
+            return Advance()
+        cascade = Advance()
+        self._settle_region_failed(join_op)
+        self._fail_downstream(join_op, cascade, {join_op})
         if failed_child is not None and failed_child.legacy_task_id:
             self._failures.name_failures(
                 cascade.failed, dependency_failed(failed_child.legacy_task_id)
             )
             cascade.failed.insert(0, failed_child.legacy_task_id)
             return cascade
-        self._failures.name_failures(
-            cascade.failed, f"join {join_op} resolved no winner"
-        )
+        reason = f"join {join_op} resolved no winner"
+        self._failures.note_control_failure(reason)
+        self._failures.name_failures(cascade.failed, reason)
         return cascade
 
     def _freeze_region_aggregate(
