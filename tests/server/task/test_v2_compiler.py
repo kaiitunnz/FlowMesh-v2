@@ -165,19 +165,13 @@ class _CapturingRegistry:
     async def register_workflow_async(
         self,
         workflow_id: str,
-        tasks: list[Any],
+        tasks: Any,
+        sched: Any,
         v2: Any = None,
+        ledger: Any = None,
         submitted_at: str | None = None,
     ) -> None:
         self.v2[workflow_id] = v2
-
-    async def save_task_states_async(self, items: list[Any]) -> None:
-        return None
-
-    async def save_workflow_sched_async(
-        self, workflow_id: str, in_epoch_order: bool, frontier: int
-    ) -> None:
-        return None
 
 
 def _runtime() -> TaskRuntime:
@@ -218,7 +212,7 @@ async def test_compile_error_leaves_no_orphan_state() -> None:
     with pytest.raises(CompileError):
         await runtime.register("owner", "org", _BAD_V2, format="native")
     # The failed submission mutated no in-memory scheduler state.
-    assert runtime.tasks == {}
+    assert runtime._tasks == {}
 
 
 def test_old_parser_path_still_selectable() -> None:

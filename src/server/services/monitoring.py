@@ -70,7 +70,7 @@ from ..task.models import (
     TaskUsage,
     serve_engine_reported,
 )
-from ..task.runtime import TaskRuntime
+from ..task.runtime import TaskRuntime, TransitionNotDurable
 from ..utils.logging import log_node_event, log_worker_event
 from ..utils.time import now_iso
 from .metrics import MetricsRecorder
@@ -87,6 +87,12 @@ _GIVEN_UP_ENDS = {
 }
 
 TASK_EVENT_HANDLER_MAX_ATTEMPTS = 5
+# The backoff of a task event whose transition is not durable, doubling to the cap on
+# each try.
+_NOT_DURABLE_BACKOFF_SEC = 0.5
+_NOT_DURABLE_BACKOFF_MAX_SEC = 30.0
+# Consecutive tries after which a task event still not durable is logged as an error.
+_NOT_DURABLE_ESCALATE_AFTER = 5
 
 # How many revoked runs the monitor remembers, so a worker's repeated BUSY reports of
 # one revoked dispatch publish one revoke each interval.
@@ -172,6 +178,7 @@ class EventMonitor:
 
         # Per-entry handler-failure counts backing the consumer's retry budget.
         self._event_handler_attempts: dict[str, int] = {}
+        self._not_durable_tries: dict[str, int] = {}
         # When each (worker, dispatch) was last revoked as an orphan run.
         self._revoked_runs: RecentMap[tuple[str, str], float] = RecentMap(
             _REVOKED_RUN_MEMORY
@@ -346,6 +353,8 @@ class EventMonitor:
 
         Parse failures are skipped; handler failures are retried without advancing the
         cursor, then dead-lettered after ``TASK_EVENT_HANDLER_MAX_ATTEMPTS`` attempts.
+        An event whose transition applied but is not durable is retried with backoff
+        until it is, never dropped.
         """
         for entry_id, fields in entries:
             try:
@@ -364,10 +373,14 @@ class EventMonitor:
 
             if isinstance(event, TaskEvent):
                 try:
-                    self.handle_task_event(event)
+                    with self._runtime.acknowledging():
+                        self.handle_task_event(event)
                 except REDIS_CONN_ERRORS:
                     # Propagate so the loop backs off and replays from this cursor.
                     raise
+                except TransitionNotDurable as exc:
+                    self._back_off_not_durable(entry_id, event, exc)
+                    return cursor
                 except Exception as exc:
                     # Don't advance past a handler failure: it may be transient, and the
                     # watchdog only reclaims dead workers (not a task stuck under a live
@@ -391,11 +404,37 @@ class EventMonitor:
                         exc,
                     )
                 self._event_handler_attempts.pop(entry_id, None)
+                self._not_durable_tries.pop(entry_id, None)
 
             cursor = self._advance_event_cursor(entry_id)
             if self._stop_event.is_set():
                 break
         return cursor
+
+    def _back_off_not_durable(
+        self, entry_id: str, event: TaskEvent, exc: TransitionNotDurable
+    ) -> None:
+        tries = self._not_durable_tries.get(entry_id, 0) + 1
+        self._not_durable_tries[entry_id] = tries
+        self._logger.log(
+            (
+                logging.ERROR
+                if tries >= _NOT_DURABLE_ESCALATE_AFTER
+                else logging.WARNING
+            ),
+            "Task event %s (%s of %s) is not durable after %d tries; retrying: %s",
+            entry_id,
+            event.type,
+            event.task_id,
+            tries,
+            exc,
+        )
+        self._stop_event.wait(
+            min(
+                _NOT_DURABLE_BACKOFF_MAX_SEC,
+                _NOT_DURABLE_BACKOFF_SEC * 2 ** (tries - 1),
+            )
+        )
 
     def _advance_event_cursor(self, entry_id: str) -> str:
         self._redis_client.set_value(TASK_EVENT_CURSOR_KEY, entry_id)
@@ -1089,34 +1128,38 @@ class EventMonitor:
         """
         requeued: list[str] = []
         ts = now_iso()
-        recovery = self._runtime.recover_tasks_for_worker(
-            worker_id, spend_attempt=not graceful, node_id=node_id
-        )
-        self.record_worker_losses(worker_id, recovery.resolved, "worker_unregistered")
-        for task_id in recovery.lost:
-            end = self._dispatcher.requeue_task(
-                task_id,
-                reason="worker_unregistered",
-                front=True,
-                holder=worker_id,
-                count_retry=not graceful,
-                extra_payload={"worker": worker_id},
+        # What the recovery and each return owe is delivered once all have committed.
+        with self._runtime.transition():
+            recovery = self._runtime.recover_tasks_for_worker(
+                worker_id, spend_attempt=not graceful, node_id=node_id
             )
-            if end is DispatchEnd.CANCELLED:
-                self._record_cancellation(
-                    TaskEvent(
-                        type="TASK_CANCELLED",
-                        task_id=task_id,
-                        worker_id=worker_id,
-                        ts=ts,
-                    ),
-                    [],
+            self.record_worker_losses(
+                worker_id, recovery.resolved, "worker_unregistered"
+            )
+            for task_id in recovery.lost:
+                end = self._dispatcher.requeue_task(
+                    task_id,
+                    reason="worker_unregistered",
+                    front=True,
+                    holder=worker_id,
+                    count_retry=not graceful,
+                    extra_payload={"worker": worker_id},
                 )
-                continue
-            if end not in (DispatchEnd.STALE, DispatchEnd.SETTLED):
-                self._release_task(task_id)
-            if end is DispatchEnd.RETURNED:
-                requeued.append(task_id)
+                if end is DispatchEnd.CANCELLED:
+                    self._record_cancellation(
+                        TaskEvent(
+                            type="TASK_CANCELLED",
+                            task_id=task_id,
+                            worker_id=worker_id,
+                            ts=ts,
+                        ),
+                        [],
+                    )
+                    continue
+                if end not in (DispatchEnd.STALE, DispatchEnd.SETTLED):
+                    self._release_task(task_id)
+                if end is DispatchEnd.RETURNED:
+                    requeued.append(task_id)
         if requeued:
             self._logger.info(
                 "Requeued %d task(s) after worker %s unregistered: %s",

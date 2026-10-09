@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from server.orchestration.state import AttemptStatus, WorkItemStatus
-from server.task.models import TaskStatus
+from server.task.models import PublishGate, TaskStatus
 from server.task.results import ResultUnavailable, ResultUnreadable
 from server.task.runtime import TaskRuntime
 from server.task.runtime.input_checks import _InputCheck
@@ -49,9 +49,8 @@ spec:
 
 
 def _fail(runtime: TaskRuntime, workflow_id: str) -> None:
-    with runtime._cv:
+    with runtime._transition():
         runtime._fail_workflow_locked(workflow_id, "fan-out producer unreadable")
-    runtime._release_pending_terminations()
 
 
 def _fail_by_unreadable_fanout(runtime: TaskRuntime, planner: str) -> None:
@@ -210,7 +209,10 @@ async def test_a_task_being_published_is_interrupted() -> None:
     _, ids = await _register(runtime, _PARALLEL)
     _pop_ready(runtime)
     side = ids["side"]
-    assert runtime.begin_publish(side, cast(Any, _worker("wkr-2")), "dsp-s")
+    assert (
+        runtime.begin_publish(side, cast(Any, _worker("wkr-2")), "dsp-s")
+        is PublishGate.PUBLISH
+    )
 
     _fail_by_unreadable_fanout(runtime, ids["planner"])
 
@@ -259,7 +261,7 @@ async def test_a_release_error_stays_out_of_the_report_that_failed_the_workflow(
     assert events == ["TASK_SUCCEEDED"]
     assert attempted == [side]
     assert runtime._tasks[side].status == TaskStatus.FAILED
-    assert runtime._terminations.pending_terminations == []
+    assert runtime._actions.ready == []
 
 
 class _RefusesDispatchedWrite(FakeRegistry):
@@ -287,7 +289,10 @@ async def _publishing_when_failed(
     _, ids = await _register(runtime, _PARALLEL)
     _pop_ready(runtime)
     record_dispatch(runtime, ids["planner"], cast(Any, _worker()), "dsp-p")
-    assert runtime.begin_publish(ids["side"], cast(Any, _worker("wkr-2")), "dsp-s")
+    assert (
+        runtime.begin_publish(ids["side"], cast(Any, _worker("wkr-2")), "dsp-s")
+        is PublishGate.PUBLISH
+    )
     if isinstance(registry, _RefusesDispatchedWrite):
         registry.armed = True
     return runtime, ids, interrupts

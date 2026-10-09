@@ -84,10 +84,11 @@ class TaskMerges:
                 f"The worker assigned for task {task_id} ({assigned_worker}) "
                 f"is not in selected workers {record.selected_worker}."
             )
-        bucket = (
-            self._ready.merge_buckets[(record.merge_key, assigned_worker)]
-            + self._ready.merge_buckets[(record.merge_key, None)]
-        )
+        buckets = self._ready.merge_buckets
+        bucket = [
+            *buckets.get((record.merge_key, assigned_worker), ()),
+            *buckets.get((record.merge_key, None), ()),
+        ]
         if not bucket or len(bucket) <= 1:
             return []
         siblings: list[str] = []
@@ -105,6 +106,12 @@ class TaskMerges:
             ):
                 continue
             if candidate not in self._ready.ready_index:
+                continue
+            # A task waits for the handling of its report as its own dispatch does.
+            if (
+                self._committer.reporting(candidate)
+                or candidate in self._committer.unacknowledged
+            ):
                 continue
             siblings.append(candidate)
         if not siblings:

@@ -53,7 +53,7 @@ from ...schemas.workflow import (
     WorkflowValidateTaskEntry,
 )
 from ...services.metrics import MetricsRecorder
-from ...task.runtime import TaskRuntime
+from ...task.runtime import TaskRuntime, TransitionNotDurable
 from ...task.v2 import CompileError, Diagnostic
 from ...utils.cursors import InvalidCursor, decode_position, encode_cursor
 from ._listing import (
@@ -528,6 +528,11 @@ async def stream_workflow_logs(
     summary="Cancel a workflow",
     description="Cancel a running workflow.",
     response_description="Cancelled workflow",
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": "The cancel applied but is not durable yet; retry it"
+        }
+    },
 )
 async def cancel_workflow(
     workflow_id: str,
@@ -539,7 +544,16 @@ async def cancel_workflow(
     await require_permission(
         principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.CANCEL, logger
     )
-    runtime.cancel_workflow(workflow_id)
+    try:
+        with runtime.acknowledging():
+            runtime.cancel_workflow(workflow_id)
+    except TransitionNotDurable as exc:
+        logger.warning("Cancel of workflow %s is not durable yet: %s", workflow_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The cancel is not durable yet; retry it.",
+            headers={"Retry-After": "1"},
+        ) from exc
     workflow = await registry.get_workflow_async(workflow_id)
     if not workflow:
         raise HTTPException(

@@ -22,8 +22,8 @@ from server.orchestration.tool_dispatch import (
     ToolOutcomeStatus,
 )
 from server.registries.worker import Worker
-from server.task.models import EventEffect, TaskStatus
-from server.task.runtime import TaskRuntime
+from server.task.models import EventEffect, PublishGate, TaskStatus
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.harness import (
     BoundaryEventKind,
     HarnessAdapter,
@@ -905,7 +905,9 @@ def test_a_step_that_suspends_before_its_dispatch_is_recorded_resumes() -> None:
         )
         step = {"agent_episode": result.model_dump(mode="json")}
         runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
-        record_dispatch(runtime, writer, _WORKER, "dsp-1")
+        record_dispatch(
+            runtime, writer, _WORKER, "dsp-1", expect=PublishGate.NOT_PENDING
+        )
 
         (envelope,) = held
         assert runtime.settle_episode_invocation(
@@ -933,13 +935,16 @@ def test_a_first_report_handled_again_after_its_record_failed_opens_the_attempt(
         assert dispatch is not None
         runtime.begin_publish(writer, _WORKER, "dsp-1")
 
-        registry.fail_next = True
-        with pytest.raises(ConnectionError):
+        registry.down = True
+        with pytest.raises(TransitionNotDurable), runtime.acknowledging():
             runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1")
+        registry.down = False
         assert runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1") is (
             EventEffect.APPLIED
         )
-        assert record_dispatch(runtime, writer, _WORKER, "dsp-1")
+        assert record_dispatch(
+            runtime, writer, _WORKER, "dsp-1", expect=PublishGate.NOT_PENDING
+        )
         result = adapter.start(
             writer, capsule=None, outcomes=dispatch.delivered_outcomes
         )

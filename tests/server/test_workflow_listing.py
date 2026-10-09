@@ -20,7 +20,11 @@ from server.clients.redis import (
     workflow_key,
 )
 from server.config import OrchestrationConfig
-from server.registries.workflow import WorkflowRecord, WorkflowRegistry
+from server.registries.workflow import (
+    WorkflowRecord,
+    WorkflowRegistry,
+    WorkflowSched,
+)
 from server.routers.v1 import workflows as workflows_router
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
@@ -160,7 +164,9 @@ def _seed(registry: WorkflowRegistry, count: int, indexed: bool = True) -> list[
     for index, workflow_id in enumerate(ids):
         submitted_at = datetime.fromtimestamp(1_700_000_000 + index, UTC).isoformat()
         if indexed:
-            registry.register_workflow(workflow_id, [], submitted_at=submitted_at)
+            registry.register_workflow(
+                workflow_id, [], WorkflowSched(), submitted_at=submitted_at
+            )
             continue
         record = WorkflowRecord(
             workflow_id=workflow_id, task_ids=[], submitted_at=submitted_at

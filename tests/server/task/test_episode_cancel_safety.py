@@ -15,7 +15,7 @@ from server.orchestration.tool_dispatch import (
     FacadeCompletionMode,
     FacadeTurnGroup,
 )
-from server.task.models import DispatchEnd, TaskStatus
+from server.task.models import DispatchEnd, PublishGate, TaskStatus
 from shared.harness import BoundaryEventKind, HarnessCapsule, HarnessResult
 from shared.private_state import OwnerFence
 from tests.server.dispatch_helpers import record_dispatch
@@ -246,7 +246,12 @@ def test_a_racing_dispatch_does_not_erase_a_cancellation() -> None:
 
         result = _run_step(runtime, adapter, writer)
         runtime.cancel_workflow(workflow_id)
-        record_dispatch(runtime, writer, cast(Any, _worker("wkr-2")))
+        record_dispatch(
+            runtime,
+            writer,
+            cast(Any, _worker("wkr-2")),
+            expect=PublishGate.NOT_PENDING,
+        )
         assert runtime._tasks[writer].status == TaskStatus.CANCELLING
         assert runtime._tasks[writer].assigned_worker != "wkr-2"
 

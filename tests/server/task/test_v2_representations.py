@@ -79,19 +79,13 @@ class _CapturingRegistry:
     async def register_workflow_async(
         self,
         workflow_id: str,
-        tasks: list[Any],
-        v2: PersistedV2Workflow | None = None,
+        tasks: Any,
+        sched: Any,
+        v2: Any = None,
+        ledger: Any = None,
         submitted_at: str | None = None,
     ) -> None:
         self.v2[workflow_id] = v2
-
-    async def save_task_states_async(self, items: list[Any]) -> None:
-        return None
-
-    async def save_workflow_sched_async(
-        self, workflow_id: str, in_epoch_order: bool, frontier: int
-    ) -> None:
-        return None
 
     def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
         return None

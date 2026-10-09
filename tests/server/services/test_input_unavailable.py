@@ -16,7 +16,7 @@ from server.services.task_events import TaskEventPublisher
 from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultUnavailable, ResultUnreadable
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.content import ContentReference, reference_for
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -502,8 +502,9 @@ class _Stream:
     def pump(self) -> None:
         while self.entries:
             try:
-                self._monitor.handle_task_event(self.entries[0])
-            except ConnectionError:
+                with self._monitor._runtime.acknowledging():
+                    self._monitor.handle_task_event(self.entries[0])
+            except TransitionNotDurable:
                 return
             self.entries.pop(0)
 
@@ -531,8 +532,9 @@ async def test_a_verdict_whose_write_failed_is_handled_again_and_finalizes_once(
     fixture.probe.error = ResultUnreadable("no content")
     fixture.scheduler.run_due()
 
-    registry.fail_next = True
+    registry.down = True
     stream.pump()
+    registry.down = False
     assert registry.durable_status(task_id) != TaskStatus.FAILED
     assert task_id in runtime._inputs.input_checks
     fixture.scheduler.run_due()  # control reports its verdict again
@@ -545,7 +547,7 @@ async def test_a_verdict_whose_write_failed_is_handled_again_and_finalizes_once(
 
 
 @pytest.mark.anyio
-async def test_a_verdict_applied_directly_after_a_failed_write_is_reported_again() -> (
+async def test_a_verdict_applied_directly_after_a_failed_write_is_made_durable() -> (
     None
 ):
     registry = _Registry()
@@ -563,7 +565,7 @@ async def test_a_verdict_applied_directly_after_a_failed_write_is_reported_again
     registry.fail_next = True
     fixture.scheduler.run_due()
     assert registry.durable_status(task_id) != TaskStatus.FAILED
-    fixture.scheduler.run_due()
+    runtime._retry_durability(runtime._tasks[task_id].workflow_id)
 
     assert registry.durable_status(task_id) == TaskStatus.FAILED
     assert _finalized(fixture).count(task_id) == 1
@@ -576,9 +578,10 @@ async def test_a_verdict_is_never_answered_with_the_workers_stashed_report() -> 
     runtime = fixture.runtime
     task_id, reference = await _consumer(runtime)
     report = _unavailable(task_id, [reference])
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable), fixture.runtime.acknowledging():
         fixture.report(report)  # the stream hands this over again later
+    registry.down = False
     fixture.probe.error = ResultUnreadable("no content")
 
     fixture.scheduler.run_due()
@@ -605,9 +608,10 @@ async def test_a_verdict_applied_directly_supersedes_the_workers_stashed_report(
     runtime.set_failure_reporter(publisher.publish)
     task_id, reference = await _consumer(runtime)
     report = _unavailable(task_id, [reference])
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable), fixture.runtime.acknowledging():
         fixture.report(report)
+    registry.down = False
     fixture.probe.error = ResultUnreadable("no content")
     fixture.scheduler.run_due()
     handled = len(fixture.metrics.record_task_event.call_args_list)

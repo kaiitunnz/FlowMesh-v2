@@ -19,8 +19,10 @@ class _WorkflowRegistryStub:
     async def register_workflow_async(
         self,
         workflow_id: str,
-        tasks: list[Any],
+        tasks: Sequence[PersistedTask],
+        sched: WorkflowSched,
         v2: Any = None,
+        ledger: Any = None,
         submitted_at: str | None = None,
     ) -> None:
         return None
@@ -36,14 +38,6 @@ class _WorkflowRegistryStub:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
-    ) -> None:
-        return None
-
-    async def save_task_states_async(self, items: Any) -> None:
-        return None
-
-    async def save_workflow_sched_async(
-        self, workflow_id: str, in_epoch_order: bool, frontier: int
     ) -> None:
         return None
 
@@ -253,7 +247,7 @@ spec:
         taskType: ssh
 """
     workflow_id, _ = _register(runtime, payload)
-    task_id = next(iter(runtime.tasks))
+    task_id = next(iter(runtime._tasks))
     record_dispatch(runtime, task_id)
 
     cancelled = runtime.cancel_workflow(workflow_id)
@@ -289,7 +283,7 @@ spec:
     workflow_id, _ = _register(runtime, payload)
     task_ids = [
         task_id
-        for task_id, record in runtime.tasks.items()
+        for task_id, record in runtime._tasks.items()
         if record.workflow_id == workflow_id
     ]
     parent_id, child_id = task_ids

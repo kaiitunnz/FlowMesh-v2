@@ -11,7 +11,7 @@ import pytest
 
 from server.resident.state import ClaimState, ClaimTerminalReason, ResidentSnapshot
 from server.startup import rehydrate_root_state
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from tests.server.resident.test_service import _admission, _build, _env
 from tests.server.task.test_agent_episode_runtime import _held_boundary
 from tests.server.task.test_held_termination_release import _Scenario
@@ -96,7 +96,7 @@ def test_a_restart_holds_a_credit_whose_invocation_is_still_open() -> None:
 
 def _crash_before_ledger_save(registry: FakeRegistry) -> None:
     def crash(*_args: Any, **_kwargs: Any) -> None:
-        raise RuntimeError("root crashed")
+        raise ConnectionError("root crashed")
 
     registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
 
@@ -106,8 +106,9 @@ def test_a_restart_releases_a_credit_whose_cancel_only_its_records_hold() -> Non
     runtime, workflow_id, env = _held(registry)
     snapshot = _admit(workflow_id, env.invocation_id)
     _crash_before_ledger_save(registry)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.cancel_workflow(workflow_id)
+    runtime.shutdown()
     del registry.save_ledger_snapshot
 
     stores = _restart(registry, snapshot)

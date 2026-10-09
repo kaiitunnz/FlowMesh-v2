@@ -2,7 +2,7 @@
 
 import heapq
 import time
-from collections import defaultdict, deque
+from collections import deque
 
 from ..models import TaskRecord, TaskStatus
 from .static_dag import StaticDag
@@ -68,7 +68,7 @@ class ReadyQueue:
         )  # task_id | workflow_id, is_workflow
         self.ready_index: set[str] = set()
         self.merge_key_by_task: dict[str, tuple[str | None, str | None]] = {}
-        self.merge_buckets: dict[tuple[str, str | None], list[str]] = defaultdict(list)
+        self.merge_buckets: dict[tuple[str, str | None], list[str]] = {}
 
     def enqueue_ready_locked(self, task_id: str, *, front: bool = False) -> bool:
         """Add a task to the ready queue if it is pending and not already queued."""

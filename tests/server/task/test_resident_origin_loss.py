@@ -10,7 +10,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration.state import InvocationState, LedgerSnapshot
-from server.resident import ClaimState
+from server.resident import ClaimState, ClaimTerminalReason
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessCapsule
@@ -20,6 +20,7 @@ from shared.schemas.event import WorkerEvent
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.resident.test_service import _build
 from tests.server.result_store import make_result_reader
+from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.task.test_private_state_ledger import _manifest
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import (
@@ -146,17 +147,14 @@ def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
         save = registry.save_ledger_snapshot
 
         def down(workflow_id: str, snapshot: LedgerSnapshot) -> None:
-            raise RuntimeError("control redis unavailable")
+            raise ConnectionError("control redis unavailable")
 
         registry.save_ledger_snapshot = down  # type: ignore[method-assign]
-        with pytest.raises(RuntimeError):
-            runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
+        runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
         assert releases == []
 
         registry.save_ledger_snapshot = save  # type: ignore[method-assign]
-        with runtime._cv:
-            runtime._committer.save_ledger_locked(workflow_id)
-        runtime._release_pending_terminations()
+        runtime._retry_durability(workflow_id)
         assert releases == [env.invocation_id]
 
     asyncio.run(run())
@@ -212,8 +210,8 @@ def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again(
             raise ConnectionError("crash before the ledger save")
 
         registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
-        with pytest.raises(ConnectionError):
-            runtime.settle_episode_invocation(writer, env.call_correlation, "done")
+        assert runtime.settle_episode_invocation(writer, env.call_correlation, "done")
+        runtime.shutdown()
         registry.save_ledger_snapshot = save  # type: ignore[method-assign]
 
         restored = TaskRuntime(
@@ -452,3 +450,56 @@ def test_a_cancel_during_a_cold_start_ends_the_origination(
     )
     assert not [record for record in caplog.records if record.levelname == "ERROR"]
     assert "resident_handoff" not in [kind for _, kind, _ in delivery.relays]
+
+
+def test_a_credit_release_the_admission_store_refused_is_finished_once(
+    tmp_path: Path,
+) -> None:
+    runtime = TaskRuntime(
+        cast(Any, FakeRegistry()),
+        cast(Any, _WorkerStub()),
+        OrchestrationConfig(),
+        make_result_reader(),
+        logging.getLogger("resident-test"),
+        credential_vault=InMemoryCredentialVault(),
+        durability_retry=manual_durability_retry,
+    )
+    svc, stores, _, loop, originated = _wire_resident_service(runtime)
+    admission = svc._admission
+    persist = admission._persist
+    told: list[str] = []
+    on_release = admission._on_release
+
+    def released(replica_id: str) -> None:
+        told.append(replica_id)
+        on_release(replica_id)
+
+    def refused() -> None:
+        raise ConnectionError("control redis unavailable")
+
+    admission._on_release = released
+    try:
+        workflow_id, ids = loop.run_until_complete(_register(runtime, _RESIDENT_WF))
+        writer = ids["writer"]
+        _capture_resident_boundary(runtime, writer, seal_in=tmp_path)
+        loop.run_until_complete(asyncio.sleep(0.05))
+        (env,) = originated
+        (claim,) = stores.claims.by_invocation(env.invocation_id)
+        assert claim.holds_credit
+
+        admission._persist = refused
+        assert runtime.settle_episode_invocation(writer, env.call_correlation, "done")
+        loop.run_until_complete(asyncio.sleep(0.05))
+        assert told == []
+        assert runtime._durability.pending(workflow_id)
+        admission._persist = persist
+
+        assert runtime._durability.run_due() == [workflow_id]
+        loop.run_until_complete(asyncio.sleep(0.05))
+    finally:
+        loop.close()
+
+    assert claim.state is ClaimState.TERMINAL
+    assert claim.terminal_reason is ClaimTerminalReason.COMPLETED
+    assert told == [claim.replica_id]
+    assert not stores.credit_ledger.held(claim.replica_id)

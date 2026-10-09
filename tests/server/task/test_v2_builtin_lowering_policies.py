@@ -350,15 +350,13 @@ def test_each_policy_is_selectable_at_its_own_hook() -> None:
 
 class _CapturingRegistry:
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list, v2=None, submitted_at: str | None = None
-    ) -> None:
-        return None
-
-    async def save_task_states_async(self, items: list) -> None:
-        return None
-
-    async def save_workflow_sched_async(
-        self, workflow_id: str, in_epoch_order: bool, frontier: int
+        self,
+        workflow_id: str,
+        tasks: Any,
+        sched: Any,
+        v2: Any = None,
+        ledger: Any = None,
+        submitted_at: str | None = None,
     ) -> None:
         return None
 

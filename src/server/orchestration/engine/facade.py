@@ -496,6 +496,11 @@ class OrchestrationEngine:
         """
         return self._attempt_lifecycle.on_uncertain(task_id, error)
 
+    def record_continuation(self, task_id: str, continuation: str) -> None:
+        """Record the continuation an episode's step yielded, which its next dispatch
+        resumes from."""
+        self._router.record_continuation(task_id, continuation)
+
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
         """Route an episode's boundary request back into the ledger, validated first.
 

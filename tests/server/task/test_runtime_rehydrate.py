@@ -10,7 +10,7 @@ import pytest
 from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
-from server.task.models import TaskStatus
+from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
@@ -32,13 +32,19 @@ class FakeWorkflowRegistry:
     async def register_workflow_async(
         self,
         workflow_id: str,
-        tasks: list[Any],
+        tasks: Sequence[PersistedTask],
+        sched: WorkflowSched,
         v2: Any = None,
+        ledger: Any = None,
         submitted_at: str | None = None,
     ) -> None:
-        self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
+        self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
+        self.save_task_states(tasks)
+        self.sched[workflow_id] = sched.model_dump_json()
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
+        if ledger is not None:
+            self.save_ledger_snapshot(workflow_id, ledger)
 
     async def get_v2_workflow_async(self, workflow_id: str) -> Any:
         from server.task.v2 import PersistedV2Workflow
@@ -84,7 +90,7 @@ class FakeWorkflowRegistry:
     async def get_workflow_record_async(self, workflow_id: str) -> Any:
         return self.get_workflow_record(workflow_id)
 
-    def save_task_states(self, items: list[PersistedTask]) -> None:
+    def save_task_states(self, items: Sequence[PersistedTask]) -> None:
         for item in items:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
 
@@ -145,6 +151,7 @@ class FakeWorkflowRegistry:
         records: Sequence[PersistedTask],
         snapshot: Any,
         retire: Sequence[str] = (),
+        **membership: Any,
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
@@ -409,7 +416,7 @@ async def test_terminal_task_does_not_regress_on_replayed_dispatch_or_start() ->
 
     # A replayed dispatch / start / progress update must not move a's status
     # back to DISPATCHED.
-    record_dispatch(runtime, a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker), expect=PublishGate.NOT_PENDING)
     runtime.mark_started(a, "wkr-1", {}, "2026-06-01T00:00:01Z")
     runtime.mark_updated(a, "wkr-1", {"note": "stale"})
 

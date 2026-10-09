@@ -659,9 +659,20 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   embodiment selection, dispatch or recovery, and it writes nothing to the orchestration
   ledger. Off by default; enable with `SERVER_METRICS_TELEMETRY_LEVEL`. See
   [`TELEMETRY.md`](TELEMETRY.md).
+- **Durable transitions.** A runtime transition commits its task records and ledger before
+  any side effect it causes runs, such as a resident credit release, a worker interrupt,
+  revoke or reap, a boundary handoff, a model-turn permit, or a credential purge. A write
+  that fails is held, the workflow's later writes land after it, and a background retry
+  lands it and redelivers any side effect whose delivery failed. What depends on a held
+  transition waits for it: a task event is acknowledged, and its task's log stream
+  closed, usage reported and exposed endpoints released, only once its transition is
+  durable, and the task is dispatched again only after that; a dispatch carrying a held
+  transition publishes once it is durable, and a cancel answers `503` meanwhile. A
+  submission registers its workflow, tasks and initial ledger in one write before any of
+  its work runs.
 - **Workflow completion.** A workflow closes once, through one serialized finalizer:
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
-  settled. The span's end is the last durable finish among its tasks, so a workflow that
+  durably settled. The span's end is the last durable finish among its tasks, so a workflow that
   closes again after a restart closes the same way it did the first time.
 - **Redis channels.** The runtime uses two Redis endpoints (separate instances in the
   stack):

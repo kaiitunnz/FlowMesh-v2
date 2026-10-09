@@ -3,16 +3,20 @@ task-event consumer."""
 
 import logging
 import threading
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 import redis.exceptions
 
+from server.services import monitoring
 from server.services.monitoring import (
     TASK_EVENT_HANDLER_MAX_ATTEMPTS,
     EventMonitor,
     _stream_id_tuple,
 )
+from server.task.runtime import TransitionNotDurable
 from shared.schemas.event import Event, TaskEvent
 
 
@@ -87,11 +91,15 @@ class _ConsumerMonitor(EventMonitor):
         fail_times: dict[str, int] | None = None,
         parse_raises_on: set[str] | None = None,
         conn_error_on: set[str] | None = None,
+        not_durable_times: dict[str, int] | None = None,
     ) -> None:
         self._redis_client = cast(Any, redis)
+        self._runtime = cast(Any, SimpleNamespace(acknowledging=nullcontext))
         self._stop_event = threading.Event()
         self._logger = logging.getLogger("consumer-test")
         self._event_handler_attempts: dict[str, int] = {}
+        self._not_durable_tries: dict[str, int] = {}
+        self._not_durable_times = dict(not_durable_times or {})
         self.handled: list[str] = []
         self._fail_times = dict(fail_times or {})
         self._parse_raises_on = parse_raises_on or set()
@@ -109,6 +117,10 @@ class _ConsumerMonitor(EventMonitor):
         self._handle_calls[event.task_id] = seen
         if event.task_id in self._conn_error_on:
             raise redis.exceptions.ConnectionError(f"redis down {event.task_id}")
+        if seen <= self._not_durable_times.get(event.task_id, 0):
+            raise TransitionNotDurable(
+                {"wfl-1": redis.exceptions.ReadOnlyError("read-only replica")}
+            )
         if seen <= self._fail_times.get(event.task_id, 0):
             raise RuntimeError(f"boom {event.task_id}")
         self.handled.append(event.task_id)
@@ -118,9 +130,12 @@ def _consumer(
     fail_times: dict[str, int] | None = None,
     parse_raises_on: set[str] | None = None,
     conn_error_on: set[str] | None = None,
+    not_durable_times: dict[str, int] | None = None,
 ) -> tuple[_ConsumerMonitor, _RecordingRedis, list[str]]:
     redis = _RecordingRedis()
-    monitor = _ConsumerMonitor(redis, fail_times, parse_raises_on, conn_error_on)
+    monitor = _ConsumerMonitor(
+        redis, fail_times, parse_raises_on, conn_error_on, not_durable_times
+    )
     return monitor, redis, monitor.handled
 
 
@@ -196,3 +211,24 @@ def test_batch_stops_mid_batch_when_stop_event_set() -> None:
     assert cursor == "1-0"
     assert redis.cursors == ["1-0"]
     assert handled == ["tsk-1"]
+
+
+def test_a_not_durable_event_holds_its_cursor_past_the_handler_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitoring, "_NOT_DURABLE_BACKOFF_SEC", 0.0)
+    tries = TASK_EVENT_HANDLER_MAX_ATTEMPTS * 2
+    monitor, recording, handled = _consumer(not_durable_times={"tsk-2": tries})
+    entries = [(f"{i}-0", {"task_id": f"tsk-{i}"}) for i in range(1, 4)]
+    assert monitor._consume_stream_batch(entries, "$") == "1-0"
+    for _ in range(tries - 1):
+        assert monitor._consume_stream_batch(entries[1:], "1-0") == "1-0"
+    assert handled == ["tsk-1"]
+    assert monitor._event_handler_attempts == {}
+
+    cursor = monitor._consume_stream_batch(entries[1:], "1-0")
+
+    assert cursor == "3-0"
+    assert handled == ["tsk-1", "tsk-2", "tsk-3"]
+    assert recording.cursors == ["1-0", "2-0", "3-0"]
+    assert monitor._not_durable_tries == {}

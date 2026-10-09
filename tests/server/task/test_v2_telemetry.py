@@ -834,14 +834,18 @@ class _SubmitTimeRegistry(FakeRegistry):
     async def register_workflow_async(
         self,
         workflow_id: str,
-        tasks: list[Any],
+        tasks: Any,
+        sched: Any,
         v2: Any = None,
+        ledger: Any = None,
         submitted_at: str | None = None,
     ) -> None:
         # Falls back to stamping here, exactly as the record's own default does, so
         # the assertion measures the ordering rather than the plumbing.
         self.submitted_at = submitted_at or now_iso()
-        await super().register_workflow_async(workflow_id, tasks, v2=v2)
+        await super().register_workflow_async(
+            workflow_id, tasks, sched, v2=v2, ledger=ledger
+        )
 
 
 def test_the_workflow_span_starts_no_later_than_its_earliest_child() -> None:

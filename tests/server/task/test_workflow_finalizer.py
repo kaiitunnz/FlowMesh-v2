@@ -422,7 +422,7 @@ def test_a_workflow_with_a_spawn_region_closes() -> None:
             # fan-out materialized so the region can close.
             for child in [
                 task_id
-                for task_id, child_record in runtime.tasks.items()
+                for task_id, child_record in runtime._tasks.items()
                 if child_record.workflow_id == workflow_id
                 and task_id.startswith("act-")
                 and child_record.status not in _TERMINAL

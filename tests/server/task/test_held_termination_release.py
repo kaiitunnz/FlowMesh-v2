@@ -2,34 +2,34 @@
 durable.
 
 A worker report whose durable writes fail completes in memory and is redelivered; a
-workflow it failed along the way keeps its resident credits until the replay makes the
-held ledger durable, so a crash in between never leaves a credit released against a
-ledger that still shows the invocation open.
+workflow it failed along the way keeps its resident credits until a later write makes
+the held ledger durable, so a crash in between never leaves a credit released against
+a ledger that still shows the invocation open.
 """
 
 import asyncio
+import logging
 import threading
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from server.config import OrchestrationConfig
 from server.orchestration.state import InvocationState, LedgerSnapshot
-from server.orchestration.tool_dispatch import ToolInvocationEnvelope
-from server.task.models import EventEffect, SettleOutcome
 from server.task.results import ResultUnreadable
-from server.task.runtime import TaskRuntime
-from server.task.runtime.commits import HeldWrites, _Unacknowledged
-from server.task.runtime.terminations import Termination
+from server.task.runtime import TaskRuntime, TransitionNotDurable
+from server.task.runtime.after_commit import AfterCommit, CreditRelease
 from shared.tools.contract import MediatedOperationOutcome
+from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
-from tests.server.result_store import result_payload
+from tests.server.result_store import make_result_reader, result_payload
+from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.task.test_agent_episode_runtime import _MODEL_HELD_SCRIPT, _step
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _register,
-    _runtime,
     _worker,
+    _WorkerRegistryStub,
 )
 from worker.executors.harness.scripted import ScriptedHarnessAdapter
 
@@ -62,6 +62,19 @@ spec:
 """
 
 
+def _runtime(registry: FakeRegistry) -> TaskRuntime:
+    """A runtime whose durability retry runs only when a test drives it."""
+    return TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        make_result_reader(),
+        logging.getLogger("held-termination"),
+        credential_vault=InMemoryCredentialVault(),
+        durability_retry=manual_durability_retry,
+    )
+
+
 class _Scenario:
     """An agent holds a model boundary while its workflow's spawn producer succeeds
     with a collection that cannot be read, which fails the workflow."""
@@ -73,9 +86,7 @@ class _Scenario:
         self.runtime.set_model_settler(captured.append)
         # Each release records the invocation's durable state at the moment it fires.
         self.releases: list[tuple[str, Any]] = []
-        self.runtime.set_resident_terminal_hook(
-            lambda inv, _failed: self.releases.append((inv, self.durable_state(inv)))
-        )
+        self.runtime.set_resident_terminal_hook(self._release)
         self.workflow_id, self.ids = asyncio.run(_register(self.runtime, _WF))
         _step(
             self.runtime,
@@ -97,6 +108,9 @@ class _Scenario:
         self._commit = self.registry.commit_transition
         self.writes = 0
 
+    def _release(self, invocation_id: str, _failed: bool) -> None:
+        self.releases.append((invocation_id, self.durable_state(invocation_id)))
+
     def durable_state(self, invocation_id: str) -> InvocationState:
         snapshot = LedgerSnapshot.model_validate_json(
             self.registry.ledger_blobs[self.workflow_id]
@@ -109,7 +123,7 @@ class _Scenario:
         def commit(*args: Any, **kwargs: Any) -> None:
             self.writes += 1
             if self.writes > allowed:
-                raise RuntimeError("redis down")
+                raise ConnectionError("redis down")
             self._commit(*args, **kwargs)
 
         self.registry.commit_transition = commit  # type: ignore[method-assign]
@@ -119,10 +133,11 @@ class _Scenario:
 
     def report_success(self) -> Exception | None:
         try:
-            self.runtime.mark_succeeded(
-                self.ids["planner"], "wkr-1", self.payload, _TS, "dsp-p"
-            )
-        except RuntimeError as exc:
+            with self.runtime.acknowledging():
+                self.runtime.mark_succeeded(
+                    self.ids["planner"], "wkr-1", self.payload, _TS, "dsp-p"
+                )
+        except TransitionNotDurable as exc:
             return exc
         return None
 
@@ -144,7 +159,23 @@ def test_the_replayed_report_releases_once_after_the_ledger_is_durable() -> None
     scenario.heal_writes()
 
     assert scenario.report_success() is None
+    assert scenario.report_success() is None
     assert scenario.releases == [(scenario.invocation_id, InvocationState.TERMINAL)]
+
+
+def test_the_durability_retry_releases_once_with_no_replay() -> None:
+    scenario = _Scenario()
+    scenario.fail_writes_after(1)
+    assert scenario.report_success() is not None
+    assert scenario.runtime._durability.run_due() == [scenario.workflow_id]
+    assert scenario.releases == []
+    assert scenario.runtime._durability.pending(scenario.workflow_id)
+    scenario.heal_writes()
+
+    assert scenario.runtime._durability.run_due() == [scenario.workflow_id]
+
+    assert scenario.releases == [(scenario.invocation_id, InvocationState.TERMINAL)]
+    assert not scenario.runtime._durability.pending(scenario.workflow_id)
 
 
 def test_an_unheld_failure_releases_once_after_the_ledger_is_durable() -> None:
@@ -153,14 +184,14 @@ def test_an_unheld_failure_releases_once_after_the_ledger_is_durable() -> None:
     assert scenario.releases == [(scenario.invocation_id, InvocationState.TERMINAL)]
 
 
-def test_a_replaced_stash_keeps_the_release_it_carries() -> None:
+def test_a_later_report_of_the_same_dispatch_keeps_the_release_held() -> None:
     scenario = _Scenario()
     planner = scenario.ids["planner"]
     scenario.fail_writes_after(1)
     assert scenario.report_success() is not None
-    # A failure report of the same dispatch replaces the stash while writes still fail.
-    with pytest.raises(RuntimeError):
+    with pytest.raises(TransitionNotDurable), scenario.runtime.acknowledging():
         scenario.runtime.fail_dispatch(planner, "wkr-1", {}, _TS, "dsp-p", error="late")
+    assert scenario.releases == []
     scenario.heal_writes()
 
     scenario.runtime.fail_dispatch(planner, "wkr-1", {}, _TS, "dsp-p", error="late")
@@ -168,57 +199,34 @@ def test_a_replaced_stash_keeps_the_release_it_carries() -> None:
     assert scenario.releases == [(scenario.invocation_id, InvocationState.TERMINAL)]
 
 
-def test_a_save_under_a_held_report_keeps_its_release_held() -> None:
+def test_a_failed_credit_release_is_retried_without_repeating_its_siblings() -> None:
     scenario = _Scenario()
     runtime = scenario.runtime
-    termination = Termination([], [], resident_invocation_ids=["inv-x"])
-    current = runtime._committer.report_writes.held = HeldWrites(
-        error=RuntimeError("down")
-    )
-    try:
-        with runtime._cv:
-            runtime._terminations.hold_termination_locked(
-                scenario.workflow_id, termination
-            )
-            runtime._committer.save_ledger_locked(scenario.workflow_id)
-    finally:
-        runtime._committer.report_writes.held = None
+    attempts: list[str] = []
 
-    assert runtime._terminations.pending_terminations == []
-    assert runtime._terminations.undurable_terminations[scenario.workflow_id] == [
-        termination
-    ]
-    assert current.workflow_ids == [scenario.workflow_id]
+    def flaky(invocation_id: str, failed: bool) -> None:
+        attempts.append(invocation_id)
+        if len(attempts) == 1:
+            raise ConnectionError("resident control unavailable")
+        scenario._release(invocation_id, failed)
 
+    runtime.set_resident_terminal_hook(flaky)
+    assert scenario.report_success() is None
+    assert scenario.releases == []
+    assert runtime._durability.pending(scenario.workflow_id)
 
-def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
-    scenario = _Scenario()
-    runtime = scenario.runtime
-    released: list[str] = []
-    runtime.set_resident_terminal_hook(lambda inv, _failed: released.append(inv))
-    planner = scenario.ids["planner"]
-    termination = Termination([], [], resident_invocation_ids=["inv-x"])
-    with runtime._cv:
-        runtime._terminations.hold_termination_locked(scenario.workflow_id, termination)
-    runtime._committer.unacknowledged[planner] = _Unacknowledged(
-        "TASK_CANCELLED",
-        "wkr-1",
-        "dsp-p",
-        HeldWrites(workflow_ids=[scenario.workflow_id]),
-        SettleOutcome(EventEffect.SETTLED, "cancelled", [], []),
-    )
+    assert runtime._durability.run_due() == [scenario.workflow_id]
 
-    runtime.mark_cancelled(planner, "wkr-1", {}, _TS, "dsp-p")
-
-    assert released == ["inv-x"]
-    assert runtime._terminations.pending_terminations == []
+    assert attempts == [scenario.invocation_id] * 2
+    assert scenario.releases == [(scenario.invocation_id, InvocationState.TERMINAL)]
+    assert not runtime._durability.pending(scenario.workflow_id)
 
 
 def _lock_probe(runtime: TaskRuntime) -> list[bool]:
-    """Queue a pending termination; records whether each release held the lock."""
+    """Owe one action; records whether its delivery held the lock."""
     owned: list[bool] = []
 
-    def release(termination: Termination) -> None:
+    def deliver(_workflow_id: str | None, _action: AfterCommit) -> None:
         # A reentrant acquire succeeds on the owning thread, so probe from another.
         def probe() -> None:
             free = runtime._lock.acquire(blocking=False)
@@ -230,14 +238,13 @@ def _lock_probe(runtime: TaskRuntime) -> list[bool]:
         thread.start()
         thread.join()
 
-    runtime._terminations.release_terminated_work = release  # type: ignore[method-assign]
-    runtime._terminations.pending_terminations.append(Termination([], []))
+    runtime._deliver = deliver  # type: ignore[method-assign,assignment]
+    runtime._actions.queue_locked(CreditRelease("inv-x", failed=True))
     return owned
 
 
-def test_a_mediated_outcome_releases_off_the_lock() -> None:
+def test_a_mediated_outcome_delivers_off_the_lock() -> None:
     runtime = _runtime(FakeRegistry())
-    runtime._mediated_ops.reap_mediated_op = lambda *_: None  # type: ignore[method-assign]
     owned = _lock_probe(runtime)
 
     runtime.settle_mediated_operation(
@@ -254,19 +261,7 @@ def test_a_mediated_outcome_releases_off_the_lock() -> None:
     assert owned == [False]
 
 
-def test_a_boundary_settled_under_the_lock_leaves_its_release_pending() -> None:
-    runtime = _runtime(FakeRegistry())
-    owned = _lock_probe(runtime)
-    env = SimpleNamespace(task_id="tsk-x", call_correlation="c0")
-
-    with runtime._cv:
-        runtime._dispatch_resident_op(cast(ToolInvocationEnvelope, env))
-
-    assert owned == []
-    assert runtime._terminations.pending_terminations
-
-
-def test_a_redispatched_boundary_releases_off_the_lock() -> None:
+def test_a_redispatched_boundary_delivers_off_the_lock() -> None:
     runtime = _runtime(FakeRegistry())
     owned = _lock_probe(runtime)
 
@@ -275,9 +270,9 @@ def test_a_redispatched_boundary_releases_off_the_lock() -> None:
     assert owned == [False]
 
 
-def test_a_stopped_resident_control_fails_its_boundary_under_the_lock() -> None:
-    runtime = _runtime(FakeRegistry())
-    owned = _lock_probe(runtime)
+def test_a_stopped_resident_control_fails_its_boundary_off_the_lock() -> None:
+    scenario = _Scenario()
+    runtime = scenario.runtime
     settled: list[str | None] = []
 
     def settle(*_args: Any, error: str | None = None, **_kwargs: Any) -> bool:
@@ -286,10 +281,11 @@ def test_a_stopped_resident_control_fails_its_boundary_under_the_lock() -> None:
 
     runtime._resident_originate = lambda _env: False
     runtime._settle_episode_invocation = settle  # type: ignore[method-assign]
-    env = SimpleNamespace(task_id="tsk-x", call_correlation="c0")
-
+    owned = _lock_probe(runtime)
     with runtime._cv:
-        runtime._dispatch_resident_op(cast(ToolInvocationEnvelope, env))
+        env = runtime._engines[scenario.workflow_id].pending_tool_dispatches()[0]
+
+    runtime._originate_resident(env)
 
     assert settled == ["resident-capacity control is not running"]
-    assert owned == []
+    assert owned == [False, False]

@@ -19,6 +19,7 @@ the same invocation identity rather than falling through to a wrong terminal.
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Collection, Coroutine, Set
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -543,8 +544,11 @@ class ResidentCapacityControl:
             attempt.origin, attempt.listener, [(transport, outcome)]
         )
 
-    def on_invocation_terminal(self, invocation_id: str, failed: bool = False) -> None:
-        """Release the admission credit from a fenced DS terminal outcome.
+    def on_invocation_terminal(
+        self, invocation_id: str, failed: bool = False
+    ) -> Future[bool]:
+        """Release the admission credit from a fenced DS terminal outcome, returning
+        the consumption: whether a claim released, or why consuming it failed.
 
         Wired on both the success and the failure/cancel settlement of a resident
         boundary, so every fenced terminal — not only a completion — releases the
@@ -552,18 +556,26 @@ class ResidentCapacityControl:
         mutation is marshaled onto the loop the origination coroutines run on, keeping
         every access to the claim store and attempt map single-threaded.
         """
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                self._settle_terminal_local, invocation_id, failed
-            )
-        else:
-            self._settle_terminal_local(invocation_id, failed)
+        consumed: Future[bool] = Future()
 
-    def _settle_terminal_local(self, invocation_id: str, failed: bool) -> None:
+        def consume() -> None:
+            try:
+                consumed.set_result(self._settle_terminal_local(invocation_id, failed))
+            except Exception as exc:
+                consumed.set_exception(exc)
+
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(consume)
+        else:
+            consume()
+        return consumed
+
+    def _settle_terminal_local(self, invocation_id: str, failed: bool) -> bool:
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
         released = self._admission.settle_invocation_terminal(invocation_id, reason)
         self._transient_failures.pop(invocation_id, None)
         self._reap_attempt(invocation_id, released)
+        return released
 
     def _reap_attempt(self, invocation_id: str, released: bool = False) -> None:
         """Reap both ends of a resident invocation on its fenced terminal.

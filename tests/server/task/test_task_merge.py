@@ -14,7 +14,7 @@ from server.dispatcher.base import Dispatcher
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.schemas.event import TaskEvent, WorkerEvent
 from shared.tasks.specs.common import ConditionSpec
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -350,9 +350,10 @@ async def test_a_replayed_merged_failure_is_absorbed(retryable: bool) -> None:
     monitor = _monitor(runtime)
     event = _failed(ids["a"], "batch rejected", retryable=retryable)
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable), monitor._runtime.acknowledging():
         monitor.handle_task_event(event)
+    registry.down = False
     monitor.handle_task_event(event)
 
     for task_id in ids.values():
@@ -579,9 +580,10 @@ async def test_a_replayed_success_heals_a_merged_childs_other_workflow() -> None
     record_dispatch(runtime, parent, _WORKER)
     payload = _merged_success(runtime, parent, b["b1"])
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.mark_succeeded(parent, "wkr-1", payload, _TS)
+    registry.down = False
     assert registry.durable_status(b["b1"]) == TaskStatus.DISPATCHED
     runtime.mark_succeeded(parent, "wkr-1", payload, _TS)
 
@@ -601,9 +603,10 @@ async def test_a_failed_commit_leaves_a_parent_failure_whole_for_its_replay() ->
     assert runtime.plan_merge(parent, 8, _WORKER.id) == [t["a2"], t["a3"]]
     record_dispatch(runtime, parent, _WORKER)
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.mark_failed(parent, "wkr-1", {}, _TS, error="bad input")
+    registry.down = False
     runtime.mark_failed(parent, "wkr-1", {}, _TS, error="bad input")
 
     assert runtime._tasks[t["a4"]].status == TaskStatus.FAILED
@@ -625,9 +628,10 @@ async def test_a_failed_commit_leaves_a_parent_success_whole_for_its_replay() ->
     record_dispatch(runtime, parent, _WORKER)
     payload = _merged_success(runtime, parent)
 
-    registry.fail_next = True
-    with pytest.raises(ConnectionError):
+    registry.down = True
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.mark_succeeded(parent, "wkr-1", payload, _TS)
+    registry.down = False
     runtime.mark_succeeded(parent, "wkr-1", payload, _TS)
 
     assert {_next(runtime), _next(runtime)} == {a["a2"], b["b1"]}
@@ -641,10 +645,8 @@ async def test_a_merge_planned_while_the_store_is_down_returns_its_siblings() ->
     parent = _next(runtime)
 
     registry.down = True
-    with pytest.raises(ConnectionError):
-        runtime.plan_merge(parent, 8, _WORKER.id)
-    with pytest.raises(ConnectionError):
-        runtime.return_dispatch(parent, None, increment_retry=False, front=True)
+    assert runtime.plan_merge(parent, 8, _WORKER.id) == [t["b"], t["c"]]
+    runtime.return_dispatch(parent, None, increment_retry=False, front=True)
     registry.down = False
 
     for child in (t["b"], t["c"]):
@@ -803,7 +805,8 @@ async def test_a_restored_task_merges_under_its_current_key() -> None:
     legacy_key = "vllm:legacy-unscoped"
     for task_id in (x["a"], y["b"]):
         runtime._tasks[task_id].merge_key = legacy_key
-        runtime._committer.persist_locked(task_id)
+        with runtime._lock:
+            runtime._committer.persist_locked(task_id)
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -870,7 +873,8 @@ async def test_a_restart_returns_the_children_of_a_parent_no_longer_running(
     ids = await _dispatch_merged(runtime, dispatch=False)
     if parent_status != TaskStatus.PENDING:
         runtime._tasks[ids["a"]].status = parent_status
-        runtime._committer.persist_locked(ids["a"])
+        with runtime._lock:
+            runtime._committer.persist_locked(ids["a"])
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -978,3 +982,16 @@ async def test_a_merged_child_of_a_cancelled_workflow_stays_cancelled() -> None:
         assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
     for task_id in first_ids.values():
         assert runtime._tasks[task_id].status == TaskStatus.DONE
+
+
+@pytest.mark.anyio
+async def test_planning_a_merge_adds_no_bucket_for_a_worker_it_looked_up() -> None:
+    runtime = _runtime(_Registry())
+    await _register(runtime, _siblings(names=("a",)))
+    a = _next(runtime)
+    before = dict(runtime._ready.merge_buckets)
+
+    for worker_id in ("wkr-1", "wkr-2", "wkr-3"):
+        assert runtime.plan_merge(a, 8, worker_id) == []
+
+    assert runtime._ready.merge_buckets == before

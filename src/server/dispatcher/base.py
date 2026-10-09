@@ -38,7 +38,13 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.credentials import credential_merge_key
 from ..task.metadata import extract_model_dataset_names
-from ..task.models import SERVE_TASK_TYPES, DispatchEnd, TaskRecord, TaskStatus
+from ..task.models import (
+    SERVE_TASK_TYPES,
+    DispatchEnd,
+    PublishGate,
+    TaskRecord,
+    TaskStatus,
+)
 from ..task.results import ResultUnavailable
 from ..task.runtime import TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
@@ -431,14 +437,7 @@ class Dispatcher:
         if not self._control.enabled:
             return self._dispatch_once_impl(task_id)
         record = self._runtime.get_record(task_id)
-        engine = (
-            self._runtime.orchestration_engine(record.workflow_id)
-            if record is not None
-            else None
-        )
-        work_item_id = (
-            engine.work_item_id_for_task(task_id) if engine is not None else None
-        )
+        work_item_id = self._runtime.work_item_id(task_id)
         if record is None or work_item_id is None:
             return self._dispatch_once_impl(task_id)
         with self._control.episode_stage(
@@ -825,10 +824,21 @@ class Dispatcher:
         )
 
         # 8. Give the task what it reads and writes its content under, then publish it
-        if not self._runtime.begin_publish(
+        match self._runtime.begin_publish(
             task_id, worker, dispatch_id, input_preparation=preparing
         ):
-            return True
+            case PublishGate.NOT_PENDING:
+                return True
+            case PublishGate.REPORTING:
+                # The runtime queues the task again once its report is handled.
+                self._runtime.release_merge(task_id)
+                return True
+            case PublishGate.NOT_DURABLE:
+                # The task waits behind the queue, spending no attempt, while the
+                # runtime makes what the dispatch would carry durable.
+                self._runtime.release_merge(task_id)
+                self.requeue_task(task_id, reason="not_durable", count_retry=False)
+                return False
         # The worker is reserved BUSY for this dispatch before it can start the task,
         # so only the IDLE that ends this dispatch frees it.
         if not self._reserve_worker(worker, task_id, dispatch_id):

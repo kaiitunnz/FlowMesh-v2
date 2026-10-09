@@ -68,6 +68,12 @@ class EpisodeBoundaryRouter:
         self._spawns = spawns
         self._budget = budget
 
+    def record_continuation(self, task_id: str, continuation: str) -> None:
+        """Record the continuation an episode's step yielded, which its next dispatch
+        resumes from."""
+        if (wi := self._ledger.work_item_for_task(task_id)) is not None:
+            wi.continuation_ref = continuation
+
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
         """Route an episode's boundary request back into the ledger, validated first."""
         wi = self._ledger.work_item_for_task(task_id)

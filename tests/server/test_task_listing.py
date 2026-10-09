@@ -302,7 +302,7 @@ def test_an_unbounded_listing_returns_the_newest_page(listing: _Listing) -> None
 
     page = response.json()
     newest = sorted(
-        listing.runtime.tasks.values(), key=lambda r: (r.submitted_ts, r.task_id)
+        listing.runtime._tasks.values(), key=lambda r: (r.submitted_ts, r.task_id)
     )[-100:]
     assert [t["task_id"] for t in page["entries"]] == [r.task_id for r in newest]
 
@@ -348,7 +348,7 @@ def test_cursors_walk_every_task_once_while_tasks_are_added() -> None:
     for index in range(6):
         asyncio.run(_register(runtime, _workflow(index, stages=3)))
     app = _app(runtime)
-    initial = set(runtime.tasks)
+    initial = set(runtime._tasks)
 
     seen: list[str] = []
     before: str | None = None
@@ -365,7 +365,7 @@ def test_cursors_walk_every_task_once_while_tasks_are_added() -> None:
     assert sorted(seen) == sorted(initial)
     assert len(seen) == len(set(seen))
 
-    oldest = min(runtime.tasks.values(), key=lambda r: (r.submitted_ts, r.task_id))
+    oldest = min(runtime._tasks.values(), key=lambda r: (r.submitted_ts, r.task_id))
     info = runtime.describe_task(oldest.task_id)
     assert info is not None
     forward = [oldest.task_id]
@@ -374,7 +374,7 @@ def test_cursors_walk_every_task_once_while_tasks_are_added() -> None:
         forward.extend(t["task_id"] for t in entries)
         page = _get(app, f"/api/v1/tasks?limit=5&after={page.json()['next_cursor']}")
     assert forward == sorted(
-        runtime.tasks, key=lambda t: (runtime.tasks[t].submitted_ts, t)
+        runtime._tasks, key=lambda t: (runtime._tasks[t].submitted_ts, t)
     )
 
 
@@ -399,7 +399,7 @@ def test_entries_serialize_as_the_response_model_does(listing: _Listing) -> None
     response = _get(_app(listing.runtime), f"/api/v1/tasks?workflow_id={workflow_id}")
 
     infos = []
-    for task_id in sorted(tasks, key=lambda t: listing.runtime.tasks[t].submitted_ts):
+    for task_id in sorted(tasks, key=lambda t: listing.runtime._tasks[t].submitted_ts):
         info = listing.runtime.describe_task(task_id)
         assert info is not None
         tasks_router._sanitize_latest_update(info)
@@ -434,7 +434,7 @@ def test_a_listing_never_redacts(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == ["native"]
 
     _get(_app(runtime), "/api/v1/tasks?limit=1000")
-    for record in runtime.tasks.values():
+    for record in runtime._tasks.values():
         record.model_dump_json()
     assert calls == ["native"]
 
@@ -444,7 +444,7 @@ def test_a_page_is_unaffected_by_appends_after_its_lock_pass(
 ) -> None:
     runtime = _live_runtime(FakeRegistry())
     _, tasks = asyncio.run(_register(runtime, _workflow(0, stages=1)))
-    record = runtime.tasks[tasks[0]]
+    record = runtime._tasks[tasks[0]]
     record.failed_workers.append("wkr-before")
 
     class _AppendingFirst(TaskInfo):
