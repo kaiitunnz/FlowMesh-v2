@@ -79,6 +79,7 @@ from ..state import (
     LedgerSnapshot,
     LoopInstance,
     Occurrence,
+    OccurrencePlace,
     ProgressAxis,
     ProgressCapability,
     PublicationOutcome,
@@ -1037,6 +1038,28 @@ class OrchestrationEngine:
             self._ledger.occurrence_by_activation.get(wi.activation_id) if wi else None
         )
         return self._ledger.occurrences.get(key) if key else None
+
+    def occurrence_place(self, task_id: str) -> OccurrencePlace | None:
+        """Where a task runs inside a region definition, by authored names: the member
+        it runs, the child context it runs in, and its loop times; None at the root."""
+        occurrence = self.occurrence_of(task_id)
+        if occurrence is None:
+            return None
+        names = {e.logical_ref: e.source_id for e in self.template.source_map}
+        time: list[tuple[str, int]] = []
+        for frame in occurrence.time:
+            instance = self._ledger.loop_instances.get(frame.loop)
+            loop_op = (
+                self._ledger.occurrence(instance.occurrence).operator_id
+                if instance is not None
+                else frame.loop
+            )
+            time.append((names.get(loop_op, loop_op), frame.iteration))
+        return OccurrencePlace(
+            member=names.get(occurrence.operator_id, occurrence.operator_id),
+            context=occurrence.context_id or None,
+            time=tuple(time),
+        )
 
     def legacy_control_regions(self) -> list[str]:
         """Branch and loop operators stored before they had a runnable contract."""

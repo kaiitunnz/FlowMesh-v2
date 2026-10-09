@@ -11,7 +11,7 @@ import pytest
 from server.config import OrchestrationConfig
 from server.orchestration import OrchestrationEngine, PublicationOutcome
 from server.registries.workflow import PersistedTask
-from server.task.models import TaskStatus
+from server.task.models import TaskLoopTime, TaskOccurrence, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from server.task.v2.compiler import regions
@@ -500,3 +500,23 @@ async def test_a_child_of_a_projected_fan_out_runs_on_its_element_of_the_part() 
         (None, ("nested", 0)),
         (None, ("nested", 1)),
     ]
+
+
+@pytest.mark.anyio
+async def test_a_loop_body_task_names_its_member_and_loop_time() -> None:
+    run = await _Run().start(_workflow(_LOOP_NODES, _LOOP))
+    seed = run.run("seed")
+    first = run.run("step", {"route": "again"})
+    (second,) = [t for t in run.ready if run.name(t) == "step"]
+
+    places = [run.runtime.describe_task(t) for t in (first, second)]
+    assert [p.occurrence for p in places if p is not None] == [
+        TaskOccurrence(
+            member="body/step", time=[TaskLoopTime(loop="refine", iteration=0)]
+        ),
+        TaskOccurrence(
+            member="body/step", time=[TaskLoopTime(loop="refine", iteration=1)]
+        ),
+    ]
+    root = run.runtime.describe_task(seed)
+    assert root is not None and root.occurrence is None

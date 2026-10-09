@@ -119,6 +119,8 @@ from ..models import (
     SettleOutcome,
     TaskInfo,
     TaskInputElement,
+    TaskLoopTime,
+    TaskOccurrence,
     TaskOrder,
     TaskParsingResult,
     TaskRecord,
@@ -5392,6 +5394,8 @@ class TaskRuntime:
         """Return a task's ``TaskInfo`` fields to build from after the lock is
         released, duplicating the containers a record appends to in place."""
         element = self._content_bindings.input_element_locked(task_id)
+        engine = self._engines.get(record.workflow_id)
+        place = engine.occurrence_place(task_id) if engine is not None else None
         return {
             **{
                 name: value.copy() if isinstance(value, (list, dict)) else value
@@ -5409,6 +5413,18 @@ class TaskRuntime:
                     path=list(element.ref.path),
                 )
                 if element is not None
+                else None
+            ),
+            "occurrence": (
+                TaskOccurrence(
+                    member=place.member,
+                    context=place.context,
+                    time=[
+                        TaskLoopTime(loop=loop, iteration=iteration)
+                        for loop, iteration in place.time
+                    ],
+                )
+                if place is not None
                 else None
             ),
         }

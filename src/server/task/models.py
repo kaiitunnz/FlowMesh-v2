@@ -340,6 +340,25 @@ def task_order(record: TaskRecord) -> TaskOrder:
     return record.submitted_ts, record.task_id
 
 
+class TaskLoopTime(BaseModel):
+    """One loop time a task runs at."""
+
+    loop: str = Field(description="Graph node name of the loop.")
+    iteration: int = Field(description="The loop's time, from 0.")
+
+
+class TaskOccurrence(BaseModel):
+    """Where inside a template a task runs."""
+
+    member: str = Field(description="The template member it runs, as template/node.")
+    context: str | None = Field(
+        default=None, description="The spawned child whose template it runs in."
+    )
+    time: list[TaskLoopTime] = Field(
+        default_factory=list, description="The loop times it runs at, outermost first."
+    )
+
+
 class TaskInfo(TaskRecord):
     depends_on: list[str] = Field(description="Dependency task IDs.")
     pending_dependencies: list[str] = Field(
@@ -350,6 +369,9 @@ class TaskInfo(TaskRecord):
     failed: bool = Field(description="Whether the task failed.")
     input_element: TaskInputElement | None = Field(
         default=None, description="The producer element a fan-out child runs on."
+    )
+    occurrence: TaskOccurrence | None = Field(
+        default=None, description="Where inside a template the task runs."
     )
 
 

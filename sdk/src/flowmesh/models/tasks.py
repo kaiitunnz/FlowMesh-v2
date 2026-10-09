@@ -27,6 +27,17 @@ class TaskInputElement(BaseModel):
     path: list[str | int] = Field(default_factory=list)
 
 
+class TaskLoopTime(BaseModel):
+    loop: str
+    iteration: int
+
+
+class TaskOccurrence(BaseModel):
+    member: str
+    context: str | None = None
+    time: list[TaskLoopTime] = Field(default_factory=list)
+
+
 class TaskInfo(BaseModel):
     task_id: str
     workflow_id: str
@@ -71,6 +82,7 @@ class TaskInfo(BaseModel):
     completed: bool
     failed: bool
     input_element: TaskInputElement | None = None
+    occurrence: TaskOccurrence | None = None
 
 
 class TaskPage(CursorPage):

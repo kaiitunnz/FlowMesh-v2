@@ -661,6 +661,17 @@ class TimeFrame(BaseModel):
 type NestedTime = tuple[TimeFrame, ...]
 
 
+class OccurrencePlace(BaseModel):
+    """Where an occurrence runs, by authored names: the definition member, the child
+    context, and each enclosing loop's name and time, outermost first."""
+
+    model_config = ConfigDict(frozen=True)
+
+    member: str
+    context: str | None = None
+    time: tuple[tuple[str, int], ...] = ()
+
+
 class Occurrence(BaseModel):
     """One tagged occurrence of a template operator in a child context and time.
 
