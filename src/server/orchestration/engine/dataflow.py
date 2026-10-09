@@ -525,6 +525,17 @@ class RegionFlow:
             wi = self._ledger.work_items.get(wi_id) if wi_id else None
             if wi is None or wi.status is not WorkItemStatus.BLOCKED:
                 return
+            required = [i for i in inputs if i.use is not DependencyUse.ORDER_ONLY]
+            if failed := [i for i in required if i.state is EdgeState.FAILED]:
+                # A value or route that resolved as a failure delivers nothing to run
+                # on.
+                wi.failure_reason = dependency_failed(failed[0].edge.from_op)
+                advance.extend(self.settle_failed_wi(wi))
+                return
+            if any(i.state is EdgeState.CANCELLED for i in required):
+                self._cancel_work_item(wi)
+                advance.cancelled.append(wi.legacy_task_id)
+                return
             if self._inactive(occurrence, op, inputs):
                 self.mark_dead(key, advance)
             else:

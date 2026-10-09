@@ -4,7 +4,7 @@ logical times, frontier-gated release, budgets, failure and restart."""
 import pytest
 
 from server.config import OrchestrationConfig
-from server.orchestration import ScopeBudget
+from server.orchestration import OrchestrationEngine, ScopeBudget
 from server.orchestration.state import (
     ControlStatus,
     IterationKind,
@@ -13,9 +13,10 @@ from server.orchestration.state import (
     ValueRef,
     WorkItemStatus,
 )
+from server.task.v2 import CompileError
 from server.task.v2.compiler import region_checks
 
-from .control_flow import ECHO, Driver, workflow
+from .control_flow import ECHO, Driver, compile_text, workflow
 
 _BODY = f"""
     templates:
@@ -829,3 +830,87 @@ def test_a_failed_instance_discards_a_pending_body_route() -> None:
     instance = run.engine.loop_instance("refine")
     assert instance is not None and instance.status is LoopInstanceStatus.FAILED
     assert run.engine.iteration("refine", 0) is None
+
+
+_TWO_CARRIED = f"""
+    templates:
+      - name: body
+        inputs: [{{name: s, role: carried}}, {{name: t, role: carried}}]
+        nodes:
+          - name: step
+            dependsOn:
+              - {{node: $ingress, port: s, input: s}}
+              - {{node: $ingress, port: t, input: t}}
+            spec: {ECHO}
+          - name: route
+            dependsOn: [{{node: step, input: input}}]
+            region:
+              kind: branch
+              inputs: [{{name: input}}]
+              outputs: [{{name: again}}, {{name: done}}]
+              selection: {{input: input}}
+        edges:
+          - from: {{node: route, port: again}}
+            to: {{node: $feedback, port: s}}
+          - from: {{node: route, port: again}}
+            to: {{node: $feedback, port: t}}
+          - from: {{node: route, port: done}}
+            to: {{node: $egress, port: s}}
+          - from: {{node: route, port: done}}
+            to: {{node: $egress, port: t}}
+"""
+
+
+def _two_carried(dependency: str) -> str:
+    return workflow(
+        f"""
+      - name: seed
+        spec: {ECHO}
+      - name: refine
+        dependsOn: [{{node: seed, input: s}}, {{node: seed, input: t}}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{{name: s}}, {{name: t}}]
+      - name: consume
+        dependsOn: [{dependency}]
+        spec: {ECHO}
+""",
+        _TWO_CARRIED,
+    )
+
+
+def test_a_value_read_naming_no_port_of_a_two_port_loop_is_refused() -> None:
+    with pytest.raises(CompileError) as exc:
+        compile_text(_two_carried("{node: refine, input: x}"))
+    assert "ports.ambiguous-output" in {d.code for d in exc.value.diagnostics}
+
+
+def test_an_ordering_dependency_on_a_two_port_loop_runs_after_it() -> None:
+    run = Driver(_two_carried("refine"))
+    run.run_one("seed")
+    run.run_one("step")
+    run.select("done")
+    assert [run.name(t) for t in run.ready] == ["consume"]
+
+
+def test_a_required_value_that_resolved_failed_fails_its_consumer() -> None:
+    run = Driver(_two_carried("{node: refine, port: s, input: x}"))
+    # A plan stored before the read was refused names no port of the loop.
+    consume = run.ops["consume"]
+    edges = [
+        edge.model_copy(update={"from_port": None}) if edge.to_op == consume else edge
+        for edge in run.bundle.template.edges
+    ]
+    run.bundle = run.bundle.model_copy(
+        update={"template": run.bundle.template.model_copy(update={"edges": edges})}
+    )
+    run.engine = OrchestrationEngine.build("wfl-cf", "owner", "org", run.bundle)
+    run.ready = []
+    run.apply(run.engine.initial_advance())
+    run.run_one("seed")
+    run.run_one("step")
+    run.select("done")
+    assert run.ready == []
+    assert consume in run.failed

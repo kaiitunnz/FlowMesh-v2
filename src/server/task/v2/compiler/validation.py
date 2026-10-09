@@ -4,6 +4,7 @@ from shared.sandbox import SANDBOX_EGRESS_INTERFACE, SANDBOX_EXECUTE_INTERFACE
 from shared.tasks.specs import ModelBindingMode
 
 from ..representations.operators import (
+    REGION_OPERATOR_KINDS,
     AgentOperator,
     AuthorityCeiling,
     BranchRegion,
@@ -27,6 +28,7 @@ from ..representations.results import CardinalityKind, ReleaseConditionKind
 from ..representations.template import (
     RETURN_KINDS,
     BoundaryKind,
+    DependencyUse,
     LogicalWorkflowTemplate,
     TemplateEdge,
 )
@@ -95,11 +97,31 @@ def _check_ports(
     diags: list[Diagnostic] = []
     outputs_by_op = {op.operator_id: _output_names(op) for op in template.operators}
     inputs_by_op = {op.operator_id: _input_names(op) for op in template.operators}
+    controls = {
+        op.operator_id: op.kind in REGION_OPERATOR_KINDS for op in template.operators
+    }
     for edge in template.edges:
         # A boundary end's port is a definition input or return, checked with the
         # definition.
         entry = edge.boundary is BoundaryKind.ENTRY
         leaving = edge.boundary in RETURN_KINDS
+        if (
+            edge.from_port is None
+            and edge.is_forward
+            and edge.use is DependencyUse.VALUE_REQUIRED
+            and len(outputs := outputs_by_op.get(edge.from_op, set())) > 1
+            and controls.get(edge.from_op, False)
+        ):
+            diags.append(
+                Diagnostic(
+                    code="ports.ambiguous-output",
+                    message=(
+                        f"a read of {edge.from_op!r} names none of its output ports "
+                        f"{sorted(outputs)}"
+                    ),
+                    location=loc.get(edge.to_op),
+                )
+            )
         if edge.from_port is not None and not entry:
             names = outputs_by_op.get(edge.from_op, set())
             if edge.from_port not in names:
