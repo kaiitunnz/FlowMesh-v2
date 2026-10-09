@@ -12,6 +12,7 @@ from server.registries.workflow import WorkflowRecord, WorkflowRegistry
 from server.task.models import TaskStatus
 from server.task.runtime import control_reads
 from server.task.runtime import facade as runtime_facade
+from server.task.v2 import PersistedV2Workflow
 from shared.harness.boundary import BoundaryEventKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
@@ -384,3 +385,46 @@ async def test_work_with_no_blueprint_fails_its_workflow_by_name() -> None:
     failure = restored.engine.control_failure()
     assert failure is not None and failure.startswith("BlueprintMissing")
     assert restored.registry.control[run.workflow_id].failure == failure
+
+
+@pytest.mark.anyio
+async def test_a_workflow_this_server_cannot_read_fails_alone() -> None:
+    run = await _Run().start(_workflow(_DIAMOND))
+    registry = run.registry
+    other = run.workflow_id
+    broken, _ = await _register(run.runtime, _workflow(_DIAMOND))
+    registry.v2_blobs[broken] = "{}"
+
+    restored = _Run(registry, run.reader)
+    assert await restored.runtime.rehydrate() == 1
+    assert restored.runtime.orchestration_engine(other) is not None
+    assert restored.runtime.orchestration_engine(broken) is None
+    failure = registry.control[broken].failure
+    assert failure is not None and failure.startswith("UnsupportedWorkflowVersion")
+
+
+@pytest.mark.anyio
+async def test_a_running_workflow_through_a_pre_contract_branch_fails_on_restart() -> (
+    None
+):
+    run = await _Run().start(_workflow(_DIAMOND))
+    run.run("classify", {"label": "yes"})
+    registry = run.registry
+    bundle = PersistedV2Workflow.model_validate_json(registry.v2_blobs[run.workflow_id])
+    decide = next(
+        e.logical_ref for e in bundle.template.source_map if e.source_id == "decide"
+    )
+    operators = [
+        op.model_copy(update={"rule": None}) if op.operator_id == decide else op
+        for op in bundle.template.operators
+    ]
+    registry.v2_blobs[run.workflow_id] = bundle.model_copy(
+        update={"template": bundle.template.model_copy(update={"operators": operators})}
+    ).model_dump_json()
+
+    restored = await run.restart()
+    failure = restored.engine.control_failure()
+    assert failure is not None
+    assert failure.startswith("LegacyControlRegionUnsupported")
+    record = restored.runtime.get_record(run.ids["left_work"])
+    assert record is not None and record.status == TaskStatus.FAILED

@@ -56,6 +56,7 @@ from ...task.v2.representations.operators import (
 )
 from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 from ...task.v2.representations.results import CardinalityKind, ResultDeclaration
+from ...task.v2.representations.template import LogicalWorkflowTemplate
 from ..guardrails import ScopeBudget
 from ..outcomes import check_admissible
 from ..state import (
@@ -1069,6 +1070,11 @@ class OrchestrationEngine:
         """Cancel the whole workflow instance: the root scope and every descendant."""
         self._failures.instance_cancelled = True
         return self.cancel_scope(self._ledger.root_scope.scope_id)
+
+    @property
+    def template(self) -> LogicalWorkflowTemplate:
+        """The logical template the instance runs."""
+        return self._topology.bundle.template
 
     def instance_cancelled(self) -> bool:
         """Whether the whole workflow instance was cancelled."""

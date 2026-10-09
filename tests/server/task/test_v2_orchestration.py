@@ -189,6 +189,9 @@ class FakeRegistry:
         if control is not None:
             self.control[workflow_id] = control
 
+    async def commit_transition_async(self, workflow_id: str, **kwargs: Any) -> None:
+        self.commit_transition(workflow_id, **kwargs)
+
     def commit_dynamic_tasks(
         self,
         workflow_id: str,

@@ -60,7 +60,6 @@ from shared.utils.redact import credential_scrubber
 from ...config import AgentBindingConfig, N8nConfig, OrchestrationConfig
 from ...orchestration import (
     Advance,
-    LedgerSnapshot,
     OrchestrationEngine,
     RecoveryDisposition,
     RegionError,
@@ -69,6 +68,7 @@ from ...orchestration import (
     ValueRef,
     WorkItemStatus,
 )
+from ...orchestration.engine.advance import legacy_control_unsupported
 from ...orchestration.engine.topology import (
     blueprint_operators,
     materialized_operators,
@@ -86,7 +86,12 @@ from ...orchestration.tool_dispatch import (
     ToolOutcomeStatus,
 )
 from ...registries.worker import Worker, WorkerRegistry
-from ...registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
+from ...registries.workflow import (
+    PersistedTask,
+    WorkflowControl,
+    WorkflowRegistry,
+    WorkflowSched,
+)
 from ...services.credential_vault import CredentialVault
 from ...utils.cursors import page_slice
 from ...utils.query import QueryFilter
@@ -167,7 +172,7 @@ from .after_commit import (
     Settled,
 )
 from .agent_inputs import AgentInputs
-from .commits import TransitionCommitter, TransitionNotDurable
+from .commits import TransitionCommitter, TransitionNotDurable, store_unavailable
 from .content_bindings import ContentBindings
 from .dispatch_fence import DispatchFence, Publish, supplier_id
 from .episode_dispatch import EpisodeDispatch, EpisodeFeasibility
@@ -871,49 +876,22 @@ class TaskRuntime:
         rehydrated_at = time.time()
         restored: list[str] = []
         for workflow_id in sorted(workflow_ids):
-            wf_record = await self._workflow_registry.get_workflow_record_async(
-                workflow_id
-            )
-            if wf_record is None:
+            try:
+                stored = await self._load_stored_workflow(workflow_id)
+            except Exception as exc:
+                if store_unavailable(exc):
+                    raise
+                await self._fail_unrestorable_workflow(workflow_id, exc)
                 continue
-            dynamic_ids = await self._workflow_registry.get_dynamic_task_ids_async(
-                workflow_id
-            )
-            task_ids = list(dict.fromkeys([*wf_record.task_ids, *sorted(dynamic_ids)]))
-            tasks: list[PersistedTask] = [
-                state
-                for state in await self._workflow_registry.load_task_states_async(
-                    *task_ids
-                )
-                if state
-            ]
-            if not tasks:
+            if stored is None:
                 continue
-            await self._vault_stored_credentials(workflow_id, tasks)
-            remaining = await self._workflow_registry.get_remaining_tasks_async(
-                workflow_id
-            )
-            sched = await self._workflow_registry.load_workflow_sched_async(workflow_id)
-            snapshot = await self._workflow_registry.load_ledger_snapshot_async(
-                workflow_id
-            )
-            bundle = (
-                await self._workflow_registry.get_v2_workflow_async(workflow_id)
-                if snapshot is not None
-                else None
-            )
-            blueprints = (
-                await self._workflow_registry.load_blueprints_async(workflow_id)
-                if bundle is not None
-                else []
-            )
+            tasks, remaining, sched, engine, blueprints = stored
             with self._transition():
-                if snapshot is not None and bundle is not None:
+                if engine is not None:
                     self._install_rehydrated_v2_workflow_locked(
                         workflow_id,
                         tasks,
-                        snapshot,
-                        bundle,
+                        engine,
                         rehydrated_at,
                         [persisted.record for persisted in blueprints],
                         remaining,
@@ -956,6 +934,67 @@ class TaskRuntime:
                 "Rehydrated %d workflow(s) from durable state", len(restored)
             )
         return len(restored)
+
+    async def _load_stored_workflow(self, workflow_id: str) -> (
+        tuple[
+            list[PersistedTask],
+            set[str],
+            WorkflowSched | None,
+            OrchestrationEngine | None,
+            list[PersistedTask],
+        ]
+        | None
+    ):
+        """Read a stored workflow and restore its orchestration engine, without
+        installing either: its tasks, remaining set, schedule, engine and task
+        blueprints, or None when it holds no task."""
+        wf_record = await self._workflow_registry.get_workflow_record_async(workflow_id)
+        if wf_record is None:
+            return None
+        dynamic_ids = await self._workflow_registry.get_dynamic_task_ids_async(
+            workflow_id
+        )
+        task_ids = list(dict.fromkeys([*wf_record.task_ids, *sorted(dynamic_ids)]))
+        tasks: list[PersistedTask] = [
+            state
+            for state in await self._workflow_registry.load_task_states_async(*task_ids)
+            if state
+        ]
+        if not tasks:
+            return None
+        await self._vault_stored_credentials(workflow_id, tasks)
+        remaining = await self._workflow_registry.get_remaining_tasks_async(workflow_id)
+        sched = await self._workflow_registry.load_workflow_sched_async(workflow_id)
+        snapshot = await self._workflow_registry.load_ledger_snapshot_async(workflow_id)
+        bundle = (
+            await self._workflow_registry.get_v2_workflow_async(workflow_id)
+            if snapshot is not None
+            else None
+        )
+        if snapshot is None or bundle is None:
+            return tasks, remaining, sched, None, []
+        blueprints = await self._workflow_registry.load_blueprints_async(workflow_id)
+        engine = OrchestrationEngine(
+            snapshot,
+            bundle,
+            budget=self._scope_budget,
+            control=self._control,
+            emitter=build_span_emitter(self._tracer, self._telemetry, workflow_id),
+        )
+        return tasks, remaining, sched, engine, blueprints
+
+    async def _fail_unrestorable_workflow(
+        self, workflow_id: str, error: Exception
+    ) -> None:
+        """Fail a stored workflow this server cannot read or restore, leaving every
+        other workflow to restore."""
+        reason = f"UnsupportedWorkflowVersion: {type(error).__name__}: {error}"[:500]
+        self._logger.exception(
+            "Workflow %s cannot be restored; failing it", workflow_id
+        )
+        await self._workflow_registry.commit_transition_async(
+            workflow_id, control=WorkflowControl(failure=reason)
+        )
 
     async def _vault_stored_credentials(
         self, workflow_id: str, tasks: list[PersistedTask]
@@ -1111,8 +1150,7 @@ class TaskRuntime:
         self,
         workflow_id: str,
         tasks: list[PersistedTask],
-        snapshot: LedgerSnapshot,
-        bundle: PersistedV2Workflow,
+        engine: OrchestrationEngine,
         rehydrated_at: float,
         blueprints: list[TaskRecord],
         remaining: set[str],
@@ -1126,7 +1164,7 @@ class TaskRuntime:
         stored with its child templates as tasks has them read as blueprints and
         withdrawn from its remaining tasks.
         """
-        materialized = materialized_operators(bundle.template)
+        materialized = materialized_operators(engine.template)
         prototypes = [p.record for p in tasks if p.record.task_id in materialized]
         tasks = [p for p in tasks if p.record.task_id not in materialized]
         # A workflow stored before blueprints made a recursive agent's children from
@@ -1135,7 +1173,7 @@ class TaskRuntime:
         roots = [
             p.record
             for p in tasks
-            if p.record.task_id in blueprint_operators(bundle.template)
+            if p.record.task_id in blueprint_operators(engine.template)
             and p.record.task_id not in covered
         ]
         self._occurrences.install_locked(
@@ -1153,13 +1191,6 @@ class TaskRuntime:
             elif record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                 self._rehydrated_dispatched[task_id] = rehydrated_at
 
-        engine = OrchestrationEngine(
-            snapshot,
-            bundle,
-            budget=self._scope_budget,
-            control=self._control,
-            emitter=build_span_emitter(self._tracer, self._telemetry, workflow_id),
-        )
         self._engines[workflow_id] = engine
         cancelled = False
         for persisted in tasks:
@@ -1257,6 +1288,15 @@ class TaskRuntime:
         if withdrawn := sorted(p.task_id for p in prototypes if p.task_id in remaining):
             self._committer.retire_locked(workflow_id, withdrawn)
         self._committer.save_ledger_locked(workflow_id)
+        # A branch or loop stored before it had a runnable contract may already have
+        # run, so nothing re-evaluates it: a workflow still running through one fails.
+        if (
+            legacy := engine.legacy_control_regions()
+        ) and not self._committer.workflow_settlement_locked(workflow_id).settled:
+            self._fail_workflow_locked(
+                workflow_id,
+                legacy_control_unsupported(legacy[0], "a runnable contract"),
+            )
 
     def _repair_work_records_locked(
         self, workflow_id: str, engine: OrchestrationEngine
