@@ -330,7 +330,7 @@ merge delivers, reads as a list of `{key, outcome, value}`, where `value` is
 `null` unless the member succeeded. A task reads an input by its `input` name, and
 an upstream node by that node's name as the node's whole value. Inside a
 template, `${name}` reads a value whole, and `${name.task_id}` names the task
-another node of the template ran as in the same iteration and child; a template
+another node of the template ran as in the same iteration and child. A template
 input, a projected input, or a region's value has no task, so `${name.task_id}`
 on one is refused at submission.
 

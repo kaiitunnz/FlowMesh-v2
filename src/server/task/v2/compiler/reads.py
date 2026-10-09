@@ -140,8 +140,8 @@ def classify_reads(
     dependency the spec reads, or one with a named input, is a required value; an
     identity read or an unread branch arm is a required route; any other is ordering
     only. An ancestor read by name but not depended on directly is a derived
-    requirement of the same kind. Inside a region definition, an identity read of a
-    definition input, a projected input, or a region's value is identityless.
+    requirement of the same kind. An identity read of a definition input, a projected
+    input, or a region's value is identityless.
     """
     reads = spec_reads(task)
     aliases = {
@@ -178,9 +178,7 @@ def classify_reads(
                 derived[op] = DependencyUse.VALUE_REQUIRED
     identityless: list[str] = []
     for name in sorted(reads.identities):
-        if task.definition is not None and _identityless(
-            name, aliases, dependencies, names, regions
-        ):
+        if _identityless(name, aliases, dependencies, sources, names, regions):
             identityless.append(name)
         match _resolve(name):
             case set() as indexes:
@@ -214,12 +212,13 @@ def _identityless(
     name: str,
     aliases: Mapping[str, int],
     dependencies: list[ParsedDependency],
+    sources: list[str],
     names: Mapping[str, str],
     regions: frozenset[str],
 ) -> bool:
-    """Whether a name inside a region definition reads a value no task's result is:
-    a definition input, a projected input, or a region's value."""
+    """Whether a name reads a value no task's result is: a definition input, a
+    projected input, or a region's value."""
     if (index := aliases.get(name)) is not None:
         dep = dependencies[index]
-        return dep.source == INGRESS or bool(dep.project)
+        return dep.source == INGRESS or bool(dep.project) or sources[index] in regions
     return names.get(name) in regions

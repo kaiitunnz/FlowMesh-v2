@@ -1064,3 +1064,36 @@ def test_a_region_whose_input_port_carries_a_projection_may_leave_it_unnamed(
     consumer: str,
 ) -> None:
     assert _compile(_workflow(_PROJECTED + consumer))
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        "{node: a, input: x, project: [items, 0]}",
+        "{node: m, input: x}",
+    ],
+    ids=["projected", "region-alias"],
+)
+def test_a_root_task_id_read_of_a_value_is_refused(dependency: str) -> None:
+    nodes = f"""
+      - name: a
+        spec: {_ECHO}
+      - name: m
+        dependsOn: [a]
+        region: {{kind: merge, combination: concat}}
+      - name: b
+        dependsOn: [{dependency}]
+        spec: {{taskType: echo, data: {{type: list, items: ["${{x.task_id}}"]}}}}
+"""
+    assert _codes(_workflow(nodes)) == ["reads.task-id-of-value"]
+
+
+def test_a_root_task_id_read_of_a_task_compiles() -> None:
+    nodes = f"""
+      - name: a
+        spec: {_ECHO}
+      - name: b
+        dependsOn: [{{node: a, input: x}}]
+        spec: {{taskType: echo, data: {{type: list, items: ["${{x.task_id}}"]}}}}
+"""
+    _compile(_workflow(nodes))
