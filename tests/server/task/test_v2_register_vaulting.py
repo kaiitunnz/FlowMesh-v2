@@ -152,7 +152,7 @@ async def test_reclaim_on_a_non_final_settlement_is_a_noop():
     calls: list = []
     reg.commit_transition = lambda *a, **k: calls.append((a, k))  # type: ignore[method-assign]
     with runtime._cv:
-        runtime._committer.reclaim_vault_if_settled_locked(workflow_id)
+        runtime._committer.settle_if_done_locked(workflow_id)
     assert calls == []
     assert workflow_id not in vault.purged
 

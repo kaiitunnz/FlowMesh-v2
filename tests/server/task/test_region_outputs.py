@@ -279,3 +279,57 @@ async def test_a_published_early_join_lists_the_members_it_released_with() -> No
     members = _members(run, "collect")
     assert list(members) == ["0"]
     assert run.runtime.read_output(members["0"]).model_dump()["value"] == "first"
+
+
+_PENDING_OUTPUTS = """
+      - name: seed
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: refine
+        dependsOn: [{node: seed, input: state}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{name: state}]
+          result: {visibility: published}
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: b
+        dependsOn: [seed]
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: either
+        dependsOn: [{node: a, input: l}, {node: b, input: r}]
+        region: {kind: merge, combination: concat, result: {visibility: published}}
+      - name: plan
+        dependsOn: [seed]
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: kid
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: fan
+        dependsOn: [plan]
+        region: {kind: spawn, child: kid}
+      - name: collect
+        dependsOn: [fan]
+        region: {kind: join, completion: all_settled, result: {visibility: published}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_cancel_publishes_every_pending_output_empty() -> None:
+    run = await _Run().start(_workflow(_PENDING_OUTPUTS, _LOOP_BODY))
+    run.run("a", {"v": 1})
+
+    run.runtime.cancel_workflow(run.workflow_id)
+
+    listed = run.runtime.published_outputs(run.workflow_id)
+    assert listed is not None
+    assert {
+        member.name: member.publication.outcome
+        for member in listed.members
+        if member.publication is not None
+    } == {
+        "refine": PublicationOutcome.EXPLICIT_EMPTY,
+        "either": PublicationOutcome.EXPLICIT_EMPTY,
+        "collect": PublicationOutcome.EXPLICIT_EMPTY,
+    }
+    assert all(member.publication is not None for member in listed.members)

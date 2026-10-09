@@ -520,3 +520,17 @@ async def test_a_loop_body_task_names_its_member_and_loop_time() -> None:
     ]
     root = run.runtime.describe_task(seed)
     assert root is not None and root.occurrence is None
+
+
+@pytest.mark.anyio
+async def test_a_loop_whose_exit_settles_its_workflow_purges_its_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = await _Run().start(_workflow(_LOOP_NODES, _LOOP))
+    purged: list[str] = []
+    monkeypatch.setattr(run.runtime._credential_vault, "purge", purged.append)
+    run.run("seed")
+    run.run("step", {"route": "again"})
+    run.run("step", {"route": "done"})
+
+    assert run.settled() and purged == [run.workflow_id]

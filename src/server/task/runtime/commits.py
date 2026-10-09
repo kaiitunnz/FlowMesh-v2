@@ -673,15 +673,18 @@ class TransitionCommitter:
     # Settlement
     # ------------------------------------------------------------------ #
 
-    def reclaim_vault_if_settled_locked(self, workflow_id: str) -> None:
-        """Purge a workflow's vaulted credentials once its last task has settled and
-        the settlement is durable.
+    def settle_if_done_locked(self, workflow_id: str) -> None:
+        """Once a workflow has settled, have its finalizer close it and purge its
+        vaulted credentials, each once the settlement is durable.
 
-        Called after an event's advance materializes any new children, so a producer
-        that fans out is not reclaimed while its children are still pending.
+        Called at the end of every transition that can settle a workflow, after its
+        advance materializes any new children, so a producer that fans out does not
+        settle its workflow while its children are still pending.
         """
         if self.workflow_settlement_locked(workflow_id).settled:
-            self._actions.file_locked(workflow_id, Purge(workflow_id))
+            self._actions.file_locked(
+                workflow_id, Settled(workflow_id), Purge(workflow_id)
+            )
 
     def workflow_settlement_locked(self, workflow_id: str) -> WorkflowSettlement:
         """Whether every task of a workflow has settled in memory, durable or not, and

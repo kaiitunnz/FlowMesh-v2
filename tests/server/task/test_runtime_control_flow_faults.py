@@ -403,6 +403,52 @@ async def test_a_workflow_this_server_cannot_read_fails_alone() -> None:
 
 
 @pytest.mark.anyio
+async def test_a_workflow_this_server_cannot_read_settles_failed_and_closes(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = await _Run().start(_workflow(_DIAMOND))
+    registry = run.registry
+    broken, ids = await _register(run.runtime, _workflow(_DIAMOND))
+    classify = ids["classify"]
+    record_dispatch(run.runtime, classify, cast(Any, _worker()), "dsp-1")
+    run.runtime.mark_started(classify, "wkr-1", {}, _TS)
+    registry.v2_blobs[broken] = "{}"
+
+    restored = _Run(registry, run.reader)
+    closed: list[str] = []
+    restored.runtime.set_completion_notifier(closed.append)
+    revoked: list[Any] = []
+
+    def publish_revoke(*args: Any) -> int:
+        revoked.append(args)
+        return 1
+
+    monkeypatch.setattr(
+        restored.runtime._worker_registry, "publish_revoke", publish_revoke
+    )
+    await restored.runtime.rehydrate()
+    restored.runtime._act_after_commit()
+
+    failure = registry.control[broken].failure
+    assert failure is not None
+    assert all(
+        persisted.record.status == TaskStatus.FAILED
+        and persisted.record.error == failure
+        for task_id in registry.workflow_task_ids[broken]
+        if (persisted := registry.load_task_states(task_id)[0]) is not None
+    )
+    assert not registry.remaining_of(broken)
+    assert restored.runtime.workflow_settlement(broken).settled
+    assert broken in closed
+    assert len(revoked) == 1
+
+    caplog.clear()
+    again = _Run(registry, run.reader)
+    await again.runtime.rehydrate()
+    assert not [r for r in caplog.records if r.exc_info is not None]
+
+
+@pytest.mark.anyio
 async def test_a_running_workflow_through_a_pre_contract_branch_fails_on_restart() -> (
     None
 ):
@@ -427,3 +473,45 @@ async def test_a_running_workflow_through_a_pre_contract_branch_fails_on_restart
     assert failure.startswith("LegacyControlRegionUnsupported")
     record = restored.runtime.get_record(run.ids["left_work"])
     assert record is not None and record.status == TaskStatus.FAILED
+
+
+_ZERO_FAN = f"""
+      - name: planner
+        spec: {_ECHO}
+      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [planner]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_fan_out_read_again_that_settles_its_workflow_closes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = await _Run().start(_workflow(_ZERO_FAN))
+    closed: list[str] = []
+    run.runtime.set_completion_notifier(closed.append)
+    reads: list[str] = []
+    read_fanout = runtime_facade.fanout.read_fanout
+
+    def read(results: Any, task_id: str, binding: Any) -> Any:
+        reads.append(task_id)
+        if len(reads) == 1:
+            return runtime_facade.fanout.FanoutRead(error="away", unavailable=True)
+        return read_fanout(results, task_id, binding)
+
+    monkeypatch.setattr(runtime_facade.fanout, "read_fanout", read)
+    (planner,) = run.ready
+    run.ready.clear()
+    _succeed(run, planner, {"items": []})
+    assert not run.settled()
+    closed.clear()
+
+    run.runtime._redrive_workflow(run.workflow_id)
+
+    assert run.settled() and closed == [run.workflow_id]

@@ -109,7 +109,12 @@ class FakeRegistry:
         ids = self.workflow_task_ids.get(workflow_id)
         if ids is None:
             return None
-        return SimpleNamespace(task_ids=list(ids), submitted_at=self.submitted_at)
+        control = self.control.get(workflow_id)
+        return SimpleNamespace(
+            task_ids=list(ids),
+            submitted_at=self.submitted_at,
+            control_failure=(control.failure or "") if control else "",
+        )
 
     async def get_workflow_record_async(self, workflow_id: str) -> Any:
         return self.get_workflow_record(workflow_id)

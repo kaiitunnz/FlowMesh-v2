@@ -1115,7 +1115,9 @@ class OrchestrationEngine:
     def cancel_instance(self) -> Advance:
         """Cancel the whole workflow instance: the root scope and every descendant."""
         self._failures.instance_cancelled = True
-        return self.cancel_scope(self._ledger.root_scope.scope_id)
+        advance = self.cancel_scope(self._ledger.root_scope.scope_id)
+        self._publication.publish_unresolved(PublicationOutcome.EXPLICIT_EMPTY)
+        return advance
 
     @property
     def template(self) -> LogicalWorkflowTemplate:

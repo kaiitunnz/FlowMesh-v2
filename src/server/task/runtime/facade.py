@@ -907,7 +907,17 @@ class TaskRuntime:
             except Exception as exc:
                 if store_unavailable(exc):
                     raise
-                await self._fail_unrestorable_workflow(workflow_id, exc)
+                tasks, revokes = await self._fail_unrestorable_workflow(
+                    workflow_id, exc
+                )
+                if tasks:
+                    with self._transition():
+                        self._install_rehydrated_workflow_locked(
+                            workflow_id, tasks, None, rehydrated_at
+                        )
+                        self._actions.file_locked(
+                            workflow_id, *revokes, Settled(workflow_id)
+                        )
                 continue
             if stored is None:
                 continue
@@ -974,18 +984,7 @@ class TaskRuntime:
         """Read a stored workflow and restore its orchestration engine, without
         installing either: its tasks, remaining set, schedule, engine and task
         blueprints, or None when it holds no task."""
-        wf_record = await self._workflow_registry.get_workflow_record_async(workflow_id)
-        if wf_record is None:
-            return None
-        dynamic_ids = await self._workflow_registry.get_dynamic_task_ids_async(
-            workflow_id
-        )
-        task_ids = list(dict.fromkeys([*wf_record.task_ids, *sorted(dynamic_ids)]))
-        tasks: list[PersistedTask] = [
-            state
-            for state in await self._workflow_registry.load_task_states_async(*task_ids)
-            if state
-        ]
+        tasks = await self._stored_tasks(workflow_id)
         if not tasks:
             return None
         await self._vault_stored_credentials(workflow_id, tasks)
@@ -1011,16 +1010,67 @@ class TaskRuntime:
 
     async def _fail_unrestorable_workflow(
         self, workflow_id: str, error: Exception
-    ) -> None:
+    ) -> tuple[list[PersistedTask], list[Revoke]]:
         """Fail a stored workflow this server cannot read or restore, leaving every
-        other workflow to restore."""
+        other workflow to restore.
+
+        Every task of it still open fails with the typed reason, written with that
+        reason in one transition; returns the workflow's task records, when they read,
+        and the revocation of each dispatch that failing ended.
+        """
         reason = f"UnsupportedWorkflowVersion: {type(error).__name__}: {error}"[:500]
-        self._logger.exception(
-            "Workflow %s cannot be restored; failing it", workflow_id
-        )
+        stored = await self._workflow_registry.get_workflow_record_async(workflow_id)
+        if stored is not None and stored.control_failure == reason:
+            self._logger.warning("Workflow %s stays failed: %s", workflow_id, reason)
+        else:
+            self._logger.exception(
+                "Workflow %s cannot be restored; failing it", workflow_id
+            )
+        try:
+            tasks = await self._stored_tasks(workflow_id)
+        except Exception as exc:
+            if store_unavailable(exc):
+                raise
+            tasks = []
+        failed: list[PersistedTask] = []
+        revokes: list[Revoke] = []
+        for persisted in tasks:
+            record = persisted.record
+            if record.status in TERMINAL_TASK_STATUSES:
+                continue
+            if record.assigned_worker is not None and (
+                revoke := self._actions.revoke_for(
+                    record.task_id, record.assigned_worker, record.dispatch_id, None
+                )
+            ):
+                revokes.append(revoke)
+            record.status = TaskStatus.FAILED
+            record.error = reason
+            record.assigned_worker = None
+            record.finished_ts = time.time()
+            failed.append(persisted)
         await self._workflow_registry.commit_transition_async(
-            workflow_id, control=WorkflowControl(failure=reason)
+            workflow_id,
+            records=failed,
+            failed=[persisted.record.task_id for persisted in failed],
+            control=WorkflowControl(failure=reason),
         )
+        return tasks, revokes
+
+    async def _stored_tasks(self, workflow_id: str) -> list[PersistedTask]:
+        """The task records a stored workflow holds, its dynamic ones included."""
+        wf_record = await self._workflow_registry.get_workflow_record_async(workflow_id)
+        if wf_record is None:
+            return []
+        dynamic_ids = await self._workflow_registry.get_dynamic_task_ids_async(
+            workflow_id
+        )
+        task_ids = list(dict.fromkeys([*wf_record.task_ids, *sorted(dynamic_ids)]))
+        return [
+            state
+            for state in await self._workflow_registry.load_task_states_async(*task_ids)
+            if state
+        ]
 
     async def _vault_stored_credentials(
         self, workflow_id: str, tasks: list[PersistedTask]
@@ -3603,8 +3653,7 @@ class TaskRuntime:
             if self._apply_advance_locked(workflow_id, advance):
                 self._cv.notify_all()
             self._committer.save_ledger_locked(workflow_id)
-            if controls and not engine.awaits_control_reads():
-                self._actions.file_locked(workflow_id, Settled(workflow_id))
+            self._committer.settle_if_done_locked(workflow_id)
 
     def _task_result_binding_locked(self, value: ValueRef) -> ResultBinding | None:
         """The stored result a value reference names, when it names a task's."""
@@ -3724,7 +3773,7 @@ class TaskRuntime:
         self._fail_v2_records_locked(non_terminal, reason, persist=True)
         self._actions.file_locked(workflow_id, *owed)
         self._committer.save_ledger_locked(workflow_id)
-        self._committer.reclaim_vault_if_settled_locked(workflow_id)
+        self._committer.settle_if_done_locked(workflow_id)
         self._cv.notify_all()
 
     def plan_merge(
@@ -4203,7 +4252,7 @@ class TaskRuntime:
             )
             readied = self._apply_advance_locked(record.workflow_id, advance)
             self._committer.save_ledger_locked(record.workflow_id)
-        self._committer.reclaim_vault_if_settled_locked(record.workflow_id)
+        self._committer.settle_if_done_locked(record.workflow_id)
         return readied
 
     def fail_dispatch(
@@ -4626,7 +4675,7 @@ class TaskRuntime:
                 self._committer.save_ledger_locked(record.workflow_id)
 
             if record is not None:
-                self._committer.reclaim_vault_if_settled_locked(record.workflow_id)
+                self._committer.settle_if_done_locked(record.workflow_id)
             return impacted, usages
 
     # ------------------------------------------------------------------ #
@@ -5055,7 +5104,7 @@ class TaskRuntime:
         # ledger never leads task state.
         self._committer.commit_locked(task_id, *returned, sched=False)
         self._committer.save_ledger_locked(record.workflow_id)
-        self._committer.reclaim_vault_if_settled_locked(record.workflow_id)
+        self._committer.settle_if_done_locked(record.workflow_id)
 
     def get_record(self, task_id: str) -> TaskRecord | None:
         with self._lock:

@@ -88,6 +88,28 @@ class PublicationLedger:
                     member.value_ref,
                 )
 
+    def publish_unresolved(self, outcome: PublicationOutcome) -> None:
+        """Publish ``outcome`` to every declared output that holds no publication: each
+        pending slot, and one member of a collection with none."""
+        empty = ValueRef(kind="empty")
+        for slot in list(self.slots.values()):
+            self.write_publication(slot, outcome, empty)
+        for decl in self._topology.bundle.template.result_declarations:
+            if (
+                decl.cardinality is CardinalityKind.KEYED_COLLECTION
+                and decl.source_ref not in self._topology.definition_of
+                and not self.slots_by_output.get(decl.output_id)
+            ):
+                self.write_publication(
+                    ResultSlot(
+                        instance_id=self._ledger.workflow_instance.instance_id,
+                        output_id=decl.output_id,
+                        source_operator_id=decl.source_ref,
+                    ),
+                    outcome,
+                    empty,
+                )
+
     def write_publication(
         self, slot: ResultSlot, outcome: PublicationOutcome, value_ref: ValueRef | None
     ) -> None:
