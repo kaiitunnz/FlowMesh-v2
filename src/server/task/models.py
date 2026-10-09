@@ -361,10 +361,10 @@ def task_order(record: TaskRecord) -> TaskOrder:
 
 
 class TaskLoopTime(BaseModel):
-    """One loop time a task runs at."""
+    """One loop iteration a task runs at."""
 
-    loop: str = Field(description="Graph node name of the loop.")
-    iteration: int = Field(description="The loop's time, from 0.")
+    loop: str = Field(description="The loop's coordinate, its node name by default.")
+    iteration: int = Field(description="The loop's iteration, from 0.")
 
 
 class TaskOccurrence(BaseModel):

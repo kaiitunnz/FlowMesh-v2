@@ -518,7 +518,7 @@ async def test_a_root_task_fed_by_tasks_reads_the_same_through_records_or_edges(
                 run.runtime._content_bindings.value_binding_locked(entry.value),
                 entry.task_id,
             )
-            for entry in run.engine.edge_inputs(task_id)
+            for entry in run.engine._flow.edges.inputs(task_id)
         }
     dispatcher = Dispatcher(
         runtime=run.runtime,

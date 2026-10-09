@@ -65,7 +65,6 @@ from ..state import (
     Activation,
     AuthorityGrant,
     BoundaryEvent,
-    BranchDecision,
     Continuation,
     ControlState,
     DelegatedAuthorityGrant,
@@ -289,6 +288,7 @@ class OrchestrationEngine:
             invocations=self._ledger.invocations,
             trace=self._ledger.trace,
             scope_closed=self._ledger.scope_closed,
+            loop_time=self._ledger.loop_time,
         )
 
     # ------------------------------------------------------------------ #
@@ -940,13 +940,6 @@ class OrchestrationEngine:
             self._flow.accept_branch_selection(branch, value, error=error)
         )
 
-    def branch_decision(self, branch: str) -> BranchDecision | None:
-        return self._ledger.branch_decisions.get(branch)
-
-    def spawn_input(self, spawn: str) -> ValueRef | None:
-        """The value a live spawn occurrence fans out over."""
-        return self._flow.spawn_input(spawn)
-
     def awaiting_fanouts(self) -> list[tuple[str, ValueRef]]:
         """Each live spawn occurrence still to fan out over its input, with that
         input."""
@@ -1034,7 +1027,8 @@ class OrchestrationEngine:
 
     def occurrence_place(self, task_id: str) -> OccurrencePlace | None:
         """Where a task runs inside a region definition, by authored names: the member
-        it runs, the child context it runs in, and its loop times; None at the root."""
+        it runs, the child context it runs in, and each loop's coordinate with its
+        iteration; None at the root."""
         occurrence = self.occurrence_of(task_id)
         if occurrence is None:
             return None
@@ -1047,7 +1041,17 @@ class OrchestrationEngine:
                 if instance is not None
                 else frame.loop
             )
-            time.append((names.get(loop_op, loop_op), frame.iteration))
+            loop = self._topology.operators.get(loop_op)
+            time.append(
+                (
+                    (
+                        loop.loop_coordinate
+                        if isinstance(loop, LoopContextRegion)
+                        else names.get(loop_op, loop_op)
+                    ),
+                    frame.iteration,
+                )
+            )
         return OccurrencePlace(
             member=names.get(occurrence.operator_id, occurrence.operator_id),
             context=occurrence.context_id or None,
@@ -1069,11 +1073,6 @@ class OrchestrationEngine:
             for edge in self._topology.incoming.get(task_id, ())
         ):
             return None
-        return self._flow.edges.inputs(task_id)
-
-    def edge_inputs(self, task_id: str) -> list[OccurrenceInput]:
-        """The values a root task reads through its incoming edges, whatever feeds
-        it."""
         return self._flow.edges.inputs(task_id)
 
     def legacy_control_regions(self) -> list[str]:

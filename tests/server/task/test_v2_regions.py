@@ -224,7 +224,7 @@ async def test_region_bearing_submit_is_admitted() -> None:
 
 def test_region_bearing_inspect_succeeds() -> None:
     runtime = _runtime()
-    report = runtime.inspect_v2(REGIONS_WF, format="native")
+    report = runtime.validate(REGIONS_WF, format="native")[1]
     assert report is not None and report.ok
 
 
@@ -259,7 +259,7 @@ async def test_spawn_bearing_workflow_is_admitted_as_v2() -> None:
         "owner", "org", _SPAWN_ONLY, format="native"
     )
     assert runtime.is_v2_workflow(workflow_id)
-    report = runtime.inspect_v2(_SPAWN_ONLY, format="native")
+    report = runtime.validate(_SPAWN_ONLY, format="native")[1]
     assert report is not None and report.region_bearing
 
 

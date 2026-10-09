@@ -23,7 +23,8 @@ from ..representations.template import (
 from .diagnostics import compile_error
 from .project import LoweringAccumulator, build_value_ops
 
-_RETURN_KINDS = {
+# The boundary each node a definition's edge may leave through stands for.
+_RETURN_NODES = {
     node: kind
     for kind, node in BOUNDARY_NODES.items()
     if kind is not BoundaryKind.ENTRY
@@ -93,13 +94,13 @@ def _lower_definition(
         else {port.name for port in inputs if port.role is EntryRole.CARRIED}
     )
     for index, edge in enumerate(definition.edges):
-        return_kind = _RETURN_KINDS[edge.target]
+        return_kind = _RETURN_NODES[edge.target]
         if return_kind not in _RETURNS[kind]:
             raise compile_error(
                 "definition.bad-return",
                 f"a {kind.value.replace('_', ' ')} template returns through "
                 + " or ".join(
-                    sorted(t for t, k in _RETURN_KINDS.items() if k in _RETURNS[kind])
+                    sorted(t for t, k in _RETURN_NODES.items() if k in _RETURNS[kind])
                 )
                 + f", not {edge.target}",
                 name,
@@ -200,8 +201,11 @@ def _definition_inputs(
     ports: list[DefinitionPort] = []
     for raw in definition.inputs:
         entry = _port_mapping(raw, definition.name, "inputs", {"name", "kind", "role"})
-        role = next((r for r in _ROLES[kind] if r.value == entry.get("role")), None)
-        if role is None:
+        try:
+            role: EntryRole | None = EntryRole(str(entry.get("role")))
+        except ValueError:
+            role = None
+        if role is None or role not in _ROLES[kind]:
             allowed = ", ".join(sorted(r.value for r in _ROLES[kind]))
             raise compile_error(
                 "definition.bad-input",

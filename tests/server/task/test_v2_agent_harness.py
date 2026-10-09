@@ -877,8 +877,9 @@ def test_terminal_failure_fails_a_never_entered_region() -> None:
     failed = eng.on_failed("A", "boom", retryable=False).failed
 
     # A failed agent's unused region is not an empty one: it opens no scope, seals
-    # nothing, and its template and join fail with it.
-    assert failed[0] == "A" and {"rbody", "vbody"} <= set(failed)
+    # nothing, and its join fails with it. Its template is a blueprint, no task.
+    assert failed == ["A"]
+    assert not {"rbody", "vbody"} & set(eng.declared_failures())
     for role in ("researcher", "reviewer"):
         assert eng.region_scope_for(act, role) is None
     assert set(eng.to_snapshot().failed_regions) == {
@@ -906,7 +907,7 @@ def test_an_ambiguity_terminal_fails_a_never_entered_region() -> None:
 
     failed = eng.on_uncertain("A").failed
 
-    assert failed[0] == "A" and {"rbody", "vbody"} <= set(failed)
+    assert failed == ["A"]
     assert eng.region_scope_for(act, "researcher") is None
     assert "reviewer:spawn:join" in eng.to_snapshot().failed_regions
 

@@ -610,18 +610,33 @@ def test_a_loop_body_occurrence_emits_its_own_span_and_control_ones_none() -> No
     eng = _engine(bundle, emitter=emitter, granted_interfaces=frozenset())
     (seed,) = eng.initial_advance().ready
     _dispatch(eng, seed)
-    (step,) = eng.on_succeeded(seed).ready
+    (first,) = eng.on_succeeded(seed).ready
+    _dispatch(eng, first)
+    eng.on_succeeded(first)
+    key, _ = eng.pending_branch_reads()[0]
+    (step,) = eng.accept_branch_selection(key, "again").ready
     _dispatch(eng, step)
     eng.on_succeeded(step)
     key, _ = eng.pending_branch_reads()[0]
     eng.accept_branch_selection(key, "done")
     assert eng.region_closed("loop") or eng.control_state("loop") is not None
+    loop_times = {
+        _attrs(s)["flowmesh.logical.activation_id"]: _attrs(s)[
+            "flowmesh.logical.loop_time"
+        ]
+        for s in _spans_named(exporter, SPAN_OPERATOR)
+    }
+    assert [
+        loop_times[occurrence.activation_id]
+        for task in (first, step)
+        if (occurrence := eng.occurrence_of(task)) is not None
+    ] == ["0", "1"]
 
     activations = {
         _attrs(s)["flowmesh.logical.activation_id"]
         for s in _spans_named(exporter, SPAN_OPERATOR)
     }
-    (route,) = eng.occurrences(
+    route, _ = eng.occurrences(
         next(op.operator_id for op in bundle.template.operators if op.kind == "branch")
     )
     occurrence = eng.occurrence_of(step)
@@ -658,6 +673,7 @@ def test_an_unclassifiable_activation_drops_its_span_instead_of_raising() -> Non
         invocations={},
         trace=[],
         scope_closed=lambda _: False,
+        loop_time=lambda _: 0,
     )
 
     assert _spans_named(exporter, SPAN_OPERATOR) == []

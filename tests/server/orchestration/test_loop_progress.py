@@ -9,14 +9,29 @@ from server.orchestration.state import (
     ControlStatus,
     IterationKind,
     LoopInstanceStatus,
+    Occurrence,
     PublicationOutcome,
     ValueRef,
+    WorkItem,
     WorkItemStatus,
 )
 from server.task.v2 import CompileError
 from server.task.v2.compiler import region_checks
 
 from .control_flow import ECHO, Driver, compile_text, workflow
+
+
+def _occurrence(run: Driver, task_id: str) -> Occurrence:
+    occurrence = run.engine.occurrence_of(task_id)
+    assert occurrence is not None
+    return occurrence
+
+
+def _work_item(run: Driver, task_id: str) -> WorkItem:
+    wi = run.engine.work_item(task_id)
+    assert wi is not None
+    return wi
+
 
 _BODY = f"""
     templates:
@@ -349,17 +364,17 @@ def test_loops_inside_two_spawned_children_keep_their_contexts_apart() -> None:
     run.apply(run.engine.seal_spawn("fan"))
     steps = run.ready_named("step")
     assert len(steps) == 2
-    contexts = {run.engine.occurrence_of(s).context_id for s in steps}  # type: ignore[union-attr]
+    contexts = {_occurrence(run, s).context_id for s in steps}
     assert len(contexts) == 2
     # Both children are at their own time 0 of their own loop instance.
-    loops = {run.engine.occurrence_of(s).time[-1].loop for s in steps}  # type: ignore[union-attr]
+    loops = {_occurrence(run, s).time[-1].loop for s in steps}
     assert len(loops) == 2
 
     def answer(context: str, decision: str) -> None:
         task = next(
             t
             for t in run.ready_named("step")
-            if run.engine.occurrence_of(t).context_id == context  # type: ignore[union-attr]
+            if _occurrence(run, t).context_id == context
         )
         run.run(task)
         key = next(k for k, _ in run.engine.pending_branch_reads() if context in k)
@@ -415,13 +430,10 @@ def test_a_cancel_residual_withdraws_a_definition_childs_whole_context() -> None
         )
     run.apply(run.engine.seal_spawn("fan"))
     first, second = sorted(
-        run.engine.occurrence_of(s).context_id  # type: ignore[union-attr]
-        for s in run.ready_named("step")
+        _occurrence(run, s).context_id for s in run.ready_named("step")
     )
     (winner,) = [
-        s
-        for s in run.ready_named("step")
-        if run.engine.occurrence_of(s).context_id == first  # type: ignore[union-attr]
+        s for s in run.ready_named("step") if _occurrence(run, s).context_id == first
     ]
     (residual,) = [s for s in run.ready_named("step") if s != winner]
     run.run(winner)
@@ -429,7 +441,7 @@ def test_a_cancel_residual_withdraws_a_definition_childs_whole_context() -> None
     run.apply(run.engine.accept_branch_selection(key, "finish"))
 
     assert run.ready_named("after") != []
-    assert run.engine.work_item(residual).status is WorkItemStatus.CANCELLED  # type: ignore[union-attr]
+    assert _work_item(run, residual).status is WorkItemStatus.CANCELLED
     assert residual in run.cancelled
     assert "" not in run.cancelled
     (inner,) = [
@@ -587,7 +599,7 @@ def test_an_early_joins_residual_child_delays_the_loop_exit_not_the_next_time(
     instance = run.engine.loop_instance("refine")
     assert instance is not None
     if residual == "cancel":
-        assert run.engine.work_item(late).status is WorkItemStatus.CANCELLED  # type: ignore[union-attr]
+        assert _work_item(run, late).status is WorkItemStatus.CANCELLED
         assert instance.status is LoopInstanceStatus.RELEASED
         return
     assert instance.status is LoopInstanceStatus.EXITED
@@ -619,7 +631,7 @@ def test_an_agent_in_a_loop_body_runs_as_a_fresh_activation_each_time() -> None:
     run.select("continue")
     sides = run.ready_named("side")
     assert len(sides) == 2
-    activations = {run.engine.work_item(s).activation_id for s in sides}  # type: ignore[union-attr]
+    activations = {_work_item(run, s).activation_id for s in sides}
     assert len(activations) == 2
     for side in sides:
         accepted = run.engine.accepted_inputs_for_task(side)
@@ -686,13 +698,13 @@ def test_an_inner_loop_reenters_at_time_zero_at_each_outer_time() -> None:
 """
     run = Driver(workflow(nodes, templates))
     run.run_one("seed")
-    seen: list[tuple[int, int]] = []
+    seen: list[tuple[int, ...]] = []
     for outer_decision in ("again", "done"):
         for inner_decision in ("again", "done"):
             (work,) = run.ready_named("work")
             occurrence = run.engine.occurrence_of(work)
             assert occurrence is not None
-            seen.append(tuple(f.iteration for f in occurrence.time))  # type: ignore[arg-type]
+            seen.append(tuple(f.iteration for f in occurrence.time))
             run.run(work)
             run.select(inner_decision)
         run.select(outer_decision)
@@ -821,7 +833,7 @@ def test_a_failed_instance_discards_a_pending_selection() -> None:
     assert decide is not None and decide.status is ControlStatus.FAILED
     # A selection read before the failure and delivered after it enters nothing.
     advance = run.engine.accept_branch_selection("decide", "go")
-    assert advance.ready == [] and advance.materialized == []
+    assert advance.ready == []
     assert run.engine.loop_instance("refine") is None
 
 
@@ -833,7 +845,7 @@ def test_a_failed_instance_discards_a_pending_body_route() -> None:
     run.apply(run.engine.fail_instance("operator failed the workflow"))
     assert run.engine.pending_branch_reads() == []
     advance = run.engine.accept_branch_selection(route, "continue")
-    assert advance.ready == [] and advance.materialized == []
+    assert advance.ready == []
     instance = run.engine.loop_instance("refine")
     assert instance is not None and instance.status is LoopInstanceStatus.FAILED
     assert run.engine.iteration("refine", 0) is None

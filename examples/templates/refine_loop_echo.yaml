@@ -47,7 +47,6 @@ spec:
         region:
           kind: loop
           body_ref: refine_body
-          loop_coordinate: round
           carried: [{ name: state }]
       - name: consume
         dependsOn: [{ node: refine, port: state, input: final }]

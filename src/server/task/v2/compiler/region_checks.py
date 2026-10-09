@@ -6,7 +6,6 @@ one branch never both hold.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
 
 from ..representations.operators import (
     AgentOperator,
@@ -17,6 +16,7 @@ from ..representations.operators import (
     LoopContextRegion,
     MergeCombination,
     MergeRegion,
+    PortKind,
     SpawnRegion,
     is_spawn_fanout_port,
 )
@@ -451,7 +451,7 @@ def _check_return_routes(
     return diags
 
 
-def _describe(ports: dict[str, tuple[EntryRole, Any]]) -> str:
+def _describe(ports: dict[str, tuple[EntryRole, PortKind]]) -> str:
     return (
         ", ".join(f"{name} ({role.value})" for name, (role, _) in sorted(ports.items()))
         or "nothing"

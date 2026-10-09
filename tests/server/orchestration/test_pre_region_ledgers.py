@@ -63,7 +63,8 @@ def test_a_spawn_open_before_the_upgrade_releases_its_join_when_children_settle(
     outstanding = [
         child
         for child in stored["children"]
-        if engine.work_item(child).status is WorkItemStatus.READY  # type: ignore[union-attr]
+        if (wi := engine.work_item(child)) is not None
+        and wi.status is WorkItemStatus.READY
     ]
     assert len(outstanding) == 1
     _settle(engine, outstanding[0])

@@ -100,14 +100,6 @@ class TemplateEdge(BaseModel):
         """Whether the edge joins two operators of one definition."""
         return self.boundary is None
 
-    @property
-    def boundary_port(self) -> str | None:
-        """The definition input an entry edge reads, or the port a return edge
-        leaves through."""
-        if self.boundary is BoundaryKind.ENTRY:
-            return self.from_port
-        return self.to_port if self.boundary is not None else None
-
 
 class DefinitionKind(StrEnum):
     """What enters a region definition."""

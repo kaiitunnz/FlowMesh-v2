@@ -9,7 +9,7 @@ only through a stable ``invocation_id``.
 
 Structured dynamic regions populate the lineage fields the acyclic subset leaves at
 their defaults: a child ``Scope.parent_scope_id`` and ``depth``, an ``Activation``'s
-``kind``/``loop_time``/``child_index``, a grant's ``delegate`` face and ``epoch``, and
+``kind``/``child_index``, a grant's ``delegate`` face and ``epoch``, and
 per-scope ``ProgressCapability`` accounting on the child-init and loop-time axes.
 """
 
@@ -305,10 +305,9 @@ class Activation(BaseModel):
 
     activation_id: str
     instance_id: str
-    scope_id: str  # with loop_time/child_index, separates child vs iteration vs call
+    scope_id: str  # with child_index, separates a child from a call
     operator_id: str
     kind: str = "leaf"
-    loop_time: int = 0  # orders loop-body re-materializations
     child_index: int | None = None  # distinguishes spawned siblings
     parent_activation_id: str | None = None  # agent that owns a "region" opener
 
@@ -321,7 +320,6 @@ class Record(BaseModel):
     operator_id: str  # static template location
     activation_id: str
     scope_id: str  # scope-progress key
-    loop_time: int = 0
     value_ref: ValueRef | None = None
     # The occurrence it left from, whose key carries its context and nested time.
     occurrence: str = ""
@@ -751,9 +749,13 @@ class IterationKind(StrEnum):
     """How one loop time resolved."""
 
     FEEDBACK = "feedback"
+    """The time fed its carried values back, enabling the next time."""
     EXIT = "exit"
+    """The time routed the loop's exit value out."""
     FAILED = "failed"
+    """The loop failed at this time."""
     CANCELLED = "cancelled"
+    """A cancel withdrew this time."""
 
 
 class IterationResolution(BaseModel):
@@ -778,7 +780,9 @@ class LoopInstanceStatus(StrEnum):
     RELEASED = "released"
     """The exiting value left the loop."""
     FAILED = "failed"
+    """The loop failed; it enables no later time."""
     CANCELLED = "cancelled"
+    """A cancel withdrew the loop."""
 
 
 class LoopInstance(BaseModel):

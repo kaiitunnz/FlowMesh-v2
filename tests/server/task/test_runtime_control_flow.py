@@ -554,10 +554,10 @@ async def test_a_loop_body_task_names_its_member_and_loop_time() -> None:
     places = [run.runtime.describe_task(t) for t in (first, second)]
     assert [p.occurrence for p in places if p is not None] == [
         TaskOccurrence(
-            member="body/step", time=[TaskLoopTime(loop="refine", iteration=0)]
+            member="body/step", time=[TaskLoopTime(loop="round", iteration=0)]
         ),
         TaskOccurrence(
-            member="body/step", time=[TaskLoopTime(loop="refine", iteration=1)]
+            member="body/step", time=[TaskLoopTime(loop="round", iteration=1)]
         ),
     ]
     root = run.runtime.describe_task(seed)

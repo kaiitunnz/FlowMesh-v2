@@ -7,7 +7,6 @@ from ...task.v2.representations.operators import (
     LeafOperator,
     LeafProfile,
     LogicalOperator,
-    LoopContextRegion,
     OperatorKind,
     RecoveryClass,
     SpawnRegion,
@@ -259,25 +258,3 @@ class PlanTopology:
             if edge.from_op == spawn_op and self.kind(edge.to_op) is OperatorKind.JOIN:
                 return edge.to_op
         return None
-
-    def loop_of_body(self, definition_id: str) -> str | None:
-        """The loop operator whose body a definition is."""
-        return next(
-            (
-                op.operator_id
-                for op in self.operators.values()
-                if isinstance(op, LoopContextRegion) and op.body_ref == definition_id
-            ),
-            None,
-        )
-
-    def edge_from_port(self, from_op: str, to_op: str) -> str | None:
-        for edge in self.bundle.template.edges:
-            if edge.from_op == from_op and edge.to_op == to_op:
-                return edge.from_port
-        return None
-
-
-def edge_key(edge: TemplateEdge) -> str:
-    """A stable identity for an edge."""
-    return edge.edge_id

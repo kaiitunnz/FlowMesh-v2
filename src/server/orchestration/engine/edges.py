@@ -40,7 +40,9 @@ class EdgeState(StrEnum):
     DEAD = "dead"
     """No record can travel this route for this occurrence."""
     FAILED = "failed"
+    """Its source failed, so it carries no record and fails what reads it."""
     CANCELLED = "cancelled"
+    """Its source was cancelled."""
 
 
 @dataclass(frozen=True)

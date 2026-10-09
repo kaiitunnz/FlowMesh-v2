@@ -790,11 +790,7 @@ def _loop(region: ParsedRegion, definitions: set[str]) -> LoopContextRegion:
     carried = _ports_field(region, "carried")
     invariants = _ports_field(region, "invariants")
     body = str(region.region.get("body_ref") or "").strip()
-    coordinate = str(region.region.get("loop_coordinate") or "").strip()
-    if not coordinate:
-        raise compile_error(
-            "region.loop-no-coordinate", "a loop declares loop_coordinate", name
-        )
+    coordinate = str(region.region.get("loop_coordinate") or "").strip() or name
     if body not in definitions:
         raise compile_error(
             "loop.unknown-body",

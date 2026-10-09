@@ -406,7 +406,7 @@ def test_a_conservative_deployment_resolves_an_unstyled_binding() -> None:
 
 def test_a_dry_run_inspection_matches_what_the_runtime_would_register() -> None:
     runtime = _runtime(residency=WarmRetention.name)
-    report = runtime.inspect_v2(_PRELUDE, format="native")
+    report = runtime.validate(_PRELUDE, format="native")[1]
     assert report is not None
     lowering = _lowering(report.plan)
     assert lowering.residency == WarmRetention.name
@@ -435,7 +435,7 @@ spec:
 
 def test_a_dry_run_under_a_policy_still_vaults_nothing_and_redacts() -> None:
     runtime = _runtime(residency=WarmRetention.name)
-    report = runtime.inspect_v2(_INLINE_SECRET, format="native")
+    report = runtime.validate(_INLINE_SECRET, format="native")[1]
     assert report is not None
     assert _lowering(report.plan).residency == WarmRetention.name
     assert "sk-secret" not in report.model_dump_json()

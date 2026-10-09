@@ -15,7 +15,7 @@ from shared.tasks.result_binding import BindingKind, ResultBinding, ResultElemen
 
 from ._base import BaseExecutorResult
 from .catalog import ResultEnvelope
-from .routed import RoutedValue
+from .routed import RoutedValue, routed_root
 
 # The outcome of an aggregate member that carries a value.
 _SUCCESS = "success"
@@ -96,8 +96,7 @@ def dig(value: Any, steps: Sequence[str | int]) -> Any:
     list. A step that finds nothing yields None."""
     current = value
     for step in steps:
-        if isinstance(current, RoutedValue):
-            current = current.routed_value
+        current = routed_root(current)
         match current:
             case dict():
                 current = current.get(str(step))

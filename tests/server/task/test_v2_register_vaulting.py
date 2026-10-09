@@ -107,7 +107,7 @@ async def test_inline_key_is_vaulted_and_absent_from_every_persisted_surface():
 
 def test_inspect_does_not_echo_the_raw_inline_key():
     runtime = _runtime(_RecordingVault(), FakeRegistry())
-    report = runtime.inspect_v2(_WF, format="native")
+    report = runtime.validate(_WF, format="native")[1]
     assert report is not None
     assert _RAW_KEY not in report.model_dump_json()
 

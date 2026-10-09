@@ -61,7 +61,7 @@ BOUNDARY_TARGETS = frozenset({"$feedback", "$egress", "$return"})
 """The edge targets leaving a region definition."""
 
 _DEPENDENCY_KEYS = frozenset({"node", "port", "input", "project"})
-_EDGE_KEYS = frozenset({"from", "to", "project", "feedback"})
+_EDGE_KEYS = frozenset({"from", "to", "project"})
 _TEMPLATE_KEYS = frozenset({"name", "inputs", "returns", "nodes", "edges"})
 
 type ProjectionStep = str | int
@@ -86,7 +86,6 @@ class ParsedBoundaryEdge:
     target: str
     target_port: str
     project: tuple[ProjectionStep, ...] = ()
-    feedback: bool = False
 
 
 @dataclass
@@ -313,7 +312,6 @@ def _build_workflow(
                     target=edge.target,
                     target_port=edge.target_port,
                     project=edge.project,
-                    feedback=edge.feedback,
                 )
                 for edge in definition.edges
             ],
@@ -702,16 +700,12 @@ def _parse_boundary_edge(raw: Any, path: str) -> ParsedBoundaryEdge:
         )
     if not (target_port := _optional_name(target.get("port"))):
         raise ValueError(f"{path}.to.port is required")
-    feedback = raw.get("feedback", target_node == "$feedback")
-    if not isinstance(feedback, bool) or feedback != (target_node == "$feedback"):
-        raise ValueError(f"{path}: feedback is true exactly for an edge to $feedback")
     return ParsedBoundaryEdge(
         source=source_node,
         port=_optional_name(source.get("port")),
         target=target_node,
         target_port=target_port,
         project=_projection(raw.get("project"), path),
-        feedback=feedback,
     )
 
 

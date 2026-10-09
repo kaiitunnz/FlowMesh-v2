@@ -217,7 +217,8 @@ def test_a_dead_child_entry_mints_no_grant() -> None:
     run.select("skip")
     trace = run.engine.contract_trace()
     assert ("grant_delegated", "fan") not in trace
-    assert run.engine.control_state("collect").status.value == "dead"  # type: ignore[union-attr]
+    collect = run.engine.control_state("collect")
+    assert collect is not None and collect.status.value == "dead"
 
 
 def test_admission_is_decided_once_across_restart_and_redelivery() -> None:

@@ -183,7 +183,7 @@ def test_a_credential_under_a_non_string_key_is_vaulted_and_restored(
 
     assert all(_no_secret(blob) for blob in registry.task_blobs.values())
     if api_version == "flowmesh/v2":
-        assert runtime.inspect_v2(payload) is not None
+        assert runtime.validate(payload)[1] is not None
     publisher, _ = _dispatch(runtime, ids["call"])
     message = publisher.publish_task.call_args[0][1]
     assert _api(message.task)["json"] == {"shards": {key: {"token": _HF}}}
@@ -506,7 +506,7 @@ def test_a_leaf_whose_adapter_url_carries_a_credential_runs_self_contained():
     assert node.residency_intent is None
     persisted = "".join([*registry.v2_blobs.values(), *registry.ledger_blobs.values()])
     assert "PRESIGNED-SECRET" not in persisted
-    report = runtime.inspect_v2(_adapter_leaf(_PRESIGNED))
+    report = runtime.validate(_adapter_leaf(_PRESIGNED))[1]
     assert report is not None
     assert "PRESIGNED-SECRET" not in report.model_dump_json()
 
@@ -521,7 +521,7 @@ def test_resident_serving_of_a_credentialed_adapter_is_refused(service):
         _register(runtime, payload)
     assert vault.redis.hashes == {}
     with pytest.raises(CompileError, match="adapter"):
-        runtime.inspect_v2(payload)
+        runtime.validate(payload)[1]
 
 
 def test_resident_serving_of_a_plain_adapter_url_keeps_its_source():
@@ -579,7 +579,7 @@ def test_a_credential_shaped_harness_param_is_vaulted_and_reaches_the_worker():
     assert _DSN not in blobs and _JWT not in blobs
     info = runtime.describe_task(ids["solver"])
     assert info is not None and _JWT not in info.model_dump_json()
-    report = runtime.inspect_v2(_agent(_AGENT_PARAMS))
+    report = runtime.validate(_agent(_AGENT_PARAMS))[1]
     assert report is not None and _JWT not in report.model_dump_json()
 
     publisher, disp = _dispatch(runtime, ids["solver"])
@@ -626,7 +626,7 @@ def test_an_agent_model_url_carrying_a_credential_is_refused(params, model_bindi
     with pytest.raises(CompileError, match="model_binding.api_key"):
         _register(runtime, payload)
     with pytest.raises(CompileError, match="model_binding.api_key"):
-        runtime.inspect_v2(payload)
+        runtime.validate(payload)[1]
     assert vault.redis.hashes == {}
 
 
@@ -674,7 +674,7 @@ def test_resident_serving_of_a_credentialed_model_source_is_refused(service):
     with pytest.raises(CompileError, match="model"):
         _register(_runtime(), payload)
     with pytest.raises(CompileError, match="model"):
-        _runtime().inspect_v2(payload)
+        _runtime().validate(payload)[1]
 
 
 def _engine_env_leaf(service: str = "") -> str:

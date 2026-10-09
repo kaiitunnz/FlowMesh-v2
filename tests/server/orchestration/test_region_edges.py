@@ -1,5 +1,7 @@
 """Branch routing and dead-path resolution through the orchestration engine."""
 
+from typing import Any
+
 import pytest
 
 from server.orchestration.state import (
@@ -199,9 +201,7 @@ def test_success_empty_dead_failure_and_cancellation_stay_distinct() -> None:
         (3, "int"),
     ],
 )
-def test_a_selection_naming_no_port_fails_the_branch(
-    value: object, reason: str
-) -> None:
+def test_a_selection_naming_no_port_fails_the_branch(value: Any, reason: str) -> None:
     run = Driver(workflow(_DIAMOND))
     run.run_one("classify")
     run.select(value)
@@ -226,14 +226,14 @@ def test_an_accepted_decision_survives_restart_and_is_never_revised() -> None:
     run.run_one("classify")
     run.select("accepted")
     run.restore()
-    decision = run.engine.branch_decision("decide")
+    decision = run.engine._ledger.branch_decisions.get("decide")
     assert decision is not None and (decision.port, decision.case) == (
         "left",
         "accepted",
     )
     # A redelivered selection changes nothing.
     assert run.engine.accept_branch_selection("decide", "rejected").ready == []
-    assert run.engine.branch_decision("decide") == decision
+    assert run.engine._ledger.branch_decisions.get("decide") == decision
     assert run.status("right_work") is WorkItemStatus.SKIPPED
     run.run_one("left_work")
     run.run_one("left_more")

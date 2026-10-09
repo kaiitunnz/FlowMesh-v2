@@ -1,7 +1,7 @@
 """Durable persistence and restart rehydration of TaskRuntime."""
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -620,15 +620,15 @@ async def test_a_replayed_terminal_event_rewrites_only_its_own_task(
         runtime.mark_succeeded(task_id, "wkr-1", {}, "2026-06-01T00:00:00Z")
     last = ids["d"]
     record_dispatch(runtime, last)
+    settle: Callable[..., Any]
     match report:
         case "succeeded":
             settle = runtime.mark_succeeded
         case "failed":
-            settle = runtime.mark_failed  # type: ignore[assignment]
+            settle = runtime.mark_failed
         case _:
             runtime.cancel_workflow(workflow_id)
-            settle = runtime.mark_cancelled  # type: ignore[assignment]
-    settle(last, "wkr-1", {}, "2026-06-01T00:00:00Z")
+            settle = runtime.mark_cancelled
 
     written: list[str] = []
     real_commit = registry.commit_transition

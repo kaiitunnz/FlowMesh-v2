@@ -306,7 +306,6 @@ spec:
         region:
           kind: loop
           body_ref: refine_body
-          loop_coordinate: round
           carried: [{ name: draft }]
       - name: publish
         dependsOn: [{ node: refine, port: draft, input: final }]
@@ -342,7 +341,8 @@ on one is refused at submission.
 
 Each task a template runs reports where it ran as `occurrence` in its task
 information: the template member, the child it belongs to, and the iteration of
-each loop around it.
+each loop around it, named by the loop's `loop_coordinate`, its node name unless
+it declares one.
 
 ### Dry-run inspection
 

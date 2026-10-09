@@ -656,7 +656,6 @@ def lower_tasks(
             )
         acc.source_map.append(_source_map_entry(task))
 
-    ops_by_id = {op.operator_id: op for op in acc.operators}
     _wire_dependencies(parsed, known_ids, acc)
     ops_by_id = {op.operator_id: op for op in acc.operators}
 

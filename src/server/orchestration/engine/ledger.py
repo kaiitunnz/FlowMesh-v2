@@ -41,9 +41,8 @@ from .failures import FailureLedger
 from .topology import PlanTopology
 
 # Activations created as a workflow runs, each charged to its activation budget: a
-# spawned child, a legacy loop iteration, and an operator occurrence inside a region
-# definition.
-DYNAMIC_ACTIVATION_KINDS = frozenset({"child", "iteration", "occurrence"})
+# spawned child, and an operator occurrence inside a region definition.
+DYNAMIC_ACTIVATION_KINDS = frozenset({"child", "occurrence"})
 
 _EVENT_FIELDS = frozenset(
     {"operator_id", "work_item_id", "attempt_id", "invocation_id", "slot_key"}
@@ -161,6 +160,12 @@ class OrchestrationLedger:
         self.open_occurrences.setdefault(occurrence.scope_id, {})[occurrence.key] = None
         self.occurrence_by_activation[occurrence.activation_id] = occurrence.key
 
+    def loop_time(self, activation_id: str) -> int:
+        """The iteration of the innermost loop an activation runs in; 0 outside any."""
+        key = self.occurrence_by_activation.get(activation_id)
+        occurrence = self.occurrences.get(key) if key is not None else None
+        return occurrence.time[-1].iteration if occurrence and occurrence.time else 0
+
     def occurrence_of_work_item(self, wi: WorkItem) -> str:
         """The occurrence a work item realizes; a root work item's is its operator."""
         return self.occurrence_by_activation.get(wi.activation_id, wi.operator_id)
@@ -184,9 +189,6 @@ class OrchestrationLedger:
     def control_terminal(self, key: str) -> bool:
         state = self.control_states.get(key)
         return state is not None and state.status is not ControlStatus.PENDING
-
-    def failed_region_ids(self) -> set[str]:
-        return self._failures.failed_regions
 
     def is_dynamic_activation(self, activation_id: str) -> bool:
         act = self.activations.get(activation_id)

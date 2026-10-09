@@ -566,16 +566,6 @@ class TaskRuntime:
             results = [entry for entry in results if entry.task_id not in blueprints]
         return results, inspection
 
-    def inspect_v2(
-        self, payload: str, format: str = "native"
-    ) -> InspectionReport | None:
-        """Compile a v2 submission into an inspection report without executing.
-
-        Returns ``None`` for a non-v2 submission. Structural frontend errors raise
-        ``CompileError``; semantic findings ride on the report's diagnostics.
-        """
-        return self._inspect_parsed(self._parse(payload, format), payload, format)
-
     def _inspect_parsed(
         self, parsed_workflow: ParsedWorkflow, payload: str, format: str
     ) -> InspectionReport | None:

@@ -42,7 +42,6 @@ from ..state import (
 )
 from .advance import (
     Advance,
-    Materialization,
     dependency_failed,
     legacy_control_unsupported,
 )
@@ -1426,20 +1425,6 @@ class RegionFlow:
         self._ledger.emit(
             "work_item_ready", work_item_id=work_item_id, operator_id=wi.operator_id
         )
-        if (
-            key := self._ledger.occurrence_by_activation.get(wi.activation_id)
-        ) is not None:
-            occurrence = self._ledger.occurrence(key)
-            advance.materialized.append(
-                Materialization(
-                    task_id=wi.legacy_task_id,
-                    work_item_id=wi.work_item_id,
-                    operator_id=wi.operator_id,
-                    occurrence=key,
-                    context_id=occurrence.context_id,
-                    time=tuple((f.loop, f.iteration) for f in occurrence.time),
-                )
-            )
         advance.ready.append(wi.legacy_task_id)
 
     def _settle_failure(self, work_item_id: str) -> Advance:
@@ -1562,7 +1547,7 @@ class RegionFlow:
             return
         self._settle_region_failed(operator_id)
         if kind is OperatorKind.SPAWN:
-            self._fail_spawn_template(operator_id, cascade)
+            self._fail_spawn_template(operator_id)
             self._publication.publish_keyed(
                 operator_id, None, PublicationOutcome.DECLARED_FAILURE, None
             )
@@ -1579,9 +1564,10 @@ class RegionFlow:
             operator_id, PublicationOutcome.DECLARED_FAILURE, None
         )
 
-    def _fail_spawn_template(self, spawn_op: str, cascade: Advance) -> None:
-        """Fail a failed spawn's child template, and the templates nested under it,
-        once no live spawn instantiates them."""
+    def _fail_spawn_template(self, spawn_op: str) -> None:
+        """Publish a failed spawn's child template, and the templates nested under it,
+        as failed once no live spawn instantiates them; a template runs as no task of
+        its own."""
         template = self._topology.child_template_of(spawn_op)
         if template is None:
             return
@@ -1589,7 +1575,6 @@ class RegionFlow:
             template, self._instantiable_by_live
         ):
             self._publication.publish(failed, PublicationOutcome.DECLARED_FAILURE, None)
-            cascade.failed.append(failed)
 
     def _instantiable_by_live(self, template: str, dead: list[str]) -> bool:
         """Whether a spawn that neither failed nor belongs to a dead template can still
