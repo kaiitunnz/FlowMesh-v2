@@ -2961,7 +2961,7 @@ class TaskRuntime:
         running the task, and the task must already be bound to exactly this reference
         — the request it was prepared with, an outcome the engine delivered into its
         episode, the settled result of an upstream task it depends on, a value it reads
-        inside a region definition, or the producer result one of its accepted inputs
+        through an incoming edge, or the producer result one of its accepted inputs
         or its fan-out element is frozen to. Naming an object it merely knows of
         authorizes nothing.
         """
@@ -3140,8 +3140,8 @@ class TaskRuntime:
             return self._content_bindings.result_binding_locked(task_id)
 
     def scoped_inputs(self, task_id: str) -> dict[str, ScopedInput] | None:
-        """The values a task inside a region definition reads, by the names its spec
-        reads them through; None for a root task.
+        """The values a task reads through its incoming edges, by the names its spec
+        reads them through; None for a root task fed only by tasks.
 
         Raises ``UnreadableInput`` for a value no binding can carry.
         """

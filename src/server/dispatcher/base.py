@@ -1331,9 +1331,9 @@ class Dispatcher:
         """Render a task's placeholders and name each upstream value it receives.
 
         Placeholders render here, against the upstream values they name; the upstream
-        values themselves travel as bindings the worker hydrates. A task inside a
-        region definition reads the values its scope routes to it; a root task reads
-        its upstream tasks.
+        values themselves travel as bindings the worker hydrates. A task reading a
+        region's value, or inside a region definition, reads the values its incoming
+        edges deliver; a root task fed only by tasks reads their results by name.
         """
         resolved_task: TaskEnvelopeTemplate = task
         if scoped is not None:
@@ -1519,7 +1519,7 @@ class Dispatcher:
         scoped: dict[str, ScopedInput] | None = None,
     ) -> None:
         """Check that each SSH input names a settled upstream stage of the task, or
-        inside a region definition an input carrying a task's result."""
+        for a task reading through its edges an input carrying a task's result."""
         if not isinstance(spec, SSHSpecStrict) or not spec.inputs:
             return
         for entry in spec.inputs:

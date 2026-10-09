@@ -1062,13 +1062,27 @@ class OrchestrationEngine:
             time=tuple(time),
         )
 
-    def occurrence_inputs(self, task_id: str) -> list[OccurrenceInput] | None:
-        """The values a task inside a region definition reads, by the names its spec
-        reads them through; None at the root, where a task reads its upstream tasks."""
-        occurrence = self.occurrence_of(task_id)
-        if occurrence is None:
+    def task_inputs(self, task_id: str) -> list[OccurrenceInput] | None:
+        """The values a task reads through its incoming edges, by the names its spec
+        reads them through; None for a root task fed only by tasks, whose inputs are
+        those tasks' results by their names.
+
+        A task inside a region definition, and a root task reading a region's value,
+        read every input through its edges.
+        """
+        if (occurrence := self.occurrence_of(task_id)) is not None:
+            return self._flow.edges.inputs(occurrence.key)
+        if self._ledger.work_item_for_task(task_id) is None or not any(
+            self._topology.is_control(edge.from_op)
+            for edge in self._topology.incoming.get(task_id, ())
+        ):
             return None
-        return self._flow.edges.inputs(occurrence.key)
+        return self._flow.edges.inputs(task_id)
+
+    def edge_inputs(self, task_id: str) -> list[OccurrenceInput]:
+        """The values a root task reads through its incoming edges, whatever feeds
+        it."""
+        return self._flow.edges.inputs(task_id)
 
     def legacy_control_regions(self) -> list[str]:
         """Branch and loop operators stored before they had a runnable contract."""

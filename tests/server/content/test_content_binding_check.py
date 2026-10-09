@@ -62,7 +62,7 @@ class _Engine:
     def accepted_inputs_for_task(self, task_id: str) -> tuple[AcceptedInput, ...]:
         return self._accepted if task_id == "tsk-1" else ()
 
-    def occurrence_inputs(self, task_id: str) -> None:
+    def task_inputs(self, task_id: str) -> None:
         return None
 
 

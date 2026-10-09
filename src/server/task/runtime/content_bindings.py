@@ -34,8 +34,8 @@ class _InputElement:
 
 @dataclass(frozen=True)
 class ScopedInput:
-    """One value a task inside a region definition reads: what it binds to, and
-    the task whose whole result it is, when a ``task_id`` read may name one."""
+    """One value a task reads through an incoming edge: what it binds to, and the
+    task whose whole result it is, when a ``task_id`` read may name one."""
 
     binding: ResultBinding
     task_id: str | None = None
@@ -147,8 +147,8 @@ class ContentBindings:
     def _scoped_input_is_locked(
         self, task_id: str, reference: ContentReference
     ) -> bool:
-        """Whether a value the task reads inside a region definition reads exactly
-        this object."""
+        """Whether a value the task reads through an incoming edge reads exactly this
+        object."""
         try:
             inputs = self.scoped_inputs_locked(task_id)
         except UnreadableInput:
@@ -199,14 +199,14 @@ class ContentBindings:
         )
 
     def scoped_inputs_locked(self, task_id: str) -> dict[str, ScopedInput] | None:
-        """The values a task inside a region definition reads, by name; None for a
-        root task, which reads its upstream tasks by their names.
+        """The values a task reads through its incoming edges, by name; None for a
+        root task fed only by tasks, which reads their results by their names.
 
         Raises ``UnreadableInput`` for a value no binding can carry.
         """
         record = self._tasks.get(task_id)
         engine = self._engines.get(record.workflow_id) if record else None
-        inputs = engine.occurrence_inputs(task_id) if engine else None
+        inputs = engine.task_inputs(task_id) if engine else None
         if inputs is None:
             return None
         return {

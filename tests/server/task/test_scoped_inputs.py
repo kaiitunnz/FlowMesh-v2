@@ -12,6 +12,7 @@ import pytest
 
 from server.dispatcher.base import Dispatcher
 from server.registries.worker import WorkerRegistry
+from server.task.runtime import ScopedInput
 from server.task.v2.compiler.diagnostics import CompileError
 from shared.schemas.result import RoutedValue
 from shared.tasks.worker_message import WorkerTaskMessage
@@ -319,3 +320,219 @@ def test_a_bare_reference_stays_malformed_at_the_root() -> None:
     with pytest.raises(CompileError) as raised:
         compile_text(_workflow(nodes))
     assert "reads.unresolved" in str(raised.value)
+
+
+_ROOT_LOOP = _REFINE + """      - name: consume
+        dependsOn: [{node: refine, port: state, input: final}]
+        spec:
+          taskType: echo
+          data: {type: list, items: ["${final.draft}", "${refine.draft}"]}
+"""
+
+
+async def _exited(run: _Run) -> _Run:
+    run.run("seed", {"draft": "a"})
+    run.run("step", {"route": "again", "next": {"draft": "b"}})
+    run.run("step", {"route": "done", "draft": "z"})
+    return run
+
+
+@pytest.mark.anyio
+async def test_a_root_task_reads_a_loops_exit_value_by_input_and_by_node() -> None:
+    run = await _exited(await _Run().start(_workflow(_ROOT_LOOP, _REFINE_BODY)))
+    spec, message = _dispatch(run, "consume")
+    assert spec["data"]["items"] == ["z", "z"]
+    assert _worker_reads(message, "final.draft") == "z"
+    assert _worker_reads(message, "refine.draft") == "z"
+
+
+@pytest.mark.anyio
+async def test_a_root_task_reads_a_loops_exit_value_after_a_restart() -> None:
+    run = await _exited(await _Run().start(_workflow(_ROOT_LOOP, _REFINE_BODY)))
+    restored = await run.restart()
+    spec, _ = _dispatch(restored, "consume")
+    assert spec["data"]["items"] == ["z", "z"]
+
+
+def test_a_root_read_of_a_loop_with_several_values_names_its_port() -> None:
+    body = _REFINE_BODY.replace(
+        "inputs: [{name: state, role: carried}]",
+        "inputs: [{name: state, role: carried}, {name: other, role: carried}]",
+    )
+    nodes = """
+      - name: seed
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: refine
+        dependsOn: [{node: seed, input: state}, {node: seed, input: other}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{name: state}, {name: other}]
+      - name: consume
+        dependsOn: [refine]
+        spec: {taskType: echo, data: {type: list, items: ["${refine.draft}"]}}
+"""
+    with pytest.raises(CompileError) as raised:
+        compile_text(_workflow(nodes, body))
+    assert "ports.ambiguous-output" in str(raised.value)
+
+
+_ROOT_BRANCH = """
+      - name: classify
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: route
+        dependsOn: [{node: classify, input: input}]
+        region:
+          kind: branch
+          inputs: [{name: input}]
+          outputs: [{name: hit}, {name: miss}]
+          selection: {input: input, field: [label]}
+      - name: on_hit
+        dependsOn: [{node: route, port: hit, input: picked}]
+        spec: {taskType: echo, data: {type: list, items: ["${picked.label}"]}}
+      - name: on_miss
+        dependsOn: [{node: route, port: miss, input: picked}]
+        spec: {taskType: echo, data: {type: list, items: ["${picked.label}"]}}
+      - name: either
+        dependsOn: [{node: route, port: hit}, {node: route, port: miss}]
+        region: {kind: merge, combination: one_live}
+      - name: joined
+        dependsOn: [{node: either, input: chosen}]
+        spec: {taskType: echo, data: {type: list, items: ["${chosen.label}"]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_root_task_reads_the_branch_arm_and_merge_it_takes() -> None:
+    run = await _Run().start(_workflow(_ROOT_BRANCH))
+    run.run("classify", {"label": "hit"})
+    assert sorted(run.name(t) for t in run.ready) == ["joined", "on_hit"]
+    spec, message = _dispatch(run, "on_hit")
+    assert spec["data"]["items"] == ["hit"]
+    assert _worker_reads(message, "picked.label") == "hit"
+    spec, _ = _dispatch(run, "joined")
+    assert spec["data"]["items"] == ["hit"]
+    record = run.runtime.get_record(run.ids["on_miss"])
+    assert record is not None and record.result_skip is not None
+
+
+_ROOT_JOIN = f"""
+      - name: plan
+        spec: {_ECHO}
+      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [plan]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+      - name: tally
+        dependsOn: [{{node: collect, input: members}}]
+        spec: {_OUTCOME}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_root_task_reads_a_joins_members_with_each_outcome() -> None:
+    run = await _Run().start(_workflow(_ROOT_JOIN))
+    run.run("plan", {"items": ["x", "y"]})
+    first, second = (t for t in run.ready if run.name(t) == "kid")
+    run.run("kid", {"value": "ok"})
+    run.ready.remove(second)
+    run.runtime.mark_failed(second, "wkr-1", {}, _TS, error="boom")
+    run.drive()
+
+    spec, message = _dispatch(run, "tally")
+    assert spec["data"]["items"] == ["declared_failure"]
+    members = _worker_reads(message, "members")
+    assert [(m["outcome"], m["value"]) for m in members] == [
+        ("success", {"ok": True, "value": "ok"}),
+        ("declared_failure", None),
+    ]
+    assert first not in run.ready
+
+
+_ROOT_AGENT = _REFINE + """      - name: reader
+        dependsOn: [{node: refine, port: state, input: final}]
+        spec:
+          taskType: agent
+          task: read the final draft
+          v2:
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+            boundary: [invocation, yield]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_root_agent_accepts_a_loops_exit_value() -> None:
+    run = await _Run().start(_workflow(_ROOT_AGENT, _REFINE_BODY))
+    run.run("seed", {"draft": "a"})
+    run.run("step", {"route": "again", "next": {"draft": "b"}})
+    last = run.run("step", {"route": "done", "draft": "z"})
+    assert [run.name(t) for t in run.ready] == ["reader"]
+    (accepted,) = run.engine.accepted_inputs_for_task(run.ids["reader"])
+    assert accepted.target_port == "final"
+    (member,) = accepted.members
+    assert member.value_ref is not None
+    assert member.value_ref.legacy_task_id == last
+
+
+_TASKS_ONLY = """
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: b
+        dependsOn: [a]
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: c
+        dependsOn: [b]
+        spec:
+          taskType: echo
+          data:
+            type: list
+            items: ["${a.x}", "${b.y.0}", "${b.task_id}", "${a.task_id}"]
+"""
+
+
+@pytest.mark.anyio
+async def test_a_root_task_fed_by_tasks_reads_the_same_through_records_or_edges() -> (
+    None
+):
+    run = await _Run().start(_workflow(_TASKS_ONLY))
+    run.run("a", {"x": "from-a"})
+    run.run("b", {"y": ["from-b"]})
+    task_id = run.ids["c"]
+    record = run.runtime.get_record(task_id)
+    assert record is not None
+    assert run.runtime.scoped_inputs(task_id) is None
+    with run.runtime._lock:
+        through_edges = {
+            entry.name: ScopedInput(
+                run.runtime._content_bindings._value_binding_locked(entry.value),
+                entry.task_id,
+            )
+            for entry in run.engine.edge_inputs(task_id)
+        }
+    dispatcher = Dispatcher(
+        runtime=run.runtime,
+        worker_registry=cast(WorkerRegistry, object()),
+        logger=logging.getLogger("scoped-inputs"),
+    )
+    by_records, record_bindings = dispatcher._resolve_stage_references(
+        task_id, record.task, dispatcher._build_stage_context(record)
+    )
+    by_edges, edge_bindings = dispatcher._resolve_stage_references(
+        task_id, record.task, {}, through_edges
+    )
+    assert by_edges == by_records
+    assert by_records.spec.model_dump()["data"]["items"] == [
+        "from-a",
+        "from-b",
+        run.ids["b"],
+        run.ids["a"],
+    ]
+    assert record_bindings is not None and edge_bindings is not None
+    assert edge_bindings == record_bindings
