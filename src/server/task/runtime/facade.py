@@ -438,6 +438,8 @@ class TaskRuntime:
         self._parked_turns: dict[tuple[str, str], AuthorizeTurn] = {}
         # Tasks taken off the queue while a report of theirs is being handled.
         self._awaiting_reports: set[str] = set()
+        # The tasks whose publication waits for a write of their faulted workflow.
+        self._write_faulted: dict[str, set[str]] = {}
 
         self._dag = StaticDag()
         self._epochs = EpochFrontier()
@@ -492,6 +494,7 @@ class TaskRuntime:
             self._lock,
         )
         self._committer.on_debt = self._durability.schedule
+        self._committer.on_fault_cleared = self._release_write_faulted_locked
         self._occurrences = OccurrenceMaterializer(
             self._tasks, self._original_deps, self._committer
         )
@@ -1456,6 +1459,16 @@ class TaskRuntime:
                             record, increment_retry=False, front=True
                         )
                         self._cv.notify_all()
+
+    def _release_write_faulted_locked(self, workflow_id: str) -> None:
+        """Queue again each task whose publication waited for a write of the
+        workflow."""
+        for task_id in sorted(self._write_faulted.pop(workflow_id, ())):
+            if (record := self._tasks.get(task_id)) is not None and (
+                record.status == TaskStatus.PENDING
+            ):
+                self._return_dispatch_locked(record, increment_retry=False, front=True)
+                self._cv.notify_all()
 
     def _file_locked(self, task_id: str, *actions: AfterCommit | None) -> None:
         """Hold actions until the transition of the task's workflow commits."""
@@ -3758,7 +3771,16 @@ class TaskRuntime:
                 if (record := self._tasks.get(spanned_id)) is not None
             }
             # Every spanned workflow is closed, whether or not an earlier one is.
-            closed = [self._committer.close_locked(w) for w in sorted(spanned)]
+            try:
+                closed = [self._committer.close_locked(w) for w in sorted(spanned)]
+            except Exception:
+                # A fault of the write's own recurs on every write of the workflow;
+                # the task waits aside until one is made, and the rewrite the
+                # workflow owes carries its merge's release.
+                self._merges.unmerge_locked(task_id)
+                faulted = min(spanned & self._committer.faulted or spanned)
+                self._write_faulted.setdefault(faulted, set()).add(task_id)
+                return PublishGate.WRITE_FAULTED
             if not all(closed):
                 return PublishGate.NOT_DURABLE
             if task_id in self._committer.unacknowledged:

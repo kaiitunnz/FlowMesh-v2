@@ -839,6 +839,10 @@ class Dispatcher:
                 # The runtime queues the task again once its report is handled.
                 self._runtime.release_merge(task_id)
                 return True
+            case PublishGate.WRITE_FAULTED:
+                # The runtime released its merge and queues it again once a write of
+                # its workflow is made.
+                return True
             case PublishGate.NOT_DURABLE:
                 # The task waits behind the queue, spending no attempt, while the
                 # runtime makes what the dispatch would carry durable.

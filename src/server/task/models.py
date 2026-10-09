@@ -134,6 +134,9 @@ class PublishGate(StrEnum):
     handled again."""
     REPORTING = "reporting"
     """A report of its task is being handled; the task is queued again once it is."""
+    WRITE_FAULTED = "write_faulted"
+    """A write of its workflow raised a fault of its own; the task is queued again
+    once a write of the workflow is made."""
 
 
 class SettleOutcome(NamedTuple):

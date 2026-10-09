@@ -133,12 +133,16 @@ class TaskMerges:
         return siblings
 
     def release_merge_locked(self, task_id: str) -> None:
+        self._committer.commit_locked(task_id, *self.unmerge_locked(task_id))
+
+    def unmerge_locked(self, task_id: str) -> list[str]:
+        """Take a task's merged children out of its dispatch and back to the queue, in
+        memory; returns the children it moved."""
         if parent := self._tasks.get(task_id):
             parent.merged_children = None
-        returned = self.return_merged_children_locked(
+        return self.return_merged_children_locked(
             self.merge_children_map.pop(task_id, [])
         )
-        self._committer.commit_locked(task_id, *returned)
 
     def merged_child_record_locked(
         self, task_id: str, child_id: str

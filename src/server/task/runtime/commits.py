@@ -239,6 +239,10 @@ class TransitionCommitter:
         self._reports: dict[str, int] = {}
         self.on_workflow_settled: Callable[[str], None] | None = None
         self.on_debt: Callable[[str], None] | None = None
+        # Workflows owing a rewrite after a write raised a fault of its own, and what
+        # runs once a write of one is made again.
+        self.faulted: set[str] = set()
+        self.on_fault_cleared: Callable[[str], None] | None = None
 
     # ------------------------------------------------------------------ #
     # Transition scopes and debt
@@ -369,17 +373,23 @@ class TransitionCommitter:
                 else:
                     self.debt[workflow_id] = before
                 self._owe_rewrite_locked(workflow_id)
-                self._logger.error(
-                    "A write of workflow %s raised; its next write rewrites it: %s",
-                    workflow_id,
-                    exc,
-                )
+                if workflow_id not in self.faulted:
+                    self.faulted.add(workflow_id)
+                    self._logger.error(
+                        "A write of workflow %s raised; its next write rewrites it: %s",
+                        workflow_id,
+                        exc,
+                    )
                 raise
             self._note_held(workflow_id, exc)
             return False
         finally:
             self._making.discard(workflow_id)
         del self.debt[workflow_id]
+        if workflow_id in self.faulted:
+            self.faulted.discard(workflow_id)
+            if self.on_fault_cleared is not None:
+                self.on_fault_cleared(workflow_id)
         return True
 
     def _make_locked(self, workflow_id: str, owed: _Debt) -> None:

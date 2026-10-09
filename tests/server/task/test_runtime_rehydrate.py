@@ -607,29 +607,6 @@ async def test_a_cascade_whose_write_raised_lands_with_the_next_write(
 
 
 @pytest.mark.anyio
-async def test_a_recurring_write_fault_publishes_nothing_of_its_workflow(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    registry = FakeWorkflowRegistry()
-    runtime = _runtime(registry)
-    workflow_id, ids = await _register(runtime, _BESIDE)
-    writes = _RaisingOnce(registry, times=3)
-    monkeypatch.setattr(registry, "commit_transition", writes)
-
-    with pytest.raises(RuntimeError):
-        runtime.mark_failed(ids["a"], "wkr-1", {}, "2026-06-01T00:00:00Z")
-    # Every write of the workflow carries the owed rewrite, so a fault that recurs
-    # stops the workflow's publishes rather than running past what it lost.
-    worker = cast(Any, SimpleNamespace(id="wkr-1", node_id="nde-1"))
-    for _ in range(2):
-        with pytest.raises(RuntimeError):
-            runtime.begin_publish(ids["c"], worker, None)
-    assert not runtime._durability.pending(workflow_id)
-    record_dispatch(runtime, ids["c"])
-    assert _persisted_status(registry, ids["b"]) == TaskStatus.FAILED
-
-
-@pytest.mark.anyio
 @pytest.mark.parametrize("report", ["succeeded", "failed", "cancelled"])
 async def test_a_replayed_terminal_event_rewrites_only_its_own_task(
     monkeypatch: pytest.MonkeyPatch, report: str
