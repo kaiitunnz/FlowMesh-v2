@@ -1,14 +1,12 @@
 """Compilation of branch, merge and loop regions and the region definitions they
 enter: the finite structure, dependency classification and the refused shapes."""
 
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
 from server.task.parser import parse_workflow
 from server.task.v2 import CompileError, FrontendWorkflowSource, compile_workflow
-from server.task.v2.compiler import regions
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.inspect import build_inspection
 from server.task.v2.representations.operators import (
@@ -33,12 +31,6 @@ from server.task.v2.representations.template import (
 
 _BINDINGS = AgentBindingDefaults(default_backend="codex")
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
-
-
-@pytest.fixture(autouse=True)
-def _runnable(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(regions, "CONTROL_FLOW_RUNNABLE", True)
-    yield
 
 
 def _compile(text: str) -> LogicalWorkflowTemplate:
@@ -343,14 +335,6 @@ def test_a_read_through_a_task_ancestor_is_a_derived_edge(read: str, use: str) -
     assert derived not in [
         e for e in template.edges if e.to_op == c.operator_id and not e.derived
     ]
-
-
-def test_control_flow_is_refused_while_not_runnable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(regions, "CONTROL_FLOW_RUNNABLE", False)
-    assert _codes(_workflow(_DIAMOND)) == ["region.unknown-kind"]
-    assert _codes(_workflow(_LOOP_NODES, _LOOP_TEMPLATE)) == ["region.unknown-kind"]
 
 
 def _diamond_with(old: str, new: str) -> str:
@@ -866,39 +850,6 @@ def test_merge_inputs_from_one_branch_are_named_apart() -> None:
 """
     merge = _op(_compile(_workflow(nodes)), "either")
     assert [p.name for p in merge.inputs] == ["decide.a", "decide.b"]
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        _workflow(
-            _FANOUT.replace(
-                "all_settled}", "all_settled, result: {visibility: published}}"
-            )
-        ),
-        _workflow(f"""
-      - name: a
-        spec: {_ECHO}
-      - name: b
-        spec: {_ECHO}
-      - name: m
-        dependsOn: [a, b]
-        region: {{kind: merge, combination: one_live}}
-"""),
-        _workflow(f"""
-      - name: a
-        spec: {_ECHO}
-      - name: b
-        dependsOn: [{{node: a, project: [x]}}]
-        spec: {_ECHO}
-"""),
-    ],
-)
-def test_forms_only_branches_and_loops_need_wait_for_them(
-    monkeypatch: pytest.MonkeyPatch, text: str
-) -> None:
-    monkeypatch.setattr(regions, "CONTROL_FLOW_RUNNABLE", False)
-    assert len(_codes(text)) == 1
 
 
 def test_template_members_are_named_by_their_template() -> None:

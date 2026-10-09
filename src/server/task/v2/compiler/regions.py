@@ -464,12 +464,6 @@ def _apply_result_visibility(
             )
 
 
-# Branch, loop and region-definition authoring, and the region results and
-# dependency forms only they need, are refused at submission until the runtime runs
-# them end to end.
-CONTROL_FLOW_RUNNABLE = False
-
-_CONTROL_FLOW_KINDS = frozenset({"branch", "loop"})
 _PUBLISHING_KINDS = frozenset({"spawn", "merge", "join", "loop"})
 _REGION_KEYS = {
     "branch": frozenset({"kind", "inputs", "outputs", "selection"}),
@@ -493,8 +487,6 @@ def _lower_regions(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
         region.name: str(region.region.get("kind", "")).strip()
         for region in parsed.regions
     }
-    if not CONTROL_FLOW_RUNNABLE:
-        _refuse_control_flow(parsed, definitions)
     for region in parsed.regions:
         _lower_region(
             region,
@@ -503,49 +495,6 @@ def _lower_regions(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
             definitions,
             region_kinds,
             acc,
-        )
-
-
-def _refuse_control_flow(parsed: ParsedWorkflow, definitions: set[str]) -> None:
-    """Refuse the first construct only branch and loop regions run."""
-    for region in parsed.regions:
-        kind = str(region.region.get("kind", "")).strip()
-        if kind in _CONTROL_FLOW_KINDS:
-            raise compile_error(
-                "region.unknown-kind",
-                f"unknown region kind {kind!r}",
-                region.authored_name,
-            )
-        if kind in {"join", "merge"} and region.region.get("result") is not None:
-            raise compile_error(
-                "region.result-unsupported",
-                f"a {kind} region publishes no result",
-                region.authored_name,
-            )
-        if kind == "merge" and region.region.get("combination") == "one_live":
-            raise compile_error(
-                "region.bad-combination",
-                "unknown merge combination 'one_live'",
-                region.authored_name,
-            )
-    if definitions:
-        raise compile_error(
-            "region.unknown-kind", "unknown region kind 'template'", min(definitions)
-        )
-    projected = [
-        task.graph_node_name or task.local_name or task.task_id
-        for task in parsed.tasks
-        if any(dep.project for dep in task.dependencies)
-    ] + [
-        region.authored_name
-        for region in parsed.regions
-        if any(dep.project for dep in region.dependencies)
-    ]
-    if projected:
-        raise compile_error(
-            "parse.unknown-field",
-            "dependsOn declares unknown field 'project'",
-            projected[0],
         )
 
 

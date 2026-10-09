@@ -2,14 +2,11 @@
 
 from typing import Any
 
-import pytest
-
 from server.orchestration import OrchestrationEngine, ScopeBudget
 from server.orchestration.engine.advance import Advance
 from server.orchestration.state import WorkItemStatus
 from server.task.parser import parse_workflow
 from server.task.v2 import FrontendWorkflowSource, PersistedV2Workflow, compile_bundle
-from server.task.v2.compiler import regions
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 
 ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
@@ -30,14 +27,9 @@ spec:
 
 
 def compile_text(text: str) -> PersistedV2Workflow:
-    mp = pytest.MonkeyPatch()
-    mp.setattr(regions, "CONTROL_FLOW_RUNNABLE", True)
-    try:
-        parsed = parse_workflow(text, "native")
-        source = FrontendWorkflowSource.capture(text, "native", name="wf")
-        return compile_bundle("wfl-cf", parsed, source, bindings=_BINDINGS)
-    finally:
-        mp.undo()
+    parsed = parse_workflow(text, "native")
+    source = FrontendWorkflowSource.capture(text, "native", name="wf")
+    return compile_bundle("wfl-cf", parsed, source, bindings=_BINDINGS)
 
 
 class Driver:

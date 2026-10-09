@@ -3,7 +3,6 @@ made from blueprints, routes read off the lock, dead routes settled without runn
 and workflow status that reflects what no task holds."""
 
 import logging
-from collections.abc import Iterator
 from typing import Any, cast
 
 import pytest
@@ -14,7 +13,6 @@ from server.registries.workflow import PersistedTask
 from server.task.models import TaskLoopTime, TaskOccurrence, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
-from server.task.v2.compiler import regions
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
@@ -27,12 +25,6 @@ from tests.server.task.test_v2_orchestration import (
 from tests.support.waiting import pop_ready
 
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
-
-
-@pytest.fixture(autouse=True)
-def _runnable(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(regions, "CONTROL_FLOW_RUNNABLE", True)
-    yield
 
 
 def _workflow(nodes: str, templates: str = "") -> str:

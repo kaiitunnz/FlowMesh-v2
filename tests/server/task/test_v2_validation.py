@@ -137,19 +137,24 @@ def test_predicate_join_non_positive_threshold_rejected() -> None:
     assert any(d.code == "region.join-bad-predicate" for d in err.diagnostics)
 
 
+def test_unknown_region_kind_rejected() -> None:
+    err = _reject("""      - name: r
+        region: {kind: frobnicate}
+""")
+    assert [d.code for d in err.diagnostics] == ["region.unknown-kind"]
+
+
 @pytest.mark.parametrize(
     "region",
-    [
-        "{kind: frobnicate}",
-        '{kind: branch, selection: "x", ports: [p]}',
-        "{kind: loop, coordinate: t}",
-    ],
+    ['{kind: branch, selection: "x", ports: [p]}', "{kind: loop, coordinate: t}"],
 )
-def test_unknown_region_kind_rejected(region: str) -> None:
+def test_a_branch_or_loop_with_unknown_fields_is_rejected(
+    region: str,
+) -> None:
     err = _reject(f"""      - name: r
         region: {region}
 """)
-    assert [d.code for d in err.diagnostics] == ["region.unknown-kind"]
+    assert [d.code for d in err.diagnostics] == ["region.unknown-field"]
 
 
 def test_a_feedback_key_is_invalid_input() -> None:

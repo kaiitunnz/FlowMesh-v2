@@ -9,7 +9,6 @@ from typing import Any, cast
 
 import pytest
 
-from server.task.v2.compiler import regions
 from shared.inference import InferenceSourceKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
@@ -85,10 +84,7 @@ async def test_a_child_of_a_menu_leaf_names_its_element_in_its_contract() -> Non
 
 
 @pytest.mark.anyio
-async def test_a_child_of_a_projected_fan_out_names_its_collection_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(regions, "CONTROL_FLOW_RUNNABLE", True)
+async def test_a_child_of_a_projected_fan_out_names_its_collection_path() -> None:
     runtime = _live_runtime(FakeRegistry())
     _workflow_id, ids = await _register(
         runtime,

@@ -6,14 +6,12 @@ over the one content store the runtime's results live in.
 """
 
 import logging
-from collections.abc import Iterator
 from typing import Any, cast
 
 import pytest
 
 from server.dispatcher.base import Dispatcher
 from server.registries.worker import WorkerRegistry
-from server.task.v2.compiler import regions
 from server.task.v2.compiler.diagnostics import CompileError
 from shared.schemas.result import RoutedValue
 from shared.tasks.worker_message import WorkerTaskMessage
@@ -25,12 +23,6 @@ from worker.content.inputs import TaskInputHydrator
 from worker.executors.utils.expressions import project_expression
 
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
-
-
-@pytest.fixture(autouse=True)
-def _runnable(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(regions, "CONTROL_FLOW_RUNNABLE", True)
-    yield
 
 
 def _dispatch(run: _Run, name: str) -> tuple[dict[str, Any], WorkerTaskMessage]:

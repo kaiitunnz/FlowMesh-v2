@@ -174,16 +174,20 @@ def test_v2_guard_on_region_returns_422_with_location(client: TestClient) -> Non
 
 
 @pytest.mark.parametrize(
-    "region",
-    ['{kind: branch, selection: "x", ports: [p, q]}', "{kind: loop, coordinate: t}"],
+    ("region", "code"),
+    [
+        ("{kind: frobnicate}", "region.unknown-kind"),
+        ('{kind: branch, selection: "x", ports: [p, q]}', "region.unknown-field"),
+        ("{kind: loop, coordinate: t}", "region.unknown-field"),
+    ],
 )
-def test_v2_unsupported_region_kind_returns_422(
-    client: TestClient, region: str
+def test_v2_malformed_region_returns_422(
+    client: TestClient, region: str, code: str
 ) -> None:
     resp = _post(client, _region(region))
     assert resp.status_code == 422
     diagnostics = resp.json()["detail"]["diagnostics"]
-    assert any("region.unknown-kind" in d for d in diagnostics)
+    assert any(code in d for d in diagnostics)
 
 
 def test_v2_region_input_from_a_spawned_agent_returns_422(client: TestClient) -> None:

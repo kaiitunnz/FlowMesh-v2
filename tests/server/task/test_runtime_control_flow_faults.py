@@ -16,13 +16,12 @@ from server.task.v2 import PersistedV2Workflow
 from shared.harness.boundary import BoundaryEventKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
-from tests.server.task.test_runtime_control_flow import (  # noqa: F401
+from tests.server.task.test_runtime_control_flow import (
     _DIAMOND,
     _ECHO,
     _LOOP,
     _LOOP_NODES,
     _Run,
-    _runnable,
     _workflow,
 )
 from tests.server.task.test_v2_orchestration import (
