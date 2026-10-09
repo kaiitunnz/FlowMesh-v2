@@ -5,7 +5,8 @@ from typing import Any, cast
 
 import pytest
 
-from server.task.models import TaskRecord, TaskStatus
+from server.task.models import TaskRecord, TaskStatus, TerminalStatusReverted
+from server.task.runtime.reports import reset_to_pending
 from server.task.runtime.task_table import TaskTable
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_runtime_rehydrate import (
@@ -16,8 +17,21 @@ from tests.server.task.test_runtime_rehydrate import (
 )
 
 
-def _record(task_id: str, workflow_id: str) -> TaskRecord:
-    return cast(TaskRecord, SimpleNamespace(task_id=task_id, workflow_id=workflow_id))
+def _record(
+    task_id: str,
+    workflow_id: str,
+    status: str = TaskStatus.PENDING,
+    finished_ts: float | None = None,
+) -> TaskRecord:
+    return cast(
+        TaskRecord,
+        SimpleNamespace(
+            task_id=task_id,
+            workflow_id=workflow_id,
+            status=status,
+            finished_ts=finished_ts,
+        ),
+    )
 
 
 def test_a_workflow_reads_its_own_tasks_in_the_order_they_were_added() -> None:
@@ -46,6 +60,23 @@ def test_a_replaced_or_removed_task_leaves_its_workflow() -> None:
     assert table.ids_of("w2") == [] and not table
 
 
+def test_a_workflow_is_settled_once_its_last_open_task_is_terminal() -> None:
+    table = TaskTable()
+    table["a"] = _record("a", "w", TaskStatus.DONE, finished_ts=5.0)
+    table["b"] = _record("b", "w")
+    table["c"] = _record("c", "w", TaskStatus.FAILED, finished_ts=9.0)
+    assert table.first_unsettled("w") == "b"
+    assert table.last_finish("w") == 5.0
+    table["b"].status = TaskStatus.CANCELLED
+    table["b"].finished_ts = 7.0
+    assert table.first_unsettled("w") is None
+    assert table.last_finish("w") == 9.0
+    # A task added after the workflow settled opens it again.
+    table["d"] = _record("d", "w")
+    assert table.first_unsettled("w") == "d"
+    assert table.holds("w") and not table.holds("other")
+
+
 @pytest.mark.anyio
 async def test_settlement_reads_only_its_workflows_tasks(
     monkeypatch: pytest.MonkeyPatch,
@@ -68,3 +99,20 @@ async def test_settlement_reads_only_its_workflows_tasks(
         record.status == TaskStatus.DONE
         for record in runtime._tasks.of_workflow(workflow_id)
     )
+
+
+@pytest.mark.anyio
+async def test_a_terminal_task_never_returns_to_an_active_status() -> None:
+    runtime = _runtime(FakeWorkflowRegistry())
+    _, ids = await _register(runtime, WIDE)
+    task_id = ids["a"]
+    record_dispatch(runtime, task_id)
+    runtime.mark_succeeded(task_id, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    record = runtime.get_record(task_id)
+    assert record is not None and record.status == TaskStatus.DONE
+    with pytest.raises(TerminalStatusReverted):
+        reset_to_pending(record)
+    with pytest.raises(TerminalStatusReverted):
+        record.status = TaskStatus.CANCELLING
+    record.status = TaskStatus.DONE
+    assert record.status == TaskStatus.DONE

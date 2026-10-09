@@ -669,17 +669,15 @@ class TransitionCommitter:
         A workflow whose ledger still waits on a value read to route a branch or fan
         out a spawn has not settled, though none of its tasks holds it open.
         """
-        records = self._tasks.of_workflow(workflow_id)
         engine = self._engines.get(workflow_id)
         if (
-            not records
-            or any(r.status not in TERMINAL_TASK_STATUSES for r in records)
+            not self._tasks.holds(workflow_id)
+            or self._tasks.first_unsettled(workflow_id) is not None
             or (engine is not None and engine.awaits_control_reads())
         ):
             return WorkflowSettlement(settled=False, finished_ts=None)
-        finishes = [r.finished_ts for r in records if r.finished_ts is not None]
         return WorkflowSettlement(
-            settled=True, finished_ts=max(finishes) if finishes else None
+            settled=True, finished_ts=self._tasks.last_finish(workflow_id)
         )
 
     def notify_terminal_transition(self, workflow_id: str) -> None:

@@ -49,6 +49,11 @@ TERMINAL_TASK_STATUSES = frozenset(
 # its worker's terminal); the status writers refuse to regress one to an active state.
 SETTLING_TASK_STATUSES = TERMINAL_TASK_STATUSES | {TaskStatus.CANCELLING}
 
+
+class TerminalStatusReverted(RuntimeError):
+    """A write that would move a terminal task back to an active status."""
+
+
 # Task types that run a model server for the life of the task.
 SERVE_TASK_TYPES = frozenset({TaskType.SERVE, TaskType.DEV_MODEL})
 
@@ -317,6 +322,18 @@ class TaskRecord(BaseModel):
     def last_failed_worker(self) -> str | None:
         """The most recent worker to have failed this task."""
         return self.failed_workers[-1] if self.failed_workers else None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # A terminal status is final; settlement and completion rely on it.
+        if (
+            name == "status"
+            and self.status in TERMINAL_TASK_STATUSES
+            and value not in TERMINAL_TASK_STATUSES
+        ):
+            raise TerminalStatusReverted(
+                f"task {self.task_id} is {self.status} and cannot become {value}"
+            )
+        super().__setattr__(name, value)
 
 
 class TaskInputElement(BaseModel):
