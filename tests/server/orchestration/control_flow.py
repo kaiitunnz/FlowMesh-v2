@@ -74,6 +74,7 @@ class Driver:
         self.ready: list[str] = []
         self.skipped: list[str] = []
         self.failed: list[str] = []
+        self.cancelled: list[str] = []
         self.ran: list[str] = []
         self.apply(self.engine.initial_advance())
 
@@ -85,6 +86,7 @@ class Driver:
         self.ready.extend(t for t in advance.ready if t not in self.ready)
         self.skipped.extend(advance.skipped)
         self.failed.extend(advance.failed)
+        self.cancelled.extend(advance.cancelled)
         return advance
 
     def operator(self, task_id: str) -> str:

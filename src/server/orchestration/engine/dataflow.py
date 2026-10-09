@@ -331,7 +331,9 @@ class RegionFlow:
         join = self._join_of_scope(scope_id)
         if self._residual_policy(join, ResidualPolicy.CANCEL) is ResidualPolicy.CANCEL:
             return [
-                wi.legacy_task_id for wi in self._cancel_residual_children(scope_id)
+                wi.legacy_task_id
+                for wi in self._cancel_residual_children(scope_id)
+                if wi.legacy_task_id
             ]
         return []
 
@@ -1114,23 +1116,27 @@ class RegionFlow:
         return cancelled
 
     def _cancel_residual_subtrees(self, scope_id: str) -> list[str]:
-        """Cancel a scope's unsettled children, each with the regions it entered and
-        everything under them, as a cancel does; returns the task ids cancelled."""
+        """Cancel a scope's unsettled children, each with every scope it runs or
+        entered and everything under them, as a cancel does; returns the task ids
+        cancelled."""
         cancelled: list[str] = []
         for wi in self._cancel_residual_children(scope_id):
-            cancelled.append(wi.legacy_task_id)
-            for opener in self._entered_region_openers(wi.activation_id):
-                for sid in self._ledger.scope_subtree(
-                    self._ledger.scope_by_activation[opener]
-                ):
+            if wi.legacy_task_id:
+                cancelled.append(wi.legacy_task_id)
+            for owned in self._child_scopes(wi.activation_id):
+                for sid in self._ledger.scope_subtree(owned):
                     cancelled.extend(self.cancel_one_scope(sid).cancelled)
         return cancelled
 
-    def _entered_region_openers(self, agent_activation: str) -> list[str]:
+    def _child_scopes(self, child_activation: str) -> list[str]:
+        """The scopes a child owns: the context a region-definition child runs its
+        members in, or the regions an agent child entered."""
+        if (context := self._ledger.child_contexts.get(child_activation)) is not None:
+            return [context.scope_id]
         return [
-            opener
+            self._ledger.scope_by_activation[opener]
             for (activation_id, _), opener in self._ledger.region_openers.items()
-            if activation_id == agent_activation
+            if activation_id == child_activation
             and opener in self._ledger.scope_by_activation
         ]
 

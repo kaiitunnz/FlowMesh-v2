@@ -377,6 +377,65 @@ def test_loops_inside_two_spawned_children_keep_their_contexts_apart() -> None:
     run.run(after)
 
 
+def test_a_cancel_residual_withdraws_a_definition_childs_whole_context() -> None:
+    run = Driver(
+        workflow(
+            _SPAWN.replace(
+                "completion: all_settled", "completion: any, residual: cancel"
+            ),
+            _CHILD,
+        )
+    )
+    run.run_one("plan")
+    for element in ("a", "b"):
+        run.apply(
+            run.engine.enter_definition_child(
+                "fan", ValueRef(kind="inline", literal=element)
+            )
+        )
+    run.apply(run.engine.seal_spawn("fan"))
+    first, second = sorted(
+        run.engine.occurrence_of(s).context_id  # type: ignore[union-attr]
+        for s in run.ready_named("step")
+    )
+    (winner,) = [
+        s
+        for s in run.ready_named("step")
+        if run.engine.occurrence_of(s).context_id == first  # type: ignore[union-attr]
+    ]
+    (residual,) = [s for s in run.ready_named("step") if s != winner]
+    run.run(winner)
+    key = next(k for k, _ in run.engine.pending_branch_reads() if first in k)
+    run.apply(run.engine.accept_branch_selection(key, "finish"))
+
+    assert run.ready_named("after") != []
+    assert run.engine.work_item(residual).status is WorkItemStatus.CANCELLED  # type: ignore[union-attr]
+    assert residual in run.cancelled
+    assert "" not in run.cancelled
+    (inner,) = [
+        o
+        for o in run.engine.occurrences(run.ops["researcher/inner"])
+        if o.context_id == second
+    ]
+    instance = run.engine.loop_instance(inner.key)
+    assert instance is not None and instance.status is LoopInstanceStatus.CANCELLED
+    # A late success of the withdrawn step reopens nothing in the cancelled child.
+    run.ready.remove(residual)
+    assert run.engine.pending_branch_reads() == []
+
+
+def test_cancelling_the_workflow_withdraws_definition_children_by_their_tasks() -> None:
+    run = Driver(workflow(_SPAWN, _CHILD))
+    run.run_one("plan")
+    run.apply(
+        run.engine.enter_definition_child("fan", ValueRef(kind="inline", literal="a"))
+    )
+    (step,) = run.ready_named("step")
+    run.apply(run.engine.cancel_instance())
+    assert step in run.cancelled
+    assert "" not in run.cancelled
+
+
 _SPAWN_BODY = f"""
     templates:
       - name: body
@@ -457,6 +516,56 @@ def test_a_spawn_and_join_inside_a_loop_close_per_time() -> None:
     # a zero-child spawn closes once sealed.
     run.apply(run.engine.seal_spawn(fan1))
     run.select("done")
+    assert run.ready_named("consume") != []
+
+
+@pytest.mark.parametrize("residual", ["continue", "drain", "cancel"])
+def test_an_early_joins_residual_child_delays_the_loop_exit_not_the_next_time(
+    residual: str,
+) -> None:
+    run = Driver(
+        workflow(
+            _SPAWN_LOOP,
+            _SPAWN_BODY.replace(
+                "completion: all_settled", f"completion: any, residual: {residual}"
+            ),
+        )
+    )
+    run.run_one("seed")
+    run.run_one("step")
+    fan0 = _fan_at(run, 0)
+    for element in ("a", "b"):
+        run.apply(
+            run.engine.materialize_child(
+                fan0, value_ref=ValueRef(kind="inline", literal=element)
+            )
+        )
+    run.apply(run.engine.seal_spawn(fan0))
+    first, late = run.ready_named("kid")
+    run.run(first)
+    run.select("again")
+    run.run_one("step")
+    fan1 = _fan_at(run, 1)
+    run.apply(
+        run.engine.materialize_child(
+            fan1, value_ref=ValueRef(kind="inline", literal="c")
+        )
+    )
+    run.apply(run.engine.seal_spawn(fan1))
+    (kid,) = [k for k in run.ready_named("kid") if k != late]
+    run.run(kid)
+    run.select("done")
+    instance = run.engine.loop_instance("refine")
+    assert instance is not None
+    if residual == "cancel":
+        assert run.engine.work_item(late).status is WorkItemStatus.CANCELLED  # type: ignore[union-attr]
+        assert instance.status is LoopInstanceStatus.RELEASED
+        return
+    assert instance.status is LoopInstanceStatus.EXITED
+    assert run.ready_named("consume") == []
+    run.run(late)
+    instance = run.engine.loop_instance("refine")
+    assert instance is not None and instance.status is LoopInstanceStatus.RELEASED
     assert run.ready_named("consume") != []
 
 
