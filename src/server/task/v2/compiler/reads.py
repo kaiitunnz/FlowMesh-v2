@@ -108,6 +108,15 @@ def binding_name(dep: ParsedDependency) -> str | None:
     return dep.input
 
 
+def unnamed_projection(dependencies: Iterable[ParsedDependency]) -> str | None:
+    """The source of the first dependency that projects a value it gives no name to
+    read by, if any."""
+    return next(
+        (dep.source for dep in dependencies if dep.project and not binding_name(dep)),
+        None,
+    )
+
+
 def classify_reads(
     task: ParsedTask,
     dependencies: list[ParsedDependency],

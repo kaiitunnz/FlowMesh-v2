@@ -97,7 +97,7 @@ from .embodiment import (
     replica_unfit_reason,
     unproven_reason,
 )
-from .reads import classify_reads
+from .reads import classify_reads, unnamed_projection
 
 _SERVICE_BACKED_SPECS = (
     InferenceSpecStrict,
@@ -716,6 +716,14 @@ def _wire_dependencies(
             regions,
         )
         source_kind, source_id = _task_source(task)
+        if (unnamed := unnamed_projection(task.dependencies)) is not None:
+            raise compile_error(
+                "reads.unnamed-projection",
+                f"the dependency on {unnamed!r} projects a part of its value but "
+                "names no input to read it by; add an input name",
+                source_id,
+                source_kind,
+            )
         if classification.unresolved:
             raise compile_error(
                 "reads.unresolved",

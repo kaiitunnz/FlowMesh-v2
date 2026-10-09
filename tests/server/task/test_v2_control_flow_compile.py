@@ -942,3 +942,119 @@ def test_a_branch_selecting_on_an_aggregate_is_refused(nodes: str, source: str) 
     templates = _CHILD if source != "both" else ""
     text = _workflow(nodes + _SELECT_ON.replace("SOURCE", source), templates)
     assert "dataflow.region-input" in _codes(text)
+
+
+_PROJECTED = f"""
+      - name: a
+        spec: {_ECHO}
+"""
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    [
+        f"""      - name: b
+        dependsOn: [{{node: a, project: [inner]}}]
+        spec: {_ECHO}
+""",
+        """      - name: refine
+        dependsOn: [{node: a, input: state}, {node: a, project: [inner]}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{name: state}]
+""",
+        f"""      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [a]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan, {{node: a, project: [inner]}}]
+        region: {{kind: join, completion: all_settled}}
+""",
+    ],
+    ids=["task", "loop", "join"],
+)
+def test_a_projection_no_input_names_is_refused(consumer: str) -> None:
+    body = f"""
+    templates:
+      - name: body
+        inputs: [{{name: state, role: carried}}]
+        nodes:
+          - name: step
+            dependsOn: [{{node: $ingress, port: state, input: state}}]
+            spec: {_ECHO}
+        edges:
+          - from: {{node: step}}
+            to: {{node: $egress, port: state}}
+"""
+    assert _codes(_workflow(_PROJECTED + consumer, body)) == [
+        "reads.unnamed-projection"
+    ]
+
+
+def test_a_template_member_projection_no_input_names_is_refused() -> None:
+    body = f"""
+    templates:
+      - name: body
+        inputs: [{{name: state, role: carried}}]
+        nodes:
+          - name: step
+            dependsOn: [{{node: $ingress, port: state, input: state}}]
+            spec: {_ECHO}
+          - name: next
+            dependsOn: [{{node: step, project: [items]}}]
+            spec: {_ECHO}
+        edges:
+          - from: {{node: next}}
+            to: {{node: $egress, port: state}}
+"""
+    nodes = _PROJECTED + """      - name: refine
+        dependsOn: [{node: a, input: state}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{name: state}]
+"""
+    assert _codes(_workflow(nodes, body)) == ["reads.unnamed-projection"]
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    [
+        f"""      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [{{node: a, project: [inner]}}]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+""",
+        """      - name: either
+        dependsOn: [{node: a, project: [inner]}]
+        region: {kind: merge, combination: concat}
+""",
+        f"""      - name: route
+        dependsOn: [{{node: a, project: [inner]}}]
+        region:
+          kind: branch
+          outputs: [{{name: p}}, {{name: q}}]
+          selection: {{field: [label]}}
+      - name: on_p
+        dependsOn: [{{node: route, port: p}}]
+        spec: {_ECHO}
+      - name: on_q
+        dependsOn: [{{node: route, port: q}}]
+        spec: {_ECHO}
+""",
+    ],
+    ids=["spawn", "merge", "branch"],
+)
+def test_a_region_whose_input_port_carries_a_projection_may_leave_it_unnamed(
+    consumer: str,
+) -> None:
+    assert _compile(_workflow(_PROJECTED + consumer))
