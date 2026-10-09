@@ -413,10 +413,10 @@ async def test_a_running_workflow_through_a_pre_contract_branch_fails_on_restart
     decide = next(
         e.logical_ref for e in bundle.template.source_map if e.source_id == "decide"
     )
-    operators = [
+    operators = tuple(
         op.model_copy(update={"rule": None}) if op.operator_id == decide else op
         for op in bundle.template.operators
-    ]
+    )
     registry.v2_blobs[run.workflow_id] = bundle.model_copy(
         update={"template": bundle.template.model_copy(update={"operators": operators})}
     ).model_dump_json()
