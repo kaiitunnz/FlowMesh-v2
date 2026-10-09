@@ -646,3 +646,56 @@ def test_the_deployment_sets_the_loop_iteration_budget(
     monkeypatch.setenv("ORCHESTRATOR_MAX_LOOP_ITERATIONS", "7")
     budget = ScopeBudget.from_config(OrchestrationConfig.from_env())
     assert budget.max_loop_iterations == 7
+
+
+_GATED_LOOP = f"""
+      - name: classify
+        spec: {ECHO}
+      - name: decide
+        dependsOn: [{{node: classify, input: input}}]
+        region:
+          kind: branch
+          inputs: [{{name: input}}]
+          outputs: [{{name: go}}, {{name: skip}}]
+          selection: {{input: input}}
+      - name: data
+        spec: {ECHO}
+      - name: refine
+        dependsOn:
+          - {{node: decide, port: go, input: state}}
+          - {{node: data, input: dataset}}
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{{name: state}}]
+          invariants: [{{name: dataset}}]
+"""
+
+
+def test_a_failed_instance_discards_a_pending_selection() -> None:
+    run = Driver(workflow(_GATED_LOOP, _BODY))
+    run.run_one("classify")
+    run.run_one("data")
+    run.apply(run.engine.fail_instance("operator failed the workflow"))
+    assert run.engine.pending_branch_reads() == []
+    decide = run.engine.control_state("decide")
+    assert decide is not None and decide.status is ControlStatus.FAILED
+    # A selection read before the failure and delivered after it enters nothing.
+    advance = run.engine.accept_branch_selection("decide", "go")
+    assert advance.ready == [] and advance.materialized == []
+    assert run.engine.loop_instance("refine") is None
+
+
+def test_a_failed_instance_discards_a_pending_body_route() -> None:
+    run = _loop()
+    run.run_one("step")
+    run.run_one("side")
+    ((route, _),) = run.engine.pending_branch_reads()
+    run.apply(run.engine.fail_instance("operator failed the workflow"))
+    assert run.engine.pending_branch_reads() == []
+    advance = run.engine.accept_branch_selection(route, "continue")
+    assert advance.ready == [] and advance.materialized == []
+    instance = run.engine.loop_instance("refine")
+    assert instance is not None and instance.status is LoopInstanceStatus.FAILED
+    assert run.engine.iteration("refine", 0) is None

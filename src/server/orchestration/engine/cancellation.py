@@ -1,7 +1,12 @@
 """Whole-subtree cancellation and failure of one workflow instance."""
 
 from ...task.v2.representations.operators import OperatorKind
-from ..state import TERMINAL_WORK_ITEM_STATUSES, PublicationOutcome
+from ..state import (
+    TERMINAL_WORK_ITEM_STATUSES,
+    ControlStatus,
+    LoopInstanceStatus,
+    PublicationOutcome,
+)
 from .advance import Advance, RegionError
 from .attempts import AttemptLifecycle
 from .dataflow import RegionFlow
@@ -31,9 +36,27 @@ class ScopeCancellation:
         self._attempt_lifecycle = attempt_lifecycle
 
     def fail_scope_tree(self, scope_id: str, reason: str) -> Advance:
+        """Fail a scope subtree: no scope of it admits another child or time, every
+        control occurrence of it still pending fails, so no read routes it later,
+        and every unsettled leaf or agent settles as a declared failure."""
         self._ledger.emit("instance_failed", detail={"reason": reason})
-        for sid in self._ledger.scope_subtree(scope_id):
+        subtree = set(self._ledger.scope_subtree(scope_id))
+        for sid in subtree:
             self._scope_progress.revoke_progress(sid)
+        for key, state in self._ledger.control_states.items():
+            if (
+                state.status is ControlStatus.PENDING
+                and self._ledger.occurrence(key).scope_id in subtree
+            ):
+                state.status = ControlStatus.FAILED
+                state.reason = reason
+        for instance in self._ledger.loop_instances.values():
+            if instance.scope_id in subtree and instance.status in (
+                LoopInstanceStatus.OPEN,
+                LoopInstanceStatus.EXITED,
+            ):
+                instance.status = LoopInstanceStatus.FAILED
+                self._ledger.active_loops.discard(instance.scope_id)
         advance = Advance()
         for wi in list(self._ledger.work_items.values()):
             if wi.status in TERMINAL_WORK_ITEM_STATUSES or self._topology.kind(
