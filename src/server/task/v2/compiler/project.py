@@ -716,7 +716,9 @@ def _wire_dependencies(
             regions,
         )
         source_kind, source_id = _task_source(task)
-        if (unnamed := unnamed_projection(task.dependencies)) is not None:
+        if (
+            unnamed := unnamed_projection(task.dependencies, names[task.definition])
+        ) is not None:
             raise compile_error(
                 "reads.unnamed-projection",
                 f"the dependency on {unnamed!r} projects a part of its value but "

@@ -510,6 +510,18 @@ def _lower_region(
     kind = str(region.region.get("kind", "")).strip()
     name = region.authored_name
     has_input = bool(region.depends_on)
+    # A loop's unnamed input only orders it and a join's inputs only route or order
+    # it, so a projection there selects nothing anyone reads.
+    if (
+        kind in ("loop", "join")
+        and (unnamed := unnamed_projection(region.dependencies, name_to_op)) is not None
+    ):
+        raise compile_error(
+            "reads.unnamed-projection",
+            f"the dependency on {unnamed!r} projects a part of its value but names no "
+            f"input of the {kind} to carry it; add an input name",
+            name,
+        )
     if (allowed := _REGION_KEYS.get(kind)) is not None and (
         unknown := sorted(set(region.region) - allowed)
     ):
@@ -580,18 +592,6 @@ def _wire_region_dependencies(
     orders it only. A join collects its spawn's children and runs only on the branch
     arms it depends on; any other join input orders it only.
     """
-    # A loop's unnamed input only orders it and a join's inputs only route or order
-    # it, so a projection there selects nothing anyone reads.
-    if (
-        kind in ("loop", "join")
-        and (unnamed := unnamed_projection(dependencies)) is not None
-    ):
-        raise compile_error(
-            "reads.unnamed-projection",
-            f"the dependency on {unnamed!r} projects a part of its value but names no "
-            f"input of the {kind} to carry it; add an input name",
-            region.authored_name,
-        )
     for index, dep in enumerate(dependencies):
         source_kind = region_kinds.get(dep.source)
         if kind == "join":

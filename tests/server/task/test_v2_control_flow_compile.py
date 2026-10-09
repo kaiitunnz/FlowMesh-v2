@@ -990,9 +990,11 @@ def test_a_projection_no_input_names_is_refused(consumer: str) -> None:
           - from: {{node: step}}
             to: {{node: $egress, port: state}}
 """
-    assert _codes(_workflow(_PROJECTED + consumer, body)) == [
-        "reads.unnamed-projection"
-    ]
+    with pytest.raises(CompileError) as caught:
+        _compile(_workflow(_PROJECTED + consumer, body))
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "reads.unnamed-projection"
+    assert "the dependency on 'a'" in diagnostic.message
 
 
 def test_a_template_member_projection_no_input_names_is_refused() -> None:
@@ -1019,7 +1021,11 @@ def test_a_template_member_projection_no_input_names_is_refused() -> None:
           loop_coordinate: round
           carried: [{name: state}]
 """
-    assert _codes(_workflow(nodes, body)) == ["reads.unnamed-projection"]
+    with pytest.raises(CompileError) as caught:
+        _compile(_workflow(nodes, body))
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "reads.unnamed-projection"
+    assert "the dependency on 'step'" in diagnostic.message
 
 
 @pytest.mark.parametrize(
