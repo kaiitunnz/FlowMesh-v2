@@ -722,6 +722,7 @@ class RegionFlow:
             if (
                 cap is None
                 or cap.status is not CapabilityStatus.OPEN
+                or self._topology.kind(operator_id) is not OperatorKind.SPAWN
                 or operator_id in self._topology.agent_region_spawns
             ):
                 continue
