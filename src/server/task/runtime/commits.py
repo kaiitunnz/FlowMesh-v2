@@ -116,7 +116,7 @@ class _Snapshot:
     retire: tuple[str, ...] = ()
 
 
-_Write = _Records | _Snapshot
+type _Write = _Records | _Snapshot
 
 
 @dataclass
@@ -141,7 +141,7 @@ class _Debt:
                 self.retire.update(retire)
 
     def copy(self) -> "_Debt":
-        return _Debt(dict(self.records), self.sched, self.snapshot, set(self.retire))
+        return _Debt(self.records.copy(), self.sched, self.snapshot, self.retire.copy())
 
     def __bool__(self) -> bool:
         return bool(self.records or self.sched or self.snapshot or self.retire)

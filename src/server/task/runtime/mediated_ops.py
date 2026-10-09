@@ -23,7 +23,7 @@ from .after_commit import Reap
 
 # Releases an invocation's resident credit on its committed terminal, returning the
 # consumption when it completes on the resident event loop.
-ResidentTerminalHook = Callable[[str, bool], Future[Any] | None]
+type ResidentTerminalHook = Callable[[str, bool], Future[Any] | None]
 
 
 @dataclass

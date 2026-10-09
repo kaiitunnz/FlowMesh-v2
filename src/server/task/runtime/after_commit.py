@@ -81,7 +81,7 @@ class AuthorizeTurn:
     deadline_epoch: float
 
 
-AfterCommit = (
+type AfterCommit = (
     CreditRelease | Reap | Interrupt | Revoke | Issue | Purge | Settled | AuthorizeTurn
 )
 
