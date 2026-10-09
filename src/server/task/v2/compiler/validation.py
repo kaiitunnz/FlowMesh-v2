@@ -624,17 +624,25 @@ def _check_region_inputs(
                     loc,
                 )
             )
-        if (
-            isinstance(target, BranchRegion)
-            and target.rule is not None
-            and edge.to_port == target.rule.input
-            and edge.boundary is not BoundaryKind.ENTRY
-            and not _releases_one_value(source)
+    for op in template.operators:
+        if not isinstance(op, BranchRegion) or op.rule is None:
+            continue
+        selected = _selection_edge(template, op.operator_id, op.rule.input)
+        if selected is None:
+            diags.append(
+                _region_input(
+                    op.operator_id,
+                    f"binds no edge to its selection input {op.rule.input!r}",
+                    loc,
+                )
+            )
+        elif selected.boundary is not BoundaryKind.ENTRY and not _releases_one_value(
+            op_by_id.get(selected.from_op)
         ):
             diags.append(
                 _region_input(
-                    edge.to_op,
-                    f"selects on input from {edge.from_op!r}, which releases no "
+                    op.operator_id,
+                    f"selects on input from {selected.from_op!r}, which releases no "
                     "single value",
                     loc,
                 )
@@ -645,6 +653,18 @@ def _check_region_inputs(
         if isinstance(op, JoinRegion) and op.operator_id not in fed_by_spawn
     )
     return diags
+
+
+def _selection_edge(
+    template: LogicalWorkflowTemplate, branch: str, port: str
+) -> TemplateEdge | None:
+    """The edge a branch selects on: the one bound to its selection input, or its
+    only incoming edge."""
+    incoming = [edge for edge in template.edges if edge.to_op == branch]
+    return next(
+        (edge for edge in incoming if edge.to_port == port),
+        incoming[0] if len(incoming) == 1 else None,
+    )
 
 
 def _releases_one_value(source: LogicalOperator | None) -> bool:

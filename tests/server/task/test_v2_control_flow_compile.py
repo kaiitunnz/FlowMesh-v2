@@ -1097,3 +1097,56 @@ def test_a_root_task_id_read_of_a_task_compiles() -> None:
         spec: {{taskType: echo, data: {{type: list, items: ["${{x.task_id}}"]}}}}
 """
     _compile(_workflow(nodes))
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "dependsOn: [both]",
+        "dependsOn: [a, b]",
+    ],
+    ids=["unnamed-aggregate", "no-selection-input"],
+)
+def test_a_branch_selects_on_one_value_its_edge_binds(selection: str) -> None:
+    nodes = f"""
+      - name: a
+        spec: {_ECHO}
+      - name: b
+        spec: {_ECHO}
+      - name: both
+        dependsOn: [{{node: a, input: x}}, {{node: b, input: y}}]
+        region: {{kind: merge, combination: concat}}
+      - name: decide
+        {selection}
+        region:
+          kind: branch
+          outputs: [{{name: l}}, {{name: r}}]
+          selection: {{field: [0, key]}}
+      - name: on_l
+        dependsOn: [{{node: decide, port: l}}]
+        spec: {_ECHO}
+      - name: on_r
+        dependsOn: [{{node: decide, port: r}}]
+        spec: {_ECHO}
+"""
+    assert "dataflow.region-input" in _codes(_workflow(nodes))
+
+
+def test_a_branch_with_one_unnamed_input_selects_on_it() -> None:
+    nodes = f"""
+      - name: a
+        spec: {_ECHO}
+      - name: decide
+        dependsOn: [a]
+        region:
+          kind: branch
+          outputs: [{{name: l}}, {{name: r}}]
+          selection: {{field: [items, 0, output]}}
+      - name: on_l
+        dependsOn: [{{node: decide, port: l}}]
+        spec: {_ECHO}
+      - name: on_r
+        dependsOn: [{{node: decide, port: r}}]
+        spec: {_ECHO}
+"""
+    _compile(_workflow(nodes))
