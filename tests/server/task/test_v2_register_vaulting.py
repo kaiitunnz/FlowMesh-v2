@@ -144,19 +144,6 @@ def _drive_agent_to_done(runtime: TaskRuntime, task_id: str) -> None:
 
 
 @pytest.mark.anyio
-async def test_repersist_with_no_terminal_tasks_commits_the_schedule():
-    reg = FakeRegistry()
-    runtime = _runtime(_RecordingVault(), reg)
-    workflow_id, _ = await runtime.register("owner", "org", _WF, format="native")
-    calls: list = []
-    reg.commit_transition = lambda *a, **k: calls.append((a, k))  # type: ignore[method-assign]
-    with runtime._cv:
-        runtime._committer.repersist_terminal_workflow_locked(workflow_id)
-    assert len(calls) == 1
-    assert calls[0][1].get("sched") is not None
-
-
-@pytest.mark.anyio
 async def test_reclaim_on_a_non_final_settlement_is_a_noop():
     reg = FakeRegistry()
     vault = _RecordingVault()

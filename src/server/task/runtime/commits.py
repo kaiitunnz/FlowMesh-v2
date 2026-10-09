@@ -41,6 +41,7 @@ from .reports import membership
 from .reservations import WorkerReservations
 from .resident_tasks import ResidentServeTasks
 from .scheduling import EpochFrontier
+from .task_table import TaskTable
 
 _UNAVAILABLE_ERRORS: tuple[type[BaseException], ...] = (
     *REDIS_CONN_ERRORS,
@@ -207,7 +208,7 @@ class TransitionCommitter:
         reservations: WorkerReservations,
         actions: AfterCommitActions,
         record_failures: RecordFailures,
-        tasks: dict[str, TaskRecord],
+        tasks: TaskTable,
         original_deps: dict[str, set[str]],
         engines: dict[str, OrchestrationEngine],
         workflow_registry: WorkflowRegistry,
@@ -323,11 +324,7 @@ class TransitionCommitter:
         owed = self.debt.setdefault(workflow_id, _Debt())
         owed.owe(
             _Records(
-                tuple(
-                    task_id
-                    for task_id, record in self._tasks.items()
-                    if record.workflow_id == workflow_id
-                ),
+                tuple(self._tasks.ids_of(workflow_id)),
                 sched=True,
             )
         )
@@ -633,17 +630,23 @@ class TransitionCommitter:
         if failed:
             self.commit_locked(*failed)
 
-    def repersist_terminal_workflow_locked(self, workflow_id: str) -> None:
-        """Re-commit a workflow's terminal tasks and its schedule, so a replayed
-        terminal event leaves its durable state current; a cascade's other tasks are
-        not known from the replay, so it covers the whole workflow."""
-        terminal_ids = [
-            task_id
-            for task_id, record in self._tasks.items()
-            if record.workflow_id == workflow_id
-            and record.status in TERMINAL_TASK_STATUSES
-        ]
-        self.commit_records_locked(workflow_id, terminal_ids, sched=True)
+    def recommit_terminal_locked(self, record: TaskRecord) -> None:
+        """Re-commit a task a replayed terminal event reports, with the merged
+        children its settlement settled.
+
+        A write the transition made and the store refused is held and retried, and a
+        transition that stopped partway owes its whole workflow, so the replay owes
+        only the reported task's own records.
+        """
+        self.commit_locked(
+            record.task_id,
+            *(
+                child_id
+                for child_id in record.merged_children or ()
+                if (child := self._tasks.get(child_id)) is not None
+                and child.status in TERMINAL_TASK_STATUSES
+            ),
+        )
 
     # ------------------------------------------------------------------ #
     # Settlement
@@ -666,7 +669,7 @@ class TransitionCommitter:
         A workflow whose ledger still waits on a value read to route a branch or fan
         out a spawn has not settled, though none of its tasks holds it open.
         """
-        records = [r for r in self._tasks.values() if r.workflow_id == workflow_id]
+        records = self._tasks.of_workflow(workflow_id)
         engine = self._engines.get(workflow_id)
         if (
             not records

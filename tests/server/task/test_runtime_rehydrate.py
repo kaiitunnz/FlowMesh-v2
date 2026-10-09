@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
@@ -222,6 +223,20 @@ spec:
         dependsOn: [a]
         spec:
           taskType: echo
+"""
+
+WIDE = """
+apiVersion: flowmesh/v1
+kind: Workflow
+metadata:
+  name: wide
+spec:
+  graph:
+    nodes:
+      - {name: a, spec: {taskType: echo}}
+      - {name: b, spec: {taskType: echo}}
+      - {name: c, spec: {taskType: echo}}
+      - {name: d, spec: {taskType: echo}}
 """
 
 EPOCH_GRAPH = """
@@ -494,12 +509,12 @@ async def test_mark_failed_applies_cascade_atomically_when_persist_raises(
 
 
 @pytest.mark.anyio
-async def test_replayed_terminal_event_repersists_after_failed_write(
+async def test_a_replayed_terminal_event_lands_the_cascade_its_store_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = FakeWorkflowRegistry()
     runtime = _runtime(registry)
-    _, ids = await _register(runtime, GRAPH)
+    workflow_id, ids = await _register(runtime, GRAPH)
     a, b = ids["a"], ids["b"]
 
     real_commit = registry.commit_transition
@@ -508,7 +523,7 @@ async def test_replayed_terminal_event_repersists_after_failed_write(
     def flaky_commit(*args: Any, **kwargs: Any) -> None:
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("redis down")
+            raise RedisConnectionError("redis down")
         real_commit(*args, **kwargs)
 
     monkeypatch.setattr(registry, "commit_transition", flaky_commit)
@@ -518,22 +533,54 @@ async def test_replayed_terminal_event_repersists_after_failed_write(
             registry.task_blobs[task_id]
         ).record.status
 
-    # Registration persisted both tasks as PENDING.
-    assert persisted_status(a) == TaskStatus.PENDING
-
-    # Attempt 1: the cascade applies in memory, but the durable write fails, so
-    # the persisted records are left at their stale PENDING state.
-    with pytest.raises(RuntimeError):
-        runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    # The cascade applies in memory and its write is held.
+    runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert persisted_status(a) == TaskStatus.PENDING
     assert persisted_status(b) == TaskStatus.PENDING
+    assert not runtime._committer.durable(workflow_id)
 
-    # Replay of the same TASK_FAILED: the guard heals by re-persisting the
-    # workflow's terminal records (the whole cascade, not just the primary).
+    # A replay of the same TASK_FAILED writes what the workflow holds.
     impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert impacted == []
     assert persisted_status(a) == TaskStatus.FAILED
     assert persisted_status(b) == TaskStatus.FAILED
+    assert runtime._committer.durable(workflow_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("report", ["succeeded", "failed", "cancelled"])
+async def test_a_replayed_terminal_event_rewrites_only_its_own_task(
+    monkeypatch: pytest.MonkeyPatch, report: str
+) -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, WIDE)
+    finished = [ids[name] for name in ("a", "b", "c")]
+    for task_id in finished:
+        record_dispatch(runtime, task_id)
+        runtime.mark_succeeded(task_id, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    last = ids["d"]
+    record_dispatch(runtime, last)
+    match report:
+        case "succeeded":
+            settle = runtime.mark_succeeded
+        case "failed":
+            settle = runtime.mark_failed  # type: ignore[assignment]
+        case _:
+            runtime.cancel_workflow(workflow_id)
+            settle = runtime.mark_cancelled  # type: ignore[assignment]
+    settle(last, "wkr-1", {}, "2026-06-01T00:00:00Z")
+
+    written: list[str] = []
+    real_commit = registry.commit_transition
+
+    def recording(workflow: str, **kwargs: Any) -> None:
+        written.extend(item.record.task_id for item in kwargs.get("records", ()))
+        real_commit(workflow, **kwargs)
+
+    monkeypatch.setattr(registry, "commit_transition", recording)
+    settle(last, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    assert written == [last]
 
 
 @pytest.mark.anyio

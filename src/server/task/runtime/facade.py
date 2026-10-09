@@ -202,6 +202,7 @@ from .reservations import WorkerReservations
 from .resident_tasks import ResidentServeTasks
 from .scheduling import EpochFrontier, ReadyQueue
 from .static_dag import StaticDag
+from .task_table import TaskTable
 
 _RESIDUAL_CANCEL_REASON = "cancelled by its region's residual policy"
 # The empty result a task no route reaches settles with.
@@ -407,7 +408,7 @@ class TaskRuntime:
             if orchestration.episode_lowering
             else LoweringStrategy.TRANSPARENT
         )
-        self._tasks: dict[str, TaskRecord] = {}
+        self._tasks = TaskTable()
         self._original_deps: dict[str, set[str]] = {}
         self._completed: set[str] = set()
         self._failed: set[str] = set()
@@ -3494,9 +3495,8 @@ class TaskRuntime:
                 return
             producers = [
                 (task_id, self._content_bindings.result_binding_locked(task_id))
-                for task_id, record in self._tasks.items()
-                if record.workflow_id == workflow_id
-                and record.status == TaskStatus.DONE
+                for task_id in self._tasks.ids_of(workflow_id)
+                if self._tasks[task_id].status == TaskStatus.DONE
                 and (spawn_op := engine.fanout_spawn(task_id)) is not None
                 and engine.spawn_awaits_children(spawn_op)
             ]
@@ -3678,10 +3678,9 @@ class TaskRuntime:
         durable."""
         owed = self._terminate_workflow_locked(workflow_id, reason, reason)
         non_terminal = [
-            task_id
-            for task_id, record in self._tasks.items()
-            if record.workflow_id == workflow_id
-            and record.status not in TERMINAL_TASK_STATUSES
+            record.task_id
+            for record in self._tasks.of_workflow(workflow_id)
+            if record.status not in TERMINAL_TASK_STATUSES
         ]
         self._fail_v2_records_locked(non_terminal, reason, persist=True)
         self._actions.file_locked(workflow_id, *owed)
@@ -4036,8 +4035,7 @@ class TaskRuntime:
                     # Idempotent: a replayed TASK_SUCCEEDED must not re-apply, but
                     # re-persist in case the original completion's write failed
                     # after its in-memory commit.
-                    for workflow_id in self._merges.settle_workflows_locked(record):
-                        self._committer.repersist_terminal_workflow_locked(workflow_id)
+                    self._committer.recommit_terminal_locked(record)
                     # Recover a settlement or fan-out lost to a failed commit or a crash
                     # between the producer's terminal persist and its children: both
                     # are no-ops once applied.
@@ -4252,7 +4250,7 @@ class TaskRuntime:
                 self._fence.heal_returned_locked(task_id, worker_id, dispatch_id)
                 return FailureOutcome(DispatchEnd.STALE, 0, [], [])
             if record.status in TERMINAL_TASK_STATUSES:
-                self._committer.repersist_terminal_workflow_locked(record.workflow_id)
+                self._committer.recommit_terminal_locked(record)
                 return FailureOutcome(DispatchEnd.SETTLED, record.attempts, [], [])
             if self._fence.return_failed_merge_locked(record, worker_id):
                 return FailureOutcome(
@@ -4495,9 +4493,7 @@ class TaskRuntime:
                     # Idempotent: a replayed TASK_FAILED must not re-apply, but
                     # re-persist in case the original failure's write (including
                     # its cascade) failed after the in-memory commit.
-                    self._committer.repersist_terminal_workflow_locked(
-                        record.workflow_id
-                    )
+                    self._committer.recommit_terminal_locked(record)
                     return [], []
                 if record.status == TaskStatus.DONE:
                     self._logger.warning(
@@ -4591,9 +4587,8 @@ class TaskRuntime:
         returned: list[str] = []
         with self._transition():
             workflow_tasks = [
-                item
-                for item in self._tasks.items()
-                if item[1].workflow_id == workflow_id
+                (record.task_id, record)
+                for record in self._tasks.of_workflow(workflow_id)
             ]
             if not workflow_tasks:
                 return touched  # Unknown workflow: no records to move
@@ -4637,14 +4632,7 @@ class TaskRuntime:
         delivery once that commit is durable.
         """
         self._redrive.settle(workflow_id)
-        owed = self._take_task_work_locked(
-            [
-                record
-                for record in self._tasks.values()
-                if record.workflow_id == workflow_id
-            ],
-            reason,
-        )
+        owed = self._take_task_work_locked(self._tasks.of_workflow(workflow_id), reason)
         self._epochs.forget_workflow(workflow_id)
         if (engine := self._engines.get(workflow_id)) is None:
             return owed
@@ -4842,7 +4830,7 @@ class TaskRuntime:
                 # Idempotent: a replayed cancellation must not re-apply, but
                 # re-persist in case the original cancellation's write failed
                 # after its in-memory commit.
-                self._committer.repersist_terminal_workflow_locked(record.workflow_id)
+                self._committer.recommit_terminal_locked(record)
                 return settle_outcome(EventEffect.SETTLED, record, [], [])
             if record.status in (TaskStatus.DONE, TaskStatus.FAILED):
                 self._logger.warning(
