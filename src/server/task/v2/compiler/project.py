@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from shared.inference import (
     CanonicalInferenceInputSource,
@@ -24,7 +25,7 @@ from shared.tasks.specs import (
 from shared.tasks.specs.common import ModelSpecTemplate
 from shared.utils.redact import is_credential_url
 
-from ...parser import ParsedTask, ParsedWorkflow
+from ...parser import INGRESS, ParsedTask, ParsedWorkflow
 from ..policy.lowering import (
     PolicySurface,
     screen_residency,
@@ -64,6 +65,9 @@ from ..representations.results import (
 )
 from ..representations.serving_size import DEFAULT_SERVING_SIZE, ServingSize
 from ..representations.template import (
+    DependencyUse,
+    EntryBinding,
+    RegionDefinition,
     ResourceDeclaration,
     SourceKind,
     SourceMapEntry,
@@ -94,6 +98,7 @@ from .embodiment import (
     replica_unfit_reason,
     unproven_reason,
 )
+from .reads import classify_reads
 
 _SERVICE_BACKED_SPECS = (
     InferenceSpecStrict,
@@ -157,6 +162,9 @@ def _ports(
     outputs: list[Port] = [Port(name="out")]
     if task.depends_on:
         inputs.append(Port(name="in"))
+    for dep in task.dependencies:
+        if dep.input and all(port.name != dep.input for port in inputs):
+            inputs.append(Port(name=dep.input))
     model_ref = _model_ref(task)
     if model_ref is not None:
         if is_training(task_type):
@@ -484,6 +492,9 @@ class LoweringAccumulator:
     source_map: list[SourceMapEntry] = field(default_factory=list)
     nodes: list[PhysicalNode] = field(default_factory=list)
     sandbox_egress_requests: dict[str, SandboxEgressMode] = field(default_factory=dict)
+    definitions: list[RegionDefinition] = field(default_factory=list)
+    # Each region definition's $ingress bindings, gathered as its members lower.
+    entries: dict[str, list[EntryBinding]] = field(default_factory=dict)
 
     @property
     def operator_ids(self) -> set[str]:
@@ -495,19 +506,52 @@ def call_join_id(name: str) -> str:
     return f"{name}:join"
 
 
-def build_name_map(parsed: ParsedWorkflow) -> dict[str, str]:
-    """Map source-visible node names to the operator ids that produce their values."""
+def build_name_map(parsed: ParsedWorkflow, scope: str | None = None) -> dict[str, str]:
+    """Map the source-visible names of one graph scope (the root, or a region
+    definition) to the operator ids that produce their values."""
     name_to_op: dict[str, str] = {}
     for task in parsed.tasks:
+        if task.definition != scope:
+            continue
         if task.graph_node_name:
             name_to_op[task.graph_node_name] = task.task_id
         if task.local_name:
             name_to_op[task.local_name] = task.task_id
-    # A call's value is its join's, so a reference to a call names the join.
+    value_ops = build_value_ops(parsed)
     for region in parsed.regions:
-        if str(region.region.get("kind", "")).strip() == "call":
-            name_to_op[region.name] = call_join_id(region.name)
+        if region.definition == scope:
+            name_to_op[region.authored_name] = value_ops.get(region.name, region.name)
     return name_to_op
+
+
+def build_value_ops(parsed: ParsedWorkflow) -> dict[str, str]:
+    """Map each operator id a dependency may name to the operator producing its value:
+    a call's value is its join's."""
+    return {
+        region.name: call_join_id(region.name)
+        for region in parsed.regions
+        if str(region.region.get("kind", "")).strip() == "call"
+    }
+
+
+def _task_ancestors(
+    parsed: ParsedWorkflow, value_ops: dict[str, str]
+) -> dict[str, frozenset[str]]:
+    """The operators each task may read by name: its direct dependencies, and the
+    tasks reached from them through task dependencies."""
+    deps = {task.task_id: task.depends_on for task in parsed.tasks}
+    ancestors: dict[str, frozenset[str]] = {}
+    for task in parsed.tasks:
+        seen: set[str] = {value_ops.get(dep, dep) for dep in task.depends_on}
+        pending = [dep for dep in task.depends_on if dep in deps]
+        while pending:
+            current = pending.pop()
+            for dep in deps[current]:
+                if dep in deps and dep not in seen:
+                    seen.add(dep)
+                    pending.append(dep)
+        ancestors[task.task_id] = frozenset(seen)
+    return ancestors
 
 
 def lower_tasks(
@@ -550,16 +594,13 @@ def lower_tasks(
         acc.source_map.append(_source_map_entry(task))
 
     ops_by_id = {op.operator_id: op for op in acc.operators}
+    _wire_dependencies(parsed, known_ids, acc)
+    ops_by_id = {op.operator_id: op for op in acc.operators}
 
-    # Pass 2: wiring, induced outputs, and physical nodes.
+    # Pass 2: induced outputs and physical nodes.
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
         operator_id = task.task_id
-        for dep in task.depends_on:
-            if dep in known_ids:
-                acc.edges.append(
-                    TemplateEdge(from_op=name_to_op.get(dep, dep), to_op=operator_id)
-                )
 
         # serve administers resident capacity: a residency node, no result slot.
         if binding_class(task_type) is BindingClass.RESIDENCY:
@@ -621,6 +662,91 @@ def lower_tasks(
                 residency_intent=intent,
             )
         )
+
+
+def _wire_dependencies(
+    parsed: ParsedWorkflow, known_ids: set[str], acc: LoweringAccumulator
+) -> None:
+    """Turn each task's ``dependsOn`` entries into classified edges.
+
+    A dependency's use follows from what the task's spec reads; a ``$ingress`` entry
+    becomes an entry binding of the task's region definition.
+    """
+    value_ops = build_value_ops(parsed)
+    ancestors = _task_ancestors(parsed, value_ops)
+    routed = frozenset(
+        region.name
+        for region in parsed.regions
+        if str(region.region.get("kind", "")).strip() == "branch"
+    )
+    names = {scope: build_name_map(parsed, scope) for scope in _scopes(parsed)}
+    by_id = {op.operator_id: idx for idx, op in enumerate(acc.operators)}
+    for task in parsed.tasks:
+        classification = classify_reads(
+            task,
+            names[task.definition],
+            value_ops,
+            ancestors[task.task_id],
+            routed,
+        )
+        if classification.unresolved:
+            source_kind, source_id = _task_source(task)
+            raise compile_error(
+                "reads.unresolved",
+                "references "
+                + ", ".join(repr(name) for name in classification.unresolved)
+                + " name no upstream node this task can read; a ${name.path} "
+                "reference names a dependency, an ancestor reached through task "
+                "dependencies, or a named input",
+                source_id,
+                source_kind,
+            )
+        for index, (dep, use) in enumerate(
+            zip(task.dependencies, classification.uses, strict=True)
+        ):
+            if dep.source == INGRESS:
+                acc.entries.setdefault(task.definition or "", []).append(
+                    EntryBinding(
+                        port=dep.port or dep.input or "",
+                        to_op=task.task_id,
+                        to_port=dep.input,
+                        use=(
+                            DependencyUse.VALUE_REQUIRED
+                            if dep.input
+                            or (dep.port or "") in classification.entry_reads
+                            else DependencyUse.ORDER_ONLY
+                        ),
+                        projection=dep.project,
+                    )
+                )
+                continue
+            if dep.source not in known_ids:
+                continue
+            acc.edges.append(
+                TemplateEdge(
+                    from_op=value_ops.get(dep.source, dep.source),
+                    to_op=task.task_id,
+                    from_port=dep.port,
+                    to_port=dep.input,
+                    edge_id=f"{task.task_id}#{index}",
+                    use=use,
+                    projection=dep.project,
+                )
+            )
+        idx = by_id[task.task_id]
+        op = acc.operators[idx]
+        updates: dict[str, Any] = {"value_reads": classification.value_reads}
+        if isinstance(op, AgentOperator):
+            named = tuple(dep.input for dep in task.dependencies if dep.input)
+            if named:
+                updates["declared_input_ports"] = tuple(
+                    dict.fromkeys((*op.declared_input_ports, *named))
+                )
+        acc.operators[idx] = op.model_copy(update=updates)
+
+
+def _scopes(parsed: ParsedWorkflow) -> set[str | None]:
+    return {None} | {definition.name for definition in parsed.definitions}
 
 
 def _embodiment_menu(

@@ -46,7 +46,22 @@ class InspectionReport(BaseModel):
             lines.append("  edges:")
             for edge in self.template.edges:
                 arrow = "==>" if edge.feedback else "-->"
-                lines.append(f"    {edge.from_op} {arrow} {edge.to_op}")
+                source = _endpoint(edge.from_op, edge.from_port)
+                target = _endpoint(edge.to_op, edge.to_port)
+                lines.append(f"    {source} {arrow} {target} [{edge.use.value}]")
+        for definition in self.template.definitions:
+            lines.append(
+                f"  template {definition.definition_id} [{definition.kind.value}]"
+            )
+            lines.append(f"    members: {', '.join(definition.members)}")
+            for port in definition.inputs:
+                lines.append(f"    input {port.name} [{port.role.value}]")
+            for entry in definition.entries:
+                target = _endpoint(entry.to_op, entry.to_port)
+                lines.append(f"    $ingress.{entry.port} --> {target}")
+            for binding in definition.return_bindings:
+                source = _endpoint(binding.from_op, binding.from_port)
+                lines.append(f"    {source} --> ${binding.kind.value}.{binding.port}")
         if self.template.tool_declarations:
             names = ", ".join(t.name for t in self.template.tool_declarations)
             lines.append(f"  tools: {names}")
@@ -74,6 +89,10 @@ class InspectionReport(BaseModel):
                 "  note: structured regions are inspect-only via this endpoint"
             )
         return "\n".join(lines)
+
+
+def _endpoint(operator_id: str, port: str | None) -> str:
+    return f"{operator_id}.{port}" if port else operator_id
 
 
 def build_inspection(

@@ -6,6 +6,7 @@ from shared.tasks.specs import ModelBindingMode
 from ..representations.operators import (
     AgentOperator,
     AuthorityCeiling,
+    BranchRegion,
     DeterminismClass,
     EffectClass,
     InputProvenanceKind,
@@ -13,6 +14,8 @@ from ..representations.operators import (
     JoinRegion,
     LeafOperator,
     LogicalOperator,
+    LoopContextRegion,
+    MergeCombination,
     MergeRegion,
     RecoveryClass,
     ResidualPolicy,
@@ -23,6 +26,7 @@ from ..representations.plan import PhysicalExecutionPlan
 from ..representations.results import CardinalityKind, ReleaseConditionKind
 from ..representations.template import LogicalWorkflowTemplate
 from .diagnostics import Diagnostic, Severity, SourceLocation
+from .region_checks import check_control_flow
 from .sandbox import egress_authorized, egress_requested
 
 _DETERMINISTIC = (
@@ -43,8 +47,12 @@ def _location_index(
     return index
 
 
-def _port_names(op: LogicalOperator) -> set[str]:
-    return {port.name for port in (*op.inputs, *op.outputs)}
+def _output_names(op: LogicalOperator) -> set[str]:
+    return {port.name for port in op.outputs}
+
+
+def _input_names(op: LogicalOperator) -> set[str]:
+    return {port.name for port in op.inputs}
 
 
 def _check_source_map(
@@ -80,10 +88,11 @@ def _check_ports(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
     diags: list[Diagnostic] = []
-    ports_by_op = {op.operator_id: _port_names(op) for op in template.operators}
+    outputs_by_op = {op.operator_id: _output_names(op) for op in template.operators}
+    inputs_by_op = {op.operator_id: _input_names(op) for op in template.operators}
     for edge in template.edges:
         if edge.from_port is not None:
-            names = ports_by_op.get(edge.from_op, set())
+            names = outputs_by_op.get(edge.from_op, set())
             if edge.from_port not in names:
                 diags.append(
                     Diagnostic(
@@ -96,7 +105,7 @@ def _check_ports(
                     )
                 )
         if edge.to_port is not None:
-            names = ports_by_op.get(edge.to_op, set())
+            names = inputs_by_op.get(edge.to_op, set())
             if edge.to_port not in names:
                 diags.append(
                     Diagnostic(
@@ -214,7 +223,7 @@ def _check_region(
                 )
             )
     elif isinstance(op, SpawnRegion):
-        if not op.child_template_ref:
+        if not op.child_template_ref and not op.child_definition_ref:
             diags.append(
                 Diagnostic(
                     code="region.spawn-no-child",
@@ -559,9 +568,10 @@ def _check_spawn_dependents(
 def _check_region_inputs(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
-    """A spawn (a call included) fans out over a task's result, and a join releases
-    over a spawn's children: a spawn takes input only from tasks, and a join needs a
-    spawn among its inputs."""
+    """A spawn (a call included) fans out over one released value, and a join
+    releases over a spawn's children: a spawn takes a task's result, a branch arm, a
+    one_live merge's value or a loop's exit value, and a join needs a spawn among its
+    inputs."""
     op_by_id = {op.operator_id: op for op in template.operators}
     fed_by_spawn: set[str] = set()
     diags: list[Diagnostic] = []
@@ -571,12 +581,13 @@ def _check_region_inputs(
         source, target = op_by_id.get(edge.from_op), op_by_id.get(edge.to_op)
         if isinstance(source, SpawnRegion):
             fed_by_spawn.add(edge.to_op)
-        if isinstance(target, SpawnRegion) and not isinstance(
-            source, (LeafOperator, AgentOperator)
-        ):
+        if isinstance(target, SpawnRegion) and not _fans_out(source):
             diags.append(
                 _region_input(
-                    edge.to_op, f"takes input from {edge.from_op!r}, not a task", loc
+                    edge.to_op,
+                    f"takes input from {edge.from_op!r}, which releases no single "
+                    "value",
+                    loc,
                 )
             )
     diags.extend(
@@ -587,14 +598,24 @@ def _check_region_inputs(
     return diags
 
 
+def _fans_out(source: LogicalOperator | None) -> bool:
+    match source:
+        case LeafOperator() | AgentOperator() | BranchRegion() | LoopContextRegion():
+            return True
+        case MergeRegion():
+            return source.combination is MergeCombination.ONE_LIVE
+        case _:
+            return False
+
+
 def _region_input(
     operator_id: str, problem: str, loc: dict[str, SourceLocation]
 ) -> Diagnostic:
     return Diagnostic(
         code="dataflow.region-input",
         message=(
-            f"region {operator_id!r} {problem}; a spawn fans out over a task's "
-            "result and a join collects a spawn's children"
+            f"region {operator_id!r} {problem}; a spawn fans out over a released "
+            "value and a join collects a spawn's children"
         ),
         location=loc.get(operator_id),
     )
@@ -800,6 +821,7 @@ def validate_compilation(
     diags.extend(_check_region_inputs(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
+    diags.extend(check_control_flow(template, loc))
 
     for op in template.operators:
         diags.extend(_check_region(op, loc))

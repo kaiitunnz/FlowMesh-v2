@@ -47,6 +47,7 @@ def _assemble_template(
             legacy_projection=tuple(acc.legacy_projection),
             effect_boundaries=tuple(acc.effect_boundaries),
             source_map=tuple(acc.source_map),
+            definitions=tuple(acc.definitions),
         )
     except ValidationError as exc:
         raise CompileError(

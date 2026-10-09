@@ -2,7 +2,7 @@ from collections.abc import Iterable
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from shared.harness.boundary import BoundaryEventKind
 from shared.inference import engine_profile_key
@@ -95,6 +95,15 @@ class ResidualPolicy(StrEnum):
     CONTINUE = "continue"
     DRAIN = "drain"
     CANCEL = "cancel"
+
+
+class MergeCombination(StrEnum):
+    """How a merge combines the live records reaching it."""
+
+    ONE_LIVE = "one_live"
+    """Exactly one input route is live; the merge forwards its binding."""
+    CONCAT = "concat"
+    """Every live input contributes a member, in declared input order."""
 
 
 class OperatorKind(StrEnum):
@@ -513,6 +522,8 @@ class LeafOperator(_OperatorBase):
     service_dependency: ServiceDependency | None = None
     # Set for every inference/embedding leaf; None for any other binding.
     embodiment: InferenceEmbodimentBinding | None = None
+    # Operators whose values the spec reads, directly or through an ancestor name.
+    value_reads: tuple[str, ...] = ()
 
 
 class AgentOperator(_OperatorBase):
@@ -546,27 +557,72 @@ class AgentOperator(_OperatorBase):
     # Legacy single-target shorthand the compiler normalizes into one declared region;
     # a declaration that sets both this and child_region_refs is rejected.
     child_template_ref: str | None = None
+    # Operators whose values the spec reads, directly or through an ancestor name.
+    value_reads: tuple[str, ...] = ()
+
+
+type SelectorStep = str | int
+
+
+class SelectionCase(BaseModel):
+    """One literal selector value and the output port it selects."""
+
+    model_config = ConfigDict(frozen=True)
+
+    value: str
+    port: str
+
+
+class SelectionRule(BaseModel):
+    """How a branch picks one output port from the record on one of its inputs.
+
+    ``field`` walks the accepted input value; the value found must be a string. Without
+    ``cases`` that string names an output port; with them it must equal one case value,
+    which names the port. No other value selects anything.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    input: str
+    field: tuple[SelectorStep, ...] = ()
+    cases: tuple[SelectionCase, ...] | None = None
+    version: int = 1
 
 
 class BranchRegion(_OperatorBase):
-    """Typed output-port structure with a selection rule."""
+    """Routes the record on its input to the one output port its rule selects."""
 
     kind: Literal[OperatorKind.BRANCH] = OperatorKind.BRANCH
-    selection: str | None = None
+    selection: str | None = None  # an unrunnable pre-rule selection, kept to decode
+    rule: SelectionRule | None = None
 
 
 class MergeRegion(_OperatorBase):
     """Typed input-port combination structure."""
 
     kind: Literal[OperatorKind.MERGE] = OperatorKind.MERGE
-    combination: str | None = None
+    combination: MergeCombination | None = None
+
+    @field_validator("combination", mode="before")
+    @classmethod
+    def _tolerate_unknown_combination(cls, value: Any) -> Any:
+        # A stored merge may carry any string; one this contract does not name keeps
+        # its all-inputs behavior.
+        if isinstance(value, str) and value not in MergeCombination:
+            return None
+        return value
 
 
 class SpawnRegion(_OperatorBase):
-    """A matched child-region boundary for streamed child creation."""
+    """A matched child-region boundary for streamed child creation.
+
+    Its child is one operator (``child_template_ref``) or a declared multi-operator
+    region definition (``child_definition_ref``).
+    """
 
     kind: Literal[OperatorKind.SPAWN] = OperatorKind.SPAWN
     child_template_ref: str | None = None
+    child_definition_ref: str | None = None
     authority: AuthorityCeiling = AuthorityCeiling()
 
 
@@ -600,11 +656,18 @@ class JoinRegion(_OperatorBase):
 
 
 class LoopContextRegion(_OperatorBase):
-    """A structured ingress/feedback/egress region with a loop coordinate."""
+    """A structured ingress/feedback/egress region with a loop coordinate.
+
+    ``carried`` ports seed time 0 and are replaced by each feedback; ``invariants`` bind
+    once at ingress and stay readable at every time. ``body_ref`` names the region
+    definition run at each time.
+    """
 
     kind: Literal[OperatorKind.LOOP_CONTEXT] = OperatorKind.LOOP_CONTEXT
     loop_coordinate: str
     carried: tuple[Port, ...] = ()
+    invariants: tuple[Port, ...] = ()
+    body_ref: str | None = None
 
 
 type LogicalOperator = Annotated[

@@ -52,6 +52,7 @@ class ResultDeclaration(BaseModel):
         default=None,
         description="Declared value-type identity (e.g. result task_type).",
     )
+    source_port: str | None = None  # the source's output port, when it has several
 
 
 class LegacyLogicalTaskProjection(BaseModel):

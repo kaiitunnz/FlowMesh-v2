@@ -100,16 +100,10 @@ def test_a_malformed_result_is_a_targeted_error(result: str, code: str) -> None:
     assert _codes(f"{{kind: spawn, child: reviewer, result: {result}}}") == [code]
 
 
-@pytest.mark.parametrize(
-    "region",
-    [
-        "{kind: call, child: reviewer, result: {visibility: published}}",
-        "{kind: join, completion: all_settled, result: {visibility: published}}",
-        "{kind: merge, result: {visibility: published}}",
-    ],
-)
-def test_only_a_spawn_publishes(region: str) -> None:
-    assert _codes(region) == ["region.result-unsupported"]
+def test_a_call_publishes_nothing_of_its_own() -> None:
+    assert _codes("{kind: call, child: reviewer, result: {visibility: published}}") == [
+        "region.result-unsupported"
+    ]
 
 
 def test_a_child_with_no_result_type_cannot_be_published() -> None:
