@@ -6,6 +6,7 @@ over the one content store the runtime's results live in.
 """
 
 import logging
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -24,6 +25,7 @@ from worker.content.inputs import TaskInputHydrator
 from worker.executors.utils.expressions import project_expression
 
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
+_EXAMPLES = Path(__file__).resolve().parents[3] / "examples" / "templates"
 
 
 def _dispatch(run: _Run, name: str) -> tuple[dict[str, Any], WorkerTaskMessage]:
@@ -569,3 +571,20 @@ async def test_a_root_task_reads_a_named_input_of_a_task() -> None:
     )
     assert rendered.spec.model_dump()["data"]["items"] == ["v", "v"]
     assert upstream is not None and upstream["src"].path == ("inner",)
+
+
+@pytest.mark.anyio
+async def test_the_refine_loop_example_reads_its_exit_value_at_the_root() -> None:
+    text = (_EXAMPLES / "refine_loop_echo.yaml").read_text(encoding="utf-8")
+    run = await _Run().start(text)
+    run.run("seed", {"items": [{"output": "again"}]})
+    for carried, verdict in (("again", "again"), ("done", "done")):
+        spec, _ = _dispatch(run, "step")
+        assert spec["data"]["items"] == [carried, "done"]
+        run.run("step", {"items": [{"output": verdict}, {"output": "done"}]})
+    spec, message = _dispatch(run, "consume")
+    assert spec["data"]["items"] == ["final: done"]
+    assert _worker_reads(message, "final.items") == [
+        {"output": "done"},
+        {"output": "done"},
+    ]
