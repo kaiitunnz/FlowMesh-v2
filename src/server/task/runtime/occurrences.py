@@ -69,9 +69,16 @@ class OccurrenceMaterializer:
 
     def materialize_locked(
         self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
-    ) -> None:
+    ) -> list[str]:
         """Give each work item an advance readies without a record its record, owed
-        with the ledger snapshot that holds its work."""
+        with the ledger snapshot that holds its work; returns the operators that have
+        no blueprint to make one from."""
+        missing: list[str] = []
         for task_id in advance.ready:
-            if task_id not in self._tasks and (wi := engine.work_item(task_id)):
-                self.register_locked(workflow_id, task_id, wi.operator_id)
+            if (
+                task_id not in self._tasks
+                and (wi := engine.work_item(task_id)) is not None
+                and not self.register_locked(workflow_id, task_id, wi.operator_id)
+            ):
+                missing.append(wi.operator_id)
+        return missing

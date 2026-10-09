@@ -201,6 +201,12 @@ _RESIDUAL_CANCEL_REASON = "cancelled by its region's residual policy"
 ROUTE_NOT_TAKEN: Final = {"skipped": True, "reason": "route_not_taken"}
 
 
+def blueprint_missing(operator_id: str) -> str:
+    """The reason a workflow fails for when work of ``operator_id`` has no blueprint to
+    make its task from."""
+    return f"BlueprintMissing: operator {operator_id} has no task blueprint"
+
+
 class _Drain(threading.local):
     active = False
 
@@ -1123,7 +1129,18 @@ class TaskRuntime:
         materialized = materialized_operators(bundle.template)
         prototypes = [p.record for p in tasks if p.record.task_id in materialized]
         tasks = [p for p in tasks if p.record.task_id not in materialized]
-        self._occurrences.install_locked(workflow_id, [*prototypes, *blueprints])
+        # A workflow stored before blueprints made a recursive agent's children from
+        # the agent's own root task.
+        covered = {record.task_id for record in [*prototypes, *blueprints]}
+        roots = [
+            p.record
+            for p in tasks
+            if p.record.task_id in blueprint_operators(bundle.template)
+            and p.record.task_id not in covered
+        ]
+        self._occurrences.install_locked(
+            workflow_id, [*prototypes, *blueprints, *roots]
+        )
         for persisted in tasks:
             record = persisted.record
             task_id = record.task_id
@@ -1251,9 +1268,14 @@ class TaskRuntime:
         for wi in engine.task_work_items():
             record = self._tasks.get(wi.legacy_task_id)
             if record is None and wi.status not in TERMINAL_WORK_ITEM_STATUSES:
-                if self._occurrences.register_locked(
+                if not self._occurrences.register_locked(
                     workflow_id, wi.legacy_task_id, wi.operator_id
-                ) and (wi.status is WorkItemStatus.READY):
+                ):
+                    self._fail_workflow_locked(
+                        workflow_id, blueprint_missing(wi.operator_id)
+                    )
+                    return
+                if wi.status is WorkItemStatus.READY:
                     self._ready.enqueue_ready_locked(wi.legacy_task_id)
             elif (
                 record is not None
@@ -3148,7 +3170,11 @@ class TaskRuntime:
             changed |= bool(staged.failed)
             self._fail_v2_advance_locked(engine, staged)
             advance.extend(staged)
-            self._occurrences.materialize_locked(workflow_id, engine, advance)
+            if missing := self._occurrences.materialize_locked(
+                workflow_id, engine, advance
+            ):
+                self._fail_workflow_locked(workflow_id, blueprint_missing(missing[0]))
+                return True
             if engine.awaits_control_reads():
                 self._redrive.drive_now(workflow_id)
             if self._committer.holds_unwritten_locked(workflow_id):

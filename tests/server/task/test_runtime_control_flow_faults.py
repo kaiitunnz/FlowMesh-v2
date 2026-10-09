@@ -7,10 +7,12 @@ from typing import Any, cast
 import pytest
 
 from server.orchestration import LedgerSnapshot, WorkItemStatus
+from server.orchestration.state import BoundaryEvent
 from server.registries.workflow import WorkflowRecord, WorkflowRegistry
 from server.task.models import TaskStatus
 from server.task.runtime import control_reads
 from server.task.runtime import facade as runtime_facade
+from shared.harness.boundary import BoundaryEventKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
 from tests.server.task.test_runtime_control_flow import (  # noqa: F401
@@ -322,3 +324,63 @@ async def test_a_cancel_while_only_a_read_holds_the_workflow_reads_cancelled() -
     assert _durable_status(run.registry, run.workflow_id) == "pending"
     run.runtime.cancel_workflow(run.workflow_id)
     assert _durable_status(run.registry, run.workflow_id) == "cancelled"
+
+
+_RECURSIVE = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: recursive}
+spec:
+  graph:
+    nodes:
+      - name: writer
+        spec:
+          taskType: agent
+          v2: {child: writer}
+          harness: {backend: scripted, version: v1, params: {script: []}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_recursive_agent_stored_before_blueprints_makes_its_children() -> None:
+    run = await _Run().start(_RECURSIVE)
+    (writer,) = run.ready
+    run.ready.clear()
+    # A workflow stored before blueprints keeps only its live tasks.
+    run.registry.blueprints.pop(run.workflow_id)
+    record_dispatch(run.runtime, writer, cast(Any, _worker()))
+    with run.runtime._lock:
+        (child,) = run.engine.route_boundary_event(
+            writer,
+            BoundaryEvent(
+                kind=BoundaryEventKind.SPAWN,
+                call_correlation="c0",
+                child_region_ref="writer",
+            ),
+        ).ready
+        run.runtime._committer.save_ledger_locked(run.workflow_id)
+
+    restored = await run.restart()
+    record = restored.runtime.get_record(child)
+    assert record is not None and record.status == TaskStatus.PENDING
+    assert child in restored.ready
+
+
+@pytest.mark.anyio
+async def test_work_with_no_blueprint_fails_its_workflow_by_name() -> None:
+    run = await _Run().start(_workflow(_SPAWN_AND_LOOP, _LOOP))
+    run.run("seed", {"items": ["a", "b"]})
+    kids = [t for t in run.ready if run.name(t) == "kid"]
+    registry = run.registry
+    for kid in kids:
+        del registry.task_blobs[kid]
+        registry.dynamic_task_ids[run.workflow_id].discard(kid)
+    blueprints = registry.blueprints[run.workflow_id]
+    registry.blueprints[run.workflow_id] = [
+        p for p in blueprints if p.record.task_id != run.ids["kid"]
+    ]
+
+    restored = await run.restart()
+    failure = restored.engine.control_failure()
+    assert failure is not None and failure.startswith("BlueprintMissing")
+    assert restored.registry.control[run.workflow_id].failure == failure
