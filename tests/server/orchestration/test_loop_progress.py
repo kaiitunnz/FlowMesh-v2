@@ -474,8 +474,11 @@ _SPAWN_BODY = f"""
           - name: collect
             dependsOn: [fan]
             region: {{kind: join, completion: all_settled}}
+          - name: tally
+            dependsOn: [{{node: collect, input: members}}]
+            spec: {ECHO}
           - name: route
-            dependsOn: [{{node: collect, input: input}}]
+            dependsOn: [{{node: tally, input: input}}]
             region:
               kind: branch
               inputs: [{{name: input}}]
@@ -530,6 +533,7 @@ def test_a_spawn_and_join_inside_a_loop_close_per_time() -> None:
     run.run(kids[0])
     assert run.engine.pending_branch_reads() == []
     run.run(kids[1])
+    run.run_one("tally")
     run.select("again")
     run.run_one("step")
     fan1 = _fan_at(run, 1)
@@ -537,6 +541,7 @@ def test_a_spawn_and_join_inside_a_loop_close_per_time() -> None:
     # A later time's spawn is a distinct occurrence with its own child-init scope;
     # a zero-child spawn closes once sealed.
     run.apply(run.engine.seal_spawn(fan1))
+    run.run_one("tally")
     run.select("done")
     assert run.ready_named("consume") != []
 
@@ -565,6 +570,7 @@ def test_an_early_joins_residual_child_delays_the_loop_exit_not_the_next_time(
     run.apply(run.engine.seal_spawn(fan0))
     first, late = run.ready_named("kid")
     run.run(first)
+    run.run_one("tally")
     run.select("again")
     run.run_one("step")
     fan1 = _fan_at(run, 1)
@@ -576,6 +582,7 @@ def test_an_early_joins_residual_child_delays_the_loop_exit_not_the_next_time(
     run.apply(run.engine.seal_spawn(fan1))
     (kid,) = [k for k in run.ready_named("kid") if k != late]
     run.run(kid)
+    run.run_one("tally")
     run.select("done")
     instance = run.engine.loop_instance("refine")
     assert instance is not None

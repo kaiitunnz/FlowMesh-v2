@@ -397,8 +397,8 @@ def test_a_branch_reads_a_merge_through_its_named_port() -> None:
       - name: b
         spec: {ECHO}
       - name: both
-        dependsOn: [{{node: a, input: x}}, {{node: b, input: y}}]
-        region: {{kind: merge, combination: concat}}
+        dependsOn: [{{node: a, input: x}}]
+        region: {{kind: merge, combination: one_live}}
       - name: decide
         dependsOn: [{{node: both, port: out, input: input}}]
         region:
@@ -411,10 +411,9 @@ def test_a_branch_reads_a_merge_through_its_named_port() -> None:
         spec: {ECHO}
 """
     run = Driver(workflow(nodes))
-    run.run_one("a")
-    run.run_one("b")
+    a = run.run_one("a")
     ((key, value),) = run.engine.pending_branch_reads()
-    assert key == "decide" and value.kind == "aggregate"
+    assert key == "decide" and value.legacy_task_id == a
 
 
 def test_a_merge_forwards_a_join_read_through_its_named_port() -> None:

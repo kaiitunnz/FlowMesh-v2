@@ -942,3 +942,52 @@ def test_a_spawn_may_capture_a_join_aggregate() -> None:
         "      - name: fan\n        dependsOn: [plan, {node: plan, input: ctx}]",
     )
     assert _compile(_workflow(nodes, capturing))
+
+
+_SELECT_ON = f"""
+      - name: decide
+        dependsOn: [{{node: SOURCE, port: out, input: input}}]
+        region:
+          kind: branch
+          inputs: [{{name: input}}]
+          outputs: [{{name: l}}, {{name: r}}]
+          selection: {{input: input}}
+      - name: on_l
+        dependsOn: [{{node: decide, port: l}}]
+        spec: {_ECHO}
+"""
+
+
+@pytest.mark.parametrize(
+    ("nodes", "source"),
+    [
+        (
+            f"""
+      - name: a
+        spec: {_ECHO}
+      - name: b
+        spec: {_ECHO}
+      - name: both
+        dependsOn: [{{node: a, input: x}}, {{node: b, input: y}}]
+        region: {{kind: merge, combination: concat}}
+""",
+            "both",
+        ),
+        (_FANOUT, "collect"),
+        (
+            f"""
+      - name: plan
+        spec: {_ECHO}
+      - name: called
+        dependsOn: [plan]
+        region: {{kind: call, child: one, returns: [out]}}
+""",
+            "called",
+        ),
+    ],
+    ids=["concat-merge", "join", "call"],
+)
+def test_a_branch_selecting_on_an_aggregate_is_refused(nodes: str, source: str) -> None:
+    templates = _CHILD if source != "both" else ""
+    text = _workflow(nodes + _SELECT_ON.replace("SOURCE", source), templates)
+    assert "dataflow.region-input" in _codes(text)

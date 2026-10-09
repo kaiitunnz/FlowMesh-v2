@@ -598,11 +598,11 @@ def _check_spawn_dependents(
 def _check_region_inputs(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
-    """A spawn (a call included) fans out over one released value, and a join
-    releases over a spawn's children: a spawn takes a task's result, a branch arm, a
-    one_live merge's value, a loop's exit value or a definition input, and a join needs
-    a spawn among its inputs. A spawn's named captures are bound once at entry and may
-    read any value."""
+    """A spawn (a call included) fans out over one released value, a branch selects
+    on one, and a join releases over a spawn's children: a released value is a task's
+    result, a branch arm, a one_live merge's value, a loop's exit value or a definition
+    input, never an aggregate, and a join needs a spawn among its inputs. A spawn's
+    named captures are bound once at entry and may read any value."""
     op_by_id = {op.operator_id: op for op in template.operators}
     fed_by_spawn: set[str] = set()
     diags: list[Diagnostic] = []
@@ -614,13 +614,28 @@ def _check_region_inputs(
             isinstance(target, SpawnRegion)
             and edge.to_port is None
             and edge.boundary is not BoundaryKind.ENTRY
-            and not _fans_out(source)
+            and not _releases_one_value(source)
         ):
             diags.append(
                 _region_input(
                     edge.to_op,
                     f"takes input from {edge.from_op!r}, which releases no single "
                     "value",
+                    loc,
+                )
+            )
+        if (
+            isinstance(target, BranchRegion)
+            and target.rule is not None
+            and edge.to_port == target.rule.input
+            and edge.boundary is not BoundaryKind.ENTRY
+            and not _releases_one_value(source)
+        ):
+            diags.append(
+                _region_input(
+                    edge.to_op,
+                    f"selects on input from {edge.from_op!r}, which releases no "
+                    "single value",
                     loc,
                 )
             )
@@ -632,7 +647,7 @@ def _check_region_inputs(
     return diags
 
 
-def _fans_out(source: LogicalOperator | None) -> bool:
+def _releases_one_value(source: LogicalOperator | None) -> bool:
     match source:
         case LeafOperator() | AgentOperator() | BranchRegion() | LoopContextRegion():
             return True
@@ -649,7 +664,7 @@ def _region_input(
         code="dataflow.region-input",
         message=(
             f"region {operator_id!r} {problem}; a spawn fans out over a released "
-            "value and a join collects a spawn's children"
+            "value, a branch selects on one, and a join collects a spawn's children"
         ),
         location=loc.get(operator_id),
     )
