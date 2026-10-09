@@ -118,19 +118,17 @@ class DispatchEnd(StrEnum):
 
 
 class PublishGate(StrEnum):
-    """Whether a dispatch may be published.
-
-    ``PUBLISH``: its task is pending and everything the dispatch carries is durable.
-    ``NOT_PENDING``: its task is not waiting for a dispatch. ``NOT_DURABLE``: what the
-    dispatch carries is still owed, or its task's last report waits to be handled
-    again. ``REPORTING``: a report of its task is being handled; the task is queued
-    again once it is.
-    """
+    """Whether a dispatch may be published."""
 
     PUBLISH = "publish"
+    """Its task is pending and everything the dispatch carries is durable."""
     NOT_PENDING = "not_pending"
+    """Its task is not waiting for a dispatch."""
     NOT_DURABLE = "not_durable"
+    """What the dispatch carries is still owed, or its task's last report waits to be
+    handled again."""
     REPORTING = "reporting"
+    """A report of its task is being handled; the task is queued again once it is."""
 
 
 class SettleOutcome(NamedTuple):
