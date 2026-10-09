@@ -1,7 +1,14 @@
+from dataclasses import replace
 from enum import Enum
 from typing import Any
 
-from ...parser import INGRESS, ParsedRegion, ParsedTask, ParsedWorkflow
+from ...parser import (
+    INGRESS,
+    ParsedDependency,
+    ParsedRegion,
+    ParsedTask,
+    ParsedWorkflow,
+)
 from ..representations.operators import (
     AgentOperator,
     AuthorityCeiling,
@@ -36,7 +43,6 @@ from ..representations.results import (
 )
 from ..representations.template import (
     DependencyUse,
-    EntryBinding,
     ResourceDeclaration,
     SourceMapEntry,
     TemplateEdge,
@@ -46,9 +52,11 @@ from .definitions import lower_definitions
 from .diagnostics import compile_error
 from .project import (
     LoweringAccumulator,
+    agent_region_join_id,
     build_name_map,
     build_value_ops,
     call_join_id,
+    dependency_edge,
 )
 
 # Friendly aliases for the two provenance values authors write in spec.v2.
@@ -175,7 +183,18 @@ def normalize_agent_child_regions(acc: LoweringAccumulator) -> None:
         )
         _add_synth_operator(spawn, op.operator_id, acc)
         _add_synth_operator(join, op.operator_id, acc)
-        acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
+        acc.edges.append(membership_edge(spawn_id, join_id))
+
+
+def membership_edge(spawn_id: str, join_id: str) -> TemplateEdge:
+    """The edge by which a join collects its spawn's children: the join runs only
+    when the spawn does."""
+    return TemplateEdge(
+        from_op=spawn_id,
+        to_op=join_id,
+        edge_id=f"{join_id}#members",
+        use=DependencyUse.ROUTE_REQUIRED,
+    )
 
 
 def _add_synth_operator(
@@ -259,7 +278,7 @@ def _apply_one(
 
     if isinstance(op, AgentOperator):
         return _apply_agent_child_regions(
-            _apply_agent_inputs(_apply_agent_v2(op, v2, name), v2, name_to_op, acc),
+            _apply_agent_inputs(_apply_agent_v2(op, v2, name), v2),
             v2,
             name_to_op,
             acc,
@@ -302,7 +321,7 @@ def _apply_agent_child_regions(
             role, ceiling = str(child), AuthorityCeiling()
         entry_op = name_to_op.get(role, role)
         spawn_id = f"{op.operator_id}:{role}:spawn"
-        join_id = f"{spawn_id}:join"
+        join_id = agent_region_join_id(op.operator_id, role)
         spawn = SpawnRegion(
             operator_id=spawn_id,
             source_ref=op.source_ref,
@@ -319,26 +338,22 @@ def _apply_agent_child_regions(
         )
         _add_synth_operator(spawn, op.operator_id, acc)
         _add_synth_operator(join, op.operator_id, acc)
-        acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
+        acc.edges.append(membership_edge(spawn_id, join_id))
         refs.append(ChildRegionRef(name=role, spawn_ref=spawn_id))
     return op.model_copy(update={"child_region_refs": tuple(refs)})
 
 
-def _apply_agent_inputs(
-    op: AgentOperator,
-    v2: dict[str, Any],
-    name_to_op: dict[str, str],
-    acc: LoweringAccumulator,
-) -> AgentOperator:
+def _apply_agent_inputs(op: AgentOperator, v2: dict[str, Any]) -> AgentOperator:
     """Declare an agent's delivered input ports and their producer bindings.
 
     Each ``spec.v2.inputs`` entry adds a named input port delivered on the agent's first
-    turn. A ``{name, from}`` entry wires a delivery edge from the producer's output; a
-    ``{name, from, region}`` entry binds the parent agent's child-region join aggregate
-    (its region output) — dynamically-spawned children merged downstream, not mid-run; a
-    bare ``{name}`` entry (a spawn child's entry port) is filled by the spawned element.
-    Declaring inputs is opt-in — an agent with none keeps ordering-only deps. The port
-    set augments the lowered ports so model/ordering ports stay.
+    turn. A ``{name, from}`` entry is bound like a ``dependsOn`` entry naming the
+    producer and the input; a ``{name, from, region}`` entry binds the parent agent's
+    child-region join aggregate (its region output) — dynamically-spawned children
+    merged downstream, not mid-run; a bare ``{name}`` entry (a spawn child's entry port)
+    is filled by the spawned element. Declaring inputs is opt-in — an agent with none
+    keeps ordering-only deps. The port set augments the lowered ports so model/ordering
+    ports stay.
     """
     inputs = v2.get("inputs")
     if inputs is None:
@@ -350,13 +365,10 @@ def _apply_agent_inputs(
     ports: list[Port] = list(op.inputs)
     declared: list[str] = []
     for entry in inputs:
-        region: str | None = None
         if isinstance(entry, str):
-            port_name, source = entry, None
+            port_name = entry
         elif isinstance(entry, dict) and entry.get("name"):
             port_name = str(entry["name"])
-            source = entry.get("from")
-            region = str(entry["region"]) if entry.get("region") else None
         else:
             raise compile_error(
                 "v2.bad-input-port",
@@ -366,16 +378,13 @@ def _apply_agent_inputs(
         declared.append(port_name)
         if not any(port.name == port_name for port in ports):
             ports.append(Port(name=port_name))
-        if source is not None:
-            parent_op = name_to_op.get(str(source), str(source))
-            # A region output binds the parent's child-region join aggregate; a plain
-            # source binds the producer's own output.
-            from_op = f"{parent_op}:{region}:spawn:join" if region else parent_op
-            acc.edges.append(
-                TemplateEdge(from_op=from_op, to_op=op.operator_id, to_port=port_name)
-            )
     return op.model_copy(
-        update={"inputs": tuple(ports), "declared_input_ports": tuple(declared)}
+        update={
+            "inputs": tuple(ports),
+            "declared_input_ports": tuple(
+                dict.fromkeys((*declared, *op.declared_input_ports))
+            ),
+        }
     )
 
 
@@ -455,12 +464,22 @@ def _apply_result_visibility(
             )
 
 
-# Branch, loop and region-definition authoring is refused at submission until the
-# runtime runs it end to end.
+# Branch, loop and region-definition authoring, and the region results and
+# dependency forms only they need, are refused at submission until the runtime runs
+# them end to end.
 CONTROL_FLOW_RUNNABLE = False
 
 _CONTROL_FLOW_KINDS = frozenset({"branch", "loop"})
 _PUBLISHING_KINDS = frozenset({"spawn", "merge", "join", "loop"})
+_REGION_KEYS = {
+    "branch": frozenset({"kind", "inputs", "outputs", "selection"}),
+    "loop": frozenset(
+        {"kind", "body_ref", "loop_coordinate", "carried", "invariants", "result"}
+    ),
+}
+_EARLY_COMPLETIONS = frozenset(
+    {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
+)
 
 
 def _lower_regions(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
@@ -470,29 +489,64 @@ def _lower_regions(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
         scope: build_name_map(parsed, scope)
         for scope in {None, *definitions, *(r.definition for r in parsed.regions)}
     }
-    if not CONTROL_FLOW_RUNNABLE and (
-        definitions
-        or any(
-            str(r.region.get("kind", "")).strip() in _CONTROL_FLOW_KINDS
-            for r in parsed.regions
-        )
-    ):
-        region = next(
-            (
-                r
-                for r in parsed.regions
-                if str(r.region.get("kind", "")).strip() in _CONTROL_FLOW_KINDS
-            ),
-            None,
-        )
-        kind = str(region.region.get("kind")) if region else "template"
-        raise compile_error(
-            "region.unknown-kind",
-            f"unknown region kind {kind!r}",
-            region.authored_name if region else sorted(definitions)[0],
-        )
+    region_kinds = {
+        region.name: str(region.region.get("kind", "")).strip()
+        for region in parsed.regions
+    }
+    if not CONTROL_FLOW_RUNNABLE:
+        _refuse_control_flow(parsed, definitions)
     for region in parsed.regions:
-        _lower_region(region, names[region.definition], value_ops, definitions, acc)
+        _lower_region(
+            region,
+            names[region.definition],
+            value_ops,
+            definitions,
+            region_kinds,
+            acc,
+        )
+
+
+def _refuse_control_flow(parsed: ParsedWorkflow, definitions: set[str]) -> None:
+    """Refuse the first construct only branch and loop regions run."""
+    for region in parsed.regions:
+        kind = str(region.region.get("kind", "")).strip()
+        if kind in _CONTROL_FLOW_KINDS:
+            raise compile_error(
+                "region.unknown-kind",
+                f"unknown region kind {kind!r}",
+                region.authored_name,
+            )
+        if kind in {"join", "merge"} and region.region.get("result") is not None:
+            raise compile_error(
+                "region.result-unsupported",
+                f"a {kind} region publishes no result",
+                region.authored_name,
+            )
+        if kind == "merge" and region.region.get("combination") == "one_live":
+            raise compile_error(
+                "region.bad-combination",
+                "unknown merge combination 'one_live'",
+                region.authored_name,
+            )
+    if definitions:
+        raise compile_error(
+            "region.unknown-kind", "unknown region kind 'template'", min(definitions)
+        )
+    projected = [
+        task.graph_node_name or task.local_name or task.task_id
+        for task in parsed.tasks
+        if any(dep.project for dep in task.dependencies)
+    ] + [
+        region.authored_name
+        for region in parsed.regions
+        if any(dep.project for dep in region.dependencies)
+    ]
+    if projected:
+        raise compile_error(
+            "parse.unknown-field",
+            "dependsOn declares unknown field 'project'",
+            projected[0],
+        )
 
 
 def _lower_region(
@@ -500,11 +554,20 @@ def _lower_region(
     name_to_op: dict[str, str],
     value_ops: dict[str, str],
     definitions: set[str],
+    region_kinds: dict[str, str],
     acc: LoweringAccumulator,
 ) -> None:
     kind = str(region.region.get("kind", "")).strip()
     name = region.authored_name
     has_input = bool(region.depends_on)
+    if (allowed := _REGION_KEYS.get(kind)) is not None and (
+        unknown := sorted(set(region.region) - allowed)
+    ):
+        raise compile_error(
+            "region.unknown-field",
+            f"a {kind} region declares unknown field(s) {', '.join(unknown)}",
+            name,
+        )
     if (result := region.region.get("result")) is not None and (
         kind not in _PUBLISHING_KINDS
     ):
@@ -515,9 +578,11 @@ def _lower_region(
             name,
         )
 
+    dependencies = region.dependencies
     match kind:
         case "merge":
-            merge = _merge(region, has_input)
+            dependencies = _merge_bindings(region, name_to_op)
+            merge = _merge(region, dependencies, has_input)
             _add_operator(merge, region, acc)
             if result is not None:
                 _publish_region(result, merge, region, acc)
@@ -539,13 +604,15 @@ def _lower_region(
             if result is not None:
                 _publish_region(result, loop, region, acc)
         case "call":
-            _lower_call(region, name_to_op, value_ops, definitions, acc)
+            _lower_call(region, name_to_op, value_ops, definitions, region_kinds, acc)
             return
         case _:
             raise compile_error(
                 "region.unknown-kind", f"unknown region kind {kind!r}", name
             )
-    _wire_region_dependencies(region, region.name, kind, value_ops, acc)
+    _wire_region_dependencies(
+        region, region.name, kind, value_ops, region_kinds, acc, dependencies
+    )
 
 
 def _wire_region_dependencies(
@@ -553,35 +620,30 @@ def _wire_region_dependencies(
     operator_id: str,
     kind: str,
     value_ops: dict[str, str],
+    region_kinds: dict[str, str],
     acc: LoweringAccumulator,
+    dependencies: list[ParsedDependency],
 ) -> None:
     """Turn a region's ``dependsOn`` entries into edges into ``operator_id``.
 
-    A region consumes the value on each input; a join collects its spawn's children,
-    so any other join input orders it only.
+    A region consumes the value on each input, except that a loop's unnamed input
+    orders it only. A join collects its spawn's children and runs only on the branch
+    arms it depends on; any other join input orders it only.
     """
-    use = DependencyUse.ORDER_ONLY if kind == "join" else DependencyUse.VALUE_REQUIRED
-    for index, dep in enumerate(region.dependencies):
-        if dep.source == INGRESS:
-            acc.entries.setdefault(region.definition or "", []).append(
-                EntryBinding(
-                    port=dep.port or dep.input or "",
-                    to_op=operator_id,
-                    to_port=dep.input,
-                    projection=dep.project,
-                )
+    for index, dep in enumerate(dependencies):
+        source_kind = region_kinds.get(dep.source)
+        if kind == "join":
+            use = (
+                DependencyUse.ROUTE_REQUIRED
+                if source_kind == "spawn" or (dep.port and source_kind == "branch")
+                else DependencyUse.ORDER_ONLY
             )
-            continue
+        elif kind == "loop" and dep.input is None:
+            use = DependencyUse.ORDER_ONLY
+        else:
+            use = DependencyUse.VALUE_REQUIRED
         acc.edges.append(
-            TemplateEdge(
-                from_op=value_ops.get(dep.source, dep.source),
-                to_op=operator_id,
-                from_port=dep.port,
-                to_port=dep.input,
-                edge_id=f"{operator_id}#{index}",
-                use=use,
-                projection=dep.project,
-            )
+            dependency_edge(dep, operator_id, index, use, region.definition, value_ops)
         )
 
 
@@ -607,11 +669,39 @@ def _inputs(has_input: bool, name: str = "in") -> tuple[Port, ...]:
     return (Port(name=name),) if has_input else ()
 
 
-def _merge(region: ParsedRegion, has_input: bool) -> MergeRegion:
+def _merge_bindings(
+    region: ParsedRegion, name_to_op: dict[str, str]
+) -> list[ParsedDependency]:
+    """A merge's dependencies, each bound to a distinct input named for it.
+
+    An unnamed input takes its source's name, qualified by the port it reads; inputs
+    otherwise alike are numbered.
+    """
+    authored = {op: name for name, op in name_to_op.items()}
+    taken: list[str] = []
+    bindings: list[ParsedDependency] = []
+    for dep in region.dependencies:
+        if dep.input is not None:
+            base = dep.input
+        elif dep.source == INGRESS:
+            base = dep.port or INGRESS
+        else:
+            source = authored.get(dep.source, dep.source)
+            base = f"{source}.{dep.port}" if dep.port else source
+        name, count = base, 1
+        while name in taken:
+            count += 1
+            name = f"{base}#{count}"
+        taken.append(name)
+        bindings.append(replace(dep, input=name))
+    return bindings
+
+
+def _merge(
+    region: ParsedRegion, dependencies: list[ParsedDependency], has_input: bool
+) -> MergeRegion:
     inputs = tuple(
-        Port(name=dep.input or dep.source)
-        for dep in region.dependencies
-        if dep.source != INGRESS or dep.input
+        Port(name=dep.input) for dep in dependencies if dep.input
     ) or _inputs(has_input)
     raw = region.region.get("combination")
     combination = None
@@ -829,7 +919,11 @@ def _publish_region(
                 if collection
                 else CardinalityKind.SINGLETON
             ),
-            release=ReleaseConditionKind.SCOPE_CLOSED,
+            release=(
+                ReleaseConditionKind.JOIN_WINNER
+                if isinstance(op, JoinRegion) and op.completion in _EARLY_COMPLETIONS
+                else ReleaseConditionKind.SCOPE_CLOSED
+            ),
             visibility=Visibility.PUBLISHED,
             keying="member" if collection else None,
             source_port=source_port,
@@ -983,6 +1077,7 @@ def _lower_call(
     name_to_op: dict[str, str],
     value_ops: dict[str, str],
     definitions: set[str],
+    region_kinds: dict[str, str],
     acc: LoweringAccumulator,
 ) -> None:
     """Normalize a ``call`` into a structured ``Spawn(1)`` then ``Join`` pair."""
@@ -1008,5 +1103,7 @@ def _lower_call(
     )
     _add_operator(spawn, region, acc)
     _add_operator(join, region, acc)
-    acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
-    _wire_region_dependencies(region, spawn_id, "call", value_ops, acc)
+    acc.edges.append(membership_edge(spawn_id, join_id))
+    _wire_region_dependencies(
+        region, spawn_id, "call", value_ops, region_kinds, acc, region.dependencies
+    )

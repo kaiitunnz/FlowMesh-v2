@@ -84,18 +84,28 @@ def _data_sources(data: Any) -> Iterable[str]:
 
 @dataclass(frozen=True)
 class ReadClassification:
-    """A task's dependency uses, the operators it reads, and the names it cannot."""
+    """What a task needs from each of its dependencies and from the upstreams it
+    reads by name without depending on them directly."""
 
     uses: tuple[DependencyUse, ...]
-    # Operators whose values the spec reads, directly or through an ancestor name.
-    value_reads: tuple[str, ...]
-    # Entry ports the spec reads, for a task inside a region definition.
-    entry_reads: frozenset[str]
+    # Each upstream operator read through an ancestor name, with the use it needs.
+    derived: tuple[tuple[str, DependencyUse], ...]
     unresolved: tuple[str, ...]
+    # Input names that would hide a different node of the task's scope.
+    shadowing: tuple[str, ...]
+
+
+def binding_name(dep: ParsedDependency) -> str | None:
+    """The name a dependency makes visible to its consumer's spec: its input name,
+    or for a ``$ingress`` entry its definition input."""
+    if dep.source == INGRESS:
+        return dep.input or dep.port
+    return dep.input
 
 
 def classify_reads(
     task: ParsedTask,
+    dependencies: list[ParsedDependency],
     names: Mapping[str, str],
     value_op: Mapping[str, str],
     ancestors: frozenset[str],
@@ -103,62 +113,70 @@ def classify_reads(
 ) -> ReadClassification:
     """Classify each of a task's dependencies by what its spec needs from it.
 
-    ``names`` maps the names visible in the task's scope to operators; each binding's
-    ``input`` name is visible too, as is each ``$ingress`` binding's. ``ancestors`` are
-    the operators an upstream name may resolve through, and ``routed`` the operators
-    whose outputs are branch arms. A dependency the spec reads, or one with a named
-    input, is a required value; an unread branch arm is a required route; any other
-    is ordering only.
+    ``names`` maps the names visible in the task's scope to operators; each
+    dependency's binding name is visible too. ``ancestors`` are the operators an
+    upstream name may resolve through, and ``routed`` the operators whose outputs are
+    branch arms. A dependency the spec reads, or one with a named input, is a required
+    value; an identity read or an unread branch arm is a required route; any other is
+    ordering only. An ancestor read by name but not depended on directly is a derived
+    requirement of the same kind.
     """
     reads = spec_reads(task)
-    aliases = {dep.input: dep for dep in task.dependencies if dep.input}
-    resolved_values: set[str] = set()
-    entry_reads: set[str] = set()
-    unresolved: list[str] = list(reads.malformed) if task.dependencies else []
-    identity_ops: set[str] = set()
+    aliases = {
+        name: index
+        for index, dep in enumerate(dependencies)
+        if (name := binding_name(dep)) is not None
+    }
+    sources = [value_op.get(dep.source, dep.source) for dep in dependencies]
+    unresolved: list[str] = list(reads.malformed) if dependencies else []
 
-    def _resolve(name: str) -> str | None:
-        if (dep := aliases.get(name)) is not None:
-            if dep.source == INGRESS:
-                entry_reads.add(dep.port or name)
-                return None
-            return value_op.get(dep.source, dep.source)
+    def _resolve(name: str) -> set[int] | str | None:
+        """The dependencies a name reads, or the ancestor it reads past them."""
+        if (index := aliases.get(name)) is not None:
+            return {index}
         if (op := names.get(name)) is not None and op in ancestors:
-            return op
-        if name == INGRESS:
-            return None
-        if task.dependencies:
+            direct = {
+                i
+                for i, (dep, source) in enumerate(zip(dependencies, sources))
+                if source == op and dep.source != INGRESS
+            }
+            return direct or op
+        if dependencies:
             unresolved.append(name)
         return None
 
+    value_deps: set[int] = set()
+    identity_deps: set[int] = set()
+    derived: dict[str, DependencyUse] = {}
     for name in sorted(reads.values):
-        if (op := _resolve(name)) is not None:
-            resolved_values.add(op)
+        match _resolve(name):
+            case set() as indexes:
+                value_deps |= indexes
+            case str() as op:
+                derived[op] = DependencyUse.VALUE_REQUIRED
     for name in sorted(reads.identities):
-        if (op := _resolve(name)) is not None:
-            identity_ops.add(op)
+        match _resolve(name):
+            case set() as indexes:
+                identity_deps |= indexes
+            case str() as op:
+                derived.setdefault(op, DependencyUse.ROUTE_REQUIRED)
 
     uses: list[DependencyUse] = []
-    for dep in task.dependencies:
-        source = value_op.get(dep.source, dep.source)
-        uses.append(_dependency_use(dep, source, resolved_values, identity_ops, routed))
+    for index, (dep, source) in enumerate(zip(dependencies, sources)):
+        if dep.input is not None or index in value_deps:
+            uses.append(DependencyUse.VALUE_REQUIRED)
+        elif index in identity_deps or (dep.port is not None and source in routed):
+            uses.append(DependencyUse.ROUTE_REQUIRED)
+        else:
+            uses.append(DependencyUse.ORDER_ONLY)
+    shadowing = [
+        name
+        for name, index in aliases.items()
+        if (node := names.get(name)) is not None and node != sources[index]
+    ]
     return ReadClassification(
         uses=tuple(uses),
-        value_reads=tuple(sorted(resolved_values)),
-        entry_reads=frozenset(entry_reads),
+        derived=tuple(sorted(derived.items())),
         unresolved=tuple(dict.fromkeys(unresolved)),
+        shadowing=tuple(sorted(shadowing)),
     )
-
-
-def _dependency_use(
-    dep: ParsedDependency,
-    source: str,
-    values: set[str],
-    identities: set[str],
-    routed: frozenset[str],
-) -> DependencyUse:
-    if dep.input is not None or source in values:
-        return DependencyUse.VALUE_REQUIRED
-    if source in identities or (dep.port is not None and source in routed):
-        return DependencyUse.ROUTE_REQUIRED
-    return DependencyUse.ORDER_ONLY

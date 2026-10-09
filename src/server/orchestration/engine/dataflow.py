@@ -7,7 +7,6 @@ from ...task.v2.representations.operators import (
     BranchRegion,
     JoinCompletion,
     JoinRegion,
-    LeafOperator,
     MergeCombination,
     MergeRegion,
     OperatorKind,
@@ -15,7 +14,7 @@ from ...task.v2.representations.operators import (
     SpawnRegion,
     spawned_only_region_owners,
 )
-from ...task.v2.representations.template import DependencyUse, TemplateEdge
+from ...task.v2.representations.template import DependencyUse
 from ..state import (
     TERMINAL_WORK_ITEM_STATUSES,
     Activation,
@@ -464,8 +463,12 @@ class RegionFlow:
                     self.mark_dead(key, advance)
                 elif self.contexts is not None:
                     self.contexts.ingress(key, inputs, advance)
+            case JoinRegion():
+                # A join releases on its spawn's scope closure, never on an input; a
+                # dead route it runs only on makes it dead.
+                if any(i.state is EdgeState.DEAD for i in required):
+                    self.mark_dead(key, advance)
             case _:
-                # A join releases on its spawn's scope closure, never on an input.
                 pass
 
     def _inactive(
@@ -473,17 +476,11 @@ class RegionFlow:
     ) -> bool:
         """Whether a leaf or agent has no live route to run on.
 
-        A dead required value or route makes it inactive, as does a dead upstream it
-        reads by name; with only ordering inputs, it runs when any of them is live.
+        A dead required value or route makes it inactive; with only ordering inputs, it
+        runs when any of them is live.
         """
         required = [i for i in inputs if i.use is not DependencyUse.ORDER_ONLY]
         if any(i.state is EdgeState.DEAD for i in required):
-            return True
-        if isinstance(op, (LeafOperator, AgentOperator)) and any(
-            self.edges.source_state(self.edges.sibling(occurrence, read))[0]
-            is EdgeState.DEAD
-            for read in op.value_reads
-        ):
             return True
         ordering = [i for i in inputs if i.use is DependencyUse.ORDER_ONLY]
         return (
@@ -501,11 +498,11 @@ class RegionFlow:
             wi,
             [
                 (
-                    i.edge if isinstance(i.edge, TemplateEdge) else None,
+                    i.edge if i.edge.is_forward else None,
                     i.port or "",
                     (
                         self.edges.sibling(occurrence, i.edge.from_op)
-                        if isinstance(i.edge, TemplateEdge)
+                        if i.edge.is_forward
                         else None
                     ),
                     i.value,
@@ -748,6 +745,9 @@ class RegionFlow:
                 and self._ledger.root_level(scope_id)
             )
         ):
+            return Advance()
+        join_key = self._join_key(scope_id, join_op)
+        if join_key is not None and self._ledger.control_terminal(join_key):
             return Advance()
         cap = self._ledger.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if cap is None:

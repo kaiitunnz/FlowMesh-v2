@@ -24,7 +24,12 @@ from ..representations.operators import (
 )
 from ..representations.plan import PhysicalExecutionPlan
 from ..representations.results import CardinalityKind, ReleaseConditionKind
-from ..representations.template import LogicalWorkflowTemplate
+from ..representations.template import (
+    RETURN_KINDS,
+    BoundaryKind,
+    LogicalWorkflowTemplate,
+    TemplateEdge,
+)
 from .diagnostics import Diagnostic, Severity, SourceLocation
 from .region_checks import check_control_flow
 from .sandbox import egress_authorized, egress_requested
@@ -91,7 +96,11 @@ def _check_ports(
     outputs_by_op = {op.operator_id: _output_names(op) for op in template.operators}
     inputs_by_op = {op.operator_id: _input_names(op) for op in template.operators}
     for edge in template.edges:
-        if edge.from_port is not None:
+        # A boundary end's port is a definition input or return, checked with the
+        # definition.
+        entry = edge.boundary is BoundaryKind.ENTRY
+        leaving = edge.boundary in RETURN_KINDS
+        if edge.from_port is not None and not entry:
             names = outputs_by_op.get(edge.from_op, set())
             if edge.from_port not in names:
                 diags.append(
@@ -104,7 +113,7 @@ def _check_ports(
                         location=loc.get(edge.from_op),
                     )
                 )
-        if edge.to_port is not None:
+        if edge.to_port is not None and not leaving:
             names = inputs_by_op.get(edge.to_op, set())
             if edge.to_port not in names:
                 diags.append(
@@ -340,7 +349,7 @@ def _check_child_regions(
     producer_fed = {
         edge.to_op
         for edge in template.edges
-        if not edge.feedback and isinstance(op_by_id.get(edge.to_op), SpawnRegion)
+        if isinstance(op_by_id.get(edge.to_op), SpawnRegion)
     }
     for op in template.operators:
         if not isinstance(op, AgentOperator):
@@ -456,12 +465,8 @@ def _check_agent_inputs(
     }
     bound: dict[str, set[str]] = defaultdict(set)
     for edge in template.edges:
-        if edge.to_port and not edge.feedback:
+        if edge.to_port:
             bound[edge.to_op].add(edge.to_port)
-    for definition in template.definitions:
-        for entry in definition.entries:
-            if entry.to_port:
-                bound[entry.to_op].add(entry.to_port)
     for op in template.operators:
         if not isinstance(op, AgentOperator):
             continue
@@ -516,7 +521,7 @@ def _check_region_outputs(
     }
     spawned_only = spawned_only_region_owners(template.operators)
     for edge in template.edges:
-        if edge.feedback or edge.to_port is None:
+        if edge.to_port is None:
             continue
         source = op_by_id.get(edge.from_op)
         target = op_by_id.get(edge.to_op)
@@ -563,8 +568,7 @@ def _check_spawn_dependents(
             location=loc.get(edge.to_op),
         )
         for edge in template.edges
-        if not edge.feedback
-        and isinstance(op_by_id.get(edge.from_op), SpawnRegion)
+        if isinstance(op_by_id.get(edge.from_op), SpawnRegion)
         and not isinstance(op_by_id.get(edge.to_op), JoinRegion)
     ]
 
@@ -574,18 +578,22 @@ def _check_region_inputs(
 ) -> list[Diagnostic]:
     """A spawn (a call included) fans out over one released value, and a join
     releases over a spawn's children: a spawn takes a task's result, a branch arm, a
-    one_live merge's value or a loop's exit value, and a join needs a spawn among its
-    inputs."""
+    one_live merge's value, a loop's exit value or a definition input, and a join needs
+    a spawn among its inputs. A spawn's named captures are bound once at entry and may
+    read any value."""
     op_by_id = {op.operator_id: op for op in template.operators}
     fed_by_spawn: set[str] = set()
     diags: list[Diagnostic] = []
     for edge in template.edges:
-        if edge.feedback:
-            continue
         source, target = op_by_id.get(edge.from_op), op_by_id.get(edge.to_op)
         if isinstance(source, SpawnRegion):
             fed_by_spawn.add(edge.to_op)
-        if isinstance(target, SpawnRegion) and not _fans_out(source):
+        if (
+            isinstance(target, SpawnRegion)
+            and edge.to_port is None
+            and edge.boundary is not BoundaryKind.ENTRY
+            and not _fans_out(source)
+        ):
             diags.append(
                 _region_input(
                     edge.to_op,
@@ -623,6 +631,40 @@ def _region_input(
         ),
         location=loc.get(operator_id),
     )
+
+
+def _check_edge_catalog(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """Every edge has its own identity, and each input is bound once."""
+    diags: list[Diagnostic] = []
+    ids: set[str] = set()
+    bound: dict[tuple[str, str], TemplateEdge] = {}
+    for edge in template.edges:
+        if edge.edge_id in ids:
+            diags.append(
+                Diagnostic(
+                    code="edge.duplicate-id",
+                    message=f"more than one edge is identified {edge.edge_id!r}",
+                    location=loc.get(edge.to_op),
+                )
+            )
+        ids.add(edge.edge_id)
+        if edge.to_port is None or edge.boundary in RETURN_KINDS:
+            continue
+        if (first := bound.setdefault((edge.to_op, edge.to_port), edge)) is not edge:
+            diags.append(
+                Diagnostic(
+                    code="edge.duplicate-input",
+                    message=(
+                        f"input {edge.to_port!r} of {edge.to_op!r} is bound by both "
+                        f"{first.from_op!r} and {edge.from_op!r}; bind each input "
+                        "once"
+                    ),
+                    location=loc.get(edge.to_op),
+                )
+            )
+    return diags
 
 
 def _check_result_declarations(
@@ -677,7 +719,7 @@ def _check_cycles(
 ) -> list[Diagnostic]:
     adjacency: dict[str, list[str]] = {op.operator_id: [] for op in template.operators}
     for edge in template.edges:
-        if edge.feedback:
+        if not edge.is_forward:
             continue
         if edge.from_op in adjacency:
             adjacency[edge.from_op].append(edge.to_op)
@@ -817,6 +859,7 @@ def validate_compilation(
 
     diags.extend(_check_source_map(template, plan, loc))
     diags.extend(_check_ports(template, loc))
+    diags.extend(_check_edge_catalog(template, loc))
     diags.extend(_check_spawn_child_targets(template, loc))
     diags.extend(_check_child_regions(template, loc))
     diags.extend(_check_agent_inputs(template, loc))

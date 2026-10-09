@@ -11,28 +11,30 @@ from ..representations.operators import (
     SpawnRegion,
 )
 from ..representations.template import (
+    BOUNDARY_NODES,
+    BoundaryKind,
     DefinitionKind,
     DefinitionPort,
+    DependencyUse,
     EntryRole,
     RegionDefinition,
-    ReturnBinding,
-    ReturnKind,
+    TemplateEdge,
 )
 from .diagnostics import compile_error
 from .project import LoweringAccumulator, build_value_ops
 
 _RETURN_KINDS = {
-    "$feedback": ReturnKind.FEEDBACK,
-    "$egress": ReturnKind.EGRESS,
-    "$return": ReturnKind.RETURN,
+    node: kind
+    for kind, node in BOUNDARY_NODES.items()
+    if kind is not BoundaryKind.ENTRY
 }
 _ROLES = {
     DefinitionKind.LOOP_BODY: frozenset({EntryRole.CARRIED, EntryRole.INVARIANT}),
     DefinitionKind.CHILD: frozenset({EntryRole.PARAM, EntryRole.CAPTURE}),
 }
 _RETURNS = {
-    DefinitionKind.LOOP_BODY: frozenset({ReturnKind.FEEDBACK, ReturnKind.EGRESS}),
-    DefinitionKind.CHILD: frozenset({ReturnKind.RETURN}),
+    DefinitionKind.LOOP_BODY: frozenset({BoundaryKind.FEEDBACK, BoundaryKind.EGRESS}),
+    DefinitionKind.CHILD: frozenset({BoundaryKind.RETURN}),
 }
 
 
@@ -41,10 +43,25 @@ def lower_definitions(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
 
     A definition is a loop body when a loop's ``body_ref`` names it and a child when a
     spawn or call does; its members are the operators declared inside it, with any
-    region an agent member declares.
+    region an agent member declares. Its return routes join the edge catalog as
+    boundary edges, and every forward edge is scoped to the definition its consumer
+    belongs to.
     """
     for definition in parsed.definitions:
         acc.definitions.append(_lower_definition(definition, parsed, acc))
+    owner = {
+        member: definition.definition_id
+        for definition in acc.definitions
+        for member in definition.members
+    }
+    acc.edges = [
+        (
+            edge.model_copy(update={"definition": owner.get(edge.to_op)})
+            if edge.is_forward
+            else edge
+        )
+        for edge in acc.edges
+    ]
 
 
 def _lower_definition(
@@ -56,12 +73,16 @@ def _lower_definition(
     inputs = _definition_inputs(definition, kind)
     returns = _definition_returns(definition, kind)
     input_names = {port.name for port in inputs}
-    entries = tuple(acc.entries.get(name, ()))
-    for entry in entries:
-        if entry.port not in input_names:
+    for entry in acc.edges:
+        if (
+            entry.boundary is BoundaryKind.ENTRY
+            and entry.definition == name
+            and entry.from_port not in input_names
+        ):
             raise compile_error(
                 "definition.unknown-input",
-                f"$ingress port {entry.port!r} is not an input of template {name!r}",
+                f"$ingress port {entry.from_port!r} is not an input of template "
+                f"{name!r}",
                 name,
                 "graph_node",
             )
@@ -71,8 +92,7 @@ def _lower_definition(
         if kind is DefinitionKind.CHILD
         else {port.name for port in inputs if port.role is EntryRole.CARRIED}
     )
-    bindings: list[ReturnBinding] = []
-    for edge in definition.edges:
+    for index, edge in enumerate(definition.edges):
         return_kind = _RETURN_KINDS[edge.target]
         if return_kind not in _RETURNS[kind]:
             raise compile_error(
@@ -98,13 +118,17 @@ def _lower_definition(
                 name,
                 "graph_node",
             )
-        bindings.append(
-            ReturnBinding(
-                kind=return_kind,
-                port=edge.target_port,
+        acc.edges.append(
+            TemplateEdge(
                 from_op=value_ops.get(edge.source, edge.source),
+                to_op=edge.target,
                 from_port=edge.port,
+                to_port=edge.target_port,
+                edge_id=f"{name}{edge.target}#{index}",
+                use=DependencyUse.VALUE_REQUIRED,
                 projection=edge.project,
+                boundary=return_kind,
+                definition=name,
             )
         )
     return RegionDefinition(
@@ -114,8 +138,6 @@ def _lower_definition(
         members=members,
         inputs=inputs,
         returns=returns,
-        entries=entries,
-        return_bindings=tuple(bindings),
     )
 
 

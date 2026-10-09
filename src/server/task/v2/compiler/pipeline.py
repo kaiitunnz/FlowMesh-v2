@@ -23,7 +23,6 @@ from .episodes import lower_to_episodes
 from .facades import pin_agent_facades
 from .project import (
     LoweringAccumulator,
-    build_name_map,
     induce_effect_boundaries,
     lower_tasks,
 )
@@ -115,8 +114,7 @@ def compile_workflow(
     with tracer.workflow_stage(
         ControlPlaneStage.COMPILE_LOWER, ControlPlaneWindow.SUBMIT, workflow_id
     ):
-        name_to_op = build_name_map(parsed)
-        lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {}, policies)
+        lower_tasks(parsed, acc, defaults, secret_refs or {}, policies)
         lower_frontend_v2(parsed, acc)
         induce_effect_boundaries(acc)
         pin_agent_sandbox(acc, defaults.sandbox_enabled)

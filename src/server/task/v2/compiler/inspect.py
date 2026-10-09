@@ -5,7 +5,7 @@ from ..mode import LoweringStrategy
 from ..policy.lowering import PolicySurface
 from ..representations.plan import PhysicalExecutionPlan
 from ..representations.source import FrontendWorkflowSource
-from ..representations.template import LogicalWorkflowTemplate
+from ..representations.template import BoundaryKind, LogicalWorkflowTemplate
 from .agent_binding import AgentBindingDefaults, neutral_defaults
 from .diagnostics import Diagnostic, Severity
 from .pipeline import compile_workflow
@@ -45,10 +45,15 @@ class InspectionReport(BaseModel):
         if self.template.edges:
             lines.append("  edges:")
             for edge in self.template.edges:
-                arrow = "==>" if edge.feedback else "-->"
+                arrow = "==>" if edge.boundary is BoundaryKind.FEEDBACK else "-->"
                 source = _endpoint(edge.from_op, edge.from_port)
                 target = _endpoint(edge.to_op, edge.to_port)
-                lines.append(f"    {source} {arrow} {target} [{edge.use.value}]")
+                marks = [edge.use.value, *(["derived"] if edge.derived else [])]
+                scope = f" in {edge.definition}" if edge.definition else ""
+                lines.append(
+                    f"    {edge.edge_id}: {source} {arrow} {target}{scope} "
+                    f"[{', '.join(marks)}]"
+                )
         for definition in self.template.definitions:
             lines.append(
                 f"  template {definition.definition_id} [{definition.kind.value}]"
@@ -56,12 +61,6 @@ class InspectionReport(BaseModel):
             lines.append(f"    members: {', '.join(definition.members)}")
             for port in definition.inputs:
                 lines.append(f"    input {port.name} [{port.role.value}]")
-            for entry in definition.entries:
-                target = _endpoint(entry.to_op, entry.to_port)
-                lines.append(f"    $ingress.{entry.port} --> {target}")
-            for binding in definition.return_bindings:
-                source = _endpoint(binding.from_op, binding.from_port)
-                lines.append(f"    {source} --> ${binding.kind.value}.{binding.port}")
         if self.template.tool_declarations:
             names = ", ".join(t.name for t in self.template.tool_declarations)
             lines.append(f"  tools: {names}")

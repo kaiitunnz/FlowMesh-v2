@@ -378,7 +378,7 @@ class OrchestrationEngine:
             op.operator_id: set() for op in template.operators
         }
         for edge in template.edges:
-            if edge.feedback or edge.to_op not in preds:
+            if not edge.is_forward or edge.to_op not in preds:
                 continue
             if (
                 kind_by_id.get(edge.from_op) is OperatorKind.SPAWN

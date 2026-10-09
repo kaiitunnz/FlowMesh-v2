@@ -9,10 +9,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from ..representations.operators import (
-    AgentOperator,
     BranchRegion,
     JoinRegion,
-    LeafOperator,
     LogicalOperator,
     LoopContextRegion,
     MergeCombination,
@@ -20,19 +18,21 @@ from ..representations.operators import (
     SpawnRegion,
 )
 from ..representations.template import (
+    BOUNDARY_NODES,
+    BoundaryKind,
     DefinitionKind,
     DependencyUse,
     EntryRole,
     LogicalWorkflowTemplate,
     RegionDefinition,
-    ReturnBinding,
-    ReturnKind,
     TemplateEdge,
 )
 from .diagnostics import Diagnostic, SourceLocation
 
 type Arm = tuple[str, str]
 type Arms = frozenset[Arm]
+# A return route: the one source record carrying a bundle out of a definition.
+type ReturnRoute = tuple[BoundaryKind, str, str | None]
 
 
 def check_control_flow(
@@ -53,7 +53,9 @@ def check_control_flow(
             case LoopContextRegion():
                 diags.extend(_check_loop(op, template, definitions, ops, arms, loc))
             case SpawnRegion() if op.child_definition_ref is not None:
-                diags.extend(_check_child_entry(op, template, definitions, loc))
+                diags.extend(
+                    _check_child_entry(op, template, definitions, ops, arms, loc)
+                )
     for op_id, needed in arms.items():
         if (conflict := _conflict(needed)) is not None:
             diags.append(
@@ -65,6 +67,31 @@ def check_control_flow(
                     loc.get(op_id),
                 )
             )
+    for definition in template.definitions:
+        entering = next(
+            (
+                op.operator_id
+                for op in template.operators
+                if (
+                    isinstance(op, LoopContextRegion)
+                    and op.body_ref == definition.definition_id
+                )
+                or (
+                    isinstance(op, SpawnRegion)
+                    and op.child_definition_ref == definition.definition_id
+                )
+            ),
+            None,
+        )
+        diags.extend(
+            _check_return_routes(
+                definition,
+                _return_routes(template, definition.definition_id),
+                ops,
+                arms,
+                loc.get(entering or ""),
+            )
+        )
     diags.extend(_check_definition_nesting(template, ops, definitions, loc))
     return diags
 
@@ -76,19 +103,29 @@ def _error(code: str, message: str, location: SourceLocation | None) -> Diagnost
 def _check_scopes(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
-    """An edge stays inside one definition; it crosses only through entry/return."""
+    """An edge stays inside one definition; it crosses only through its boundary."""
     owner = template.definition_of()
-    return [
-        _error(
-            "definition.boundary",
-            f"edge {edge.from_op!r} -> {edge.to_op!r} crosses a template boundary; "
-            "a template reads its inputs through $ingress and returns through its "
-            "boundary edges",
-            loc.get(edge.to_op),
-        )
-        for edge in template.edges
-        if owner.get(edge.from_op) != owner.get(edge.to_op)
-    ]
+    diags: list[Diagnostic] = []
+    for edge in template.edges:
+        if edge.is_forward:
+            inside = owner.get(edge.from_op) == owner.get(edge.to_op) == edge.definition
+            member = edge.to_op
+        else:
+            member = edge.to_op if edge.boundary is BoundaryKind.ENTRY else edge.from_op
+            inside = edge.definition is not None and owner.get(member) == (
+                edge.definition
+            )
+        if not inside:
+            diags.append(
+                _error(
+                    "definition.boundary",
+                    f"edge {edge.from_op!r} -> {edge.to_op!r} crosses a template "
+                    "boundary; a template reads its inputs through $ingress and "
+                    "returns through its boundary edges",
+                    loc.get(member),
+                )
+            )
+    return diags
 
 
 def _check_branch(
@@ -143,11 +180,12 @@ def _route_arms(
 
     An operator needs the arms of each required input; with only ordering inputs it
     needs the arms common to them all, and a merge needs only those common to its
-    inputs. An operator also needs the arms of each upstream it reads by name.
+    inputs. A join needs the arms common to its spawns and those of its other
+    required inputs.
     """
     incoming: dict[str, list[TemplateEdge]] = {op_id: [] for op_id in ops}
     for edge in template.edges:
-        if not edge.feedback and edge.to_op in incoming:
+        if edge.to_op in incoming:
             incoming[edge.to_op].append(edge)
     arms: dict[str, Arms] = {}
     visiting: set[str] = set()
@@ -169,17 +207,18 @@ def _route_arms(
         if isinstance(op, MergeRegion):
             needed = _common(_edge_arms(edge) for edge in edges)
         elif isinstance(op, JoinRegion):
-            needed = _common(
-                _edge_arms(edge)
-                for edge in edges
-                if isinstance(ops.get(edge.from_op), SpawnRegion)
+            spawned = [e for e in edges if isinstance(ops.get(e.from_op), SpawnRegion)]
+            needed = _common(_edge_arms(edge) for edge in spawned).union(
+                *(
+                    _edge_arms(edge)
+                    for edge in edges
+                    if edge not in spawned and edge.use is not DependencyUse.ORDER_ONLY
+                )
             )
         elif required := [e for e in edges if e.use is not DependencyUse.ORDER_ONLY]:
             needed = frozenset().union(*(_edge_arms(edge) for edge in required))
         else:
             needed = _common(_edge_arms(edge) for edge in edges)
-        if isinstance(op, (LeafOperator, AgentOperator)):
-            needed = needed.union(*(_arms_of(read) for read in op.value_reads))
         visiting.discard(op_id)
         arms[op_id] = needed
         return needed
@@ -228,7 +267,7 @@ def _check_one_live(
     inputs = [
         (edge, _source_arms(edge.from_op, edge.from_port, ops, arms))
         for edge in edges
-        if edge.to_op == op.operator_id and not edge.feedback
+        if edge.to_op == op.operator_id
     ]
     for index, (left, left_arms) in enumerate(inputs):
         for right, right_arms in inputs[index + 1 :]:
@@ -257,12 +296,9 @@ def _check_loop(
     diags: list[Diagnostic] = []
     ports = [port.name for port in (*op.carried, *op.invariants)]
     bound = [
-        edge.to_port for edge in template.edges if edge.to_op == op.operator_id
-    ] + [
-        entry.to_port
-        for definition in template.definitions
-        for entry in definition.entries
-        if entry.to_op == op.operator_id
+        edge.to_port
+        for edge in template.edges
+        if edge.to_op == op.operator_id and edge.to_port is not None
     ]
     for port in ports:
         if (count := bound.count(port)) != 1:
@@ -303,8 +339,8 @@ def _check_loop(
             )
         )
     carried = {port.name for port in op.carried}
-    groups = _return_groups(body.return_bindings)
-    for (kind, source, source_port), names in groups.items():
+    routes = _return_routes(template, body.definition_id)
+    for (kind, source, source_port), names in routes.items():
         if names != carried:
             diags.append(
                 _error(
@@ -316,7 +352,7 @@ def _check_loop(
                     location,
                 )
             )
-    if not any(kind is ReturnKind.EGRESS for kind, _, _ in groups):
+    if not any(kind is BoundaryKind.EGRESS for kind, _, _ in routes):
         diags.append(
             _error(
                 "loop.no-exit",
@@ -325,20 +361,49 @@ def _check_loop(
                 location,
             )
         )
-    feedbacks = [key for key in groups if key[0] is ReturnKind.FEEDBACK]
-    exits = [key for key in groups if key[0] is ReturnKind.EGRESS]
-    for _, fb_source, fb_port in feedbacks:
-        for _, exit_source, exit_port in exits:
-            if not _exclusive(
-                _source_arms(fb_source, fb_port, ops, arms),
-                _source_arms(exit_source, exit_port, ops, arms),
+    return diags
+
+
+def _check_return_routes(
+    definition: RegionDefinition,
+    routes: dict[ReturnRoute, set[str]],
+    ops: dict[str, LogicalOperator],
+    arms: dict[str, Arms],
+    location: SourceLocation | None,
+) -> list[Diagnostic]:
+    """At most one return route of a definition runs at one time, and every arm of a
+    branch routing them leads to one."""
+    diags: list[Diagnostic] = []
+    keyed = [(route, _source_arms(route[1], route[2], ops, arms)) for route in routes]
+    for index, (left, left_arms) in enumerate(keyed):
+        for right, right_arms in keyed[index + 1 :]:
+            if not _exclusive(left_arms, right_arms):
+                diags.append(
+                    _error(
+                        "definition.return-not-exclusive",
+                        f"{BOUNDARY_NODES[left[0]]} from {left[1]!r} and "
+                        f"{BOUNDARY_NODES[right[0]]} from {right[1]!r} can both "
+                        "happen at one time; route them from different arms of one "
+                        "branch",
+                        location,
+                    )
+                )
+    routing = {branch for _, route_arms in keyed for branch, _ in route_arms} & set(
+        definition.members
+    )
+    for branch in sorted(routing):
+        op = ops[branch]
+        for port in op.outputs:
+            selected = arms.get(branch, frozenset()) | {(branch, port.name)}
+            if not any(
+                _conflict(route_arms | selected) is None for _, route_arms in keyed
             ):
                 diags.append(
                     _error(
-                        "loop.feedback-exit",
-                        f"feedback from {fb_source!r} and exit from {exit_source!r} "
-                        "can both happen at one time; route them from different "
-                        "arms of one branch",
+                        "definition.unrouted-arm",
+                        f"arm {port.name!r} of branch {branch!r} leads to no "
+                        f"{' or '.join(sorted({BOUNDARY_NODES[r[0]] for r in routes}))}"
+                        f" of {definition.definition_id!r}",
                         location,
                     )
                 )
@@ -352,22 +417,29 @@ def _describe(ports: dict[str, tuple[EntryRole, Any]]) -> str:
     )
 
 
-def _return_groups(
-    bindings: Iterable[ReturnBinding],
-) -> dict[tuple[ReturnKind, str, str | None], set[str]]:
-    """Return bindings grouped by the one source record that carries them out."""
-    groups: dict[tuple[ReturnKind, str, str | None], set[str]] = {}
-    for binding in bindings:
-        groups.setdefault(
-            (binding.kind, binding.from_op, binding.from_port), set()
-        ).add(binding.port)
-    return groups
+def _return_routes(
+    template: LogicalWorkflowTemplate, definition_id: str
+) -> dict[ReturnRoute, set[str]]:
+    """A definition's return edges grouped by the source record carrying them out,
+    with the boundary ports each route carries."""
+    routes: dict[ReturnRoute, set[str]] = {}
+    for edge in template.boundary_edges(
+        definition_id, BoundaryKind.FEEDBACK, BoundaryKind.EGRESS, BoundaryKind.RETURN
+    ):
+        if edge.boundary is None or edge.to_port is None:
+            continue
+        routes.setdefault((edge.boundary, edge.from_op, edge.from_port), set()).add(
+            edge.to_port
+        )
+    return routes
 
 
 def _check_child_entry(
     op: SpawnRegion,
     template: LogicalWorkflowTemplate,
     definitions: dict[str, RegionDefinition],
+    ops: dict[str, LogicalOperator],
+    arms: dict[str, Arms],
     loc: dict[str, SourceLocation],
 ) -> list[Diagnostic]:
     location = loc.get(op.operator_id)
@@ -404,9 +476,9 @@ def _check_child_entry(
                 location,
             )
         )
-    groups = _return_groups(child.return_bindings)
+    routes = _return_routes(template, child.definition_id)
     returns = {port.name for port in child.returns}
-    for (_, source, port), names in groups.items():
+    for (_, source, port), names in routes.items():
         if names != returns:
             diags.append(
                 _error(
@@ -418,7 +490,7 @@ def _check_child_entry(
                     loc.get(source),
                 )
             )
-    if not groups:
+    if not routes:
         diags.append(
             _error(
                 "definition.no-return",
@@ -426,7 +498,40 @@ def _check_child_entry(
                 location,
             )
         )
+    diags.extend(_check_call_returns(op, template, ops, returns, location))
     return diags
+
+
+def _check_call_returns(
+    op: SpawnRegion,
+    template: LogicalWorkflowTemplate,
+    ops: dict[str, LogicalOperator],
+    returns: set[str],
+    location: SourceLocation | None,
+) -> list[Diagnostic]:
+    """A call's declared returns are returns of the child template it calls."""
+    join = next(
+        (
+            ops[edge.to_op]
+            for edge in template.edges
+            if edge.from_op == op.operator_id
+            and isinstance(ops.get(edge.to_op), JoinRegion)
+        ),
+        None,
+    )
+    if not isinstance(join, JoinRegion) or join.source_ref != op.operator_id:
+        return []
+    declared = {port.name for port in join.outputs}
+    if declared == {"out"} or not (unknown := sorted(declared - returns)):
+        return []
+    return [
+        _error(
+            "call.unknown-return",
+            f"call {op.operator_id!r} returns {', '.join(unknown)}, which "
+            f"{op.child_definition_ref!r} does not return",
+            location,
+        )
+    ]
 
 
 def _check_definition_nesting(

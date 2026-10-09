@@ -1,6 +1,8 @@
 """Loops through the orchestration engine: routed feedback and exit, pipelined
 logical times, frontier-gated release, budgets, failure and restart."""
 
+import pytest
+
 from server.orchestration import ScopeBudget
 from server.orchestration.state import (
     ControlStatus,
@@ -10,6 +12,7 @@ from server.orchestration.state import (
     ValueRef,
     WorkItemStatus,
 )
+from server.task.v2.compiler import region_checks
 
 from .control_flow import ECHO, Driver, workflow
 
@@ -33,7 +36,7 @@ _BODY = f"""
             region:
               kind: branch
               inputs: [{{name: input}}]
-              outputs: [{{name: continue}}, {{name: finish}}, {{name: neither}}]
+              outputs: [{{name: continue}}, {{name: finish}}]
               selection: {{input: input, field: [route]}}
         edges:
           - from: {{node: route, port: continue}}
@@ -150,8 +153,15 @@ def test_invariants_are_read_at_every_time_and_carried_values_are_replaced() -> 
     assert instance.invariants["dataset"].legacy_task_id == run.ops["data"]
 
 
-def test_a_time_routing_neither_feedback_nor_exit_fails_the_loop() -> None:
-    run = _loop()
+def test_a_time_routing_neither_feedback_nor_exit_fails_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Submission refuses an arm leading to neither; a stored plan can still hold one.
+    monkeypatch.setattr(region_checks, "_check_return_routes", lambda *_: [])
+    body = _BODY.replace("{name: finish}]", "{name: finish}, {name: neither}]")
+    run = Driver(workflow(_NODES, body))
+    run.run_one("seed")
+    run.run_one("data")
     run.run_one("step")
     run.run_one("side")
     run.select("neither")

@@ -284,3 +284,105 @@ def test_a_one_live_merge_with_two_live_inputs_fails() -> None:
     run.run_one("on_a")
     state = run.engine.control_state("merged")
     assert state is not None and state.status is ControlStatus.LIVE
+
+
+_ARMS = f"""
+      - name: classify
+        spec: {ECHO}
+      - name: decide
+        dependsOn: [{{node: classify, input: input}}]
+        region:
+          kind: branch
+          inputs: [{{name: input}}]
+          outputs: [{{name: a}}, {{name: b}}]
+          selection: {{input: input}}
+      - name: on_a
+        dependsOn: [{{node: decide, port: a}}]
+        spec: {ECHO}
+      - name: on_b
+        dependsOn: [{{node: decide, port: b}}]
+        spec: {ECHO}
+"""
+
+
+def test_a_value_read_past_a_live_dependency_on_a_dead_arm_is_inactive() -> None:
+    nodes = _ARMS + f"""
+      - name: c
+        dependsOn: [on_a, on_b]
+        spec: {ECHO}
+      - name: d
+        dependsOn: [c]
+        spec: {{taskType: echo, data: {{type: list, items: ['${{on_a.out}}']}}}}
+"""
+    run = Driver(workflow(nodes))
+    run.run_one("classify")
+    run.select("b")
+    run.run_one("on_b")
+    run.run_one("c")
+    assert run.status("d") is WorkItemStatus.SKIPPED
+    assert run.ran == ["classify", "on_b", "c"]
+
+
+def test_an_agent_input_bound_to_a_dead_arm_leaves_the_agent_inactive() -> None:
+    # A live ordering dependency beside the dead input does not activate the agent.
+    nodes = _ARMS + """
+      - name: reader
+        dependsOn: [classify]
+        spec:
+          taskType: agent
+          task: read
+          harness: {backend: scripted, version: v1, params: {script: []}}
+          v2: {inputs: [{name: findings, from: on_a}]}
+"""
+    run = Driver(workflow(nodes))
+    run.run_one("classify")
+    run.select("b")
+    assert run.status("reader") is WorkItemStatus.SKIPPED
+
+
+_CHILD = f"""
+    templates:
+      - name: one
+        inputs: [{{name: e, role: param}}]
+        returns: [{{name: out}}]
+        nodes:
+          - name: work
+            dependsOn: [{{node: $ingress, port: e, input: e}}]
+            spec: {ECHO}
+        edges:
+          - from: {{node: work}}
+            to: {{node: $return, port: out}}
+"""
+
+
+@pytest.mark.parametrize(
+    ("fan_input", "join_deps"),
+    [
+        # The spawn itself is on the dead arm, beside a live ordering input.
+        ("{node: decide, port: a}", "[fan, on_b]"),
+        # The spawn is live, but the join runs only on the dead arm.
+        ("plan", "[fan, {node: decide, port: a}]"),
+    ],
+)
+def test_a_join_on_a_dead_route_is_dead(fan_input: str, join_deps: str) -> None:
+    nodes = _ARMS + f"""
+      - name: plan
+        spec: {ECHO}
+      - name: fan
+        dependsOn: [{fan_input}]
+        region: {{kind: spawn, child: one}}
+      - name: collect
+        dependsOn: {join_deps}
+        region: {{kind: join, completion: all_settled}}
+      - name: after
+        dependsOn: [collect]
+        spec: {ECHO}
+"""
+    run = Driver(workflow(nodes, _CHILD))
+    run.run_one("plan")
+    run.run_one("classify")
+    run.select("b")
+    run.run_one("on_b")
+    collect = run.engine.control_state("collect")
+    assert collect is not None and collect.status is ControlStatus.DEAD
+    assert run.status("after") is WorkItemStatus.SKIPPED

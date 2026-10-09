@@ -2,7 +2,7 @@
 release once the loop's frontier closes."""
 
 from ...task.v2.representations.operators import LoopContextRegion
-from ...task.v2.representations.template import ReturnBinding, ReturnKind
+from ...task.v2.representations.template import BoundaryKind
 from ..guardrails import ScopeBudget
 from ..state import (
     CapabilityStatus,
@@ -20,7 +20,7 @@ from ..state import (
 )
 from .advance import Advance, RegionError
 from .dataflow import RegionFlow
-from .edges import EdgeState, Incoming
+from .edges import Incoming
 from .ledger import OrchestrationLedger
 from .occurrences import OccurrenceFactory
 from .publications import PublicationLedger
@@ -28,8 +28,8 @@ from .scopes import ScopeProgress
 from .topology import PlanTopology
 
 _RETURN_ITERATION = {
-    ReturnKind.FEEDBACK: IterationKind.FEEDBACK,
-    ReturnKind.EGRESS: IterationKind.EXIT,
+    BoundaryKind.FEEDBACK: IterationKind.FEEDBACK,
+    BoundaryKind.EGRESS: IterationKind.EXIT,
 }
 
 
@@ -133,27 +133,12 @@ class LoopProgress:
         instance = self._ledger.loop_instances.get(frame.loop)
         if instance is None:
             return
-        for kind, port, bindings in self._groups(occurrence.operator_id):
-            state, _ = self._flow.edges.source_state(key, port)
-            if state not in (EdgeState.LIVE, EdgeState.EMPTY):
-                continue
-            bundle = {
-                b.port: self._flow.edges.source_state(key, port, b.projection)[1]
-                or _EMPTY
-                for b in bindings
-            }
+        for (kind, port), bundle in self._flow.edges.return_bundles(
+            key, BoundaryKind.FEEDBACK, BoundaryKind.EGRESS
+        ).items():
             self._accept(
                 instance, frame.iteration, _RETURN_ITERATION[kind], bundle, advance
             )
-
-    def _groups(
-        self, operator_id: str
-    ) -> list[tuple[ReturnKind, str | None, list[ReturnBinding]]]:
-        """An operator's return bindings, grouped into the bundles they carry out."""
-        groups: dict[tuple[ReturnKind, str | None], list[ReturnBinding]] = {}
-        for _, binding in self._topology.returns_from.get(operator_id, ()):
-            groups.setdefault((binding.kind, binding.from_port), []).append(binding)
-        return [(kind, port, bindings) for (kind, port), bindings in groups.items()]
 
     def _accept(
         self,

@@ -325,7 +325,7 @@ def test_region_output_binds_the_child_region_join_to_the_merge_input() -> None:
     template, _ = compile_workflow("wfl-x", parsed, source, bindings=binding)
     by_id = {op.operator_id: op for op in template.operators}
     reviews_edges = [
-        e for e in template.edges if e.to_port == "reviews" and not e.feedback
+        e for e in template.edges if e.to_port == "reviews" and e.is_forward
     ]
     assert len(reviews_edges) == 1
     # The merge's input is delivered by the lead's reviewer child-region join aggregate.

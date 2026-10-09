@@ -10,9 +10,9 @@ from enum import StrEnum
 
 from ...task.v2.representations.operators import BranchRegion, OperatorKind
 from ...task.v2.representations.template import (
+    BoundaryKind,
     DefinitionKind,
     DependencyUse,
-    EntryBinding,
     TemplateEdge,
 )
 from ..state import (
@@ -46,7 +46,7 @@ class EdgeState(StrEnum):
 class Incoming:
     """One resolved input of an occurrence: the edge, how it resolved, and its value."""
 
-    edge: TemplateEdge | EntryBinding
+    edge: TemplateEdge
     state: EdgeState
     value: ValueRef | None = None
 
@@ -99,7 +99,7 @@ class EdgeResolver:
             for edge in self._topology.incoming.get(occurrence.operator_id, ())
         ]
         for entry in self._topology.entries_into.get(occurrence.operator_id, ()):
-            value = self.entry_value(occurrence, entry.port)
+            value = self.entry_value(occurrence, entry.from_port or "")
             resolved.append(
                 Incoming(
                     entry,
@@ -108,6 +108,23 @@ class EdgeResolver:
                 )
             )
         return resolved
+
+    def return_bundles(
+        self, key: str, *kinds: BoundaryKind
+    ) -> dict[tuple[BoundaryKind, str | None], dict[str, ValueRef]]:
+        """The bundles a settled occurrence carries out of its definition on its live
+        routes, by boundary kind and the source port each leaves through."""
+        operator_id = self._ledger.occurrence(key).operator_id
+        bundles: dict[tuple[BoundaryKind, str | None], dict[str, ValueRef]] = {}
+        for edge in self._topology.returns_from.get(operator_id, ()):
+            if edge.boundary not in kinds or edge.boundary is None:
+                continue
+            state, value = self.source_state(key, edge.from_port, edge.projection)
+            if state not in (EdgeState.LIVE, EdgeState.EMPTY):
+                continue
+            bundle = bundles.setdefault((edge.boundary, edge.from_port), {})
+            bundle[edge.to_port or ""] = value or ValueRef(kind="empty")
+        return bundles
 
     def source_state(
         self,

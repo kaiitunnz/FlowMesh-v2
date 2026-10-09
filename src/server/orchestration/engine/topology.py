@@ -14,9 +14,9 @@ from ...task.v2.representations.operators import (
 )
 from ...task.v2.representations.results import ResultDeclaration
 from ...task.v2.representations.template import (
-    EntryBinding,
+    RETURN_KINDS,
+    BoundaryKind,
     RegionDefinition,
-    ReturnBinding,
     TemplateEdge,
 )
 
@@ -90,31 +90,29 @@ class PlanTopology:
         self.definition_of = bundle.template.definition_of()
         self.incoming: dict[str, list[TemplateEdge]] = {op: [] for op in self.operators}
         self.outgoing: dict[str, list[TemplateEdge]] = {op: [] for op in self.operators}
+        # A definition's entry edges by the member they enter, and its return edges
+        # by the member they leave from.
+        self.entries_into: dict[str, list[TemplateEdge]] = {}
+        self.returns_from: dict[str, list[TemplateEdge]] = {}
         for edge in bundle.template.edges:
-            if (
-                edge.feedback
-                or edge.from_op not in self.operators
-                or edge.to_op not in self.operators
-                or self._is_spawn_join_edge(edge.from_op, edge.to_op)
+            if edge.definition is not None and edge.boundary is BoundaryKind.ENTRY:
+                self.entries_into.setdefault(edge.to_op, []).append(edge)
+            elif edge.definition is not None and edge.boundary in RETURN_KINDS:
+                self.returns_from.setdefault(edge.from_op, []).append(edge)
+            elif (
+                edge.is_forward
+                and edge.from_op in self.operators
+                and edge.to_op in self.operators
+                and not self._is_spawn_join_edge(edge.from_op, edge.to_op)
             ):
-                continue
-            self.incoming[edge.to_op].append(edge)
-            self.outgoing[edge.from_op].append(edge)
-        self.entries_into: dict[str, list[EntryBinding]] = {}
-        self.returns_from: dict[str, list[tuple[str, ReturnBinding]]] = {}
-        for definition in bundle.template.definitions:
-            for entry in definition.entries:
-                self.entries_into.setdefault(entry.to_op, []).append(entry)
-            for binding in definition.return_bindings:
-                self.returns_from.setdefault(binding.from_op, []).append(
-                    (definition.definition_id, binding)
-                )
+                self.incoming[edge.to_op].append(edge)
+                self.outgoing[edge.from_op].append(edge)
 
     def _build_topology(self) -> dict[str, list[str]]:
         """Forward successor edges, excluding feedback and spawn->join binding edges."""
         forward: dict[str, list[str]] = {op: [] for op in self.operators}
         for edge in self.bundle.template.edges:
-            if edge.feedback or edge.from_op not in forward:
+            if not edge.is_forward or edge.from_op not in forward:
                 continue
             if self._is_spawn_join_edge(edge.from_op, edge.to_op):
                 continue
@@ -208,8 +206,5 @@ class PlanTopology:
 
 
 def edge_key(edge: TemplateEdge) -> str:
-    """A stable identity for an edge; an edge compiled without one is named by its
-    endpoints and ports."""
-    return edge.edge_id or (
-        f"{edge.from_op}.{edge.from_port or ''}->{edge.to_op}.{edge.to_port or ''}"
-    )
+    """A stable identity for an edge."""
+    return edge.edge_id

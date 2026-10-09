@@ -63,6 +63,14 @@ class Driver:
             e.logical_ref: e.source_id for e in self.bundle.template.source_map
         }
         self.ops = {v: k for k, v in self.names.items()}
+        # A template member is also reachable by its bare name when no other node
+        # shares it.
+        tails: dict[str, list[str]] = {}
+        for source, op in self.ops.items():
+            tails.setdefault(source.rpartition("/")[2], []).append(op)
+        for tail, ops in tails.items():
+            if len(ops) == 1:
+                self.ops.setdefault(tail, ops[0])
         self.ready: list[str] = []
         self.skipped: list[str] = []
         self.failed: list[str] = []
@@ -79,13 +87,17 @@ class Driver:
         self.failed.extend(advance.failed)
         return advance
 
-    def name(self, task_id: str) -> str:
+    def operator(self, task_id: str) -> str:
         wi = self.engine.work_item(task_id)
         assert wi is not None
-        return self.names.get(wi.operator_id, wi.operator_id)
+        return wi.operator_id
+
+    def name(self, task_id: str) -> str:
+        operator_id = self.operator(task_id)
+        return self.names.get(operator_id, operator_id)
 
     def ready_named(self, name: str) -> list[str]:
-        return [t for t in self.ready if self.name(t) == name]
+        return [t for t in self.ready if self.operator(t) == self.ops[name]]
 
     def run(self, task_id: str, *, fail: bool = False) -> Advance:
         """Dispatch a ready task and settle it."""

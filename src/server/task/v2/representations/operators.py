@@ -522,8 +522,6 @@ class LeafOperator(_OperatorBase):
     service_dependency: ServiceDependency | None = None
     # Set for every inference/embedding leaf; None for any other binding.
     embodiment: InferenceEmbodimentBinding | None = None
-    # Operators whose values the spec reads, directly or through an ancestor name.
-    value_reads: tuple[str, ...] = ()
 
 
 class AgentOperator(_OperatorBase):
@@ -557,8 +555,6 @@ class AgentOperator(_OperatorBase):
     # Legacy single-target shorthand the compiler normalizes into one declared region;
     # a declaration that sets both this and child_region_refs is rejected.
     child_template_ref: str | None = None
-    # Operators whose values the spec reads, directly or through an ancestor name.
-    value_reads: tuple[str, ...] = ()
 
 
 type SelectorStep = str | int

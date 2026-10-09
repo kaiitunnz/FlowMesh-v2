@@ -139,7 +139,7 @@ spec:
     from_call = {(e.to_op, e.to_port) for e in template.edges if e.from_op == "c:join"}
     assert from_call == {
         (ids["after"], None),
-        ("m", None),
+        ("m", "c"),
         (ids["reader"], None),
         (ids["reader"], "verdict"),
     }

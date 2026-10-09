@@ -8,7 +8,7 @@ from ...task.v2.representations.operators import (
     OperatorKind,
     SpawnRegion,
 )
-from ...task.v2.representations.template import EntryRole, ReturnKind
+from ...task.v2.representations.template import BoundaryKind, EntryRole
 from ..guardrails import ScopeBudget
 from ..state import (
     TERMINAL_WORK_ITEM_STATUSES,
@@ -27,7 +27,6 @@ from ..state import (
 from .advance import Advance, RegionError
 from .authority import AuthorityLedger
 from .dataflow import RegionFlow
-from .edges import EdgeState
 from .inputs import AcceptedInputLedger
 from .ledger import OrchestrationLedger
 from .occurrences import OccurrenceFactory
@@ -412,22 +411,10 @@ class SpawnRegions:
         if context is None or context.returned:
             return
         definition = self._topology.definitions[context.definition_id]
-        bindings = [
-            b
-            for _, b in self._topology.returns_from.get(occurrence.operator_id, ())
-            if b.kind is ReturnKind.RETURN
-        ]
-        if not bindings:
+        bundles = self._flow.edges.return_bundles(key, BoundaryKind.RETURN)
+        if not bundles:
             return
-        port = bindings[0].from_port
-        state, _ = self._flow.edges.source_state(key, port)
-        if state not in (EdgeState.LIVE, EdgeState.EMPTY):
-            return
-        values = {
-            b.port: self._flow.edges.source_state(key, b.from_port, b.projection)[1]
-            or ValueRef(kind="empty")
-            for b in bindings
-        }
+        values = next(iter(bundles.values()))
         if len(definition.returns) == 1:
             context.result = values.get(definition.returns[0].name)
         else:

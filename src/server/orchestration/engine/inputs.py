@@ -162,7 +162,7 @@ class AcceptedInputLedger:
         sources = [
             edge.from_op
             for edge in self._topology.bundle.template.edges
-            if edge.to_op == agent_op and edge.to_port == port and not edge.feedback
+            if edge.to_op == agent_op and edge.to_port == port and edge.is_forward
         ]
         if not sources:
             return None
