@@ -2,6 +2,7 @@
 write leaves behind."""
 
 import copy
+import json
 from typing import Any, cast
 
 import pytest
@@ -21,6 +22,8 @@ from tests.server.task.test_runtime_control_flow import (
     _ECHO,
     _LOOP,
     _LOOP_NODES,
+    _ROUTE_BODY,
+    _SEEDED_FROM_A_JOIN,
     _Run,
     _workflow,
 )
@@ -561,3 +564,20 @@ async def test_a_cancel_of_a_settled_workflow_changes_nothing(
     assert _durable_status(run.registry, run.workflow_id) == "done"
     assert run.registry.control[run.workflow_id].cancelled is False
     assert _published(run) == published
+
+
+@pytest.mark.anyio
+async def test_a_ledger_stored_without_its_control_failure_keeps_failing() -> None:
+    run = await _Run().start(_workflow(_SEEDED_FROM_A_JOIN, _ROUTE_BODY))
+    run.run("plan", {"items": ["p"]})
+    run.run("kid", {"route": "done"})
+    failure = run.registry.control[run.workflow_id].failure
+    assert failure is not None and failure.startswith("BranchSelectionInvalid: ")
+    stored = json.loads(run.registry.ledger_blobs[run.workflow_id])
+    del stored["control_failure"]
+    run.registry.ledger_blobs[run.workflow_id] = json.dumps(stored)
+
+    await run.restart()
+
+    assert _durable_status(run.registry, run.workflow_id) == "failed"
+    assert run.registry.control[run.workflow_id].failure == failure

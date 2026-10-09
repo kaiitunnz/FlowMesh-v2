@@ -265,7 +265,11 @@ class SnapshotCodec:
         # A ledger stored without failure reasons names each failed work item's own.
         self._failures.failure_reasons = dict(snapshot.failure_reasons)
         self._failures.instance_failure = snapshot.instance_failure
-        self._failures.control_failure = snapshot.control_failure
+        self._failures.control_failure = (
+            snapshot.control_failure
+            if "control_failure" in snapshot.model_fields_set
+            else self._failed_control_reason()
+        )
         self._failures.instance_cancelled = snapshot.instance_cancelled
         for wi in self._ledger.work_items.values():
             if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
@@ -281,6 +285,20 @@ class SnapshotCodec:
             and d.operator_id
             and d.work_item_id is None
         }
+
+    def _failed_control_reason(self) -> str | None:
+        """The control failure a ledger stored without one records: its first failed
+        control's reason, else its first failed region."""
+        failed = sorted(
+            (key, state.reason or "control failed")
+            for key, state in self._ledger.control_states.items()
+            if state.status is ControlStatus.FAILED
+        )
+        if failed:
+            return failed[0][1]
+        if self._failures.failed_regions:
+            return f"region {min(self._failures.failed_regions)} failed"
+        return None
 
     def to_snapshot(self) -> LedgerSnapshot:
         return LedgerSnapshot(
