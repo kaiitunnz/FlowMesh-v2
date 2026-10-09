@@ -1064,16 +1064,16 @@ class OrchestrationEngine:
 
     def task_inputs(self, task_id: str) -> list[OccurrenceInput] | None:
         """The values a task reads through its incoming edges, by the names its spec
-        reads them through; None for a root task fed only by tasks, whose inputs are
-        those tasks' results by their names.
+        reads them through; None for a root task that reads only tasks' whole results
+        by their names, which its upstream tasks' results answer the same way.
 
-        A task inside a region definition, and a root task reading a region's value,
-        read every input through its edges.
+        A task inside a region definition, and a root task reading a region's value or
+        a named input, read every input through its edges.
         """
         if (occurrence := self.occurrence_of(task_id)) is not None:
             return self._flow.edges.inputs(occurrence.key)
         if self._ledger.work_item_for_task(task_id) is None or not any(
-            self._topology.is_control(edge.from_op)
+            self._topology.is_control(edge.from_op) or edge.to_port
             for edge in self._topology.incoming.get(task_id, ())
         ):
             return None

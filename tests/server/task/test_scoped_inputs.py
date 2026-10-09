@@ -536,3 +536,36 @@ async def test_a_root_task_fed_by_tasks_reads_the_same_through_records_or_edges(
     ]
     assert record_bindings is not None and edge_bindings is not None
     assert edge_bindings == record_bindings
+
+
+_NAMED = """
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: b
+        dependsOn: [{node: a, input: src, project: [inner]}]
+        spec: {taskType: echo, data: {type: list, items: ["${src.y}", "${a.inner.y}"]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_root_task_reads_a_named_input_of_a_task() -> None:
+    run = await _Run().start(_workflow(_NAMED))
+    run.run("a", {"inner": {"y": "v"}})
+    task_id = run.ids["b"]
+    record = run.runtime.get_record(task_id)
+    assert record is not None
+    dispatcher = Dispatcher(
+        runtime=run.runtime,
+        worker_registry=cast(WorkerRegistry, object()),
+        logger=logging.getLogger("scoped-inputs"),
+    )
+    # As the dispatcher reads it: a root task fed only by unnamed task inputs reads
+    # its records, and any other reads its edges.
+    rendered, upstream = dispatcher._resolve_stage_references(
+        task_id,
+        record.task,
+        dispatcher._build_stage_context(record),
+        run.runtime.scoped_inputs(task_id),
+    )
+    assert rendered.spec.model_dump()["data"]["items"] == ["v", "v"]
+    assert upstream is not None and upstream["src"].path == ("inner",)
