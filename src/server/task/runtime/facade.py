@@ -3774,12 +3774,16 @@ class TaskRuntime:
             try:
                 closed = [self._committer.close_locked(w) for w in sorted(spanned)]
             except Exception:
-                # A fault of the write's own recurs on every write of the workflow;
-                # the task waits aside until one is made, and the rewrite the
-                # workflow owes carries its merge's release.
+                # A fault of the write's own recurs on every write of its workflow.
+                # The dispatch drops what it merged from a faulted workflow, whose
+                # owed rewrite carries those tasks' return, and a task of the faulted
+                # workflow waits aside until a write of it is made.
                 self._merges.unmerge_locked(task_id)
-                faulted = min(spanned & self._committer.faulted or spanned)
-                self._write_faulted.setdefault(faulted, set()).add(task_id)
+                if (record := self._tasks.get(task_id)) is None:
+                    return PublishGate.NOT_PENDING
+                if record.workflow_id not in self._committer.faulted:
+                    return PublishGate.NOT_DURABLE
+                self._write_faulted.setdefault(record.workflow_id, set()).add(task_id)
                 return PublishGate.WRITE_FAULTED
             if not all(closed):
                 return PublishGate.NOT_DURABLE

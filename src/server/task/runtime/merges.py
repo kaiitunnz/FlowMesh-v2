@@ -79,6 +79,9 @@ class TaskMerges:
             return []
         if self.merge_children_map.get(task_id):
             return []
+        # A workflow owing a rewrite after a write fault publishes nothing.
+        if record.workflow_id in self._committer.faulted:
+            return []
         if record.selected_worker and assigned_worker not in record.selected_worker:
             raise ValueError(
                 f"The worker assigned for task {task_id} ({assigned_worker}) "
@@ -111,6 +114,7 @@ class TaskMerges:
             if (
                 self._committer.reporting(candidate)
                 or candidate in self._committer.unacknowledged
+                or candidate_record.workflow_id in self._committer.faulted
             ):
                 continue
             siblings.append(candidate)
