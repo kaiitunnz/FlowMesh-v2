@@ -5,13 +5,14 @@ result envelope of the task whose value reaches them, and applied under it only 
 the occurrence still waits on them.
 """
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
-
-from shared.schemas.result.binding import collection_element, collection_elements
+from shared.schemas.result.binding import (
+    collection_element,
+    collection_elements,
+    dig,
+)
 from shared.tasks.result_binding import ResultBinding
 
 from ...orchestration.state import ValueRef
@@ -28,26 +29,6 @@ class ControlRead:
     error: str | None = None
     # The store could not be reached; the value is still there to read later.
     unavailable: bool = False
-
-
-def dig(value: Any, steps: Sequence[str | int]) -> Any:
-    """Walk ``steps`` into a value: a field of a mapping or model, or an index of a
-    list. A step that finds nothing yields None."""
-    current = value
-    for step in steps:
-        match current:
-            case dict():
-                current = current.get(str(step))
-            case list() if isinstance(step, int) or str(step).isdigit():
-                index = int(step)
-                current = current[index] if 0 <= index < len(current) else None
-            case BaseModel():
-                current = getattr(current, str(step), None)
-            case _:
-                return None
-        if current is None:
-            return None
-    return current
 
 
 def read_control_value(

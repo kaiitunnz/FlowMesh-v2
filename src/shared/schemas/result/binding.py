@@ -6,11 +6,12 @@ reads the same wherever it is read.
 """
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from shared.tasks.result_binding import ResultBinding
+from shared.tasks.result_binding import ResultBinding, ResultElementRef
 
 from ._base import BaseExecutorResult
 from .catalog import ResultEnvelope
@@ -70,6 +71,43 @@ def collection_element(envelope: ResultEnvelope, index: int) -> Any:
             f"none at {index}"
         )
     return elements[index]
+
+
+def dig(value: Any, steps: Sequence[str | int]) -> Any:
+    """Walk ``steps`` into a value: a field of a mapping or model, or an index of a
+    list. A step that finds nothing yields None."""
+    current = value
+    for step in steps:
+        match current:
+            case dict():
+                current = current.get(str(step))
+            case list() if isinstance(step, int) or str(step).isdigit():
+                index = int(step)
+                current = current[index] if 0 <= index < len(current) else None
+            case BaseModel():
+                current = getattr(current, str(step), None)
+            case _:
+                return None
+        if current is None:
+            return None
+    return current
+
+
+def element_value(envelope: ResultEnvelope, ref: ResultElementRef) -> Any:
+    """The value one element of a result reads as; raises ``IndexError`` when the
+    result holds none there."""
+    start = (
+        collection_element(envelope, ref.element)
+        if ref.element is not None
+        else envelope.result
+    )
+    if not ref.path:
+        return start
+    if (value := dig(start, ref.path)) is None:
+        raise IndexError(
+            f"task {envelope.task_id} holds no value at {list(ref.path)!r}"
+        )
+    return value
 
 
 def value_text(envelope: ResultEnvelope, element: int | None) -> str | None:

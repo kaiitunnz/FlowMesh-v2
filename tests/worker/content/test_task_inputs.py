@@ -222,6 +222,52 @@ def test_a_fan_out_element_hydrates_to_the_inline_data(
     assert hydrated.hydrated_element() == (element,)
 
 
+@pytest.mark.parametrize(
+    ("element", "path", "value"),
+    [
+        (None, ("nested", 1), "y"),
+        (2, ("n",), 2.0),
+    ],
+)
+def test_an_element_at_a_path_hydrates_to_the_value_it_reaches(
+    plane: FakeContentPlane,
+    element: int | None,
+    path: tuple[str | int, ...],
+    value: Any,
+) -> None:
+    producer = _store(plane, "tsk-p", {**_PRODUCED, "nested": ["x", "y"]})
+    assert producer.reference is not None
+    spec = {"taskType": "echo", "data": {"type": "list", "items": ["template"]}}
+
+    hydrated = _hydrate(
+        plane,
+        _message(
+            spec,
+            input_element=ResultElementRef(
+                reference=producer.reference, element=element, path=path
+            ),
+        ),
+    )
+
+    assert hydrated.hydrated_element() == (value,)
+
+
+def test_a_path_that_reaches_nothing_fails_the_task(plane: FakeContentPlane) -> None:
+    producer = _store(plane, "tsk-p", _PRODUCED)
+    assert producer.reference is not None
+    with pytest.raises(ExecutionError) as caught:
+        _hydrate(
+            plane,
+            _message(
+                {"taskType": "echo"},
+                input_element=ResultElementRef(
+                    reference=producer.reference, path=("missing",)
+                ),
+            ),
+        )
+    assert not caught.value.retryable
+
+
 def _agent(members: tuple[InputBindingMember, ...]) -> AgentEpisodeDispatch:
     return AgentEpisodeDispatch(
         backend=HarnessBackendKey(backend="scripted", version="v1"),

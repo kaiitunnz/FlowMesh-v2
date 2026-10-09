@@ -9,8 +9,10 @@ from typing import Any, cast
 
 import pytest
 
+from server.task.v2.compiler import regions
 from shared.inference import InferenceSourceKind
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.result_store import result_payload
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
@@ -80,3 +82,38 @@ async def test_a_child_of_a_menu_leaf_names_its_element_in_its_contract() -> Non
         assert element.element == source.element
         indices.append(source.element)
     assert sorted(indices) == [0, 1]
+
+
+@pytest.mark.anyio
+async def test_a_child_of_a_projected_fan_out_names_its_collection_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(regions, "CONTROL_FLOW_RUNNABLE", True)
+    runtime = _live_runtime(FakeRegistry())
+    _workflow_id, ids = await _register(
+        runtime,
+        _SPAWN_OVER_MENU.replace(
+            "dependsOn: [planner]", "dependsOn: [{node: planner, project: [nested]}]"
+        ),
+    )
+    planner = ids["planner"]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    payload = result_payload(
+        runtime._results,
+        planner,
+        {"ok": True, "items": ["a", "b", "c"], "nested": ["first", "second"]},
+        runtime._tasks[planner].org_id,
+    )
+    runtime.mark_succeeded(planner, "wkr-1", payload, _TS)
+    # A projected fan-out is read off the lock by the workflow's re-drive.
+    runtime._redrive.run_due()
+
+    children = _pop_ready(runtime)
+    assert len(children) == 2
+    sources = []
+    for child in children:
+        contract = runtime.declared_contract(child)
+        assert contract is not None
+        sources.append((contract.source.path, contract.source.element))
+        assert contract.source.expression.startswith(f"{planner}.nested[")
+    assert sorted(sources) == [("nested", 0), ("nested", 1)]

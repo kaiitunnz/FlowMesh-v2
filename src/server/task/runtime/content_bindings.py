@@ -138,14 +138,20 @@ class ContentBindings:
         if (
             child_input is None
             or child_input.content is None
-            or child_input.collection_key is None
             or child_input.legacy_task_id is None
+            or (child_input.collection_key is None and not child_input.projection)
         ):
             return None
         return _InputElement(
             child_input.legacy_task_id,
             ResultElementRef(
-                reference=child_input.content, element=int(child_input.collection_key)
+                reference=child_input.content,
+                element=(
+                    int(child_input.collection_key)
+                    if child_input.collection_key is not None
+                    else None
+                ),
+                path=child_input.projection,
             ),
         )
 

@@ -5404,7 +5404,9 @@ class TaskRuntime:
             "failed": task_id in self._failed,
             "input_element": (
                 TaskInputElement(
-                    producer_task_id=element.producer_task_id, index=element.ref.element
+                    producer_task_id=element.producer_task_id,
+                    index=element.ref.element,
+                    path=list(element.ref.path),
                 )
                 if element is not None
                 else None

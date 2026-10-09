@@ -23,7 +23,7 @@ from shared.schemas.event import TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import (
     NotAResultEnvelope,
-    collection_element,
+    element_value,
     result_envelope,
     skip_envelope_bytes,
     value_text,
@@ -137,7 +137,7 @@ class TaskInputHydrator:
         if (ref := msg.input_element) is not None:
             source = reader.reference_envelope(ref.reference)
             try:
-                element = (collection_element(source, ref.element),)
+                element = (element_value(source, ref),)
             except IndexError as exc:
                 raise input_unreadable(str(exc)) from exc
         msg.task = _with_inputs(msg.task, upstream, element)

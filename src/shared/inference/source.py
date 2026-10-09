@@ -47,7 +47,8 @@ class CanonicalInferenceInputSource(BaseModel):
     names one declared direct upstream input by node and the path projecting it into a
     prompt vector; ``data.expr`` and ``data.node`` plus ``data.path`` normalize to this
     same form. An element source names one element of a producer's collection by the
-    producer's task and the element's index, and resolves to that one prompt.
+    producer's task, the path to the collection when it is part of the result, and the
+    element's index, and resolves to that one prompt.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -84,10 +85,8 @@ class CanonicalInferenceInputSource(BaseModel):
                 raise ValueError("an upstream source names a node")
             if self.element is None and not self.path:
                 raise ValueError("an upstream source names a path or an element")
-            if self.element is not None and (self.path or self.max_items != 1):
-                raise ValueError(
-                    "an element source names no path and resolves to exactly one item"
-                )
+            if self.element is not None and self.max_items != 1:
+                raise ValueError("an element source resolves to exactly one item")
         return self
 
     @model_serializer(mode="wrap")
@@ -113,7 +112,8 @@ class CanonicalInferenceInputSource(BaseModel):
         if self.kind is not InferenceSourceKind.UPSTREAM:
             raise InputResolutionError("a literal source has no upstream expression")
         if self.element is not None:
-            return f"{self.node}[{self.element}]"
+            collection = f"{self.node}.{self.path}" if self.path else self.node
+            return f"{collection}[{self.element}]"
         return f"{self.node}.{self.path}"
 
     def digest(self) -> str:

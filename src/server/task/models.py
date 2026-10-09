@@ -323,7 +323,13 @@ class TaskInputElement(BaseModel):
     """The producer collection element a fan-out child runs on."""
 
     producer_task_id: str = Field(description="Task whose result holds the element.")
-    index: int = Field(description="Position of the element in that collection.")
+    index: int | None = Field(
+        default=None, description="Position of the element in that collection."
+    )
+    path: list[str | int] = Field(
+        default_factory=list,
+        description="Path to the element inside the result or the collection member.",
+    )
 
 
 # A task's position in a listing: its submission time, then its id.

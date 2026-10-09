@@ -476,3 +476,27 @@ async def test_a_branch_reads_its_selector_through_its_inputs_projection() -> No
     run = await _Run().start(_workflow(nodes))
     run.run("classify", {"label": "no", "inner": {"label": "yes"}})
     assert [run.name(t) for t in run.ready] == ["left_work"]
+
+
+@pytest.mark.anyio
+async def test_a_child_of_a_projected_fan_out_runs_on_its_element_of_the_part() -> None:
+    nodes = f"""
+      - name: plan
+        spec: {_ECHO}
+      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [{{node: plan, project: [nested]}}]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+"""
+    run = await _Run().start(_workflow(nodes))
+    run.run("plan", {"items": ["a", "b", "c"], "nested": ["x", "y"]})
+    kids = [t for t in run.ready if run.name(t) == "kid"]
+    elements = [run.runtime.input_element(kid) for kid in kids]
+    assert [(e.element, e.path) for e in elements if e is not None] == [
+        (None, ("nested", 0)),
+        (None, ("nested", 1)),
+    ]
