@@ -508,3 +508,76 @@ def test_an_agent_takes_a_merge_read_through_its_named_port() -> None:
     run.run_one("a")
     run.run_one("b")
     assert run.ready_named("think") != []
+
+
+_GATED_JOIN = f"""
+      - name: plan
+        spec: {ECHO}
+      - name: fan
+        dependsOn: [plan]
+        region: {{kind: spawn, child: one}}
+      - name: collect
+        dependsOn: [fan, {{node: decide, port: a}}]
+        region: {{kind: join, completion: all_settled}}
+      - name: after
+        dependsOn: [collect]
+        spec: {ECHO}
+"""
+
+_ONE = f"""
+    templates:
+      - name: one
+        inputs: [{{name: e, role: param}}]
+        returns: [{{name: out}}]
+        nodes:
+          - name: work
+            dependsOn: [{{node: $ingress, port: e, input: e}}]
+            spec: {ECHO}
+        edges:
+          - from: {{node: work}}
+            to: {{node: $return, port: out}}
+"""
+
+
+def _close_children(run: Driver) -> None:
+    run.apply(
+        run.engine.enter_definition_child("fan", ValueRef(kind="inline", literal="x"))
+    )
+    run.apply(run.engine.seal_spawn("fan"))
+    run.run_one("work")
+
+
+@pytest.mark.parametrize("children_first", [False, True])
+@pytest.mark.parametrize(
+    ("arm", "status"), [("a", ControlStatus.LIVE), ("b", ControlStatus.DEAD)]
+)
+def test_a_join_runs_only_on_its_route_whatever_arrives_first(
+    children_first: bool, arm: str, status: ControlStatus
+) -> None:
+    run = Driver(workflow(_ARMS + _GATED_JOIN, _ONE))
+    run.run_one("plan")
+    run.run_one("classify")
+    if children_first:
+        _close_children(run)
+        held = run.engine.control_state("collect")
+        assert held is None or held.status is ControlStatus.PENDING
+        run.select(arm)
+    else:
+        run.select(arm)
+        _close_children(run)
+    collect = run.engine.control_state("collect")
+    assert collect is not None and collect.status is status
+    if status is ControlStatus.DEAD:
+        assert run.status("after") is WorkItemStatus.SKIPPED
+    else:
+        run.run_one("after")
+
+
+def test_a_join_whose_route_fails_after_its_children_close_fails() -> None:
+    run = Driver(workflow(_ARMS + _GATED_JOIN, _ONE))
+    run.run_one("plan")
+    _close_children(run)
+    run.run_one("classify", fail=True)
+    collect = run.engine.control_state("collect")
+    assert collect is None or collect.status is not ControlStatus.LIVE
+    assert run.ops["after"] in run.failed

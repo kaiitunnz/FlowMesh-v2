@@ -47,6 +47,7 @@ from .scopes import ScopeProgress
 from .topology import PlanTopology
 
 _LIVE_STATES = frozenset({EdgeState.LIVE, EdgeState.EMPTY})
+_BROKEN_STATES = frozenset({EdgeState.FAILED, EdgeState.CANCELLED})
 
 
 class ContextRegions(Protocol):
@@ -364,6 +365,32 @@ class RegionFlow:
         self.propagate(join_key, advance, value=empty)
         return advance
 
+    def _gates_open(self, join_key: str) -> bool:
+        """Whether every route a join occurrence runs only on resolved live."""
+        return all(
+            i.state in _LIVE_STATES
+            for i in self.edges.incoming(join_key)
+            if i.use is not DependencyUse.ORDER_ONLY
+        )
+
+    def _join_scope(self, occurrence: Occurrence, join: JoinRegion) -> str | None:
+        """The child-init scope a join occurrence collects: its spawn's, in its own
+        context and time."""
+        spawn_op = next(
+            (
+                e.from_op
+                for e in self._topology.bundle.template.edges
+                if e.to_op == join.operator_id
+                and self._topology.kind(e.from_op) is OperatorKind.SPAWN
+            ),
+            None,
+        )
+        if spawn_op is None:
+            return None
+        spawn = self._ledger.occurrence(self.edges.sibling(occurrence, spawn_op))
+        opener = spawn.activation_id or self._ledger.control_activation(spawn_op)
+        return self._ledger.scope_by_activation.get(opener)
+
     def _join_key(self, scope_id: str, join_op: str) -> str | None:
         """The join occurrence a child-init scope releases into: the one in the context
         and time of the occurrence that opened the scope, or None for a nested level of
@@ -490,10 +517,16 @@ class RegionFlow:
                 elif self.contexts is not None:
                     self.contexts.ingress(key, inputs, advance)
             case JoinRegion():
-                # A join releases on its spawn's scope closure, never on an input; a
-                # dead route it runs only on makes it dead.
+                # A join releases on its spawn's scope closure once every route it runs
+                # only on is live; a dead or failed one settles it instead.
                 if any(i.state is EdgeState.DEAD for i in required):
                     self.mark_dead(key, advance)
+                elif failed := [i for i in required if i.state in _BROKEN_STATES]:
+                    self.fail_control(
+                        key, f"join input {failed[0].edge.from_op} failed", advance
+                    )
+                elif (scope_id := self._join_scope(occurrence, op)) is not None:
+                    advance.extend(self.maybe_release_join(scope_id))
             case _:
                 pass
 
@@ -800,7 +833,9 @@ class RegionFlow:
         ):
             return Advance()
         join_key = self._join_key(scope_id, join_op)
-        if join_key is not None and self._ledger.control_terminal(join_key):
+        if join_key is not None and (
+            self._ledger.control_terminal(join_key) or not self._gates_open(join_key)
+        ):
             return Advance()
         cap = self._ledger.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if cap is None:
