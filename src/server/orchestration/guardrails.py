@@ -31,6 +31,7 @@ class ScopeBudget:
     def from_config(cls, config: OrchestrationConfig) -> Self:
         overrides = {
             "max_scope_depth": config.max_scope_depth,
+            "max_loop_iterations": config.max_loop_iterations,
             "max_activations": config.max_activations,
             "max_spawns_per_turn": config.max_spawns_per_turn,
             "max_spawns_per_region": config.max_spawns_per_region,

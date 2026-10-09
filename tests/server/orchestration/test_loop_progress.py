@@ -3,6 +3,7 @@ logical times, frontier-gated release, budgets, failure and restart."""
 
 import pytest
 
+from server.config import OrchestrationConfig
 from server.orchestration import ScopeBudget
 from server.orchestration.state import (
     ControlStatus,
@@ -635,3 +636,13 @@ def test_an_effect_leaf_is_admitted_alike_as_a_child_and_in_a_child_definition()
         definition=True,
     )
     assert shorthand == defined == ["granted"]
+
+
+def test_the_deployment_sets_the_loop_iteration_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ORCHESTRATOR_MAX_LOOP_ITERATIONS", raising=False)
+    assert ScopeBudget.from_config(OrchestrationConfig.from_env()) == ScopeBudget()
+    monkeypatch.setenv("ORCHESTRATOR_MAX_LOOP_ITERATIONS", "7")
+    budget = ScopeBudget.from_config(OrchestrationConfig.from_env())
+    assert budget.max_loop_iterations == 7
