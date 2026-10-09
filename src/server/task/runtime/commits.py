@@ -320,7 +320,12 @@ class TransitionCommitter:
 
     def mark_dirty_locked(self, workflow_id: str) -> None:
         """Owe a write of every record and the ledger of a workflow whose in-memory
-        state may hold changes no write carried."""
+        state may hold changes no write carried, and schedule it."""
+        self._owe_rewrite_locked(workflow_id)
+        if self.on_debt is not None:
+            self.on_debt(workflow_id)
+
+    def _owe_rewrite_locked(self, workflow_id: str) -> None:
         owed = self.debt.setdefault(workflow_id, _Debt())
         owed.owe(
             _Records(
@@ -329,8 +334,6 @@ class TransitionCommitter:
             )
         )
         owed.owe(_Snapshot())
-        if self.on_debt is not None:
-            self.on_debt(workflow_id)
 
     def _write_locked(self, workflow_id: str, write: _Write) -> bool:
         """Make one durable write of a workflow with the writes it holds, or hold it
@@ -349,8 +352,10 @@ class TransitionCommitter:
         """Make what a workflow owes; returns whether all of it was made.
 
         A write the store cannot take for now stays owed and is held. Any other error
-        is the transition's own: the debt is restored to ``before`` and the error
-        raised.
+        is the transition's own and is raised. The workflow's in-memory state may then
+        hold what no write carried, so a rewrite of all of it is owed, made with the
+        workflow's next write rather than retried on its own, so a fault that recurs
+        never spins.
         """
         owed = self.debt[workflow_id]
         self._making.add(workflow_id)
@@ -363,6 +368,12 @@ class TransitionCommitter:
                     self.debt.pop(workflow_id, None)
                 else:
                     self.debt[workflow_id] = before
+                self._owe_rewrite_locked(workflow_id)
+                self._logger.error(
+                    "A write of workflow %s raised; its next write rewrites it: %s",
+                    workflow_id,
+                    exc,
+                )
                 raise
             self._note_held(workflow_id, exc)
             return False

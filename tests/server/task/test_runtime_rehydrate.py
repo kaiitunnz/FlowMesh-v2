@@ -16,6 +16,7 @@ from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.server.runtime_helpers import manual_durability_retry
 from tests.support.waiting import pop_ready
 
 
@@ -198,6 +199,7 @@ def _runtime(
         make_result_reader(),
         logging.getLogger("rehydrate-test"),
         credential_vault=vault or InMemoryCredentialVault(),
+        durability_retry=manual_durability_retry,
     )
 
 
@@ -545,6 +547,86 @@ async def test_a_replayed_terminal_event_lands_the_cascade_its_store_refused(
     assert persisted_status(a) == TaskStatus.FAILED
     assert persisted_status(b) == TaskStatus.FAILED
     assert runtime._committer.durable(workflow_id)
+
+
+_BESIDE = GRAPH + """      - name: c
+        spec:
+          taskType: echo
+"""
+
+
+class _RaisingOnce:
+    """A registry write that raises a fault of its own the first ``times`` times."""
+
+    def __init__(self, registry: FakeWorkflowRegistry, times: int) -> None:
+        self._commit = registry.commit_transition
+        self.times = times
+        self.written: list[str] = []
+
+    def __call__(self, workflow: str, **kwargs: Any) -> None:
+        if self.times:
+            self.times -= 1
+            raise RuntimeError("the write could not be encoded")
+        self.written.extend(item.record.task_id for item in kwargs.get("records", ()))
+        self._commit(workflow, **kwargs)
+
+
+def _persisted_status(registry: FakeWorkflowRegistry, task_id: str) -> str:
+    return PersistedTask.model_validate_json(registry.task_blobs[task_id]).record.status
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("next_write", ["replay", "another_task"])
+async def test_a_cascade_whose_write_raised_lands_with_the_next_write(
+    monkeypatch: pytest.MonkeyPatch, next_write: str
+) -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, _BESIDE)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+    writes = _RaisingOnce(registry, times=1)
+    monkeypatch.setattr(registry, "commit_transition", writes)
+
+    # The cascade's own write raised: the transition's error, and a rewrite owed.
+    with pytest.raises(RuntimeError):
+        runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    assert _persisted_status(registry, b) == TaskStatus.PENDING
+    assert not runtime._committer.durable(workflow_id)
+    assert not runtime._durability.pending(workflow_id)
+
+    match next_write:
+        case "replay":
+            impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+            assert impacted == []
+        case _:
+            # Publishing another task makes the workflow's owed writes first.
+            record_dispatch(runtime, c)
+    assert _persisted_status(registry, a) == TaskStatus.FAILED
+    assert _persisted_status(registry, b) == TaskStatus.FAILED
+    assert runtime._committer.durable(workflow_id)
+
+
+@pytest.mark.anyio
+async def test_a_recurring_write_fault_publishes_nothing_of_its_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, _BESIDE)
+    writes = _RaisingOnce(registry, times=3)
+    monkeypatch.setattr(registry, "commit_transition", writes)
+
+    with pytest.raises(RuntimeError):
+        runtime.mark_failed(ids["a"], "wkr-1", {}, "2026-06-01T00:00:00Z")
+    # Every write of the workflow carries the owed rewrite, so a fault that recurs
+    # stops the workflow's publishes rather than running past what it lost.
+    worker = cast(Any, SimpleNamespace(id="wkr-1", node_id="nde-1"))
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            runtime.begin_publish(ids["c"], worker, None)
+    assert not runtime._durability.pending(workflow_id)
+    record_dispatch(runtime, ids["c"])
+    assert _persisted_status(registry, ids["b"]) == TaskStatus.FAILED
 
 
 @pytest.mark.anyio
