@@ -1208,13 +1208,9 @@ class OrchestrationEngine:
     def region_closed(self, region_op: str) -> bool:
         return self._ledger.region_closed(region_op)
 
-    def spawn_successor(self, operator_id: str) -> str | None:
-        """The spawn region an operator feeds via a forward edge, if any."""
-        return self._topology.spawn_successor(operator_id)
-
-    def child_template_of(self, spawn_op: str) -> str | None:
-        """The operator id of a spawn's child template, if it declares one."""
-        return self._topology.child_template_of(spawn_op)
+    def fanout_spawn(self, operator_id: str) -> str | None:
+        """The root spawn that fans out over an operator's whole result, if any."""
+        return self._topology.fanout_spawn(operator_id)
 
     def spawn_awaits_children(self, spawn_op: str) -> bool:
         """Whether a spawn has yet to fan out: unopened, or open and not sealed.

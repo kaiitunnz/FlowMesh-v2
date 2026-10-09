@@ -1222,8 +1222,7 @@ class TaskRuntime:
         # materializes the children or records the inputs.
         if engine.blocked_input_agents() or any(
             persisted.record.status == TaskStatus.DONE
-            and (spawn_op := engine.spawn_successor(persisted.record.task_id))
-            is not None
+            and (spawn_op := engine.fanout_spawn(persisted.record.task_id)) is not None
             and engine.spawn_awaits_children(spawn_op)
             for persisted in tasks
         ):
@@ -3220,7 +3219,7 @@ class TaskRuntime:
         A producer that feeds no spawn yields no children.
         """
         advance = Advance()
-        spawn_op = engine.spawn_successor(producer_task_id)
+        spawn_op = engine.fanout_spawn(producer_task_id)
         if spawn_op is None:
             return advance
         if not engine.spawn_is_open(spawn_op):
@@ -3412,10 +3411,10 @@ class TaskRuntime:
                 for task_id, record in self._tasks.items()
                 if record.workflow_id == workflow_id
                 and record.status == TaskStatus.DONE
-                and (spawn_op := engine.spawn_successor(task_id)) is not None
+                and (spawn_op := engine.fanout_spawn(task_id)) is not None
                 and engine.spawn_awaits_children(spawn_op)
             ]
-            produced = {engine.spawn_successor(task_id) for task_id, _ in producers}
+            produced = {engine.fanout_spawn(task_id) for task_id, _ in producers}
             controls = [
                 (key, value, self._value_binding_locked(value))
                 for key, value in (
@@ -3549,7 +3548,7 @@ class TaskRuntime:
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
-            spawn_op = engine.spawn_successor(task_id) if engine else None
+            spawn_op = engine.fanout_spawn(task_id) if engine else None
             if (
                 record is None
                 or record.status in TERMINAL_TASK_STATUSES

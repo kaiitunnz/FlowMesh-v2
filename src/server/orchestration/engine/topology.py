@@ -35,6 +35,9 @@ _REGION_KINDS = frozenset(
 # spawn_agent children.
 CONTROL_KINDS = _REGION_KINDS
 CHILD_INIT_OPENERS = frozenset({OperatorKind.SPAWN, OperatorKind.AGENT})
+# The input ports a spawn fans out over; any other input is a value its children
+# capture.
+SPAWN_FANOUT_PORTS = frozenset({"", "in"})
 
 
 def effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryClass]:
@@ -207,11 +210,23 @@ class PlanTopology:
         """Each published declaration with the public name it was authored under."""
         return self.bundle.template.published_outputs()
 
-    def spawn_successor(self, operator_id: str) -> str | None:
-        """The spawn region an operator feeds via a forward edge, if any."""
-        for successor in self.forward.get(operator_id, ()):
-            if self.kind(successor) is OperatorKind.SPAWN:
-                return successor
+    def fanout_spawn(self, operator_id: str) -> str | None:
+        """The root spawn that fans out over an operator's whole result, if any.
+
+        Only the spawn's fan-out input counts: a capture it also reads, or a fan-out
+        over a projection of the result, is read for it through its own value.
+        """
+        for edge in self.bundle.template.edges:
+            if (
+                edge.from_op == operator_id
+                and edge.is_forward
+                and self.kind(edge.to_op) is OperatorKind.SPAWN
+                and edge.to_op not in self.definition_of
+                and edge.to_op not in self.agent_region_spawns
+                and (edge.to_port or "") in SPAWN_FANOUT_PORTS
+                and not edge.projection
+            ):
+                return edge.to_op
         return None
 
     def child_template_of(self, spawn_op: str) -> str | None:
