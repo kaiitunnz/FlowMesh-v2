@@ -56,7 +56,9 @@ def read_control_value(
         return ControlRead(error=str(exc), unavailable=True)
     if value_ref.collection_key is not None:
         try:
-            start = collection_element(envelope, int(value_ref.collection_key))
+            start = collection_element(
+                envelope, int(value_ref.collection_key), value_ref.collection
+            )
         except IndexError as exc:
             return ControlRead(error=str(exc))
     elif not value_ref.projection:

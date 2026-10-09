@@ -37,7 +37,6 @@ from shared.tasks.result_binding import (
     ResultBinding,
     ResultElementRef,
     ResultMember,
-    ResultValueRef,
 )
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
@@ -295,9 +294,9 @@ def test_agent_inputs_hydrate_to_the_projected_strings(plane: FakeContentPlane) 
     assert collection.reference is not None and whole.reference is not None
     agent = _agent(
         (
-            _member(source=ResultValueRef(reference=collection.reference, element=0)),
-            _member(source=ResultValueRef(reference=collection.reference, element=2)),
-            _member(source=ResultValueRef(reference=whole.reference)),
+            _member(source=ResultBinding(reference=collection.reference, element=0)),
+            _member(source=ResultBinding(reference=collection.reference, element=2)),
+            _member(source=ResultBinding(reference=whole.reference)),
             _member(value="an inline literal"),
         )
     )

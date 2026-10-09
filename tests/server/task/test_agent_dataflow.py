@@ -151,7 +151,7 @@ def test_join_feeding_an_agent_aggregates_children_in_declared_order() -> None:
     assert port.target_port == "reviews" and port.provenance == "join_aggregate"
     assert [m.child_index for m in port.members] == [0, 1, 2]
     assert [m.ordinal for m in port.members] == [0, 1, 2]
-    assert [m.legacy_task_id for m in port.members] == kids
+    assert [m.value_ref.legacy_task_id for m in port.members] == kids
 
 
 def test_spawn_mints_a_typed_child_entry_input_not_spec_data() -> None:
@@ -233,7 +233,7 @@ def _member_pairs(
 ) -> list[tuple[int | None, str | None]]:
     plan = engine.agent_input_plan(task_id)
     assert plan is not None
-    return [(m.child_index, m.legacy_task_id) for m in plan.ports[0].members]
+    return [(m.child_index, m.value_ref.legacy_task_id) for m in plan.ports[0].members]
 
 
 def test_region_aggregate_replays_identically_after_restart() -> None:

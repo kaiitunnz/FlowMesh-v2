@@ -653,7 +653,18 @@ class RegionFlow:
         state.status = ControlStatus.LIVE
         state.outputs = _port_outputs(op, value)
         self._ledger.emit("merge_combined", operator_id=op.operator_id)
-        self._publish_control(key, PublicationOutcome.SUCCESS, value)
+        empty = op.combination is MergeCombination.ONE_LIVE and (
+            live[0].state is EdgeState.EMPTY or value.kind == "empty"
+        )
+        self._publish_control(
+            key,
+            (
+                PublicationOutcome.EXPLICIT_EMPTY
+                if empty
+                else PublicationOutcome.SUCCESS
+            ),
+            value,
+        )
         self.propagate(key, advance, value=value)
 
     def _await_selection(
@@ -844,17 +855,26 @@ class RegionFlow:
         return advance
 
     def _publish_control(
-        self, key: str, outcome: PublicationOutcome, value: ValueRef | None
+        self,
+        key: str,
+        outcome: PublicationOutcome,
+        value: ValueRef | None,
+        members: tuple[ValueMember, ...] | None = None,
     ) -> None:
         """Publish a root control occurrence's declared outputs: a singleton takes the
         value, a keyed collection one member per aggregate member, or one empty or
-        failed member when the region produced no aggregate."""
+        failed member when the region produced no aggregate.
+
+        ``members`` names the keyed members when they are not the value's own, as an
+        early join's released qualifiers are."""
         occurrence = self._ledger.occurrence(key)
         if occurrence.context_id or occurrence.time:
             return
         self._publication.publish(occurrence.operator_id, outcome, value)
-        if value is not None and value.kind == "aggregate":
-            self._publication.publish_members(occurrence.operator_id, value.members)
+        if members is None and value is not None and value.kind == "aggregate":
+            members = value.members
+        if members is not None:
+            self._publication.publish_members(occurrence.operator_id, members)
         elif outcome is not PublicationOutcome.SUCCESS:
             self._publication.publish_keyed(
                 occurrence.operator_id, None, outcome, value
@@ -945,7 +965,9 @@ class RegionFlow:
         state = self._ledger.control_state(join_key)
         state.status = ControlStatus.LIVE
         state.outputs = _port_outputs(join, value_ref or ValueRef(kind="empty"))
-        self._publish_control(join_key, outcome, value_ref)
+        self._publish_control(
+            join_key, outcome, value_ref, self._released_members(join_key)
+        )
         advance = Advance()
         self.propagate(join_key, advance, value=value_ref)
         advance.cancelled.extend(cancelled)
@@ -956,19 +978,21 @@ class RegionFlow:
     ) -> ValueRef | None:
         """The value a released join delivers downstream: its frozen aggregate's
         members in place of a full-closure result."""
-        aggregate = self._ledger.aggregate_by_join.get(join_key)
-        if value_ref is None or value_ref.kind != "join_result" or not aggregate:
+        members = self._released_members(join_key)
+        if value_ref is None or value_ref.kind != "join_result" or not members:
             return value_ref
-        return ValueRef(
-            kind="aggregate",
-            members=tuple(
-                ValueMember(
-                    key=member.child_key,
-                    outcome=member.outcome,
-                    value_ref=member.value_ref,
-                )
-                for member in aggregate.members
-            ),
+        return ValueRef(kind="aggregate", members=members)
+
+    def _released_members(self, join_key: str) -> tuple[ValueMember, ...]:
+        """The members a join froze at its release, keyed by child."""
+        aggregate = self._ledger.aggregate_by_join.get(join_key)
+        return tuple(
+            ValueMember(
+                key=member.child_key,
+                outcome=member.outcome,
+                value_ref=member.value_ref,
+            )
+            for member in (aggregate.members if aggregate else ())
         )
 
     def adopt_stored_controls(self) -> None:

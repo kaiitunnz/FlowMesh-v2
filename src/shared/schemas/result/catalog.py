@@ -36,6 +36,7 @@ from .payloads import (
     RagSearch,
     RagUsage,
 )
+from .routed import RoutedValue
 
 
 class InferenceResult(StrictExecutorResult):
@@ -281,6 +282,7 @@ class SSHResult(StrictExecutorResult):
 
 
 _BASE_TAG = "__base__"
+_ROUTED_TAG = "__routed__"
 
 _RESULT_TAGS: frozenset[str] = frozenset(
     {
@@ -318,7 +320,11 @@ def _result_discriminator(value: Any) -> str:
     """
     if isinstance(value, dict):
         tag = value.get("task_type")
+        if tag is None and "routed_value" in value:
+            return _ROUTED_TAG
     else:
+        if isinstance(value, RoutedValue):
+            return _ROUTED_TAG
         tag = getattr(value, "task_type", None)
     if tag is None:
         return _BASE_TAG
@@ -352,6 +358,7 @@ AnyExecutorResult = Annotated[
         | Annotated[EchoResult, Tag(TaskType.ECHO.value)]
         | Annotated[APIResult, Tag(TaskType.API.value)]
         | Annotated[SSHResult, Tag(TaskType.SSH.value)]
+        | Annotated[RoutedValue, Tag(_ROUTED_TAG)]
         | Annotated[BaseExecutorResult, Tag(_BASE_TAG)]
     ),
     Discriminator(_result_discriminator),

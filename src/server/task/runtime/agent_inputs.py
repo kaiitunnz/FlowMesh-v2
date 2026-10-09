@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from shared.content import ContentReference
 from shared.harness import InputBinding, InputBindingMember
 from shared.schemas.result import ResultEnvelope
-from shared.schemas.result.binding import value_text
+from shared.schemas.result.binding import binding_text, skip_envelope
+from shared.tasks.result_binding import BindingKind, ResultBinding
 
 from ...orchestration import (
     AcceptedInput,
@@ -19,16 +20,16 @@ from ...orchestration.tool_dispatch import InputMemberPlan
 from ..redrive import StoreRedriveScheduler
 from ..results import ResultReader, ResultUnavailable, ResultUnreadable
 from . import content_bindings
-from .content_bindings import ContentBindings
+from .content_bindings import ContentBindings, UnreadableInput
 
 
 @dataclass(frozen=True)
 class _PortSnapshot:
-    """One agent input port whose members are each frozen to what supplies them."""
+    """One agent input port whose members are each frozen to the value it reads."""
 
     target_port: str
     provenance: str
-    members: tuple[tuple[InputMemberPlan, ValueRef], ...]
+    members: tuple[tuple[InputMemberPlan, ValueRef, ResultBinding | None], ...]
 
 
 @dataclass(frozen=True)
@@ -38,18 +39,21 @@ class _AgentInputSnapshot:
     task_id: str
     activation_id: str
     ports: tuple[_PortSnapshot, ...]
-    # Why the agent's input can never be read, when a producer settled unbound.
+    # Why the agent's input can never be read, when a value has nothing to read.
     unreadable: str | None = None
 
     @property
-    def references(self) -> dict[str, ContentReference]:
-        """Each stored result the ports read, keyed by the producer it names."""
-        return {
-            value_ref.legacy_task_id or "": value_ref.content
-            for port in self.ports
-            for _member, value_ref in port.members
-            if value_ref.content is not None
-        }
+    def references(self) -> tuple[ContentReference, ...]:
+        """Each stored result the ports read, once."""
+        return tuple(
+            dict.fromkeys(
+                reference
+                for port in self.ports
+                for _member, _value, binding in port.members
+                if binding is not None
+                for reference in content_bindings.references(binding)
+            )
+        )
 
 
 def _literal_text(value_ref: ValueRef | None) -> str | None:
@@ -64,15 +68,26 @@ def _literal_text(value_ref: ValueRef | None) -> str | None:
 
 
 def _member_text(
-    value_ref: ValueRef, values: dict[ContentReference, ResultEnvelope | Exception]
+    value_ref: ValueRef,
+    binding: ResultBinding | None,
+    values: dict[ContentReference, ResultEnvelope | Exception],
 ) -> str | None:
     """The string an input member resolves to from the results read for it."""
-    if value_ref.content is None:
+    if binding is None:
         return _literal_text(value_ref)
-    envelope = values.get(value_ref.content)
-    if not isinstance(envelope, ResultEnvelope):
+
+    def envelope_of(read: ResultBinding) -> ResultEnvelope:
+        if read.reference is None:
+            return skip_envelope(read)
+        envelope = values.get(read.reference)
+        if not isinstance(envelope, ResultEnvelope):
+            raise IndexError(f"the stored result of task {read.task_id} is unread")
+        return envelope
+
+    try:
+        return binding_text(binding, envelope_of)
+    except IndexError:
         return None
-    return value_text(envelope, content_bindings.element_of(value_ref))
 
 
 def mint_fanout_facet_locked(
@@ -114,7 +129,7 @@ def read_input_values(
     """Read every result the snapshots' inputs are frozen to, off the lock."""
     values: dict[ContentReference, ResultEnvelope | Exception] = {}
     for snapshot in snapshots:
-        for reference in snapshot.references.values():
+        for reference in snapshot.references:
             if reference in values:
                 continue
             try:
@@ -174,27 +189,28 @@ class AgentInputs:
         ports: list[_PortSnapshot] = []
         unreadable: str | None = None
         for port in plan.ports:
-            members: list[tuple[InputMemberPlan, ValueRef]] = []
+            members: list[tuple[InputMemberPlan, ValueRef, ResultBinding | None]] = []
             for member in port.members:
-                value_ref = ValueRef(
-                    kind=member.value_ref_kind,
-                    legacy_task_id=member.legacy_task_id,
-                    collection_key=member.collection_key,
-                    literal=member.literal,
-                )
-                if value_ref.kind == "legacy_task_result":
-                    producer = value_ref.legacy_task_id or ""
-                    binding = self._content_bindings.result_binding_locked(producer)
-                    if binding is None or binding.reference is None:
+                value_ref = member.value_ref
+                if value_ref.kind in ("inline", "empty"):
+                    members.append((member, value_ref, None))
+                    continue
+                try:
+                    binding = self._content_bindings.value_binding_locked(value_ref)
+                except UnreadableInput as exc:
+                    unreadable = str(exc)
+                    break
+                if binding.kind is BindingKind.RESULT and binding.reference is None:
+                    if binding.skip is None:
+                        producer = value_ref.legacy_task_id or ""
                         if self._content_bindings.settled_unbound_locked(producer):
                             unreadable = f"task {producer} settled with no bound result"
                         break
+                elif value_ref.kind == "legacy_task_result":
                     value_ref = value_ref.model_copy(
                         update={"content": binding.reference}
                     )
-                elif value_ref.kind not in ("inline", "empty"):
-                    break
-                members.append((member, value_ref))
+                members.append((member, value_ref, binding))
             if unreadable is not None:
                 break
             if len(members) == len(port.members):
@@ -233,7 +249,7 @@ class AgentInputs:
                 )
             )
             return
-        read = [values.get(ref) for ref in snapshot.references.values()]
+        read = [values.get(ref) for ref in snapshot.references]
         if any(isinstance(value, ResultUnavailable) for value in read):
             self._redrive.schedule(workflow_id)
             return
@@ -250,7 +266,8 @@ class AgentInputs:
         accepted: list[AcceptedInput] = []
         for port in snapshot.ports:
             texts = [
-                _member_text(value_ref, values) for _member, value_ref in port.members
+                _member_text(value_ref, binding, values)
+                for _member, value_ref, binding in port.members
             ]
             if any(text is None for text in texts):
                 continue
@@ -269,7 +286,7 @@ class AgentInputs:
                             value_ref=value_ref,
                             ordinal=member.ordinal,
                         )
-                        for member, value_ref in port.members
+                        for member, value_ref, _binding in port.members
                     ),
                 )
             )

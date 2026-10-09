@@ -5,10 +5,13 @@ from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Discriminator,
     Field,
     SerializeAsAny,
+    SerializerFunctionWrapHandler,
     Tag,
+    model_serializer,
 )
 
 from ..artifacts import ArtifactRef
@@ -231,7 +234,25 @@ class SSHResult(StrictExecutorResult):
     port: int | None = None
 
 
+class RoutedValue(BaseExecutorResult):
+    """A value that is not one whole task result, such as a projected part of one,
+    an aggregate's members, or an explicit empty; ``routed_value`` carries it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    routed_value: Any
+
+    @model_serializer(mode="wrap")
+    def _drop_none_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        dumped = BaseExecutorResult._drop_none_fields(self, handler)
+        dumped.setdefault("routed_value", None)
+        return dumped
+
+
 _BASE_TAG = "__base__"
+_ROUTED_TAG = "__routed__"
 
 _RESULT_TAGS: frozenset[str] = frozenset(
     {
@@ -263,7 +284,11 @@ _RESULT_TAGS: frozenset[str] = frozenset(
 def _result_discriminator(value: Any) -> str:
     if isinstance(value, dict):
         tag = value.get("task_type")
+        if tag is None and "routed_value" in value:
+            return _ROUTED_TAG
     else:
+        if isinstance(value, RoutedValue):
+            return _ROUTED_TAG
         tag = getattr(value, "task_type", None)
     if tag is None:
         return _BASE_TAG
@@ -297,6 +322,7 @@ AnyExecutorResult = Annotated[
         | Annotated[EchoResult, Tag(TaskType.ECHO.value)]
         | Annotated[APIResult, Tag(TaskType.API.value)]
         | Annotated[SSHResult, Tag(TaskType.SSH.value)]
+        | Annotated[RoutedValue, Tag(_ROUTED_TAG)]
         | Annotated[BaseExecutorResult, Tag(_BASE_TAG)]
     ),
     Discriminator(_result_discriminator),

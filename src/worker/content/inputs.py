@@ -20,14 +20,14 @@ from pydantic import BaseModel
 from shared.content import ContentReference, ContentStoreError, ContentUnavailable
 from shared.harness import AgentEpisodeDispatch, InputBinding
 from shared.schemas.event import TaskFailureKind
-from shared.schemas.result import BaseExecutorResult, ResultEnvelope, RoutedValue
+from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.schemas.result.binding import (
     NotAResultEnvelope,
+    binding_text,
     element_value,
     result_envelope,
-    scoped_value,
     skip_envelope_bytes,
-    value_text,
+    upstream_value,
 )
 from shared.tasks import MergedChildTaskStrict, TaskEnvelopeStrict
 from shared.tasks.result_binding import BindingKind, ResultBinding
@@ -194,10 +194,8 @@ class _TaskReader:
     def upstream_value(self, binding: ResultBinding) -> BaseExecutorResult:
         """What a task's upstream map carries for one input: its whole result, or
         the value the binding reads as."""
-        if binding.whole_result:
-            return self.envelope(binding).result
         try:
-            return RoutedValue(routed_value=scoped_value(binding, self.envelope))
+            return upstream_value(binding, self.envelope)
         except IndexError as exc:
             raise input_unreadable(str(exc)) from exc
 
@@ -257,11 +255,10 @@ def _with_member_values(
             if (source := member.source) is None:
                 members.append(member)
                 continue
-            envelope = reader.reference_envelope(source.reference)
             members.append(
                 member.model_copy(
                     update={
-                        "value": value_text(envelope, source.element),
+                        "value": binding_text(source, reader.envelope),
                         "source": None,
                     }
                 )

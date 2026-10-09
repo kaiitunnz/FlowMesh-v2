@@ -368,7 +368,7 @@ class EpisodeDispatch:
 def _element_source(ref: ResultElementRef) -> tuple[int, str | None]:
     """The index and collection path an element contract names an element by."""
     if not ref.path and ref.element is not None:
-        return ref.element, None
+        return ref.element, ".".join(map(str, ref.collection)) or None
     *collection, index = ref.path or (None,)
     if ref.element is not None or not isinstance(index, int):
         raise CanonicalProjectionError(

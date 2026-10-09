@@ -22,6 +22,8 @@ from tests.server.orchestration.control_flow import compile_text
 from tests.server.task.test_runtime_control_flow import _TS, _Run, _workflow
 from tests.worker.factories import FakeContentPlane
 from worker.content.inputs import TaskInputHydrator
+from worker.executors.mixins.data import DataMixin
+from worker.executors.utils.artifacts import maybe_resolve_artifact_ref
 from worker.executors.utils.expressions import project_expression
 
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
@@ -513,7 +515,7 @@ async def test_a_root_task_fed_by_tasks_reads_the_same_through_records_or_edges(
     with run.runtime._lock:
         through_edges = {
             entry.name: ScopedInput(
-                run.runtime._content_bindings._value_binding_locked(entry.value),
+                run.runtime._content_bindings.value_binding_locked(entry.value),
                 entry.task_id,
             )
             for entry in run.engine.edge_inputs(task_id)
@@ -588,3 +590,31 @@ async def test_the_refine_loop_example_reads_its_exit_value_at_the_root() -> Non
         {"output": "done"},
         {"output": "done"},
     ]
+
+
+_ARTIFACTS = {"base_dir": "/results/tsk-producer", "base_url": "http://fm.example"}
+
+
+@pytest.mark.anyio
+async def test_an_artifact_ref_in_a_part_of_a_result_resolves_alike_on_both_sides() -> (
+    None
+):
+    run = await _Run().start(_workflow(f"""
+      - name: gen
+        spec: {_ECHO}
+      - name: use
+        dependsOn: [{{node: gen, input: img, project: [inner]}}]
+        spec:
+          taskType: echo
+          data: {{type: list, items: ["${{img.image}}"]}}
+"""))
+    run.run("gen", {"inner": {"image": {"path": "img.png"}}, "_artifacts": _ARTIFACTS})
+    spec, message = _dispatch(run, "use")
+    context = message.task.spec.upstreamResults or {}
+
+    worker = maybe_resolve_artifact_ref(
+        project_expression("img.image", context), context, "img"
+    )
+    assert spec["data"]["items"] == [worker]
+    assert worker == "http://fm.example/api/v1/results/tsk-producer/files/img.png"
+    assert DataMixin()._extract_source_data_ids(message.task.spec) == ["tsk-producer"]

@@ -168,6 +168,7 @@ _RESULT_MODEL_NAMES = [
     "EchoResult",
     "APIResult",
     "SSHResult",
+    "RoutedValue",
     # nested payload models
     "GenerationUsage",
     "EmbeddingUsage",

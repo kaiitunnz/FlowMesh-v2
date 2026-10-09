@@ -11,7 +11,6 @@ from shared.tasks.result_binding import (
     ResultBinding,
     ResultElementRef,
     ResultMember,
-    ResultValueRef,
 )
 
 from ...orchestration import (
@@ -56,13 +55,13 @@ def element_of(value_ref: ValueRef) -> int | None:
     )
 
 
-def _references(binding: ResultBinding) -> Iterator[ContentReference]:
+def references(binding: ResultBinding) -> Iterator[ContentReference]:
     """Every stored object a binding reads, its members' included."""
     if binding.reference is not None:
         yield binding.reference
     for member in binding.members:
         if member.binding is not None:
-            yield from _references(member.binding)
+            yield from references(member.binding)
 
 
 class ContentBindings:
@@ -154,7 +153,7 @@ class ContentBindings:
         except UnreadableInput:
             return False
         return any(
-            reference in _references(entry.binding) for entry in (inputs or {}).values()
+            reference in references(entry.binding) for entry in (inputs or {}).values()
         )
 
     def _frozen_input_is_locked(
@@ -167,7 +166,7 @@ class ContentBindings:
             return True
         return any(
             (source := self.member_source_locked(member.value_ref)) is not None
-            and source.reference == reference
+            and reference in references(source)
             for accepted in engine.accepted_inputs_for_task(task_id)
             for member in accepted.members
         )
@@ -189,6 +188,7 @@ class ContentBindings:
             child_input.legacy_task_id,
             ResultElementRef(
                 reference=child_input.content,
+                collection=child_input.collection,
                 element=(
                     int(child_input.collection_key)
                     if child_input.collection_key is not None
@@ -211,12 +211,12 @@ class ContentBindings:
             return None
         return {
             entry.name: ScopedInput(
-                self._value_binding_locked(entry.value), entry.task_id
+                self.value_binding_locked(entry.value), entry.task_id
             )
             for entry in inputs
         }
 
-    def _value_binding_locked(self, value: ValueRef) -> ResultBinding:
+    def value_binding_locked(self, value: ValueRef) -> ResultBinding:
         """The binding a worker reads one input value through."""
         match value.kind:
             case "legacy_task_result":
@@ -242,6 +242,7 @@ class ContentBindings:
                         None if reference is not None or result is None else result.skip
                     ),
                     settled_at=result.settled_at if result is not None else None,
+                    collection=value.collection,
                     element=element_of(value),
                     path=value.projection,
                 )
@@ -257,7 +258,7 @@ class ContentBindings:
                             key=member.key,
                             outcome=member.outcome.value,
                             binding=(
-                                self._value_binding_locked(member.value_ref)
+                                self.value_binding_locked(member.value_ref)
                                 if member.value_ref is not None
                                 and member.outcome is PublicationOutcome.SUCCESS
                                 else None
@@ -358,17 +359,18 @@ class ContentBindings:
         )
         return None
 
-    def member_source_locked(self, value_ref: ValueRef | None) -> ResultValueRef | None:
-        """The stored result an input member reads, when a producer supplies it."""
-        if value_ref is None or value_ref.kind != "legacy_task_result":
+    def member_source_locked(self, value_ref: ValueRef | None) -> ResultBinding | None:
+        """The binding an input member reads its value through, when a producer's
+        result supplies it rather than the member carrying it inline."""
+        if value_ref is None or value_ref.kind in ("inline", "empty"):
             return None
-        reference = value_ref.content
-        if reference is None and value_ref.legacy_task_id:
-            binding = self.result_binding_locked(value_ref.legacy_task_id)
-            reference = binding.reference if binding is not None else None
-        if reference is None:
+        try:
+            binding = self.value_binding_locked(value_ref)
+        except UnreadableInput:
             return None
-        return ResultValueRef(reference=reference, element=element_of(value_ref))
+        if binding.kind is BindingKind.RESULT and binding.reference is None:
+            return binding if binding.skip is not None else None
+        return binding
 
     def consumed_inputs_locked(
         self, record: TaskRecord, references: Sequence[ContentReference]

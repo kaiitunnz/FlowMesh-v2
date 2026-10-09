@@ -58,6 +58,10 @@ def _result_collection(payload: dict[str, Any]) -> list[Any] | None:
     return collection if isinstance(collection, list) else None
 
 
+def _listed(value: Any) -> list[Any]:
+    return [_unwrapped(item) for item in value] if isinstance(value, list) else []
+
+
 def collection_elements(envelope: ResultEnvelope) -> list[Any]:
     """A result's collection with each element's carried value unwrapped.
 
@@ -68,9 +72,17 @@ def collection_elements(envelope: ResultEnvelope) -> list[Any]:
     return [_unwrapped(item) for item in collection]
 
 
-def collection_element(envelope: ResultEnvelope, index: int) -> Any:
-    """One element of a result's collection; raises ``IndexError`` when it has none."""
-    elements = collection_elements(envelope)
+def collection_element(
+    envelope: ResultEnvelope, index: int, collection: Sequence[str | int] = ()
+) -> Any:
+    """One element of a result's collection, or of the list ``collection`` reaches
+    inside it, unwrapped as ``collection_elements`` unwraps one; raises
+    ``IndexError`` when it has none."""
+    elements = (
+        _listed(dig(envelope.result, collection))
+        if collection
+        else collection_elements(envelope)
+    )
     if index < 0 or index >= len(elements):
         raise IndexError(
             f"task {envelope.task_id} has {len(elements)} collection elements and "
@@ -105,7 +117,7 @@ def element_value(envelope: ResultEnvelope, ref: ResultElementRef) -> Any:
     """The value one element of a result reads as; raises ``IndexError`` when the
     result holds none there."""
     start = (
-        collection_element(envelope, ref.element)
+        collection_element(envelope, ref.element, ref.collection)
         if ref.element is not None
         else envelope.result
     )
@@ -133,7 +145,7 @@ def scoped_value(
         case BindingKind.RESULT:
             envelope = envelope_of(binding)
             value: Any = (
-                collection_element(envelope, binding.element)
+                collection_element(envelope, binding.element, binding.collection)
                 if binding.element is not None
                 else envelope.result
             )
@@ -162,6 +174,27 @@ def scoped_value(
     return dig(value, binding.path) if binding.path else value
 
 
+def upstream_value(
+    binding: ResultBinding, envelope_of: Callable[[ResultBinding], ResultEnvelope]
+) -> BaseExecutorResult:
+    """What a reader receives for one value: a whole result as itself, any other value
+    as a ``RoutedValue`` carrying what ``scoped_value`` reads; raises ``IndexError``
+    when a result holds no element the binding selects.
+
+    A value read out of one result keeps that result's artifact context, so an
+    artifact ref inside it resolves against its producer.
+    """
+    if binding.whole_result:
+        return envelope_of(binding).result
+    value = scoped_value(binding, envelope_of)
+    artifacts = (
+        envelope_of(binding).result.artifacts_
+        if binding.kind is BindingKind.RESULT
+        else None
+    )
+    return RoutedValue(routed_value=value, _artifacts=artifacts)
+
+
 def _member_value(
     binding: ResultBinding | None,
     envelope_of: Callable[[ResultBinding], ResultEnvelope],
@@ -170,6 +203,25 @@ def _member_value(
         return None
     value = scoped_value(binding, envelope_of)
     return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+
+
+def binding_text(
+    binding: ResultBinding, envelope_of: Callable[[ResultBinding], ResultEnvelope]
+) -> str | None:
+    """The string an agent input member reads a value as, or None when absent.
+
+    A whole result reads as ``value_text`` reads it; any other value reads as the
+    value ``scoped_value`` reads, rendered as JSON unless it is a string.
+    """
+    if binding.whole_result:
+        return value_text(envelope_of(binding), None)
+    try:
+        value = scoped_value(binding, envelope_of)
+    except IndexError:
+        return None
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    return _stringify(value)
 
 
 def value_text(envelope: ResultEnvelope, element: int | None) -> str | None:
@@ -198,11 +250,15 @@ def _stringify(value: Any) -> str:
 
 __all__ = [
     "NotAResultEnvelope",
+    "binding_text",
     "collection_element",
     "collection_elements",
+    "dig",
+    "element_value",
     "result_envelope",
     "scoped_value",
     "skip_envelope",
     "skip_envelope_bytes",
+    "upstream_value",
     "value_text",
 ]

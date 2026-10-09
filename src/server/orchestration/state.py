@@ -142,6 +142,9 @@ class ValueRef(BaseModel):
     # the stored result envelope a settled legacy task result is bound to
     content: ContentReference | None = None
     collection_key: str | None = None  # element selector into a producer collection
+    # The part of the result whose list ``collection_key`` indexes; empty for the
+    # result's own collection.
+    collection: tuple[SelectorStep, ...] = ()
     literal: str | None = None  # a bounded, immutable inline child-init value
     model_ref: ModelRef | None = None
     # A pure field/index projection a reader applies to the referenced value.

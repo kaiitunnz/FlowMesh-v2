@@ -31,6 +31,7 @@ from .catalog import (
     PPOResult,
     RAGResult,
     ResultEnvelope,
+    RoutedValue,
     ServeResult,
     SFTResult,
     SSHResult,
@@ -84,6 +85,7 @@ _RESULT_MODELS: tuple[type[BaseModel], ...] = (
     EchoResult,
     APIResult,
     SSHResult,
+    RoutedValue,
     ResultEnvelope,
 )
 for _model in _RESULT_MODELS:
@@ -133,6 +135,7 @@ __all__ = [
     "RagSearch",
     "RagUsage",
     "ResultEnvelope",
+    "RoutedValue",
     "SFTResult",
     "SSHResult",
     "ServeResult",

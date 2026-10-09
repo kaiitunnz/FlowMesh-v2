@@ -19,6 +19,7 @@ from shared.tools.model.schema import MODEL_INTERFACE as MODEL_INTERFACE
 from shared.tools.search.schema import SEARCH_INTERFACE
 
 from ..task.v2.representations.operators import BoundaryEventKind
+from .state import ValueRef
 
 # The interfaces the fabric serves as an injected facade tool (never the model turn).
 FABRIC_TOOL_INTERFACES = frozenset({SEARCH_INTERFACE})
@@ -66,9 +67,10 @@ class ToolInvocationEnvelope(BaseModel):
 class InputMemberPlan(BaseModel):
     """One member of an agent input the engine identifies for the runtime to resolve.
 
-    The engine owns membership and ordering; the runtime resolves ``value_ref`` to a
-    frozen value and digest. A single producer binding yields one member; a merge/join
-    aggregate yields one per settled source child, ordered by the declared contract.
+    The engine owns membership and ordering; the runtime resolves ``value_ref``, the
+    value the member's edge delivers, to a frozen value. A single producer binding
+    yields one member; a join aggregate yields one per settled source child, ordered by
+    the declared contract.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -77,10 +79,7 @@ class InputMemberPlan(BaseModel):
     source_activation_id: str
     child_index: int | None = None
     outcome: str
-    value_ref_kind: str
-    legacy_task_id: str | None = None
-    collection_key: str | None = None
-    literal: str | None = None
+    value_ref: ValueRef
     ordinal: int = 0
 
 

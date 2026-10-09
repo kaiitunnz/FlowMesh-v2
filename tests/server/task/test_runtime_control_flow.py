@@ -13,6 +13,7 @@ from server.registries.workflow import PersistedTask
 from server.task.models import TaskLoopTime, TaskOccurrence, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
+from shared.schemas.result.binding import element_value
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
@@ -471,27 +472,34 @@ async def test_a_branch_reads_its_selector_through_its_inputs_projection() -> No
 
 
 @pytest.mark.anyio
-async def test_a_child_of_a_projected_fan_out_runs_on_its_element_of_the_part() -> None:
+@pytest.mark.parametrize("projected", [True, False])
+async def test_a_fan_out_child_reads_its_element_by_one_rule(projected: bool) -> None:
+    source = "{node: plan, project: [nested]}" if projected else "plan"
     nodes = f"""
       - name: plan
         spec: {_ECHO}
       - name: kid
         spec: {_ECHO}
       - name: fan
-        dependsOn: [{{node: plan, project: [nested]}}]
+        dependsOn: [{source}]
         region: {{kind: spawn, child: kid}}
       - name: collect
         dependsOn: [fan]
         region: {{kind: join, completion: all_settled}}
 """
+    collection = [{"output": "x"}, None, "z"]
     run = await _Run().start(_workflow(nodes))
-    run.run("plan", {"items": ["a", "b", "c"], "nested": ["x", "y"]})
+    run.run(
+        "plan",
+        {"nested": collection} if projected else {"items": collection, "nested": []},
+    )
     kids = [t for t in run.ready if run.name(t) == "kid"]
     elements = [run.runtime.input_element(kid) for kid in kids]
-    assert [(e.element, e.path) for e in elements if e is not None] == [
-        (None, ("nested", 0)),
-        (None, ("nested", 1)),
-    ]
+    assert sorted(
+        (e.element, element_value(run.reader.read_reference(e.reference), e))
+        for e in elements
+        if e is not None
+    ) == [(0, "x"), (1, None), (2, "z")]
 
 
 @pytest.mark.anyio

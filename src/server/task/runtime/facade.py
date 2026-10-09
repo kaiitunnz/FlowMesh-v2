@@ -45,7 +45,8 @@ from shared.resident.reports import (
 )
 from shared.schemas.command import MediatedOpMessage
 from shared.schemas.event import TaskEvent, TaskFailureKind
-from shared.schemas.result import ResultEnvelope
+from shared.schemas.result import BaseExecutorResult, ResultEnvelope
+from shared.schemas.result.binding import upstream_value
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.credentials import set_spec_values
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
@@ -175,7 +176,7 @@ from .after_commit import (
 )
 from .agent_inputs import AgentInputs
 from .commits import TransitionCommitter, TransitionNotDurable, store_unavailable
-from .content_bindings import ContentBindings, ScopedInput
+from .content_bindings import ContentBindings, ScopedInput, UnreadableInput
 from .dispatch_fence import DispatchFence, Publish, supplier_id
 from .episode_dispatch import EpisodeDispatch, EpisodeFeasibility
 from .fanout import FanoutRead
@@ -237,9 +238,15 @@ def _durability_retry(
 
 def _element(value: ValueRef, index: int) -> ValueRef:
     """One element of the collection a fan-out value names: a member of a whole
-    result's collection, or an index into a part of one."""
-    if value.collection_key is None and not value.projection:
-        return value.model_copy(update={"collection_key": str(index)})
+    result's collection or of a part of one, or an index into a part of an element."""
+    if value.collection_key is None:
+        return value.model_copy(
+            update={
+                "collection": value.projection,
+                "projection": (),
+                "collection_key": str(index),
+            }
+        )
     return value.model_copy(update={"projection": (*value.projection, index)})
 
 
@@ -3136,16 +3143,22 @@ class TaskRuntime:
                 ).settled,
             )
 
-    def read_output(self, member: OutputMember) -> ResultEnvelope:
-        """The stored result a published member settled with, read off the lock.
+    def read_output(self, member: OutputMember) -> BaseExecutorResult:
+        """The value a published member settled with, as an input reading it would
+        read it, read off the lock.
 
         Raises ``ResultUnavailable`` while the store cannot be reached and
-        ``ResultUnreadable`` for bound content that is missing or corrupt.
+        ``ResultUnreadable`` for a value that is missing, corrupt, or not readable.
         """
         value_ref = member.publication.value_ref if member.publication else None
-        if value_ref is None or value_ref.content is None:
+        if value_ref is None:
             raise ResultUnreadable(f"output {member.name} has no bound result")
-        return self._results.read_reference(value_ref.content)
+        try:
+            with self._lock:
+                binding = self._content_bindings.value_binding_locked(value_ref)
+            return upstream_value(binding, self._results.read)
+        except (UnreadableInput, IndexError) as exc:
+            raise ResultUnreadable(f"output {member.name}: {exc}") from exc
 
     def resolve_v2_legacy_result(
         self, workflow_id: str, task_id: str
@@ -3528,7 +3541,7 @@ class TaskRuntime:
             ]
             produced = {engine.fanout_spawn(task_id) for task_id, _ in producers}
             controls = [
-                (key, value, self._value_binding_locked(value))
+                (key, value, self._task_result_binding_locked(value))
                 for key, value in (
                     *engine.pending_branch_reads(),
                     *(
@@ -3593,7 +3606,7 @@ class TaskRuntime:
             if controls and not engine.awaits_control_reads():
                 self._actions.file_locked(workflow_id, Settled(workflow_id))
 
-    def _value_binding_locked(self, value: ValueRef) -> ResultBinding | None:
+    def _task_result_binding_locked(self, value: ValueRef) -> ResultBinding | None:
         """The stored result a value reference names, when it names a task's."""
         if value.legacy_task_id is None:
             return None
@@ -3635,7 +3648,7 @@ class TaskRuntime:
             reason = read.error or "the spawn's input is not a collection"
             return engine.fail_control(key, f"fan-out input unreadable: {reason}")
         content = value.content
-        if content is None and (binding := self._value_binding_locked(value)):
+        if content is None and (binding := self._task_result_binding_locked(value)):
             content = binding.reference
         return self._spawn_children_locked(
             workflow_id,

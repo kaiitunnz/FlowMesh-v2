@@ -51,6 +51,9 @@ class ResultBinding(BaseModel):
     skip: dict[str, Any] | None = None
     settled_at: str | None = None
     kind: BindingKind = BindingKind.RESULT
+    # The part of the result whose list ``element`` indexes; empty for the result's
+    # own collection.
+    collection: tuple[str | int, ...] = ()
     element: int | None = None
     path: tuple[str | int, ...] = ()
     members: tuple[ResultMember, ...] = ()
@@ -64,19 +67,6 @@ class ResultBinding(BaseModel):
         )
 
 
-class ResultValueRef(BaseModel):
-    """One value a consumer reads from a producer's stored result.
-
-    ``element`` selects one member of the producer's collection; without it the value is
-    the whole result.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    reference: ContentReference
-    element: int | None = None
-
-
 class ResultElementRef(BaseModel):
     """One element of a producer's stored result: a member of its collection, a value
     a path reaches inside the result, or a value a path reaches inside one member."""
@@ -84,6 +74,7 @@ class ResultElementRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     reference: ContentReference
+    collection: tuple[str | int, ...] = ()
     element: int | None = None
     path: tuple[str | int, ...] = ()
 
@@ -99,7 +90,6 @@ __all__ = [
     "ResultBinding",
     "ResultElementRef",
     "ResultMember",
-    "ResultValueRef",
 ]
 
 
