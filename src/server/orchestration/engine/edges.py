@@ -144,7 +144,7 @@ class EdgeResolver:
             return self._wi_state(wi, steps)
         state = self._ledger.control_states.get(source)
         if state is None:
-            return self._legacy_control_state(operator_id), None
+            return EdgeState.PENDING, None
         match state.status:
             case ControlStatus.PENDING:
                 return EdgeState.PENDING, None
@@ -188,15 +188,6 @@ class EdgeResolver:
                     case _:
                         return EdgeState.FAILED, None
         return EdgeState.PENDING, None
-
-    def _legacy_control_state(self, operator_id: str) -> EdgeState:
-        """A root control a ledger stored before control states existed: failed, or
-        released once its region closed."""
-        if operator_id in self._ledger.failed_region_ids():
-            return EdgeState.FAILED
-        if self._ledger.region_closed(operator_id):
-            return EdgeState.LIVE
-        return EdgeState.PENDING
 
     def entry_value(self, occurrence: Occurrence, port: str) -> ValueRef | None:
         """The value a definition input carries into an occurrence's context and time.

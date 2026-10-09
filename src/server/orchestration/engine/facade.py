@@ -274,6 +274,7 @@ class OrchestrationEngine:
             self._budget,
         )
         self._codec.restore(snapshot)
+        self._flow.adopt_stored_controls()
 
         # Binds the emitter to this engine's own live collections (mutated in place,
         # never reassigned) and re-derives every already-settled entity from them --

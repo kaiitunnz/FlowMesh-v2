@@ -284,7 +284,7 @@ class OrchestrationLedger:
         if self._failures.region_failed(region_op):
             return True
         scope_id = (
-            self._scope_for_join(region_op)
+            self.scope_id_for_join(region_op)
             if self._topology.kind(region_op) is OperatorKind.JOIN
             else self.scope_id_for(region_op)
         )
@@ -375,7 +375,7 @@ class OrchestrationLedger:
                 return a.activation_id
         return operator_id
 
-    def _scope_for_join(self, join_op: str) -> str | None:
+    def scope_id_for_join(self, join_op: str) -> str | None:
         for edge in self._topology.bundle.template.edges:
             if (
                 edge.to_op == join_op

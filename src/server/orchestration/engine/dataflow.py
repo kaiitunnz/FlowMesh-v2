@@ -93,6 +93,30 @@ _EARLY_JOINS = frozenset(
 )
 
 
+def _merged_value(op: MergeRegion, inputs: list[Incoming]) -> ValueRef:
+    """A merge's value over its resolved inputs: its one live record under
+    ``one_live``, or every live record in input order."""
+    if op.combination is MergeCombination.ONE_LIVE:
+        live = next((i for i in inputs if i.state in _LIVE_STATES), None)
+        return (live.value if live else None) or ValueRef(kind="empty")
+    return ValueRef(
+        kind="aggregate",
+        members=tuple(
+            ValueMember(
+                key=i.port or str(index),
+                outcome=(
+                    PublicationOutcome.EXPLICIT_EMPTY
+                    if i.state is EdgeState.EMPTY
+                    else PublicationOutcome.SUCCESS
+                ),
+                value_ref=i.value,
+            )
+            for index, i in enumerate(inputs)
+            if i.state in _LIVE_STATES
+        ),
+    )
+
+
 def _port_outputs(op: MergeRegion | JoinRegion, value: ValueRef) -> dict[str, ValueRef]:
     """A merge's or join's value under each output port it declares.
 
@@ -582,32 +606,14 @@ class RegionFlow:
         if not live:
             self.mark_dead(key, advance)
             return
-        if op.combination is MergeCombination.ONE_LIVE:
-            if len(live) > 1:
-                self.fail_control(
-                    key,
-                    f"one_live merge {op.operator_id} received {len(live)} live inputs",
-                    advance,
-                )
-                return
-            value = live[0].value or ValueRef(kind="empty")
-        else:
-            value = ValueRef(
-                kind="aggregate",
-                members=tuple(
-                    ValueMember(
-                        key=i.port or str(index),
-                        outcome=(
-                            PublicationOutcome.EXPLICIT_EMPTY
-                            if i.state is EdgeState.EMPTY
-                            else PublicationOutcome.SUCCESS
-                        ),
-                        value_ref=i.value,
-                    )
-                    for index, i in enumerate(inputs)
-                    if i.state in _LIVE_STATES
-                ),
+        if op.combination is MergeCombination.ONE_LIVE and len(live) > 1:
+            self.fail_control(
+                key,
+                f"one_live merge {op.operator_id} received {len(live)} live inputs",
+                advance,
             )
+            return
+        value = _merged_value(op, inputs)
         state = self._ledger.control_state(key)
         state.status = ControlStatus.LIVE
         state.outputs = _port_outputs(op, value)
@@ -896,19 +902,7 @@ class RegionFlow:
         cancelled = self._apply_residual_policy(join, scope_id)
         if (join_key := self._join_key(scope_id, join_op)) is None:
             return Advance(cancelled=cancelled)
-        aggregate = self._ledger.aggregate_by_join.get(join_key)
-        if value_ref is not None and value_ref.kind == "join_result" and aggregate:
-            value_ref = ValueRef(
-                kind="aggregate",
-                members=tuple(
-                    ValueMember(
-                        key=member.child_key,
-                        outcome=member.outcome,
-                        value_ref=member.value_ref,
-                    )
-                    for member in aggregate.members
-                ),
-            )
+        value_ref = self._delivered_join_value(join_key, value_ref)
         state = self._ledger.control_state(join_key)
         state.status = ControlStatus.LIVE
         state.outputs = _port_outputs(join, value_ref or ValueRef(kind="empty"))
@@ -917,6 +911,85 @@ class RegionFlow:
         self.propagate(join_key, advance, value=value_ref)
         advance.cancelled.extend(cancelled)
         return advance
+
+    def _delivered_join_value(
+        self, join_key: str, value_ref: ValueRef | None
+    ) -> ValueRef | None:
+        """The value a released join delivers downstream: its frozen aggregate's
+        members in place of a full-closure result."""
+        aggregate = self._ledger.aggregate_by_join.get(join_key)
+        if value_ref is None or value_ref.kind != "join_result" or not aggregate:
+            return value_ref
+        return ValueRef(
+            kind="aggregate",
+            members=tuple(
+                ValueMember(
+                    key=member.child_key,
+                    outcome=member.outcome,
+                    value_ref=member.value_ref,
+                )
+                for member in aggregate.members
+            ),
+        )
+
+    def adopt_stored_controls(self) -> None:
+        """Give each root control a ledger stored before control states existed the
+        state its stored ledger shows it reached.
+
+        A failed region failed; a merge holding a record fired over its inputs; a
+        spawn whose scope opened is live with the values it captured; a join whose
+        scope released carries its result. A control with none of these is pending.
+        """
+        fired = {r.operator_id for r in self._ledger.records}
+        stored = [
+            op_id
+            for op_id in self._topology.operators
+            if self._topology.is_control(op_id)
+            and op_id not in self._topology.child_templates
+            and op_id not in self._topology.definition_of
+            and op_id not in self._ledger.control_states
+        ]
+        # A control fed by another stored control reads its state, so adopt in
+        # dependency order.
+        while adopted := [
+            op_id for op_id in stored if self._adopt_stored_control(op_id, fired)
+        ]:
+            stored = [op_id for op_id in stored if op_id not in adopted]
+
+    def _adopt_stored_control(self, op_id: str, fired: set[str]) -> bool:
+        op = self._topology.operators[op_id]
+        if self._failures.region_failed(op_id):
+            self._ledger.control_state(op_id).status = ControlStatus.FAILED
+            return True
+        match op:
+            case MergeRegion() if op_id in fired:
+                inputs = self.edges.incoming(op_id)
+                if any(i.state is EdgeState.PENDING for i in inputs):
+                    return False
+                state = self._ledger.control_state(op_id)
+                state.status = ControlStatus.LIVE
+                state.outputs = _port_outputs(op, _merged_value(op, inputs))
+            case SpawnRegion() if (
+                op_id not in self._topology.agent_region_spawns
+                and (scope_id := self._ledger.scope_id_for(op_id)) is not None
+            ):
+                state = self._ledger.control_state(op_id)
+                state.status = ControlStatus.LIVE
+                for item in self.edges.incoming(op_id):
+                    if item.value is not None:
+                        state.inputs[item.port or ""] = item.value
+                self._ledger.scope_occurrence.setdefault(scope_id, op_id)
+            case JoinRegion() if self._ledger.region_closed(op_id) and (
+                scope_id := self._ledger.scope_id_for_join(op_id)
+            ):
+                _, value_ref = self._join_result(op, scope_id)
+                value_ref = self._delivered_join_value(op_id, value_ref)
+                state = self._ledger.control_state(op_id)
+                state.status = ControlStatus.LIVE
+                state.outputs = _port_outputs(op, value_ref or ValueRef(kind="empty"))
+            case _:
+                return False
+        return True
 
     def _fail_resolved_join(
         self, join_op: str, scope_id: str, children: list[Activation]
