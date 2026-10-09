@@ -16,6 +16,7 @@ from ...task.v2.representations.results import ResultDeclaration
 from ...task.v2.representations.template import (
     RETURN_KINDS,
     BoundaryKind,
+    LogicalWorkflowTemplate,
     RegionDefinition,
     TemplateEdge,
 )
@@ -45,6 +46,43 @@ def effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryCl
     if isinstance(op, LeafOperator):
         return op.profile.effect, op.profile.recovery
     return EffectClass.PURE, RecoveryClass.RECOMPUTE
+
+
+def child_bodies(template: LogicalWorkflowTemplate) -> frozenset[str]:
+    """The spawn child templates that run only as spawned children.
+
+    A region whose entry is its enclosing agent is explicit recursion: that agent also
+    runs at the root.
+    """
+    region_owner = {
+        ref.spawn_ref: op.operator_id
+        for op in template.operators
+        if isinstance(op, AgentOperator)
+        for ref in op.child_region_refs
+    }
+    return frozenset(
+        op.child_template_ref
+        for op in template.operators
+        if isinstance(op, SpawnRegion)
+        and op.child_template_ref
+        and op.child_template_ref != op.operator_id
+        and region_owner.get(op.operator_id) != op.child_template_ref
+    )
+
+
+def blueprint_operators(template: LogicalWorkflowTemplate) -> frozenset[str]:
+    """The operators whose tasks are made as their work materializes: every region
+    definition member and spawn child template."""
+    return frozenset(template.definition_of()) | frozenset(
+        op.child_template_ref
+        for op in template.operators
+        if isinstance(op, SpawnRegion) and op.child_template_ref
+    )
+
+
+def materialized_operators(template: LogicalWorkflowTemplate) -> frozenset[str]:
+    """The blueprint operators with no work of their own at the root."""
+    return frozenset(template.definition_of()) | child_bodies(template)
 
 
 class PlanTopology:

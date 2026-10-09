@@ -390,20 +390,15 @@ def test_the_finalizer_thread_closes_without_being_polled() -> None:
 
 
 def test_a_workflow_with_a_spawn_region_closes() -> None:
-    """A sealed spawn's child template must not hold the workflow open.
-
-    The template is never dispatched, so its record stays PENDING forever; the sealing
-    spawn drops it from the workflow's remaining set instead. A completion check that
-    counted every record it holds would leave every spawn-region workflow unsettled,
-    and every such workflow is one that used to close.
-    """
+    """A spawn's child template is no task of the workflow, so only its children
+    hold the workflow open, and it closes once they settle."""
 
     async def run() -> None:
         registry = FakeRegistry()
         runtime = _runtime(registry)
         registry.submitted_at = _TS
         workflow_id, ids = await _register(runtime, _AGENT_WF)
-        writer, reviewer = ids["writer"], ids["reviewer"]
+        writer = ids["writer"]
         finalizer, redis, emitter = _wired(runtime, registry, workflow_id)
 
         adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
@@ -433,8 +428,7 @@ def test_a_workflow_with_a_spawn_region_closes() -> None:
                 break
         finalizer.drain()
 
-        template = runtime.get_record(reviewer)
-        assert template is not None and template.status == TaskStatus.PENDING
+        assert runtime.get_record(ids["reviewer"]) is None
         assert registry.remaining_of(workflow_id) == set()
         assert runtime.workflow_settlement(workflow_id).settled
         assert f"workflow:{workflow_id}:logs:closed" in redis.keys

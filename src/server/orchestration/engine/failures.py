@@ -17,6 +17,8 @@ class FailureLedger:
         # Why each task settled as a declared failure: its own reason, or the failure
         # it depends on.
         self.failure_reasons: dict[str, str] = {}
+        # Why the whole instance failed, once it has.
+        self.instance_failure: str | None = None
 
     def mark_region_failed(self, operator_id: str) -> None:
         self.failed_regions.add(operator_id)

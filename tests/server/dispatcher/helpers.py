@@ -38,6 +38,7 @@ class WorkflowRegistryStub:
         v2: Any = None,
         ledger: Any = None,
         submitted_at: str | None = None,
+        blueprints: Any = (),
     ) -> None:
         return None
 

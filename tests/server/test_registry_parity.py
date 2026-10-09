@@ -201,6 +201,7 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
         "v2": _bundle(AUTORESEARCH, "wfl-new"),
         "ledger": snapshot,
         "submitted_at": "2026-10-08T00:00:00+00:00",
+        "blueprints": records[:1],
     }
     sync.register_workflow("wfl-new", records, WorkflowSched(), **registration)
     asyncio.run(
@@ -210,6 +211,9 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
     )
 
     assert twins.stores()[0] == twins.stores()[1]
+    blueprints = sync.load_blueprints("wfl-new")
+    assert [b.record.task_id for b in blueprints] == [records[0].record.task_id]
+    assert blueprints == asyncio.run(async_.load_blueprints_async("wfl-new"))
     sched = sync.load_workflow_sched(workflow_id)
     assert sched is not None and sched.epoch_frontier == 3
     assert sched == asyncio.run(async_.load_workflow_sched_async(workflow_id))

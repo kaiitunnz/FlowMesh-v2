@@ -67,6 +67,7 @@ from ..state import (
     BranchDecision,
     Continuation,
     ControlState,
+    ControlStatus,
     DelegatedAuthorityGrant,
     DenialKind,
     EmbodimentSelection,
@@ -108,7 +109,7 @@ from .publications import PublicationLedger
 from .scopes import ScopeProgress
 from .snapshot import SnapshotCodec
 from .spawns import SpawnRegions
-from .topology import CONTROL_KINDS, PlanTopology, effect_recovery
+from .topology import CONTROL_KINDS, PlanTopology, child_bodies, effect_recovery
 
 _logger = logging.getLogger("orchestration-engine")
 
@@ -320,24 +321,9 @@ class OrchestrationEngine:
             if b.source_ref
         }
         kind_by_id = {op.operator_id: op.kind for op in template.operators}
-        # The agent that declares each spawn region as one of its child regions.
-        region_owner = {
-            ref.spawn_ref: op.operator_id
-            for op in template.operators
-            if isinstance(op, AgentOperator)
-            for ref in op.child_region_refs
-        }
         # A region's entry body is materialized dynamically per spawn, never dispatched
-        # eagerly. A region whose entry is its enclosing agent is explicit recursion:
-        # that agent stays a normal dispatchable entry rather than a materialized body.
-        child_body_refs = {
-            op.child_template_ref
-            for op in template.operators
-            if isinstance(op, SpawnRegion)
-            and op.child_template_ref
-            and op.child_template_ref != op.operator_id
-            and region_owner.get(op.operator_id) != op.child_template_ref
-        }
+        # eagerly.
+        child_body_refs = child_bodies(template)
         requested: set[str] = set()
         for op in template.operators:
             if isinstance(op, LeafOperator):
@@ -958,6 +944,50 @@ class OrchestrationEngine:
         """The value a live spawn occurrence fans out over."""
         return self._flow.spawn_input(spawn)
 
+    def awaiting_fanouts(self) -> list[tuple[str, ValueRef]]:
+        """Each live spawn occurrence still to fan out over its input, with that
+        input."""
+        return self._flow.awaiting_fanouts()
+
+    def awaits_control_reads(self) -> bool:
+        """Whether the instance still waits on a value read to route a branch or fan
+        out a spawn, which no task of its own holds open."""
+        return bool(self.pending_branch_reads() or self.awaiting_fanouts())
+
+    def control_failure(self) -> str | None:
+        """Why the instance failed outside any task, if it has: the whole instance, or
+        a control occurrence, failed."""
+        if (reason := self._failures.instance_failure) is not None:
+            return reason
+        failed = sorted(
+            (key, state.reason or "control failed")
+            for key, state in self._ledger.control_states.items()
+            if state.status is ControlStatus.FAILED
+        )
+        if failed:
+            return failed[0][1]
+        if self._failures.failed_regions:
+            return f"region {min(self._failures.failed_regions)} failed"
+        return None
+
+    def spawn_handle(self, spawn: str) -> str:
+        """The handle a spawn occurrence's children are created and sealed under."""
+        occurrence = self._ledger.occurrence(spawn)
+        return occurrence.activation_id or occurrence.operator_id
+
+    def spawn_region(self, spawn: str) -> SpawnRegion | None:
+        """The spawn region a spawn occurrence runs."""
+        op = self._topology.operators.get(self._ledger.occurrence(spawn).operator_id)
+        return op if isinstance(op, SpawnRegion) else None
+
+    @_ds_drive(ControlPlaneWindow.POST_START)
+    def fail_control(self, occurrence: str, reason: str) -> Advance:
+        """Settle a pending control occurrence as a declared failure, as an input it
+        could not read fails it."""
+        advance = Advance()
+        self._flow.fail_control(occurrence, reason, advance)
+        return self._contexts.sweep(advance)
+
     @_ds_drive(ControlPlaneWindow.POST_START)
     def enter_definition_child(self, spawn: str, element: ValueRef) -> Advance:
         """Create one child of a spawn that enters a region definition."""
@@ -1028,6 +1058,7 @@ class OrchestrationEngine:
         No scope admits another child, every unsettled leaf or agent settles as a
         declared failure, and every unpublished declared output resolves to one.
         """
+        self._failures.instance_failure = self._failures.instance_failure or reason
         return self._fail_scope_tree(self._ledger.root_scope.scope_id, reason)
 
     @_ds_drive(ControlPlaneWindow.POST_START)
@@ -1064,16 +1095,6 @@ class OrchestrationEngine:
         nothing through this face.
         """
         return self._authority.effective_invoke_face(task_id)
-
-    def template_closure(
-        self,
-        template: str,
-        excluded: Callable[[str, list[str]], bool] | None = None,
-    ) -> list[str]:
-        """A child template and, under an agent template, the child templates of every
-        region it declares, however deep; a template ``excluded`` rejects is left out
-        together with what is nested under it."""
-        return self._ledger.template_closure(template, excluded)
 
     def output_publication(
         self,
@@ -1172,16 +1193,6 @@ class OrchestrationEngine:
     def child_template_of(self, spawn_op: str) -> str | None:
         """The operator id of a spawn's child template, if it declares one."""
         return self._topology.child_template_of(spawn_op)
-
-    def sealed_region_child_templates(self) -> frozenset[str]:
-        """Child templates of agent-region spawns whose child-init sealed or revoked.
-
-        A child template holds the workflow open until its spawn seals; a producer
-        fanout retires it on materialization, and an agent's dynamic spawn region
-        retires it once the region seals (on ``spawn_agent`` seal or the parent's
-        completion), so the template — never dispatched as a task — stops holding it.
-        """
-        return self._ledger.sealed_region_child_templates()
 
     def spawn_awaits_children(self, spawn_op: str) -> bool:
         """Whether a spawn has yet to fan out: unopened, or open and not sealed.

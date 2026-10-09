@@ -28,6 +28,7 @@ class FakeWorkflowRegistry:
         self.v2_blobs: dict[str, str] = {}
         self.ledger_blobs: dict[str, str] = {}
         self.dynamic_task_ids: dict[str, set[str]] = {}
+        self.blueprints: dict[str, list[PersistedTask]] = {}
 
     async def register_workflow_async(
         self,
@@ -37,6 +38,7 @@ class FakeWorkflowRegistry:
         v2: Any = None,
         ledger: Any = None,
         submitted_at: str | None = None,
+        blueprints: Any = (),
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
         self.save_task_states(tasks)
@@ -45,6 +47,10 @@ class FakeWorkflowRegistry:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
         if ledger is not None:
             self.save_ledger_snapshot(workflow_id, ledger)
+        self.blueprints[workflow_id] = list(blueprints)
+
+    async def load_blueprints_async(self, workflow_id: str) -> list[PersistedTask]:
+        return self.blueprints.get(workflow_id, [])
 
     async def get_v2_workflow_async(self, workflow_id: str) -> Any:
         from server.task.v2 import PersistedV2Workflow
@@ -52,7 +58,9 @@ class FakeWorkflowRegistry:
         blob = self.v2_blobs.get(workflow_id)
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: Any, control: Any = None
+    ) -> None:
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
 
     def load_ledger_snapshot(self, workflow_id: str) -> Any:

@@ -815,6 +815,7 @@ class LedgerSnapshot(BaseModel):
     failed_regions: list[str] = Field(default_factory=list)
     failed_scopes: list[str] = Field(default_factory=list)
     failure_reasons: dict[str, str] = Field(default_factory=dict)
+    instance_failure: str | None = None
     next_seq: int = 0
     occurrences: list[Occurrence] = Field(default_factory=list)
     control_states: list[ControlState] = Field(default_factory=list)

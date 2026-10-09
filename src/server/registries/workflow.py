@@ -25,6 +25,7 @@ from ..clients.redis import (
     WORKFLOWS_SET_KEY,
     RedisClient,
     task_state_key,
+    workflow_blueprints_key,
     workflow_cancelled_tasks_key,
     workflow_credential_key,
     workflow_dispatched_tasks_key,
@@ -87,6 +88,18 @@ class PersistedTask(BaseModel):
         return data
 
 
+class TaskBlueprints(BaseModel):
+    """The task each region-definition member and spawn child is materialized from.
+
+    Written once at submission; a blueprint is never dispatched or counted as one of
+    the workflow's tasks.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tasks: list[PersistedTask] = Field(default_factory=list)
+
+
 class WorkflowSched(BaseModel):
     """Durable per-workflow scheduling state (epoch ordering)."""
 
@@ -109,6 +122,24 @@ TERMINAL_WORKFLOW_STATUSES = frozenset(
 )
 
 
+class WorkflowControl(BaseModel):
+    """What a workflow's ledger holds beyond its tasks: whether it still waits on a
+    value read to route a branch or fan out a spawn, and why it failed outside any
+    task, if it did."""
+
+    model_config = ConfigDict(frozen=True)
+
+    open: bool = False
+    failure: str | None = None
+
+    def fields(self) -> dict[str, str]:
+        """The workflow-record fields that store it."""
+        return {
+            "control_open": "1" if self.open else "",
+            "control_failure": self.failure or "",
+        }
+
+
 class WorkflowRecord(BaseModel):
     workflow_id: str = Field(description="Workflow identifier.")
     task_ids: list[str] = Field(description="Task identifiers in the workflow.")
@@ -118,6 +149,21 @@ class WorkflowRecord(BaseModel):
     updated_at: str = Field(
         default_factory=now_iso, description="Last update timestamp."
     )
+    control_open: bool = Field(
+        default=False,
+        description="Whether the workflow waits on a value read no task holds.",
+    )
+    control_failure: str = Field(
+        default="", description="Why the workflow failed outside any task, if it did."
+    )
+
+    @field_serializer("control_open")
+    def serialize_control_open(self, control_open: bool) -> str:
+        return "1" if control_open else ""
+
+    @field_validator("control_open", mode="before")
+    def deserialize_control_open(cls, v: Any) -> bool:
+        return v not in ("", "0", None, False)
 
     @field_serializer("task_ids")
     def serialize_task_ids(self, task_ids: list[str]) -> str:
@@ -306,6 +352,7 @@ def _queue_registration(
     v2: PersistedV2Workflow | None,
     ledger: LedgerSnapshot | None,
     submitted_at: str | None,
+    blueprints: Sequence[PersistedTask],
 ) -> None:
     record, remaining_tasks, failed_tasks = _create_workflow_record(
         workflow_id, [item.record for item in tasks], submitted_at
@@ -323,6 +370,11 @@ def _queue_registration(
         pipe.set(workflow_v2_key(workflow_id), v2.model_dump_json())
     if ledger is not None:
         pipe.set(workflow_ds_key(workflow_id), ledger.model_dump_json())
+    if blueprints:
+        pipe.set(
+            workflow_blueprints_key(workflow_id),
+            TaskBlueprints(tasks=list(blueprints)).model_dump_json(),
+        )
 
 
 def _queue_transition(
@@ -367,6 +419,7 @@ def _queue_dynamic_tasks(
     failed: Sequence[str],
     cancelled: Sequence[str],
     sched: WorkflowSched | None,
+    control: WorkflowControl | None,
 ) -> None:
     ids = [item.record.task_id for item in records]
     settled = {*done, *failed, *cancelled}
@@ -388,10 +441,28 @@ def _queue_dynamic_tasks(
         pipe.sadd(workflow_cancelled_tasks_key(workflow_id), *cancelled)
     if retire:
         pipe.srem(workflow_tasks_key(workflow_id), *retire)
-    pipe.set(workflow_ds_key(workflow_id), snapshot.model_dump_json())
-    pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
+    _queue_ledger(pipe, workflow_id, snapshot, control)
     if sched is not None:
         pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
+
+
+def _queue_ledger(
+    pipe: _AnyPipeline,
+    workflow_id: str,
+    snapshot: LedgerSnapshot,
+    control: WorkflowControl | None,
+) -> None:
+    pipe.set(workflow_ds_key(workflow_id), snapshot.model_dump_json())
+    update = control.fields() if control is not None else {}
+    pipe.hset(workflow_key(workflow_id), mapping=_workflow_update(update))
+
+
+def _blueprints(blob: str | bytes | None) -> list[PersistedTask]:
+    if not blob:
+        return []
+    return TaskBlueprints.model_validate_json(
+        blob, context=PERSISTED_LOAD_CONTEXT
+    ).tasks
 
 
 def _sched_payload(in_epoch_order: bool, epoch_frontier: int) -> str:
@@ -412,12 +483,13 @@ class WorkflowRegistry:
         v2: PersistedV2Workflow | None = None,
         ledger: LedgerSnapshot | None = None,
         submitted_at: str | None = None,
+        blueprints: Sequence[PersistedTask] = (),
     ) -> None:
-        """Register a workflow with its task states, schedule, plan and ledger as one
-        atomic transaction."""
+        """Register a workflow with its task states, schedule, plan, ledger and task
+        blueprints as one atomic transaction."""
         with self._rds.sync.control_pipeline() as pipe:
             _queue_registration(
-                pipe, workflow_id, tasks, sched, v2, ledger, submitted_at
+                pipe, workflow_id, tasks, sched, v2, ledger, submitted_at, blueprints
             )
             pipe.execute()
 
@@ -429,11 +501,12 @@ class WorkflowRegistry:
         v2: PersistedV2Workflow | None = None,
         ledger: LedgerSnapshot | None = None,
         submitted_at: str | None = None,
+        blueprints: Sequence[PersistedTask] = (),
     ) -> None:
         """Register a workflow as ``register_workflow`` does."""
         async with self._rds.asyncio.control_pipeline() as pipe:
             _queue_registration(
-                pipe, workflow_id, tasks, sched, v2, ledger, submitted_at
+                pipe, workflow_id, tasks, sched, v2, ledger, submitted_at, blueprints
             )
             await pipe.execute()
 
@@ -452,6 +525,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_ds_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_blueprints_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
@@ -472,6 +546,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_ds_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_blueprints_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
@@ -765,6 +840,7 @@ class WorkflowRegistry:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: WorkflowControl | None = None,
     ) -> None:
         """Persist newly materialized dynamic-child records with the ledger snapshot.
 
@@ -795,6 +871,7 @@ class WorkflowRegistry:
                 failed,
                 cancelled,
                 sched,
+                control,
             )
             pipe.execute()
 
@@ -810,6 +887,7 @@ class WorkflowRegistry:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: WorkflowControl | None = None,
     ) -> None:
         """Persist dynamic-child records as ``commit_dynamic_tasks`` does."""
         if not records and not retire:
@@ -826,6 +904,7 @@ class WorkflowRegistry:
                 failed,
                 cancelled,
                 sched,
+                control,
             )
             await pipe.execute()
 
@@ -919,17 +998,26 @@ class WorkflowRegistry:
 
     # ---- Durable orchestration ledger (`DS`) -------------------------- #
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: LedgerSnapshot) -> None:
-        self._rds.sync.set_value(
-            workflow_ds_key(workflow_id), snapshot.model_dump_json()
-        )
+    def save_ledger_snapshot(
+        self,
+        workflow_id: str,
+        snapshot: LedgerSnapshot,
+        control: WorkflowControl | None = None,
+    ) -> None:
+        """Save a workflow's ledger with what it holds beyond its tasks."""
+        with self._rds.sync.control_pipeline() as pipe:
+            _queue_ledger(pipe, workflow_id, snapshot, control)
+            pipe.execute()
 
     async def save_ledger_snapshot_async(
-        self, workflow_id: str, snapshot: LedgerSnapshot
+        self,
+        workflow_id: str,
+        snapshot: LedgerSnapshot,
+        control: WorkflowControl | None = None,
     ) -> None:
-        await self._rds.asyncio.set_value(
-            workflow_ds_key(workflow_id), snapshot.model_dump_json()
-        )
+        async with self._rds.asyncio.control_pipeline() as pipe:
+            _queue_ledger(pipe, workflow_id, snapshot, control)
+            await pipe.execute()
 
     def load_ledger_snapshot(self, workflow_id: str) -> LedgerSnapshot | None:
         blob = self._rds.sync.get(workflow_ds_key(workflow_id))
@@ -940,6 +1028,14 @@ class WorkflowRegistry:
     ) -> LedgerSnapshot | None:
         blob = await self._rds.asyncio.get(workflow_ds_key(workflow_id))
         return LedgerSnapshot.model_validate_json(blob) if blob else None
+
+    def load_blueprints(self, workflow_id: str) -> list[PersistedTask]:
+        blob = self._rds.sync.get(workflow_blueprints_key(workflow_id))
+        return _blueprints(blob)
+
+    async def load_blueprints_async(self, workflow_id: str) -> list[PersistedTask]:
+        blob = await self._rds.asyncio.get(workflow_blueprints_key(workflow_id))
+        return _blueprints(blob)
 
     def get_remaining_tasks(self, workflow_id: str) -> set[str]:
         return self._rds.sync.set_members(workflow_tasks_key(workflow_id))
@@ -956,9 +1052,9 @@ class WorkflowRegistry:
         remaining_tasks: set[str],
     ) -> Workflow:
         active_dispatched = dispatched_tasks.intersection(remaining_tasks)
-        if failed_tasks:
+        if failed_tasks or record.control_failure:
             status = WorkflowStatus.FAILED
-        elif remaining_tasks:
+        elif remaining_tasks or record.control_open:
             if active_dispatched:
                 status = WorkflowStatus.DISPATCHED
             else:

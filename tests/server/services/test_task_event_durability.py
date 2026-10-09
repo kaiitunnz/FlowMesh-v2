@@ -56,7 +56,9 @@ class _Store(_Registry):
         self.done_commits += done
         self.writes.append("records")
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: Any, control: Any = None
+    ) -> None:
         if self.error is not None:
             raise self.error
         super().save_ledger_snapshot(workflow_id, snapshot)

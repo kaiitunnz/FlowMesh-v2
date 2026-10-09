@@ -20,7 +20,12 @@ from server.telemetry.tracing import ControlPlaneTracer
 
 from ...clients.redis import REDIS_CONN_ERRORS
 from ...orchestration import OrchestrationEngine
-from ...registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
+from ...registries.workflow import (
+    PersistedTask,
+    WorkflowControl,
+    WorkflowRegistry,
+    WorkflowSched,
+)
 from ..models import (
     SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -96,6 +101,12 @@ class TransitionNotDurable(Exception):
         super().__init__(
             f"writes of workflow(s) {', '.join(sorted(held))} are not durable: {first}"
         )
+
+
+def _control(engine: OrchestrationEngine) -> WorkflowControl:
+    return WorkflowControl(
+        open=engine.awaits_control_reads(), failure=engine.control_failure()
+    )
 
 
 @dataclass(frozen=True)
@@ -223,7 +234,6 @@ class TransitionCommitter:
         self.unacknowledged: dict[str, _Unacknowledged] = {}
         # How many acknowledging handlings have taken up a report of each task.
         self._reports: dict[str, int] = {}
-        self.retired_region_templates: dict[str, set[str]] = {}
         self.on_workflow_settled: Callable[[str], None] | None = None
         self.on_debt: Callable[[str], None] | None = None
 
@@ -498,6 +508,7 @@ class TransitionCommitter:
             failed=by_status[TaskStatus.FAILED],
             cancelled=by_status[TaskStatus.CANCELLED],
             sched=self._sched_locked(workflow_id) if children else None,
+            control=_control(engine),
         )
         self._after_records_locked(workflow_id, records, by_status)
         if unwritten := self._unwritten_children.get(workflow_id):
@@ -515,7 +526,7 @@ class TransitionCommitter:
             return self._commit_children_raw(workflow_id, retire)
         with self._control.ledger_snapshot(workflow_id):
             self._workflow_registry.save_ledger_snapshot(
-                workflow_id, engine.to_snapshot()
+                workflow_id, engine.to_snapshot(), _control(engine)
             )
         return []
 
@@ -588,9 +599,8 @@ class TransitionCommitter:
         Persisting the child records and the snapshot in one transaction keeps a
         dynamically materialized child from being durably half-recorded — a ledger work
         item without its task record, or a task record with no ledger work item — across
-        a crash. ``retire`` drops the sealed spawn's child template from the remaining
-        set in the same transaction, so the children replace it without a window in
-        which the workflow reads as complete.
+        a crash. ``retire`` drops tasks that are no longer the workflow's from its
+        remaining set in the same transaction.
         """
         if not (child_task_ids or retire):
             return
@@ -599,26 +609,9 @@ class TransitionCommitter:
         self._persist_declared_failures_locked(engine, child_task_ids)
         self._write_locked(workflow_id, _Snapshot(tuple(retire)))
         if retire:
-            self.retired_region_templates.setdefault(workflow_id, set()).update(retire)
             # A retire drains the remaining set as a terminal does, and can drain its
-            # last entry: a spawn that seals with no children leaves the workflow
-            # complete with no task terminal behind it.
+            # last entry.
             self._actions.file_locked(workflow_id, Settled(workflow_id))
-
-    def retire_sealed_region_templates_locked(
-        self, workflow_id: str, engine: OrchestrationEngine
-    ) -> None:
-        """Retire an agent-region child template once its spawn region has sealed.
-
-        A dynamic spawn region's child body is a template, never dispatched as a task;
-        once the region seals it no longer holds the workflow open, so it is dropped
-        from the remaining set (idempotently, tracked per workflow) with the ledger.
-        """
-        already = self.retired_region_templates.setdefault(workflow_id, set())
-        if pending := engine.sealed_region_child_templates() - already:
-            self.commit_new_children_locked(
-                workflow_id, engine, [], retire=sorted(pending)
-            )
 
     def commit_cancelled_locked(
         self, workflow_id: str, touched: list[str], returned: list[str]
@@ -676,18 +669,18 @@ class TransitionCommitter:
 
     def workflow_settlement_locked(self, workflow_id: str) -> WorkflowSettlement:
         """Whether every task of a workflow has settled in memory, durable or not, and
-        the last of their finishes."""
-        # A retired task -- a sealed spawn's child template, replaced by the children it
-        # instantiated -- no longer holds the workflow open, and its record stays
-        # PENDING forever because it is never dispatched. Counting it would leave every
-        # workflow with a spawn region permanently unsettled.
-        retired = self.retired_region_templates.get(workflow_id) or set()
-        records = [
-            r
-            for r in self._tasks.values()
-            if r.workflow_id == workflow_id and r.task_id not in retired
-        ]
-        if not records or any(r.status not in TERMINAL_TASK_STATUSES for r in records):
+        the last of their finishes.
+
+        A workflow whose ledger still waits on a value read to route a branch or fan
+        out a spawn has not settled, though none of its tasks holds it open.
+        """
+        records = [r for r in self._tasks.values() if r.workflow_id == workflow_id]
+        engine = self._engines.get(workflow_id)
+        if (
+            not records
+            or any(r.status not in TERMINAL_TASK_STATUSES for r in records)
+            or (engine is not None and engine.awaits_control_reads())
+        ):
             return WorkflowSettlement(settled=False, finished_ts=None)
         finishes = [r.finished_ts for r in records if r.finished_ts is not None]
         return WorkflowSettlement(

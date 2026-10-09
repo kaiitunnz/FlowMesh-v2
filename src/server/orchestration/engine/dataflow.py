@@ -606,6 +606,24 @@ class RegionFlow:
         )
         self._ledger.scope_occurrence[scope_id] = key
 
+    def awaiting_fanouts(self) -> list[tuple[str, ValueRef]]:
+        """Each live spawn occurrence still admitting the children its input fans
+        out to, with that input; an agent's child region is filled by its agent's
+        requests instead."""
+        awaiting: list[tuple[str, ValueRef]] = []
+        for scope_id, key in self._ledger.scope_occurrence.items():
+            operator_id = self._ledger.occurrence(key).operator_id
+            cap = self._ledger.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+            if (
+                cap is None
+                or cap.status is not CapabilityStatus.OPEN
+                or operator_id in self._topology.agent_region_spawns
+            ):
+                continue
+            if (value := self.spawn_input(key)) is not None:
+                awaiting.append((key, value))
+        return sorted(awaiting, key=lambda item: item[0])
+
     def spawn_input(self, key: str) -> ValueRef | None:
         """The value a live spawn occurrence fans out over."""
         state = self._ledger.control_states.get(key)

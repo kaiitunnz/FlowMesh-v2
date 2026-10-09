@@ -172,6 +172,7 @@ class _CapturingRegistry:
         v2: Any = None,
         ledger: Any = None,
         submitted_at: str | None = None,
+        blueprints: Any = (),
     ) -> None:
         self.v2[workflow_id] = v2
 

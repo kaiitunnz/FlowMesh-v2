@@ -18,6 +18,7 @@ from tests.server.task.test_agent_episode_runtime import _adapter, _step
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
+    _blueprints,
     _drain,
     _live_runtime,
     _planned,
@@ -106,7 +107,17 @@ def _engine(runtime: TaskRuntime, workflow_id: str) -> OrchestrationEngine:
 def _assert_failed_downstream(
     runtime: TaskRuntime, ids: dict[str, str], failed: str, *names: str
 ) -> None:
+    """Each named task failed with its dependency; a child template runs no task of
+    its own, so it has none to fail."""
+    templates = {
+        task_id
+        for workflow_id in {r.workflow_id for r in runtime._tasks.values()}
+        for task_id in _blueprints(runtime, workflow_id)
+    }
     for name in names:
+        if ids[name] in templates:
+            assert runtime.get_record(ids[name]) is None, name
+            continue
         record = runtime.get_record(ids[name])
         assert record is not None and record.status == TaskStatus.FAILED, name
         assert record.error == f"Dependency {ids[failed]} failed", name
@@ -273,18 +284,21 @@ _TWO_SPAWNS = """
 @pytest.mark.anyio
 async def test_a_shared_child_template_fails_only_with_every_spawn() -> None:
     runtime = _live_runtime(FakeRegistry())
-    _, ids = await _register(runtime, _HEAD + _TWO_SPAWNS)
+    workflow_id, ids = await _register(runtime, _HEAD + _TWO_SPAWNS)
+    engine = _engine(runtime, workflow_id)
+    template = f"legacy:{ids['kid']}"
     _fail(runtime, ids["a"])
-    kid = runtime.get_record(ids["kid"])
-    assert kid is not None and kid.status == TaskStatus.PENDING
+    assert engine.output_publication(template) is None
 
     _fail(runtime, ids["b"])
-    kid = runtime.get_record(ids["kid"])
-    assert kid is not None and kid.status == TaskStatus.FAILED
+    publication = engine.output_publication(template)
+    assert publication is not None
+    assert publication.outcome is PublicationOutcome.DECLARED_FAILURE
+    assert runtime.get_record(ids["kid"]) is None
 
 
 @pytest.mark.anyio
-async def test_a_succeeded_spawn_retires_its_template() -> None:
+async def test_a_succeeded_spawn_leaves_no_template_task() -> None:
     registry = FakeRegistry()
     runtime = _live_runtime(registry)
     workflow_id, ids = await _register(runtime, _HEAD + _spawn_join(_JOINS["any"]))
@@ -293,8 +307,7 @@ async def test_a_succeeded_spawn_retires_its_template() -> None:
     runtime.mark_succeeded(a, "wkr-1", _planned(runtime, a, ["h1"]), _TS)
     _drain(runtime)
 
-    kid = runtime.get_record(ids["kid"])
-    assert kid is not None and kid.status == TaskStatus.PENDING
+    assert runtime.get_record(ids["kid"]) is None
     assert ids["kid"] not in registry.remaining_of(workflow_id)
     engine = _engine(runtime, workflow_id)
     assert "region_failed" not in {kind for kind, _ in engine.contract_trace()}
@@ -430,9 +443,9 @@ async def test_a_restart_leaves_a_cancelled_hung_workflow_cancelled(
 
     restored = _live_runtime(registry, "restored", reader=runtime._results)
     await restored.rehydrate()
-    for name in ("kid", "after"):
-        record = restored.get_record(ids[name])
-        assert record is not None and record.status == TaskStatus.CANCELLED
+    record = restored.get_record(ids["after"])
+    assert record is not None and record.status == TaskStatus.CANCELLED
+    assert restored.get_record(ids["kid"]) is None
     assert _engine(restored, workflow_id).to_snapshot().failed_regions == []
 
 
@@ -903,10 +916,12 @@ async def test_a_join_with_no_winner_names_every_task_downstream_of_it() -> None
     runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
     _drain(runtime)
 
-    for name in ("after", "kid2", "after2"):
+    for name in ("after", "after2"):
         record = runtime.get_record(ids[name])
         assert record is not None and record.status == TaskStatus.FAILED, name
         assert record.error == "join collect resolved no winner", name
+    # The second spawn's child template runs no task of its own.
+    assert runtime.get_record(ids["kid2"]) is None
     assert runtime.workflow_settlement(workflow_id).settled
 
 
@@ -1009,7 +1024,9 @@ def test_a_failed_agent_persists_its_records_before_the_ledger(path: str) -> Non
             writes.append("ledger")
             dynamic(*args, **kwargs)
 
-        def save_ledger_snapshot(workflow_id: str, snapshot: LedgerSnapshot) -> None:
+        def save_ledger_snapshot(
+            workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+        ) -> None:
             writes.append("ledger")
             save(workflow_id, snapshot)
 
@@ -1104,7 +1121,9 @@ def test_a_fan_out_persists_what_it_failed_before_the_ledger(shape: str) -> None
             writes.append("ledger")
             dynamic(*args, **kwargs)
 
-        def save_ledger_snapshot(workflow_id: str, snapshot: LedgerSnapshot) -> None:
+        def save_ledger_snapshot(
+            workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+        ) -> None:
             writes.append("ledger")
             save(workflow_id, snapshot)
 

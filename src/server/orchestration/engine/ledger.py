@@ -17,7 +17,6 @@ from ..state import (
     Activation,
     Attempt,
     BranchDecision,
-    CapabilityStatus,
     ChildContext,
     Continuation,
     ControlState,
@@ -290,26 +289,6 @@ class OrchestrationLedger:
             else self.scope_id_for(region_op)
         )
         return scope_id in self.released_scopes if scope_id else False
-
-    def sealed_region_child_templates(self) -> frozenset[str]:
-        """Child templates of agent-region spawns whose child-init sealed or revoked."""
-        sealed: set[str] = set()
-        for spawn_op in self._topology.agent_region_spawns:
-            template = self._topology.child_template_of(spawn_op)
-            if template is None:
-                continue
-            scope_id = self.scope_id_for(spawn_op)
-            cap = (
-                self.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
-                if scope_id
-                else None
-            )
-            if cap is not None and cap.status in (
-                CapabilityStatus.SEALED,
-                CapabilityStatus.REVOKED,
-            ):
-                sealed.update(self.template_closure(template))
-        return frozenset(sealed)
 
     def embodiment_menu(self, task_id: str) -> InferenceEmbodimentMenu | None:
         """The finite set of embodiments a task's plan node offers, if it offers one."""

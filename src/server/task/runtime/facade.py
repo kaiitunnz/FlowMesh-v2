@@ -69,6 +69,10 @@ from ...orchestration import (
     ValueRef,
     WorkItemStatus,
 )
+from ...orchestration.engine.topology import (
+    blueprint_operators,
+    materialized_operators,
+)
 from ...orchestration.episode import BoundaryEvent
 from ...orchestration.harness import to_boundary_event
 from ...orchestration.telemetry import build_span_emitter
@@ -146,8 +150,8 @@ from ..v2.representations.plan import InferenceEmbodimentMenu
 from ..workflow_retry import WorkflowRetryScheduler
 from . import (
     agent_inputs,
+    control_reads,
     fanout,
-    materialized_records,
 )
 from .after_commit import (
     AfterCommit,
@@ -175,6 +179,7 @@ from .mediated_ops import (
     deny_model_turn_payload,
 )
 from .merges import TaskMerges
+from .occurrences import OccurrenceMaterializer
 from .record_failures import RecordFailures
 from .reports import (
     LOSS_EFFECTS,
@@ -213,6 +218,14 @@ def _durability_retry(
     return WorkflowRetryScheduler(fire, logger, thread_name="durability-retry")
 
 
+def _element(value: ValueRef, index: int) -> ValueRef:
+    """One element of the collection a fan-out value names: a member of a whole
+    result's collection, or an index into a part of one."""
+    if value.collection_key is None and not value.projection:
+        return value.model_copy(update={"collection_key": str(index)})
+    return value.model_copy(update={"projection": (*value.projection, index)})
+
+
 @dataclass(frozen=True)
 class _StagedRegistration:
     """A submission's records and plan, built in memory before its durable write."""
@@ -226,6 +239,8 @@ class _StagedRegistration:
     in_epoch_order: bool
     v2_bundle: PersistedV2Workflow | None
     v2_engine: OrchestrationEngine | None
+    # The tasks region definitions and spawns materialize their work from.
+    blueprints: list[TaskRecord]
 
     def persisted(self) -> list[PersistedTask]:
         return [
@@ -460,6 +475,9 @@ class TaskRuntime:
             self._lock,
         )
         self._committer.on_debt = self._durability.schedule
+        self._occurrences = OccurrenceMaterializer(
+            self._tasks, self._original_deps, self._committer
+        )
         self._merges = TaskMerges(
             self._ready,
             self._dag,
@@ -580,6 +598,7 @@ class TaskRuntime:
                     else None
                 ),
                 submitted_at=submitted_at,
+                blueprints=[PersistedTask(record=r) for r in staged.blueprints],
             )
         except BaseException:
             await self._discard_registration(workflow_id)
@@ -628,6 +647,9 @@ class TaskRuntime:
 
         v2_bundle: PersistedV2Workflow | None = None
         v2_engine: OrchestrationEngine | None = None
+        blueprint_ops: frozenset[str] = frozenset()
+        materialized: frozenset[str] = frozenset()
+        blueprints: list[TaskRecord] = []
         if ExecutionMode.is_v2(parsed_workflow.api_version):
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(
@@ -656,6 +678,8 @@ class TaskRuntime:
                         self._tracer, self._telemetry, workflow_id
                     ),
                 )
+            blueprint_ops = blueprint_operators(v2_bundle.template)
+            materialized = materialized_operators(v2_bundle.template)
 
         in_epoch_order = bool(
             parsed_workflow.schedule_in_epoch_order
@@ -670,7 +694,6 @@ class TaskRuntime:
             task = entry.task.model_copy(deep=True)
             task_credentials = credentials.tasks.get(task_id, TaskCredentials())
             depends_on = entry.depends_on.copy()
-            depends[task_id] = set(depends_on)
 
             task_type = task.spec.taskType
             category = categorize_task_type(task_type)
@@ -710,6 +733,11 @@ class TaskRuntime:
                 resident=resident,
                 credential_refs=task_credentials.refs,
             )
+            if task_id in blueprint_ops:
+                blueprints.append(record.model_copy(deep=True))
+            if task_id in materialized:
+                continue
+            depends[task_id] = set(depends_on)
             task_records.append(record)
             record.last_queue_ts = record.submitted_ts
             if v2_engine is None:
@@ -761,6 +789,7 @@ class TaskRuntime:
             in_epoch_order=in_epoch_order,
             v2_bundle=v2_bundle,
             v2_engine=v2_engine,
+            blueprints=blueprints,
         )
 
     def _install_registration(
@@ -799,6 +828,7 @@ class TaskRuntime:
             new_ready = False
             if v2_engine is not None:
                 self._engines[workflow_id] = v2_engine
+                self._occurrences.install_locked(workflow_id, staged.blueprints)
                 with self._control.workflow_stage(
                     ControlPlaneStage.DS_INITIAL_ADVANCE,
                     ControlPlaneWindow.SUBMIT,
@@ -863,21 +893,21 @@ class TaskRuntime:
                 if snapshot is not None
                 else None
             )
+            blueprints = (
+                await self._workflow_registry.load_blueprints_async(workflow_id)
+                if bundle is not None
+                else []
+            )
             with self._transition():
-                # A non-terminal record the remaining set no longer lists was
-                # retired before the crash, and nothing will ever dispatch it; the
-                # durable set is what carries that fact across a restart.
-                self._committer.retired_region_templates.setdefault(
-                    workflow_id, set()
-                ).update(
-                    persisted.record.task_id
-                    for persisted in tasks
-                    if persisted.record.status not in TERMINAL_TASK_STATUSES
-                    and persisted.record.task_id not in remaining
-                )
                 if snapshot is not None and bundle is not None:
                     self._install_rehydrated_v2_workflow_locked(
-                        workflow_id, tasks, snapshot, bundle, rehydrated_at
+                        workflow_id,
+                        tasks,
+                        snapshot,
+                        bundle,
+                        rehydrated_at,
+                        [persisted.record for persisted in blueprints],
+                        remaining,
                     )
                 else:
                     self._install_rehydrated_workflow_locked(
@@ -1075,14 +1105,22 @@ class TaskRuntime:
         snapshot: LedgerSnapshot,
         bundle: PersistedV2Workflow,
         rehydrated_at: float,
+        blueprints: list[TaskRecord],
+        remaining: set[str],
     ) -> None:
         """Rebuild a v2 workflow: restore the engine and re-admit ready work items.
 
         The legacy dependency machinery stays unwired; the orchestration engine is the
         readiness authority. Terminal task facts reconcile the engine idempotently, so a
         crash between a task's terminal write and its ledger snapshot never loses a
-        settlement and never duplicates a publication or effect receipt.
+        settlement and never duplicates a publication or effect receipt. A workflow
+        stored with its child templates as tasks has them read as blueprints and
+        withdrawn from its remaining tasks.
         """
+        materialized = materialized_operators(bundle.template)
+        prototypes = [p.record for p in tasks if p.record.task_id in materialized]
+        tasks = [p for p in tasks if p.record.task_id not in materialized]
+        self._occurrences.install_locked(workflow_id, [*prototypes, *blueprints])
         for persisted in tasks:
             record = persisted.record
             task_id = record.task_id
@@ -1189,8 +1227,12 @@ class TaskRuntime:
         self._actions.file_locked(
             workflow_id, *map(_issue, engine.pending_tool_dispatches())
         )
-        # The replayed terminals can seal a region whose retire a crash lost.
-        self._committer.retire_sealed_region_templates_locked(workflow_id, engine)
+        if engine.awaits_control_reads():
+            self._redrive.drive_now(workflow_id)
+        if withdrawn := sorted(p.task_id for p in prototypes if p.task_id in remaining):
+            self._committer.commit_new_children_locked(
+                workflow_id, engine, [], retire=withdrawn
+            )
         self._committer.save_ledger_locked(workflow_id)
 
     def _catch_up_dispatch_locked(
@@ -1600,7 +1642,6 @@ class TaskRuntime:
             if record is None or engine is None:
                 return False
             advance = engine.route_boundary_event(task_id, event)
-            self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
             changed = self._apply_advance_locked(record.workflow_id, advance)
             self._committer.save_ledger_locked(record.workflow_id)
             if changed:
@@ -1656,7 +1697,6 @@ class TaskRuntime:
         engine.mark_pending_outcome(task_id, None)
         event = to_boundary_event(request, continuation=capsule)
         advance = engine.route_boundary_event(task_id, event)
-        self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
         changed = self._apply_advance_locked(record.workflow_id, advance)
         corr = request.call_correlation
         env = (
@@ -1730,7 +1770,6 @@ class TaskRuntime:
             engine.record_continuation(task_id, capsule.blob)
         engine.mark_pending_outcome(task_id, None)
         advance = engine.route_facade_turn_group(task_id, group)
-        self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
         self._apply_advance_locked(record.workflow_id, advance)
         cap = self._web_search.max_parallel
         for index, envelope in enumerate(
@@ -2662,29 +2701,6 @@ class TaskRuntime:
             self._committer.save_ledger_locked(record.workflow_id)
             return selection.alternative_id
 
-    def _synthesize_ready_children_locked(
-        self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
-    ) -> None:
-        """Give any newly ready child a dispatchable, durably persisted task record."""
-        new_children: list[str] = []
-        for child_task_id in advance.ready:
-            if child_task_id in self._tasks:
-                continue
-            wi = engine.work_item(child_task_id)
-            template = self._tasks.get(wi.operator_id) if wi else None
-            if template is not None:
-                self._register_child_locked(child_task_id, template)
-                new_children.append(child_task_id)
-        self._committer.commit_new_children_locked(workflow_id, engine, new_children)
-
-    def _register_child_locked(self, child_task_id: str, template: TaskRecord) -> None:
-        """Install a self-contained task record for one materialized child."""
-        self._tasks[child_task_id] = materialized_records.synthesize_child_record(
-            template, child_task_id
-        )
-        self._original_deps[child_task_id] = set()
-        self._committer.note_child_locked(template.workflow_id, child_task_id)
-
     def episode_feasible(self, task_id: str) -> bool:
         """Whether a ready episode's declared alternative can be placed now.
 
@@ -3079,19 +3095,21 @@ class TaskRuntime:
         return advance
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
-        """Apply an engine advance: fail and persist what it failed, cancel what a
-        residual policy cancelled, then record the inputs its agents accept, retire
-        the region templates it sealed, and ready its work. Returns whether it changed
-        any task.
+        """Apply an engine advance: fail and persist what it failed, settle what a dead
+        route skipped, cancel what a residual policy cancelled, then record the inputs
+        its agents accept, give the work it materialized its tasks, and ready its work.
+        Returns whether it changed any task.
 
-        The failed and cancelled records persist before a retire writes the ledger, so
-        the ledger never leads them.
+        The failed, skipped and cancelled records persist before the new tasks write
+        the ledger, so the ledger never leads them. A value still to read for a branch
+        or spawn is read off the lock by the workflow's re-drive.
         """
         # A ready/settle advance never carries a retry; the failure path drives those.
         assert not advance.retry, "retry is applied by the failure path"
         engine = self._engines.get(workflow_id)
         changed = bool(advance.failed)
         self._fail_v2_advance_locked(engine, advance)
+        changed |= self._skip_dead_routes_locked(advance.skipped)
         if engine is not None and advance.cancelled:
             changed |= self._cancel_residual_locked(
                 workflow_id, engine, advance.cancelled
@@ -3102,11 +3120,37 @@ class TaskRuntime:
             changed |= bool(staged.failed)
             self._fail_v2_advance_locked(engine, staged)
             advance.extend(staged)
-            self._committer.retire_sealed_region_templates_locked(workflow_id, engine)
+            self._occurrences.materialize_locked(workflow_id, engine, advance)
+            if engine.awaits_control_reads():
+                self._redrive.drive_now(workflow_id)
         for task_id in advance.ready:
             if self._ready.enqueue_ready_locked(task_id):
                 changed = True
         return changed
+
+    def _skip_dead_routes_locked(self, task_ids: list[str]) -> bool:
+        """Settle each task no route reaches as done without running, with an empty
+        result that says so; returns whether any settled.
+
+        It takes no attempt and never reports a success: the engine already settled
+        its work item dead, and only its record follows.
+        """
+        skipped: list[str] = []
+        for task_id in task_ids:
+            record = self._tasks.get(task_id)
+            if record is None or record.status in TERMINAL_TASK_STATUSES:
+                continue
+            record.status = TaskStatus.DONE
+            record.assigned_worker = None
+            record.finished_ts = time.time()
+            record.result_skip = {"skipped": True, "reason": "route_not_taken"}
+            self._completed.add(task_id)
+            self._dag.forget_pending(task_id)
+            self._ready.remove_from_ready_locked(task_id)
+            skipped.append(task_id)
+        if skipped:
+            self._committer.commit_locked(*skipped)
+        return bool(skipped)
 
     def _fail_v2_advance_locked(
         self,
@@ -3137,14 +3181,10 @@ class TaskRuntime:
         producer_task_id: str,
         read: FanoutRead | None,
     ) -> Advance:
-        """Materialize one dispatchable child per element of a producer's fan-out.
+        """Fan a settled producer's collection out to the spawn it feeds.
 
-        When the settled producer feeds a spawn whose child template is a dispatchable
-        leaf, its result collection drives the child cardinality: each element mints a
-        child work item with a synthesized task record, the child-init authority is then
-        sealed, and the new records persist durably ahead of the ledger snapshot. A
-        producer that feeds no spawn, or a spawn whose child body is not a leaf task,
-        yields no children.
+        Each element of the producer's result becomes one child, then the spawn seals.
+        A producer that feeds no spawn yields no children.
         """
         advance = Advance()
         spawn_op = engine.spawn_successor(producer_task_id)
@@ -3152,25 +3192,6 @@ class TaskRuntime:
             return advance
         if not engine.spawn_is_open(spawn_op):
             return advance  # already sealed: a re-driven fan-out is a no-op
-        child_template_id = engine.child_template_of(spawn_op)
-        template_record = (
-            self._tasks.get(child_template_id) if child_template_id else None
-        )
-        if child_template_id is None or template_record is None:
-            # Compile-time validation rejects an unresolved or non-leaf child template,
-            # so reaching here is an internal inconsistency; fail the workflow rather
-            # than defer a join that could never close.
-            self._logger.error(
-                "Spawn %s child template %r is unresolvable; failing the workflow",
-                spawn_op,
-                child_template_id,
-            )
-            self._fail_workflow_locked(
-                workflow_id,
-                f"spawn child template {child_template_id!r} is not a "
-                "dispatchable leaf",
-            )
-            return advance
         if read is None:
             # Nothing read the collection ahead of the lock: read it off the lock.
             self._redrive.drive_now(workflow_id)
@@ -3198,42 +3219,87 @@ class TaskRuntime:
             # The read predates the binding the producer settled with: read again.
             self._redrive.drive_now(workflow_id)
             return advance
-        # A child receives its element as a frozen reference into the producer result:
-        # an agent child through the typed accepted-input channel of its declared entry
-        # port, a leaf child as its child-init input, which its worker hydrates.
-        child_is_agent = engine.agent_entry_port(child_template_id) is not None
-        new_children: list[str] = []
-        for index in range(read.count):
-            value_ref = ValueRef(
-                kind="legacy_task_result",
-                legacy_task_id=producer_task_id,
-                content=content,
-                collection_key=str(index),
+        value = ValueRef(
+            kind="legacy_task_result", legacy_task_id=producer_task_id, content=content
+        )
+        return self._spawn_children_locked(
+            workflow_id, engine, spawn_op, value, read.count
+        )
+
+    def _spawn_children_locked(
+        self,
+        workflow_id: str,
+        engine: OrchestrationEngine,
+        spawn: str,
+        value: ValueRef,
+        count: int,
+    ) -> Advance:
+        """Create one child of a spawn occurrence per element of ``value``'s
+        collection, then seal it.
+
+        A child receives its element as a frozen reference into the value: an agent
+        child through the typed accepted-input channel of its declared entry port, a
+        leaf child as its child-init input, which its worker hydrates, and a region
+        definition's child as the definition's param.
+        """
+        advance = Advance()
+        region = engine.spawn_region(spawn)
+        handle = engine.spawn_handle(spawn)
+        if region is None:
+            return advance
+        template = region.child_template_ref
+        if region.child_definition_ref is None and (
+            template is None
+            or self._occurrences.blueprint_locked(workflow_id, template) is None
+        ):
+            # Compile-time validation rejects an unresolved or non-leaf child template,
+            # so reaching here is an internal inconsistency; fail the workflow rather
+            # than defer a join that could never close.
+            self._logger.error(
+                "Spawn %s child template %r is unresolvable; failing the workflow",
+                spawn,
+                template,
             )
+            self._fail_workflow_locked(
+                workflow_id,
+                f"spawn child template {template!r} is not a dispatchable leaf",
+            )
+            return advance
+        child_is_agent = (
+            template is not None and engine.agent_entry_port(template) is not None
+        )
+        new_children: list[str] = []
+        for index in range(count):
+            element = _element(value, index)
             try:
+                if region.child_definition_ref is not None:
+                    advance.extend(engine.enter_definition_child(spawn, element))
+                    continue
+                assert template is not None
                 if child_is_agent:
-                    child_task_id = engine.create_fanout_child(spawn_op, value_ref)
-                    self._register_child_locked(child_task_id, template_record)
+                    child_task_id = engine.create_fanout_child(handle, element)
+                    self._occurrences.register_locked(
+                        workflow_id, child_task_id, template
+                    )
                     agent_inputs.mint_fanout_facet_locked(
-                        engine, child_task_id, producer_task_id, index, value_ref
+                        engine,
+                        child_task_id,
+                        element.legacy_task_id or "",
+                        index,
+                        element,
                     )
                     advance.extend(engine.reconsider_admission(child_task_id))
                     new_children.append(child_task_id)
                     continue
-                child_advance = engine.materialize_child(spawn_op, value_ref=value_ref)
+                child_advance = engine.materialize_child(handle, value_ref=element)
             except RegionError:
                 break  # a budget, seal, or denial stops further children
             for child_task_id in child_advance.ready:
-                self._register_child_locked(child_task_id, template_record)
+                self._occurrences.register_locked(workflow_id, child_task_id, template)
                 new_children.append(child_task_id)
             advance.extend(child_advance)
-        advance.extend(engine.seal_spawn(spawn_op))
-        self._committer.commit_new_children_locked(
-            workflow_id,
-            engine,
-            new_children,
-            retire=engine.template_closure(child_template_id),
-        )
+        advance.extend(engine.seal_spawn(handle))
+        self._committer.commit_new_children_locked(workflow_id, engine, new_children)
         return advance
 
     def _drive_workflow(self, workflow_id: str) -> None:
@@ -3304,10 +3370,12 @@ class TaskRuntime:
         """Drive the advances of a workflow that wait on a read of stored results.
 
         Every settled producer whose spawn has yet to fan out has its collection read,
-        and every blocked agent whose bound inputs need reading has them read, all off
-        the lock. The results apply under it: an agent's inputs record only while the
-        snapshot they were read for holds, and are read again otherwise. A read
-        that cannot reach the store schedules the next re-drive.
+        every branch awaiting its selector and every other spawn awaiting its fan-out
+        has the value reaching it read, and every blocked agent whose bound inputs
+        need reading has them read, all off the lock. The results apply under it, each
+        only while what it was read for still waits on it: an agent's inputs record
+        only while the snapshot they were read for holds, and are read again
+        otherwise. A read that cannot reach the store schedules the next re-drive.
         """
         with self._lock:
             engine = self._engines.get(workflow_id)
@@ -3320,6 +3388,18 @@ class TaskRuntime:
                 and record.status == TaskStatus.DONE
                 and (spawn_op := engine.spawn_successor(task_id)) is not None
                 and engine.spawn_awaits_children(spawn_op)
+            ]
+            produced = {engine.spawn_successor(task_id) for task_id, _ in producers}
+            controls = [
+                (key, value, self._value_binding_locked(value))
+                for key, value in (
+                    *engine.pending_branch_reads(),
+                    *(
+                        (key, value)
+                        for key, value in engine.awaiting_fanouts()
+                        if key not in produced
+                    ),
+                )
             ]
             snapshots = [
                 snapshot
@@ -3336,6 +3416,10 @@ class TaskRuntime:
             task_id: fanout.read_fanout(self._results, task_id, binding)
             for task_id, binding in producers
         }
+        control_values = {
+            key: control_reads.read_control_value(self._results, value, binding)
+            for key, value, binding in controls
+        }
         values = agent_inputs.read_input_values(self._results, snapshots)
         with self._transition():
             if (engine := self._engines.get(workflow_id)) is None:
@@ -3345,6 +3429,12 @@ class TaskRuntime:
                 advance.extend(
                     self._fan_out_children_locked(
                         workflow_id, engine, task_id, reads[task_id]
+                    )
+                )
+            for key, value, _ in controls:
+                advance.extend(
+                    self._apply_control_read_locked(
+                        workflow_id, engine, key, value, control_values[key]
                     )
                 )
             for snapshot in snapshots:
@@ -3363,6 +3453,60 @@ class TaskRuntime:
             if self._apply_advance_locked(workflow_id, advance):
                 self._cv.notify_all()
             self._committer.save_ledger_locked(workflow_id)
+            if controls and not engine.awaits_control_reads():
+                self._actions.file_locked(workflow_id, Settled(workflow_id))
+
+    def _value_binding_locked(self, value: ValueRef) -> ResultBinding | None:
+        """The stored result a value reference names, when it names a task's."""
+        if value.legacy_task_id is None:
+            return None
+        if value.content is not None:
+            return ResultBinding(task_id=value.legacy_task_id, reference=value.content)
+        return self._content_bindings.result_binding_locked(value.legacy_task_id)
+
+    def _apply_control_read_locked(
+        self,
+        workflow_id: str,
+        engine: OrchestrationEngine,
+        key: str,
+        value: ValueRef,
+        read: control_reads.ControlRead,
+    ) -> Advance:
+        """Route a branch or fan out a spawn by the value read for it, while it still
+        waits on that value.
+
+        A value the store could not answer for is read again later; one that cannot be
+        read at all fails the occurrence.
+        """
+        if (rule := engine.selection_rule(key)) is not None:
+            if dict(engine.pending_branch_reads()).get(key) != value:
+                return Advance()
+            if read.unavailable:
+                self._redrive.schedule(workflow_id)
+                return Advance()
+            if read.error is not None:
+                return engine.accept_branch_selection(key, None, error=read.error)
+            return engine.accept_branch_selection(
+                key, control_reads.dig(read.value, rule.field)
+            )
+        if dict(engine.awaiting_fanouts()).get(key) != value:
+            return Advance()
+        if read.unavailable:
+            self._redrive.schedule(workflow_id)
+            return Advance()
+        if read.error is not None or read.elements is None:
+            reason = read.error or "the spawn's input is not a collection"
+            return engine.fail_control(key, f"fan-out input unreadable: {reason}")
+        content = value.content
+        if content is None and (binding := self._value_binding_locked(value)):
+            content = binding.reference
+        return self._spawn_children_locked(
+            workflow_id,
+            engine,
+            key,
+            value.model_copy(update={"content": content}),
+            read.elements,
+        )
 
     def _prefetch_fanout(
         self,
