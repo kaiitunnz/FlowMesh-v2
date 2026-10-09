@@ -70,13 +70,8 @@ class OccurrenceMaterializer:
     def materialize_locked(
         self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
     ) -> None:
-        """Give each work item an advance readies without a record its record, and
-        persist the new records with the ledger snapshot that holds their work."""
-        created = [
-            task_id
-            for task_id in advance.ready
-            if task_id not in self._tasks
-            and (wi := engine.work_item(task_id)) is not None
-            and self.register_locked(workflow_id, task_id, wi.operator_id)
-        ]
-        self._committer.commit_new_children_locked(workflow_id, engine, created)
+        """Give each work item an advance readies without a record its record, owed
+        with the ledger snapshot that holds its work."""
+        for task_id in advance.ready:
+            if task_id not in self._tasks and (wi := engine.work_item(task_id)):
+                self.register_locked(workflow_id, task_id, wi.operator_id)

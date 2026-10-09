@@ -39,6 +39,7 @@ class _WorkflowRegistryStub:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: Any = None,
     ) -> None:
         return None
 

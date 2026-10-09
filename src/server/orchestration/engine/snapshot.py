@@ -253,6 +253,7 @@ class SnapshotCodec:
         # A ledger stored without failure reasons names each failed work item's own.
         self._failures.failure_reasons = dict(snapshot.failure_reasons)
         self._failures.instance_failure = snapshot.instance_failure
+        self._failures.instance_cancelled = snapshot.instance_cancelled
         for wi in self._ledger.work_items.values():
             if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
                 self._failures.failure_reasons.setdefault(
@@ -301,6 +302,7 @@ class SnapshotCodec:
             failed_scopes=sorted(self._failures.failed_scopes),
             failure_reasons=dict(self._failures.failure_reasons),
             instance_failure=self._failures.instance_failure,
+            instance_cancelled=self._failures.instance_cancelled,
             next_seq=self._ledger.next_seq,
             occurrences=list(self._ledger.occurrences.values()),
             control_states=list(self._ledger.control_states.values()),

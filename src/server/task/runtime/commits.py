@@ -105,7 +105,9 @@ class TransitionNotDurable(Exception):
 
 def _control(engine: OrchestrationEngine) -> WorkflowControl:
     return WorkflowControl(
-        open=engine.awaits_control_reads(), failure=engine.control_failure()
+        open=engine.has_unsettled_tasks() or engine.awaits_control_reads(),
+        failure=engine.control_failure(),
+        cancelled=engine.instance_cancelled(),
     )
 
 
@@ -450,6 +452,7 @@ class TransitionCommitter:
             if task_id in ids:
                 by_status[membership(self._tasks[task_id])].append(task_id)
         records = self._records_locked(*ids)
+        engine = self._engines.get(workflow_id)
         self._workflow_registry.commit_transition(
             workflow_id,
             records=records,
@@ -459,6 +462,7 @@ class TransitionCommitter:
             failed=by_status[TaskStatus.FAILED],
             cancelled=by_status[TaskStatus.CANCELLED],
             sched=self._sched_locked(workflow_id) if sched else None,
+            control=_control(engine) if engine is not None else None,
         )
         self._after_records_locked(workflow_id, records, by_status)
 
@@ -587,31 +591,19 @@ class TransitionCommitter:
         work item also writes its record."""
         self._unwritten_children.setdefault(workflow_id, set()).add(child_task_id)
 
-    def commit_new_children_locked(
-        self,
-        workflow_id: str,
-        engine: OrchestrationEngine,
-        child_task_ids: list[str],
-        retire: Sequence[str] = (),
-    ) -> None:
-        """Persist new child records atomically with the ledger snapshot they belong to.
+    def holds_unwritten_locked(self, workflow_id: str) -> bool:
+        """Whether a workflow has materialized records its next ledger write owes."""
+        return bool(self._unwritten_children.get(workflow_id))
 
-        Persisting the child records and the snapshot in one transaction keeps a
-        dynamically materialized child from being durably half-recorded — a ledger work
-        item without its task record, or a task record with no ledger work item — across
-        a crash. ``retire`` drops tasks that are no longer the workflow's from its
-        remaining set in the same transaction.
-        """
-        if not (child_task_ids or retire):
+    def retire_locked(self, workflow_id: str, retire: Sequence[str]) -> None:
+        """Drop tasks that are no longer the workflow's from its remaining set, with
+        its ledger, in one transaction."""
+        if not retire:
             return
-        for child_task_id in child_task_ids:
-            self.note_child_locked(workflow_id, child_task_id)
-        self._persist_declared_failures_locked(engine, child_task_ids)
         self._write_locked(workflow_id, _Snapshot(tuple(retire)))
-        if retire:
-            # A retire drains the remaining set as a terminal does, and can drain its
-            # last entry.
-            self._actions.file_locked(workflow_id, Settled(workflow_id))
+        # A retire drains the remaining set as a terminal does, and can drain its last
+        # entry.
+        self._actions.file_locked(workflow_id, Settled(workflow_id))
 
     def commit_cancelled_locked(
         self, workflow_id: str, touched: list[str], returned: list[str]

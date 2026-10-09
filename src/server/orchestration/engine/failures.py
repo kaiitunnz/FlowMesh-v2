@@ -19,6 +19,8 @@ class FailureLedger:
         self.failure_reasons: dict[str, str] = {}
         # Why the whole instance failed, once it has.
         self.instance_failure: str | None = None
+        # Whether the whole instance was cancelled.
+        self.instance_cancelled = False
 
     def mark_region_failed(self, operator_id: str) -> None:
         self.failed_regions.add(operator_id)

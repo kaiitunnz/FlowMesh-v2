@@ -123,20 +123,22 @@ TERMINAL_WORKFLOW_STATUSES = frozenset(
 
 
 class WorkflowControl(BaseModel):
-    """What a workflow's ledger holds beyond its tasks: whether it still waits on a
-    value read to route a branch or fan out a spawn, and why it failed outside any
-    task, if it did."""
+    """What a workflow's ledger holds beyond its tasks: whether work its task records
+    do not account for still holds it open, why it failed outside any task, and
+    whether it was cancelled as a whole."""
 
     model_config = ConfigDict(frozen=True)
 
     open: bool = False
     failure: str | None = None
+    cancelled: bool = False
 
     def fields(self) -> dict[str, str]:
         """The workflow-record fields that store it."""
         return {
             "control_open": "1" if self.open else "",
             "control_failure": self.failure or "",
+            "control_cancelled": "1" if self.cancelled else "",
         }
 
 
@@ -151,18 +153,21 @@ class WorkflowRecord(BaseModel):
     )
     control_open: bool = Field(
         default=False,
-        description="Whether the workflow waits on a value read no task holds.",
+        description="Whether work no task record accounts for holds the workflow.",
     )
     control_failure: str = Field(
         default="", description="Why the workflow failed outside any task, if it did."
     )
+    control_cancelled: bool = Field(
+        default=False, description="Whether the workflow was cancelled as a whole."
+    )
 
-    @field_serializer("control_open")
-    def serialize_control_open(self, control_open: bool) -> str:
-        return "1" if control_open else ""
+    @field_serializer("control_open", "control_cancelled")
+    def serialize_control_flag(self, flag: bool) -> str:
+        return "1" if flag else ""
 
-    @field_validator("control_open", mode="before")
-    def deserialize_control_open(cls, v: Any) -> bool:
+    @field_validator("control_open", "control_cancelled", mode="before")
+    def deserialize_control_flag(cls, v: Any) -> bool:
         return v not in ("", "0", None, False)
 
     @field_serializer("task_ids")
@@ -387,6 +392,7 @@ def _queue_transition(
     failed: Sequence[str],
     cancelled: Sequence[str],
     sched: WorkflowSched | None,
+    control: WorkflowControl | None,
 ) -> None:
     terminal = (*done, *failed, *cancelled)
     touched_membership = bool(dispatched or pending or terminal)
@@ -402,8 +408,9 @@ def _queue_transition(
         pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed)
     if cancelled:
         pipe.sadd(workflow_cancelled_tasks_key(workflow_id), *cancelled)
-    if touched_membership or sched is not None:
-        pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
+    if touched_membership or sched is not None or control is not None:
+        update = control.fields() if control is not None else {}
+        pipe.hset(workflow_key(workflow_id), mapping=_workflow_update(update))
     if sched is not None:
         pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
 
@@ -777,15 +784,16 @@ class WorkflowRegistry:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: WorkflowControl | None = None,
     ) -> None:
         """Apply a workflow state delta as one atomic control-Redis transaction.
 
         ``records`` are upserted; ``dispatched`` / ``pending`` / ``done`` /
         ``failed`` / ``cancelled`` move their task ids into the matching status-set
         membership; ``sched`` snapshots the schedule when present. The records,
-        membership moves, the workflow's ``updated_at``, and the schedule snapshot
-        commit together or not at all, so a crash mid-persist can never leave
-        durable state half-applied.
+        membership moves, the workflow's ``updated_at``, the schedule snapshot and the
+        ``control`` summary commit together or not at all, so a crash mid-persist can
+        never leave durable state half-applied.
         """
         with self._rds.sync.control_pipeline() as pipe:
             _queue_transition(
@@ -798,6 +806,7 @@ class WorkflowRegistry:
                 failed,
                 cancelled,
                 sched,
+                control,
             )
             pipe.execute()
 
@@ -812,6 +821,7 @@ class WorkflowRegistry:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: WorkflowControl | None = None,
     ) -> None:
         """Apply a workflow state delta as ``commit_transition`` does."""
         async with self._rds.asyncio.control_pipeline() as pipe:
@@ -825,6 +835,7 @@ class WorkflowRegistry:
                 failed,
                 cancelled,
                 sched,
+                control,
             )
             await pipe.execute()
 
@@ -1059,7 +1070,7 @@ class WorkflowRegistry:
                 status = WorkflowStatus.DISPATCHED
             else:
                 status = WorkflowStatus.PENDING
-        elif cancelled_tasks:
+        elif cancelled_tasks or record.control_cancelled:
             status = WorkflowStatus.CANCELLED
         else:
             status = WorkflowStatus.DONE

@@ -177,6 +177,7 @@ class FakeRegistry:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: WorkflowControl | None = None,
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
@@ -185,6 +186,8 @@ class FakeRegistry:
         )
         if sched is not None:
             self.sched[workflow_id] = sched.model_dump_json()
+        if control is not None:
+            self.control[workflow_id] = control
 
     def commit_dynamic_tasks(
         self,

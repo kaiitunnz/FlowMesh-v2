@@ -8,7 +8,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from opentelemetry.trace import Tracer
 from pydantic import ValidationError
@@ -75,6 +75,7 @@ from ...orchestration.engine.topology import (
 )
 from ...orchestration.episode import BoundaryEvent
 from ...orchestration.harness import to_boundary_event
+from ...orchestration.state import TERMINAL_WORK_ITEM_STATUSES
 from ...orchestration.telemetry import build_span_emitter
 from ...orchestration.tool_dispatch import (
     MODEL_INTERFACE,
@@ -196,6 +197,8 @@ from .scheduling import EpochFrontier, ReadyQueue
 from .static_dag import StaticDag
 
 _RESIDUAL_CANCEL_REASON = "cancelled by its region's residual policy"
+# The empty result a task no route reaches settles with.
+ROUTE_NOT_TAKEN: Final = {"skipped": True, "reason": "route_not_taken"}
 
 
 class _Drain(threading.local):
@@ -1145,6 +1148,10 @@ class TaskRuntime:
         for persisted in tasks:
             record = persisted.record
             if record.status == TaskStatus.DONE:
+                # A dead route's record settles from its branch decision, restored or
+                # made again, and never as a success.
+                if record.result_skip == ROUTE_NOT_TAKEN:
+                    continue
                 engine.on_succeeded(
                     record.task_id,
                     empty=record.result_skip is not None,
@@ -1208,6 +1215,8 @@ class TaskRuntime:
                 self._rehydrated_dispatched[record.task_id] = rehydrated_at
                 self._committer.commit_locked(record.task_id)
 
+        self._repair_work_records_locked(workflow_id, engine)
+
         # Re-drive any DONE producer whose spawn never sealed and any agent waiting on
         # its bound inputs: their terminal events do not replay, so nothing else
         # materializes the children or records the inputs.
@@ -1230,10 +1239,30 @@ class TaskRuntime:
         if engine.awaits_control_reads():
             self._redrive.drive_now(workflow_id)
         if withdrawn := sorted(p.task_id for p in prototypes if p.task_id in remaining):
-            self._committer.commit_new_children_locked(
-                workflow_id, engine, [], retire=withdrawn
-            )
+            self._committer.retire_locked(workflow_id, withdrawn)
         self._committer.save_ledger_locked(workflow_id)
+
+    def _repair_work_records_locked(
+        self, workflow_id: str, engine: OrchestrationEngine
+    ) -> None:
+        """Bring the task records in line with the work the restored ledger holds: an
+        unsettled work item with no record gets one, ready to run when its work item
+        is, and a pending record whose work item no route reaches settles skipped."""
+        skipped: list[str] = []
+        for wi in engine.task_work_items():
+            record = self._tasks.get(wi.legacy_task_id)
+            if record is None and wi.status not in TERMINAL_WORK_ITEM_STATUSES:
+                if self._occurrences.register_locked(
+                    workflow_id, wi.legacy_task_id, wi.operator_id
+                ) and (wi.status is WorkItemStatus.READY):
+                    self._ready.enqueue_ready_locked(wi.legacy_task_id)
+            elif (
+                record is not None
+                and record.status == TaskStatus.PENDING
+                and wi.status is WorkItemStatus.SKIPPED
+            ):
+                skipped.append(wi.legacy_task_id)
+        self._skip_dead_routes_locked(skipped)
 
     def _catch_up_dispatch_locked(
         self, engine: OrchestrationEngine, record: TaskRecord
@@ -3123,6 +3152,10 @@ class TaskRuntime:
             self._occurrences.materialize_locked(workflow_id, engine, advance)
             if engine.awaits_control_reads():
                 self._redrive.drive_now(workflow_id)
+            if self._committer.holds_unwritten_locked(workflow_id):
+                # The records this transition made land with the ledger that holds
+                # their work, after the records it failed, skipped or cancelled.
+                self._committer.save_ledger_locked(workflow_id)
         for task_id in advance.ready:
             if self._ready.enqueue_ready_locked(task_id):
                 changed = True
@@ -3143,7 +3176,7 @@ class TaskRuntime:
             record.status = TaskStatus.DONE
             record.assigned_worker = None
             record.finished_ts = time.time()
-            record.result_skip = {"skipped": True, "reason": "route_not_taken"}
+            record.result_skip = dict(ROUTE_NOT_TAKEN)
             self._completed.add(task_id)
             self._dag.forget_pending(task_id)
             self._ready.remove_from_ready_locked(task_id)
@@ -3268,7 +3301,6 @@ class TaskRuntime:
         child_is_agent = (
             template is not None and engine.agent_entry_port(template) is not None
         )
-        new_children: list[str] = []
         for index in range(count):
             element = _element(value, index)
             try:
@@ -3289,17 +3321,11 @@ class TaskRuntime:
                         element,
                     )
                     advance.extend(engine.reconsider_admission(child_task_id))
-                    new_children.append(child_task_id)
                     continue
-                child_advance = engine.materialize_child(handle, value_ref=element)
+                advance.extend(engine.materialize_child(handle, value_ref=element))
             except RegionError:
                 break  # a budget, seal, or denial stops further children
-            for child_task_id in child_advance.ready:
-                self._occurrences.register_locked(workflow_id, child_task_id, template)
-                new_children.append(child_task_id)
-            advance.extend(child_advance)
         advance.extend(engine.seal_spawn(handle))
-        self._committer.commit_new_children_locked(workflow_id, engine, new_children)
         return advance
 
     def _drive_workflow(self, workflow_id: str) -> None:

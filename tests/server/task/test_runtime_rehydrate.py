@@ -147,6 +147,7 @@ class FakeWorkflowRegistry:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: Any = None,
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()

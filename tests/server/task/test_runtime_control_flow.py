@@ -225,8 +225,12 @@ async def test_a_workflow_waiting_on_a_selector_read_stays_open() -> None:
     assert run.registry.control[run.workflow_id].open
     assert not run.settled()
     run.drive()
-    assert not run.registry.control[run.workflow_id].open
+    with run.runtime._lock:
+        assert not run.engine.awaits_control_reads()
     assert [run.name(t) for t in run.ready] == ["right_work"]
+    run.run("right_work")
+    run.run("after")
+    assert not run.registry.control[run.workflow_id].open
 
 
 _LOOP = f"""

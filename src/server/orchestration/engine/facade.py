@@ -955,6 +955,17 @@ class OrchestrationEngine:
         out a spawn, which no task of its own holds open."""
         return bool(self.pending_branch_reads() or self.awaiting_fanouts())
 
+    def has_unsettled_tasks(self) -> bool:
+        """Whether any work item a task runs as is still to settle."""
+        return any(
+            wi.legacy_task_id and wi.status not in TERMINAL_WORK_ITEM_STATUSES
+            for wi in self._ledger.work_items.values()
+        )
+
+    def task_work_items(self) -> list[WorkItem]:
+        """Every work item a task runs as."""
+        return [wi for wi in self._ledger.work_items.values() if wi.legacy_task_id]
+
     def control_failure(self) -> str | None:
         """Why the instance failed outside any task, if it has: the whole instance, or
         a control occurrence, failed."""
@@ -1056,7 +1067,12 @@ class OrchestrationEngine:
 
     def cancel_instance(self) -> Advance:
         """Cancel the whole workflow instance: the root scope and every descendant."""
+        self._failures.instance_cancelled = True
         return self.cancel_scope(self._ledger.root_scope.scope_id)
+
+    def instance_cancelled(self) -> bool:
+        """Whether the whole workflow instance was cancelled."""
+        return self._failures.instance_cancelled
 
     def fail_instance(self, reason: str) -> Advance:
         """Fail the whole workflow instance as a recorded terminal event.
