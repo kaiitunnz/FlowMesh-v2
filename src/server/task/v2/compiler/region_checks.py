@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ..representations.operators import (
+    AgentOperator,
     BranchRegion,
     JoinRegion,
     LogicalOperator,
@@ -44,6 +45,12 @@ def check_control_flow(
     diags: list[Diagnostic] = []
     diags.extend(_check_scopes(template, loc))
     arms = _route_arms(template, ops)
+    agent_spawns = {
+        ref.spawn_ref
+        for op in template.operators
+        if isinstance(op, AgentOperator)
+        for ref in op.child_region_refs
+    }
     for op in template.operators:
         match op:
             case BranchRegion():
@@ -52,6 +59,10 @@ def check_control_flow(
                 diags.extend(_check_one_live(op, template.edges, ops, arms, loc))
             case LoopContextRegion():
                 diags.extend(_check_loop(op, template, definitions, ops, arms, loc))
+            case SpawnRegion() if (
+                op.child_template_ref is not None and op.operator_id not in agent_spawns
+            ):
+                diags.extend(_check_operator_child_entry(op, template, loc))
             case SpawnRegion() if op.child_definition_ref is not None:
                 diags.extend(
                     _check_child_entry(op, template, definitions, ops, arms, loc)
@@ -432,6 +443,22 @@ def _return_routes(
             edge.to_port
         )
     return routes
+
+
+def _check_operator_child_entry(
+    op: SpawnRegion, template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    incoming = [e for e in template.edges if e.to_op == op.operator_id]
+    if len(incoming) == 1 and (incoming[0].to_port or "") in ("", "in"):
+        return []
+    return [
+        _error(
+            "spawn.param",
+            f"spawn {op.operator_id!r} fans out over exactly one unnamed input; a "
+            f"child task {op.child_template_ref!r} reads no other input",
+            loc.get(op.operator_id),
+        )
+    ]
 
 
 def _check_child_entry(

@@ -1150,3 +1150,24 @@ def test_a_branch_with_one_unnamed_input_selects_on_it() -> None:
         spec: {_ECHO}
 """
     _compile(_workflow(nodes))
+
+
+@pytest.mark.parametrize(
+    "dependency", ["{node: plan, input: x}", "plan, {node: other, input: y}"]
+)
+def test_a_spawn_of_a_task_fans_out_over_one_unnamed_input(dependency: str) -> None:
+    nodes = f"""
+      - name: plan
+        spec: {_ECHO}
+      - name: other
+        spec: {_ECHO}
+      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [{dependency}]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+"""
+    assert _codes(_workflow(nodes)) == ["spawn.param"]

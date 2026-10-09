@@ -115,9 +115,12 @@ metadata: {name: t}
 spec:
   graph:
     nodes:
+      - name: src
+        spec: {taskType: echo, data: {type: list, items: [k]}}
       - name: kid
         spec: {taskType: echo, data: {type: list, items: [k]}}
       - name: c
+        dependsOn: [src]
         region: {kind: call, child: kid, returns: [out]}
       - name: after
         dependsOn: [c]
@@ -238,9 +241,12 @@ metadata: {name: t}
 spec:
   graph:
     nodes:
+      - name: plan
+        spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: c
         spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: only
+        dependsOn: [plan]
         region: {kind: spawn, child: c, authority: {invoke: []}}
 """
 

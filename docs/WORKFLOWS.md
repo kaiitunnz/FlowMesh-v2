@@ -202,12 +202,12 @@ spec:
 ```
 
 Region kinds are `branch`, `merge`, `loop`, `spawn`, `join`, and `call` (`call`
-normalizes to a `spawn`/`join` pair). A spawn or call fans out over a task's
-result, a part of one, or a branch arm carrying one, and a join collects a
-spawn's children, so one of its inputs is a spawn. Only a join may depend on a
-spawn, and a node that depends on a call reads the call's join. A failed input
-fails the region and everything downstream of it, as a failed dependency fails a
-task.
+normalizes to a `spawn`/`join` pair). A spawn or call fans out over its one
+unnamed input: a task's result, a part of one, or a branch arm carrying one. A
+join collects a spawn's children, so one of its inputs is a spawn. Only a join may
+depend on a spawn, and a node that depends on a call reads the call's join. A
+failed input fails the region and everything downstream of it, as a failed
+dependency fails a task.
 
 A `dependsOn` entry is a node name or a mapping
 `{ node, port, input, project }`: `port` names the output it reads (a branch arm,
