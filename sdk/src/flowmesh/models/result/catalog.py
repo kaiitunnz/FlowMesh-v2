@@ -240,6 +240,7 @@ class RoutedValue(BaseExecutorResult):
 
     model_config = ConfigDict(extra="forbid")
 
+    routed: Literal[True] = Field(default=True, alias="__routed__")
     routed_value: Any
 
     @model_serializer(mode="wrap")
@@ -283,9 +284,9 @@ _RESULT_TAGS: frozenset[str] = frozenset(
 
 def _result_discriminator(value: Any) -> str:
     if isinstance(value, dict):
-        tag = value.get("task_type")
-        if tag is None and "routed_value" in value:
+        if value.get(_ROUTED_TAG) is True:
             return _ROUTED_TAG
+        tag = value.get("task_type")
     else:
         if isinstance(value, RoutedValue):
             return _ROUTED_TAG

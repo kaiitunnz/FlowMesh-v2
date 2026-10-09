@@ -19,6 +19,7 @@ from shared.schemas.result import (
     InferenceResult,
     OmniText2ImageResult,
     ResultEnvelope,
+    RoutedValue,
 )
 from shared.tasks.specs import EchoSpecStrict
 from shared.tasks.task_type import TaskType
@@ -255,3 +256,18 @@ def test_upstream_results_preserve_subclass_payload_over_the_wire() -> None:
     assert reloaded.upstreamResults is not None
     injected = reloaded.upstreamResults["echo-a"]
     assert injected.model_dump()["items"][0]["output"] == "literal_from_a"
+
+
+def test_only_a_tagged_payload_reads_as_a_routed_value() -> None:
+    routed = RoutedValue(routed_value={"draft": "z"})
+    stored = {"ok": True, "routed_value": 1, "custom": 2}
+
+    assert isinstance(
+        ResultEnvelope.model_validate_json(
+            ResultEnvelope(task_id="tsk-x", result=routed).model_dump_json()
+        ).result,
+        RoutedValue,
+    )
+    read = ResultEnvelope.model_validate({"task_id": "tsk-x", "result": stored}).result
+    assert type(read) is BaseExecutorResult
+    assert read.model_dump() == stored

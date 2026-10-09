@@ -6,11 +6,14 @@ in one typed map of results, so a value that is not a whole result rides in it a
 ``RoutedValue``, and every reader sees through it to the value it carries.
 """
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import ConfigDict, SerializerFunctionWrapHandler, model_serializer
+from pydantic import ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from ._base import BaseExecutorResult
+
+# The key a serialized ``RoutedValue`` carries, which alone tells it from a task result.
+ROUTED_TAG = "__routed__"
 
 
 class RoutedValue(BaseExecutorResult):
@@ -19,6 +22,7 @@ class RoutedValue(BaseExecutorResult):
 
     model_config = ConfigDict(extra="forbid")
 
+    routed: Literal[True] = Field(default=True, alias="__routed__")
     routed_value: Any
 
     @model_serializer(mode="wrap")
@@ -36,4 +40,4 @@ def routed_root(value: Any) -> Any:
     return value.routed_value if isinstance(value, RoutedValue) else value
 
 
-__all__ = ["RoutedValue", "routed_root"]
+__all__ = ["ROUTED_TAG", "RoutedValue", "routed_root"]

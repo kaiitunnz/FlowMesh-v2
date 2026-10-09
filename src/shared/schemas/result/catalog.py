@@ -36,7 +36,7 @@ from .payloads import (
     RagSearch,
     RagUsage,
 )
-from .routed import RoutedValue
+from .routed import ROUTED_TAG, RoutedValue
 
 
 class InferenceResult(StrictExecutorResult):
@@ -282,7 +282,7 @@ class SSHResult(StrictExecutorResult):
 
 
 _BASE_TAG = "__base__"
-_ROUTED_TAG = "__routed__"
+_ROUTED_TAG = ROUTED_TAG
 
 _RESULT_TAGS: frozenset[str] = frozenset(
     {
@@ -319,9 +319,9 @@ def _result_discriminator(value: Any) -> str:
     permissive base model.
     """
     if isinstance(value, dict):
-        tag = value.get("task_type")
-        if tag is None and "routed_value" in value:
+        if value.get(_ROUTED_TAG) is True:
             return _ROUTED_TAG
+        tag = value.get("task_type")
     else:
         if isinstance(value, RoutedValue):
             return _ROUTED_TAG
