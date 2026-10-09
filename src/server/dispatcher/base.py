@@ -824,21 +824,21 @@ class Dispatcher:
         )
 
         # 8. Give the task what it reads and writes its content under, then publish it
-        gate = self._runtime.begin_publish(
+        match self._runtime.begin_publish(
             task_id, worker, dispatch_id, input_preparation=preparing
-        )
-        if gate is PublishGate.NOT_PENDING:
-            return True
-        if gate is PublishGate.REPORTING:
-            # The runtime queues the task again once its report is handled.
-            self._runtime.release_merge(task_id)
-            return True
-        if gate is PublishGate.NOT_DURABLE:
-            # The task waits behind the queue, spending no attempt, while the runtime
-            # makes what the dispatch would carry durable.
-            self._runtime.release_merge(task_id)
-            self.requeue_task(task_id, reason="not_durable", count_retry=False)
-            return False
+        ):
+            case PublishGate.NOT_PENDING:
+                return True
+            case PublishGate.REPORTING:
+                # The runtime queues the task again once its report is handled.
+                self._runtime.release_merge(task_id)
+                return True
+            case PublishGate.NOT_DURABLE:
+                # The task waits behind the queue, spending no attempt, while the
+                # runtime makes what the dispatch would carry durable.
+                self._runtime.release_merge(task_id)
+                self.requeue_task(task_id, reason="not_durable", count_retry=False)
+                return False
         # The worker is reserved BUSY for this dispatch before it can start the task,
         # so only the IDLE that ends this dispatch frees it.
         if not self._reserve_worker(worker, task_id, dispatch_id):
