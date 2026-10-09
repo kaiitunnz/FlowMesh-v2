@@ -640,7 +640,8 @@ class JoinRegion(_OperatorBase):
 
     ``first_k`` and ``predicate`` parametrize the early-completion policies; a no-winner
     early join resolves ``EXPLICIT_EMPTY`` unless ``no_winner_failure`` opts into
-    ``DECLARED_FAILURE``.
+    ``DECLARED_FAILURE``. A call's join delivers its one child's returned value, each
+    return port carrying the value returned through it.
     """
 
     kind: Literal[OperatorKind.JOIN] = OperatorKind.JOIN
@@ -649,6 +650,7 @@ class JoinRegion(_OperatorBase):
     first_k: int | None = None
     predicate: JoinPredicate | None = None
     no_winner_failure: bool = False
+    call: bool = False
 
 
 class LoopContextRegion(_OperatorBase):

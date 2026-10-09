@@ -8,6 +8,7 @@ from server.orchestration.state import (
     ValueRef,
     WorkItemStatus,
 )
+from server.task.v2.representations.operators import JoinRegion, OperatorKind
 
 from .control_flow import ECHO, Driver, workflow
 
@@ -583,3 +584,78 @@ def test_a_join_whose_route_fails_after_its_children_close_fails() -> None:
     collect = run.engine.control_state("collect")
     assert collect is None or collect.status is not ControlStatus.LIVE
     assert run.ops["after"] in run.failed
+
+
+_CALLS = f"""
+    templates:
+      - name: two
+        inputs: [{{name: e, role: param}}]
+        returns: [{{name: a}}, {{name: b}}]
+        nodes:
+          - name: w
+            dependsOn: [{{node: $ingress, port: e, input: e}}]
+            spec: {ECHO}
+        edges:
+          - from: {{node: w}}
+            to: {{node: $return, port: a}}
+          - from: {{node: w}}
+            to: {{node: $return, port: b}}
+      - name: one
+        inputs: [{{name: e, role: param}}]
+        returns: [{{name: out}}]
+        nodes:
+          - name: v
+            dependsOn: [{{node: $ingress, port: e, input: e}}]
+            spec: {ECHO}
+        edges:
+          - from: {{node: v}}
+            to: {{node: $return, port: out}}
+"""
+
+_CALL_NODES = f"""
+      - name: src
+        spec: {ECHO}
+      - name: c
+        dependsOn: [src]
+        region: {{kind: call, child: two, returns: [a, b]}}
+      - name: use_a
+        dependsOn: [{{node: c, port: a, input: x}}]
+        spec: {ECHO}
+      - name: use_b
+        dependsOn: [{{node: c, port: b, input: x}}]
+        spec: {ECHO}
+      - name: c1
+        dependsOn: [src]
+        region: {{kind: call, child: one, returns: [out]}}
+      - name: use_one
+        dependsOn: [{{node: c1, port: out, input: x}}]
+        spec: {ECHO}
+"""
+
+
+def test_each_call_return_port_carries_the_value_returned_through_it() -> None:
+    run = Driver(workflow(_CALL_NODES, _CALLS))
+    run.run_one("src")
+    element = ValueRef(kind="inline", literal="e")
+    spawns = {
+        op_id
+        for op_id, op in run.engine._topology.operators.items()
+        if op.kind is OperatorKind.SPAWN
+    }
+    for spawn in sorted(spawns):
+        run.apply(run.engine.enter_definition_child(spawn, 0, element))
+        run.apply(run.engine.seal_spawn(spawn))
+    w, v = (run.run_one(name) for name in ("w", "v"))
+    joins = {
+        op.operator_id: run.engine.control_state(op.operator_id)
+        for op in run.engine._topology.operators.values()
+        if isinstance(op, JoinRegion) and op.call
+    }
+    returned = {
+        port: value.legacy_task_id
+        for state in joins.values()
+        if state is not None
+        for port, value in state.outputs.items()
+    }
+    assert returned == {"a": w, "b": w, "out": v}
+    assert sorted(run.name(t) for t in run.ready) == ["use_a", "use_b", "use_one"]

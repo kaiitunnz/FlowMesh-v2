@@ -127,25 +127,32 @@ def _merged_value(op: MergeRegion, inputs: list[Incoming]) -> ValueRef:
 def _port_outputs(op: MergeRegion | JoinRegion, value: ValueRef) -> dict[str, ValueRef]:
     """A merge's or join's value under each output port it declares.
 
-    A join declaring several ports is a call returning a bundle: each port carries
-    its own member of the one child's returned bundle.
+    A call's join carries its one child's returned value: each return port the value
+    returned through it, and a port the child returned nothing through no value.
     """
     ports = [port.name for port in op.outputs]
-    if len(ports) == 1:
-        return {ports[0]: value}
-    bundle = (
+    if value.kind == "empty":
+        return dict.fromkeys(ports, value)
+    if not isinstance(op, JoinRegion) or not op.call:
+        return {port: value for port in ports[:1]}
+    returned = (
         value.members[0].value_ref
         if value.kind == "aggregate" and len(value.members) == 1
         else None
     )
+    if returned is None:
+        return {}
+    if len(ports) == 1:
+        return {ports[0]: returned}
     members = (
-        {member.key: member.value_ref for member in bundle.members}
-        if bundle is not None and bundle.kind == "bundle"
+        {member.key: member.value_ref for member in returned.members}
+        if returned.kind == "bundle"
         else {}
     )
     return {
-        port: members.get(port) or (bundle if bundle is not None else value)
+        port: value_ref
         for port in ports
+        if (value_ref := members.get(port)) is not None
     }
 
 

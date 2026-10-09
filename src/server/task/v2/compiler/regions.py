@@ -1100,6 +1100,7 @@ def _lower_call(
         inputs=(Port(name="child"),),
         outputs=tuple(Port(name=port) for port in returns) or (Port(name="out"),),
         completion=JoinCompletion.ALL_SUCCEED,
+        call=True,
     )
     _add_operator(spawn, region, acc)
     _add_operator(join, region, acc)
