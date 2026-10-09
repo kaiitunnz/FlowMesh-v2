@@ -458,6 +458,10 @@ def _check_agent_inputs(
     for edge in template.edges:
         if edge.to_port and not edge.feedback:
             bound[edge.to_op].add(edge.to_port)
+    for definition in template.definitions:
+        for entry in definition.entries:
+            if entry.to_port:
+                bound[entry.to_op].add(entry.to_port)
     for op in template.operators:
         if not isinstance(op, AgentOperator):
             continue

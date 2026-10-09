@@ -43,7 +43,6 @@ from server.task.v2.representations.operators import (
     JoinRegion,
     LeafOperator,
     LogicalOperator,
-    LoopContextRegion,
     OperatorKind,
     Port,
     SpawnRegion,
@@ -72,6 +71,7 @@ from shared.telemetry.semconv import (
 )
 from shared.utils.time import now_iso, parse_iso_datetime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
+from tests.server.orchestration.control_flow import ECHO, compile_text, workflow
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
@@ -214,15 +214,6 @@ def _spawn_join_bundle() -> PersistedV2Workflow:
         [spawn, join, _leaf("body")],
         [TemplateEdge(from_op="S", to_op="J")],
         (_decl("out:J", "J", release=ReleaseConditionKind.SCOPE_CLOSED),),
-    )
-
-
-def _loop_bundle() -> PersistedV2Workflow:
-    loop = LoopContextRegion(operator_id="L", source_ref="L", loop_coordinate="t")
-    return _bundle(
-        [loop],
-        [],
-        (_decl("out:L", "L", release=ReleaseConditionKind.SCOPE_CLOSED),),
     )
 
 
@@ -577,23 +568,65 @@ def test_top_level_spawn_root_gets_an_operator_span_at_scope_release() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_loop_iteration_activation_produces_no_span_and_does_not_raise() -> None:
+def test_a_loop_body_occurrence_emits_its_own_span_and_control_ones_none() -> None:
     tracer, exporter, config = recording_tracer(TelemetryLevel.FULL)
     emitter = TelemetrySpanEmitter(tracer, config, _WORKFLOW_ID)
-    eng = _engine(_loop_bundle(), emitter=emitter, granted_interfaces=frozenset())
+    bundle = compile_text(
+        workflow(
+            f"""
+      - name: seed
+        spec: {ECHO}
+      - name: loop
+        dependsOn: [{{node: seed, input: state}}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: t
+          carried: [{{name: state}}]
+""",
+            f"""
+    templates:
+      - name: body
+        inputs: [{{name: state, role: carried}}]
+        nodes:
+          - name: step
+            dependsOn: [{{node: $ingress, port: state, input: state}}]
+            spec: {ECHO}
+          - name: route
+            dependsOn: [{{node: step, input: input}}]
+            region:
+              kind: branch
+              inputs: [{{name: input}}]
+              outputs: [{{name: again}}, {{name: done}}]
+              selection: {{input: input}}
+        edges:
+          - from: {{node: route, port: again}}
+            to: {{node: $feedback, port: state}}
+          - from: {{node: route, port: done}}
+            to: {{node: $egress, port: state}}
+""",
+        )
+    )
+    eng = _engine(bundle, emitter=emitter, granted_interfaces=frozenset())
+    (seed,) = eng.initial_advance().ready
+    _dispatch(eng, seed)
+    (step,) = eng.on_succeeded(seed).ready
+    _dispatch(eng, step)
+    eng.on_succeeded(step)
+    key, _ = eng.pending_branch_reads()[0]
+    eng.accept_branch_selection(key, "done")
+    assert eng.region_closed("loop") or eng.control_state("loop") is not None
 
-    iteration = eng.loop_feedback("L")
-    eng.settle_iteration(iteration)
-    eng.loop_seal("L")
-    assert eng.region_closed("L")
-
-    operator_spans = _spans_named(exporter, SPAN_OPERATOR)
-    iteration_span = [
-        s
-        for s in operator_spans
-        if _attrs(s)["flowmesh.logical.activation_id"] == iteration
-    ]
-    assert iteration_span == [], "an iteration activation has no observable extent"
+    activations = {
+        _attrs(s)["flowmesh.logical.activation_id"]
+        for s in _spans_named(exporter, SPAN_OPERATOR)
+    }
+    (route,) = eng.occurrences(
+        next(op.operator_id for op in bundle.template.operators if op.kind == "branch")
+    )
+    occurrence = eng.occurrence_of(step)
+    assert occurrence is not None and occurrence.activation_id in activations
+    assert route.activation_id not in activations, "a control occurrence has no extent"
 
 
 # --------------------------------------------------------------------------- #

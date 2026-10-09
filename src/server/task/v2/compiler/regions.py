@@ -714,8 +714,15 @@ def _branch(region: ParsedRegion) -> BranchRegion:
                 "region.selection.cases maps each literal value to an output port",
                 name,
             )
+        if bad := [v for v in raw_cases if not isinstance(v, str)]:
+            raise compile_error(
+                "branch.bad-case",
+                f"case value {bad[0]!r} is not a string; a selector matches a string, "
+                "so quote the case value",
+                name,
+            )
         cases = tuple(
-            SelectionCase(value=str(value), port=str(port))
+            SelectionCase(value=value, port=str(port))
             for value, port in raw_cases.items()
         )
     return BranchRegion(

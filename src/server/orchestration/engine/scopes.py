@@ -3,7 +3,13 @@
 from shared.utils import new_scope_id
 
 from ..guardrails import ScopeBudget
-from ..state import CapabilityStatus, ProgressAxis, ProgressCapability, Scope
+from ..state import (
+    TERMINAL_WORK_ITEM_STATUSES,
+    CapabilityStatus,
+    ProgressAxis,
+    ProgressCapability,
+    Scope,
+)
 from .advance import RegionError
 from .authority import AuthorityLedger
 from .failures import FailureLedger
@@ -64,20 +70,48 @@ class ScopeProgress:
         )
         return scope.scope_id
 
-    def open_loop(
-        self, opener_activation: str, *, parent_scope_id: str | None = None
-    ) -> str:
+    def open_loop(self, opener_activation: str, parent_scope_id: str) -> str:
+        """Open a loop's progress scope under its enclosing scope.
+
+        Entering a loop moves progress, never authority: the scope carries no grant of
+        its own and runs under its enclosing scope's.
+        """
         if opener_activation in self._ledger.scope_by_activation:
             return self._ledger.scope_by_activation[opener_activation]
-        scope = self._new_child_scope(opener_activation, parent_scope_id)
+        parent = self._ledger.scopes[parent_scope_id]
+        scope = Scope(
+            scope_id=new_scope_id(),
+            instance_id=self._ledger.workflow_instance.instance_id,
+            parent_scope_id=parent.scope_id,
+            owner_operator_id=self._ledger.activations[opener_activation].operator_id,
+            owner_activation_id=opener_activation,
+            depth=parent.depth,
+        )
+        self._ledger.add_scope(scope)
         self._register_scope_owner(scope)
-        self._ledger.loop_time[scope.scope_id] = 0
         self._acquire_capability(scope.scope_id, ProgressAxis.LOOP_TIME, coordinate=0)
         self._ledger.emit(
             "loop_ingress",
             operator_id=scope.owner_operator_id,
             detail={"scope": scope.scope_id},
         )
+        return scope.scope_id
+
+    def open_context_scope(self, child_activation: str, parent_scope_id: str) -> str:
+        """Open the progress scope of a child that runs a region definition.
+
+        It inherits the grant of the child-init scope that created the child.
+        """
+        parent = self._ledger.scopes[parent_scope_id]
+        scope = Scope(
+            scope_id=new_scope_id(),
+            instance_id=self._ledger.workflow_instance.instance_id,
+            parent_scope_id=parent.scope_id,
+            owner_activation_id=child_activation,
+            depth=parent.depth,
+        )
+        self._ledger.add_scope(scope)
+        self._register_scope_owner(scope)
         return scope.scope_id
 
     def _acquire_capability(
@@ -126,7 +160,7 @@ class ScopeProgress:
             grant_id=grant.grant_id,
             depth=parent.depth + 1,
         )
-        self._ledger.scopes[scope.scope_id] = scope
+        self._ledger.add_scope(scope)
         self._authority.store_grant(
             grant.model_copy(update={"scope_id": scope.scope_id})
         )
@@ -140,11 +174,40 @@ class ScopeProgress:
                 scope.owner_operator_id, []
             ).append(scope.owner_activation_id)
 
+    def scope_drained(self, scope_id: str) -> bool:
+        """Whether nothing can still arrive in a scope: every occurrence and child it
+        accounts for is terminal, no spawn of it can add a child, and every scope
+        nested under it has drained too."""
+        ledger = self._ledger
+        for key in ledger.occurrences_by_scope.get(scope_id, ()):
+            if (wi_id := ledger.wi_by_occurrence.get(key)) is not None:
+                if ledger.work_items[wi_id].status not in TERMINAL_WORK_ITEM_STATUSES:
+                    return False
+            elif not ledger.control_terminal(key):
+                return False
+        for child in ledger.children_by_scope.get(scope_id, ()):
+            wi_id = ledger.wi_by_activation.get(child)
+            if (
+                wi_id is not None
+                and ledger.work_items[wi_id].status not in TERMINAL_WORK_ITEM_STATUSES
+            ):
+                return False
+        cap = ledger.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        if cap is not None and cap.status is CapabilityStatus.OPEN:
+            return False
+        return all(
+            self.scope_drained(sub) for sub in ledger.subscopes.get(scope_id, ())
+        )
+
     def frontier_closed(self, scope_id: str) -> None:
         self._ledger.emit("frontier_closed", detail={"scope": scope_id})
 
     def charge_activation(self) -> None:
-        if self._ledger.dynamic_activations >= self._budget.max_activations:
+        self.charge_activations(1)
+
+    def charge_activations(self, count: int) -> None:
+        """Check a batch of new activations against the activation budget."""
+        if self._ledger.dynamic_activations + count > self._budget.max_activations:
             self.exhaust_budget("activations", self._budget.max_activations)
 
     def exhaust_budget(self, budget: str, limit: int) -> None:
@@ -191,11 +254,3 @@ class ScopeProgress:
             else None
         )
         return self.open_child_init_scope(opener, parent_scope_id=parent)
-
-    def require_loop_scope(self, handle: str) -> str:
-        if (scope_id := self._ledger.scope_id_for(handle)) is not None:
-            return scope_id
-        opener = self._ledger.resolve_opener_activation(handle)
-        if opener is None:
-            raise RegionError(f"{handle!r} has no opener activation")
-        return self.open_loop(opener)

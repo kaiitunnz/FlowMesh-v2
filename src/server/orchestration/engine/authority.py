@@ -150,9 +150,17 @@ class AuthorityLedger:
     def grant_for_scope(
         self, scope_id: str
     ) -> AuthorityGrant | DelegatedAuthorityGrant:
-        scope = self._ledger.scopes.get(scope_id)
-        if scope and scope.grant_id and scope.grant_id in self.grants:
-            return self.grants[scope.grant_id]
+        """The grant a scope runs under: its own, else its nearest enclosing scope's.
+
+        A loop or a definition child's scope holds no grant of its own, so it runs
+        under the grant of the scope it entered from; only the root falls back to the
+        root grant.
+        """
+        current: str | None = scope_id
+        while (scope := self._ledger.scopes.get(current or "")) is not None:
+            if scope.grant_id and scope.grant_id in self.grants:
+                return self.grants[scope.grant_id]
+            current = scope.parent_scope_id
         return self._ledger.root_grant
 
     def _policy_interfaces(self) -> tuple[str, ...]:

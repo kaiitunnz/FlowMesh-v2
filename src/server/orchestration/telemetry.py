@@ -97,12 +97,12 @@ __all__ = [
 
 # Operator kinds whose root activation settles inside the ledger and never
 # dispatches; distinct vocabulary from an Activation's own kind
-# (``child``/``iteration``/``region``).
+# (``child``/``occurrence``/``region``).
 _NO_EXTENT_OPERATOR_KINDS = REGION_OPERATOR_KINDS
-# ``iteration`` activations (``engine/loops.py::loop_feedback``) own neither a work
-# item nor a scope: unlike a spawn child, the loop primitive materializes no
-# dispatchable body for its own activation. Checked directly since it is already a
-# first-class Activation.kind, not an operator id needing a cross-reference.
+# An ``occurrence`` activation of a control operator inside a region definition owns
+# neither a work item nor a scope: like a root control, it settles in the ledger. An
+# occurrence of a leaf or agent owns a work item, which is checked first. A stored
+# ``iteration`` activation is the same shape.
 #
 # ``leaf``/``agent`` root activations that name a spawn's ``child_template_ref`` are
 # the same story under a different kind: ``engine/facade.py::build`` excludes a child
@@ -112,7 +112,7 @@ _NO_EXTENT_OPERATOR_KINDS = REGION_OPERATOR_KINDS
 # only once that has already come back empty -- a genuinely dispatchable leaf/agent
 # always owns a work item from the moment ``build()`` constructs it, so this never
 # masks one that merely has not settled yet.
-_NO_EXTENT_ACTIVATION_KINDS = frozenset({"iteration", "leaf", "agent"})
+_NO_EXTENT_ACTIVATION_KINDS = frozenset({"occurrence", "iteration", "leaf", "agent"})
 
 
 _logger = logging.getLogger("orchestration-telemetry")

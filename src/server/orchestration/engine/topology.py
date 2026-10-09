@@ -7,11 +7,18 @@ from ...task.v2.representations.operators import (
     LeafOperator,
     LeafProfile,
     LogicalOperator,
+    LoopContextRegion,
     OperatorKind,
     RecoveryClass,
     SpawnRegion,
 )
 from ...task.v2.representations.results import ResultDeclaration
+from ...task.v2.representations.template import (
+    EntryBinding,
+    RegionDefinition,
+    ReturnBinding,
+    TemplateEdge,
+)
 
 _REGION_KINDS = frozenset(
     {
@@ -76,6 +83,32 @@ class PlanTopology:
             for ref in op.child_region_refs
         }
         self.forward = self._build_topology()
+        self.definitions: dict[str, RegionDefinition] = {
+            d.definition_id: d for d in bundle.template.definitions
+        }
+        # The definition each member runs in; a root operator is absent.
+        self.definition_of = bundle.template.definition_of()
+        self.incoming: dict[str, list[TemplateEdge]] = {op: [] for op in self.operators}
+        self.outgoing: dict[str, list[TemplateEdge]] = {op: [] for op in self.operators}
+        for edge in bundle.template.edges:
+            if (
+                edge.feedback
+                or edge.from_op not in self.operators
+                or edge.to_op not in self.operators
+                or self._is_spawn_join_edge(edge.from_op, edge.to_op)
+            ):
+                continue
+            self.incoming[edge.to_op].append(edge)
+            self.outgoing[edge.from_op].append(edge)
+        self.entries_into: dict[str, list[EntryBinding]] = {}
+        self.returns_from: dict[str, list[tuple[str, ReturnBinding]]] = {}
+        for definition in bundle.template.definitions:
+            for entry in definition.entries:
+                self.entries_into.setdefault(entry.to_op, []).append(entry)
+            for binding in definition.return_bindings:
+                self.returns_from.setdefault(binding.from_op, []).append(
+                    (definition.definition_id, binding)
+                )
 
     def _build_topology(self) -> dict[str, list[str]]:
         """Forward successor edges, excluding feedback and spawn->join binding edges."""
@@ -156,8 +189,27 @@ class PlanTopology:
                 return edge.to_op
         return None
 
+    def loop_of_body(self, definition_id: str) -> str | None:
+        """The loop operator whose body a definition is."""
+        return next(
+            (
+                op.operator_id
+                for op in self.operators.values()
+                if isinstance(op, LoopContextRegion) and op.body_ref == definition_id
+            ),
+            None,
+        )
+
     def edge_from_port(self, from_op: str, to_op: str) -> str | None:
         for edge in self.bundle.template.edges:
             if edge.from_op == from_op and edge.to_op == to_op:
                 return edge.from_port
         return None
+
+
+def edge_key(edge: TemplateEdge) -> str:
+    """A stable identity for an edge; an edge compiled without one is named by its
+    endpoints and ports."""
+    return edge.edge_id or (
+        f"{edge.from_op}.{edge.from_port or ''}->{edge.to_op}.{edge.to_port or ''}"
+    )

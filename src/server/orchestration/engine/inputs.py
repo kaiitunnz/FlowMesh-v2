@@ -1,7 +1,16 @@
 """Accepted agent inputs of one workflow instance."""
 
-from ...task.v2.representations.operators import OperatorKind
-from ..state import AcceptedInput, PublicationOutcome, ValueRef, WorkItemStatus
+from ...task.v2.representations.operators import AgentOperator, OperatorKind
+from ...task.v2.representations.template import TemplateEdge
+from ..state import (
+    AcceptedInput,
+    AcceptedInputMember,
+    Occurrence,
+    PublicationOutcome,
+    ValueRef,
+    WorkItem,
+    WorkItemStatus,
+)
 from ..tool_dispatch import AgentInputPlan, InputMemberPlan, InputPortPlan
 from .ledger import OrchestrationLedger
 from .topology import PlanTopology
@@ -28,6 +37,70 @@ class AcceptedInputLedger:
             return
         self.accepted_inputs.append(accepted)
         existing.append(accepted)
+
+    def record_routed_inputs(
+        self,
+        occurrence: Occurrence,
+        wi: WorkItem,
+        inputs: list[tuple[TemplateEdge | None, str, str | None, ValueRef | None]],
+    ) -> None:
+        """Record an agent occurrence's accepted inputs from the routes it took.
+
+        ``inputs`` holds, per resolved input, its edge (None for a definition entry),
+        target port, source occurrence and value. An occurrence inside a region
+        definition takes every declared port this way; a root agent takes the ports a
+        merge, branch or loop feeds, whose value no task holds.
+        """
+        op = self._topology.operators.get(wi.operator_id)
+        if not isinstance(op, AgentOperator):
+            return
+        dynamic = bool(occurrence.context_id or occurrence.time)
+        for ordinal, (edge, port, source, value) in enumerate(inputs):
+            if port not in op.declared_input_ports or value is None:
+                continue
+            source_op = edge.from_op if edge is not None else occurrence.operator_id
+            if not dynamic and self._topology.kind(source_op) in (
+                OperatorKind.LEAF,
+                OperatorKind.AGENT,
+                OperatorKind.JOIN,
+            ):
+                continue
+            members = (
+                tuple(
+                    AcceptedInputMember(
+                        source_operator_id=source_op,
+                        source_output_port=edge.from_port if edge else None,
+                        source_activation_id=source or occurrence.key,
+                        outcome=member.outcome,
+                        value_ref=member.value_ref,
+                        ordinal=index,
+                    )
+                    for index, member in enumerate(value.members)
+                )
+                if value.kind == "aggregate"
+                else (
+                    AcceptedInputMember(
+                        source_operator_id=source_op,
+                        source_output_port=edge.from_port if edge else None,
+                        source_activation_id=source or occurrence.key,
+                        outcome=(
+                            PublicationOutcome.EXPLICIT_EMPTY
+                            if value.kind == "empty"
+                            else PublicationOutcome.SUCCESS
+                        ),
+                        value_ref=value,
+                    ),
+                )
+            )
+            self.record_accepted_input(
+                AcceptedInput(
+                    activation_id=wi.activation_id,
+                    target_port=port,
+                    provenance="routed",
+                    members=members,
+                    ordinal=ordinal,
+                )
+            )
 
     def accepted_inputs_for(self, activation_id: str) -> tuple[AcceptedInput, ...]:
         """The recorded accepted inputs for one activation, ordered by ordinal."""
@@ -126,7 +199,7 @@ class AcceptedInputLedger:
                     )
                     ordinal += 1
             else:
-                src_wi_id = self._ledger.wi_by_operator.get(source)
+                src_wi_id = self._ledger.wi_by_occurrence.get(source)
                 src_wi = self._ledger.work_items.get(src_wi_id) if src_wi_id else None
                 if src_wi is None or src_wi.outcome is None:
                     return None

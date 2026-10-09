@@ -3,10 +3,11 @@
 from collections import Counter
 from collections.abc import Iterable
 
-from ...task.v2.representations.operators import OperatorKind
+from ..guardrails import ScopeBudget
 from ..state import (
     AuthorityDecisionKind,
     LedgerSnapshot,
+    LoopInstanceStatus,
     PublicationOutcome,
     ResultPublication,
     ResultSlot,
@@ -53,6 +54,7 @@ class SnapshotCodec:
         authority: AuthorityLedger,
         boundaries: BoundaryLedger,
         attempt_lifecycle: AttemptLifecycle,
+        budget: ScopeBudget,
     ) -> None:
         self._ledger = ledger
         self._topology = topology
@@ -63,13 +65,18 @@ class SnapshotCodec:
         self._authority = authority
         self._boundaries = boundaries
         self._attempt_lifecycle = attempt_lifecycle
+        self._budget = budget
 
     def restore(self, snapshot: LedgerSnapshot) -> None:
-        self._ledger.scopes = {s.scope_id: s for s in snapshot.scopes}
+        self._ledger.scopes = {}
+        self._ledger.subscopes = {}
+        for scope in snapshot.scopes:
+            self._ledger.add_scope(scope)
         self._ledger.scopes.setdefault(
             self._ledger.root_scope.scope_id, self._ledger.root_scope
         )
         self._ledger.activations = {}
+        self._ledger.children_by_scope = {}
         self._ledger.scope_population = Counter()
         self._ledger.scope_children = Counter()
         self._ledger.dynamic_activations = 0
@@ -89,7 +96,7 @@ class SnapshotCodec:
         # A stored ledger may hold a nested level's aggregate after its root level's;
         # the root level's is the one delivered downstream.
         for aggregate in self._ledger.region_aggregates:
-            join_op = aggregate.join_operator_id
+            join_op = aggregate.occurrence or aggregate.join_operator_id
             if join_op not in self._ledger.aggregate_by_join or not any(
                 (act := self._ledger.activations.get(member.child_activation_id))
                 is not None
@@ -142,12 +149,34 @@ class SnapshotCodec:
         # The operator index resolves a static leaf's forward-record successor; a
         # dispatched child or iteration shares its body operator across instances, so it
         # is addressed by task or activation, never by operator.
-        self._ledger.wi_by_operator = {
+        self._ledger.occurrences = {}
+        self._ledger.occurrences_by_scope = {}
+        self._ledger.occurrence_by_activation = {}
+        for occurrence in snapshot.occurrences:
+            self._ledger.add_occurrence(occurrence)
+        self._ledger.wi_by_occurrence = {
             w.operator_id: w.work_item_id
             for w in self._ledger.work_items.values()
             if w.legacy_task_id
             and not self._ledger.is_dynamic_activation(w.activation_id)
         }
+        for w in self._ledger.work_items.values():
+            if (
+                key := self._ledger.occurrence_by_activation.get(w.activation_id)
+            ) is not None:
+                self._ledger.wi_by_occurrence[key] = w.work_item_id
+        self._ledger.control_states = {c.key: c for c in snapshot.control_states}
+        self._ledger.branch_decisions = {
+            d.occurrence: d for d in snapshot.branch_decisions
+        }
+        self._ledger.loop_instances = {i.scope_id: i for i in snapshot.loop_instances}
+        self._ledger.loop_by_occurrence = {
+            i.occurrence: i.scope_id for i in snapshot.loop_instances
+        }
+        self._ledger.iterations = {
+            (r.loop, r.iteration): r for r in snapshot.iteration_resolutions
+        }
+        self._ledger.child_contexts = {c.context_id: c for c in snapshot.child_contexts}
         self._ledger.wi_by_activation = {
             w.activation_id: w.work_item_id for w in self._ledger.work_items.values()
         }
@@ -174,22 +203,37 @@ class SnapshotCodec:
                 self._ledger.owner_acts_by_operator.setdefault(
                     s.owner_operator_id, []
                 ).append(s.owner_activation_id)
-        self._ledger.loop_time = {}
+        # The control occurrence owning each scope it opened: a root control through its
+        # control activation, an occurrence through its own activation.
+        self._ledger.scope_occurrence = {}
         for scope in self._ledger.scopes.values():
-            owner = scope.owner_operator_id
-            if owner and self._topology.kind(owner) is OperatorKind.LOOP_CONTEXT:
-                self._ledger.loop_time[scope.scope_id] = max(
-                    (
-                        a.loop_time
-                        for a in self._ledger.activations.values()
-                        if a.scope_id == scope.scope_id
-                    ),
-                    default=0,
-                )
+            owner_act, owner_op = scope.owner_activation_id, scope.owner_operator_id
+            if owner_act is None or owner_op is None:
+                continue
+            if (
+                key := self._ledger.occurrence_by_activation.get(owner_act)
+            ) is not None:
+                self._ledger.scope_occurrence[scope.scope_id] = key
+            elif self._topology.is_control(owner_op) and (
+                owner_act == self._ledger.control_activation(owner_op)
+            ):
+                self._ledger.scope_occurrence[scope.scope_id] = owner_op
+        for instance in self._ledger.loop_instances.values():
+            self._ledger.scope_occurrence[instance.scope_id] = instance.occurrence
         # Released scopes are authoritative scope-level state, restored directly rather
         # than re-derived from records: a recursive region's levels share one join/loop
         # operator, so a record could not attribute a release to the right level.
         self._ledger.released_scopes = set(snapshot.released_scopes)
+        self._ledger.active_loops = {
+            i.scope_id
+            for i in snapshot.loop_instances
+            if i.status in (LoopInstanceStatus.OPEN, LoopInstanceStatus.EXITED)
+        }
+        self._ledger.active_contexts = {
+            c.context_id
+            for c in snapshot.child_contexts
+            if c.scope_id not in self._ledger.released_scopes
+        }
         self._failures.failed_regions = set(snapshot.failed_regions)
         self._failures.failed_scopes = set(snapshot.failed_scopes)
         # A ledger stored without failure reasons names each failed work item's own.
@@ -242,4 +286,11 @@ class SnapshotCodec:
             failed_scopes=sorted(self._failures.failed_scopes),
             failure_reasons=dict(self._failures.failure_reasons),
             next_seq=self._ledger.next_seq,
+            occurrences=list(self._ledger.occurrences.values()),
+            control_states=list(self._ledger.control_states.values()),
+            branch_decisions=list(self._ledger.branch_decisions.values()),
+            loop_instances=list(self._ledger.loop_instances.values()),
+            iteration_resolutions=list(self._ledger.iterations.values()),
+            child_contexts=list(self._ledger.child_contexts.values()),
+            max_loop_iterations=self._budget.max_loop_iterations,
         )

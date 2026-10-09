@@ -345,6 +345,7 @@ def _diamond_with(old: str, new: str) -> str:
             "branch.unported-dependency",
         ),
         ("rejected: right", "rejected: nowhere", "branch.bad-case"),
+        ("accepted: left", "yes: left", "branch.bad-case"),
         ("combination: one_live", "combination: first", "region.bad-combination"),
         (
             "input: input\n            field",

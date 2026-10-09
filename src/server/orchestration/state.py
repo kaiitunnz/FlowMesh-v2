@@ -30,6 +30,7 @@ from ..task.v2.representations.operators import (
     EffectReplayContract,
     ModelRef,
     RecoveryClass,
+    SelectorStep,
 )
 from ..utils.time import now_iso
 
@@ -42,10 +43,11 @@ class WorkItemStatus(StrEnum):
     DISPATCHED = "dispatched"  # an attempt is in flight
     SETTLED = "settled"  # terminal, carries a settled outcome
     CANCELLED = "cancelled"  # terminal, withdrawn by cancellation
+    SKIPPED = "skipped"  # terminal, on a route that delivers it no record
 
 
 TERMINAL_WORK_ITEM_STATUSES = frozenset(
-    {WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED}
+    {WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED, WorkItemStatus.SKIPPED}
 )
 """The work-item statuses past which no further attempt is admissible."""
 
@@ -142,6 +144,24 @@ class ValueRef(BaseModel):
     collection_key: str | None = None  # element selector into a producer collection
     literal: str | None = None  # a bounded, immutable inline child-init value
     model_ref: ModelRef | None = None
+    # A pure field/index projection a reader applies to the referenced value.
+    projection: tuple[SelectorStep, ...] = ()
+    # The ordered members of an aggregate ("aggregate"), or the named values of a
+    # multi-port bundle ("bundle").
+    members: tuple["ValueMember", ...] = ()
+
+
+class ValueMember(BaseModel):
+    """One member of an aggregate or bundle value."""
+
+    model_config = ConfigDict(frozen=True)
+
+    key: str
+    outcome: PublicationOutcome
+    value_ref: ValueRef | None = None
+
+
+ValueRef.model_rebuild()
 
 
 class BoundaryEvent(BaseModel):
@@ -300,6 +320,9 @@ class Record(BaseModel):
     scope_id: str  # scope-progress key
     loop_time: int = 0
     value_ref: ValueRef | None = None
+    # The occurrence it left from, whose key carries its context and nested time.
+    occurrence: str = ""
+    source_port: str | None = None
 
 
 class RegionAggregateMember(BaseModel):
@@ -333,6 +356,7 @@ class RegionJoinAggregate(BaseModel):
     join_operator_id: str
     activation_id: str
     members: tuple[RegionAggregateMember, ...] = ()
+    occurrence: str = ""  # the join occurrence it froze at; "" for a root join
 
 
 class AcceptedInputMember(BaseModel):
@@ -625,6 +649,141 @@ class OrchestrationEvent(BaseModel):
     detail: dict[str, str] = Field(default_factory=dict)
 
 
+class TimeFrame(BaseModel):
+    """One loop coordinate of a nested logical time: a loop instance and its time."""
+
+    model_config = ConfigDict(frozen=True)
+
+    loop: str  # the loop instance's scope id
+    iteration: int
+
+
+type NestedTime = tuple[TimeFrame, ...]
+
+
+class Occurrence(BaseModel):
+    """One tagged occurrence of a template operator in a child context and time.
+
+    A root operator's occurrence is implicit and keyed by its operator id; an operator
+    inside a region definition occurs once per child context and nested loop time.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    key: str
+    operator_id: str
+    context_id: str  # the child activation whose definition it runs in; "" at root
+    time: NestedTime = ()
+    scope_id: str  # the progress scope that accounts for it
+    activation_id: str = ""
+
+
+class ControlStatus(StrEnum):
+    """Lifecycle of a control operator occurrence."""
+
+    PENDING = "pending"
+    """Its inputs, or its decision, are still to arrive."""
+    LIVE = "live"
+    """It released a record on its outputs."""
+    DEAD = "dead"
+    """It is on a route that delivers no record."""
+    FAILED = "failed"
+    """It resolved as a declared failure."""
+    CANCELLED = "cancelled"
+    """Cancellation withdrew it."""
+
+
+class ControlState(BaseModel):
+    """The resolution of one control operator occurrence and the values it carries.
+
+    ``inputs`` holds the value accepted on each named input; ``outputs`` the value
+    released on each output port, keyed by port (``""`` for an unnamed output).
+    """
+
+    key: str
+    status: ControlStatus = ControlStatus.PENDING
+    inputs: dict[str, ValueRef] = Field(default_factory=dict)
+    outputs: dict[str, ValueRef] = Field(default_factory=dict)
+    reason: str | None = None
+
+
+class BranchDecision(BaseModel):
+    """The one output port a branch occurrence selected from its accepted input."""
+
+    model_config = ConfigDict(frozen=True)
+
+    occurrence: str
+    port: str
+    case: str | None = None  # the matched literal case, when the rule declares cases
+    rule_version: int = 1
+    input_ref: ValueRef | None = None
+
+
+class IterationKind(StrEnum):
+    """How one loop time resolved."""
+
+    FEEDBACK = "feedback"
+    EXIT = "exit"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class IterationResolution(BaseModel):
+    """The one accepted resolution of a loop instance at one logical time."""
+
+    model_config = ConfigDict(frozen=True)
+
+    loop: str
+    iteration: int
+    kind: IterationKind
+    bundle: dict[str, ValueRef] = Field(default_factory=dict)
+    reason: str | None = None
+
+
+class LoopInstanceStatus(StrEnum):
+    """Lifecycle of one loop instance."""
+
+    OPEN = "open"
+    """Feedback may still enable a later time."""
+    EXITED = "exited"
+    """An exit was accepted; release waits for its frontier."""
+    RELEASED = "released"
+    """The exiting value left the loop."""
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class LoopInstance(BaseModel):
+    """One entry of a loop: its scope, captured parent context and bound inputs.
+
+    ``carried`` holds the bundle the latest materialized time started from, and
+    ``invariants`` the values bound once at ingress.
+    """
+
+    scope_id: str
+    occurrence: str
+    context_id: str
+    parent_time: NestedTime = ()
+    carried: dict[str, ValueRef] = Field(default_factory=dict)
+    invariants: dict[str, ValueRef] = Field(default_factory=dict)
+    times: int = 0  # logical times materialized so far
+    status: LoopInstanceStatus = LoopInstanceStatus.OPEN
+    exit_time: int | None = None
+    exit_bundle: dict[str, ValueRef] = Field(default_factory=dict)
+
+
+class ChildContext(BaseModel):
+    """A child activation running a region definition: its entry values and result."""
+
+    context_id: str
+    definition_id: str
+    scope_id: str
+    time: NestedTime = ()
+    entries: dict[str, ValueRef] = Field(default_factory=dict)
+    result: ValueRef | None = None
+    returned: bool = False
+
+
 class LedgerSnapshot(BaseModel):
     """The durable aggregate of one workflow instance's orchestration ledger."""
 
@@ -657,3 +816,11 @@ class LedgerSnapshot(BaseModel):
     failed_scopes: list[str] = Field(default_factory=list)
     failure_reasons: dict[str, str] = Field(default_factory=dict)
     next_seq: int = 0
+    occurrences: list[Occurrence] = Field(default_factory=list)
+    control_states: list[ControlState] = Field(default_factory=list)
+    branch_decisions: list[BranchDecision] = Field(default_factory=list)
+    loop_instances: list[LoopInstance] = Field(default_factory=list)
+    iteration_resolutions: list[IterationResolution] = Field(default_factory=list)
+    child_contexts: list[ChildContext] = Field(default_factory=list)
+    # The loop-iteration bound the instance runs under, pinned at its first build.
+    max_loop_iterations: int | None = None
