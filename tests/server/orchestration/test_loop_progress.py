@@ -921,3 +921,72 @@ def test_a_required_value_that_resolved_failed_fails_its_consumer() -> None:
     run.select("done")
     assert run.ready == []
     assert consume in run.failed
+
+
+_LONG_BODY = f"""
+    templates:
+      - name: body
+        inputs: [{{name: state, role: carried}}]
+        nodes:
+          - name: step
+            dependsOn: [{{node: $ingress, port: state, input: state}}]
+            spec: {ECHO}
+          - name: route
+            dependsOn: [{{node: step, input: input}}]
+            region:
+              kind: branch
+              inputs: [{{name: input}}]
+              outputs: [{{name: again}}, {{name: done}}]
+              selection: {{input: input, field: [route]}}
+        edges:
+          - from: {{node: route, port: again}}
+            to: {{node: $feedback, port: state}}
+          - from: {{node: route, port: done}}
+            to: {{node: $egress, port: state}}
+"""
+
+_LONG_NODES = f"""
+      - name: seed
+        spec: {ECHO}
+      - name: refine
+        dependsOn: [{{node: seed, input: state}}]
+        region:
+          kind: loop
+          body_ref: body
+          loop_coordinate: round
+          carried: [{{name: state}}]
+      - name: consume
+        dependsOn: [{{node: refine, port: state, input: final}}]
+        spec: {ECHO}
+"""
+
+
+def _open_candidates(engine: OrchestrationEngine) -> int:
+    ledger = engine._ledger
+    return (
+        len(ledger.open_task_items)
+        + len(ledger.selection_candidates)
+        + len(ledger.fanout_candidates)
+        + sum(len(keys) for keys in ledger.open_occurrences.values())
+        + sum(len(keys) for keys in ledger.open_children.values())
+        + sum(len(keys) for keys in ledger.open_subscopes.values())
+    )
+
+
+def test_what_a_transition_walks_stays_flat_as_a_loop_runs() -> None:
+    run = Driver(
+        workflow(_LONG_NODES, _LONG_BODY),
+        budget=ScopeBudget(max_loop_iterations=1000, max_activations=10_000),
+    )
+    run.run_one("seed")
+    walked: dict[int, int] = {}
+    for iteration in range(400):
+        run.run_one("step")
+        run.engine.awaits_control_reads()
+        run.engine.has_unsettled_tasks()
+        run.select("again")
+        run.engine.awaits_control_reads()
+        run.engine.has_unsettled_tasks()
+        walked[iteration] = _open_candidates(run.engine)
+
+    assert walked[399] == walked[20]

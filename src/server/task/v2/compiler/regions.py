@@ -53,7 +53,6 @@ from .diagnostics import compile_error
 from .project import (
     LoweringAccumulator,
     agent_region_join_id,
-    build_name_map,
     build_value_ops,
     call_join_id,
     dependency_edge,
@@ -125,7 +124,7 @@ def _reject_published_children(
     op_to_name = {
         op_id: name
         for scope in {None, *(d.name for d in parsed.definitions)}
-        for name, op_id in build_name_map(parsed, scope).items()
+        for name, op_id in acc.names(parsed, scope).items()
     }
     children = {
         op.child_template_ref
@@ -225,7 +224,7 @@ def _apply_leaf_declarations(parsed: ParsedWorkflow, acc: LoweringAccumulator) -
         if idx is None:
             continue
         op = acc.operators[idx]
-        name_to_op = build_name_map(parsed, task.definition)
+        name_to_op = acc.names(parsed, task.definition)
         acc.operators[idx] = _apply_one(task, op, name_to_op, acc)
 
 
@@ -481,7 +480,7 @@ def _lower_regions(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
     value_ops = build_value_ops(parsed)
     definitions = {definition.name for definition in parsed.definitions}
     names = {
-        scope: build_name_map(parsed, scope)
+        scope: acc.names(parsed, scope)
         for scope in {None, *definitions, *(r.definition for r in parsed.regions)}
     }
     region_kinds = {

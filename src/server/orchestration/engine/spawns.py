@@ -92,7 +92,7 @@ class SpawnRegions:
         # An agent occurring in a region definition releases its region's join in its
         # own context and time.
         if occurrence := self._ledger.occurrence_by_activation.get(agent_activation):
-            self._ledger.scope_occurrence[scope_id] = occurrence
+            self._ledger.bind_scope_occurrence(scope_id, occurrence)
         return opener_act.activation_id
 
     def spawn_child(self, spawn: str, *, operator_id: str | None = None) -> str:
@@ -237,7 +237,7 @@ class SpawnRegions:
             recovery=recovery,
             replay_contract=self._topology.replay.get(body_ref),
         )
-        self._ledger.work_items[child_wi.work_item_id] = child_wi
+        self._ledger.add_work_item(child_wi)
         self._ledger.wi_by_activation[activation.activation_id] = child_wi.work_item_id
         if dispatchable:
             self._ledger.wi_by_task[child_wi.legacy_task_id] = child_wi.work_item_id
@@ -382,7 +382,7 @@ class SpawnRegions:
             legacy_task_id="",
             child_input=element,
         )
-        self._ledger.work_items[wi.work_item_id] = wi
+        self._ledger.add_work_item(wi)
         self._ledger.wi_by_activation[activation.activation_id] = wi.work_item_id
         cap.outstanding += 1
         captured = self._ledger.control_state(spawn_key).inputs

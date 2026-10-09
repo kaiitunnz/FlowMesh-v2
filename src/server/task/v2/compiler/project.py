@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from shared.inference import (
@@ -521,10 +521,17 @@ class LoweringAccumulator:
     # and each SSH input stage.
     node_reads: list[NamedRead] = field(default_factory=list)
     stage_reads: list[NamedRead] = field(default_factory=list)
+    name_maps: dict[str | None, dict[str, str]] = field(default_factory=dict)
 
     @property
     def operator_ids(self) -> set[str]:
         return {op.operator_id for op in self.operators}
+
+    def names(self, parsed: ParsedWorkflow, scope: str | None) -> dict[str, str]:
+        """``build_name_map`` of one scope, built once."""
+        if (names := self.name_maps.get(scope)) is None:
+            names = self.name_maps[scope] = build_name_map(parsed, scope)
+        return names
 
 
 def call_join_id(name: str) -> str:
@@ -560,24 +567,45 @@ def build_value_ops(parsed: ParsedWorkflow) -> dict[str, str]:
     }
 
 
+class _Ancestors:
+    """The operators a task may read by name: its direct dependencies, and the tasks
+    reached from them through task dependencies, walked only once a name past its
+    direct dependencies is asked about."""
+
+    def __init__(
+        self,
+        depends_on: Sequence[str],
+        deps: Mapping[str, Sequence[str]],
+        value_ops: Mapping[str, str],
+    ) -> None:
+        self._direct = {value_ops.get(dep, dep) for dep in depends_on}
+        self._roots = [dep for dep in depends_on if dep in deps]
+        self._deps = deps
+        self._reached: set[str] | None = None
+
+    def __contains__(self, op: object) -> bool:
+        if op in self._direct:
+            return True
+        if self._reached is None:
+            self._reached = set()
+            pending = list(self._roots)
+            while pending:
+                for dep in self._deps[pending.pop()]:
+                    if dep in self._deps and dep not in self._reached:
+                        self._reached.add(dep)
+                        pending.append(dep)
+        return op in self._reached
+
+
 def _task_ancestors(
     parsed: ParsedWorkflow, value_ops: dict[str, str]
-) -> dict[str, frozenset[str]]:
-    """The operators each task may read by name: its direct dependencies, and the
-    tasks reached from them through task dependencies."""
+) -> dict[str, _Ancestors]:
+    """The operators each task may read by name."""
     deps = {task.task_id: task.depends_on for task in parsed.tasks}
-    ancestors: dict[str, frozenset[str]] = {}
-    for task in parsed.tasks:
-        seen: set[str] = {value_ops.get(dep, dep) for dep in task.depends_on}
-        pending = [dep for dep in task.depends_on if dep in deps]
-        while pending:
-            current = pending.pop()
-            for dep in deps[current]:
-                if dep in deps and dep not in seen:
-                    seen.add(dep)
-                    pending.append(dep)
-        ancestors[task.task_id] = frozenset(seen)
-    return ancestors
+    return {
+        task.task_id: _Ancestors(task.depends_on, deps, value_ops)
+        for task in parsed.tasks
+    }
 
 
 def lower_tasks(
@@ -596,7 +624,7 @@ def lower_tasks(
     a required residency intent. Nothing here carries worker/replica/endpoint bindings.
     """
     policies = surface if surface is not None else PolicySurface()
-    names = {scope: build_name_map(parsed, scope) for scope in _scopes(parsed)}
+    names = {scope: acc.names(parsed, scope) for scope in _scopes(parsed)}
     task_ids: dict[str | None, set[str]] = {scope: set() for scope in names}
     for task in parsed.tasks:
         task_ids[task.definition].add(task.task_id)
@@ -716,7 +744,7 @@ def _wire_dependencies(
         for region in parsed.regions
         if str(region.region.get("kind", "")).strip() == "branch"
     )
-    names = {scope: build_name_map(parsed, scope) for scope in _scopes(parsed)}
+    names = {scope: acc.names(parsed, scope) for scope in _scopes(parsed)}
     regions = frozenset(value_ops.get(r.name, r.name) for r in parsed.regions)
     children = _operator_children(parsed, names)
     by_id = {op.operator_id: idx for idx, op in enumerate(acc.operators)}

@@ -88,7 +88,7 @@ class LoopProgress:
         self._ledger.loop_instances[scope_id] = instance
         self._ledger.active_loops.add(scope_id)
         self._ledger.loop_by_occurrence[key] = scope_id
-        self._ledger.scope_occurrence[scope_id] = key
+        self._ledger.bind_scope_occurrence(scope_id, key)
         self._enter_time(instance, 0, advance)
 
     def _enter_time(self, instance: LoopInstance, time: int, advance: Advance) -> None:

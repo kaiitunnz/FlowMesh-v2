@@ -271,15 +271,18 @@ class RegionFlow:
     def pending_branch_reads(self) -> list[tuple[str, ValueRef]]:
         """Each branch occurrence awaiting a selector read, with the input it reads."""
         reads: list[tuple[str, ValueRef]] = []
-        for key, state in self._ledger.control_states.items():
+        candidates = self._ledger.selection_candidates
+        for key in list(candidates):
+            state = self._ledger.control_states[key]
             op = self._topology.operators.get(self._ledger.occurrence(key).operator_id)
             if (
-                isinstance(op, BranchRegion)
-                and op.rule is not None
-                and state.status is ControlStatus.PENDING
-                and key not in self._ledger.branch_decisions
-                and (value := state.inputs.get(op.rule.input)) is not None
+                not isinstance(op, BranchRegion)
+                or op.rule is None
+                or state.status is not ControlStatus.PENDING
+                or key in self._ledger.branch_decisions
             ):
+                del candidates[key]
+            elif (value := state.inputs.get(op.rule.input)) is not None:
                 reads.append((key, value))
         return reads
 
@@ -707,6 +710,7 @@ class RegionFlow:
             return
         state = self._ledger.control_state(key)
         state.inputs[rule.input] = selected.value
+        self._ledger.selection_candidates[key] = None
         self._ledger.emit("branch_awaiting_selection", operator_id=op.operator_id)
 
     def _open_spawn(
@@ -730,24 +734,31 @@ class RegionFlow:
                 else None
             ),
         )
-        self._ledger.scope_occurrence[scope_id] = key
+        self._ledger.bind_scope_occurrence(scope_id, key)
 
     def awaiting_fanouts(self) -> list[tuple[str, ValueRef]]:
         """Each live spawn occurrence still admitting the children its input fans
         out to, with that input; an agent's child region is filled by its agent's
         requests instead."""
         awaiting: list[tuple[str, ValueRef]] = []
-        for scope_id, key in self._ledger.scope_occurrence.items():
+        candidates = self._ledger.fanout_candidates
+        for scope_id in list(candidates):
+            key = self._ledger.scope_occurrence[scope_id]
             operator_id = self._ledger.occurrence(key).operator_id
             cap = self._ledger.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
             if (
-                cap is None
-                or cap.status is not CapabilityStatus.OPEN
+                (cap is not None and cap.status is not CapabilityStatus.OPEN)
                 or self._topology.kind(operator_id) is not OperatorKind.SPAWN
                 or operator_id in self._topology.agent_region_spawns
+                or (
+                    self._ledger.control_terminal(key)
+                    and self._ledger.control_states[key].status
+                    is not ControlStatus.LIVE
+                )
             ):
+                del candidates[scope_id]
                 continue
-            if (value := self.spawn_input(key)) is not None:
+            if cap is not None and (value := self.spawn_input(key)) is not None:
                 awaiting.append((key, value))
         return sorted(awaiting, key=lambda item: item[0])
 
@@ -1064,7 +1075,8 @@ class RegionFlow:
                 for item in self.edges.incoming(op_id):
                     if item.value is not None:
                         state.inputs[item.port or ""] = item.value
-                self._ledger.scope_occurrence.setdefault(scope_id, op_id)
+                if scope_id not in self._ledger.scope_occurrence:
+                    self._ledger.bind_scope_occurrence(scope_id, op_id)
             case JoinRegion() if self._ledger.region_closed(op_id) and (
                 scope_id := self._ledger.scope_id_for_join(op_id)
             ):

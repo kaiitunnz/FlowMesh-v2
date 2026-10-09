@@ -3300,9 +3300,10 @@ class TaskRuntime:
         its agents accept, give the work it materialized its tasks, and ready its work.
         Returns whether it changed any task.
 
-        The failed, skipped and cancelled records persist before the new tasks write
-        the ledger, so the ledger never leads them. A value still to read for a branch
-        or spawn is read off the lock by the workflow's re-drive.
+        The failed, skipped and cancelled records persist here; the records of the
+        work it materialized land with the caller's ledger write, which every caller
+        makes once the transition ends, so the ledger never leads them. A value still
+        to read for a branch or spawn is read off the lock by the workflow's re-drive.
         """
         # A ready/settle advance never carries a retry; the failure path drives those.
         assert not advance.retry, "retry is applied by the failure path"
@@ -3327,10 +3328,6 @@ class TaskRuntime:
                 return True
             if engine.awaits_control_reads():
                 self._redrive.drive_now(workflow_id)
-            if self._committer.holds_unwritten_locked(workflow_id):
-                # The records this transition made land with the ledger that holds
-                # their work, after the records it failed, skipped or cancelled.
-                self._committer.save_ledger_locked(workflow_id)
         for task_id in advance.ready:
             if self._ready.enqueue_ready_locked(task_id):
                 changed = True
@@ -3584,12 +3581,12 @@ class TaskRuntime:
                 return
             producers = [
                 (task_id, self._content_bindings.result_binding_locked(task_id))
-                for task_id in self._tasks.ids_of(workflow_id)
-                if self._tasks[task_id].status == TaskStatus.DONE
-                and (spawn_op := engine.fanout_spawn(task_id)) is not None
+                for task_id, spawn_op in engine.fanout_producers().items()
+                if (record := self._tasks.get(task_id)) is not None
+                and record.status == TaskStatus.DONE
                 and engine.spawn_awaits_children(spawn_op)
             ]
-            produced = {engine.fanout_spawn(task_id) for task_id, _ in producers}
+            produced = {engine.fanout_producers()[task_id] for task_id, _ in producers}
             controls = [
                 (key, value, self._task_result_binding_locked(value))
                 for key, value in (

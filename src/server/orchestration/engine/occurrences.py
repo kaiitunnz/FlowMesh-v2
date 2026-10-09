@@ -95,7 +95,7 @@ class OccurrenceFactory:
                 recovery=recovery,
                 replay_contract=self._topology.replay.get(operator_id),
             )
-            self._ledger.work_items[wi.work_item_id] = wi
+            self._ledger.add_work_item(wi)
             self._ledger.wi_by_activation[activation.activation_id] = wi.work_item_id
             self._ledger.wi_by_task[wi.legacy_task_id] = wi.work_item_id
             self._ledger.wi_by_occurrence[key] = wi.work_item_id

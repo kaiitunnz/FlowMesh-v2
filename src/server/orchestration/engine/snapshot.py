@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from ..guardrails import ScopeBudget
 from ..state import (
     AuthorityDecisionKind,
+    ControlStatus,
     LedgerSnapshot,
     LoopInstanceStatus,
     PublicationOutcome,
@@ -70,6 +71,7 @@ class SnapshotCodec:
     def restore(self, snapshot: LedgerSnapshot) -> None:
         self._ledger.scopes = {}
         self._ledger.subscopes = {}
+        self._ledger.open_subscopes = {}
         for scope in snapshot.scopes:
             self._ledger.add_scope(scope)
         self._ledger.scopes.setdefault(
@@ -77,12 +79,16 @@ class SnapshotCodec:
         )
         self._ledger.activations = {}
         self._ledger.children_by_scope = {}
+        self._ledger.open_children = {}
         self._ledger.scope_population = Counter()
         self._ledger.scope_children = Counter()
         self._ledger.dynamic_activations = 0
         for activation in snapshot.activations:
             self._ledger.add_activation(activation)
-        self._ledger.work_items = {w.work_item_id: w for w in snapshot.work_items}
+        self._ledger.work_items = {}
+        self._ledger.open_task_items = {}
+        for wi in snapshot.work_items:
+            self._ledger.add_work_item(wi)
         self._ledger.continuations = {c.work_item_id: c for c in snapshot.continuations}
         self._ledger.records = list(snapshot.records)
         self._inputs.accepted_inputs = list(snapshot.accepted_inputs)
@@ -151,6 +157,7 @@ class SnapshotCodec:
         # is addressed by task or activation, never by operator.
         self._ledger.occurrences = {}
         self._ledger.occurrences_by_scope = {}
+        self._ledger.open_occurrences = {}
         self._ledger.occurrence_by_activation = {}
         for occurrence in snapshot.occurrences:
             self._ledger.add_occurrence(occurrence)
@@ -166,6 +173,11 @@ class SnapshotCodec:
             ) is not None:
                 self._ledger.wi_by_occurrence[key] = w.work_item_id
         self._ledger.control_states = {c.key: c for c in snapshot.control_states}
+        self._ledger.selection_candidates = dict.fromkeys(
+            key
+            for key, state in self._ledger.control_states.items()
+            if state.status is ControlStatus.PENDING and state.inputs
+        )
         self._ledger.branch_decisions = {
             d.occurrence: d for d in snapshot.branch_decisions
         }
@@ -207,6 +219,7 @@ class SnapshotCodec:
         # control activation, an occurrence through its own activation, and an agent
         # occurrence's region through the region's opener.
         self._ledger.scope_occurrence = {}
+        self._ledger.fanout_candidates = {}
         for scope in self._ledger.scopes.values():
             owner_act, owner_op = scope.owner_activation_id, scope.owner_operator_id
             if owner_act is None or owner_op is None:
@@ -215,7 +228,7 @@ class SnapshotCodec:
             if (
                 key := self._ledger.occurrence_by_activation.get(owner_act)
             ) is not None:
-                self._ledger.scope_occurrence[scope.scope_id] = key
+                self._ledger.bind_scope_occurrence(scope.scope_id, key)
             elif (
                 owner is not None
                 and owner.kind == "region"
@@ -227,13 +240,13 @@ class SnapshotCodec:
                 )
                 is not None
             ):
-                self._ledger.scope_occurrence[scope.scope_id] = key
+                self._ledger.bind_scope_occurrence(scope.scope_id, key)
             elif self._topology.is_control(owner_op) and (
                 owner_act == self._ledger.control_activation(owner_op)
             ):
-                self._ledger.scope_occurrence[scope.scope_id] = owner_op
+                self._ledger.bind_scope_occurrence(scope.scope_id, owner_op)
         for instance in self._ledger.loop_instances.values():
-            self._ledger.scope_occurrence[instance.scope_id] = instance.occurrence
+            self._ledger.bind_scope_occurrence(instance.scope_id, instance.occurrence)
         # Released scopes are authoritative scope-level state, restored directly rather
         # than re-derived from records: a recursive region's levels share one join/loop
         # operator, so a record could not attribute a release to the right level.

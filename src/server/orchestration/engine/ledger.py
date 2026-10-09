@@ -133,6 +133,17 @@ class OrchestrationLedger:
         self.active_contexts: set[str] = set()
         # The occurrence that opened each scope it opened.
         self.scope_occurrence: dict[str, str] = {}
+        # Candidates each summary a transition reads walks instead of its whole
+        # collection, pruned as the walk finds one settled for good: per scope, its
+        # occurrences, children and nested scopes that may still be open; work items a
+        # task runs as that may still be unsettled; branch occurrences that may await
+        # a selector read; and spawn scopes that may still fan out.
+        self.open_occurrences: dict[str, dict[str, None]] = {}
+        self.open_children: dict[str, dict[str, None]] = {}
+        self.open_subscopes: dict[str, dict[str, None]] = {}
+        self.open_task_items: dict[str, None] = {}
+        self.selection_candidates: dict[str, None] = {}
+        self.fanout_candidates: dict[str, None] = {}
 
     def occurrence(self, key: str) -> Occurrence:
         """An occurrence by key; a root key is its operator's implicit occurrence."""
@@ -147,11 +158,22 @@ class OrchestrationLedger:
         self.occurrences_by_scope.setdefault(occurrence.scope_id, set()).add(
             occurrence.key
         )
+        self.open_occurrences.setdefault(occurrence.scope_id, {})[occurrence.key] = None
         self.occurrence_by_activation[occurrence.activation_id] = occurrence.key
 
     def occurrence_of_work_item(self, wi: WorkItem) -> str:
         """The occurrence a work item realizes; a root work item's is its operator."""
         return self.occurrence_by_activation.get(wi.activation_id, wi.operator_id)
+
+    def bind_scope_occurrence(self, scope_id: str, key: str) -> None:
+        """Record the occurrence that opened a scope."""
+        self.scope_occurrence[scope_id] = key
+        self.fanout_candidates[scope_id] = None
+
+    def add_work_item(self, wi: WorkItem) -> None:
+        self.work_items[wi.work_item_id] = wi
+        if wi.legacy_task_id:
+            self.open_task_items[wi.work_item_id] = None
 
     def control_state(self, key: str) -> ControlState:
         """A control occurrence's state, created pending on first use."""
@@ -206,6 +228,9 @@ class OrchestrationLedger:
         self.scopes[scope.scope_id] = scope
         if scope.parent_scope_id is not None:
             self.subscopes.setdefault(scope.parent_scope_id, set()).add(scope.scope_id)
+            self.open_subscopes.setdefault(scope.parent_scope_id, {})[
+                scope.scope_id
+            ] = None
 
     def add_activation(self, activation: Activation) -> None:
         self.activations[activation.activation_id] = activation
@@ -215,6 +240,9 @@ class OrchestrationLedger:
             self.children_by_scope.setdefault(activation.scope_id, []).append(
                 activation.activation_id
             )
+            self.open_children.setdefault(activation.scope_id, {})[
+                activation.activation_id
+            ] = None
         if activation.kind in DYNAMIC_ACTIVATION_KINDS:
             self.dynamic_activations += 1
 

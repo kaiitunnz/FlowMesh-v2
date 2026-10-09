@@ -959,10 +959,14 @@ class OrchestrationEngine:
 
     def has_unsettled_tasks(self) -> bool:
         """Whether any work item a task runs as is still to settle."""
-        return any(
-            wi.legacy_task_id and wi.status not in TERMINAL_WORK_ITEM_STATUSES
-            for wi in self._ledger.work_items.values()
-        )
+        candidates = self._ledger.open_task_items
+        for wi_id in list(candidates):
+            del candidates[wi_id]
+            if self._ledger.work_items[wi_id].status not in TERMINAL_WORK_ITEM_STATUSES:
+                # Behind the rest, so the next call reaches what settled since.
+                candidates[wi_id] = None
+                return True
+        return False
 
     def task_work_items(self) -> list[WorkItem]:
         """Every work item a task runs as."""
@@ -1034,7 +1038,7 @@ class OrchestrationEngine:
         occurrence = self.occurrence_of(task_id)
         if occurrence is None:
             return None
-        names = {e.logical_ref: e.source_id for e in self.template.source_map}
+        names = self._topology.source_ids
         time: list[tuple[str, int]] = []
         for frame in occurrence.time:
             instance = self._ledger.loop_instances.get(frame.loop)
@@ -1253,6 +1257,11 @@ class OrchestrationEngine:
     def fanout_spawn(self, operator_id: str) -> str | None:
         """The root spawn that fans out over an operator's whole result, if any."""
         return self._topology.fanout_spawn(operator_id)
+
+    def fanout_producers(self) -> dict[str, str]:
+        """Each root operator whose whole result a root spawn fans out over, with
+        the spawn."""
+        return self._topology.fanout_spawns
 
     def spawn_awaits_children(self, spawn_op: str) -> bool:
         """Whether a spawn has yet to fan out: unopened, or open and not sealed.

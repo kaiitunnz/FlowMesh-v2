@@ -10,7 +10,7 @@ Extraction follows those grammars without evaluating any of them.
 """
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -138,7 +138,7 @@ def classify_reads(
     dependencies: list[ParsedDependency],
     names: Mapping[str, str],
     value_op: Mapping[str, str],
-    ancestors: frozenset[str],
+    ancestors: Container[str],
     routed: frozenset[str],
     regions: frozenset[str],
 ) -> ReadClassification:

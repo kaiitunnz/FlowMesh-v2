@@ -179,25 +179,32 @@ class ScopeProgress:
         accounts for is terminal, no spawn of it can add a child, and every scope
         nested under it has drained too."""
         ledger = self._ledger
-        for key in ledger.occurrences_by_scope.get(scope_id, ()):
+        occurrences = ledger.open_occurrences.get(scope_id, {})
+        for key in list(occurrences):
             if (wi_id := ledger.wi_by_occurrence.get(key)) is not None:
                 if ledger.work_items[wi_id].status not in TERMINAL_WORK_ITEM_STATUSES:
                     return False
             elif not ledger.control_terminal(key):
                 return False
-        for child in ledger.children_by_scope.get(scope_id, ()):
-            wi_id = ledger.wi_by_activation.get(child)
-            if (
-                wi_id is not None
-                and ledger.work_items[wi_id].status not in TERMINAL_WORK_ITEM_STATUSES
-            ):
+            del occurrences[key]
+        children = ledger.open_children.get(scope_id, {})
+        for child in list(children):
+            if (wi_id := ledger.wi_by_activation.get(child)) is None:
+                continue
+            if ledger.work_items[wi_id].status not in TERMINAL_WORK_ITEM_STATUSES:
                 return False
+            del children[child]
         cap = ledger.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if cap is not None and cap.status is CapabilityStatus.OPEN:
             return False
-        return all(
-            self.scope_drained(sub) for sub in ledger.subscopes.get(scope_id, ())
-        )
+        subscopes = ledger.open_subscopes.get(scope_id, {})
+        for sub in list(subscopes):
+            if not self.scope_drained(sub):
+                return False
+            # A released scope admits nothing more, so once drained it stays drained.
+            if sub in ledger.released_scopes:
+                del subscopes[sub]
+        return True
 
     def frontier_closed(self, scope_id: str) -> None:
         self._ledger.emit("frontier_closed", detail={"scope": scope_id})

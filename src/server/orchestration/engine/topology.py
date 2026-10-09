@@ -127,6 +127,18 @@ class PlanTopology:
         }
         # The definition each member runs in; a root operator is absent.
         self.definition_of = bundle.template.definition_of()
+        # Each operator whose whole result a root spawn fans out over, with the spawn.
+        self.fanout_spawns: dict[str, str] = {}
+        for edge in bundle.template.edges:
+            if (
+                edge.is_forward
+                and self.kind(edge.to_op) is OperatorKind.SPAWN
+                and edge.to_op not in self.definition_of
+                and edge.to_op not in self.agent_region_spawns
+                and is_spawn_fanout_port(edge.to_port)
+                and not edge.projection
+            ):
+                self.fanout_spawns.setdefault(edge.from_op, edge.to_op)
         self.incoming: dict[str, list[TemplateEdge]] = {op: [] for op in self.operators}
         self.outgoing: dict[str, list[TemplateEdge]] = {op: [] for op in self.operators}
         # A definition's entry edges by the member they enter, and its return edges
@@ -146,7 +158,11 @@ class PlanTopology:
             ):
                 self.incoming[edge.to_op].append(edge)
                 self.outgoing[edge.from_op].append(edge)
-        sources = {e.logical_ref: e.source_id for e in bundle.template.source_map}
+        # The authored name of each operator, as its source names it.
+        self.source_ids = {
+            e.logical_ref: e.source_id for e in bundle.template.source_map
+        }
+        sources = self.source_ids
         # The name a spec reads each operator's value by within its scope: a
         # definition member's name inside its definition, any other operator's authored
         # name; a call's join carries the call's name.
@@ -231,18 +247,7 @@ class PlanTopology:
         Only the spawn's fan-out input counts: a capture it also reads, or a fan-out
         over a projection of the result, is read for it through its own value.
         """
-        for edge in self.bundle.template.edges:
-            if (
-                edge.from_op == operator_id
-                and edge.is_forward
-                and self.kind(edge.to_op) is OperatorKind.SPAWN
-                and edge.to_op not in self.definition_of
-                and edge.to_op not in self.agent_region_spawns
-                and is_spawn_fanout_port(edge.to_port)
-                and not edge.projection
-            ):
-                return edge.to_op
-        return None
+        return self.fanout_spawns.get(operator_id)
 
     def child_template_of(self, spawn_op: str) -> str | None:
         """The operator id of a spawn's child template, if it declares one."""
