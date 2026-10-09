@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 from ...orchestration import OrchestrationEngine
 from ...orchestration.engine.advance import Advance
+from ...orchestration.state import WorkItem
 from ..models import TaskRecord, TaskStatus
 from .commits import TransitionCommitter
 
@@ -78,7 +79,14 @@ class OccurrenceMaterializer:
             if (
                 task_id not in self._tasks
                 and (wi := engine.work_item(task_id)) is not None
+                and materialized_work(wi)
                 and not self.register_locked(workflow_id, task_id, wi.operator_id)
             ):
                 missing.append(wi.operator_id)
         return missing
+
+
+def materialized_work(wi: WorkItem) -> bool:
+    """Whether a work item runs as a task made from its operator's blueprint, not as
+    the operator's own submitted task."""
+    return wi.legacy_task_id != wi.operator_id

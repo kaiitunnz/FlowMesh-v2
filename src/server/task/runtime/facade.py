@@ -180,7 +180,7 @@ from .mediated_ops import (
     deny_model_turn_payload,
 )
 from .merges import TaskMerges
-from .occurrences import OccurrenceMaterializer
+from .occurrences import OccurrenceMaterializer, materialized_work
 from .record_failures import RecordFailures
 from .reports import (
     LOSS_EFFECTS,
@@ -1267,7 +1267,11 @@ class TaskRuntime:
         skipped: list[str] = []
         for wi in engine.task_work_items():
             record = self._tasks.get(wi.legacy_task_id)
-            if record is None and wi.status not in TERMINAL_WORK_ITEM_STATUSES:
+            if (
+                record is None
+                and materialized_work(wi)
+                and wi.status not in TERMINAL_WORK_ITEM_STATUSES
+            ):
                 if not self._occurrences.register_locked(
                     workflow_id, wi.legacy_task_id, wi.operator_id
                 ):
