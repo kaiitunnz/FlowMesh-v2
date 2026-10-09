@@ -281,6 +281,60 @@ async def test_a_published_early_join_lists_the_members_it_released_with() -> No
     assert run.runtime.read_output(members["0"]).model_dump()["value"] == "first"
 
 
+def _fail_children(run: _Run) -> None:
+    for task_id in list(run.ready):
+        run.ready.remove(task_id)
+        record_dispatch(run.runtime, task_id, _worker())
+        run.runtime.fail_dispatch(
+            task_id, "wkr-1", {}, _TS, error="boom", retryable=False
+        )
+        run.drive()
+
+
+def _join(completion: str) -> str:
+    return _EARLY.replace(
+        "completion: any\n          residual: cancel", f"completion: {completion}"
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("children", [[], ["x", "y"]])
+async def test_an_early_join_with_no_winner_publishes_one_empty_member(
+    children: list[str],
+) -> None:
+    run = await _Run().start(_workflow(_EARLY))
+    run.run("plan", {"items": children})
+    _fail_children(run)
+
+    assert run.settled()
+    publication = _singleton(run, "collect").publication
+    assert publication is not None
+    assert publication.outcome is PublicationOutcome.EXPLICIT_EMPTY
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "any\n          residual: cancel\n          no_winner_failure: true",
+        "all_succeed",
+    ],
+)
+async def test_a_join_resolving_a_failure_publishes_one_failed_member(
+    completion: str,
+) -> None:
+    run = await _Run().start(_workflow(_join(completion)))
+    run.run("plan", {"items": ["x", "y"]})
+    _fail_children(run)
+
+    assert run.settled()
+    assert {
+        member.key: member.publication.outcome
+        for member in _members(run, "collect").values()
+        if member.publication is not None
+    } == {None: PublicationOutcome.DECLARED_FAILURE}
+
+
 _PENDING_OUTPUTS = """
       - name: seed
         spec: {taskType: echo, data: {type: list, items: [x]}}

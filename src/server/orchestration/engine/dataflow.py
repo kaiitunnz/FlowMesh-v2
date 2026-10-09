@@ -906,7 +906,7 @@ class RegionFlow:
         self._publication.publish(occurrence.operator_id, outcome, value)
         if members is None and value is not None and value.kind == "aggregate":
             members = value.members
-        if members is not None:
+        if members:
             self._publication.publish_members(occurrence.operator_id, members)
         elif outcome is not PublicationOutcome.SUCCESS:
             self._publication.publish_keyed(
@@ -1548,9 +1548,6 @@ class RegionFlow:
         self._settle_region_failed(operator_id)
         if kind is OperatorKind.SPAWN:
             self._fail_spawn_template(operator_id)
-            self._publication.publish_keyed(
-                operator_id, None, PublicationOutcome.DECLARED_FAILURE, None
-            )
             if (join_op := self._topology.join_for_spawn(operator_id)) is not None:
                 self._fail_region(join_op, cascade, visited)
         self._fail_downstream(operator_id, cascade, visited)
@@ -1562,6 +1559,9 @@ class RegionFlow:
         self._ledger.emit("region_failed", operator_id=operator_id)
         self._publication.publish(
             operator_id, PublicationOutcome.DECLARED_FAILURE, None
+        )
+        self._publication.publish_keyed(
+            operator_id, None, PublicationOutcome.DECLARED_FAILURE, None
         )
 
     def _fail_spawn_template(self, spawn_op: str) -> None:
