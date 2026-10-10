@@ -150,6 +150,25 @@ def test_forward_naming_no_input_of_the_branch_is_refused() -> None:
     assert "branch.unknown-forward" in _codes(text)
 
 
+def test_forward_naming_an_input_no_edge_binds_is_refused() -> None:
+    text = _workflow(f"""
+      - name: judge_src
+        spec: {_ECHO}
+      - name: judge
+        dependsOn: [{{node: judge_src, input: verdict}}]
+        region:
+          kind: branch
+          inputs: [{{name: verdict}}, {{name: adapter}}]
+          outputs: [{{name: left}}, {{name: right}}]
+          selection: {{input: verdict, field: [route]}}
+          forward: adapter
+      - name: after
+        dependsOn: [{{node: judge, port: left, input: got}}]
+        spec: {_items("got.v")}
+""")
+    assert "dataflow.region-input" in _codes(text)
+
+
 def test_forward_and_selection_on_exclusive_arms_are_refused() -> None:
     text = _workflow(f"""
       - name: src

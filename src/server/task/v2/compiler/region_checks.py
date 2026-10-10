@@ -18,7 +18,6 @@ from ..representations.operators import (
     MergeRegion,
     PortKind,
     SpawnRegion,
-    branch_selection_index,
     is_spawn_fanout_port,
 )
 from ..representations.template import (
@@ -123,9 +122,9 @@ def releases_one_value(
         match ops.get(current):
             case LeafOperator() | AgentOperator() | LoopContextRegion():
                 return True
-            case BranchRegion(forward=forward):
+            case BranchRegion() as branch:
                 edges = incoming.get(current, ())
-                index = branch_selection_index([e.to_port for e in edges], forward)
+                index = branch.input_index([e.to_port for e in edges], branch.forward)
                 if index is None:
                     return False
                 edge = edges[index]

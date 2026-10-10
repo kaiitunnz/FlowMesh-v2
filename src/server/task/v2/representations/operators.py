@@ -585,23 +585,21 @@ class SelectionRule(BaseModel):
     version: int = 1
 
 
-def branch_selection_index(
-    ports: Sequence[str | None], selection_input: str
-) -> int | None:
-    """Which of a branch's incoming edges, given by their input ports, it selects on:
-    the one bound to its selection input, or its only incoming edge."""
-    return next(
-        (index for index, port in enumerate(ports) if port == selection_input),
-        0 if len(ports) == 1 else None,
-    )
-
-
 class BranchRegion(_OperatorBase):
     """Routes the record on its input to the one output port its rule selects."""
 
     kind: Literal[OperatorKind.BRANCH] = OperatorKind.BRANCH
     rule: SelectionRule
     forward: str  # the input whose value the selected port carries
+
+    def input_index(self, ports: Sequence[str | None], name: str) -> int | None:
+        """Which of the branch's incoming edges, given by their input ports, binds its
+        input ``name``: the edge bound to it, or for the selection input the only
+        incoming edge."""
+        return next(
+            (index for index, port in enumerate(ports) if port == name),
+            0 if len(ports) == 1 and name == self.rule.input else None,
+        )
 
 
 class MergeRegion(_OperatorBase):

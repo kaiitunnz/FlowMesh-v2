@@ -19,7 +19,6 @@ from ..representations.operators import (
     RecoveryClass,
     ResidualPolicy,
     SpawnRegion,
-    branch_selection_index,
     is_spawn_fanout_port,
     spawned_only_region_owners,
 )
@@ -632,10 +631,7 @@ def _check_region_inputs(
         if not isinstance(op, BranchRegion):
             continue
         branch_inputs = incoming.get(op.operator_id, [])
-        if (
-            branch_selection_index([edge.to_port for edge in branch_inputs], op.forward)
-            is None
-        ):
+        if op.input_index([edge.to_port for edge in branch_inputs], op.forward) is None:
             diags.append(
                 _region_input(
                     op.operator_id,
@@ -643,9 +639,7 @@ def _check_region_inputs(
                     loc,
                 )
             )
-        index = branch_selection_index(
-            [edge.to_port for edge in branch_inputs], op.rule.input
-        )
+        index = op.input_index([edge.to_port for edge in branch_inputs], op.rule.input)
         selected = branch_inputs[index] if index is not None else None
         if selected is None:
             diags.append(

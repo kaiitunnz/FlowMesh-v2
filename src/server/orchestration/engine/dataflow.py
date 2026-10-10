@@ -12,7 +12,6 @@ from ...task.v2.representations.operators import (
     OperatorKind,
     ResidualPolicy,
     SpawnRegion,
-    branch_selection_index,
     is_spawn_fanout_port,
     spawned_only_region_owners,
 )
@@ -673,7 +672,7 @@ class RegionFlow:
         participating = {
             index
             for name in (op.rule.input, op.forward)
-            if (index := branch_selection_index(ports, name)) is not None
+            if (index := op.input_index(ports, name)) is not None
         }
         required = [
             item
@@ -688,9 +687,9 @@ class RegionFlow:
         if any(i.state is EdgeState.DEAD for i in required):
             self.mark_dead(key, advance)
             return
-        index = branch_selection_index(ports, op.rule.input)
+        index = op.input_index(ports, op.rule.input)
         selected = inputs[index] if index is not None else None
-        index = branch_selection_index(ports, op.forward)
+        index = op.input_index(ports, op.forward)
         forwarded = inputs[index] if index is not None else None
         if (
             selected is None
