@@ -149,8 +149,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   (`src/server/orchestration/`), which owns semantic readiness: it turns settled
   records into ready work items over the acyclic plan and dispatches them through the
   `TaskRuntime`/dispatcher, so placement stays physical. Retries reuse the work item and
-  its `invocation_id`; outputs publish idempotently to logical result slots. The snapshot
-  persists at `workflow:{id}:ds` and `TaskRuntime.rehydrate` rebuilds it on restart; a v1
+  its `invocation_id`; outputs publish idempotently to logical result slots. The ledger
+  persists at `workflow:{id}:ds` as one hash field per entity, each transition writing only
+  the entities it changed, and `TaskRuntime.rehydrate` rebuilds it on restart; a v1
   submission keeps the static-DAG path.
 - **Structured dynamic regions.** The engine executes the compiler's semi-static regions:
   control operators (`Branch`/`Merge`/`Loop`/`Spawn`/`Join`) settle in-ledger and never
@@ -702,7 +703,8 @@ Any Compose service can be recreated in place with `flowmesh stack restart
 [SERVICE ...]`, without a full teardown. The root server survives its own
 restart without losing in-flight work: scheduling state is persisted to Redis
 and rebuilt on startup (`TaskRuntime.rehydrate`), and task events replay from a
-durable stream. Rolling a new image across the cluster one node at a time is one
+durable stream. Recovery assumes the control Redis keeps every write it
+acknowledged. Rolling a new image across the cluster one node at a time is one
 application. See [`SERVICE_RESTARTS.md`](SERVICE_RESTARTS.md).
 
 ## Plugin extension points
