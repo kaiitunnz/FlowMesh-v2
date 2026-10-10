@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import cache
 from types import GenericAlias
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, TypeAdapter
 
@@ -272,13 +272,6 @@ def _member(collection: str, name: str) -> str:
     return parts[0]
 
 
-def _split_ordinal(collection: str, value: str) -> tuple[int, str]:
-    ordinal, sep, encoded = value.partition(":")
-    if not sep or not ordinal.isdigit():
-        raise LedgerLayoutError(f"entry of {collection} has no ordinal")
-    return int(ordinal), encoded
-
-
 def decode_ledger(fields: Mapping[str, str]) -> StoredLedger:
     """Rebuild a stored ledger from its fields, refusing one that does not hold
     exactly the fields its layout places."""
@@ -298,64 +291,90 @@ def _decode_ledger(fields: Mapping[str, str]) -> StoredLedger:
     data = json.loads(foundation)
     if not isinstance(data, dict) or data.keys() != set(FOUNDATION):
         raise LedgerLayoutError("ledger foundation does not hold its fields")
-    keyed: dict[str, list[tuple[int, str, str]]] = {}
-    histories: dict[str, dict[int, str]] = {}
-    sets: dict[str, list[str]] = {}
-    scalars: dict[str, Any] = {}
+    # Fields by collection as parallel lists of names and values, so grouping
+    # allocates no object per field for the collector to track.
+    names_of: dict[str, list[str]] = {}
+    values_of: dict[str, list[str]] = {}
     for name, value in fields.items():
-        collection, sep, encoded = name.partition(":")
+        collection, sep, _ = name.partition(":")
         if not sep:
             raise LedgerLayoutError(f"malformed field {name!r}")
+        if (names := names_of.get(collection)) is None:
+            names = names_of[collection] = []
+            values_of[collection] = []
+        names.append(name)
+        values_of[collection].append(value)
+
+    scalars: dict[str, Any] = {}
+    ordinals: dict[str, dict[Hashable, int]] = {}
+    for collection, names in names_of.items():
+        values = values_of[collection]
         if collection == META:
-            if encoded in SCALARS:
-                scalars[encoded] = json.loads(value)
-            elif name not in (_LAYOUT_FIELD, _FOUNDATION_FIELD):
-                raise LedgerLayoutError(f"unknown ledger field {name!r}")
+            for name, value in zip(names, values):
+                if (scalar := name[len(META) + 1 :]) in SCALARS:
+                    scalars[scalar] = json.loads(value)
+                elif name not in (_LAYOUT_FIELD, _FOUNDATION_FIELD):
+                    raise LedgerLayoutError(f"unknown ledger field {name!r}")
         elif collection in KEYED or collection in STRINGS:
-            ordinal, body = _split_ordinal(collection, value)
-            keyed.setdefault(collection, []).append((ordinal, name, body))
+            data[collection], ordinals[collection] = _keyed_entries(
+                collection, names, values
+            )
         elif collection in HISTORIES:
-            if (position := _position(encoded)) is None:
-                raise LedgerLayoutError(f"malformed position {name!r}")
-            histories.setdefault(collection, {})[position] = value
+            data[collection] = _validated(
+                HISTORIES[collection], _history_entries(collection, names, values)
+            )
         elif collection in SETS:
-            if value != SET_MEMBER:
-                raise LedgerLayoutError(f"malformed member {name!r}")
-            sets.setdefault(collection, []).append(_member(collection, name))
+            if any(value != SET_MEMBER for value in values):
+                raise LedgerLayoutError(f"malformed member of {collection}")
+            data[collection] = sorted(_member(collection, name) for name in names)
         else:
             raise LedgerLayoutError(f"unknown ledger collection {collection!r}")
-
-    ordinals: dict[str, dict[Hashable, int]] = {}
-    for collection, entries in keyed.items():
-        entries.sort(key=lambda entry: entry[0])
-        if len({ordinal for ordinal, _, _ in entries}) != len(entries):
-            raise LedgerLayoutError(f"conflicting ordinals in {collection}")
-        if collection in STRINGS:
-            reasons = {_member(collection, name): body for _, name, body in entries}
-            data[collection] = {key: json.loads(body) for key, body in reasons.items()}
-            ordinals[collection] = dict(
-                zip(reasons, (ordinal for ordinal, _, _ in entries))
-            )
-            continue
-        model, key_of = KEYED[collection]
-        entities = _validated(model, [body for _, _, body in entries])
-        order: dict[Hashable, int] = {}
-        for (ordinal, name, _), entity in zip(entries, entities):
-            key = key_of(entity)
-            if field_name(collection, key) != name:
-                raise LedgerLayoutError(f"{name!r} holds the entry of {key!r}")
-            order[key] = ordinal
-        ordinals[collection] = order
-        data[collection] = entities
-    for collection, positions in histories.items():
-        if positions.keys() != set(range(len(positions))):
-            raise LedgerLayoutError(f"{collection} is missing an entry")
-        data[collection] = _validated(
-            HISTORIES[collection], [positions[i] for i in range(len(positions))]
-        )
-    for collection, members in sets.items():
-        data[collection] = sorted(members)
     if scalars.keys() != set(SCALARS):
         raise LedgerLayoutError("ledger does not hold every scalar")
     data.update(scalars)
     return StoredLedger(LedgerSnapshot.model_validate(data), ordinals)
+
+
+def _keyed_entries(
+    collection: str, names: list[str], values: list[str]
+) -> tuple[Any, dict[Hashable, int]]:
+    """A keyed collection's entries in insertion order, with each key's ordinal."""
+    stored = [0] * len(values)
+    bodies = [""] * len(values)
+    for i, value in enumerate(values):
+        ordinal, sep, bodies[i] = value.partition(":")
+        if not sep or not ordinal.isascii() or not ordinal.isdigit():
+            raise LedgerLayoutError(f"entry of {collection} has no ordinal")
+        stored[i] = int(ordinal)
+    if len(set(stored)) != len(stored):
+        raise LedgerLayoutError(f"conflicting ordinals in {collection}")
+    order = sorted(range(len(stored)), key=stored.__getitem__)
+    if collection in STRINGS:
+        keys = [_member(collection, names[i]) for i in order]
+        return (
+            {key: json.loads(bodies[i]) for key, i in zip(keys, order)},
+            {key: stored[i] for key, i in zip(keys, order)},
+        )
+    model, key_of = KEYED[collection]
+    entities = _validated(model, [bodies[i] for i in order])
+    ordinals: dict[Hashable, int] = {}
+    for i, entity in zip(order, entities):
+        key = key_of(entity)
+        if field_name(collection, key) != names[i]:
+            raise LedgerLayoutError(f"{names[i]!r} holds the entry of {key!r}")
+        ordinals[key] = stored[i]
+    return entities, ordinals
+
+
+def _history_entries(collection: str, names: list[str], values: list[str]) -> list[str]:
+    """A history's entries by position; each position must be named exactly as the
+    writer names it, so the positions cover the history only if none is missing."""
+    entries: list[str | None] = [None] * len(values)
+    prefix = len(collection) + 1
+    for name, value in zip(names, values):
+        if (position := _position(name[prefix:])) is None:
+            raise LedgerLayoutError(f"malformed position {name!r}")
+        if position >= len(entries):
+            raise LedgerLayoutError(f"{collection} is missing an entry")
+        entries[position] = value
+    return cast(list[str], entries)
