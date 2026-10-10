@@ -146,8 +146,9 @@ def _encoded_part(part: Hashable) -> str:
 def field_name(collection: str, key: Hashable) -> str:
     """Name the field of one entry: its collection, then its key's components as a
     compact JSON array, so distinct keys of distinct types never share a field."""
-    parts = key if isinstance(key, tuple) else (key,)
-    return f"{collection}:[{','.join(_encoded_part(p) for p in parts)}]"
+    if not isinstance(key, tuple):
+        return f"{collection}:[{_encoded_part(key)}]"
+    return f"{collection}:[{','.join([_encoded_part(p) for p in key])}]"
 
 
 def history_field(collection: str, position: int) -> str:
