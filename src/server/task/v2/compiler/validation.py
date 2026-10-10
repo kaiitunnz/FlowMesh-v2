@@ -4,8 +4,10 @@ from shared.sandbox import SANDBOX_EGRESS_INTERFACE, SANDBOX_EXECUTE_INTERFACE
 from shared.tasks.specs import ModelBindingMode
 
 from ..representations.operators import (
+    REGION_OPERATOR_KINDS,
     AgentOperator,
     AuthorityCeiling,
+    BranchRegion,
     DeterminismClass,
     EffectClass,
     InputProvenanceKind,
@@ -17,12 +19,20 @@ from ..representations.operators import (
     RecoveryClass,
     ResidualPolicy,
     SpawnRegion,
+    is_spawn_fanout_port,
     spawned_only_region_owners,
 )
 from ..representations.plan import PhysicalExecutionPlan
 from ..representations.results import CardinalityKind, ReleaseConditionKind
-from ..representations.template import LogicalWorkflowTemplate
+from ..representations.template import (
+    RETURN_KINDS,
+    BoundaryKind,
+    DependencyUse,
+    LogicalWorkflowTemplate,
+    TemplateEdge,
+)
 from .diagnostics import Diagnostic, Severity, SourceLocation
+from .region_checks import check_control_flow, releases_one_value
 from .sandbox import egress_authorized, egress_requested
 
 _DETERMINISTIC = (
@@ -43,8 +53,12 @@ def _location_index(
     return index
 
 
-def _port_names(op: LogicalOperator) -> set[str]:
-    return {port.name for port in (*op.inputs, *op.outputs)}
+def _output_names(op: LogicalOperator) -> set[str]:
+    return {port.name for port in op.outputs}
+
+
+def _input_names(op: LogicalOperator) -> set[str]:
+    return {port.name for port in op.inputs}
 
 
 def _check_source_map(
@@ -80,10 +94,35 @@ def _check_ports(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
     diags: list[Diagnostic] = []
-    ports_by_op = {op.operator_id: _port_names(op) for op in template.operators}
+    outputs_by_op = {op.operator_id: _output_names(op) for op in template.operators}
+    inputs_by_op = {op.operator_id: _input_names(op) for op in template.operators}
+    controls = {
+        op.operator_id: op.kind in REGION_OPERATOR_KINDS for op in template.operators
+    }
     for edge in template.edges:
-        if edge.from_port is not None:
-            names = ports_by_op.get(edge.from_op, set())
+        # A boundary end's port is a definition input or return, checked with the
+        # definition.
+        entry = edge.boundary is BoundaryKind.ENTRY
+        leaving = edge.boundary in RETURN_KINDS
+        if (
+            edge.from_port is None
+            and edge.is_forward
+            and edge.use is DependencyUse.VALUE_REQUIRED
+            and len(outputs := outputs_by_op.get(edge.from_op, set())) > 1
+            and controls.get(edge.from_op, False)
+        ):
+            diags.append(
+                Diagnostic(
+                    code="ports.ambiguous-output",
+                    message=(
+                        f"a read of {edge.from_op!r} names none of its output ports "
+                        f"{sorted(outputs)}"
+                    ),
+                    location=loc.get(edge.to_op),
+                )
+            )
+        if edge.from_port is not None and not entry:
+            names = outputs_by_op.get(edge.from_op, set())
             if edge.from_port not in names:
                 diags.append(
                     Diagnostic(
@@ -95,8 +134,8 @@ def _check_ports(
                         location=loc.get(edge.from_op),
                     )
                 )
-        if edge.to_port is not None:
-            names = ports_by_op.get(edge.to_op, set())
+        if edge.to_port is not None and not leaving:
+            names = inputs_by_op.get(edge.to_op, set())
             if edge.to_port not in names:
                 diags.append(
                     Diagnostic(
@@ -214,7 +253,7 @@ def _check_region(
                 )
             )
     elif isinstance(op, SpawnRegion):
-        if not op.child_template_ref:
+        if not op.child_template_ref and not op.child_definition_ref:
             diags.append(
                 Diagnostic(
                     code="region.spawn-no-child",
@@ -331,7 +370,7 @@ def _check_child_regions(
     producer_fed = {
         edge.to_op
         for edge in template.edges
-        if not edge.feedback and isinstance(op_by_id.get(edge.to_op), SpawnRegion)
+        if isinstance(op_by_id.get(edge.to_op), SpawnRegion)
     }
     for op in template.operators:
         if not isinstance(op, AgentOperator):
@@ -447,7 +486,7 @@ def _check_agent_inputs(
     }
     bound: dict[str, set[str]] = defaultdict(set)
     for edge in template.edges:
-        if edge.to_port and not edge.feedback:
+        if edge.to_port:
             bound[edge.to_op].add(edge.to_port)
     for op in template.operators:
         if not isinstance(op, AgentOperator):
@@ -503,7 +542,7 @@ def _check_region_outputs(
     }
     spawned_only = spawned_only_region_owners(template.operators)
     for edge in template.edges:
-        if edge.feedback or edge.to_port is None:
+        if edge.to_port is None:
             continue
         source = op_by_id.get(edge.from_op)
         target = op_by_id.get(edge.to_op)
@@ -550,8 +589,7 @@ def _check_spawn_dependents(
             location=loc.get(edge.to_op),
         )
         for edge in template.edges
-        if not edge.feedback
-        and isinstance(op_by_id.get(edge.from_op), SpawnRegion)
+        if isinstance(op_by_id.get(edge.from_op), SpawnRegion)
         and not isinstance(op_by_id.get(edge.to_op), JoinRegion)
     ]
 
@@ -559,24 +597,67 @@ def _check_spawn_dependents(
 def _check_region_inputs(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
-    """A spawn (a call included) fans out over a task's result, and a join releases
-    over a spawn's children: a spawn takes input only from tasks, and a join needs a
-    spawn among its inputs."""
+    """A spawn (a call included) fans out over one released value, a branch selects
+    on one, and a join releases over a spawn's children: a released value is a task's
+    result, a branch arm, a loop's exit value, a definition input or a one_live merge
+    over arms that each release one, never an aggregate, and a join needs a spawn among
+    its inputs. A spawn's named captures are bound once at entry and may read any
+    value."""
     op_by_id = {op.operator_id: op for op in template.operators}
+    incoming: dict[str, list[TemplateEdge]] = defaultdict(list)
+    for edge in template.edges:
+        incoming[edge.to_op].append(edge)
     fed_by_spawn: set[str] = set()
     diags: list[Diagnostic] = []
     for edge in template.edges:
-        if edge.feedback:
-            continue
         source, target = op_by_id.get(edge.from_op), op_by_id.get(edge.to_op)
         if isinstance(source, SpawnRegion):
             fed_by_spawn.add(edge.to_op)
-        if isinstance(target, SpawnRegion) and not isinstance(
-            source, (LeafOperator, AgentOperator)
+        if (
+            isinstance(target, SpawnRegion)
+            and is_spawn_fanout_port(edge.to_port)
+            and edge.boundary is not BoundaryKind.ENTRY
+            and not releases_one_value(edge.from_op, op_by_id, incoming)
         ):
             diags.append(
                 _region_input(
-                    edge.to_op, f"takes input from {edge.from_op!r}, not a task", loc
+                    edge.to_op,
+                    f"takes input from {edge.from_op!r}, which releases no single "
+                    "value",
+                    loc,
+                )
+            )
+    for op in template.operators:
+        if not isinstance(op, BranchRegion):
+            continue
+        branch_inputs = incoming.get(op.operator_id, [])
+        if op.input_index([edge.to_port for edge in branch_inputs], op.forward) is None:
+            diags.append(
+                _region_input(
+                    op.operator_id,
+                    f"binds no edge to its forwarded input {op.forward!r}",
+                    loc,
+                )
+            )
+        index = op.input_index([edge.to_port for edge in branch_inputs], op.rule.input)
+        selected = branch_inputs[index] if index is not None else None
+        if selected is None:
+            diags.append(
+                _region_input(
+                    op.operator_id,
+                    f"binds no edge to its selection input {op.rule.input!r}",
+                    loc,
+                )
+            )
+        elif selected.boundary is not BoundaryKind.ENTRY and not releases_one_value(
+            selected.from_op, op_by_id, incoming
+        ):
+            diags.append(
+                _region_input(
+                    op.operator_id,
+                    f"selects on input from {selected.from_op!r}, which releases no "
+                    "single value",
+                    loc,
                 )
             )
     diags.extend(
@@ -593,11 +674,45 @@ def _region_input(
     return Diagnostic(
         code="dataflow.region-input",
         message=(
-            f"region {operator_id!r} {problem}; a spawn fans out over a task's "
-            "result and a join collects a spawn's children"
+            f"region {operator_id!r} {problem}; a spawn fans out over a released "
+            "value, a branch selects on one, and a join collects a spawn's children"
         ),
         location=loc.get(operator_id),
     )
+
+
+def _check_edge_catalog(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """Every edge has its own identity, and each input is bound once."""
+    diags: list[Diagnostic] = []
+    ids: set[str] = set()
+    bound: dict[tuple[str, str], TemplateEdge] = {}
+    for edge in template.edges:
+        if edge.edge_id in ids:
+            diags.append(
+                Diagnostic(
+                    code="edge.duplicate-id",
+                    message=f"more than one edge is identified {edge.edge_id!r}",
+                    location=loc.get(edge.to_op),
+                )
+            )
+        ids.add(edge.edge_id)
+        if edge.to_port is None or edge.boundary in RETURN_KINDS:
+            continue
+        if (first := bound.setdefault((edge.to_op, edge.to_port), edge)) is not edge:
+            diags.append(
+                Diagnostic(
+                    code="edge.duplicate-input",
+                    message=(
+                        f"input {edge.to_port!r} of {edge.to_op!r} is bound by both "
+                        f"{first.from_op!r} and {edge.from_op!r}; bind each input "
+                        "once"
+                    ),
+                    location=loc.get(edge.to_op),
+                )
+            )
+    return diags
 
 
 def _check_result_declarations(
@@ -652,7 +767,7 @@ def _check_cycles(
 ) -> list[Diagnostic]:
     adjacency: dict[str, list[str]] = {op.operator_id: [] for op in template.operators}
     for edge in template.edges:
-        if edge.feedback:
+        if not edge.is_forward:
             continue
         if edge.from_op in adjacency:
             adjacency[edge.from_op].append(edge.to_op)
@@ -792,6 +907,7 @@ def validate_compilation(
 
     diags.extend(_check_source_map(template, plan, loc))
     diags.extend(_check_ports(template, loc))
+    diags.extend(_check_edge_catalog(template, loc))
     diags.extend(_check_spawn_child_targets(template, loc))
     diags.extend(_check_child_regions(template, loc))
     diags.extend(_check_agent_inputs(template, loc))
@@ -800,6 +916,7 @@ def validate_compilation(
     diags.extend(_check_region_inputs(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
+    diags.extend(check_control_flow(template, loc))
 
     for op in template.operators:
         diags.extend(_check_region(op, loc))

@@ -110,6 +110,10 @@ def workflow_ds_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:ds"
 
 
+def workflow_blueprints_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:blueprints"
+
+
 # The ``model_secret`` suffix is the persisted vault layout.
 WORKFLOW_CREDENTIAL_KEY_PATTERN = "workflow:*:model_secret"
 

@@ -847,7 +847,9 @@ class _FlakyWrites(_Registry):
         self.ledger_saves_to_failure = 0
         self.children_down = False
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: Any, control: Any = None
+    ) -> None:
         if self.ledger_saves_to_failure:
             self.ledger_saves_to_failure -= 1
             if not self.ledger_saves_to_failure:

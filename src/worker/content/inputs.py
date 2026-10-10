@@ -20,16 +20,17 @@ from pydantic import BaseModel
 from shared.content import ContentReference, ContentStoreError, ContentUnavailable
 from shared.harness import AgentEpisodeDispatch, InputBinding
 from shared.schemas.event import TaskFailureKind
-from shared.schemas.result import ResultEnvelope
+from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.schemas.result.binding import (
     NotAResultEnvelope,
-    collection_element,
+    binding_text,
+    element_value,
     result_envelope,
     skip_envelope_bytes,
-    value_text,
+    upstream_value,
 )
 from shared.tasks import MergedChildTaskStrict, TaskEnvelopeStrict
-from shared.tasks.result_binding import ResultBinding
+from shared.tasks.result_binding import BindingKind, ResultBinding
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
@@ -129,15 +130,16 @@ class TaskInputHydrator:
             return
         reader = _TaskReader(self, msg)
         envelopes: dict[str, bytes] = {}
-        upstream: dict[str, ResultEnvelope] = {}
+        upstream: dict[str, BaseExecutorResult] = {}
         for stage, binding in _bound(msg.upstream_results):
-            envelopes[stage] = reader.envelope_bytes(binding)
-            upstream[stage] = reader.envelope(binding)
+            if binding.whole_result:
+                envelopes[stage] = reader.envelope_bytes(binding)
+            upstream[stage] = reader.upstream_value(binding)
         element: tuple[Any] | None = None
         if (ref := msg.input_element) is not None:
             source = reader.reference_envelope(ref.reference)
             try:
-                element = (collection_element(source, ref.element),)
+                element = (element_value(source, ref),)
             except IndexError as exc:
                 raise input_unreadable(str(exc)) from exc
         msg.task = _with_inputs(msg.task, upstream, element)
@@ -155,7 +157,7 @@ class TaskInputHydrator:
         if not child.upstream_results:
             return child
         upstream = {
-            stage: reader.envelope(binding)
+            stage: reader.upstream_value(binding)
             for stage, binding in _bound(child.upstream_results)
         }
         return _as_dispatched(
@@ -189,6 +191,14 @@ class _TaskReader:
             self._bytes[reference] = data
         return data
 
+    def upstream_value(self, binding: ResultBinding) -> BaseExecutorResult:
+        """What a task's upstream map carries for one input: its whole result, or
+        the value the binding reads as."""
+        try:
+            return upstream_value(binding, self.envelope)
+        except IndexError as exc:
+            raise input_unreadable(str(exc)) from exc
+
     def envelope(self, binding: ResultBinding) -> ResultEnvelope:
         if binding.reference is not None:
             return self.reference_envelope(binding.reference)
@@ -216,11 +226,14 @@ def _parsed(data: bytes, source: str) -> ResultEnvelope:
 def _bound(
     upstream: dict[str, ResultBinding] | None,
 ) -> list[tuple[str, ResultBinding]]:
-    """The upstream stages that settled with a result or a skip to read."""
+    """The inputs that carry a value to read: a result or a skip, or a value that is
+    not one whole result."""
     return [
         (stage, binding)
         for stage, binding in (upstream or {}).items()
-        if binding.reference is not None or binding.skip is not None
+        if binding.reference is not None
+        or binding.skip is not None
+        or binding.kind is not BindingKind.RESULT
     ]
 
 
@@ -242,11 +255,10 @@ def _with_member_values(
             if (source := member.source) is None:
                 members.append(member)
                 continue
-            envelope = reader.reference_envelope(source.reference)
             members.append(
                 member.model_copy(
                     update={
-                        "value": value_text(envelope, source.element),
+                        "value": binding_text(source, reader.envelope),
                         "source": None,
                     }
                 )
@@ -257,7 +269,7 @@ def _with_member_values(
 
 def _with_inputs(
     task: TaskEnvelopeStrict,
-    upstream: dict[str, ResultEnvelope],
+    upstream: dict[str, BaseExecutorResult],
     element: tuple[Any] | None,
 ) -> TaskEnvelopeStrict:
     spec = _with_upstream_spec(task.spec, upstream) if upstream else task.spec
@@ -269,10 +281,10 @@ def _with_inputs(
 
 
 def _with_upstream_spec[S: TaskSpecStrictBase](
-    spec: S, upstream: dict[str, ResultEnvelope]
+    spec: S, upstream: dict[str, BaseExecutorResult]
 ) -> S:
     merged = dict(spec.upstreamResults or {})
-    merged.update({stage: envelope.result for stage, envelope in upstream.items()})
+    merged.update(upstream)
     return spec.model_copy(update={"upstreamResults": merged})
 
 

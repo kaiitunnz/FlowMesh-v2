@@ -1,11 +1,12 @@
 """Durable persistence and restart rehydration of TaskRuntime."""
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
@@ -15,6 +16,7 @@ from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.server.runtime_helpers import manual_durability_retry
 from tests.support.waiting import pop_ready
 
 
@@ -28,6 +30,7 @@ class FakeWorkflowRegistry:
         self.v2_blobs: dict[str, str] = {}
         self.ledger_blobs: dict[str, str] = {}
         self.dynamic_task_ids: dict[str, set[str]] = {}
+        self.blueprints: dict[str, list[PersistedTask]] = {}
 
     async def register_workflow_async(
         self,
@@ -37,6 +40,7 @@ class FakeWorkflowRegistry:
         v2: Any = None,
         ledger: Any = None,
         submitted_at: str | None = None,
+        blueprints: Any = (),
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
         self.save_task_states(tasks)
@@ -45,6 +49,10 @@ class FakeWorkflowRegistry:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
         if ledger is not None:
             self.save_ledger_snapshot(workflow_id, ledger)
+        self.blueprints[workflow_id] = list(blueprints)
+
+    async def load_blueprints_async(self, workflow_id: str) -> list[PersistedTask]:
+        return self.blueprints.get(workflow_id, [])
 
     async def get_v2_workflow_async(self, workflow_id: str) -> Any:
         from server.task.v2 import PersistedV2Workflow
@@ -52,7 +60,9 @@ class FakeWorkflowRegistry:
         blob = self.v2_blobs.get(workflow_id)
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: Any, control: Any = None
+    ) -> None:
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
 
     def load_ledger_snapshot(self, workflow_id: str) -> Any:
@@ -139,6 +149,7 @@ class FakeWorkflowRegistry:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: Any = None,
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
@@ -188,6 +199,7 @@ def _runtime(
         make_result_reader(),
         logging.getLogger("rehydrate-test"),
         credential_vault=vault or InMemoryCredentialVault(),
+        durability_retry=manual_durability_retry,
     )
 
 
@@ -213,6 +225,20 @@ spec:
         dependsOn: [a]
         spec:
           taskType: echo
+"""
+
+WIDE = """
+apiVersion: flowmesh/v1
+kind: Workflow
+metadata:
+  name: wide
+spec:
+  graph:
+    nodes:
+      - {name: a, spec: {taskType: echo}}
+      - {name: b, spec: {taskType: echo}}
+      - {name: c, spec: {taskType: echo}}
+      - {name: d, spec: {taskType: echo}}
 """
 
 EPOCH_GRAPH = """
@@ -485,12 +511,12 @@ async def test_mark_failed_applies_cascade_atomically_when_persist_raises(
 
 
 @pytest.mark.anyio
-async def test_replayed_terminal_event_repersists_after_failed_write(
+async def test_a_replayed_terminal_event_lands_the_cascade_its_store_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = FakeWorkflowRegistry()
     runtime = _runtime(registry)
-    _, ids = await _register(runtime, GRAPH)
+    workflow_id, ids = await _register(runtime, GRAPH)
     a, b = ids["a"], ids["b"]
 
     real_commit = registry.commit_transition
@@ -499,7 +525,7 @@ async def test_replayed_terminal_event_repersists_after_failed_write(
     def flaky_commit(*args: Any, **kwargs: Any) -> None:
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("redis down")
+            raise RedisConnectionError("redis down")
         real_commit(*args, **kwargs)
 
     monkeypatch.setattr(registry, "commit_transition", flaky_commit)
@@ -509,22 +535,111 @@ async def test_replayed_terminal_event_repersists_after_failed_write(
             registry.task_blobs[task_id]
         ).record.status
 
-    # Registration persisted both tasks as PENDING.
-    assert persisted_status(a) == TaskStatus.PENDING
-
-    # Attempt 1: the cascade applies in memory, but the durable write fails, so
-    # the persisted records are left at their stale PENDING state.
-    with pytest.raises(RuntimeError):
-        runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    # The cascade applies in memory and its write is held.
+    runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert persisted_status(a) == TaskStatus.PENDING
     assert persisted_status(b) == TaskStatus.PENDING
+    assert not runtime._committer.durable(workflow_id)
 
-    # Replay of the same TASK_FAILED: the guard heals by re-persisting the
-    # workflow's terminal records (the whole cascade, not just the primary).
+    # A replay of the same TASK_FAILED writes what the workflow holds.
     impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert impacted == []
     assert persisted_status(a) == TaskStatus.FAILED
     assert persisted_status(b) == TaskStatus.FAILED
+    assert runtime._committer.durable(workflow_id)
+
+
+_BESIDE = GRAPH + """      - name: c
+        spec:
+          taskType: echo
+"""
+
+
+class _RaisingOnce:
+    """A registry write that raises a fault of its own the first ``times`` times."""
+
+    def __init__(self, registry: FakeWorkflowRegistry, times: int) -> None:
+        self._commit = registry.commit_transition
+        self.times = times
+        self.written: list[str] = []
+
+    def __call__(self, workflow: str, **kwargs: Any) -> None:
+        if self.times:
+            self.times -= 1
+            raise RuntimeError("the write could not be encoded")
+        self.written.extend(item.record.task_id for item in kwargs.get("records", ()))
+        self._commit(workflow, **kwargs)
+
+
+def _persisted_status(registry: FakeWorkflowRegistry, task_id: str) -> str:
+    return PersistedTask.model_validate_json(registry.task_blobs[task_id]).record.status
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("next_write", ["replay", "another_task"])
+async def test_a_cascade_whose_write_raised_lands_with_the_next_write(
+    monkeypatch: pytest.MonkeyPatch, next_write: str
+) -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, _BESIDE)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+    writes = _RaisingOnce(registry, times=1)
+    monkeypatch.setattr(registry, "commit_transition", writes)
+
+    # The cascade's own write raised: the transition's error, and a rewrite owed.
+    with pytest.raises(RuntimeError):
+        runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    assert _persisted_status(registry, b) == TaskStatus.PENDING
+    assert not runtime._committer.durable(workflow_id)
+    assert not runtime._durability.pending(workflow_id)
+
+    match next_write:
+        case "replay":
+            impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+            assert impacted == []
+        case _:
+            # Publishing another task makes the workflow's owed writes first.
+            record_dispatch(runtime, c)
+    assert _persisted_status(registry, a) == TaskStatus.FAILED
+    assert _persisted_status(registry, b) == TaskStatus.FAILED
+    assert runtime._committer.durable(workflow_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("report", ["succeeded", "failed", "cancelled"])
+async def test_a_replayed_terminal_event_rewrites_only_its_own_task(
+    monkeypatch: pytest.MonkeyPatch, report: str
+) -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, WIDE)
+    finished = [ids[name] for name in ("a", "b", "c")]
+    for task_id in finished:
+        record_dispatch(runtime, task_id)
+        runtime.mark_succeeded(task_id, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    last = ids["d"]
+    record_dispatch(runtime, last)
+    settle: Callable[..., Any]
+    match report:
+        case "succeeded":
+            settle = runtime.mark_succeeded
+        case "failed":
+            settle = runtime.mark_failed
+        case _:
+            runtime.cancel_workflow(workflow_id)
+            settle = runtime.mark_cancelled
+
+    written: list[str] = []
+    real_commit = registry.commit_transition
+
+    def recording(workflow: str, **kwargs: Any) -> None:
+        written.extend(item.record.task_id for item in kwargs.get("records", ()))
+        real_commit(workflow, **kwargs)
+
+    monkeypatch.setattr(registry, "commit_transition", recording)
+    settle(last, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    assert written == [last]
 
 
 @pytest.mark.anyio

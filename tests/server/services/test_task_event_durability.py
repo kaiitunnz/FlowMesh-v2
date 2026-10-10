@@ -56,7 +56,9 @@ class _Store(_Registry):
         self.done_commits += done
         self.writes.append("records")
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: Any, control: Any = None
+    ) -> None:
         if self.error is not None:
             raise self.error
         super().save_ledger_snapshot(workflow_id, snapshot)
@@ -193,8 +195,10 @@ def test_a_programming_error_inside_a_write_is_not_held(error: Exception) -> Non
     with pytest.raises(type(error)):
         runtime.mark_succeeded(task_id, "wkr-1", event.payload, event.ts, "dsp-1")
 
-    assert runtime._committer.debt == {}
-    assert not runtime._durability.pending(runtime._tasks[task_id].workflow_id)
+    # The rewrite it owes rides the workflow's next write; nothing retries it alone.
+    workflow_id = runtime._tasks[task_id].workflow_id
+    assert set(runtime._committer.debt) == {workflow_id}
+    assert not runtime._durability.pending(workflow_id)
 
 
 def test_a_programming_error_inside_a_write_spends_the_handler_budget() -> None:

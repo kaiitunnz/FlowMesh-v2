@@ -1,17 +1,19 @@
 # Necessary for the recursive ``children`` forward reference.
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import (
     BaseModel,
     Discriminator,
     Field,
     SerializeAsAny,
+    SerializerFunctionWrapHandler,
     Tag,
+    model_serializer,
 )
 
-from ..artifacts import ArtifactRef
+from ..artifacts import ArtifactContext, ArtifactRef
 from ..common import TaskType
 from ._base import BaseExecutorResult, StrictExecutorResult
 from .payloads import (
@@ -231,6 +233,28 @@ class SSHResult(StrictExecutorResult):
     port: int | None = None
 
 
+_ROUTED_TAG: Final = "__routed__"
+
+
+class RoutedValue(StrictExecutorResult):
+    """A value that is not one whole task result, such as a projected part of one,
+    an aggregate's members, or an explicit empty; ``routed_value`` carries it."""
+
+    routed: Literal[True] = Field(default=True, alias=_ROUTED_TAG)
+    routed_value: Any
+    member_artifacts_: dict[str, ArtifactContext] = Field(
+        default_factory=dict, alias="_member_artifacts", exclude_if=lambda v: not v
+    )
+
+    @model_serializer(mode="wrap")
+    def _drop_none_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        dumped = StrictExecutorResult._drop_none_fields(self, handler)
+        dumped.setdefault("routed_value", None)
+        return dumped
+
+
 _BASE_TAG = "__base__"
 
 _RESULT_TAGS: frozenset[str] = frozenset(
@@ -262,8 +286,12 @@ _RESULT_TAGS: frozenset[str] = frozenset(
 
 def _result_discriminator(value: Any) -> str:
     if isinstance(value, dict):
+        if value.get(_ROUTED_TAG) is True:
+            return _ROUTED_TAG
         tag = value.get("task_type")
     else:
+        if isinstance(value, RoutedValue):
+            return _ROUTED_TAG
         tag = getattr(value, "task_type", None)
     if tag is None:
         return _BASE_TAG
@@ -297,6 +325,7 @@ AnyExecutorResult = Annotated[
         | Annotated[EchoResult, Tag(TaskType.ECHO.value)]
         | Annotated[APIResult, Tag(TaskType.API.value)]
         | Annotated[SSHResult, Tag(TaskType.SSH.value)]
+        | Annotated[RoutedValue, Tag(_ROUTED_TAG)]
         | Annotated[BaseExecutorResult, Tag(_BASE_TAG)]
     ),
     Discriminator(_result_discriminator),

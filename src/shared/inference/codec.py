@@ -383,11 +383,12 @@ def canonical_contract(spec: InferenceSpec) -> CanonicalInferenceContract:
 
 
 def element_contract(
-    spec: InferenceSpec, producer_task_id: str, index: int
+    spec: InferenceSpec, producer_task_id: str, index: int, path: str | None = None
 ) -> CanonicalInferenceContract:
     """The contract of a fan-out child that runs on one element of a producer's result.
 
-    The contract names the element by its producer and index, is proven from the spec's
+    The contract names the element by its producer, the path to its collection when
+    the collection is part of the result, and its index; it is proven from the spec's
     model and sampling, and resolves to exactly one prompt.
     """
     return CanonicalInferenceContract(
@@ -395,6 +396,7 @@ def element_contract(
         source=CanonicalInferenceInputSource(
             kind=InferenceSourceKind.UPSTREAM,
             node=producer_task_id,
+            path=path,
             element=index,
             max_items=1,
         ),

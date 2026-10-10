@@ -39,6 +39,9 @@ A `LogicalWorkflowTemplate` carries a small symbolic operator vocabulary:
   `BoundarySignature`;
 - symbolic region forms `BranchRegion` / `MergeRegion`, `SpawnRegion` /
   `JoinRegion`, and `LoopContextRegion`;
+- `RegionDefinition`s, the finite templates a loop runs as its body and a spawn
+  or call runs per child, wired to their regions through `$ingress`, `$feedback`,
+  `$egress`, and `$return` boundary edges;
 - typed `Port`s carrying values, `StateReference`s, or `ModelRef`s.
 
 A `BindingKey` names compatible executor semantics symbolically. It is not a

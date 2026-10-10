@@ -263,17 +263,14 @@ async def validate_workflow(
     payload = _get_workflow_from_request(raw_body, content_type, workflow_format)
 
     try:
-        results = runtime.validate(payload, format=workflow_format)
+        results, inspection = runtime.validate(payload, format=workflow_format)
+    except CompileError as exc:
+        raise _compilation_failed(exc.diagnostics) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Workflow validation failed: {exc}",
         ) from exc
-
-    try:
-        inspection = runtime.inspect_v2(payload, format=workflow_format)
-    except CompileError as exc:
-        raise _compilation_failed(exc.diagnostics) from exc
 
     if inspection is not None and not inspection.ok:
         raise _compilation_failed(inspection.diagnostics)

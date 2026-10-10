@@ -18,7 +18,7 @@ from shared.schemas.governance import (
     TASK_SPAN_NAME,
     SpanType,
 )
-from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result import BaseExecutorResult, RoutedValue
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.utils.time import now_iso
 
@@ -224,20 +224,24 @@ class GovernanceMixin:
         return context
 
     def _extract_source_data_ids(self, spec: TaskSpecStrictBase) -> list[str]:
-        """Upstream task IDs for lineage, one per ``_upstreamResults`` entry."""
+        """Upstream task IDs for lineage: the producer of each ``_upstreamResults``
+        entry, and of each member an aggregate or bundle entry holds."""
         seen: set[str] = set()
         ids: list[str] = []
         for upstream in self._spec_upstream_results(spec).values():
-            # The result payload carries no ID; the producing task ID is the
-            # final segment of its ``_artifacts.base_dir`` (the producer's dir).
-            context = upstream.artifacts_
-            if context is None or not context.base_dir:
-                continue
-            sid = Path(context.base_dir).name
-            if not sid or sid in seen:
-                continue
-            seen.add(sid)
-            ids.append(sid)
+            contexts = [upstream.artifacts_]
+            if isinstance(upstream, RoutedValue):
+                contexts.extend(upstream.member_artifacts_.values())
+            for context in contexts:
+                # The result payload carries no ID; the producing task ID is the
+                # final segment of its ``_artifacts.base_dir`` (the producer's dir).
+                if context is None or not context.base_dir:
+                    continue
+                sid = Path(context.base_dir).name
+                if not sid or sid in seen:
+                    continue
+                seen.add(sid)
+                ids.append(sid)
         return ids
 
     def _dump_to_governance(

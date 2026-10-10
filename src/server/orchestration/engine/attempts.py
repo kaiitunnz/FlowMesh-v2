@@ -331,10 +331,15 @@ class AttemptLifecycle:
         self._ledger.emitter.emit_work_item(wi)
         self._ledger.emitter.emit_activation(wi.activation_id)
         self._ledger.private_state.release(wi.activation_id)
-        self._publication.publish(wi.operator_id, outcome, value_ref)
-        return self._flow.deliver_record(
-            wi.operator_id, wi.activation_id, value_ref
-        ).extend(released)
+        # An occurrence inside a region definition delivers through its own routes;
+        # only a root operator owns the result slot its declaration induces.
+        if activation.kind != "occurrence":
+            self._publication.publish(wi.operator_id, outcome, value_ref)
+        advance = Advance()
+        self._flow.propagate(
+            self._ledger.occurrence_of_work_item(wi), advance, value=value_ref
+        )
+        return advance.extend(released)
 
     def on_failed(self, task_id: str, error: str, *, retryable: bool) -> Advance:
         """Retry a work item as a fresh attempt, or settle it and cascade failure."""

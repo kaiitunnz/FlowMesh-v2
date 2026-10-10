@@ -66,11 +66,20 @@ from .result import (
     RagSearch,
     RagUsage,
     ResultEnvelope,
+    RoutedValue,
     ServeResult,
     SFTResult,
     SSHResult,
 )
-from .tasks import HardwareUsage, TaskInfo, TaskInputElement, TaskPage, TaskUsage
+from .tasks import (
+    HardwareUsage,
+    TaskInfo,
+    TaskInputElement,
+    TaskLoopTime,
+    TaskOccurrence,
+    TaskPage,
+    TaskUsage,
+)
 from .traces import (
     ActiveWaitBreakdown,
     AssetSummary,
@@ -166,6 +175,7 @@ __all__ = [
     "RagQuery",
     "RagSearch",
     "RagUsage",
+    "RoutedValue",
     "SFTResult",
     "SSHResult",
     "ServeResult",
@@ -201,6 +211,8 @@ __all__ = [
     "TaskInfo",
     "TaskPage",
     "TaskInputElement",
+    "TaskLoopTime",
+    "TaskOccurrence",
     "TaskStatus",
     "TaskTiming",
     "TaskType",

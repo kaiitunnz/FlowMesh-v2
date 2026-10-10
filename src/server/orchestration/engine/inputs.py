@@ -1,8 +1,22 @@
 """Accepted agent inputs of one workflow instance."""
 
-from ...task.v2.representations.operators import OperatorKind
-from ..state import AcceptedInput, PublicationOutcome, ValueRef, WorkItemStatus
+from ...task.v2.representations.operators import (
+    AgentOperator,
+    JoinRegion,
+    OperatorKind,
+)
+from ...task.v2.representations.template import TemplateEdge
+from ..state import (
+    AcceptedInput,
+    AcceptedInputMember,
+    Occurrence,
+    PublicationOutcome,
+    ValueRef,
+    WorkItem,
+    WorkItemStatus,
+)
 from ..tool_dispatch import AgentInputPlan, InputMemberPlan, InputPortPlan
+from .edges import EdgeResolver, EdgeState
 from .ledger import OrchestrationLedger
 from .topology import PlanTopology
 
@@ -18,6 +32,7 @@ class AcceptedInputLedger:
     ) -> None:
         self._ledger = ledger
         self._topology = topology
+        self._edges = EdgeResolver(ledger, topology)
         self.accepted_inputs: list[AcceptedInput] = []
         self.accepted_by_activation: dict[str, list[AcceptedInput]] = {}
 
@@ -28,6 +43,70 @@ class AcceptedInputLedger:
             return
         self.accepted_inputs.append(accepted)
         existing.append(accepted)
+
+    def record_routed_inputs(
+        self,
+        occurrence: Occurrence,
+        wi: WorkItem,
+        inputs: list[tuple[TemplateEdge | None, str, str | None, ValueRef | None]],
+    ) -> None:
+        """Record an agent occurrence's accepted inputs from the routes it took.
+
+        ``inputs`` holds, per resolved input, its edge (None for a definition entry),
+        target port, source occurrence and value. An occurrence inside a region
+        definition takes every declared port this way; a root agent takes the ports a
+        merge, branch or loop feeds, whose value no task holds.
+        """
+        op = self._topology.operators.get(wi.operator_id)
+        if not isinstance(op, AgentOperator):
+            return
+        dynamic = bool(occurrence.context_id or occurrence.time)
+        for ordinal, (edge, port, source, value) in enumerate(inputs):
+            if port not in op.declared_input_ports or value is None:
+                continue
+            source_op = edge.from_op if edge is not None else occurrence.operator_id
+            if not dynamic and self._topology.kind(source_op) in (
+                OperatorKind.LEAF,
+                OperatorKind.AGENT,
+                OperatorKind.JOIN,
+            ):
+                continue
+            members = (
+                tuple(
+                    AcceptedInputMember(
+                        source_operator_id=source_op,
+                        source_output_port=edge.from_port if edge else None,
+                        source_activation_id=source or occurrence.key,
+                        outcome=member.outcome,
+                        value_ref=member.value_ref,
+                        ordinal=index,
+                    )
+                    for index, member in enumerate(value.members)
+                )
+                if value.kind == "aggregate"
+                else (
+                    AcceptedInputMember(
+                        source_operator_id=source_op,
+                        source_output_port=edge.from_port if edge else None,
+                        source_activation_id=source or occurrence.key,
+                        outcome=(
+                            PublicationOutcome.EXPLICIT_EMPTY
+                            if value.kind == "empty"
+                            else PublicationOutcome.SUCCESS
+                        ),
+                        value_ref=value,
+                    ),
+                )
+            )
+            self.record_accepted_input(
+                AcceptedInput(
+                    activation_id=wi.activation_id,
+                    target_port=port,
+                    provenance="routed",
+                    members=members,
+                    ordinal=ordinal,
+                )
+            )
 
     def accepted_inputs_for(self, activation_id: str) -> tuple[AcceptedInput, ...]:
         """The recorded accepted inputs for one activation, ordered by ordinal."""
@@ -71,7 +150,7 @@ class AcceptedInputLedger:
         for port in sorted(cont.required_ports):
             if port in have:
                 continue
-            resolved = self._port_members(wi.operator_id, port)
+            resolved = self._port_members(wi, port)
             if resolved is None:
                 continue
             provenance, members = resolved
@@ -83,89 +162,78 @@ class AcceptedInputLedger:
         return AgentInputPlan(activation_id=wi.activation_id, ports=tuple(ports))
 
     def _port_members(
-        self, agent_op: str, port: str
+        self, wi: WorkItem, port: str
     ) -> tuple[str, tuple[InputMemberPlan, ...]] | None:
-        """The ordered members feeding a port, or None if a source is unsettled."""
-        sources = [
-            edge.from_op
-            for edge in self._topology.bundle.template.edges
-            if edge.to_op == agent_op and edge.to_port == port and not edge.feedback
+        """The ordered members feeding a port, each the value its edge delivers, or
+        None while a source is unsettled.
+
+        A join read whole yields one member per child its aggregate froze; a call
+        delivers its child's returned value.
+        """
+        occurrence = self._ledger.occurrence(self._ledger.occurrence_of_work_item(wi))
+        edges = [
+            edge
+            for edge in self._topology.incoming.get(wi.operator_id, ())
+            if edge.to_port == port and edge.is_forward
         ]
-        if not sources:
+        if not edges:
             return None
         provenance = "producer"
         members: list[InputMemberPlan] = []
-        ordinal = 0
-        for source in sources:
-            if self._topology.kind(source) is OperatorKind.JOIN:
+        for edge in edges:
+            source = self._edges.sibling(occurrence, edge.from_op)
+            state, value = self._edges.source_state(
+                source, edge.from_port, edge.projection
+            )
+            if state not in (EdgeState.LIVE, EdgeState.EMPTY):
+                return None
+            value = value or ValueRef(kind="empty")
+            aggregate = self._ledger.aggregate_by_join.get(source)
+            join = self._topology.operators.get(edge.from_op)
+            if (
+                aggregate is not None
+                and not edge.projection
+                and isinstance(join, JoinRegion)
+                and not join.call
+            ):
                 provenance = "join_aggregate"
-                aggregate = self._ledger.aggregate_by_join.get(source)
-                if aggregate is None:
-                    return (
-                        None  # the join has not released and frozen its aggregate yet
-                    )
                 for member in sorted(aggregate.members, key=lambda m: m.child_key):
-                    child_op = (
-                        self._ledger.activations[member.child_activation_id].operator_id
-                        if member.child_activation_id in self._ledger.activations
-                        else source
-                    )
+                    child = self._ledger.activations.get(member.child_activation_id)
                     members.append(
-                        self._member_plan(
-                            child_op,
-                            member.child_activation_id,
-                            (
+                        InputMemberPlan(
+                            source_operator_id=(
+                                child.operator_id if child else edge.from_op
+                            ),
+                            source_activation_id=member.child_activation_id,
+                            child_index=(
                                 int(member.child_key)
                                 if member.child_key.isdigit()
                                 else None
                             ),
-                            member.outcome,
-                            member.value_ref,
-                            ordinal,
+                            outcome=member.outcome.value,
+                            value_ref=member.value_ref or ValueRef(kind="empty"),
+                            ordinal=len(members),
                         )
                     )
-                    ordinal += 1
-            else:
-                src_wi_id = self._ledger.wi_by_operator.get(source)
-                src_wi = self._ledger.work_items.get(src_wi_id) if src_wi_id else None
-                if src_wi is None or src_wi.outcome is None:
-                    return None
-                members.append(
-                    self._member_plan(
-                        source,
-                        src_wi.activation_id,
-                        None,
-                        src_wi.outcome,
-                        ValueRef(
-                            kind="legacy_task_result",
-                            legacy_task_id=src_wi.legacy_task_id,
-                        ),
-                        ordinal,
-                    )
+                continue
+            wi_id = self._ledger.wi_by_occurrence.get(source)
+            src_wi = self._ledger.work_items.get(wi_id) if wi_id else None
+            members.append(
+                InputMemberPlan(
+                    source_operator_id=edge.from_op,
+                    source_activation_id=(
+                        src_wi.activation_id if src_wi is not None else source
+                    ),
+                    outcome=(
+                        PublicationOutcome.EXPLICIT_EMPTY
+                        if state is EdgeState.EMPTY
+                        else PublicationOutcome.SUCCESS
+                    ).value,
+                    value_ref=value,
+                    ordinal=len(members),
                 )
-                ordinal += 1
+            )
         return provenance, tuple(members)
-
-    @staticmethod
-    def _member_plan(
-        source_operator_id: str,
-        source_activation_id: str,
-        child_index: int | None,
-        outcome: PublicationOutcome,
-        value_ref: ValueRef | None,
-        ordinal: int,
-    ) -> InputMemberPlan:
-        return InputMemberPlan(
-            source_operator_id=source_operator_id,
-            source_activation_id=source_activation_id,
-            child_index=child_index,
-            outcome=outcome.value,
-            value_ref_kind=value_ref.kind if value_ref else "empty",
-            legacy_task_id=value_ref.legacy_task_id if value_ref else None,
-            collection_key=value_ref.collection_key if value_ref else None,
-            literal=value_ref.literal if value_ref else None,
-            ordinal=ordinal,
-        )
 
     def child_input(self, task_id: str) -> ValueRef | None:
         """The child-init input a spawned child task runs on, if it has one."""

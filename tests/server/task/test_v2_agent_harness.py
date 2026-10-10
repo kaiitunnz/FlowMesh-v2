@@ -131,7 +131,11 @@ def _region(
         completion=JoinCompletion.ALL_SETTLED,
     )
     ref = ChildRegionRef(name=role, spawn_ref=spawn_id)
-    return ref, [spawn, join], TemplateEdge(from_op=spawn_id, to_op=join_id)
+    return (
+        ref,
+        [spawn, join],
+        TemplateEdge(from_op=spawn_id, to_op=join_id, edge_id=f"{spawn_id}->{join_id}"),
+    )
 
 
 def _leaf(op_id: str) -> LeafOperator:
@@ -877,8 +881,9 @@ def test_terminal_failure_fails_a_never_entered_region() -> None:
     failed = eng.on_failed("A", "boom", retryable=False).failed
 
     # A failed agent's unused region is not an empty one: it opens no scope, seals
-    # nothing, and its template and join fail with it.
-    assert failed[0] == "A" and {"rbody", "vbody"} <= set(failed)
+    # nothing, and its join fails with it. Its template is a blueprint, no task.
+    assert failed == ["A"]
+    assert not {"rbody", "vbody"} & set(eng.declared_failures())
     for role in ("researcher", "reviewer"):
         assert eng.region_scope_for(act, role) is None
     assert set(eng.to_snapshot().failed_regions) == {
@@ -906,7 +911,7 @@ def test_an_ambiguity_terminal_fails_a_never_entered_region() -> None:
 
     failed = eng.on_uncertain("A").failed
 
-    assert failed[0] == "A" and {"rbody", "vbody"} <= set(failed)
+    assert failed == ["A"]
     assert eng.region_scope_for(act, "researcher") is None
     assert "reviewer:spawn:join" in eng.to_snapshot().failed_regions
 
@@ -1008,7 +1013,14 @@ def _self_recursive_agent() -> PersistedV2Workflow:
     ref, ops, edge = _region("self", "A")
     return _bundle(
         [_agent("A", regions=(ref,)), *ops, _leaf("after")],
-        [edge, TemplateEdge(from_op="self:spawn:join", to_op="after")],
+        [
+            edge,
+            TemplateEdge(
+                from_op="self:spawn:join",
+                to_op="after",
+                edge_id="self:spawn:join->after",
+            ),
+        ],
         (_decl("out:A", "A"), _decl("out:after", "after")),
     )
 

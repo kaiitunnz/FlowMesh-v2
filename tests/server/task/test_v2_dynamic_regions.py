@@ -22,7 +22,6 @@ from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
     AuthorityCeiling,
     BindingKey,
-    BranchRegion,
     DeterminismClass,
     EffectBoundary,
     EffectClass,
@@ -34,9 +33,7 @@ from server.task.v2.representations.operators import (
     LeafOperator,
     LeafProfile,
     LogicalOperator,
-    LoopContextRegion,
     MergeRegion,
-    ModelRef,
     OperatorKind,
     Port,
     RecoveryClass,
@@ -169,7 +166,7 @@ def _spawn_join(
     body = _leaf("body")
     return _bundle(
         [spawn, join, body],
-        [TemplateEdge(from_op="S", to_op="J")],
+        [TemplateEdge(from_op="S", to_op="J", edge_id="S->J")],
         results=results
         or (_decl("out:J", "J", release=ReleaseConditionKind.SCOPE_CLOSED),),
     )
@@ -274,8 +271,8 @@ def test_nested_call_closes_inner_then_outer() -> None:
         _bundle(
             [outer_s, outer_j, inner_s, inner_j, _leaf("leaf")],
             [
-                TemplateEdge(from_op="So", to_op="Jo"),
-                TemplateEdge(from_op="Si", to_op="Ji"),
+                TemplateEdge(from_op="So", to_op="Jo", edge_id="So->Jo"),
+                TemplateEdge(from_op="Si", to_op="Ji", edge_id="Si->Ji"),
             ],
             results=(_decl("out:Jo", "Jo", release=ReleaseConditionKind.SCOPE_CLOSED),),
         )
@@ -350,77 +347,9 @@ def test_denied_spawn_creates_no_child_and_seal_stays_separate() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _loop_bundle() -> PersistedV2Workflow:
-    loop = LoopContextRegion(operator_id="L", source_ref="L", loop_coordinate="t")
-    return _bundle(
-        [loop],
-        [],
-        results=(_decl("out:L", "L", release=ReleaseConditionKind.SCOPE_CLOSED),),
-    )
-
-
-def test_loop_time_is_well_founded_and_bounded() -> None:
-    eng = _engine(_loop_bundle(), budget=ScopeBudget(max_loop_iterations=2))
-    t1 = eng.loop_feedback("L")
-    t2 = eng.loop_feedback("L")
-    assert eng._ledger.activations[t1].loop_time == 1  # strictly increasing
-    assert eng._ledger.activations[t2].loop_time == 2
-    with pytest.raises(RegionError):
-        eng.loop_feedback("L")  # exceeds the iteration budget
-
-
-def test_loop_closes_under_delayed_completion_with_carried_model_ref() -> None:
-    eng = _engine(_loop_bundle())
-    rounds = []
-    for version in ("v1", "v2", "v3"):
-        rounds.append(
-            eng.loop_feedback(
-                "L",
-                value_ref=ValueRef(
-                    kind="model_ref",
-                    model_ref=ModelRef(architecture="m", version=version),
-                ),
-            )
-        )
-    # Iterations settle out of order (a later rollout finishes before an earlier one).
-    eng.settle_iteration(rounds[1])
-    eng.loop_seal("L")
-    assert not eng.region_closed("L")  # rounds 0 and 2 still outstanding
-    eng.settle_iteration(rounds[0])
-    assert not eng.region_closed("L")
-    eng.settle_iteration(rounds[2])
-    assert eng.region_closed("L")
-    # Egress carries the latest loop-time ModelRef version.
-    pub = eng.output_publication("out:L")
-    assert pub is not None and pub.value_ref is not None
-    assert pub.value_ref.model_ref is not None
-    assert pub.value_ref.model_ref.version == "v3"
-
-
 # --------------------------------------------------------------------------- #
 # Branch / merge record routing
 # --------------------------------------------------------------------------- #
-
-
-def test_branch_routes_selected_port_and_empties_the_rest() -> None:
-    branch = BranchRegion(operator_id="B", source_ref="B", selection=None)
-    eng = _engine(
-        _bundle(
-            [_leaf("A"), branch, _leaf("x", deps=True), _leaf("y", deps=True)],
-            [
-                TemplateEdge(from_op="A", to_op="B"),
-                TemplateEdge(from_op="B", to_op="x", from_port="p1"),
-                TemplateEdge(from_op="B", to_op="y", from_port="p2"),
-            ],
-            results=(_decl("legacy:y", "y"),),
-        )
-    )
-    eng.on_succeeded("A")  # fires the branch; awaits a data-driven route
-    adv = eng.route_branch("B", "p1")
-    assert adv.ready == ["x"]  # the selected port readies its successor
-    assert eng.work_item("x").status.value == "ready"  # type: ignore[union-attr]
-    ypub = eng.output_publication("legacy:y")
-    assert ypub is not None and ypub.outcome is PublicationOutcome.EXPLICIT_EMPTY
 
 
 def test_merge_combines_all_inputs_before_releasing() -> None:
@@ -429,9 +358,9 @@ def test_merge_combines_all_inputs_before_releasing() -> None:
         _bundle(
             [_leaf("A"), _leaf("B"), merge, _leaf("C", deps=True)],
             [
-                TemplateEdge(from_op="A", to_op="M"),
-                TemplateEdge(from_op="B", to_op="M"),
-                TemplateEdge(from_op="M", to_op="C"),
+                TemplateEdge(from_op="A", to_op="M", edge_id="A->M"),
+                TemplateEdge(from_op="B", to_op="M", edge_id="B->M"),
+                TemplateEdge(from_op="M", to_op="C", edge_id="M->C"),
             ],
         )
     )
@@ -538,8 +467,8 @@ def test_autoresearch_controller_fans_out_experiments() -> None:
         _bundle(
             [planner, spawn, join, _leaf("trial")],
             [
-                TemplateEdge(from_op="planner", to_op="exp"),
-                TemplateEdge(from_op="exp", to_op="collect"),
+                TemplateEdge(from_op="planner", to_op="exp", edge_id="planner->exp"),
+                TemplateEdge(from_op="exp", to_op="collect", edge_id="exp->collect"),
             ],
             results=(
                 _decl(
@@ -563,33 +492,6 @@ def test_autoresearch_controller_fans_out_experiments() -> None:
     # Each experiment publishes into the keyed collection under its own logical key.
     keyed = [p for k, p in _collection_publications(eng, "results")]
     assert len(keyed) == 3
-
-
-def test_rlvr_loop_pins_model_version_per_round() -> None:
-    # A repeated rollout/evaluation loop carries an updated ModelRef each round and
-    # closes only after every delayed rollout completes.
-    eng = _engine(_loop_bundle())
-    versions = ["p1", "p2", "p3", "p4"]
-    rounds = [
-        eng.loop_feedback(
-            "L",
-            value_ref=ValueRef(
-                kind="model_ref", model_ref=ModelRef(architecture="policy", version=v)
-            ),
-        )
-        for v in versions
-    ]
-    # Evaluations return in a scrambled order.
-    for idx in (2, 0, 3, 1):
-        assert not eng.region_closed("L")
-        eng.settle_iteration(rounds[idx])
-    eng.loop_seal("L")
-    assert eng.region_closed("L")
-    pub = eng.output_publication("out:L")
-    assert pub is not None and pub.value_ref is not None
-    assert (
-        pub.value_ref.model_ref is not None and pub.value_ref.model_ref.version == "p4"
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -626,90 +528,9 @@ def test_depth_budget_breach_leaves_no_half_open_child() -> None:
     assert len(eng.to_snapshot().activations) == before
 
 
-def test_branch_skips_a_non_selected_control_subtree() -> None:
-    branch = BranchRegion(operator_id="B", source_ref="B", selection=None)
-    spawn = SpawnRegion(operator_id="Sk", source_ref="Sk", child_template_ref="body")
-    eng = _engine(
-        _bundle(
-            [_leaf("A"), branch, _leaf("x", deps=True), spawn, _leaf("body")],
-            [
-                TemplateEdge(from_op="A", to_op="B"),
-                TemplateEdge(from_op="B", to_op="x", from_port="p1"),
-                TemplateEdge(from_op="B", to_op="Sk", from_port="p2"),
-            ],
-        )
-    )
-    eng.on_succeeded("A")
-    eng.route_branch("B", "p1")
-    # The non-selected spawn subtree is skipped, not left waiting on the branch.
-    assert "region_skipped" in _kinds(eng)
-    assert eng.work_item("x").status.value == "ready"  # type: ignore[union-attr]
-
-
-def test_branch_skips_a_shared_downstream_op_once() -> None:
-    branch = BranchRegion(operator_id="B", source_ref="B", selection=None)
-    spawn = SpawnRegion(operator_id="Z", source_ref="Z", child_template_ref="body")
-    eng = _engine(
-        _bundle(
-            [
-                _leaf("A"),
-                branch,
-                _leaf("x", deps=True),
-                _leaf("m", deps=True),
-                _leaf("n", deps=True),
-                spawn,
-                _leaf("body"),
-            ],
-            [
-                TemplateEdge(from_op="A", to_op="B"),
-                TemplateEdge(from_op="B", to_op="x", from_port="p1"),
-                TemplateEdge(from_op="B", to_op="m", from_port="p2"),
-                TemplateEdge(from_op="B", to_op="n", from_port="p3"),
-                TemplateEdge(from_op="m", to_op="Z"),
-                TemplateEdge(from_op="n", to_op="Z"),
-            ],
-        )
-    )
-    eng.on_succeeded("A")
-    eng.route_branch("B", "p1")
-    skips = [op for kind, op in eng.contract_trace() if kind == "region_skipped"]
-    assert skips.count("Z") == 1  # both non-selected ports reach Z; it skips once
-    assert eng.work_item("x").status.value == "ready"  # type: ignore[union-attr]
-
-
 # --------------------------------------------------------------------------- #
 # Rehydration of a mid-flight dynamic region
 # --------------------------------------------------------------------------- #
-
-
-def test_mid_loop_snapshot_rehydrates_and_egresses() -> None:
-    bundle = _loop_bundle()
-    eng = _engine(bundle)
-    first = eng.loop_feedback(
-        "L",
-        value_ref=ValueRef(
-            kind="model_ref", model_ref=ModelRef(architecture="m", version="v1")
-        ),
-    )
-    second = eng.loop_feedback(
-        "L",
-        value_ref=ValueRef(
-            kind="model_ref", model_ref=ModelRef(architecture="m", version="v2")
-        ),
-    )
-    eng.settle_iteration(first)
-    # Rebuild from a snapshot taken after feedback but before egress: the per-iteration
-    # feedback records must not be mistaken for an already-egressed loop.
-    restored = OrchestrationEngine(eng.to_snapshot(), bundle)
-    assert not restored.region_closed("L")
-    restored.settle_iteration(second)
-    restored.loop_seal("L")
-    assert restored.region_closed("L")
-    pub = restored.output_publication("out:L")
-    assert pub is not None and pub.value_ref is not None
-    assert (
-        pub.value_ref.model_ref is not None and pub.value_ref.model_ref.version == "v2"
-    )
 
 
 def test_denied_spawn_survives_rehydration() -> None:
@@ -760,7 +581,7 @@ def _early_join(
     )
     return _bundle(
         [spawn, join, _leaf("body")],
-        [TemplateEdge(from_op="S", to_op="J")],
+        [TemplateEdge(from_op="S", to_op="J", edge_id="S->J")],
         results=(_decl("out:J", "J", release=ReleaseConditionKind.JOIN_WINNER),),
     )
 
@@ -914,7 +735,7 @@ def _recursive_bundle() -> PersistedV2Workflow:
     )
     return _bundle(
         [spawn, join, _leaf("leaf")],
-        [TemplateEdge(from_op="R", to_op="Rj")],
+        [TemplateEdge(from_op="R", to_op="Rj", edge_id="R->Rj")],
         results=(_decl("out:Rj", "Rj", release=ReleaseConditionKind.SCOPE_CLOSED),),
     )
 
@@ -1067,8 +888,8 @@ def test_inner_scope_cancel_resolves_join_and_readies_downstream() -> None:
         _bundle(
             [spawn, join, _leaf("body"), _leaf("D", deps=True)],
             [
-                TemplateEdge(from_op="S", to_op="J"),
-                TemplateEdge(from_op="J", to_op="D"),
+                TemplateEdge(from_op="S", to_op="J", edge_id="S->J"),
+                TemplateEdge(from_op="J", to_op="D", edge_id="J->D"),
             ],
             results=(_decl("out:J", "J", release=ReleaseConditionKind.SCOPE_CLOSED),),
         )
@@ -1094,7 +915,7 @@ def test_cancellation_residual_drain_lets_materialized_children_settle() -> None
     eng = _engine(
         _bundle(
             [spawn, join, _leaf("body")],
-            [TemplateEdge(from_op="S", to_op="J")],
+            [TemplateEdge(from_op="S", to_op="J", edge_id="S->J")],
             results=(_decl("out:J", "J", release=ReleaseConditionKind.JOIN_WINNER),),
         )
     )

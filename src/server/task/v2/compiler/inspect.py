@@ -5,7 +5,7 @@ from ..mode import LoweringStrategy
 from ..policy.lowering import PolicySurface
 from ..representations.plan import PhysicalExecutionPlan
 from ..representations.source import FrontendWorkflowSource
-from ..representations.template import LogicalWorkflowTemplate
+from ..representations.template import BoundaryKind, LogicalWorkflowTemplate
 from .agent_binding import AgentBindingDefaults, neutral_defaults
 from .diagnostics import Diagnostic, Severity
 from .pipeline import compile_workflow
@@ -45,8 +45,22 @@ class InspectionReport(BaseModel):
         if self.template.edges:
             lines.append("  edges:")
             for edge in self.template.edges:
-                arrow = "==>" if edge.feedback else "-->"
-                lines.append(f"    {edge.from_op} {arrow} {edge.to_op}")
+                arrow = "==>" if edge.boundary is BoundaryKind.FEEDBACK else "-->"
+                source = _endpoint(edge.from_op, edge.from_port)
+                target = _endpoint(edge.to_op, edge.to_port)
+                marks = [edge.use.value, *(["derived"] if edge.derived else [])]
+                scope = f" in {edge.definition}" if edge.definition else ""
+                lines.append(
+                    f"    {edge.edge_id}: {source} {arrow} {target}{scope} "
+                    f"[{', '.join(marks)}]"
+                )
+        for definition in self.template.definitions:
+            lines.append(
+                f"  template {definition.definition_id} [{definition.kind.value}]"
+            )
+            lines.append(f"    members: {', '.join(definition.members)}")
+            for port in definition.inputs:
+                lines.append(f"    input {port.name} [{port.role.value}]")
         if self.template.tool_declarations:
             names = ", ".join(t.name for t in self.template.tool_declarations)
             lines.append(f"  tools: {names}")
@@ -69,11 +83,11 @@ class InspectionReport(BaseModel):
             lines.append("  diagnostics:")
             for diag in self.diagnostics:
                 lines.append(f"    {diag.severity.value}: {diag.render()}")
-        if self.region_bearing:
-            lines.append(
-                "  note: structured regions are inspect-only via this endpoint"
-            )
         return "\n".join(lines)
+
+
+def _endpoint(operator_id: str, port: str | None) -> str:
+    return f"{operator_id}.{port}" if port else operator_id
 
 
 def build_inspection(

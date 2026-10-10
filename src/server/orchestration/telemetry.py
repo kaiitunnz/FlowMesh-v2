@@ -97,12 +97,11 @@ __all__ = [
 
 # Operator kinds whose root activation settles inside the ledger and never
 # dispatches; distinct vocabulary from an Activation's own kind
-# (``child``/``iteration``/``region``).
+# (``child``/``occurrence``/``region``).
 _NO_EXTENT_OPERATOR_KINDS = REGION_OPERATOR_KINDS
-# ``iteration`` activations (``engine/loops.py::loop_feedback``) own neither a work
-# item nor a scope: unlike a spawn child, the loop primitive materializes no
-# dispatchable body for its own activation. Checked directly since it is already a
-# first-class Activation.kind, not an operator id needing a cross-reference.
+# An ``occurrence`` activation of a control operator inside a region definition owns
+# neither a work item nor a scope: like a root control, it settles in the ledger. An
+# occurrence of a leaf or agent owns a work item, which is checked first.
 #
 # ``leaf``/``agent`` root activations that name a spawn's ``child_template_ref`` are
 # the same story under a different kind: ``engine/facade.py::build`` excludes a child
@@ -112,7 +111,7 @@ _NO_EXTENT_OPERATOR_KINDS = REGION_OPERATOR_KINDS
 # only once that has already come back empty -- a genuinely dispatchable leaf/agent
 # always owns a work item from the moment ``build()`` constructs it, so this never
 # masks one that merely has not settled yet.
-_NO_EXTENT_ACTIVATION_KINDS = frozenset({"iteration", "leaf", "agent"})
+_NO_EXTENT_ACTIVATION_KINDS = frozenset({"occurrence", "leaf", "agent"})
 
 
 _logger = logging.getLogger("orchestration-telemetry")
@@ -264,6 +263,7 @@ class TelemetrySpanEmitter:
         self._invocations: dict[str, Invocation] = {}
         self._trace: list[OrchestrationEvent] = []
         self._scope_closed: Callable[[str], bool] = lambda _: False
+        self._loop_time: Callable[[str], int] = lambda _: 0
         self._reset_indexes()
 
     @_absorbs_faults
@@ -277,6 +277,7 @@ class TelemetrySpanEmitter:
         invocations: dict[str, Invocation],
         trace: list[OrchestrationEvent],
         scope_closed: Callable[[str], bool],
+        loop_time: Callable[[str], int],
     ) -> None:
         self._activations = activations
         self._scopes = scopes
@@ -285,6 +286,7 @@ class TelemetrySpanEmitter:
         self._invocations = invocations
         self._trace = trace
         self._scope_closed = scope_closed
+        self._loop_time = loop_time
         self._reset_indexes()
         self._rehydrate()
 
@@ -604,7 +606,7 @@ class TelemetrySpanEmitter:
             LOGICAL_ACTIVATION_ID: activation.activation_id,
             LOGICAL_SCOPE_ID: activation.scope_id,
             LOGICAL_OPERATOR_KIND: activation.kind,
-            LOGICAL_LOOP_TIME: str(activation.loop_time),
+            LOGICAL_LOOP_TIME: str(self._loop_time(activation.activation_id)),
         }
         if activation.parent_activation_id is not None:
             attrs[LOGICAL_PARENT_ACTIVATION_ID] = activation.parent_activation_id

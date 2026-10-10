@@ -45,14 +45,18 @@ from ...task.v2.representations.admission import ResidentAdmissionBinding
 from ...task.v2.representations.bundle import PersistedV2Workflow
 from ...task.v2.representations.operators import (
     AgentOperator,
+    BranchRegion,
     EffectClass,
     LeafOperator,
+    LoopContextRegion,
     OperatorKind,
+    SelectionRule,
     ServiceDependency,
     SpawnRegion,
 )
 from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 from ...task.v2.representations.results import CardinalityKind, ResultDeclaration
+from ...task.v2.representations.template import LogicalWorkflowTemplate
 from ..guardrails import ScopeBudget
 from ..outcomes import check_admissible
 from ..state import (
@@ -62,13 +66,19 @@ from ..state import (
     AuthorityGrant,
     BoundaryEvent,
     Continuation,
+    ControlState,
     DelegatedAuthorityGrant,
     DenialKind,
     EmbodimentSelection,
     InputPreparation,
     InputResolution,
     Invocation,
+    IterationResolution,
     LedgerSnapshot,
+    LoopInstance,
+    Occurrence,
+    OccurrenceInput,
+    OccurrencePlace,
     ProgressAxis,
     ProgressCapability,
     PublicationOutcome,
@@ -88,17 +98,19 @@ from .authority import AuthorityLedger
 from .boundaries import BoundaryLedger
 from .boundary_routing import EpisodeBoundaryRouter
 from .cancellation import ScopeCancellation
+from .contexts import RegionContexts
 from .dataflow import RegionFlow
 from .embodiments import EmbodimentLedger
 from .failures import FailureLedger
 from .inputs import AcceptedInputLedger
 from .ledger import OrchestrationLedger, control_key
 from .loops import LoopProgress
+from .occurrences import OccurrenceFactory
 from .publications import PublicationLedger
 from .scopes import ScopeProgress
 from .snapshot import SnapshotCodec
 from .spawns import SpawnRegions
-from .topology import CONTROL_KINDS, PlanTopology, effect_recovery
+from .topology import CONTROL_KINDS, PlanTopology, child_bodies, effect_recovery
 
 _logger = logging.getLogger("orchestration-engine")
 
@@ -178,7 +190,7 @@ class OrchestrationEngine:
             self._failures,
             emitter if emitter is not None else NULL_SPAN_EMITTER,
         )
-        self._budget = budget or ScopeBudget()
+        self._budget = (budget or ScopeBudget()).pinned(snapshot.max_loop_iterations)
         self._initial = Advance()
         self._control = control if control is not None else NULL_CONTROL_TRACER
 
@@ -199,11 +211,16 @@ class OrchestrationEngine:
             self._authority,
             self._scope_progress,
         )
+        self._factory = OccurrenceFactory(
+            self._ledger, self._topology, self._scope_progress
+        )
         self._loops = LoopProgress(
             self._ledger,
+            self._topology,
             self._publication,
             self._scope_progress,
             self._flow,
+            self._factory,
             self._budget,
         )
         self._spawns = SpawnRegions(
@@ -213,8 +230,13 @@ class OrchestrationEngine:
             self._authority,
             self._scope_progress,
             self._flow,
+            self._factory,
             self._budget,
         )
+        self._contexts = RegionContexts(
+            self._ledger, self._topology, self._loops, self._spawns
+        )
+        self._flow.contexts = self._contexts
         self._attempt_lifecycle = AttemptLifecycle(
             self._ledger,
             self._publication,
@@ -250,6 +272,7 @@ class OrchestrationEngine:
             self._authority,
             self._boundaries,
             self._attempt_lifecycle,
+            self._budget,
         )
         self._codec.restore(snapshot)
 
@@ -264,6 +287,7 @@ class OrchestrationEngine:
             invocations=self._ledger.invocations,
             trace=self._ledger.trace,
             scope_closed=self._ledger.scope_closed,
+            loop_time=self._ledger.loop_time,
         )
 
     # ------------------------------------------------------------------ #
@@ -299,24 +323,9 @@ class OrchestrationEngine:
             if b.source_ref
         }
         kind_by_id = {op.operator_id: op.kind for op in template.operators}
-        # The agent that declares each spawn region as one of its child regions.
-        region_owner = {
-            ref.spawn_ref: op.operator_id
-            for op in template.operators
-            if isinstance(op, AgentOperator)
-            for ref in op.child_region_refs
-        }
         # A region's entry body is materialized dynamically per spawn, never dispatched
-        # eagerly. A region whose entry is its enclosing agent is explicit recursion:
-        # that agent stays a normal dispatchable entry rather than a materialized body.
-        child_body_refs = {
-            op.child_template_ref
-            for op in template.operators
-            if isinstance(op, SpawnRegion)
-            and op.child_template_ref
-            and op.child_template_ref != op.operator_id
-            and region_owner.get(op.operator_id) != op.child_template_ref
-        }
+        # eagerly.
+        child_body_refs = child_bodies(template)
         requested: set[str] = set()
         for op in template.operators:
             if isinstance(op, LeafOperator):
@@ -357,7 +366,7 @@ class OrchestrationEngine:
             op.operator_id: set() for op in template.operators
         }
         for edge in template.edges:
-            if edge.feedback or edge.to_op not in preds:
+            if not edge.is_forward or edge.to_op not in preds:
                 continue
             if (
                 kind_by_id.get(edge.from_op) is OperatorKind.SPAWN
@@ -369,7 +378,11 @@ class OrchestrationEngine:
         activations: list[Activation] = []
         work_items: list[WorkItem] = []
         continuations: list[Continuation] = []
+        # A region definition's members occur only as its loop or child enters it.
+        members = template.definition_of()
         for op in template.operators:
+            if op.operator_id in members:
+                continue
             activation = Activation(
                 activation_id=new_activation_id(),
                 instance_id=instance_id,
@@ -421,6 +434,7 @@ class OrchestrationEngine:
             )
             for decl in template.result_declarations
             if decl.cardinality is CardinalityKind.SINGLETON
+            and decl.source_ref not in members
         ]
         snapshot = LedgerSnapshot(
             instance=instance,
@@ -431,6 +445,7 @@ class OrchestrationEngine:
             work_items=work_items,
             continuations=continuations,
             result_slots=slots,
+            max_loop_iterations=(budget or ScopeBudget()).max_loop_iterations,
         )
         engine = cls(snapshot, bundle, budget=budget, control=control, emitter=emitter)
         engine._initial = engine._flow.open_roots()
@@ -468,14 +483,16 @@ class OrchestrationEngine:
         result the settled value is bound to; it binds once, with the settlement, so a
         later success for the same work item cannot re-point it.
         """
-        return self._attempt_lifecycle.on_succeeded(
-            task_id, empty=empty, content=content
+        return self._contexts.sweep(
+            self._attempt_lifecycle.on_succeeded(task_id, empty=empty, content=content)
         )
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def on_failed(self, task_id: str, error: str, *, retryable: bool) -> Advance:
         """Retry a work item as a fresh attempt, or settle it and cascade failure."""
-        return self._attempt_lifecycle.on_failed(task_id, error, retryable=retryable)
+        return self._contexts.sweep(
+            self._attempt_lifecycle.on_failed(task_id, error, retryable=retryable)
+        )
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def on_returned(self, task_id: str) -> bool:
@@ -494,7 +511,9 @@ class OrchestrationEngine:
         ``error`` is the executor's message for a reported failure; the attempt keeps
         it, and a work item that cannot run again fails with it beside the reason.
         """
-        return self._attempt_lifecycle.on_uncertain(task_id, error)
+        return self._contexts.sweep(
+            self._attempt_lifecycle.on_uncertain(task_id, error)
+        )
 
     def record_continuation(self, task_id: str, continuation: str) -> None:
         """Record the continuation an episode's step yielded, which its next dispatch
@@ -516,7 +535,7 @@ class OrchestrationEngine:
         work item suspends, so waiting holds no worker; a yield persists the capsule; a
         state access records the declared reference.
         """
-        return self._router.route_boundary_event(task_id, event)
+        return self._contexts.sweep(self._router.route_boundary_event(task_id, event))
 
     def route_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> Advance:
         """Record a model turn's facade group and route each member kind-specifically.
@@ -532,7 +551,9 @@ class OrchestrationEngine:
         step. A re-drive of the same group reuses its recorded members and creates no
         duplicate child or invocation.
         """
-        return self._router.route_facade_turn_group(task_id, group)
+        return self._contexts.sweep(
+            self._router.route_facade_turn_group(task_id, group)
+        )
 
     def retries_on_loss(self, task_id: str) -> bool:
         """Whether the loss of the task's worker runs its work item again, as
@@ -573,7 +594,9 @@ class OrchestrationEngine:
         settled item, or for an unrecorded call, is a no-op. An episode has one
         outstanding boundary at a time, so the recorded call is the one it awaits.
         """
-        return self._router.deliver_boundary_outcome(task_id, call_correlation)
+        return self._contexts.sweep(
+            self._router.deliver_boundary_outcome(task_id, call_correlation)
+        )
 
     def mark_pending_outcome(self, task_id: str, call_correlation: str | None) -> None:
         """Record (or clear) the settled boundary whose outcome the next resume injects.
@@ -726,8 +749,10 @@ class OrchestrationEngine:
         durably on the boundary envelope so a re-dispatch injects it and a restart
         rehydrates it; the item then returns to READY for a fresh attempt.
         """
-        return self._router.settle_boundary_outcome(
-            task_id, call_correlation, value=value, ref=ref
+        return self._contexts.sweep(
+            self._router.settle_boundary_outcome(
+                task_id, call_correlation, value=value, ref=ref
+            )
         )
 
     def terminalize_boundary_invocation(
@@ -811,8 +836,10 @@ class OrchestrationEngine:
         init scope; a spawn/loop child body is not live-dispatchable and stays a trace-
         level :meth:`spawn_child`.
         """
-        return self._spawns.materialize_child(
-            spawn, operator_id=operator_id, value_ref=value_ref
+        return self._contexts.sweep(
+            self._spawns.materialize_child(
+                spawn, operator_id=operator_id, value_ref=value_ref
+            )
         )
 
     def create_fanout_child(self, spawn: str, value_ref: ValueRef) -> str:
@@ -850,7 +877,7 @@ class OrchestrationEngine:
 
     def reconsider_admission(self, task_id: str) -> Advance:
         """Re-attempt admission of a work item after its input manifest changed."""
-        return self._flow.reconsider_admission(task_id)
+        return self._contexts.sweep(self._flow.reconsider_admission(task_id))
 
     def agent_input_plan(self, task_id: str) -> AgentInputPlan | None:
         """The engine's per-port input membership for an agent, resolved by the runtime.
@@ -865,7 +892,7 @@ class OrchestrationEngine:
 
     def seal_spawn(self, spawn: str) -> Advance:
         """Seal a spawn's child-init capability; no further children may be created."""
-        return self._spawns.seal_spawn(spawn)
+        return self._contexts.sweep(self._spawns.seal_spawn(spawn))
 
     def revoke_spawn(self, spawn: str) -> None:
         """Revoke a spawn's child-init capability as a progress transition.
@@ -883,30 +910,171 @@ class OrchestrationEngine:
         value_ref: ValueRef | None = None,
     ) -> Advance:
         """Record a child activation's terminal outcome and drain its capability."""
-        return self._spawns.settle_child(
-            child_activation_id, outcome=outcome, value_ref=value_ref
+        return self._contexts.sweep(
+            self._spawns.settle_child(
+                child_activation_id, outcome=outcome, value_ref=value_ref
+            )
         )
 
-    def route_branch(self, branch_op: str, selected_port: str) -> Advance:
-        """Route a branch record to the selected port; settle the other ports empty."""
-        return self._flow.route_branch(branch_op, selected_port)
+    def pending_branch_reads(self) -> list[tuple[str, ValueRef]]:
+        """Each branch occurrence awaiting a selector read, with the value it reads."""
+        return self._flow.pending_branch_reads()
 
-    def loop_feedback(self, loop: str, *, value_ref: ValueRef | None = None) -> str:
-        """Re-materialize a loop body at the next loop-time coordinate.
+    def selection_rule(self, branch: str) -> SelectionRule | None:
+        """The selection rule a branch occurrence routes by."""
+        op = self._topology.operators.get(self._ledger.occurrence(branch).operator_id)
+        return op.rule if isinstance(op, BranchRegion) else None
 
-        Enforces well-founded logical time: loop_time strictly increases and stays under
-        the iteration budget, so a finite prefix is acyclic after time unrolling.
-        Returns the iteration activation id.
+    @_ds_drive(ControlPlaneWindow.POST_START)
+    def accept_branch_selection(
+        self, branch: str, value: Any, *, error: str | None = None
+    ) -> Advance:
+        """Route a branch occurrence by the selector value read from its input.
+
+        The value selects one declared output port; every other port resolves dead.
+        A value selecting nothing, or an ``error`` reading the input, fails the branch.
+        A decision is recorded once and never revised.
         """
-        return self._loops.loop_feedback(loop, value_ref=value_ref)
+        return self._contexts.sweep(
+            self._flow.accept_branch_selection(branch, value, error=error)
+        )
 
-    def settle_iteration(self, iteration_activation_id: str) -> Advance:
-        """Mark a loop iteration terminal and drain the loop-time capability."""
-        return self._loops.settle_iteration(iteration_activation_id)
+    def awaiting_fanouts(self) -> list[tuple[str, ValueRef]]:
+        """Each live spawn occurrence still to fan out over its input, with that
+        input."""
+        return self._flow.awaiting_fanouts()
 
-    def loop_seal(self, loop: str) -> Advance:
-        """Seal a loop: no further feedback; egress once pending iterations drain."""
-        return self._loops.loop_seal(loop)
+    def is_open(self) -> bool:
+        """Whether any of the instance's work is still to settle: a task, or a value
+        read a branch or spawn waits on."""
+        return self.has_unsettled_tasks() or self.awaits_control_reads()
+
+    def awaits_control_reads(self) -> bool:
+        """Whether the instance still waits on a value read to route a branch or fan
+        out a spawn, which no task of its own holds open."""
+        return bool(self.pending_branch_reads() or self.awaiting_fanouts())
+
+    def has_unsettled_tasks(self) -> bool:
+        """Whether any work item a task runs as is still to settle."""
+        candidates = self._ledger.open_task_items
+        for wi_id in list(candidates):
+            del candidates[wi_id]
+            if self._ledger.work_items[wi_id].status not in TERMINAL_WORK_ITEM_STATUSES:
+                # Behind the rest, so the next call reaches what settled since.
+                candidates[wi_id] = None
+                return True
+        return False
+
+    def task_work_items(self) -> list[WorkItem]:
+        """Every work item a task runs as."""
+        return [wi for wi in self._ledger.work_items.values() if wi.legacy_task_id]
+
+    def control_failure(self) -> str | None:
+        """Why the instance failed outside any task, if it has: the whole instance
+        failed, or a control occurrence faulted."""
+        return self._failures.instance_failure or self._failures.control_failure
+
+    def spawn_handle(self, spawn: str) -> str:
+        """The handle a spawn occurrence's children are created and sealed under."""
+        occurrence = self._ledger.occurrence(spawn)
+        return occurrence.activation_id or occurrence.operator_id
+
+    def spawn_region(self, spawn: str) -> SpawnRegion | None:
+        """The spawn region a spawn occurrence runs."""
+        op = self._topology.operators.get(self._ledger.occurrence(spawn).operator_id)
+        return op if isinstance(op, SpawnRegion) else None
+
+    @_ds_drive(ControlPlaneWindow.POST_START)
+    def fail_control(self, occurrence: str, reason: str) -> Advance:
+        """Settle a pending control occurrence as a declared failure, as an input it
+        could not read fails it."""
+        advance = Advance()
+        self._flow.fail_control(occurrence, reason, advance, fault=True)
+        return self._contexts.sweep(advance)
+
+    @_ds_drive(ControlPlaneWindow.POST_START)
+    def enter_definition_child(
+        self, spawn: str, index: int, element: ValueRef
+    ) -> Advance:
+        """Create the child of a spawn that enters a region definition for the element
+        at ``index`` of its fan-out, once."""
+        return self._contexts.sweep(
+            self._spawns.enter_definition_child(spawn, index, element)
+        )
+
+    def loop_instance(self, loop: str) -> LoopInstance | None:
+        """The loop instance a loop occurrence entered, if it entered."""
+        scope_id = self._ledger.loop_by_occurrence.get(loop)
+        return self._ledger.loop_instances.get(scope_id) if scope_id else None
+
+    def iteration(self, loop: str, time: int) -> IterationResolution | None:
+        """How a loop occurrence's time resolved, if it has."""
+        scope_id = self._ledger.loop_by_occurrence.get(loop)
+        return self._ledger.iterations.get((scope_id, time)) if scope_id else None
+
+    def control_state(self, occurrence: str) -> ControlState | None:
+        return self._ledger.control_states.get(occurrence)
+
+    def occurrences(self, operator_id: str) -> list[Occurrence]:
+        """Every occurrence of an operator inside a region definition so far."""
+        return [
+            o for o in self._ledger.occurrences.values() if o.operator_id == operator_id
+        ]
+
+    def occurrence_of(self, task_id: str) -> Occurrence | None:
+        """The region-definition occurrence a task runs, or None for a root task."""
+        wi = self._ledger.work_item_for_task(task_id)
+        key = (
+            self._ledger.occurrence_by_activation.get(wi.activation_id) if wi else None
+        )
+        return self._ledger.occurrences.get(key) if key else None
+
+    def occurrence_place(self, task_id: str) -> OccurrencePlace | None:
+        """Where a task runs inside a region definition, by authored names: the member
+        it runs, the child context it runs in, and each loop's coordinate with its
+        iteration; None at the root."""
+        occurrence = self.occurrence_of(task_id)
+        if occurrence is None:
+            return None
+        names = self._topology.source_ids
+        time: list[tuple[str, int]] = []
+        for frame in occurrence.time:
+            instance = self._ledger.loop_instances.get(frame.loop)
+            loop_op = (
+                self._ledger.occurrence(instance.occurrence).operator_id
+                if instance is not None
+                else frame.loop
+            )
+            loop = self._topology.operators.get(loop_op)
+            time.append(
+                (
+                    (
+                        loop.loop_coordinate
+                        if isinstance(loop, LoopContextRegion)
+                        else names.get(loop_op, loop_op)
+                    ),
+                    frame.iteration,
+                )
+            )
+        return OccurrencePlace(
+            member=names.get(occurrence.operator_id, occurrence.operator_id),
+            context=occurrence.context_id or None,
+            time=tuple(time),
+        )
+
+    def task_inputs(self, task_id: str) -> list[OccurrenceInput] | None:
+        """The values a task reads through its incoming edges, by the names its spec
+        reads them through; None for a root task that reads only tasks' whole results
+        by their names.
+        """
+        if (occurrence := self.occurrence_of(task_id)) is not None:
+            return self._flow.edges.inputs(occurrence.key)
+        if self._ledger.work_item_for_task(task_id) is None or not any(
+            self._topology.is_control(edge.from_op) or edge.to_port
+            for edge in self._topology.incoming.get(task_id, ())
+        ):
+            return None
+        return self._flow.edges.inputs(task_id)
 
     def deny_spawn(
         self, spawn_op: str, interface: str, *, kind: DenialKind = DenialKind.AUTHORITY
@@ -928,8 +1096,25 @@ class OrchestrationEngine:
     # ------------------------------------------------------------------ #
 
     def cancel_instance(self) -> Advance:
-        """Cancel the whole workflow instance: the root scope and every descendant."""
-        return self.cancel_scope(self._ledger.root_scope.scope_id)
+        """Cancel the whole workflow instance: the root scope and every descendant.
+
+        An instance with nothing left open has settled, so cancelling it changes
+        nothing it reached or published."""
+        if not self.is_open():
+            return Advance()
+        self._failures.instance_cancelled = True
+        advance = self.cancel_scope(self._ledger.root_scope.scope_id)
+        self._publication.publish_unresolved(PublicationOutcome.EXPLICIT_EMPTY)
+        return advance
+
+    @property
+    def template(self) -> LogicalWorkflowTemplate:
+        """The logical template the instance runs."""
+        return self._topology.bundle.template
+
+    def instance_cancelled(self) -> bool:
+        """Whether the whole workflow instance was cancelled."""
+        return self._failures.instance_cancelled
 
     def fail_instance(self, reason: str) -> Advance:
         """Fail the whole workflow instance as a recorded terminal event.
@@ -937,11 +1122,14 @@ class OrchestrationEngine:
         No scope admits another child, every unsettled leaf or agent settles as a
         declared failure, and every unpublished declared output resolves to one.
         """
+        self._failures.instance_failure = self._failures.instance_failure or reason
         return self._fail_scope_tree(self._ledger.root_scope.scope_id, reason)
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def _fail_scope_tree(self, scope_id: str, reason: str) -> Advance:
-        return self._cancellation.fail_scope_tree(scope_id, reason)
+        return self._contexts.sweep(
+            self._cancellation.fail_scope_tree(scope_id, reason)
+        )
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def cancel_scope(self, scope_id: str) -> Advance:
@@ -954,7 +1142,7 @@ class OrchestrationEngine:
         grant — distinct from the child-init revoke; and resolve declared outputs to
         their cancellation / no-winner outcome.
         """
-        return self._cancellation.cancel_scope(scope_id)
+        return self._contexts.sweep(self._cancellation.cancel_scope(scope_id))
 
     # ------------------------------------------------------------------ #
     # Queries
@@ -971,16 +1159,6 @@ class OrchestrationEngine:
         nothing through this face.
         """
         return self._authority.effective_invoke_face(task_id)
-
-    def template_closure(
-        self,
-        template: str,
-        excluded: Callable[[str, list[str]], bool] | None = None,
-    ) -> list[str]:
-        """A child template and, under an agent template, the child templates of every
-        region it declares, however deep; a template ``excluded`` rejects is left out
-        together with what is nested under it."""
-        return self._ledger.template_closure(template, excluded)
 
     def output_publication(
         self,
@@ -1072,23 +1250,14 @@ class OrchestrationEngine:
     def region_closed(self, region_op: str) -> bool:
         return self._ledger.region_closed(region_op)
 
-    def spawn_successor(self, operator_id: str) -> str | None:
-        """The spawn region an operator feeds via a forward edge, if any."""
-        return self._topology.spawn_successor(operator_id)
+    def fanout_spawn(self, operator_id: str) -> str | None:
+        """The root spawn that fans out over an operator's whole result, if any."""
+        return self._topology.fanout_spawn(operator_id)
 
-    def child_template_of(self, spawn_op: str) -> str | None:
-        """The operator id of a spawn's child template, if it declares one."""
-        return self._topology.child_template_of(spawn_op)
-
-    def sealed_region_child_templates(self) -> frozenset[str]:
-        """Child templates of agent-region spawns whose child-init sealed or revoked.
-
-        A child template holds the workflow open until its spawn seals; a producer
-        fanout retires it on materialization, and an agent's dynamic spawn region
-        retires it once the region seals (on ``spawn_agent`` seal or the parent's
-        completion), so the template — never dispatched as a task — stops holding it.
-        """
-        return self._ledger.sealed_region_child_templates()
+    def fanout_producers(self) -> dict[str, str]:
+        """Each root operator whose whole result a root spawn fans out over, with
+        the spawn."""
+        return self._topology.fanout_spawns
 
     def spawn_awaits_children(self, spawn_op: str) -> bool:
         """Whether a spawn has yet to fan out: unopened, or open and not sealed.

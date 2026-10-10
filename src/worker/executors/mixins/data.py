@@ -29,7 +29,12 @@ from ..utils.artifacts import (
     resolve_artifact,
 )
 from ..utils.data_utils import normalize_prompt_payload
-from ..utils.expressions import project_expression
+from ..utils.expressions import (
+    ReadPaths,
+    element_paths,
+    item_path,
+    project_expression_paths,
+)
 from ..utils.graph_templates import (
     _resolve_columns,
     build_prompts_from_graph_template,
@@ -427,6 +432,7 @@ class DataMixin(GovernanceMixin):
             items = data.get("items")
             context: dict[str, BaseExecutorResult] | None = None
             root_node: str | None = None
+            paths: ReadPaths = ()
             if items is None:
                 expr = data.get("expr")
                 if not expr:
@@ -437,7 +443,7 @@ class DataMixin(GovernanceMixin):
                 if expr:
                     context = self._spec_upstream_results(spec)
                     resolved_expr = expr.strip()
-                    items = project_expression(resolved_expr, context)
+                    items, paths = project_expression_paths(resolved_expr, context)
                     root_node = resolved_expr.split(".", 1)[0] or None
             if not isinstance(items, list):
                 raise ExecutionError(
@@ -445,11 +451,25 @@ class DataMixin(GovernanceMixin):
                     "for type == 'list'."
                 )
             if fetch_images:
-                items, image_group_sizes = self._flatten_grouped_image_items(items)
                 items = [
-                    maybe_resolve_artifact_ref(item, context, root_node)
-                    for item in items
+                    (
+                        [
+                            maybe_resolve_artifact_ref(
+                                member,
+                                context,
+                                root_node,
+                                item_path(element_paths(paths, index), position),
+                            )
+                            for position, member in enumerate(item)
+                        ]
+                        if isinstance(item, list)
+                        else maybe_resolve_artifact_ref(
+                            item, context, root_node, item_path(paths, index)
+                        )
+                    )
+                    for index, item in enumerate(items)
                 ]
+                items, image_group_sizes = self._flatten_grouped_image_items(items)
 
                 s3_entries: list[tuple[int, str]] = []
 
@@ -537,8 +557,10 @@ class DataMixin(GovernanceMixin):
                 prompts = [x if isinstance(x, str) else "" for x in items]
             else:
                 items = [
-                    maybe_resolve_artifact_ref(item, context, root_node)
-                    for item in items
+                    maybe_resolve_artifact_ref(
+                        item, context, root_node, item_path(paths, index)
+                    )
+                    for index, item in enumerate(items)
                 ]
                 prompts, apply_chat_template, found_system_prompt = (
                     normalize_prompt_payload(items)
@@ -688,9 +710,14 @@ class DataMixin(GovernanceMixin):
             resolved_node = node_hint
             if not resolved_node and isinstance(expr, str):
                 resolved_node = expr.split(".", 1)[0].strip() or None
-            image_embedding_spec: Any = project_expression(expr.strip(), context)
+            image_embedding_spec, embedding_paths = project_expression_paths(
+                expr.strip(), context
+            )
             artifact_source = maybe_resolve_artifact_ref(
-                image_embedding_spec, context, resolved_node
+                image_embedding_spec,
+                context,
+                resolved_node,
+                embedding_paths if isinstance(embedding_paths, tuple) else (),
             )
             if not isinstance(artifact_source, str) or not artifact_source:
                 raise ExecutionError(

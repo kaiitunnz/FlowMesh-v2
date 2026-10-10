@@ -15,7 +15,7 @@ from server.orchestration import PublicationOutcome
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultReader
 from server.task.runtime import TaskRuntime, fanout
-from server.task.v2.representations.template import TemplateEdge
+from server.task.v2.representations.template import DependencyUse, TemplateEdge
 from shared.content import (
     OCTET_STREAM,
     ContentHydrationError,
@@ -123,8 +123,9 @@ async def test_a_fan_out_waits_out_an_unreachable_store_and_then_completes() -> 
     # Paused, not failed: no children yet, the spawn still holds the workflow open, and
     # one re-drive is pending.
     assert _child_count(engine) == 0 and not engine.region_closed("collect")
-    assert runtime._tasks[trial].status != "FAILED"
-    assert trial in registry.remaining_of(workflow_id)
+    assert runtime.get_record(trial) is None
+    assert registry.control[workflow_id].open
+    assert not runtime.workflow_settlement(workflow_id).settled
     assert scheduler.pending(workflow_id)
 
     # Still away when the re-drive fires: it backs off and waits again.
@@ -151,7 +152,9 @@ async def test_a_missing_producer_result_still_fails_the_workflow() -> None:
     record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(planner, "wkr-1", payload, _TS)
 
-    assert runtime._tasks[ids["trial"]].status == "FAILED"
+    failure = registry.control[workflow_id].failure
+    assert failure is not None and "no such object" in failure
+    assert runtime.workflow_settlement(workflow_id).settled
     assert not scheduler.pending(workflow_id)
 
 
@@ -159,7 +162,15 @@ def _agent_consuming(runtime: TaskRuntime, monkeypatch: pytest.MonkeyPatch) -> A
     engine = _engine(
         _bundle(
             [_leaf("P"), _input_agent("M", ("reviews",))],
-            [TemplateEdge(from_op="P", to_op="M", to_port="reviews")],
+            [
+                TemplateEdge(
+                    from_op="P",
+                    to_op="M",
+                    to_port="reviews",
+                    use=DependencyUse.VALUE_REQUIRED,
+                    edge_id="P->M.reviews",
+                )
+            ],
             (_decl("out:M", "M"),),
         ),
         granted=frozenset({"model"}),

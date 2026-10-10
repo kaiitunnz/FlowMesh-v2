@@ -55,6 +55,49 @@ class _WorkflowNodeInput(BaseModel):
     region: dict[str, Any] | None = None
 
 
+INGRESS = "$ingress"
+"""The dependency source naming a region definition's own inputs."""
+BOUNDARY_TARGETS = frozenset({"$feedback", "$egress", "$return"})
+"""The edge targets leaving a region definition."""
+
+_DEPENDENCY_KEYS = frozenset({"node", "port", "input", "project"})
+_EDGE_KEYS = frozenset({"from", "to", "project"})
+_TEMPLATE_KEYS = frozenset({"name", "inputs", "returns", "nodes", "edges"})
+
+type ProjectionStep = str | int
+
+
+@dataclass(frozen=True)
+class ParsedDependency:
+    """One ``dependsOn`` entry: a source node (or ``$ingress``) and its binding."""
+
+    source: str
+    port: str | None = None
+    input: str | None = None
+    project: tuple[ProjectionStep, ...] = ()
+
+
+@dataclass(frozen=True)
+class ParsedBoundaryEdge:
+    """A region definition's edge from one of its nodes out through a boundary."""
+
+    source: str
+    port: str | None
+    target: str
+    target_port: str
+    project: tuple[ProjectionStep, ...] = ()
+
+
+@dataclass
+class ParsedDefinition:
+    """One ``graph.templates`` entry: a named finite region definition."""
+
+    name: str
+    inputs: list[Any]
+    returns: list[Any]
+    edges: list[ParsedBoundaryEdge]
+
+
 @dataclass
 class ParsedTaskSpec:
     task: TaskEnvelopeTemplate
@@ -65,6 +108,8 @@ class ParsedTaskSpec:
     position_in_epoch: int | None = None
     selected_worker: list[str] | None = None
     v2: dict[str, Any] | None = None
+    dependencies: list[ParsedDependency] = field(default_factory=list)
+    definition: str | None = None
 
 
 @dataclass
@@ -72,6 +117,13 @@ class ParsedRegion:
     name: str
     region: dict[str, Any]
     depends_on: list[str]
+    dependencies: list[ParsedDependency] = field(default_factory=list)
+    definition: str | None = None
+    source_name: str | None = None  # the authored name; ``name`` is its operator id
+
+    @property
+    def authored_name(self) -> str:
+        return self.source_name or self.name
 
 
 @dataclass
@@ -81,6 +133,7 @@ class ParsedWorkflow:
     epoch_groups: list[list[str]] | None
     regions: list[ParsedRegion] = field(default_factory=list)
     api_version: Any | None = None
+    definitions: list[ParsedDefinition] = field(default_factory=list)
 
 
 @dataclass
@@ -94,6 +147,11 @@ class ParsedTask:
     position_in_epoch: int | None = None
     selected_worker: list[str] | None = None
     v2: dict[str, Any] | None = None
+    # Each dependsOn entry with its resolved source; parallels depends_on, plus
+    # $ingress entries, which depends_on leaves out.
+    dependencies: list[ParsedDependency] = field(default_factory=list)
+    # The region definition this task belongs to; None for a root task.
+    definition: str | None = None
     # The pointers of values the source format marks as credentials whatever their
     # shape, such as an n8n value it carried encrypted.
     declared_credentials: frozenset[str] = frozenset()
@@ -144,61 +202,121 @@ def _build_workflow(
     epoch_groups: list[list[str]] | None,
     region_specs: list[ParsedRegion] | None = None,
     api_version: Any | None = None,
+    definitions: list[ParsedDefinition] | None = None,
 ) -> ParsedWorkflow:
     region_specs = region_specs or []
     results: list[ParsedTask] = []
-    local_ids: dict[str, str] = {}
+    # Names resolve within their own definition (None for the root graph).
+    local_ids: dict[str | None, dict[str, str]] = {}
     # Region operator ids are their source names; pre-register them so tasks and
     # regions may reference each other regardless of resolution order.
     for region_spec in region_specs:
-        local_ids[region_spec.name] = region_spec.name
+        local_ids.setdefault(region_spec.definition, {})[
+            region_spec.authored_name
+        ] = region_spec.name
 
-    declared = {spec.local_name for spec in specs if spec.local_name}
+    declared: dict[str | None, set[str]] = {}
+    for spec in specs:
+        if spec.local_name:
+            declared.setdefault(spec.definition, set()).add(spec.local_name)
 
-    def _resolve_depends_on(depends_on: list[str], owner: str) -> list[str]:
-        resolved: list[str] = []
-        for dep in depends_on:
-            if not (name := dep.strip()):
-                continue
-            if (dep_id := local_ids.get(name)) is None:
-                if name in declared:
-                    raise ValueError(
-                        f"{owner}: dependsOn '{name}' names a stage declared after "
-                        "it; a stage depends only on earlier stages"
-                    )
+    def _resolve(name: str, scope: str | None, owner: str) -> str:
+        if name == INGRESS:
+            if scope is None:
                 raise ValueError(
-                    f"{owner}: dependsOn '{name}' names no node or stage of this "
-                    "workflow"
+                    f"{owner}: dependsOn '{INGRESS}' is only valid inside a template"
                 )
-            resolved.append(dep_id)
-        return resolved
+            return INGRESS
+        if (dep_id := local_ids.get(scope, {}).get(name)) is None:
+            if name in declared.get(scope, set()):
+                raise ValueError(
+                    f"{owner}: dependsOn '{name}' names a stage declared after "
+                    "it; a stage depends only on earlier stages"
+                )
+            where = (
+                f"node of template '{scope}'"
+                if scope
+                else "node or stage of this workflow"
+            )
+            raise ValueError(f"{owner}: dependsOn '{name}' names no {where}")
+        return dep_id
+
+    def _resolve_dependencies(
+        dependencies: list[ParsedDependency], scope: str | None, owner: str
+    ) -> list[ParsedDependency]:
+        return [
+            ParsedDependency(
+                source=_resolve(dep.source, scope, owner),
+                port=dep.port,
+                input=dep.input,
+                project=dep.project,
+            )
+            for dep in dependencies
+        ]
+
+    def _ids(dependencies: list[ParsedDependency]) -> list[str]:
+        return [dep.source for dep in dependencies if dep.source != INGRESS]
 
     for spec in specs:
         _validate_condition_depends_on(spec)
         task_id = new_task_id()
-        depends_on = _resolve_depends_on(spec.depends_on, spec.local_name or "task")
+        dependencies = _resolve_dependencies(
+            spec.dependencies or [ParsedDependency(dep) for dep in spec.depends_on],
+            spec.definition,
+            spec.local_name or "task",
+        )
         results.append(
             ParsedTask(
                 task_id=task_id,
                 task=spec.task,
-                depends_on=depends_on,
+                depends_on=_ids(dependencies),
                 local_name=spec.local_name,
                 graph_node_name=spec.graph_node_name,
                 load=spec.load,
                 position_in_epoch=spec.position_in_epoch,
                 selected_worker=spec.selected_worker,
                 v2=spec.v2,
+                dependencies=dependencies,
+                definition=spec.definition,
             )
         )
         if spec.local_name:
-            local_ids[spec.local_name] = task_id
-    regions = [
-        ParsedRegion(
-            name=region_spec.name,
-            region=region_spec.region,
-            depends_on=_resolve_depends_on(region_spec.depends_on, region_spec.name),
+            local_ids.setdefault(spec.definition, {})[spec.local_name] = task_id
+    regions: list[ParsedRegion] = []
+    for region_spec in region_specs:
+        dependencies = _resolve_dependencies(
+            region_spec.dependencies
+            or [ParsedDependency(dep) for dep in region_spec.depends_on],
+            region_spec.definition,
+            region_spec.authored_name,
         )
-        for region_spec in region_specs
+        regions.append(
+            ParsedRegion(
+                name=region_spec.name,
+                region=region_spec.region,
+                depends_on=_ids(dependencies),
+                dependencies=dependencies,
+                definition=region_spec.definition,
+                source_name=region_spec.source_name,
+            )
+        )
+    resolved_definitions = [
+        ParsedDefinition(
+            name=definition.name,
+            inputs=definition.inputs,
+            returns=definition.returns,
+            edges=[
+                ParsedBoundaryEdge(
+                    source=_resolve(edge.source, definition.name, definition.name),
+                    port=edge.port,
+                    target=edge.target,
+                    target_port=edge.target_port,
+                    project=edge.project,
+                )
+                for edge in definition.edges
+            ],
+        )
+        for definition in definitions or []
     ]
     return ParsedWorkflow(
         tasks=results,
@@ -206,6 +324,7 @@ def _build_workflow(
         epoch_groups=epoch_groups,
         regions=regions,
         api_version=api_version,
+        definitions=resolved_definitions,
     )
 
 
@@ -326,21 +445,52 @@ def _expand_specs(data: Any) -> ParsedWorkflow:
 def _expand_graph_nodes(
     base: _WorkflowRootInput, base_clean: _WorkflowRootInput, nodes: list[Any]
 ) -> ParsedWorkflow:
-    indexed: dict[str, _WorkflowNodeInput] = {}
     base_name = (
         str(base.metadata.name) if base.metadata and base.metadata.name else "task"
     )
+    indexed = _index_graph_nodes(base, nodes, "graph.nodes")
+    (
+        epoch_groups,
+        node_position_in_epoch,
+        schedule_in_epoch_order,
+        selected_workers,
+    ) = _parse_schedule_hint(base, indexed)
 
+    results: list[ParsedTaskSpec] = []
+    region_specs: list[ParsedRegion] = []
+    _order_graph_scope(
+        base_clean,
+        base_name,
+        indexed,
+        None,
+        results,
+        region_specs,
+        node_position_in_epoch,
+        selected_workers,
+    )
+    definitions = _expand_templates(base, base_clean, base_name, results, region_specs)
+    return _build_workflow(
+        specs=results,
+        schedule_in_epoch_order=schedule_in_epoch_order,
+        epoch_groups=epoch_groups,
+        region_specs=region_specs,
+        api_version=base.apiVersion,
+        definitions=definitions,
+    )
+
+
+def _index_graph_nodes(
+    base: _WorkflowRootInput, nodes: list[Any], path: str
+) -> dict[str, _WorkflowNodeInput]:
+    indexed: dict[str, _WorkflowNodeInput] = {}
     for idx, node in enumerate(nodes):
-        node = _validate_workflow_node(node, f"graph.nodes[{idx}]")
+        node = _validate_workflow_node(node, f"{path}[{idx}]")
 
         if node.region is not None and not _is_v2_mode(base.apiVersion):
-            raise ValueError(
-                f"graph.nodes[{idx}]: region requires apiVersion 'flowmesh/v2'"
-            )
+            raise ValueError(f"{path}[{idx}]: region requires apiVersion 'flowmesh/v2'")
         if node.region is not None and node.spec is not None:
             raise ValueError(
-                f"graph.nodes[{idx}]: a node declares either 'spec' (a task) or "
+                f"{path}[{idx}]: a node declares either 'spec' (a task) or "
                 "'region' (a structured region), not both"
             )
 
@@ -350,52 +500,105 @@ def _expand_graph_nodes(
             raise ValueError("Graph node requires a non-empty name")
         if name in indexed:
             raise ValueError(f"Duplicate graph node '{name}'")
-        deps = node.dependsOn or []
-        if any(str(dep).strip() == name for dep in deps if dep):
+        deps = _parse_dependencies(node.dependsOn, base, f"{path}[{idx}]")
+        if any(dep.source == name for dep in deps):
             raise ValueError(f"Node '{name}' cannot depend on itself")
         indexed[name] = node
+    return indexed
 
-    (
-        epoch_groups,
-        node_position_in_epoch,
-        schedule_in_epoch_order,
-        selected_workers,
-    ) = _parse_schedule_hint(base, indexed)
 
+def _parse_dependencies(
+    raw: list[Any] | None, base: _WorkflowRootInput, path: str
+) -> list[ParsedDependency]:
+    """Parse ``dependsOn`` entries: a node name, or a ``{node, port, input, project}``
+    mapping binding a source port to a consumer input."""
+    dependencies: list[ParsedDependency] = []
+    for idx, entry in enumerate(raw or []):
+        if isinstance(entry, dict):
+            if not _is_v2_mode(base.apiVersion):
+                raise ValueError(
+                    f"{path}.dependsOn[{idx}]: a dependency mapping requires "
+                    "apiVersion 'flowmesh/v2'"
+                )
+            if unknown := sorted(set(entry) - _DEPENDENCY_KEYS):
+                raise ValueError(
+                    f"{path}.dependsOn[{idx}]: unknown field(s) {', '.join(unknown)}"
+                )
+            if not (node := str(entry.get("node") or "").strip()):
+                raise ValueError(f"{path}.dependsOn[{idx}]: 'node' is required")
+            dependencies.append(
+                ParsedDependency(
+                    source=node,
+                    port=_optional_name(entry.get("port")),
+                    input=_optional_name(entry.get("input")),
+                    project=_projection(
+                        entry.get("project"), f"{path}.dependsOn[{idx}]"
+                    ),
+                )
+            )
+        elif name := str(entry).strip() if entry else "":
+            dependencies.append(ParsedDependency(source=name))
+    return dependencies
+
+
+def _optional_name(value: Any) -> str | None:
+    return str(value).strip() or None if value is not None else None
+
+
+def _projection(value: Any, path: str) -> tuple[ProjectionStep, ...]:
+    if value is None:
+        return ()
+    steps = value if isinstance(value, list) else [value]
+    if not all(isinstance(step, (str, int)) and step != "" for step in steps):
+        raise ValueError(
+            f"{path}.project must be a field name, an index, or a list of them"
+        )
+    return tuple(steps)
+
+
+def _order_graph_scope(
+    base_clean: _WorkflowRootInput,
+    base_name: str,
+    indexed: dict[str, _WorkflowNodeInput],
+    definition: str | None,
+    results: list[ParsedTaskSpec],
+    region_specs: list[ParsedRegion],
+    node_position_in_epoch: dict[str, int],
+    selected_workers: dict[str, list[str]],
+) -> None:
+    """Append one graph scope's nodes in dependency order."""
     unresolved = dict(indexed)
-    results: list[ParsedTaskSpec] = []
-    region_specs: list[ParsedRegion] = []
-
+    path = f"template '{definition}'" if definition else "graph"
     while unresolved:
         progressed = False
         for name, node in list(unresolved.items()):
-            pending = []
-            unresolved_internal = False
-            for dep in node.dependsOn or []:
-                dep = str(dep).strip()
-                if not dep:
-                    continue
-                if dep in unresolved:
-                    unresolved_internal = True
-                    break
-                pending.append(dep)
-            if unresolved_internal:
+            dependencies = _parse_dependencies(node.dependsOn, base_clean, path)
+            if any(dep.source in unresolved for dep in dependencies):
                 continue
+            pending = [dep.source for dep in dependencies if dep.source != INGRESS]
 
             if node.region is not None:
                 region_specs.append(
                     ParsedRegion(
-                        name=name,
+                        name=f"{definition}/{name}" if definition else name,
                         region=node.region,
                         depends_on=pending,
+                        dependencies=dependencies,
+                        definition=definition,
+                        source_name=name if definition else None,
                     )
                 )
                 unresolved.pop(name)
                 progressed = True
                 continue
 
+            metadata_name = (
+                f"{base_name}:{definition}/{name}"
+                if definition
+                else f"{base_name}:{name}"
+            )
             eff, v2_block = _merge_workflow_task(
-                base_clean, node.spec, f"{base_name}:{name}", graph_node_name=name
+                base_clean, node.spec, metadata_name, graph_node_name=name
             )
 
             results.append(
@@ -408,6 +611,8 @@ def _expand_graph_nodes(
                     position_in_epoch=node_position_in_epoch.get(name),
                     selected_worker=selected_workers.get(name),
                     v2=v2_block,
+                    dependencies=dependencies,
+                    definition=definition,
                 )
             )
             unresolved.pop(name)
@@ -415,16 +620,92 @@ def _expand_graph_nodes(
 
         if not progressed:
             raise ValueError(
-                "Graph contains cycles or unresolved dependencies: "
+                f"{path.capitalize()} contains cycles or unresolved dependencies: "
                 f"{', '.join(unresolved.keys())}"
             )
 
-    return _build_workflow(
-        specs=results,
-        schedule_in_epoch_order=schedule_in_epoch_order,
-        epoch_groups=epoch_groups,
-        region_specs=region_specs,
-        api_version=base.apiVersion,
+
+def _expand_templates(
+    base: _WorkflowRootInput,
+    base_clean: _WorkflowRootInput,
+    base_name: str,
+    results: list[ParsedTaskSpec],
+    region_specs: list[ParsedRegion],
+) -> list[ParsedDefinition]:
+    """Parse ``graph.templates``: the finite region definitions loops and child
+    regions enter, each its own graph scope."""
+    raw = safe_get(base.spec, "graph.templates")
+    if raw is None:
+        return []
+    if not _is_v2_mode(base.apiVersion):
+        raise ValueError("graph.templates requires apiVersion 'flowmesh/v2'")
+    if not isinstance(raw, list):
+        raise ValueError("graph.templates must be a list")
+    definitions: list[ParsedDefinition] = []
+    for idx, entry in enumerate(raw):
+        path = f"graph.templates[{idx}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path} must be a mapping/dict")
+        if unknown := sorted(set(entry) - _TEMPLATE_KEYS):
+            raise ValueError(f"{path}: unknown field(s) {', '.join(unknown)}")
+        if not (name := str(entry.get("name") or "").strip()) or "/" in name:
+            raise ValueError(f"{path} requires a non-empty name without '/'")
+        if any(d.name == name for d in definitions):
+            raise ValueError(f"Duplicate template '{name}'")
+        nodes = entry.get("nodes")
+        if not isinstance(nodes, list) or not nodes:
+            raise ValueError(f"{path}.nodes must be a non-empty list")
+        indexed = _index_graph_nodes(base, nodes, f"{path}.nodes")
+        _order_graph_scope(
+            base_clean, base_name, indexed, name, results, region_specs, {}, {}
+        )
+        definitions.append(
+            ParsedDefinition(
+                name=name,
+                inputs=_list_field(entry, "inputs", path),
+                returns=_list_field(entry, "returns", path),
+                edges=[
+                    _parse_boundary_edge(edge, f"{path}.edges[{i}]")
+                    for i, edge in enumerate(_list_field(entry, "edges", path))
+                ],
+            )
+        )
+    return definitions
+
+
+def _list_field(entry: dict[str, Any], key: str, path: str) -> list[Any]:
+    value = entry.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{path}.{key} must be a list")
+    return value
+
+
+def _parse_boundary_edge(raw: Any, path: str) -> ParsedBoundaryEdge:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path} must be a mapping/dict")
+    if unknown := sorted(set(raw) - _EDGE_KEYS):
+        raise ValueError(f"{path}: unknown field(s) {', '.join(unknown)}")
+    source, target = raw.get("from"), raw.get("to")
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        raise ValueError(f"{path}: 'from' and 'to' are {{node, port}} mappings")
+    if not (source_node := str(source.get("node") or "").strip()):
+        raise ValueError(f"{path}.from.node is required")
+    target_node = str(target.get("node") or "").strip()
+    if target_node not in BOUNDARY_TARGETS:
+        raise ValueError(
+            f"{path}.to.node must be one of {', '.join(sorted(BOUNDARY_TARGETS))}; "
+            "an edge between nodes is a dependsOn entry of its consumer"
+        )
+    if not (target_port := _optional_name(target.get("port"))):
+        raise ValueError(f"{path}.to.port is required")
+    return ParsedBoundaryEdge(
+        source=source_node,
+        port=_optional_name(source.get("port")),
+        target=target_node,
+        target_port=target_port,
+        project=_projection(raw.get("project"), path),
     )
 
 

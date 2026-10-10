@@ -1,4 +1,3 @@
-import json
 import logging
 from typing import Any, cast
 
@@ -17,10 +16,6 @@ from server.task.v2 import (
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import (
-    FakeRegistry,
-    _live_runtime,
-)
 
 REGIONS_WF = """
 apiVersion: flowmesh/v2
@@ -115,9 +110,12 @@ metadata: {name: t}
 spec:
   graph:
     nodes:
+      - name: src
+        spec: {taskType: echo, data: {type: list, items: [k]}}
       - name: kid
         spec: {taskType: echo, data: {type: list, items: [k]}}
       - name: c
+        dependsOn: [src]
         region: {kind: call, child: kid, returns: [out]}
       - name: after
         dependsOn: [c]
@@ -139,7 +137,7 @@ spec:
     from_call = {(e.to_op, e.to_port) for e in template.edges if e.from_op == "c:join"}
     assert from_call == {
         (ids["after"], None),
-        ("m", None),
+        ("m", "c"),
         (ids["reader"], None),
         (ids["reader"], "verdict"),
     }
@@ -182,10 +180,13 @@ class _CapturingRegistry:
         v2: Any = None,
         ledger: Any = None,
         submitted_at: str | None = None,
+        blueprints: Any = (),
     ) -> None:
         self.v2[workflow_id] = v2
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: Any, control: Any = None
+    ) -> None:
         return None
 
 
@@ -218,7 +219,7 @@ async def test_region_bearing_submit_is_admitted() -> None:
 
 def test_region_bearing_inspect_succeeds() -> None:
     runtime = _runtime()
-    report = runtime.inspect_v2(REGIONS_WF, format="native")
+    report = runtime.validate(REGIONS_WF, format="native")[1]
     assert report is not None and report.ok
 
 
@@ -235,9 +236,12 @@ metadata: {name: t}
 spec:
   graph:
     nodes:
+      - name: plan
+        spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: c
         spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: only
+        dependsOn: [plan]
         region: {kind: spawn, child: c, authority: {invoke: []}}
 """
 
@@ -250,7 +254,7 @@ async def test_spawn_bearing_workflow_is_admitted_as_v2() -> None:
         "owner", "org", _SPAWN_ONLY, format="native"
     )
     assert runtime.is_v2_workflow(workflow_id)
-    report = runtime.inspect_v2(_SPAWN_ONLY, format="native")
+    report = runtime.validate(_SPAWN_ONLY, format="native")[1]
     assert report is not None and report.region_bearing
 
 
@@ -340,28 +344,3 @@ spec:
         dependsOn: [a]
         region: {kind: merge}
 """
-
-
-@pytest.mark.anyio
-async def test_a_stored_branch_bearing_workflow_rehydrates() -> None:
-    registry = FakeRegistry()
-    runtime = _live_runtime(registry)
-    workflow_id, _ = await runtime.register(
-        "owner", "org", _MERGE_ONLY, format="native"
-    )
-    # A stored bundle carrying a branch region, which compile refuses.
-    bundle = json.loads(registry.v2_blobs[workflow_id])
-    route = next(
-        op for op in bundle["template"]["operators"] if op["operator_id"] == "route"
-    )
-    route.pop("combination", None)
-    route.update(kind="branch", selection="s", outputs=[{"name": "p"}])
-    registry.v2_blobs[workflow_id] = json.dumps(bundle)
-
-    restored = _live_runtime(registry, "restored")
-    assert await restored.rehydrate() == 1
-    engine = restored.orchestration_engine(workflow_id)
-    assert engine is not None
-    assert any(
-        op.kind.value == "branch" for op in engine._topology.bundle.template.operators
-    )

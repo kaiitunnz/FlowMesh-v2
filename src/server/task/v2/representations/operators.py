@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -95,6 +95,15 @@ class ResidualPolicy(StrEnum):
     CONTINUE = "continue"
     DRAIN = "drain"
     CANCEL = "cancel"
+
+
+class MergeCombination(StrEnum):
+    """How a merge combines the live records reaching it."""
+
+    ONE_LIVE = "one_live"
+    """Exactly one input route is live; the merge forwards its binding."""
+    CONCAT = "concat"
+    """Every live input contributes a member, in declared input order."""
 
 
 class OperatorKind(StrEnum):
@@ -548,26 +557,78 @@ class AgentOperator(_OperatorBase):
     child_template_ref: str | None = None
 
 
+type SelectorStep = str | int
+
+
+class SelectionCase(BaseModel):
+    """One literal selector value and the output port it selects."""
+
+    model_config = ConfigDict(frozen=True)
+
+    value: str
+    port: str
+
+
+class SelectionRule(BaseModel):
+    """How a branch picks one output port from the record on one of its inputs.
+
+    ``field`` walks the accepted input value; the value found must be a string. Without
+    ``cases`` that string names an output port; with them it must equal one case value,
+    which names the port. No other value selects anything.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    input: str
+    field: tuple[SelectorStep, ...] = ()
+    cases: tuple[SelectionCase, ...] | None = None
+    version: int = 1
+
+
 class BranchRegion(_OperatorBase):
-    """Typed output-port structure with a selection rule."""
+    """Routes the record on its input to the one output port its rule selects."""
 
     kind: Literal[OperatorKind.BRANCH] = OperatorKind.BRANCH
-    selection: str | None = None
+    rule: SelectionRule
+    forward: str  # the input whose value the selected port carries
+
+    def input_index(self, ports: Sequence[str | None], name: str) -> int | None:
+        """Which of the branch's incoming edges, given by their input ports, binds its
+        input ``name``: the edge bound to it, or for the selection input the only
+        incoming edge."""
+        return next(
+            (index for index, port in enumerate(ports) if port == name),
+            0 if len(ports) == 1 and name == self.rule.input else None,
+        )
 
 
 class MergeRegion(_OperatorBase):
     """Typed input-port combination structure."""
 
     kind: Literal[OperatorKind.MERGE] = OperatorKind.MERGE
-    combination: str | None = None
+    combination: MergeCombination | None = None
 
 
 class SpawnRegion(_OperatorBase):
-    """A matched child-region boundary for streamed child creation."""
+    """A matched child-region boundary for streamed child creation.
+
+    Its child is one operator (``child_template_ref``) or a declared multi-operator
+    region definition (``child_definition_ref``).
+    """
 
     kind: Literal[OperatorKind.SPAWN] = OperatorKind.SPAWN
     child_template_ref: str | None = None
+    child_definition_ref: str | None = None
     authority: AuthorityCeiling = AuthorityCeiling()
+
+
+_SPAWN_FANOUT_PORTS = frozenset({"", "in"})
+
+
+def is_spawn_fanout_port(port: str | None) -> bool:
+    """Whether a spawn input bound on ``port`` is the one it fans out over; any other
+    input binds a capture."""
+    return (port or "") in _SPAWN_FANOUT_PORTS
 
 
 class JoinPredicate(BaseModel):
@@ -588,7 +649,8 @@ class JoinRegion(_OperatorBase):
 
     ``first_k`` and ``predicate`` parametrize the early-completion policies; a no-winner
     early join resolves ``EXPLICIT_EMPTY`` unless ``no_winner_failure`` opts into
-    ``DECLARED_FAILURE``.
+    ``DECLARED_FAILURE``. A call's join delivers its one child's returned value, each
+    return port carrying the value returned through it.
     """
 
     kind: Literal[OperatorKind.JOIN] = OperatorKind.JOIN
@@ -597,14 +659,22 @@ class JoinRegion(_OperatorBase):
     first_k: int | None = None
     predicate: JoinPredicate | None = None
     no_winner_failure: bool = False
+    call: bool = False
 
 
 class LoopContextRegion(_OperatorBase):
-    """A structured ingress/feedback/egress region with a loop coordinate."""
+    """A structured ingress/feedback/egress region with a loop coordinate.
+
+    ``carried`` ports seed time 0 and are replaced by each feedback; ``invariants`` bind
+    once at ingress and stay readable at every time. ``body_ref`` names the region
+    definition run at each time.
+    """
 
     kind: Literal[OperatorKind.LOOP_CONTEXT] = OperatorKind.LOOP_CONTEXT
     loop_coordinate: str
     carried: tuple[Port, ...] = ()
+    invariants: tuple[Port, ...] = ()
+    body_ref: str
 
 
 type LogicalOperator = Annotated[

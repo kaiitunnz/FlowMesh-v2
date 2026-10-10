@@ -46,7 +46,9 @@ def test_examples_compile_to_acyclic_templates(path: pathlib.Path) -> None:
     # operators. dependsOn is preserved as edges.
     task_ids = {t.task_id for t in parsed.tasks}
     assert task_ids <= template.operator_ids
-    forward_edges = {(e.from_op, e.to_op) for e in template.edges if not e.feedback}
+    forward_edges = {
+        (e.from_op, e.to_op) for e in template.edges if e.is_forward and not e.derived
+    }
     expected_edges = {
         (dep, task.task_id)
         for task in parsed.tasks
@@ -170,6 +172,7 @@ class _CapturingRegistry:
         v2: Any = None,
         ledger: Any = None,
         submitted_at: str | None = None,
+        blueprints: Any = (),
     ) -> None:
         self.v2[workflow_id] = v2
 

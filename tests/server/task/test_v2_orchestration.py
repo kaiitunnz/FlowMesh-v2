@@ -26,8 +26,8 @@ from server.orchestration.outcomes import (
     next_on_uncertain,
 )
 from server.orchestration.state import LedgerSnapshot
-from server.registries.workflow import PersistedTask, WorkflowSched
-from server.task.models import TaskStatus
+from server.registries.workflow import PersistedTask, WorkflowControl, WorkflowSched
+from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
@@ -61,6 +61,8 @@ class FakeRegistry:
         self.ledger_blobs: dict[str, str] = {}
         self.dynamic_task_ids: dict[str, set[str]] = {}
         self.remaining: dict[str, set[str]] = {}
+        self.blueprints: dict[str, list[PersistedTask]] = {}
+        self.control: dict[str, WorkflowControl] = {}
 
     def remaining_of(self, workflow_id: str) -> set[str]:
         return set(self.remaining.get(workflow_id, set()))
@@ -76,6 +78,7 @@ class FakeRegistry:
         v2: Any = None,
         ledger: LedgerSnapshot | None = None,
         submitted_at: str | None = None,
+        blueprints: Any = (),
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
         self.remaining[workflow_id] = {
@@ -90,6 +93,7 @@ class FakeRegistry:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
         if ledger is not None:
             self.ledger_blobs[workflow_id] = ledger.model_dump_json()
+        self.blueprints[workflow_id] = list(blueprints)
 
     async def unregister_workflows_async(self, *workflow_ids: str) -> None:
         for workflow_id in workflow_ids:
@@ -105,7 +109,13 @@ class FakeRegistry:
         ids = self.workflow_task_ids.get(workflow_id)
         if ids is None:
             return None
-        return SimpleNamespace(task_ids=list(ids), submitted_at=self.submitted_at)
+        control = self.control.get(workflow_id)
+        return SimpleNamespace(
+            task_ids=list(ids),
+            submitted_at=self.submitted_at,
+            control_open=control.open if control else False,
+            control_failure=(control.failure or "") if control else "",
+        )
 
     async def get_workflow_record_async(self, workflow_id: str) -> Any:
         return self.get_workflow_record(workflow_id)
@@ -146,8 +156,15 @@ class FakeRegistry:
         blob = self.v2_blobs.get(workflow_id)
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: LedgerSnapshot) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+    ) -> None:
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+        if control is not None:
+            self.control[workflow_id] = control
+
+    async def load_blueprints_async(self, workflow_id: str) -> list[PersistedTask]:
+        return self.blueprints.get(workflow_id, [])
 
     async def load_ledger_snapshot_async(
         self, workflow_id: str
@@ -166,6 +183,7 @@ class FakeRegistry:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: WorkflowControl | None = None,
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
@@ -174,6 +192,11 @@ class FakeRegistry:
         )
         if sched is not None:
             self.sched[workflow_id] = sched.model_dump_json()
+        if control is not None:
+            self.control[workflow_id] = control
+
+    async def commit_transition_async(self, workflow_id: str, **kwargs: Any) -> None:
+        self.commit_transition(workflow_id, **kwargs)
 
     def commit_dynamic_tasks(
         self,
@@ -187,6 +210,7 @@ class FakeRegistry:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: Any = None,
     ) -> None:
         remaining = self.remaining.setdefault(workflow_id, set())
         settled = {*done, *failed, *cancelled}
@@ -201,6 +225,8 @@ class FakeRegistry:
                 remaining.add(item.record.task_id)
         remaining.difference_update(retire)
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+        if control is not None:
+            self.control[workflow_id] = control
         if sched is not None:
             self.sched[workflow_id] = sched.model_dump_json()
 
@@ -243,10 +269,21 @@ def _worker(worker_id: str = "wkr-1") -> Any:
 
 
 async def _register(runtime: TaskRuntime, payload: str) -> tuple[str, dict[str, str]]:
+    """Register a workflow; returns its id and each node's task id, a child template
+    named by the operator its children are made from."""
     workflow_id, results = await runtime.register(
         "owner", "org", payload, format="native"
     )
-    return workflow_id, {str(r.graph_node_name): r.task_id for r in results}
+    ids = {str(r.graph_node_name): r.task_id for r in results}
+    for blueprint in _blueprints(runtime, workflow_id).values():
+        ids.setdefault(str(blueprint.graph_node_name), blueprint.task_id)
+    return workflow_id, ids
+
+
+def _blueprints(runtime: TaskRuntime, workflow_id: str) -> dict[str, TaskRecord]:
+    """The tasks a workflow's children are made from, by operator."""
+    with runtime._lock:
+        return dict(runtime._occurrences._blueprints.get(workflow_id, {}))
 
 
 def _bundle(text: str, workflow_id: str = "wfl-x") -> Any:
@@ -430,7 +467,8 @@ async def test_live_spawn_fans_out_children_to_real_dispatch() -> None:
 
     children = _pop_ready(runtime)
     assert len(children) == 3
-    template_data = runtime._tasks[ids["trial"]].task.spec.model_dump().get("data")
+    blueprint = _blueprints(runtime, workflow_id)[ids["trial"]]
+    template_data = blueprint.task.spec.model_dump().get("data")
     produced = runtime.result_binding(planner)
     assert produced is not None and produced.reference is not None
     indices: list[int] = []
@@ -495,8 +533,8 @@ async def test_a_producer_with_no_bound_result_fails_the_workflow() -> None:
     # Never a spurious zero-child seal: the join stays open and the workflow fails.
     assert _pop_ready(runtime) == [] and _child_count(engine) == 0
     assert not engine.region_closed("collect")
-    assert runtime._tasks[ids["trial"]].status is TaskStatus.FAILED
-    assert "has no bound result" in (runtime._tasks[ids["trial"]].error or "")
+    assert "has no bound result" in (registry.control[workflow_id].failure or "")
+    assert runtime.workflow_settlement(workflow_id).settled
 
 
 @pytest.mark.anyio
@@ -519,7 +557,7 @@ async def test_an_unreadable_producer_result_fails_the_workflow() -> None:
     assert engine is not None
     assert _pop_ready(runtime) == [] and _child_count(engine) == 0
     assert not engine.region_closed("collect")
-    assert "result is unreadable" in (runtime._tasks[ids["trial"]].error or "")
+    assert "result is unreadable" in (registry.control[workflow_id].failure or "")
 
 
 @pytest.mark.anyio
@@ -536,33 +574,30 @@ async def test_zero_element_fan_out_seals_and_closes_the_join_empty() -> None:
     assert engine is not None
     assert _pop_ready(runtime) == [] and _child_count(engine) == 0
     assert engine.region_closed("collect")
-    # The sealed spawn retires its child template, so a zero-child fan-out completes.
+    # The child template is no task, so a zero-child fan-out completes.
     assert registry.remaining_of(workflow_id) == set()
 
 
 @pytest.mark.anyio
-async def test_child_template_holds_completion_until_the_spawn_seals() -> None:
+async def test_a_child_template_is_no_task_of_its_workflow() -> None:
     registry = FakeRegistry()
     runtime = _live_runtime(registry)
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner, trial = ids["planner"], ids["trial"]
-    # The child template is in the remaining set at registration; it only runs as a
-    # materialized child but represents the unsealed spawn until then.
-    assert registry.remaining_of(workflow_id) == {planner, trial}
-
-    # The spawn seals as the producer settles: the children replace the retired
-    # template in the remaining set atomically, and the workflow completes once they
-    # settle.
+    # The child template only runs as materialized children, so it is never one of
+    # the workflow's tasks; the children it makes are, until they settle.
+    assert registry.remaining_of(workflow_id) == {planner}
+    assert runtime.get_record(trial) is None
     record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(
         planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
     )
-    rem = registry.remaining_of(workflow_id)
-    assert trial not in rem and len(rem) == 3
+    assert len(registry.remaining_of(workflow_id)) == 3
     for child in _pop_ready(runtime):
         record_dispatch(runtime, child, cast(Any, _worker()))
         runtime.mark_succeeded(child, "wkr-1", {}, _TS)
     assert registry.remaining_of(workflow_id) == set()
+    assert runtime.workflow_settlement(workflow_id).settled
 
 
 @pytest.mark.anyio
@@ -1364,7 +1399,9 @@ class _LockProbingRegistry(FakeRegistry):
         self.runtime: TaskRuntime | None = None
         self.saved_unlocked: list[bool] = []
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: LedgerSnapshot) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+    ) -> None:
         assert self.runtime is not None
         lock = self.runtime._lock
         taken: list[bool] = []

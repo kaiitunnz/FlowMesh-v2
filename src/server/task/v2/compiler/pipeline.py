@@ -23,7 +23,7 @@ from .episodes import lower_to_episodes
 from .facades import pin_agent_facades
 from .project import (
     LoweringAccumulator,
-    build_name_map,
+    check_named_reads,
     induce_effect_boundaries,
     lower_tasks,
 )
@@ -47,6 +47,7 @@ def _assemble_template(
             legacy_projection=tuple(acc.legacy_projection),
             effect_boundaries=tuple(acc.effect_boundaries),
             source_map=tuple(acc.source_map),
+            definitions=tuple(acc.definitions),
         )
     except ValidationError as exc:
         raise CompileError(
@@ -114,9 +115,9 @@ def compile_workflow(
     with tracer.workflow_stage(
         ControlPlaneStage.COMPILE_LOWER, ControlPlaneWindow.SUBMIT, workflow_id
     ):
-        name_to_op = build_name_map(parsed)
-        lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {}, policies)
+        lower_tasks(parsed, acc, defaults, secret_refs or {}, policies)
         lower_frontend_v2(parsed, acc)
+        check_named_reads(acc)
         induce_effect_boundaries(acc)
         pin_agent_sandbox(acc, defaults.sandbox_enabled)
         pin_agent_facades(acc)

@@ -6,20 +6,29 @@ reads the same wherever it is read.
 """
 
 import json
+from collections.abc import Callable, Sequence
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from shared.tasks.result_binding import ResultBinding
+from shared.content import ContentReference
+from shared.tasks.result_binding import BindingKind, ResultBinding, ResultElementRef
 
+from ..artifact import ArtifactContext, ArtifactRef
 from ._base import BaseExecutorResult
 from .catalog import ResultEnvelope
+from .routed import RoutedValue, routed_root
+
+# The outcome of an aggregate member that carries a value.
+_SUCCESS = "success"
 
 
 def skip_envelope(binding: ResultBinding) -> ResultEnvelope:
     """The envelope a task that settled without running reads as."""
     envelope = ResultEnvelope(
-        task_id=binding.task_id, result=BaseExecutorResult(), metadata=binding.skip
+        task_id=binding.task_id or "",
+        result=BaseExecutorResult(),
+        metadata=binding.skip,
     )
     if binding.settled_at is not None:
         envelope.received_at = binding.settled_at
@@ -51,6 +60,10 @@ def _result_collection(payload: dict[str, Any]) -> list[Any] | None:
     return collection if isinstance(collection, list) else None
 
 
+def _listed(value: Any) -> list[Any]:
+    return [_unwrapped(item) for item in value] if isinstance(value, list) else []
+
+
 def collection_elements(envelope: ResultEnvelope) -> list[Any]:
     """A result's collection with each element's carried value unwrapped.
 
@@ -61,15 +74,236 @@ def collection_elements(envelope: ResultEnvelope) -> list[Any]:
     return [_unwrapped(item) for item in collection]
 
 
-def collection_element(envelope: ResultEnvelope, index: int) -> Any:
-    """One element of a result's collection; raises ``IndexError`` when it has none."""
-    elements = collection_elements(envelope)
+def collection_element(
+    envelope: ResultEnvelope, index: int, collection: Sequence[str | int] = ()
+) -> Any:
+    """One element of a result's collection, or of the list ``collection`` reaches
+    inside it, unwrapped as ``collection_elements`` unwraps one; raises
+    ``IndexError`` when it has none."""
+    elements = (
+        _listed(dig(envelope.result, collection))
+        if collection
+        else collection_elements(envelope)
+    )
     if index < 0 or index >= len(elements):
         raise IndexError(
             f"task {envelope.task_id} has {len(elements)} collection elements and "
             f"none at {index}"
         )
     return elements[index]
+
+
+def dig(value: Any, steps: Sequence[str | int]) -> Any:
+    """Walk ``steps`` into a value: a field of a mapping or model, or an index of a
+    list. A step that finds nothing yields None."""
+    current = value
+    for step in steps:
+        current = routed_root(current)
+        match current:
+            case dict():
+                current = current.get(str(step))
+            case list() if isinstance(step, int) or str(step).isdigit():
+                index = int(step)
+                current = current[index] if 0 <= index < len(current) else None
+            case BaseModel():
+                current = getattr(current, str(step), None)
+            case _:
+                return None
+        if current is None:
+            return None
+    return current
+
+
+def element_value(envelope: ResultEnvelope, ref: ResultElementRef) -> Any:
+    """The value one element of a result reads as; raises ``IndexError`` when the
+    result holds none there."""
+    start = (
+        collection_element(envelope, ref.element, ref.collection)
+        if ref.element is not None
+        else envelope.result
+    )
+    if not ref.path:
+        return start
+    if (value := dig(start, ref.path)) is None:
+        raise IndexError(
+            f"task {envelope.task_id} holds no value at {list(ref.path)!r}"
+        )
+    return value
+
+
+def scoped_value(
+    binding: ResultBinding, envelope_of: Callable[[ResultBinding], ResultEnvelope]
+) -> Any:
+    """The value an input binding reads as, reading each result through
+    ``envelope_of``; raises ``IndexError`` when a result holds no element it selects.
+
+    A whole result reads as the result itself. A part of one, an aggregate's members
+    ``{key, outcome, value}`` (``value`` null unless the member succeeded), a bundle's
+    named values, a literal, and an explicit empty (null) read as plain values, and
+    ``path`` reads into whichever the rest names.
+    """
+    match binding.kind:
+        case BindingKind.RESULT:
+            envelope = envelope_of(binding)
+            value: Any = (
+                collection_element(envelope, binding.element, binding.collection)
+                if binding.element is not None
+                else envelope.result
+            )
+        case BindingKind.MEMBERS:
+            value = [
+                {
+                    "key": member.key,
+                    "outcome": member.outcome,
+                    "value": (
+                        _member_value(member.binding, envelope_of)
+                        if member.outcome == _SUCCESS
+                        else None
+                    ),
+                }
+                for member in binding.members
+            ]
+        case BindingKind.BUNDLE:
+            value = {
+                member.key: _member_value(member.binding, envelope_of)
+                for member in binding.members
+            }
+        case BindingKind.LITERAL:
+            value = binding.literal
+        case BindingKind.EMPTY:
+            value = None
+    return dig(value, binding.path) if binding.path else value
+
+
+def upstream_value(
+    binding: ResultBinding, envelope_of: Callable[[ResultBinding], ResultEnvelope]
+) -> BaseExecutorResult:
+    """What a reader receives for one value: a whole result as itself, any other value
+    as a ``RoutedValue`` carrying what ``scoped_value`` reads; raises ``IndexError``
+    when a result holds no element the binding selects.
+
+    A value read out of one result keeps that result's artifact context, so an
+    artifact ref inside it resolves against its producer.
+    """
+    if binding.whole_result:
+        return envelope_of(binding).result
+    envelope_of = _read_once(envelope_of)
+    value = scoped_value(binding, envelope_of)
+    contexts = artifact_contexts(binding, envelope_of)
+    return RoutedValue(
+        routed_value=value,
+        _artifacts=contexts.pop((), None),
+        _member_artifacts={".".join(at): ctx for at, ctx in contexts.items()},
+    )
+
+
+def artifact_contexts(
+    binding: ResultBinding, envelope_of: Callable[[ResultBinding], ResultEnvelope]
+) -> dict[tuple[str, ...], ArtifactContext]:
+    """The artifact context of each producer whose values a binding reads, by the
+    read path into the value under which that producer's values sit.
+
+    A value read out of one result sits under its producer whole; an aggregate
+    member's value under ``(i, "value")`` and a bundle's under its key resolve against
+    the member's own producer.
+    """
+    found: dict[tuple[str, ...], ArtifactContext] = {}
+    path = tuple(str(step) for step in binding.path)
+
+    def collect(source: ResultBinding, at: tuple[str, ...]) -> None:
+        if at[: len(path)] != path[: len(at)]:
+            return
+        match source.kind:
+            case BindingKind.RESULT:
+                if (context := envelope_of(source).result.artifacts_) is not None:
+                    found[at] = context
+            case BindingKind.MEMBERS:
+                for index, member in enumerate(source.members):
+                    if member.binding is not None and member.outcome == _SUCCESS:
+                        collect(member.binding, (*at, str(index), "value"))
+            case BindingKind.BUNDLE:
+                for member in source.members:
+                    if member.binding is not None:
+                        collect(member.binding, (*at, member.key))
+
+    collect(binding, ())
+    return {
+        at[len(path) :] if at[: len(path)] == path else (): context
+        for at, context in found.items()
+    }
+
+
+def _read_once(
+    envelope_of: Callable[[ResultBinding], ResultEnvelope],
+) -> Callable[[ResultBinding], ResultEnvelope]:
+    """``envelope_of`` reading each stored result at most once."""
+    read: dict[ContentReference, ResultEnvelope] = {}
+
+    def envelope(binding: ResultBinding) -> ResultEnvelope:
+        if (reference := binding.reference) is None:
+            return envelope_of(binding)
+        if (cached := read.get(reference)) is None:
+            cached = read[reference] = envelope_of(binding)
+        return cached
+
+    return envelope
+
+
+def artifact_context(
+    value: Any, path: Sequence[str | int] = ()
+) -> ArtifactContext | None:
+    """The context an artifact ref at ``path`` inside an upstream value resolves
+    against: its producer's, the nearest one enclosing it."""
+    if isinstance(value, RoutedValue):
+        steps = tuple(str(step) for step in path)
+        for length in range(len(steps), 0, -1):
+            if (
+                context := value.member_artifacts_.get(".".join(steps[:length]))
+            ) is not None:
+                return context
+    return value.artifacts_ if isinstance(value, BaseExecutorResult) else None
+
+
+def artifact_ref_path(value: Any) -> str | None:
+    """The relative path an artifact ref names, or None for any other value."""
+    match value:
+        case ArtifactRef(path=path) | {"path": str() as path}:
+            return path or None
+    return None
+
+
+def _member_value(
+    binding: ResultBinding | None,
+    envelope_of: Callable[[ResultBinding], ResultEnvelope],
+) -> Any:
+    if binding is None:
+        return None
+    value = scoped_value(binding, envelope_of)
+    return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+
+
+def binding_text(
+    binding: ResultBinding, envelope_of: Callable[[ResultBinding], ResultEnvelope]
+) -> str | None:
+    """The string an agent input member reads a value as, or None when absent.
+
+    A whole result reads as ``value_text`` reads it; any other value reads as the
+    value ``scoped_value`` reads, rendered as JSON unless it is a string.
+    """
+    if binding.whole_result:
+        return value_text(envelope_of(binding), None)
+    envelope_of = _read_once(envelope_of)
+    try:
+        value = scoped_value(binding, envelope_of)
+    except IndexError:
+        return None
+    if (ref := artifact_ref_path(value)) is not None and (
+        context := artifact_contexts(binding, envelope_of).get(())
+    ) is not None:
+        return context.url_for(ref)
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    return _stringify(value)
 
 
 def value_text(envelope: ResultEnvelope, element: int | None) -> str | None:
@@ -98,10 +332,18 @@ def _stringify(value: Any) -> str:
 
 __all__ = [
     "NotAResultEnvelope",
+    "artifact_context",
+    "artifact_contexts",
+    "artifact_ref_path",
+    "binding_text",
     "collection_element",
     "collection_elements",
+    "dig",
+    "element_value",
     "result_envelope",
+    "scoped_value",
     "skip_envelope",
     "skip_envelope_bytes",
+    "upstream_value",
     "value_text",
 ]

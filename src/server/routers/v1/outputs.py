@@ -169,7 +169,7 @@ async def get_output(
     if member.publication.outcome.value != OutputOutcome.SUCCESS:
         return _present(WorkflowOutputValue, member)
     try:
-        envelope = await asyncio.to_thread(runtime.read_output, member)
+        value = await asyncio.to_thread(runtime.read_output, member)
     except ResultUnavailable as exc:
         raise api_error(
             status.HTTP_503_SERVICE_UNAVAILABLE, "content_unavailable", str(exc)
@@ -178,4 +178,4 @@ async def get_output(
         raise api_error(
             status.HTTP_500_INTERNAL_SERVER_ERROR, "output_unreadable", str(exc)
         ) from exc
-    return _present(WorkflowOutputValue, member, value=envelope.result)
+    return _present(WorkflowOutputValue, member, value=value)

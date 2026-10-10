@@ -8,15 +8,19 @@ from ...task.v2.representations.operators import (
     OperatorKind,
     SpawnRegion,
 )
+from ...task.v2.representations.template import BoundaryKind, EntryRole
 from ..guardrails import ScopeBudget
 from ..state import (
+    TERMINAL_WORK_ITEM_STATUSES,
     AcceptedInput,
     AcceptedInputMember,
     Activation,
     CapabilityStatus,
+    ChildContext,
     Continuation,
     ProgressAxis,
     PublicationOutcome,
+    ValueMember,
     ValueRef,
     WorkItem,
 )
@@ -25,6 +29,7 @@ from .authority import AuthorityLedger
 from .dataflow import RegionFlow
 from .inputs import AcceptedInputLedger
 from .ledger import OrchestrationLedger
+from .occurrences import OccurrenceFactory
 from .scopes import ScopeProgress
 from .topology import CHILD_INIT_OPENERS, PlanTopology, effect_recovery
 
@@ -41,6 +46,7 @@ class SpawnRegions:
         authority: AuthorityLedger,
         scope_progress: ScopeProgress,
         flow: RegionFlow,
+        factory: OccurrenceFactory,
         budget: ScopeBudget,
     ) -> None:
         self._ledger = ledger
@@ -49,6 +55,7 @@ class SpawnRegions:
         self._authority = authority
         self._scope_progress = scope_progress
         self._flow = flow
+        self._factory = factory
         self._budget = budget
 
     def region_opener(self, agent_activation: str, region_op: str) -> str:
@@ -77,11 +84,15 @@ class SpawnRegions:
         )
         self._ledger.add_activation(opener_act)
         self._ledger.region_openers[key] = opener_act.activation_id
-        self._scope_progress.open_child_init_scope(
+        scope_id = self._scope_progress.open_child_init_scope(
             opener_act.activation_id,
             parent_scope_id=agent.scope_id,
             parent_delegate=agent_delegate,
         )
+        # An agent occurring in a region definition releases its region's join in its
+        # own context and time.
+        if occurrence := self._ledger.occurrence_by_activation.get(agent_activation):
+            self._ledger.bind_scope_occurrence(scope_id, occurrence)
         return opener_act.activation_id
 
     def spawn_child(self, spawn: str, *, operator_id: str | None = None) -> str:
@@ -186,11 +197,9 @@ class SpawnRegions:
                 f"spawn {spawn_op!r} child-init capability is {cap.status.value}; "
                 "no child may be created"
             )
-        body_opens_scope = self._topology.kind(body_ref) in CHILD_INIT_OPENERS or (
-            self._topology.kind(body_ref) is OperatorKind.LOOP_CONTEXT
-        )
+        body_opens_scope = self._topology.kind(body_ref) in CHILD_INIT_OPENERS
         # A leaf child dispatches directly; an agent child dispatches and owns its own
-        # child-init scope (recursion). A spawn/loop child body stays trace-level.
+        # child-init scope (recursion). A spawn child body stays trace-level.
         if dispatchable and not isinstance(body_op, (LeafOperator, AgentOperator)):
             raise RegionError(
                 f"child body {body_ref!r} is not live-dispatchable; only a leaf or "
@@ -228,7 +237,7 @@ class SpawnRegions:
             recovery=recovery,
             replay_contract=self._topology.replay.get(body_ref),
         )
-        self._ledger.work_items[child_wi.work_item_id] = child_wi
+        self._ledger.add_work_item(child_wi)
         self._ledger.wi_by_activation[activation.activation_id] = child_wi.work_item_id
         if dispatchable:
             self._ledger.wi_by_task[child_wi.legacy_task_id] = child_wi.work_item_id
@@ -238,14 +247,10 @@ class SpawnRegions:
             operator_id=body_ref,
             detail={"scope": scope_id, "index": str(index)},
         )
-        # A spawn/loop child body opens its nested scope eagerly; a dispatchable agent
-        # child opens its own child-init scope lazily, only when it first spawns.
+        # A spawn child body opens its nested scope eagerly; a dispatchable agent child
+        # opens its own child-init scope lazily, only when it first spawns.
         if self._topology.kind(body_ref) is OperatorKind.SPAWN:
             self._scope_progress.open_child_init_scope(
-                activation.activation_id, parent_scope_id=scope_id
-            )
-        elif self._topology.kind(body_ref) is OperatorKind.LOOP_CONTEXT:
-            self._scope_progress.open_loop(
                 activation.activation_id, parent_scope_id=scope_id
             )
         return activation, child_wi
@@ -329,3 +334,163 @@ class SpawnRegions:
             raise RegionError(f"unknown child activation {child_activation_id!r}")
         wi = self._ledger.work_items[self._ledger.wi_by_activation[child_activation_id]]
         return self._flow.settle_child_wi(wi, activation, outcome, value_ref)
+
+    def enter_definition_child(
+        self, spawn_key: str, index: int, element: ValueRef
+    ) -> Advance:
+        """Create the child of a spawn whose child is a region definition for the
+        element at ``index`` of its fan-out; an element already entered is left as it
+        is.
+
+        The child is a new activation context: its members occur once in it, at the
+        spawn's own time, entered with the spawned element as the definition's param
+        and the spawn's captured values. The whole batch is budgeted before any of it
+        is created.
+        """
+        advance = Advance()
+        occurrence = self._ledger.occurrence(spawn_key)
+        spawn = self._topology.operators[occurrence.operator_id]
+        if not isinstance(spawn, SpawnRegion) or spawn.child_definition_ref is None:
+            raise RegionError(f"{spawn_key!r} spawns no region definition")
+        opener = occurrence.activation_id or self._ledger.control_activation(
+            occurrence.operator_id
+        )
+        scope_id = self._ledger.scope_by_activation.get(opener)
+        if scope_id is not None and any(
+            self._ledger.activations[child].child_index == index
+            for child in self._ledger.children_by_scope.get(scope_id, ())
+        ):
+            return advance
+        cap = self._scope_progress.capability(scope_id, ProgressAxis.CHILD_INIT)
+        if scope_id is None or cap is None or cap.status is not CapabilityStatus.OPEN:
+            raise RegionError(f"spawn {spawn_key!r} admits no further child")
+        definition = self._topology.definitions[spawn.child_definition_ref]
+        self._scope_progress.charge_activations(1 + len(definition.members))
+        activation = Activation(
+            activation_id=new_activation_id(),
+            instance_id=self._ledger.workflow_instance.instance_id,
+            scope_id=scope_id,
+            operator_id=occurrence.operator_id,
+            kind="child",
+            child_index=index,
+        )
+        self._ledger.add_activation(activation)
+        wi = WorkItem(
+            work_item_id=new_work_item_id(),
+            activation_id=activation.activation_id,
+            operator_id=occurrence.operator_id,
+            legacy_task_id="",
+            child_input=element,
+        )
+        self._ledger.add_work_item(wi)
+        self._ledger.wi_by_activation[activation.activation_id] = wi.work_item_id
+        cap.outstanding += 1
+        captured = self._ledger.control_state(spawn_key).inputs
+        entries: dict[str, ValueRef] = {}
+        for port in definition.inputs:
+            if port.role is EntryRole.PARAM:
+                entries[port.name] = element
+            elif (value := captured.get(port.name)) is not None:
+                entries[port.name] = value
+        context_scope = self._scope_progress.open_context_scope(
+            activation.activation_id, scope_id
+        )
+        context = ChildContext(
+            context_id=activation.activation_id,
+            scope_id=context_scope,
+            time=occurrence.time,
+            definition_id=definition.definition_id,
+            entries=entries,
+        )
+        self._ledger.child_contexts[activation.activation_id] = context
+        self._ledger.active_contexts.add(activation.activation_id)
+        self._ledger.emit(
+            "child_spawned",
+            operator_id=occurrence.operator_id,
+            detail={"scope": scope_id, "index": str(activation.child_index)},
+        )
+        for key in self._factory.enter(definition.definition_id, context):
+            self._flow.evaluate(key, advance)
+        return advance
+
+    def on_child_return(self, key: str, advance: Advance) -> None:
+        """Accept the value a child's definition returns through its return ports."""
+        occurrence = self._ledger.occurrence(key)
+        context = self._ledger.child_contexts.get(occurrence.context_id)
+        if context is None or context.returned:
+            return
+        definition = self._topology.definitions[context.definition_id]
+        bundles = self._flow.edges.return_bundles(key, BoundaryKind.RETURN)
+        if not bundles:
+            return
+        values = next(iter(bundles.values()))
+        if len(definition.returns) == 1:
+            context.result = values.get(definition.returns[0].name)
+        else:
+            context.result = ValueRef(
+                kind="bundle",
+                members=tuple(
+                    ValueMember(
+                        key=name, outcome=PublicationOutcome.SUCCESS, value_ref=value
+                    )
+                    for name, value in sorted(values.items())
+                ),
+            )
+        context.returned = True
+        self._ledger.emit(
+            "child_returned",
+            operator_id=occurrence.operator_id,
+            detail={"context": context.context_id},
+        )
+        self.maybe_settle_child(context, advance)
+
+    def maybe_settle_child(self, context: ChildContext, advance: Advance) -> None:
+        """Settle a definition child once everything it started has drained: with its
+        returned value, or as a failure when it never returned."""
+        wi = self._child_work_item(context)
+        if wi is None:
+            self._ledger.active_contexts.discard(context.context_id)
+            return
+        if not self._scope_progress.scope_drained(context.scope_id):
+            return
+        if not context.returned:
+            wi.failure_reason = (
+                f"child {context.definition_id} drained without returning a value"
+            )
+            self._settle_definition_child(
+                context, wi, PublicationOutcome.DECLARED_FAILURE, advance
+            )
+            return
+        self._settle_definition_child(context, wi, PublicationOutcome.SUCCESS, advance)
+
+    def fail_child(self, context: ChildContext, reason: str, advance: Advance) -> None:
+        """Fail a definition child, withdrawing what it still has outstanding."""
+        wi = self._child_work_item(context)
+        if wi is None:
+            return
+        for scope_id in self._ledger.scope_subtree(context.scope_id):
+            advance.extend(self._flow.cancel_one_scope(scope_id))
+        wi.failure_reason = reason
+        self._settle_definition_child(
+            context, wi, PublicationOutcome.DECLARED_FAILURE, advance
+        )
+
+    def _settle_definition_child(
+        self,
+        context: ChildContext,
+        wi: WorkItem,
+        outcome: PublicationOutcome,
+        advance: Advance,
+    ) -> None:
+        self._ledger.released_scopes.add(context.scope_id)
+        self._ledger.active_contexts.discard(context.context_id)
+        activation = self._ledger.activations[wi.activation_id]
+        value = context.result if outcome is PublicationOutcome.SUCCESS else None
+        advance.extend(self._flow.settle_child_wi(wi, activation, outcome, value))
+
+    def _child_work_item(self, context: ChildContext) -> WorkItem | None:
+        wi_id = self._ledger.wi_by_activation.get(context.context_id)
+        wi = self._ledger.work_items.get(wi_id) if wi_id else None
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
+            return None
+        return wi

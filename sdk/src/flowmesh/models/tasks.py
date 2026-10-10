@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .common import CursorPage, TaskStatus
 
@@ -23,7 +23,19 @@ class TaskUsage(BaseModel):
 
 class TaskInputElement(BaseModel):
     producer_task_id: str
-    index: int
+    index: int | None = None
+    path: list[str | int] = Field(default_factory=list)
+
+
+class TaskLoopTime(BaseModel):
+    loop: str
+    iteration: int
+
+
+class TaskOccurrence(BaseModel):
+    member: str
+    context: str | None = None
+    time: list[TaskLoopTime] = Field(default_factory=list)
 
 
 class TaskInfo(BaseModel):
@@ -70,6 +82,7 @@ class TaskInfo(BaseModel):
     completed: bool
     failed: bool
     input_element: TaskInputElement | None = None
+    occurrence: TaskOccurrence | None = None
 
 
 class TaskPage(CursorPage):

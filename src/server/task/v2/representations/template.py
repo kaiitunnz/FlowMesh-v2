@@ -1,16 +1,64 @@
+from collections import Counter
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from .operators import EffectBoundary, LogicalOperator
+from .operators import EffectBoundary, LogicalOperator, Port, PortKind, SelectorStep
 from .results import LegacyLogicalTaskProjection, ResultDeclaration, Visibility
 from .versioning import VersionId
 
 type SourceKind = Literal["legacy_task", "stage", "graph_node", "region", "root"]
 
 
+class DependencyUse(StrEnum):
+    """What a consumer needs from one of its incoming edges."""
+
+    VALUE_REQUIRED = "value_required"
+    """The consumer reads the value; a dead route makes the consumer inactive."""
+    ROUTE_REQUIRED = "route_required"
+    """The consumer runs only on this route, whatever it reads from it."""
+    ORDER_ONLY = "order_only"
+    """The consumer only runs after the source; any live such route lets it run."""
+
+
+class BoundaryKind(StrEnum):
+    """Which boundary of a region definition an edge crosses."""
+
+    ENTRY = "entry"
+    """From a definition input into a member."""
+    FEEDBACK = "feedback"
+    """Back to the owning loop, enabling its next time."""
+    EGRESS = "egress"
+    """Out of the owning loop, once its frontier closes."""
+    RETURN = "return"
+    """Out of a child to its spawn or call."""
+
+
+BOUNDARY_NODES: dict[BoundaryKind, str] = {
+    BoundaryKind.ENTRY: "$ingress",
+    BoundaryKind.FEEDBACK: "$feedback",
+    BoundaryKind.EGRESS: "$egress",
+    BoundaryKind.RETURN: "$return",
+}
+"""The node standing for a definition's boundary at the outer end of a boundary
+edge."""
+RETURN_KINDS = frozenset(
+    {BoundaryKind.FEEDBACK, BoundaryKind.EGRESS, BoundaryKind.RETURN}
+)
+
+
 class TemplateEdge(BaseModel):
-    """A symbolic wiring edge between two logical operators."""
+    """A symbolic wiring edge between two logical operators of one definition, or
+    across that definition's boundary.
+
+    A boundary edge names the boundary node of its kind (``$ingress`` and its input
+    port, or ``$feedback``/``$egress``/``$return`` and the boundary port) at its outer
+    end. ``projection`` selects part of the source value for the consumer under the
+    projection rule ``projection_version``; ``use`` says whether the consumer needs the
+    value, the route, or only the ordering. A derived edge stands for a value the
+    consumer reads by name through an ancestor rather than a dependency it declares.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -18,9 +66,68 @@ class TemplateEdge(BaseModel):
     to_op: str
     from_port: str | None = None
     to_port: str | None = None
-    # A feedback edge is a structured back-edge into a LoopContext region,
-    # excluded from the forward topology that unstructured-cycle detection rejects.
-    feedback: bool = False
+    edge_id: str
+    use: DependencyUse = DependencyUse.ORDER_ONLY
+    projection: tuple[SelectorStep, ...] = ()
+    projection_version: int = 1
+    boundary: BoundaryKind | None = None
+    # The region definition the edge belongs to; None at the root.
+    definition: str | None = None
+    derived: bool = False
+
+    @property
+    def is_forward(self) -> bool:
+        """Whether the edge joins two operators of one definition."""
+        return self.boundary is None
+
+
+class DefinitionKind(StrEnum):
+    """What enters a region definition."""
+
+    LOOP_BODY = "loop_body"
+    """A loop runs it at every logical time."""
+    CHILD = "child"
+    """A spawn or call runs it as one child activation."""
+
+
+class EntryRole(StrEnum):
+    """How a definition input binds at entry."""
+
+    CARRIED = "carried"
+    """Seeded at loop ingress and replaced by each feedback."""
+    INVARIANT = "invariant"
+    """Bound once at loop ingress, readable at every time."""
+    PARAM = "param"
+    """A child's invocation parameter: its spawned element or call input."""
+    CAPTURE = "capture"
+    """A parent value a child captures at entry."""
+
+
+class DefinitionPort(BaseModel):
+    """A typed input of a region definition."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    kind: PortKind = PortKind.VALUE
+    role: EntryRole
+
+
+class RegionDefinition(BaseModel):
+    """A finite declared subgraph a loop or a spawn/call enters.
+
+    Its members are operators of the template; its edges stay among members, and the
+    definition crosses its boundary only through its boundary edges.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    definition_id: str
+    kind: DefinitionKind
+    source_id: str
+    members: tuple[str, ...] = ()
+    inputs: tuple[DefinitionPort, ...] = ()
+    returns: tuple[Port, ...] = ()
 
 
 class ToolDeclaration(BaseModel):
@@ -71,10 +178,31 @@ class LogicalWorkflowTemplate(BaseModel):
     legacy_projection: tuple[LegacyLogicalTaskProjection, ...] = ()
     effect_boundaries: tuple[EffectBoundary, ...] = ()
     source_map: tuple[SourceMapEntry, ...] = ()
+    definitions: tuple[RegionDefinition, ...] = ()
 
     @property
     def operator_ids(self) -> frozenset[str]:
         return frozenset(op.operator_id for op in self.operators)
+
+    def definition_of(self) -> dict[str, str]:
+        """Each definition member's definition id; a root operator is absent."""
+        return {
+            member: definition.definition_id
+            for definition in self.definitions
+            for member in definition.members
+        }
+
+    def boundary_edges(
+        self, definition_id: str, *kinds: BoundaryKind
+    ) -> list[TemplateEdge]:
+        """A definition's boundary edges of the given kinds, in catalog order."""
+        return [
+            edge
+            for edge in self.edges
+            if edge.definition == definition_id
+            and edge.boundary is not None
+            and (not kinds or edge.boundary in kinds)
+        ]
 
     def published_outputs(self) -> list[tuple[str, ResultDeclaration]]:
         """Each published declaration with its public name, in declaration order.
@@ -93,10 +221,19 @@ class LogicalWorkflowTemplate(BaseModel):
     def _validate_ownership_links(self) -> "LogicalWorkflowTemplate":
         ids = self.operator_ids
         if len(ids) != len(self.operators):
-            raise ValueError("Duplicate operator_id in logical template.")
+            duplicated = sorted(
+                op_id
+                for op_id, count in Counter(
+                    op.operator_id for op in self.operators
+                ).items()
+                if count > 1
+            )
+            raise ValueError(f"Duplicate operator_id in logical template: {duplicated}")
         for edge in self.edges:
             for ref in (edge.from_op, edge.to_op):
-                if ref not in ids:
+                if ref not in ids and not (
+                    edge.boundary is not None and ref == _outer_end(edge)
+                ):
                     raise ValueError(f"Edge references unknown operator {ref!r}.")
         for decl in self.result_declarations:
             if decl.source_ref not in ids:
@@ -115,4 +252,17 @@ class LogicalWorkflowTemplate(BaseModel):
                 raise ValueError(
                     f"Source map references unknown operator {entry.logical_ref!r}."
                 )
+        for definition in self.definitions:
+            for ref in definition.members:
+                if ref not in ids:
+                    raise ValueError(
+                        f"Definition {definition.definition_id!r} references unknown "
+                        f"operator {ref!r}."
+                    )
         return self
+
+
+def _outer_end(edge: TemplateEdge) -> str | None:
+    if edge.boundary is None:
+        return None
+    return BOUNDARY_NODES[edge.boundary]

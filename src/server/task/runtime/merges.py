@@ -79,6 +79,9 @@ class TaskMerges:
             return []
         if self.merge_children_map.get(task_id):
             return []
+        # A workflow owing a rewrite after a write fault publishes nothing.
+        if record.workflow_id in self._committer.faulted:
+            return []
         if record.selected_worker and assigned_worker not in record.selected_worker:
             raise ValueError(
                 f"The worker assigned for task {task_id} ({assigned_worker}) "
@@ -111,6 +114,7 @@ class TaskMerges:
             if (
                 self._committer.reporting(candidate)
                 or candidate in self._committer.unacknowledged
+                or candidate_record.workflow_id in self._committer.faulted
             ):
                 continue
             siblings.append(candidate)
@@ -133,12 +137,16 @@ class TaskMerges:
         return siblings
 
     def release_merge_locked(self, task_id: str) -> None:
+        self._committer.commit_locked(task_id, *self.unmerge_locked(task_id))
+
+    def unmerge_locked(self, task_id: str) -> list[str]:
+        """Take a task's merged children out of its dispatch and back to the queue, in
+        memory; returns the children it moved."""
         if parent := self._tasks.get(task_id):
             parent.merged_children = None
-        returned = self.return_merged_children_locked(
+        return self.return_merged_children_locked(
             self.merge_children_map.pop(task_id, [])
         )
-        self._committer.commit_locked(task_id, *returned)
 
     def merged_child_record_locked(
         self, task_id: str, child_id: str

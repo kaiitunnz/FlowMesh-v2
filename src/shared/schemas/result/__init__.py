@@ -2,7 +2,7 @@
 ``task_type`` discriminated union that deserializes ``results.json``.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, SerializeAsAny
 
 # ``_base`` must import before ``catalog``: importing ``TaskType`` re-enters this
 # package through ``shared.tasks.specs.common``, which needs ``BaseExecutorResult``
@@ -58,6 +58,7 @@ from .payloads import (
     RagSearch,
     RagUsage,
 )
+from .routed import RoutedValue
 
 # Resolve the recursive ``children`` union on the base and every concrete
 # subclass (each inherits the field and builds its own core schema).
@@ -88,6 +89,13 @@ _RESULT_MODELS: tuple[type[BaseModel], ...] = (
 )
 for _model in _RESULT_MODELS:
     _model.model_rebuild()
+# ``RoutedValue``'s module holds neither name its inherited ``children`` refers to.
+RoutedValue.model_rebuild(
+    _types_namespace={
+        "SerializeAsAny": SerializeAsAny,
+        "AnyExecutorResult": AnyExecutorResult,
+    }
+)
 
 __all__ = [
     "RESULT_MEDIA_TYPE",
@@ -134,6 +142,7 @@ __all__ = [
     "RagSearch",
     "RagUsage",
     "ResultEnvelope",
+    "RoutedValue",
     "SFTResult",
     "SSHResult",
     "ServeResult",

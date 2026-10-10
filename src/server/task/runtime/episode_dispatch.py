@@ -23,6 +23,7 @@ from shared.sandbox import (
     LocalSandboxCapability,
     SandboxEgressMode,
 )
+from shared.tasks.result_binding import ResultElementRef
 from shared.tasks.specs import (
     InferenceEmbodimentKind,
     InferenceSpecStrict,
@@ -315,7 +316,9 @@ class EpisodeDispatch:
         element = self._content_bindings.input_element_locked(task_id)
         try:
             contract = (
-                element_contract(spec, element.producer_task_id, element.ref.element)
+                element_contract(
+                    spec, element.producer_task_id, *_element_source(element.ref)
+                )
                 if element is not None
                 else canonical_contract(spec)
             )
@@ -360,3 +363,15 @@ class EpisodeDispatch:
             and wi is not None
             and wi.status is WorkItemStatus.BLOCKED
         )
+
+
+def _element_source(ref: ResultElementRef) -> tuple[int, str | None]:
+    """The index and collection path an element contract names an element by."""
+    if not ref.path and ref.element is not None:
+        return ref.element, ".".join(map(str, ref.collection)) or None
+    *collection, index = ref.path or (None,)
+    if ref.element is not None or not isinstance(index, int):
+        raise CanonicalProjectionError(
+            "an element inside a collection member names no contract source"
+        )
+    return index, ".".join(map(str, collection)) or None

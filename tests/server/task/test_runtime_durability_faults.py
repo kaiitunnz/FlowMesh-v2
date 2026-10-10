@@ -85,7 +85,9 @@ class _FaultyRegistry(FakeRegistry):
             )
         )
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: LedgerSnapshot) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+    ) -> None:
         self._write(
             lambda: super(_FaultyRegistry, self).save_ledger_snapshot(
                 workflow_id, snapshot

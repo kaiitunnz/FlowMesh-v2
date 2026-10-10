@@ -42,7 +42,7 @@ spec:
           type: list
           items:
             - - role: user
-                content: "Extract entities from: {{input}}"
+                content: "Extract the entities from this report: ..."
     - name: summarize
       dependsOn: [extract]
       spec:
@@ -52,14 +52,14 @@ spec:
           type: list
           items:
             - - role: user
-                content: "Summarize: {{extract.output}}"
+                content: "Summarize: ${extract.items.0.output}"
 ```
 
 `spec.stages[].dependsOn` declares the DAG edges; the dispatcher
 schedules each stage once all of its dependencies are `DONE`. A stage's
 `dependsOn` names an earlier stage of the same workflow.
-Substitutions like `{{extract.output}}` are resolved against the
-upstream stage's result.
+A placeholder `${stage.path}` reads into an upstream stage's result, which the
+server renders before the stage dispatches.
 
 ## Graph DAG
 
@@ -201,12 +201,19 @@ spec:
         spec: { taskType: echo, ... }
 ```
 
-Region kinds are `merge`, `spawn`, `join`, and `call` (`call` normalizes to a
-`spawn`/`join` pair). A spawn or call fans out over a task's result, so its
-input is a task, and a join collects a spawn's children, so one of its inputs is
-a spawn. Only a join may depend on a spawn, and a node that depends on a call
-reads the call's join. A failed input fails the region and everything
-downstream of it, as a failed dependency fails a task.
+Region kinds are `branch`, `merge`, `loop`, `spawn`, `join`, and `call` (`call`
+normalizes to a `spawn`/`join` pair). A spawn or call fans out over its one
+unnamed input: a task's result, a part of one, or a branch arm carrying one. A
+join collects a spawn's children, so one of its inputs is a spawn. Only a join may
+depend on a spawn, and a node that depends on a call reads the call's join. A
+spawn's child task reads only the element it is spawned with; a child template
+reads parent values through its `capture` inputs. A failed input fails the region
+and everything downstream of it, as a failed dependency fails a task.
+
+A `dependsOn` entry is a node name or a mapping
+`{ node, port, input, project }`: `port` names the output it reads (a branch arm,
+a loop's carried value, a call's return), `input` is the name the consumer reads
+it by, and `project` selects a part of it by field names and list indexes.
 
 A `join` `completion` is `all_settled`, `all_succeed`, `any`, `first_k` (with
 `k`), or `predicate` (with `predicate: { min_qualifiers, monotone }`). An early
@@ -219,13 +226,142 @@ lowest-`child_index` child that qualifies. An `all_succeed` join with a failed
 child, or a no-winner join under `no_winner_failure`, resolves as a failure and
 fails everything downstream of it.
 
+#### Branches and merges
+
+A `branch` routes a value to exactly one of its `outputs`. Its `selection` names
+the `input` it reads, the `field` path to a string inside it, and optionally
+`cases` mapping each value to a port; without `cases` the value names the port.
+The selected port carries the value of the input `forward` names, by default the
+one it selects on. A consumer depends on the arm it takes:
+
+```yaml
+      - name: classify
+        spec: { taskType: echo, ... }
+      - name: route
+        dependsOn: [{ node: classify, input: input }]
+        region:
+          kind: branch
+          inputs: [{ name: input }]
+          outputs: [{ name: accept }, { name: revise }]
+          selection: { input: input, field: [items, 0, output], cases: { "ok": accept, "redo": revise } }
+      - name: publish
+        dependsOn: [{ node: route, port: accept }]
+        spec: { taskType: echo, ... }
+```
+
+Case values are strings, so quote any that YAML would read otherwise. A value
+that is not a string, or matches no case or port, fails the branch, and so does
+a selection or forwarded input that failed. A task on an arm the branch did not
+take finishes `DONE` without running, with a skipped result
+(`reason: route_not_taken`), and so does everything that needs it. A `merge`
+joins arms back together: `combination: one_live` forwards the one live arm's
+value, and `concat`, the default, collects every live input in declared order. A
+branch selects on, and a spawn fans out over, a `one_live` merge only when each of
+its arms carries one value rather than a join's or a `concat` merge's aggregate.
+
+#### Graph templates
+
+`spec.graph.templates` declares named, finite subgraphs that loops run as their
+body and spawns or calls run per child. A template declares its `inputs`, each
+with a `role` (`carried` or `invariant` for a loop body, `param` for a child's
+element or call argument, `capture` for a parent value a child reads), its
+`returns` for a call, its `nodes`, and its boundary `edges`. Inside a template a
+node reads a template input by depending on `$ingress`, and an edge leaves
+through `$feedback` (the next loop iteration), `$egress` (the loop's exit), or
+`$return` (a call's result). An edge may carry a `project`.
+
+#### Loops
+
+A `loop` runs its `body_ref` template once per iteration. Its `carried` inputs
+seed iteration 0 from its dependencies and are replaced by each `$feedback`;
+its `invariants` bind once and stay readable at every iteration. The body
+decides each iteration with a branch whose arms lead to `$feedback` or `$egress`;
+here `revise` returns structured output carrying a `verdict` and the `text`:
+
+```yaml
+spec:
+  graph:
+    templates:
+      - name: refine_body
+        inputs: [{ name: draft, role: carried }]
+        nodes:
+          - name: revise
+            dependsOn: [{ node: $ingress, port: draft, input: draft }]
+            spec: { taskType: inference, ... }
+          - name: judge
+            dependsOn: [{ node: revise, input: input }]
+            region:
+              kind: branch
+              inputs: [{ name: input }]
+              outputs: [{ name: again }, { name: done }]
+              selection: { input: input, field: [items, 0, output, verdict] }
+        edges:
+          - from: { node: judge, port: again }
+            to: { node: $feedback, port: draft }
+          - from: { node: judge, port: done }
+            to: { node: $egress, port: draft }
+    nodes:
+      - name: first_draft
+        spec: { taskType: inference, ... }
+      - name: refine
+        dependsOn: [{ node: first_draft, input: draft }]
+        region:
+          kind: loop
+          body_ref: refine_body
+          carried: [{ name: draft }]
+      - name: publish
+        dependsOn: [{ node: refine, port: draft, input: final }]
+        spec: { taskType: echo, data: { type: list, items: ["${final.items.0.output.text}"] } }
+```
+
+A loop's value is the carried value its body exits with, and a consumer names
+the carried port it reads. A loop declaring `result: { visibility: published }`
+publishes one carried port, which `result.source_port` names when it has
+several. An iteration starts as soon as the previous one feeds back, while work
+of earlier iterations it does not depend on may still run, and the loop exits
+only once all of it settles; dependencies alone order work across iterations.
+`ORCHESTRATOR_MAX_LOOP_ITERATIONS` bounds how many iterations a loop runs, its
+first included, and a body that feeds back past them fails the loop with
+`LoopIterationBudgetExceeded`.
+[`refine_loop_echo.yaml`](../examples/templates/refine_loop_echo.yaml) runs a
+two-iteration loop with echo tasks.
+
+#### Reading values
+
+Every input a task reads is a value, and `${name.path}` reads into it: a whole
+task result, the part a `project` selects, a fan-out element, a region's value,
+a literal, or `null` for an empty value. An aggregate, as a join or a `concat`
+merge delivers, reads as a list of `{key, outcome, value}`, where `value` is
+`null` unless the member succeeded. A task reads an input by its `input` name, and
+an upstream node by that node's name as the node's whole value; a node with
+several output ports, as a branch or a loop carrying several values, is read by
+the `input` name of a dependency naming one port. An SSH task's `inputs[].stage`
+names a task's result, never an aggregate. `${name}` reads a value whole: any
+name inside a template, and a task's named input at the root. Inside a template,
+`${name.task_id}` names the task another node of the template ran as in the same
+iteration and child. A template input, a projected input, or a region's value has
+no task, so `${name.task_id}` on one is refused at submission.
+
+A file a task produces, such as fine-tuned weights or an adapter, travels as an
+artifact reference inside its result. A consumer reading that reference, on any
+path a value takes, receives where to download the producer's file from: a URL on
+the server when the producer declares an `http` `output.destination`, else a path
+on the producer's node, which a task on another worker cannot read. A stored
+result or published output keeps the reference and its producer's `_artifacts`.
+
+Each task a template runs reports where it ran as `occurrence` in its task
+information: the template member, the child it belongs to, and the iteration of
+each loop around it, named by the loop's `loop_coordinate`, its node name unless
+it declares one.
+
 ### Dry-run inspection
 
-`POST /api/v1/workflows/validate` parses a workflow without executing it. For a
-`flowmesh/v2` submission it also compiles the workflow and returns the logical
-template, physical plan, and validation diagnostics in the `inspection` field;
-compilation errors return `422` with readable source locations. For any other
-`apiVersion` it returns the parsed task list with no `inspection`.
+`POST /api/v1/workflows/validate` parses a workflow without executing it and lists
+the tasks a submission registers. For a `flowmesh/v2` submission it also compiles
+the workflow and returns the logical template, physical plan, and validation
+diagnostics in the `inspection` field; compilation errors return `422` with
+readable source locations. For any other `apiVersion` it returns the parsed task
+list with no `inspection`.
 
 ## data_retrieval: type lumid
 

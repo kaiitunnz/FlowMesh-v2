@@ -20,18 +20,20 @@ class Advance:
     ``ready`` work items become admissible for a new attempt, ``failed`` ones settle
     terminally and cascade, and ``retry`` reissues an existing work item as a fresh
     attempt under its stable identity; ``cancelled`` lists the children a residual
-    policy cancelled. Control settlement and dynamic child materialization are internal
-    and never appear here.
+    policy cancelled, and ``skipped`` the existing tasks a dead route settles without
+    running. Control settlement is internal and never appears here.
     """
 
     ready: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     retry: list[str] = field(default_factory=list)
     cancelled: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
 
     def extend(self, other: "Advance") -> Self:
         self.ready.extend(other.ready)
         self.failed.extend(other.failed)
         self.retry.extend(other.retry)
         self.cancelled.extend(other.cancelled)
+        self.skipped.extend(other.skipped)
         return self

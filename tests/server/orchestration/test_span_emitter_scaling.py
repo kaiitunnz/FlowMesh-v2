@@ -131,6 +131,7 @@ def _drive(level: TelemetryLevel, children_count: int) -> tuple[int, int, int]:
         invocations=eng._ledger.invocations,
         trace=eng._ledger.trace,
         scope_closed=eng._ledger.scope_closed,
+        loop_time=eng._ledger.loop_time,
     )
     children = _spawn_children(eng, children_count)
     assert len(children) == children_count

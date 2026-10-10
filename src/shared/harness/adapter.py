@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from ..outcome import OutcomeManifest
 from ..private_state import PrivateStateAttachment, PrivateStateBinding
 from ..sandbox import LocalSandboxCapability
-from ..tasks.result_binding import ResultValueRef
+from ..tasks.result_binding import ResultBinding
 from ..tasks.specs.misc import ModelBindingMode
 from ..tools.facade import FacadeDescriptor
 from .boundary import BoundaryRequest, DenialKind
@@ -154,7 +154,7 @@ class InputBindingMember(BaseModel):
     child_index: int | None = None
     outcome: str
     value: str | None = None
-    source: ResultValueRef | None = None
+    source: ResultBinding | None = None
     ordinal: int = 0
 
 

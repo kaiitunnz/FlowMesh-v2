@@ -16,10 +16,17 @@ from ..private_state import PrivateStateLedger
 from ..state import (
     Activation,
     Attempt,
-    CapabilityStatus,
+    BranchDecision,
+    ChildContext,
     Continuation,
+    ControlState,
+    ControlStatus,
+    DeliveryContext,
     Invocation,
+    IterationResolution,
     LedgerSnapshot,
+    LoopInstance,
+    Occurrence,
     OrchestrationEvent,
     ProgressAxis,
     ProgressCapability,
@@ -27,20 +34,34 @@ from ..state import (
     RecoveryDisposition,
     RegionJoinAggregate,
     Scope,
-    ValueRef,
     WorkItem,
 )
 from ..telemetry import TelemetrySpanEmitter
 from .failures import FailureLedger
 from .topology import PlanTopology
 
+# Activations created as a workflow runs, each charged to its activation budget: a
+# spawned child, and an operator occurrence inside a region definition.
+DYNAMIC_ACTIVATION_KINDS = frozenset({"child", "occurrence"})
+
 _EVENT_FIELDS = frozenset(
     {"operator_id", "work_item_id", "attempt_id", "invocation_id", "slot_key"}
 )
 
 
-def control_key(operator_id: str) -> str:
-    return f"control:{operator_id}"
+def control_key(occurrence: str) -> str:
+    return f"control:{occurrence}"
+
+
+def occurrence_key(operator_id: str, at: DeliveryContext) -> str:
+    """The key of an operator's occurrence in a child context and nested loop time.
+
+    A root occurrence is keyed by its operator id alone.
+    """
+    if not at.context_id and not at.time:
+        return operator_id
+    frames = "".join(f"/{frame.loop}:{frame.iteration}" for frame in at.time)
+    return f"{operator_id}@{at.context_id}{frames}"
 
 
 class OrchestrationLedger:
@@ -86,16 +107,90 @@ class OrchestrationLedger:
         # owns that region's child-init scope.
         self.region_openers: dict[tuple[str, str], str] = {}
         self.wi_by_task: dict[str, str] = {}
-        self.wi_by_operator: dict[str, str] = {}
+        self.wi_by_occurrence: dict[str, str] = {}
         self.wi_by_activation: dict[str, str] = {}
         self.scope_by_activation: dict[str, str] = {}
         self.owner_acts_by_operator: dict[str, list[str]] = {}
-        self.loop_time: dict[str, int] = {}
         self.released_scopes: set[str] = set()
+        # Occurrences of operators inside region definitions; a root operator's
+        # occurrence is implicit.
+        self.occurrences: dict[str, Occurrence] = {}
+        self.occurrences_by_scope: dict[str, set[str]] = {}
+        self.occurrence_by_activation: dict[str, str] = {}
+        self.subscopes: dict[str, set[str]] = {}
+        self.children_by_scope: dict[str, list[str]] = {}
+        self.control_states: dict[str, ControlState] = {}
+        self.branch_decisions: dict[str, BranchDecision] = {}
+        self.loop_instances: dict[str, LoopInstance] = {}
+        self.loop_by_occurrence: dict[str, str] = {}
+        self.iterations: dict[tuple[str, int], IterationResolution] = {}
+        self.child_contexts: dict[str, ChildContext] = {}
+        # Loop instances and definition children not yet closed.
+        self.active_loops: set[str] = set()
+        self.active_contexts: set[str] = set()
+        # The occurrence that opened each scope it opened.
+        self.scope_occurrence: dict[str, str] = {}
+        # Candidates each summary a transition reads walks instead of its whole
+        # collection, pruned as the walk finds one settled for good: per scope, its
+        # occurrences, children and nested scopes that may still be open; work items a
+        # task runs as that may still be unsettled; branch occurrences that may await
+        # a selector read; and spawn scopes that may still fan out.
+        self.open_occurrences: dict[str, dict[str, None]] = {}
+        self.open_children: dict[str, dict[str, None]] = {}
+        self.open_subscopes: dict[str, dict[str, None]] = {}
+        self.open_task_items: dict[str, None] = {}
+        self.selection_candidates: dict[str, None] = {}
+        self.fanout_candidates: dict[str, None] = {}
+
+    def occurrence(self, key: str) -> Occurrence:
+        """An occurrence by key; a root key is its operator's implicit occurrence."""
+        if (occurrence := self.occurrences.get(key)) is not None:
+            return occurrence
+        return Occurrence(
+            key=key, operator_id=key, context_id="", scope_id=self.root_scope.scope_id
+        )
+
+    def add_occurrence(self, occurrence: Occurrence) -> None:
+        self.occurrences[occurrence.key] = occurrence
+        self.occurrences_by_scope.setdefault(occurrence.scope_id, set()).add(
+            occurrence.key
+        )
+        self.open_occurrences.setdefault(occurrence.scope_id, {})[occurrence.key] = None
+        self.occurrence_by_activation[occurrence.activation_id] = occurrence.key
+
+    def loop_time(self, activation_id: str) -> int:
+        """The iteration of the innermost loop an activation runs in; 0 outside any."""
+        key = self.occurrence_by_activation.get(activation_id)
+        occurrence = self.occurrences.get(key) if key is not None else None
+        return occurrence.time[-1].iteration if occurrence and occurrence.time else 0
+
+    def occurrence_of_work_item(self, wi: WorkItem) -> str:
+        """The occurrence a work item realizes; a root work item's is its operator."""
+        return self.occurrence_by_activation.get(wi.activation_id, wi.operator_id)
+
+    def bind_scope_occurrence(self, scope_id: str, key: str) -> None:
+        """Record the occurrence that opened a scope."""
+        self.scope_occurrence[scope_id] = key
+        self.fanout_candidates[scope_id] = None
+
+    def add_work_item(self, wi: WorkItem) -> None:
+        self.work_items[wi.work_item_id] = wi
+        if wi.legacy_task_id:
+            self.open_task_items[wi.work_item_id] = None
+
+    def control_state(self, key: str) -> ControlState:
+        """A control occurrence's state, created pending on first use."""
+        if (state := self.control_states.get(key)) is None:
+            state = self.control_states[key] = ControlState(key=key)
+        return state
+
+    def control_terminal(self, key: str) -> bool:
+        state = self.control_states.get(key)
+        return state is not None and state.status is not ControlStatus.PENDING
 
     def is_dynamic_activation(self, activation_id: str) -> bool:
         act = self.activations.get(activation_id)
-        return act is not None and act.kind in ("child", "iteration")
+        return act is not None and act.kind in DYNAMIC_ACTIVATION_KINDS
 
     def scope_subtree(self, root: str) -> list[str]:
         order = [root]
@@ -129,12 +224,26 @@ class OrchestrationLedger:
     def root_level(self, scope_id: str) -> bool:
         return self.scopes[scope_id].parent_scope_id == self.root_scope.scope_id
 
+    def add_scope(self, scope: Scope) -> None:
+        self.scopes[scope.scope_id] = scope
+        if scope.parent_scope_id is not None:
+            self.subscopes.setdefault(scope.parent_scope_id, set()).add(scope.scope_id)
+            self.open_subscopes.setdefault(scope.parent_scope_id, {})[
+                scope.scope_id
+            ] = None
+
     def add_activation(self, activation: Activation) -> None:
         self.activations[activation.activation_id] = activation
         self.scope_population[activation.scope_id] += 1
         if activation.kind == "child":
             self.scope_children[activation.scope_id] += 1
-        if activation.kind in ("child", "iteration"):
+            self.children_by_scope.setdefault(activation.scope_id, []).append(
+                activation.activation_id
+            )
+            self.open_children.setdefault(activation.scope_id, {})[
+                activation.activation_id
+            ] = None
+        if activation.kind in DYNAMIC_ACTIVATION_KINDS:
             self.dynamic_activations += 1
 
     def scope_closed(self, scope_id: str) -> bool:
@@ -163,7 +272,7 @@ class OrchestrationLedger:
             current = frontier.pop()
             if (
                 current in closure
-                or current in self.wi_by_operator
+                or current in self.wi_by_occurrence
                 or (excluded is not None and excluded(current, closure))
             ):
                 continue
@@ -203,31 +312,11 @@ class OrchestrationLedger:
         if self._failures.region_failed(region_op):
             return True
         scope_id = (
-            self._scope_for_join(region_op)
+            self.scope_id_for_join(region_op)
             if self._topology.kind(region_op) is OperatorKind.JOIN
             else self.scope_id_for(region_op)
         )
         return scope_id in self.released_scopes if scope_id else False
-
-    def sealed_region_child_templates(self) -> frozenset[str]:
-        """Child templates of agent-region spawns whose child-init sealed or revoked."""
-        sealed: set[str] = set()
-        for spawn_op in self._topology.agent_region_spawns:
-            template = self._topology.child_template_of(spawn_op)
-            if template is None:
-                continue
-            scope_id = self.scope_id_for(spawn_op)
-            cap = (
-                self.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
-                if scope_id
-                else None
-            )
-            if cap is not None and cap.status in (
-                CapabilityStatus.SEALED,
-                CapabilityStatus.REVOKED,
-            ):
-                sealed.update(self.template_closure(template))
-        return frozenset(sealed)
 
     def embodiment_menu(self, task_id: str) -> InferenceEmbodimentMenu | None:
         """The finite set of embodiments a task's plan node offers, if it offers one."""
@@ -306,15 +395,15 @@ class OrchestrationLedger:
 
     def control_activation(self, operator_id: str) -> str:
         for a in self.activations.values():
-            if a.operator_id == operator_id and a.kind not in (
-                "child",
-                "iteration",
-                "region",
+            if (
+                a.operator_id == operator_id
+                and a.kind not in DYNAMIC_ACTIVATION_KINDS
+                and a.kind != "region"
             ):
                 return a.activation_id
         return operator_id
 
-    def _scope_for_join(self, join_op: str) -> str | None:
+    def scope_id_for_join(self, join_op: str) -> str | None:
         for edge in self._topology.bundle.template.edges:
             if (
                 edge.to_op == join_op
@@ -345,15 +434,6 @@ class OrchestrationLedger:
     def scope_id_for(self, handle: str) -> str | None:
         opener = self.resolve_opener_activation(handle)
         return self.scope_by_activation.get(opener) if opener else None
-
-    def latest_carried(self, scope_id: str) -> ValueRef | None:
-        latest: ValueRef | None = None
-        best = -1
-        for record in self.records:
-            if record.scope_id == scope_id and record.loop_time >= best:
-                best = record.loop_time
-                latest = record.value_ref
-        return latest
 
     def emit(
         self, kind: str, *, detail: dict[str, str] | None = None, **fields: str | None

@@ -24,6 +24,7 @@ class _WorkflowRegistryStub:
         v2: Any = None,
         ledger: Any = None,
         submitted_at: str | None = None,
+        blueprints: Any = (),
     ) -> None:
         return None
 
@@ -38,6 +39,7 @@ class _WorkflowRegistryStub:
         failed: Sequence[str] = (),
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
+        control: Any = None,
     ) -> None:
         return None
 

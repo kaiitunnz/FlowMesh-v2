@@ -123,8 +123,8 @@ def _fanout_bundle() -> PersistedV2Workflow:
     return _bundle(
         [planner, spawn, join, _leaf("trial")],
         [
-            TemplateEdge(from_op="planner", to_op="exp"),
-            TemplateEdge(from_op="exp", to_op="collect"),
+            TemplateEdge(from_op="planner", to_op="exp", edge_id="planner->exp"),
+            TemplateEdge(from_op="exp", to_op="collect", edge_id="exp->collect"),
         ],
         (
             _decl(

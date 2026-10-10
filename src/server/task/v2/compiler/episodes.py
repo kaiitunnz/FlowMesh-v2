@@ -129,7 +129,8 @@ def _linear_adjacency(
     pred: dict[str, list[str]] = {}
     for edge in template.edges:
         if (
-            edge.feedback
+            not edge.is_forward
+            or edge.derived
             or edge.from_op in child_templates
             or edge.to_op in child_templates
         ):

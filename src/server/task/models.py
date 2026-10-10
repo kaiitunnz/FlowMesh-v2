@@ -49,6 +49,11 @@ TERMINAL_TASK_STATUSES = frozenset(
 # its worker's terminal); the status writers refuse to regress one to an active state.
 SETTLING_TASK_STATUSES = TERMINAL_TASK_STATUSES | {TaskStatus.CANCELLING}
 
+
+class TerminalStatusReverted(RuntimeError):
+    """A write that would move a terminal task back to an active status."""
+
+
 # Task types that run a model server for the life of the task.
 SERVE_TASK_TYPES = frozenset({TaskType.SERVE, TaskType.DEV_MODEL})
 
@@ -129,6 +134,9 @@ class PublishGate(StrEnum):
     handled again."""
     REPORTING = "reporting"
     """A report of its task is being handled; the task is queued again once it is."""
+    WRITE_FAULTED = "write_faulted"
+    """A write of its workflow raised a fault of its own; the task is queued again
+    once a write of the workflow is made."""
 
 
 class SettleOutcome(NamedTuple):
@@ -318,12 +326,30 @@ class TaskRecord(BaseModel):
         """The most recent worker to have failed this task."""
         return self.failed_workers[-1] if self.failed_workers else None
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        # A terminal status is final; settlement and completion rely on it.
+        if (
+            name == "status"
+            and self.status in TERMINAL_TASK_STATUSES
+            and value not in TERMINAL_TASK_STATUSES
+        ):
+            raise TerminalStatusReverted(
+                f"task {self.task_id} is {self.status} and cannot become {value}"
+            )
+        super().__setattr__(name, value)
+
 
 class TaskInputElement(BaseModel):
     """The producer collection element a fan-out child runs on."""
 
     producer_task_id: str = Field(description="Task whose result holds the element.")
-    index: int = Field(description="Position of the element in that collection.")
+    index: int | None = Field(
+        default=None, description="Position of the element in that collection."
+    )
+    path: list[str | int] = Field(
+        default_factory=list,
+        description="Path to the element inside the result or the collection member.",
+    )
 
 
 # A task's position in a listing: its submission time, then its id.
@@ -332,6 +358,25 @@ type TaskOrder = tuple[float, str]
 
 def task_order(record: TaskRecord) -> TaskOrder:
     return record.submitted_ts, record.task_id
+
+
+class TaskLoopTime(BaseModel):
+    """One loop iteration a task runs at."""
+
+    loop: str = Field(description="The loop's coordinate, its node name by default.")
+    iteration: int = Field(description="The loop's iteration, from 0.")
+
+
+class TaskOccurrence(BaseModel):
+    """Where inside a template a task runs."""
+
+    member: str = Field(description="The template member it runs, as template/node.")
+    context: str | None = Field(
+        default=None, description="The spawned child whose template it runs in."
+    )
+    time: list[TaskLoopTime] = Field(
+        default_factory=list, description="The loop times it runs at, outermost first."
+    )
 
 
 class TaskInfo(TaskRecord):
@@ -344,6 +389,9 @@ class TaskInfo(TaskRecord):
     failed: bool = Field(description="Whether the task failed.")
     input_element: TaskInputElement | None = Field(
         default=None, description="The producer element a fan-out child runs on."
+    )
+    occurrence: TaskOccurrence | None = Field(
+        default=None, description="Where inside a template the task runs."
     )
 
 

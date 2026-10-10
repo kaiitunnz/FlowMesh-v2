@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from shared.inference import (
@@ -24,13 +24,14 @@ from shared.tasks.specs import (
 from shared.tasks.specs.common import ModelSpecTemplate
 from shared.utils.redact import is_credential_url
 
-from ...parser import ParsedTask, ParsedWorkflow
+from ...parser import INGRESS, ParsedDependency, ParsedTask, ParsedWorkflow
 from ..policy.lowering import (
     PolicySurface,
     screen_residency,
     screen_service_family,
 )
 from ..representations.operators import (
+    REGION_OPERATOR_KINDS,
     AgentOperator,
     BindingKey,
     ConditionGuard,
@@ -64,6 +65,9 @@ from ..representations.results import (
 )
 from ..representations.serving_size import DEFAULT_SERVING_SIZE, ServingSize
 from ..representations.template import (
+    BoundaryKind,
+    DependencyUse,
+    RegionDefinition,
     ResourceDeclaration,
     SourceKind,
     SourceMapEntry,
@@ -94,6 +98,8 @@ from .embodiment import (
     replica_unfit_reason,
     unproven_reason,
 )
+from .reads import classify_reads, spec_reads, unnamed_projection
+from .region_checks import releases_one_value
 
 _SERVICE_BACKED_SPECS = (
     InferenceSpecStrict,
@@ -114,7 +120,11 @@ def _model_ref(task: ParsedTask) -> ModelRef | None:
 
 
 def _task_source(task: ParsedTask) -> tuple[SourceKind, str]:
+    """A task's source location; a template member's name is qualified by its
+    template, as a template's regions are."""
     if task.graph_node_name:
+        if task.definition:
+            return "graph_node", f"{task.definition}/{task.graph_node_name}"
         return "graph_node", task.graph_node_name
     if task.local_name:
         return "stage", task.local_name
@@ -124,6 +134,11 @@ def _task_source(task: ParsedTask) -> tuple[SourceKind, str]:
 def _condition_guard(
     task: ParsedTask, name_to_op: dict[str, str], operator_ids: set[str]
 ) -> ConditionGuard | None:
+    """The task's guard, resolved within its own graph scope.
+
+    ``name_to_op`` and ``operator_ids`` cover the task's scope only, so a guard inside
+    a region definition names a node of that definition.
+    """
     condition = task.task.spec.condition
     if condition is None:
         return None
@@ -134,7 +149,11 @@ def _condition_guard(
         raise compile_error(
             "guard.unknown-node",
             f"conditional guard references upstream {condition.node!r}, "
-            "which resolves to no operator",
+            + (
+                f"which is no node of template {task.definition!r}"
+                if task.definition
+                else "which resolves to no operator"
+            ),
             source_id,
             source_kind,
         )
@@ -157,6 +176,9 @@ def _ports(
     outputs: list[Port] = [Port(name="out")]
     if task.depends_on:
         inputs.append(Port(name="in"))
+    for dep in task.dependencies:
+        if dep.input and all(port.name != dep.input for port in inputs):
+            inputs.append(Port(name=dep.input))
     model_ref = _model_ref(task)
     if model_ref is not None:
         if is_training(task_type):
@@ -470,6 +492,16 @@ def _agent_operator(
     )
 
 
+@dataclass(frozen=True)
+class NamedRead:
+    """A value a task's spec reads by a name, from the operator producing it."""
+
+    name: str
+    source: str
+    reader_kind: SourceKind
+    reader_id: str
+
+
 @dataclass
 class LoweringAccumulator:
     """Mutable collector the compiler fills from tasks and structured regions."""
@@ -484,10 +516,22 @@ class LoweringAccumulator:
     source_map: list[SourceMapEntry] = field(default_factory=list)
     nodes: list[PhysicalNode] = field(default_factory=list)
     sandbox_egress_requests: dict[str, SandboxEgressMode] = field(default_factory=dict)
+    definitions: list[RegionDefinition] = field(default_factory=list)
+    # Reads checked once every operator is lowered: each node read by its node name,
+    # and each SSH input stage.
+    node_reads: list[NamedRead] = field(default_factory=list)
+    stage_reads: list[NamedRead] = field(default_factory=list)
+    name_maps: dict[str | None, dict[str, str]] = field(default_factory=dict)
 
     @property
     def operator_ids(self) -> set[str]:
         return {op.operator_id for op in self.operators}
+
+    def names(self, parsed: ParsedWorkflow, scope: str | None) -> dict[str, str]:
+        """``build_name_map`` of one scope, built once."""
+        if (names := self.name_maps.get(scope)) is None:
+            names = self.name_maps[scope] = build_name_map(parsed, scope)
+        return names
 
 
 def call_join_id(name: str) -> str:
@@ -495,24 +539,77 @@ def call_join_id(name: str) -> str:
     return f"{name}:join"
 
 
-def build_name_map(parsed: ParsedWorkflow) -> dict[str, str]:
-    """Map source-visible node names to the operator ids that produce their values."""
+def build_name_map(parsed: ParsedWorkflow, scope: str | None = None) -> dict[str, str]:
+    """Map the source-visible names of one graph scope (the root, or a region
+    definition) to the operator ids that produce their values."""
     name_to_op: dict[str, str] = {}
     for task in parsed.tasks:
+        if task.definition != scope:
+            continue
         if task.graph_node_name:
             name_to_op[task.graph_node_name] = task.task_id
         if task.local_name:
             name_to_op[task.local_name] = task.task_id
-    # A call's value is its join's, so a reference to a call names the join.
+    value_ops = build_value_ops(parsed)
     for region in parsed.regions:
-        if str(region.region.get("kind", "")).strip() == "call":
-            name_to_op[region.name] = call_join_id(region.name)
+        if region.definition == scope:
+            name_to_op[region.authored_name] = value_ops.get(region.name, region.name)
     return name_to_op
+
+
+def build_value_ops(parsed: ParsedWorkflow) -> dict[str, str]:
+    """Map each operator id a dependency may name to the operator producing its value:
+    a call's value is its join's."""
+    return {
+        region.name: call_join_id(region.name)
+        for region in parsed.regions
+        if str(region.region.get("kind", "")).strip() == "call"
+    }
+
+
+class _Ancestors:
+    """The operators a task may read by name: its direct dependencies, and the tasks
+    reached from them through task dependencies, walked only once a name past its
+    direct dependencies is asked about."""
+
+    def __init__(
+        self,
+        depends_on: Sequence[str],
+        deps: Mapping[str, Sequence[str]],
+        value_ops: Mapping[str, str],
+    ) -> None:
+        self._direct = {value_ops.get(dep, dep) for dep in depends_on}
+        self._roots = [dep for dep in depends_on if dep in deps]
+        self._deps = deps
+        self._reached: set[str] | None = None
+
+    def __contains__(self, op: object) -> bool:
+        if op in self._direct:
+            return True
+        if self._reached is None:
+            self._reached = set()
+            pending = list(self._roots)
+            while pending:
+                for dep in self._deps[pending.pop()]:
+                    if dep in self._deps and dep not in self._reached:
+                        self._reached.add(dep)
+                        pending.append(dep)
+        return op in self._reached
+
+
+def _task_ancestors(
+    parsed: ParsedWorkflow, value_ops: dict[str, str]
+) -> dict[str, _Ancestors]:
+    """The operators each task may read by name."""
+    deps = {task.task_id: task.depends_on for task in parsed.tasks}
+    return {
+        task.task_id: _Ancestors(task.depends_on, deps, value_ops)
+        for task in parsed.tasks
+    }
 
 
 def lower_tasks(
     parsed: ParsedWorkflow,
-    name_to_op: dict[str, str],
     acc: LoweringAccumulator,
     defaults: AgentBindingDefaults,
     secret_refs: Mapping[str, str],
@@ -527,39 +624,45 @@ def lower_tasks(
     a required residency intent. Nothing here carries worker/replica/endpoint bindings.
     """
     policies = surface if surface is not None else PolicySurface()
-    task_ids: set[str] = {task.task_id for task in parsed.tasks}
+    names = {scope: acc.names(parsed, scope) for scope in _scopes(parsed)}
+    task_ids: dict[str | None, set[str]] = {scope: set() for scope in names}
+    for task in parsed.tasks:
+        task_ids[task.definition].add(task.task_id)
     # A task may depend on a region node, whose operator id is its source name.
-    known_ids: set[str] = task_ids | {region.name for region in parsed.regions}
+    known_ids: set[str] = (
+        {task.task_id for task in parsed.tasks}
+        | {region.name for region in parsed.regions}
+        | {INGRESS}
+    )
 
     # Pass 1: one operator + source-map entry per task.
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
+        scope_names, scope_ids = names[task.definition], task_ids[task.definition]
         if binding_class(task_type) is BindingClass.AGENT:
             acc.operators.append(
                 _agent_operator(
                     task,
-                    name_to_op,
-                    task_ids,
+                    scope_names,
+                    scope_ids,
                     defaults,
                     secret_refs.get(task.task_id),
                     acc.sandbox_egress_requests,
                 )
             )
         else:
-            acc.operators.append(_leaf_operator(task, task_type, name_to_op, task_ids))
+            acc.operators.append(
+                _leaf_operator(task, task_type, scope_names, scope_ids)
+            )
         acc.source_map.append(_source_map_entry(task))
 
+    _wire_dependencies(parsed, known_ids, acc)
     ops_by_id = {op.operator_id: op for op in acc.operators}
 
-    # Pass 2: wiring, induced outputs, and physical nodes.
+    # Pass 2: induced outputs and physical nodes.
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
         operator_id = task.task_id
-        for dep in task.depends_on:
-            if dep in known_ids:
-                acc.edges.append(
-                    TemplateEdge(from_op=name_to_op.get(dep, dep), to_op=operator_id)
-                )
 
         # serve administers resident capacity: a residency node, no result slot.
         if binding_class(task_type) is BindingClass.RESIDENCY:
@@ -621,6 +724,236 @@ def lower_tasks(
                 residency_intent=intent,
             )
         )
+
+
+def _wire_dependencies(
+    parsed: ParsedWorkflow, known_ids: set[str], acc: LoweringAccumulator
+) -> None:
+    """Turn each task's ``dependsOn`` entries and ``spec.v2.inputs`` bindings into
+    classified edges.
+
+    A dependency's use follows from what the task's spec reads; a ``$ingress`` entry
+    becomes an entry edge of the task's region definition, and an upstream the spec
+    reads by name past its dependencies becomes a derived edge.
+    """
+    value_ops = build_value_ops(parsed)
+    ancestors = _task_ancestors(parsed, value_ops)
+    routed = frozenset(
+        region.name
+        for region in parsed.regions
+        if str(region.region.get("kind", "")).strip() == "branch"
+    )
+    names = {scope: acc.names(parsed, scope) for scope in _scopes(parsed)}
+    regions = frozenset(value_ops.get(r.name, r.name) for r in parsed.regions)
+    children = _operator_children(parsed, names)
+    by_id = {op.operator_id: idx for idx, op in enumerate(acc.operators)}
+    for task in parsed.tasks:
+        bindings = _input_bindings(task, names[task.definition])
+        dependencies = [*task.dependencies, *bindings]
+        classification = classify_reads(
+            task,
+            dependencies,
+            names[task.definition],
+            value_ops,
+            ancestors[task.task_id],
+            routed,
+            regions,
+        )
+        source_kind, source_id = _task_source(task)
+        if (
+            unnamed := unnamed_projection(task.dependencies, names[task.definition])
+        ) is not None:
+            raise compile_error(
+                "reads.unnamed-projection",
+                f"the dependency on {unnamed!r} projects a part of its value but "
+                "names no input to read it by; add an input name",
+                source_id,
+                source_kind,
+            )
+        if classification.unresolved:
+            raise compile_error(
+                "reads.unresolved",
+                "references "
+                + ", ".join(repr(name) for name in classification.unresolved)
+                + " name no upstream node this task can read; a ${name.path} "
+                "reference names a dependency, an ancestor reached through task "
+                "dependencies, or a named input",
+                source_id,
+                source_kind,
+            )
+        if classification.identityless:
+            raise compile_error(
+                "reads.task-id-of-value",
+                "${name.task_id} reads "
+                + ", ".join(repr(name) for name in classification.identityless)
+                + ", which carry a value rather than a task's result; read task_id "
+                "through the name of the task that produced it",
+                source_id,
+                source_kind,
+            )
+        if classification.shadowing:
+            raise compile_error(
+                "reads.input-shadows-node",
+                "input name "
+                + ", ".join(repr(name) for name in classification.shadowing)
+                + " is also the name of another node; rename the input",
+                source_id,
+                source_kind,
+            )
+        if task.task_id in children and (
+            read := sorted((reads := spec_reads(task)).values | reads.identities)
+        ):
+            raise compile_error(
+                "spawn.child-reads",
+                "spawn child reads "
+                + ", ".join(repr(name) for name in read)
+                + "; a child task reads only the element it is spawned with, and a "
+                "child template reads parent values through its captures",
+                source_id,
+                source_kind,
+            )
+        acc.node_reads.extend(
+            NamedRead(name, source, source_kind, source_id)
+            for name, source in classification.node_reads
+        )
+        acc.stage_reads.extend(
+            NamedRead(name, source, source_kind, source_id)
+            for name, source in classification.stage_reads
+        )
+        for index, (dep, use) in enumerate(
+            zip(dependencies, classification.uses, strict=True)
+        ):
+            if index < len(task.dependencies) and dep.source not in known_ids:
+                continue
+            acc.edges.append(
+                dependency_edge(
+                    dep, task.task_id, index, use, task.definition, value_ops
+                )
+            )
+        for source, use in classification.derived:
+            acc.edges.append(
+                TemplateEdge(
+                    from_op=source,
+                    to_op=task.task_id,
+                    edge_id=f"{task.task_id}#reads:{source}",
+                    use=use,
+                    definition=task.definition,
+                    derived=True,
+                )
+            )
+        idx = by_id[task.task_id]
+        op = acc.operators[idx]
+        if isinstance(op, AgentOperator):
+            if named := tuple(dep.input for dep in dependencies if dep.input):
+                acc.operators[idx] = op.model_copy(
+                    update={
+                        "declared_input_ports": tuple(
+                            dict.fromkeys((*op.declared_input_ports, *named))
+                        )
+                    }
+                )
+
+
+def dependency_edge(
+    dep: ParsedDependency,
+    to_op: str,
+    index: int,
+    use: DependencyUse,
+    definition: str | None,
+    value_ops: Mapping[str, str],
+) -> TemplateEdge:
+    """The edge one dependency entry wires into ``to_op``: an entry edge for a
+    ``$ingress`` source, else an edge from the operator producing the source's
+    value."""
+    entry = dep.source == INGRESS
+    return TemplateEdge(
+        from_op=INGRESS if entry else value_ops.get(dep.source, dep.source),
+        to_op=to_op,
+        from_port=(dep.port or dep.input) if entry else dep.port,
+        to_port=dep.input,
+        edge_id=f"{to_op}#{index}",
+        use=use,
+        projection=dep.project,
+        boundary=BoundaryKind.ENTRY if entry else None,
+        definition=definition,
+    )
+
+
+def _input_bindings(
+    task: ParsedTask, names: Mapping[str, str]
+) -> list[ParsedDependency]:
+    """An agent's ``spec.v2.inputs`` ``{name, from}`` entries as dependency bindings
+    into its named inputs; a ``region`` entry binds the producer's child-region
+    join."""
+    inputs = (task.v2 or {}).get("inputs")
+    if binding_class(
+        task.task.spec.taskType
+    ) is not BindingClass.AGENT or not isinstance(inputs, list):
+        return []
+    bindings: list[ParsedDependency] = []
+    for entry in inputs:
+        if not isinstance(entry, dict) or not entry.get("name"):
+            continue
+        if (source := entry.get("from")) is None:
+            continue
+        op = names.get(str(source), str(source))
+        if region := entry.get("region"):
+            op = agent_region_join_id(op, str(region))
+        bindings.append(ParsedDependency(source=op, input=str(entry["name"])))
+    return bindings
+
+
+def agent_region_join_id(agent_op: str, role: str) -> str:
+    """The join collecting an agent's declared child region ``role``."""
+    return f"{agent_op}:{role}:spawn:join"
+
+
+def _operator_children(
+    parsed: ParsedWorkflow, names: Mapping[str | None, Mapping[str, str]]
+) -> frozenset[str]:
+    """The operators a spawn or call runs as its child task rather than a template."""
+    definitions = {definition.name for definition in parsed.definitions}
+    return frozenset(
+        op
+        for region in parsed.regions
+        if str(region.region.get("kind", "")).strip() in ("spawn", "call")
+        and (child := str(region.region.get("child") or "")) not in definitions
+        and (op := names[region.definition].get(child)) is not None
+    )
+
+
+def check_named_reads(acc: LoweringAccumulator) -> None:
+    """Refuse a read the lowered operators cannot serve: a node-name read of a region
+    with several outputs, which names none of them, and an SSH input stage over a
+    value no single task produced."""
+    ops = {op.operator_id: op for op in acc.operators}
+    for read in acc.node_reads:
+        op = ops.get(read.source)
+        if op is not None and op.kind in REGION_OPERATOR_KINDS and len(op.outputs) > 1:
+            raise compile_error(
+                "ports.ambiguous-output",
+                f"a read of {read.name!r} by its node name names none of its output "
+                f"ports {sorted(p.name for p in op.outputs)}; read it through the "
+                "input name of a dependency naming one port",
+                read.reader_id,
+                read.reader_kind,
+            )
+    incoming: dict[str, list[TemplateEdge]] = {}
+    for edge in acc.edges:
+        incoming.setdefault(edge.to_op, []).append(edge)
+    for read in acc.stage_reads:
+        if not releases_one_value(read.source, ops, incoming):
+            raise compile_error(
+                "reads.stage-without-task",
+                f"SSH input stage {read.name!r} names a value no single task produced; "
+                "a stage names a task's result",
+                read.reader_id,
+                read.reader_kind,
+            )
+
+
+def _scopes(parsed: ParsedWorkflow) -> set[str | None]:
+    return {None} | {definition.name for definition in parsed.definitions}
 
 
 def _embodiment_menu(

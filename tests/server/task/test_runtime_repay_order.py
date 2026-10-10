@@ -60,7 +60,9 @@ class _Store(_FaultyRegistry):
         self._refuse("ledger")
         super().commit_dynamic_tasks(workflow_id, *args, **kwargs)
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: Any, control: Any = None
+    ) -> None:
         self._refuse("ledger")
         super().save_ledger_snapshot(workflow_id, snapshot)
 
@@ -219,7 +221,9 @@ class _Ambiguous(_FaultyRegistry):
             raise ConnectionError("down")
         super().commit_transition(workflow_id, **kwargs)
 
-    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(
+        self, workflow_id: str, snapshot: Any, control: Any = None
+    ) -> None:
         if self.down:
             raise ConnectionError("down")
         super().save_ledger_snapshot(workflow_id, snapshot)

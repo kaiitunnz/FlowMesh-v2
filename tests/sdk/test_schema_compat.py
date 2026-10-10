@@ -37,6 +37,8 @@ from flowmesh.models import (
     StorageInfo,
     TaskInfo,
     TaskInputElement,
+    TaskLoopTime,
+    TaskOccurrence,
     TaskPage,
     TaskType,
     TaskUsage,
@@ -118,6 +120,8 @@ from server.schemas.workflow import (
 )
 from server.task.models import TaskInfo as SrvTaskInfo
 from server.task.models import TaskInputElement as SrvTaskInputElement
+from server.task.models import TaskLoopTime as SrvTaskLoopTime
+from server.task.models import TaskOccurrence as SrvTaskOccurrence
 from server.task.models import TaskUsage as SrvTaskUsage
 from server.task.v2 import Diagnostic as SrvDiagnostic
 from server.task.v2 import InspectionReport as SrvInspectionReport
@@ -164,6 +168,7 @@ _RESULT_MODEL_NAMES = [
     "EchoResult",
     "APIResult",
     "SSHResult",
+    "RoutedValue",
     # nested payload models
     "GenerationUsage",
     "EmbeddingUsage",
@@ -211,6 +216,8 @@ MODEL_PAIRS = [
     # Task models (last_queue_ts is server-internal scheduling field)
     (SrvTaskUsage, TaskUsage),
     (SrvTaskInputElement, TaskInputElement),
+    (SrvTaskLoopTime, TaskLoopTime),
+    (SrvTaskOccurrence, TaskOccurrence),
     (SrvTaskPage, TaskPage),
     # Published outputs
     (SrvWorkflowOutputMember, WorkflowOutputMember),

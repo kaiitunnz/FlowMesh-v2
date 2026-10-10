@@ -25,6 +25,7 @@ from server.task.v2.representations.operators import (
 )
 from server.task.v2.representations.plan import PhysicalExecutionPlan, PhysicalNode
 from server.task.v2.representations.template import (
+    DependencyUse,
     LogicalWorkflowTemplate,
     SourceMapEntry,
     TemplateEdge,
@@ -71,7 +72,9 @@ def _region(
         outputs=(Port(name="out"),),
         completion=JoinCompletion.ALL_SETTLED,
     )
-    return [spawn, join], TemplateEdge(from_op=spawn_id, to_op=join_id)
+    return [spawn, join], TemplateEdge(
+        from_op=spawn_id, to_op=join_id, edge_id=f"{spawn_id}->{join_id}"
+    )
 
 
 def _diagnose(ops: list[LogicalOperator], edges: list[TemplateEdge]) -> set[str]:
@@ -136,7 +139,11 @@ def test_legacy_child_template_ref_normalizes_to_one_region() -> None:
     # The compat region inherits the agent's own ceiling as its per-site authority.
     assert spawn.authority.invoke == ("model",)
     assert any(op.operator_id == "A:child:join" for op in acc.operators)
-    assert TemplateEdge(from_op="A:child", to_op="A:child:join") in acc.edges
+    (membership,) = [e for e in acc.edges if e.to_op == "A:child:join"]
+    assert (membership.from_op, membership.use) == (
+        "A:child",
+        DependencyUse.ROUTE_REQUIRED,
+    )
     # The synthesized operators carry source-map and plan-node entries.
     assert {"A:child", "A:child:join"} <= {e.logical_ref for e in acc.source_map}
     assert {"A:child", "A:child:join"} <= {n.logical_ref for n in acc.nodes}
@@ -255,7 +262,9 @@ def test_legacy_agent_with_invoke_over_delegate_normalizes_and_compiles() -> Non
 
 def test_agent_selected_and_producer_fed_region_is_rejected() -> None:
     ops, edge = _region("r", "child")
-    feed = TemplateEdge(from_op="producer", to_op="r:spawn")
+    feed = TemplateEdge(
+        from_op="producer", to_op="r:spawn", edge_id="producer->r:spawn"
+    )
     agent = _agent(
         "A", child_region_refs=(ChildRegionRef(name="r", spawn_ref="r:spawn"),)
     )

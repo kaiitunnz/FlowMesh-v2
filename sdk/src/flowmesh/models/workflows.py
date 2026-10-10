@@ -75,6 +75,7 @@ class Workflow(BaseModel):
     completed_tasks: list[str]
     failed_tasks: list[str]
     cancelled_tasks: list[str]
+    failure: str | None = None
 
 
 class WorkflowPage(CursorPage):
