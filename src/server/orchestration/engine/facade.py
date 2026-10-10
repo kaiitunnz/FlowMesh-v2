@@ -963,7 +963,8 @@ class OrchestrationEngine:
     def has_unsettled_tasks(self) -> bool:
         """Whether any work item a task runs as is still to settle."""
         candidates = self._ledger.open_task_items
-        for wi_id in list(candidates):
+        while candidates:
+            wi_id = next(iter(candidates))
             del candidates[wi_id]
             if self._ledger.work_items[wi_id].status not in TERMINAL_WORK_ITEM_STATUSES:
                 # Behind the rest, so the next call reaches what settled since.
