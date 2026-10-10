@@ -118,7 +118,7 @@ class AttemptLifecycle:
                 else None
             ),
         )
-        wi.attempt_ids.append(attempt.attempt_id)
+        wi.attempt_ids = (*wi.attempt_ids, attempt.attempt_id)
         self._ledger.attempts[attempt.attempt_id] = attempt
         wi.status = WorkItemStatus.DISPATCHED
         self._ledger.emit(

@@ -77,9 +77,7 @@ class _Resident:
         self.releases.append((invocation_id, failed, self._durable(invocation_id)))
 
     def _durable(self, invocation_id: str) -> InvocationState | None:
-        return durable_invocation(
-            self.registry.ledger_blobs, self.workflow_id, invocation_id
-        )
+        return durable_invocation(self.registry, self.workflow_id, invocation_id)
 
     def capture(self) -> Any:
         _capture_resident_boundary(self.runtime, self.writer)
@@ -359,7 +357,7 @@ def test_a_held_initial_advance_leaves_its_registration_standing() -> None:
     workflow_id, ids = asyncio.run(_register(runtime, _DENIED_ROOT))
 
     assert workflow_id in registry.workflow_task_ids
-    assert workflow_id in registry.ledger_blobs
+    assert workflow_id in registry.ledgers
     assert runtime._durability.pending(workflow_id)
     setattr(registry, "commit_transition", commit)
 

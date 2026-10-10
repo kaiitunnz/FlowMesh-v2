@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from server.orchestration.ledger_fields import LedgerChanges
 from server.orchestration.state import TERMINAL_WORK_ITEM_STATUSES
 from server.task.models import SETTLING_TASK_STATUSES, TaskStatus
 from server.task.runtime import TaskRuntime
@@ -60,11 +61,11 @@ class _Store(_FaultyRegistry):
         self._refuse("ledger")
         super().commit_dynamic_tasks(workflow_id, *args, **kwargs)
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: Any, control: Any = None
+    def save_ledger(
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         self._refuse("ledger")
-        super().save_ledger_snapshot(workflow_id, snapshot)
+        super().save_ledger(workflow_id, ledger)
 
     def _refuse(self, kind: str) -> None:
         if kind in self.refused:
@@ -221,12 +222,12 @@ class _Ambiguous(_FaultyRegistry):
             raise ConnectionError("down")
         super().commit_transition(workflow_id, **kwargs)
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: Any, control: Any = None
+    def save_ledger(
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         if self.down:
             raise ConnectionError("down")
-        super().save_ledger_snapshot(workflow_id, snapshot)
+        super().save_ledger(workflow_id, ledger)
 
     def commit_dynamic_tasks(self, workflow_id: str, *args: Any, **kwargs: Any) -> None:
         if self.down:

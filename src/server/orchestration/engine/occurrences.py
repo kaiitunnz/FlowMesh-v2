@@ -76,7 +76,9 @@ class OccurrenceFactory:
                     activation_id=activation.activation_id,
                 )
             )
-            waiting = {e.from_op for e in self._topology.incoming.get(operator_id, ())}
+            waiting = frozenset(
+                e.from_op for e in self._topology.incoming.get(operator_id, ())
+            )
             if not isinstance(op, (LeafOperator, AgentOperator)):
                 self._ledger.control_state(key)
                 self._ledger.set_continuation(
@@ -102,9 +104,9 @@ class OccurrenceFactory:
                     work_item_id=wi.work_item_id,
                     waiting_on=waiting,
                     required_ports=(
-                        set(op.declared_input_ports)
+                        frozenset(op.declared_input_ports)
                         if isinstance(op, AgentOperator)
-                        else set()
+                        else frozenset()
                     ),
                 )
             )

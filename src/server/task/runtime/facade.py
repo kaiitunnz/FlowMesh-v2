@@ -615,23 +615,23 @@ class TaskRuntime:
         except BaseException:
             self._discard_credentials(workflow_id)
             raise
+        engine = staged.v2_engine
+        ledger = engine.ledger_changes() if engine is not None else None
         try:
             await self._workflow_registry.register_workflow_async(
                 workflow_id,
                 staged.persisted(),
                 WorkflowSched(in_epoch_order=staged.in_epoch_order),
                 v2=staged.v2_bundle,
-                ledger=(
-                    staged.v2_engine.to_snapshot()
-                    if staged.v2_engine is not None
-                    else None
-                ),
+                ledger=ledger,
                 submitted_at=submitted_at,
                 blueprints=[PersistedTask(record=r) for r in staged.blueprints],
             )
         except BaseException:
             await self._discard_registration(workflow_id)
             raise
+        if engine is not None and ledger is not None:
+            engine.ledger_written(ledger)
         self._install_registration(workflow_id, staged)
         return workflow_id, staged.results
 
@@ -981,21 +981,22 @@ class TaskRuntime:
         await self._workflow_registry.keep_sources_async(workflow_id, tasks)
         remaining = await self._workflow_registry.get_remaining_tasks_async(workflow_id)
         sched = await self._workflow_registry.load_workflow_sched_async(workflow_id)
-        snapshot = await self._workflow_registry.load_ledger_snapshot_async(workflow_id)
+        ledger = await self._workflow_registry.load_ledger_async(workflow_id)
         bundle = (
             await self._workflow_registry.get_v2_workflow_async(workflow_id)
-            if snapshot is not None
+            if ledger is not None
             else None
         )
-        if snapshot is None or bundle is None:
+        if ledger is None or bundle is None:
             return tasks, remaining, sched, None, []
         blueprints = await self._workflow_registry.load_blueprints_async(workflow_id)
         engine = OrchestrationEngine(
-            snapshot,
+            ledger.snapshot,
             bundle,
             budget=self._scope_budget,
             control=self._control,
             emitter=build_span_emitter(self._tracer, self._telemetry, workflow_id),
+            ordinals=ledger.ordinals,
         )
         return tasks, remaining, sched, engine, blueprints
 

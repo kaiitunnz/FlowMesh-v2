@@ -326,7 +326,7 @@ class RegionFlow:
             input_ref=state.inputs[branch.rule.input],
         )
         state.status = ControlStatus.LIVE
-        state.outputs[port] = forwarded
+        state.outputs = {**state.outputs, port: forwarded}
         self._ledger.emit(
             "branch_routed", operator_id=occurrence.operator_id, detail={"port": port}
         )
@@ -518,7 +518,7 @@ class RegionFlow:
             cont = self._ledger.continuations.get(wi_id) if wi_id else None
             if cont is None:
                 return
-        cont.waiting_on.discard(from_op)
+        cont.waiting_on = cont.waiting_on - {from_op}
         if not cont.waiting_on:
             self.evaluate(target, advance)
 
@@ -708,12 +708,15 @@ class RegionFlow:
             )
             return
         state = self._ledger.control_state(key)
-        state.inputs[op.rule.input] = selected.value
-        state.inputs[op.forward] = (
-            forwarded.value
-            if forwarded is not None and forwarded.value is not None
-            else ValueRef(kind="empty")
-        )
+        state.inputs = {
+            **state.inputs,
+            op.rule.input: selected.value,
+            op.forward: (
+                forwarded.value
+                if forwarded is not None and forwarded.value is not None
+                else ValueRef(kind="empty")
+            ),
+        }
         self._ledger.selection_candidates[key] = None
         self._ledger.emit("branch_awaiting_selection", operator_id=op.operator_id)
 
@@ -724,9 +727,12 @@ class RegionFlow:
         values its children are entered with."""
         state = self._ledger.control_state(key)
         state.status = ControlStatus.LIVE
-        for item in inputs:
-            if item.value is not None:
-                state.inputs[item.port or ""] = item.value
+        state.inputs = {
+            **state.inputs,
+            **{
+                item.port or "": item.value for item in inputs if item.value is not None
+            },
+        }
         opener = occurrence.activation_id or self._ledger.control_activation(
             occurrence.operator_id
         )

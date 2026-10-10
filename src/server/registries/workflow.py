@@ -50,7 +50,7 @@ from ..clients.redis import (
     workflow_tasks_key,
     workflow_v2_key,
 )
-from ..orchestration.state import LedgerSnapshot
+from ..orchestration.ledger_fields import LedgerChanges, StoredLedger, decode_ledger
 from ..task.models import TaskRecord, TaskStatus
 from ..task.v2 import PersistedV2Workflow
 from ..utils.cursors import page_slice
@@ -433,7 +433,7 @@ def _queue_registration(
     tasks: Sequence[PersistedTask],
     sched: WorkflowSched,
     v2: PersistedV2Workflow | None,
-    ledger: LedgerSnapshot | None,
+    ledger: LedgerChanges | None,
     submitted_at: str | None,
     blueprints: Sequence[PersistedTask],
 ) -> None:
@@ -453,7 +453,7 @@ def _queue_registration(
     if v2 is not None:
         pipe.set(workflow_v2_key(workflow_id), v2.model_dump_json())
     if ledger is not None:
-        pipe.set(workflow_ds_key(workflow_id), ledger.model_dump_json())
+        _queue_ledger_changes(pipe, workflow_id, ledger)
     if blueprints:
         pipe.set(
             workflow_blueprints_key(workflow_id),
@@ -498,7 +498,7 @@ def _queue_dynamic_tasks(
     pipe: _AnyPipeline,
     workflow_id: str,
     records: Sequence[PersistedTask],
-    snapshot: LedgerSnapshot,
+    ledger: LedgerChanges,
     retire: Sequence[str],
     dispatched: Sequence[str],
     done: Sequence[str],
@@ -527,18 +527,30 @@ def _queue_dynamic_tasks(
         pipe.sadd(workflow_cancelled_tasks_key(workflow_id), *cancelled)
     if retire:
         pipe.srem(workflow_tasks_key(workflow_id), *retire)
-    _queue_ledger(pipe, workflow_id, snapshot, control)
+    _queue_ledger(pipe, workflow_id, ledger, control)
     if sched is not None:
         pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
+
+
+def _queue_ledger_changes(
+    pipe: _AnyPipeline, workflow_id: str, changes: LedgerChanges
+) -> None:
+    key = workflow_ds_key(workflow_id)
+    if changes.reset:
+        pipe.delete(key)
+    if changes.fields:
+        pipe.hset(key, mapping=changes.fields)
+    if changes.deleted:
+        pipe.hdel(key, *changes.deleted)
 
 
 def _queue_ledger(
     pipe: _AnyPipeline,
     workflow_id: str,
-    snapshot: LedgerSnapshot,
+    ledger: LedgerChanges,
     control: WorkflowControl | None,
 ) -> None:
-    pipe.set(workflow_ds_key(workflow_id), snapshot.model_dump_json())
+    _queue_ledger_changes(pipe, workflow_id, ledger)
     update = control.fields() if control is not None else {}
     pipe.hset(workflow_key(workflow_id), mapping=_workflow_update(update))
 
@@ -567,7 +579,7 @@ class WorkflowRegistry:
         tasks: Sequence[PersistedTask],
         sched: WorkflowSched,
         v2: PersistedV2Workflow | None = None,
-        ledger: LedgerSnapshot | None = None,
+        ledger: LedgerChanges | None = None,
         submitted_at: str | None = None,
         blueprints: Sequence[PersistedTask] = (),
     ) -> None:
@@ -585,7 +597,7 @@ class WorkflowRegistry:
         tasks: Sequence[PersistedTask],
         sched: WorkflowSched,
         v2: PersistedV2Workflow | None = None,
-        ledger: LedgerSnapshot | None = None,
+        ledger: LedgerChanges | None = None,
         submitted_at: str | None = None,
         blueprints: Sequence[PersistedTask] = (),
     ) -> None:
@@ -924,7 +936,7 @@ class WorkflowRegistry:
         self,
         workflow_id: str,
         records: Sequence[PersistedTask],
-        snapshot: LedgerSnapshot,
+        ledger: LedgerChanges,
         retire: Sequence[str] = (),
         *,
         dispatched: Sequence[str] = (),
@@ -934,10 +946,10 @@ class WorkflowRegistry:
         sched: WorkflowSched | None = None,
         control: WorkflowControl | None = None,
     ) -> None:
-        """Persist newly materialized dynamic-child records with the ledger snapshot.
+        """Persist newly materialized dynamic-child records with the ledger changes.
 
         The child records, their dynamic-tasks and status-set membership, and the ledger
-        snapshot that carries their work items commit in one atomic transaction, so a
+        changes that carry their work items commit in one atomic transaction, so a
         crash can never leave the ledger's dynamic children without their durable task
         records or vice versa. The ids join the dynamic-tasks set so restart rehydration
         reloads them alongside the statically registered tasks. Each child is in the
@@ -956,7 +968,7 @@ class WorkflowRegistry:
                 pipe,
                 workflow_id,
                 records,
-                snapshot,
+                ledger,
                 retire,
                 dispatched,
                 done,
@@ -971,7 +983,7 @@ class WorkflowRegistry:
         self,
         workflow_id: str,
         records: Sequence[PersistedTask],
-        snapshot: LedgerSnapshot,
+        ledger: LedgerChanges,
         retire: Sequence[str] = (),
         *,
         dispatched: Sequence[str] = (),
@@ -989,7 +1001,7 @@ class WorkflowRegistry:
                 pipe,
                 workflow_id,
                 records,
-                snapshot,
+                ledger,
                 retire,
                 dispatched,
                 done,
@@ -1105,36 +1117,34 @@ class WorkflowRegistry:
 
     # ---- Durable orchestration ledger (`DS`) -------------------------- #
 
-    def save_ledger_snapshot(
+    def save_ledger(
         self,
         workflow_id: str,
-        snapshot: LedgerSnapshot,
+        ledger: LedgerChanges,
         control: WorkflowControl | None = None,
     ) -> None:
-        """Save a workflow's ledger with what it holds beyond its tasks."""
+        """Store a workflow's ledger changes with what it holds beyond its tasks."""
         with self._rds.sync.control_pipeline() as pipe:
-            _queue_ledger(pipe, workflow_id, snapshot, control)
+            _queue_ledger(pipe, workflow_id, ledger, control)
             pipe.execute()
 
-    async def save_ledger_snapshot_async(
+    async def save_ledger_async(
         self,
         workflow_id: str,
-        snapshot: LedgerSnapshot,
+        ledger: LedgerChanges,
         control: WorkflowControl | None = None,
     ) -> None:
         async with self._rds.asyncio.control_pipeline() as pipe:
-            _queue_ledger(pipe, workflow_id, snapshot, control)
+            _queue_ledger(pipe, workflow_id, ledger, control)
             await pipe.execute()
 
-    def load_ledger_snapshot(self, workflow_id: str) -> LedgerSnapshot | None:
-        blob = self._rds.sync.get(workflow_ds_key(workflow_id))
-        return LedgerSnapshot.model_validate_json(blob) if blob else None
+    def load_ledger(self, workflow_id: str) -> StoredLedger | None:
+        fields = self._rds.sync.hash_getall(workflow_ds_key(workflow_id))
+        return decode_ledger(fields) if fields else None
 
-    async def load_ledger_snapshot_async(
-        self, workflow_id: str
-    ) -> LedgerSnapshot | None:
-        blob = await self._rds.asyncio.get(workflow_ds_key(workflow_id))
-        return LedgerSnapshot.model_validate_json(blob) if blob else None
+    async def load_ledger_async(self, workflow_id: str) -> StoredLedger | None:
+        fields = await self._rds.asyncio.hash_getall(workflow_ds_key(workflow_id))
+        return decode_ledger(fields) if fields else None
 
     def load_blueprints(self, workflow_id: str) -> list[PersistedTask]:
         with self._rds.sync.control_pipeline(transaction=False) as pipe:

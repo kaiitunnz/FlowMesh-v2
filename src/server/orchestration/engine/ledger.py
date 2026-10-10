@@ -11,6 +11,7 @@ from ...task.v2.representations.operators import (
     operator_service_dependency,
 )
 from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
+from ..journal import LedgerJournal
 from ..outcomes import classify_recovery
 from ..private_state import PrivateStateLedger
 from ..state import (
@@ -83,6 +84,7 @@ class OrchestrationLedger:
         self._topology = topology
         self._failures = failures
         self.emitter = emitter
+        self.journal = LedgerJournal()
         self.workflow_instance = snapshot.instance
         self.root_scope = snapshot.root_scope
         self.root_grant = snapshot.root_grant

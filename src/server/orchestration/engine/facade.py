@@ -58,6 +58,7 @@ from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 from ...task.v2.representations.results import CardinalityKind, ResultDeclaration
 from ...task.v2.representations.template import LogicalWorkflowTemplate
 from ..guardrails import ScopeBudget
+from ..ledger_fields import LedgerChanges, LedgerOrdinals
 from ..outcomes import check_admissible
 from ..state import (
     TERMINAL_WORK_ITEM_STATUSES,
@@ -181,7 +182,10 @@ class OrchestrationEngine:
         budget: ScopeBudget | None = None,
         control: ControlPlaneTracer | None = None,
         emitter: TelemetrySpanEmitter | None = None,
+        ordinals: LedgerOrdinals | None = None,
     ) -> None:
+        """``ordinals`` restores ``snapshot`` as the stored ledger they order; without
+        them the engine's first ledger write stores the whole ledger."""
         self._topology = PlanTopology(bundle)
         self._failures = FailureLedger()
         self._ledger = OrchestrationLedger(
@@ -274,7 +278,7 @@ class OrchestrationEngine:
             self._attempt_lifecycle,
             self._budget,
         )
-        self._codec.restore(snapshot)
+        self._codec.restore(snapshot, ordinals)
 
         # Binds the emitter to this engine's own live collections (mutated in place,
         # never reassigned) and re-derives every already-settled entity from them --
@@ -400,7 +404,7 @@ class OrchestrationEngine:
                     continuations.append(
                         Continuation(
                             work_item_id=control_key(op.operator_id),
-                            waiting_on=set(preds[op.operator_id]),
+                            waiting_on=frozenset(preds[op.operator_id]),
                         )
                     )
                 continue
@@ -416,12 +420,14 @@ class OrchestrationEngine:
             )
             work_items.append(work_item)
             required_ports = (
-                set(op.declared_input_ports) if isinstance(op, AgentOperator) else set()
+                frozenset(op.declared_input_ports)
+                if isinstance(op, AgentOperator)
+                else frozenset()
             )
             continuations.append(
                 Continuation(
                     work_item_id=work_item.work_item_id,
-                    waiting_on=set(preds[op.operator_id]),
+                    waiting_on=frozenset(preds[op.operator_id]),
                     required_ports=required_ports,
                 )
             )
@@ -1479,6 +1485,18 @@ class OrchestrationEngine:
 
     def to_snapshot(self) -> LedgerSnapshot:
         return self._codec.to_snapshot()
+
+    def ledger_changes(self) -> LedgerChanges:
+        """What a write of the ledger stores, from what the last landed write left."""
+        return self._codec.changes()
+
+    def ledger_written(self, changes: LedgerChanges) -> None:
+        """Take a write of ``changes`` as landed."""
+        self._codec.written(changes)
+
+    def owe_ledger_rewrite(self) -> None:
+        """Have the next ledger write store the whole ledger."""
+        self._codec.owe_rewrite()
 
     def reconcile_failure(self, task_id: str) -> list[str]:
         """Fail what a task's settled failure left standing downstream of it.

@@ -6,7 +6,8 @@ from typing import Any, cast
 
 import pytest
 
-from server.orchestration import LedgerSnapshot, WorkItemStatus
+from server.orchestration import WorkItemStatus
+from server.orchestration.ledger_fields import decode_ledger
 from server.registries.workflow import WorkflowRecord, WorkflowRegistry
 from server.task.models import TaskStatus
 from server.task.runtime import control_reads
@@ -32,7 +33,7 @@ from tests.server.task.test_v2_orchestration import (
     _worker,
 )
 
-_DURABLE = ("task_blobs", "ledger_blobs", "remaining", "dynamic_task_ids", "control")
+_DURABLE = ("task_blobs", "ledgers", "remaining", "dynamic_task_ids", "control")
 
 
 def _succeed(
@@ -56,7 +57,7 @@ def _crash_to(registry: FakeRegistry, durable: dict[str, Any]) -> None:
         setattr(registry, name, value)
 
 
-_WRITES = ("commit_transition", "commit_dynamic_tasks", "save_ledger_snapshot")
+_WRITES = ("commit_transition", "commit_dynamic_tasks", "save_ledger")
 
 
 def _writes(
@@ -82,13 +83,13 @@ async def test_a_skip_whose_ledger_was_lost_never_replays_as_a_success() -> None
     (classify,) = run.ready
     run.ready.clear()
     _succeed(run, classify, {"label": "yes"})
-    before = run.registry.ledger_blobs[run.workflow_id]
+    before = run.registry.ledgers[run.workflow_id]
     run.drive()
     right = run.ids["right_work"]
     stored = run.registry.stored_task(right)
     assert stored is not None and stored.record.result_skip is not None
     # The skipped record landed; the ledger save holding the decision did not.
-    run.registry.ledger_blobs[run.workflow_id] = before
+    run.registry.ledgers[run.workflow_id] = before
 
     restored = await run.restart()
     wi = restored.engine.work_item(right)
@@ -216,9 +217,7 @@ async def test_a_skip_and_a_fan_out_in_one_redrive_survive_a_crash_after_each_wr
         assert not (
             record.status == TaskStatus.PENDING and wi.status is WorkItemStatus.SKIPPED
         )
-        ledger = LedgerSnapshot.model_validate_json(
-            durable["ledger_blobs"][run.workflow_id]
-        )
+        ledger = decode_ledger(durable["ledgers"][run.workflow_id]).snapshot
         for item in ledger.work_items:
             if item.legacy_task_id and item.status is not WorkItemStatus.BLOCKED:
                 assert item.legacy_task_id in durable["task_blobs"], item
@@ -434,7 +433,7 @@ async def test_a_fan_out_awaiting_its_read_this_server_cannot_read_fails(
     _succeed(run, planner, {"items": ["a"]})
     registry, workflow_id = run.registry, run.workflow_id
     assert _durable_status(registry, workflow_id) == "pending"
-    registry.ledger_blobs[workflow_id] = '{"garbage": 1}'
+    registry.ledgers[workflow_id] = {"garbage": "1"}
 
     await _Run(registry, run.reader).runtime.rehydrate()
     _unrestorable(registry, workflow_id)

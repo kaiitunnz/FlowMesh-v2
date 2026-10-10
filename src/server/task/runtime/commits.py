@@ -338,6 +338,8 @@ class TransitionCommitter:
             )
         )
         owed.owe(_Snapshot())
+        if (engine := self._engines.get(workflow_id)) is not None:
+            engine.owe_ledger_rewrite()
 
     def _write_locked(self, workflow_id: str, write: _Write) -> bool:
         """Make one durable write of a workflow with the writes it holds, or hold it
@@ -520,10 +522,11 @@ class TransitionCommitter:
         by_status: dict[str, list[str]] = defaultdict(list)
         for persisted in records:
             by_status[membership(persisted.record)].append(persisted.record.task_id)
+        changes = engine.ledger_changes()
         self._workflow_registry.commit_dynamic_tasks(
             workflow_id,
             records,
-            engine.to_snapshot(),
+            changes,
             retire,
             dispatched=by_status[TaskStatus.DISPATCHED],
             done=by_status[TaskStatus.DONE],
@@ -532,6 +535,7 @@ class TransitionCommitter:
             sched=self._sched_locked(workflow_id) if children else None,
             control=_control(engine),
         )
+        engine.ledger_written(changes)
         self._after_records_locked(workflow_id, records, by_status)
         if unwritten := self._unwritten_children.get(workflow_id):
             unwritten.difference_update(children)
@@ -547,9 +551,9 @@ class TransitionCommitter:
         if retire or self._unwritten_children.get(workflow_id):
             return self._commit_children_raw(workflow_id, retire)
         with self._control.ledger_snapshot(workflow_id):
-            self._workflow_registry.save_ledger_snapshot(
-                workflow_id, engine.to_snapshot(), _control(engine)
-            )
+            changes = engine.ledger_changes()
+            self._workflow_registry.save_ledger(workflow_id, changes, _control(engine))
+        engine.ledger_written(changes)
         return []
 
     def _by_workflow_locked(self, task_ids: Sequence[str]) -> dict[str, list[str]]:

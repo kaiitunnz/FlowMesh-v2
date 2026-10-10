@@ -19,7 +19,8 @@ from typing import Any, cast
 
 import pytest
 
-from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.orchestration.ledger_fields import LedgerChanges
+from server.orchestration.state import InvocationState
 from server.resident import ClaimState, ClaimTerminalReason
 from server.task.models import TERMINAL_TASK_STATUSES, PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime
@@ -84,21 +85,15 @@ class _FaultyRegistry(FakeRegistry):
             )
         )
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+    def save_ledger(
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         self._write(
-            lambda: super(_FaultyRegistry, self).save_ledger_snapshot(
-                workflow_id, snapshot
-            )
+            lambda: super(_FaultyRegistry, self).save_ledger(workflow_id, ledger)
         )
 
     def heal(self) -> None:
         self.fail_from = None
-
-    def ledger(self, workflow_id: str) -> LedgerSnapshot | None:
-        blob = self.ledger_blobs.get(workflow_id)
-        return LedgerSnapshot.model_validate_json(blob) if blob else None
 
     def record(self, task_id: str) -> Any:
         stored = self.stored_task(task_id)
@@ -406,7 +401,7 @@ def test_a_crash_at_a_faulted_cut_restores_without_an_early_or_lost_release(
             _run(resident, transition)
             released_before = list(resident.released)
             invocation = durable_invocation(
-                resident.registry.ledger_blobs,
+                resident.registry,
                 resident.workflow_id,
                 claim.invocation_id,
             )

@@ -139,7 +139,9 @@ class SpawnRegions:
         if entry_port is None:
             return
         self._ledger.set_continuation(
-            Continuation(work_item_id=wi.work_item_id, required_ports={entry_port})
+            Continuation(
+                work_item_id=wi.work_item_id, required_ports=frozenset({entry_port})
+            )
         )
         if value_ref is not None and value_ref.kind == "inline":
             self._inputs.record_accepted_input(

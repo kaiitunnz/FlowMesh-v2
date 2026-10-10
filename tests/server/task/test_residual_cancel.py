@@ -7,7 +7,6 @@ import pytest
 
 from server.orchestration.state import (
     InvocationState,
-    LedgerSnapshot,
     PublicationOutcome,
     WorkItemStatus,
 )
@@ -241,9 +240,8 @@ def test_an_agents_cancel_residual_releases_a_cancelled_childs_credit() -> None:
         )
 
         def durable(invocation_id: str) -> InvocationState:
-            stored = LedgerSnapshot.model_validate_json(
-                registry.ledger_blobs[workflow_id]
-            )
+            stored = registry.ledger(workflow_id)
+            assert stored is not None
             return next(
                 i.state for i in stored.invocations if i.invocation_id == invocation_id
             )

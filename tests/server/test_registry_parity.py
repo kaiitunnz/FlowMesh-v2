@@ -10,6 +10,11 @@ import pytest
 from starlette.datastructures import QueryParams
 
 from server.clients.redis import AsyncRedisClient, SyncRedisClient
+from server.orchestration.ledger_fields import (
+    LedgerChanges,
+    encode_ledger,
+    scalar_field,
+)
 from server.registries.workflow import WorkflowRegistry, WorkflowSched
 from server.utils.query import QueryFilter
 from tests.server.redis_helpers import fake_redis_client
@@ -167,8 +172,12 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
     records = [
         state for state in sync.load_task_states(workflow_id, *task_ids) if state
     ]
-    snapshot = sync.load_ledger_snapshot(workflow_id)
-    assert records and snapshot is not None
+    stored = sync.load_ledger(workflow_id)
+    assert records and stored is not None
+    assert asyncio.run(async_.load_ledger_async(workflow_id)) == stored
+    rewrite = LedgerChanges(encode_ledger(stored), reset=True)
+    dropped = next(name for name in rewrite.fields if name.startswith("work_items:"))
+    delta = LedgerChanges({scalar_field("next_seq"): "7"}, deleted=(dropped,))
 
     sync.save_task_states(records)
     asyncio.run(async_.save_task_states_async(records))
@@ -189,19 +198,17 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
         "failed": task_ids[1:2],
         "sched": WorkflowSched(in_epoch_order=True, epoch_frontier=2),
     }
-    sync.commit_dynamic_tasks(workflow_id, records[:2], snapshot, **children)
+    sync.commit_dynamic_tasks(workflow_id, records[:2], rewrite, **children)
     asyncio.run(
-        async_.commit_dynamic_tasks_async(
-            workflow_id, records[:2], snapshot, **children
-        )
+        async_.commit_dynamic_tasks_async(workflow_id, records[:2], rewrite, **children)
     )
-    sync.save_ledger_snapshot(workflow_id, snapshot)
-    asyncio.run(async_.save_ledger_snapshot_async(workflow_id, snapshot))
+    sync.save_ledger(workflow_id, delta)
+    asyncio.run(async_.save_ledger_async(workflow_id, delta))
     sync.save_workflow_sched(workflow_id, True, 3)
     asyncio.run(async_.save_workflow_sched_async(workflow_id, True, 3))
     registration: dict[str, Any] = {
         "v2": _bundle(AUTORESEARCH, "wfl-new"),
-        "ledger": snapshot,
+        "ledger": rewrite,
         "submitted_at": "2026-10-08T00:00:00+00:00",
         "blueprints": records[:1],
     }

@@ -127,7 +127,7 @@ def test_no_persisted_or_served_surface_holds_an_inline_credential(api_version):
     blobs = [
         *registry.task_blobs.values(),
         *registry.v2_blobs.values(),
-        *registry.ledger_blobs.values(),
+        *registry.ledger_texts(),
     ]
     assert blobs and all(_no_secret(blob) for blob in blobs)
     for task_id in ids.values():
@@ -506,7 +506,7 @@ def test_a_leaf_whose_adapter_url_carries_a_credential_runs_self_contained():
     assert node.embodiment_menu is None
     assert node.service_family_requirement is None
     assert node.residency_intent is None
-    persisted = "".join([*registry.v2_blobs.values(), *registry.ledger_blobs.values()])
+    persisted = "".join([*registry.v2_blobs.values(), *registry.ledger_texts()])
     assert "PRESIGNED-SECRET" not in persisted
     report = runtime.validate(_adapter_leaf(_PRESIGNED))[1]
     assert report is not None
@@ -575,7 +575,7 @@ def test_a_credential_shaped_harness_param_is_vaulted_and_reaches_the_worker():
         [
             *registry.task_blobs.values(),
             *registry.v2_blobs.values(),
-            *registry.ledger_blobs.values(),
+            *registry.ledger_texts(),
         ]
     )
     assert _DSN not in blobs and _JWT not in blobs

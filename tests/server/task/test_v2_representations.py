@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from server.config import OrchestrationConfig
+from server.orchestration.ledger_fields import LedgerChanges
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from server.task.v2 import (
@@ -88,8 +89,8 @@ class _CapturingRegistry:
     ) -> None:
         self.v2[workflow_id] = v2
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: Any, control: Any = None
+    def save_ledger(
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         return None
 

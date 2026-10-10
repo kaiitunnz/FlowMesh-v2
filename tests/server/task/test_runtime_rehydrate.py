@@ -22,11 +22,11 @@ from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.runtime_helpers import manual_durability_retry
-from tests.server.stored_state import StoredTaskStates
+from tests.server.stored_state import StoredLedgers, StoredTaskStates
 from tests.support.waiting import pop_ready
 
 
-class FakeWorkflowRegistry(StoredTaskStates):
+class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
     """In-memory registry that round-trips state through the real model JSON."""
 
     def __init__(self) -> None:
@@ -34,7 +34,6 @@ class FakeWorkflowRegistry(StoredTaskStates):
         self.sched: dict[str, str] = {}
         self.workflow_task_ids: dict[str, list[str]] = {}
         self.v2_blobs: dict[str, str] = {}
-        self.ledger_blobs: dict[str, str] = {}
         self.dynamic_task_ids: dict[str, set[str]] = {}
         self.blueprints: dict[str, list[PersistedTask]] = {}
 
@@ -55,7 +54,7 @@ class FakeWorkflowRegistry(StoredTaskStates):
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
         if ledger is not None:
-            self.save_ledger_snapshot(workflow_id, ledger)
+            self.put_ledger(workflow_id, ledger)
         self.blueprints[workflow_id] = list(blueprints)
 
     async def load_blueprints_async(self, workflow_id: str) -> list[PersistedTask]:
@@ -67,19 +66,8 @@ class FakeWorkflowRegistry(StoredTaskStates):
         blob = self.v2_blobs.get(workflow_id)
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: Any, control: Any = None
-    ) -> None:
-        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
-
-    def load_ledger_snapshot(self, workflow_id: str) -> Any:
-        from server.orchestration import LedgerSnapshot
-
-        blob = self.ledger_blobs.get(workflow_id)
-        return LedgerSnapshot.model_validate_json(blob) if blob else None
-
-    async def load_ledger_snapshot_async(self, workflow_id: str) -> Any:
-        return self.load_ledger_snapshot(workflow_id)
+    def save_ledger(self, workflow_id: str, ledger: Any, control: Any = None) -> None:
+        self.put_ledger(workflow_id, ledger)
 
     async def get_remaining_tasks_async(self, workflow_id: str) -> set[str]:
         ids = [
@@ -154,7 +142,7 @@ class FakeWorkflowRegistry(StoredTaskStates):
         self,
         workflow_id: str,
         records: Sequence[PersistedTask],
-        snapshot: Any,
+        ledger: Any,
         retire: Sequence[str] = (),
         **membership: Any,
     ) -> None:
@@ -163,7 +151,7 @@ class FakeWorkflowRegistry(StoredTaskStates):
             self.dynamic_task_ids.setdefault(workflow_id, set()).add(
                 item.record.task_id
             )
-        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+        self.put_ledger(workflow_id, ledger)
 
     async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
         return set(self.dynamic_task_ids.get(workflow_id, set()))

@@ -1138,15 +1138,15 @@ def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
         writer = ids["writer"]
         _dispatch_agent(runtime, writer, script=script, seal_in=tmp_path)
         permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
-        save = registry.save_ledger_snapshot
+        save = registry.save_ledger
 
         def crash(*_: Any, **__: Any) -> None:
             raise ConnectionError("crash before the ledger save")
 
-        registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+        registry.save_ledger = crash  # type: ignore[method-assign]
         _report(runtime, writer, "m0", "sunny")
         runtime.shutdown()
-        registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+        registry.save_ledger = save  # type: ignore[method-assign]
 
         restored = runtime_on(registry)
         await restored.rehydrate()

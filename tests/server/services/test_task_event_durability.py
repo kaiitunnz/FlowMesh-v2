@@ -15,6 +15,7 @@ import pytest
 import redis.exceptions
 
 from server.config import OrchestrationConfig
+from server.orchestration.ledger_fields import LedgerChanges
 from server.services import monitoring
 from server.services.monitoring import TASK_EVENT_HANDLER_MAX_ATTEMPTS, EventMonitor
 from server.task.models import TaskStatus
@@ -55,12 +56,12 @@ class _Store(_Registry):
         self.done_commits += done
         self.writes.append("records")
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: Any, control: Any = None
+    def save_ledger(
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         if self.error is not None:
             raise self.error
-        super().save_ledger_snapshot(workflow_id, snapshot)
+        super().save_ledger(workflow_id, ledger)
         self.writes.append("ledger")
 
     def record(self, task_id: str) -> Any:
