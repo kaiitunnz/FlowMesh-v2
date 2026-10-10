@@ -109,7 +109,7 @@ async def test_a_pending_residual_child_is_cancelled_and_never_dispatched() -> N
 
     assert _pop_ready(runtime) == [ids["after"]]
     assert _status(runtime, loser) == TaskStatus.CANCELLED
-    persisted = registry.load_task_states(loser)[0]
+    persisted = registry.stored_task(loser)
     assert persisted is not None and persisted.record.status == TaskStatus.CANCELLED
     _finish(runtime, ids["after"])
     assert runtime.workflow_settlement(workflow_id).settled

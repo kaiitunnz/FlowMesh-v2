@@ -38,10 +38,10 @@ from server.task.v2.representations.operators import (
     EffectReplayContract,
 )
 from shared.content import ContentReference
-from shared.tasks import PERSISTED_LOAD_CONTEXT
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
+from tests.server.stored_state import StoredTaskStates
 from tests.support.waiting import pop_ready
 
 # --------------------------------------------------------------------------- #
@@ -49,12 +49,12 @@ from tests.support.waiting import pop_ready
 # --------------------------------------------------------------------------- #
 
 
-class FakeRegistry:
+class FakeRegistry(StoredTaskStates):
     """In-memory registry that round-trips durable state through model JSON."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.submitted_at: str = ""
-        self.task_blobs: dict[str, str] = {}
         self.sched: dict[str, str] = {}
         self.workflow_task_ids: dict[str, list[str]] = {}
         self.v2_blobs: dict[str, str] = {}
@@ -86,8 +86,8 @@ class FakeRegistry:
             for t in tasks
             if t.record.status not in (TaskStatus.DONE, TaskStatus.FAILED)
         }
-        for item in tasks:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
+        self.put_sources([*tasks, *blueprints])
+        self.put_tasks(tasks)
         self.sched[workflow_id] = sched.model_dump_json()
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
@@ -97,8 +97,9 @@ class FakeRegistry:
 
     async def unregister_workflows_async(self, *workflow_ids: str) -> None:
         for workflow_id in workflow_ids:
-            for task_id in self.workflow_task_ids.pop(workflow_id, []):
-                self.task_blobs.pop(task_id, None)
+            self.forget_workflow_tasks(
+                workflow_id, self.workflow_task_ids.pop(workflow_id, [])
+            )
             for store in (self.remaining, self.sched, self.v2_blobs, self.ledger_blobs):
                 store.pop(workflow_id, None)
 
@@ -121,23 +122,8 @@ class FakeRegistry:
         return self.get_workflow_record(workflow_id)
 
     async def save_task_states_async(self, items: list[PersistedTask]) -> None:
-        for item in items:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
-
-    def load_task_states(self, *task_ids: str) -> list[PersistedTask | None]:
-        return [
-            (
-                PersistedTask.model_validate_json(blob, context=PERSISTED_LOAD_CONTEXT)
-                if (blob := self.task_blobs.get(t))
-                else None
-            )
-            for t in task_ids
-        ]
-
-    async def load_task_states_async(
-        self, *task_ids: str
-    ) -> list[PersistedTask | None]:
-        return self.load_task_states(*task_ids)
+        self.put_sources(items)
+        self.put_tasks(items)
 
     async def save_workflow_sched_async(
         self, workflow_id: str, in_epoch_order: bool, frontier: int
@@ -185,8 +171,7 @@ class FakeRegistry:
         sched: WorkflowSched | None = None,
         control: WorkflowControl | None = None,
     ) -> None:
-        for item in records:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
+        self.put_tasks(records)
         self.remaining.setdefault(workflow_id, set()).difference_update(
             {*done, *failed, *cancelled}
         )
@@ -214,8 +199,8 @@ class FakeRegistry:
     ) -> None:
         remaining = self.remaining.setdefault(workflow_id, set())
         settled = {*done, *failed, *cancelled}
+        self.put_tasks(records)
         for item in records:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
             self.dynamic_task_ids.setdefault(workflow_id, set()).add(
                 item.record.task_id
             )

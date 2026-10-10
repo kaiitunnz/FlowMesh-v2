@@ -11,7 +11,6 @@ import pytest
 from server.config import OrchestrationConfig
 from server.orchestration import OrchestrationEngine
 from server.orchestration.state import InvocationState
-from server.registries.workflow import PersistedTask
 from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.inference import InputResolutionBinding, UpstreamProvenance
@@ -324,10 +323,7 @@ def denied_root() -> Iterator[None]:
 
 
 def _durable_statuses(registry: FakeRegistry, ids: dict[str, str]) -> dict[str, Any]:
-    return {
-        name: PersistedTask.model_validate_json(registry.task_blobs[task_id]).record
-        for name, task_id in ids.items()
-    }
+    return {name: registry.stored_record(task_id) for name, task_id in ids.items()}
 
 
 @pytest.mark.usefixtures("denied_root")

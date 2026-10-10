@@ -20,7 +20,6 @@ from typing import Any, cast
 import pytest
 
 from server.orchestration.state import InvocationState, LedgerSnapshot
-from server.registries.workflow import PersistedTask
 from server.resident import ClaimState, ClaimTerminalReason
 from server.task.models import TERMINAL_TASK_STATUSES, PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime
@@ -102,8 +101,8 @@ class _FaultyRegistry(FakeRegistry):
         return LedgerSnapshot.model_validate_json(blob) if blob else None
 
     def record(self, task_id: str) -> Any:
-        blob = self.task_blobs.get(task_id)
-        return PersistedTask.model_validate_json(blob).record if blob else None
+        stored = self.stored_task(task_id)
+        return stored.record if stored is not None else None
 
 
 @dataclass

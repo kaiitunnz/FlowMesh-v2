@@ -391,7 +391,7 @@ def test_a_restart_closes_a_workflow_stored_hung_behind_a_failed_region(
         finalizer.drain()
 
         _assert_failed_downstream(restored, ids, "a", "kid", "after")
-        persisted = registry.load_task_states(ids["after"])[0]
+        persisted = registry.stored_task(ids["after"])
         assert persisted is not None and persisted.record.status == TaskStatus.FAILED
         assert registry.remaining_of(workflow_id) == set()
         assert f"workflow:{workflow_id}:logs:closed" in redis.keys
@@ -1162,7 +1162,7 @@ async def test_a_restart_fails_a_task_the_ledger_already_failed() -> None:
     record = restored.get_record(after)
     assert record is not None and record.status == TaskStatus.FAILED
     assert record.error == "join collect resolved no winner"
-    persisted = registry.load_task_states(after)[0]
+    persisted = registry.stored_task(after)
     assert persisted is not None and persisted.record.status == TaskStatus.FAILED
     assert restored.workflow_settlement(workflow_id).settled
 
@@ -1220,7 +1220,7 @@ def test_a_restart_fails_a_stored_reader_of_a_spawned_agents_region(
         assert record.error == (
             f"region of spawned-only agent {ids['worker']} delivers nothing"
         )
-        persisted = registry.load_task_states(ids["merge"])[0]
+        persisted = registry.stored_task(ids["merge"])
         assert persisted is not None and persisted.record.status == TaskStatus.FAILED
 
     asyncio.run(run())

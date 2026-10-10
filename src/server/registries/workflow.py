@@ -1,7 +1,17 @@
+import hashlib
 import json
-from collections.abc import AsyncGenerator, Collection, Generator, Iterator, Sequence
+from collections import defaultdict
+from collections.abc import (
+    AsyncGenerator,
+    Collection,
+    Generator,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import aclosing, closing
 from enum import StrEnum
+from functools import lru_cache
 from itertools import batched
 from typing import Any
 
@@ -10,9 +20,11 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_serializer,
+    model_validator,
 )
 from redis.asyncio.client import Pipeline as AsyncPipeline
 from redis.client import Pipeline
@@ -34,6 +46,7 @@ from ..clients.redis import (
     workflow_failed_tasks_key,
     workflow_key,
     workflow_sched_key,
+    workflow_sources_key,
     workflow_tasks_key,
     workflow_v2_key,
 )
@@ -44,15 +57,41 @@ from ..utils.cursors import page_slice
 from ..utils.query import QueryFilter
 from ..utils.time import now_iso
 
+# The validation-context key holding a workflow's stored sources by digest.
+_SOURCES = "workflow_sources"
+
+
+@lru_cache(maxsize=64)
+def source_digest(source: str) -> str:
+    """The digest a task's stored state names its workflow source by."""
+    return hashlib.sha256(source.encode()).hexdigest()
+
 
 class PersistedTask(BaseModel):
-    """A durable per-task snapshot sufficient to rebuild scheduler state."""
+    """A durable per-task snapshot sufficient to rebuild scheduler state.
+
+    The record's workflow source is stored once per workflow and named here by its
+    digest; loading it needs that workflow's stored sources.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     record: TaskRecord
     depends_on: set[str] = Field(default_factory=set)
     epoch_index: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _attach_source(cls, data: Any, info: ValidationInfo) -> Any:
+        if not isinstance(data, dict) or (digest := data.get("source_digest")) is None:
+            return data
+        sources = (info.context or {}).get(_SOURCES, {})
+        if (source := sources.get(digest)) is None:
+            raise ValueError(f"workflow source {digest} is not stored")
+        return {
+            **{key: value for key, value in data.items() if key != "source_digest"},
+            "record": {**data["record"], "raw_yaml": source},
+        }
 
     @field_serializer("depends_on")
     def _serialize_depends_on(self, value: set[str]) -> list[str]:
@@ -61,6 +100,9 @@ class PersistedTask(BaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         data = handler(self)
+        # The source is the whole workflow's, stored once beside its tasks.
+        del data["record"]["raw_yaml"]
+        data["source_digest"] = source_digest(self.record.raw_yaml)
         # ``failed_workers`` is excluded from TaskRecord's dump but routes retries, so
         # it must survive a restart.
         data["record"]["failed_workers"] = self.record.failed_workers.copy()
@@ -353,6 +395,38 @@ def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> No
         pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
 
 
+def task_sources(items: Sequence[PersistedTask]) -> dict[str, dict[str, str]]:
+    """The workflow sources the tasks name, by workflow and digest."""
+    sources: dict[str, dict[str, str]] = defaultdict(dict)
+    for item in items:
+        source = item.record.raw_yaml
+        sources[item.record.workflow_id][source_digest(source)] = source
+    return sources
+
+
+def _queue_sources(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> None:
+    for workflow_id, sources in task_sources(items).items():
+        pipe.hset(workflow_sources_key(workflow_id), mapping=sources)
+
+
+def _queue_workflow_sources(
+    pipe: _AnyPipeline, workflow_id: str, items: Sequence[PersistedTask]
+) -> None:
+    sources = {source_digest(i.record.raw_yaml): i.record.raw_yaml for i in items}
+    if sources:
+        pipe.hset(workflow_sources_key(workflow_id), mapping=sources)
+
+
+def load_context(sources: Mapping[str, str]) -> dict[str, Any]:
+    """The validation context a stored task state of a workflow with ``sources``
+    loads under."""
+    return {**PERSISTED_LOAD_CONTEXT, _SOURCES: sources}
+
+
+def load_task_state(blob: str | bytes, sources: Mapping[str, str]) -> PersistedTask:
+    return PersistedTask.model_validate_json(blob, context=load_context(sources))
+
+
 def _queue_registration(
     pipe: _AnyPipeline,
     workflow_id: str,
@@ -369,6 +443,7 @@ def _queue_registration(
     pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
     pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, {_record_member(record): 0})
     pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
+    _queue_workflow_sources(pipe, workflow_id, [*tasks, *blueprints])
     if remaining_tasks:
         pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
     if failed_tasks:
@@ -468,12 +543,12 @@ def _queue_ledger(
     pipe.hset(workflow_key(workflow_id), mapping=_workflow_update(update))
 
 
-def _blueprints(blob: str | bytes | None) -> list[PersistedTask]:
+def _blueprints(
+    blob: str | bytes | None, sources: Mapping[str, str]
+) -> list[PersistedTask]:
     if not blob:
         return []
-    return TaskBlueprints.model_validate_json(
-        blob, context=PERSISTED_LOAD_CONTEXT
-    ).tasks
+    return TaskBlueprints.model_validate_json(blob, context=load_context(sources)).tasks
 
 
 def _sched_payload(in_epoch_order: bool, epoch_frontier: int) -> str:
@@ -537,6 +612,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_ds_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_blueprints_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_sources_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
@@ -558,6 +634,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_ds_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_blueprints_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_sources_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
@@ -934,48 +1011,63 @@ class WorkflowRegistry:
     # ---- Durable task state (for restart rehydration) ----------------- #
 
     def save_task_states(self, items: Sequence[PersistedTask]) -> None:
+        """Save task states with the workflow sources they name."""
         if not items:
             return
         with self._rds.sync.control_pipeline() as pipe:
+            _queue_sources(pipe, items)
             _queue_task_states(pipe, items)
             pipe.execute()
 
     async def save_task_states_async(self, items: Sequence[PersistedTask]) -> None:
+        """Save task states as ``save_task_states`` does."""
         if not items:
             return
         async with self._rds.asyncio.control_pipeline() as pipe:
+            _queue_sources(pipe, items)
             _queue_task_states(pipe, items)
             await pipe.execute()
 
-    def load_task_states(self, *task_ids: str) -> list[PersistedTask | None]:
+    def keep_sources(self, workflow_id: str, items: Sequence[PersistedTask]) -> None:
+        """Store each workflow source the tasks name that the workflow does not hold,
+        as a task state loaded with its source inline names."""
+        sources = task_sources(items).get(workflow_id, {})
+        held = self._rds.sync.hash_getall(workflow_sources_key(workflow_id))
+        if missing := {d: text for d, text in sources.items() if d not in held}:
+            self._rds.sync.hash_set(workflow_sources_key(workflow_id), missing)
+
+    async def keep_sources_async(
+        self, workflow_id: str, items: Sequence[PersistedTask]
+    ) -> None:
+        """Store missing sources as ``keep_sources`` does."""
+        sources = task_sources(items).get(workflow_id, {})
+        held = await self._rds.asyncio.hash_getall(workflow_sources_key(workflow_id))
+        if missing := {d: text for d, text in sources.items() if d not in held}:
+            await self._rds.asyncio.hash_set(workflow_sources_key(workflow_id), missing)
+
+    def load_task_states(
+        self, workflow_id: str, *task_ids: str
+    ) -> list[PersistedTask | None]:
+        """Load the stored states of a workflow's tasks, None for one not stored."""
         if not task_ids:
             return []
-        blobs = self._rds.sync.mget([task_state_key(task_id) for task_id in task_ids])
-        return [
-            (
-                PersistedTask.model_validate_json(blob, context=PERSISTED_LOAD_CONTEXT)
-                if blob
-                else None
-            )
-            for blob in blobs
-        ]
+        with self._rds.sync.control_pipeline(transaction=False) as pipe:
+            pipe.hgetall(workflow_sources_key(workflow_id))
+            pipe.mget([task_state_key(task_id) for task_id in task_ids])
+            sources, blobs = pipe.execute()
+        return [load_task_state(blob, sources) if blob else None for blob in blobs]
 
     async def load_task_states_async(
-        self, *task_ids: str
+        self, workflow_id: str, *task_ids: str
     ) -> list[PersistedTask | None]:
+        """Load task states as ``load_task_states`` does."""
         if not task_ids:
             return []
-        blobs = await self._rds.asyncio.mget(
-            [task_state_key(task_id) for task_id in task_ids]
-        )
-        return [
-            (
-                PersistedTask.model_validate_json(blob, context=PERSISTED_LOAD_CONTEXT)
-                if blob
-                else None
-            )
-            for blob in blobs
-        ]
+        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
+            pipe.hgetall(workflow_sources_key(workflow_id))
+            pipe.mget([task_state_key(task_id) for task_id in task_ids])
+            sources, blobs = await pipe.execute()
+        return [load_task_state(blob, sources) if blob else None for blob in blobs]
 
     def save_workflow_sched(
         self, workflow_id: str, in_epoch_order: bool, epoch_frontier: int
@@ -1045,12 +1137,18 @@ class WorkflowRegistry:
         return LedgerSnapshot.model_validate_json(blob) if blob else None
 
     def load_blueprints(self, workflow_id: str) -> list[PersistedTask]:
-        blob = self._rds.sync.get(workflow_blueprints_key(workflow_id))
-        return _blueprints(blob)
+        with self._rds.sync.control_pipeline(transaction=False) as pipe:
+            pipe.hgetall(workflow_sources_key(workflow_id))
+            pipe.get(workflow_blueprints_key(workflow_id))
+            sources, blob = pipe.execute()
+        return _blueprints(blob, sources)
 
     async def load_blueprints_async(self, workflow_id: str) -> list[PersistedTask]:
-        blob = await self._rds.asyncio.get(workflow_blueprints_key(workflow_id))
-        return _blueprints(blob)
+        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
+            pipe.hgetall(workflow_sources_key(workflow_id))
+            pipe.get(workflow_blueprints_key(workflow_id))
+            sources, blob = await pipe.execute()
+        return _blueprints(blob, sources)
 
     def get_remaining_tasks(self, workflow_id: str) -> set[str]:
         return self._rds.sync.set_members(workflow_tasks_key(workflow_id))

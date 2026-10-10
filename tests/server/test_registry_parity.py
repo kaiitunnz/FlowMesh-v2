@@ -164,7 +164,9 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
     sync, async_ = twins.sync, twins.asyncio
     workflow_id = twins.workflow_id
     task_ids = sorted(sync.get_workflow_record(workflow_id).task_ids)  # type: ignore[union-attr]
-    records = [state for state in sync.load_task_states(*task_ids) if state]
+    records = [
+        state for state in sync.load_task_states(workflow_id, *task_ids) if state
+    ]
     snapshot = sync.load_ledger_snapshot(workflow_id)
     assert records and snapshot is not None
 

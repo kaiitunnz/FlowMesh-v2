@@ -406,6 +406,8 @@ def test_a_restart_vaults_credentials_stored_before_they_were_vaulted():
 
     blobs = "".join(registry.task_blobs.values())
     assert not any(secret in blobs for secret in _LEGACY)
+    sources = json.dumps(registry.sources)
+    assert not any(secret in sources for secret in _LEGACY)
     for task_id in runtime._tasks:
         info = runtime.describe_task(task_id)
         assert info is not None

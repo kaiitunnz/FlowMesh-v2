@@ -15,7 +15,6 @@ import pytest
 import redis.exceptions
 
 from server.config import OrchestrationConfig
-from server.registries.workflow import PersistedTask
 from server.services import monitoring
 from server.services.monitoring import TASK_EVENT_HANDLER_MAX_ATTEMPTS, EventMonitor
 from server.task.models import TaskStatus
@@ -65,7 +64,7 @@ class _Store(_Registry):
         self.writes.append("ledger")
 
     def record(self, task_id: str) -> Any:
-        return PersistedTask.model_validate_json(self.task_blobs[task_id]).record
+        return self.stored_record(task_id)
 
 
 class _Cursor:

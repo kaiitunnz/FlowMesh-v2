@@ -85,7 +85,7 @@ async def test_a_skip_whose_ledger_was_lost_never_replays_as_a_success() -> None
     before = run.registry.ledger_blobs[run.workflow_id]
     run.drive()
     right = run.ids["right_work"]
-    stored = run.registry.load_task_states(right)[0]
+    stored = run.registry.stored_task(right)
     assert stored is not None and stored.record.result_skip is not None
     # The skipped record landed; the ledger save holding the decision did not.
     run.registry.ledger_blobs[run.workflow_id] = before
@@ -231,7 +231,7 @@ def _durable_status(registry: FakeRegistry, workflow_id: str) -> str:
         *registry.workflow_task_ids[workflow_id],
         *registry.dynamic_task_ids.get(workflow_id, ()),
     ]
-    records = [p.record for t in ids if (p := registry.load_task_states(t)[0])]
+    records = [p.record for t in ids if (p := registry.stored_task(t))]
     record = WorkflowRecord(
         workflow_id=workflow_id,
         task_ids=list(registry.workflow_task_ids[workflow_id]),
@@ -473,7 +473,7 @@ async def test_a_workflow_this_server_cannot_read_settles_failed_and_closes(
         persisted.record.status == TaskStatus.FAILED
         and persisted.record.error == failure
         for task_id in registry.workflow_task_ids[broken]
-        if (persisted := registry.load_task_states(task_id)[0]) is not None
+        if (persisted := registry.stored_task(task_id)) is not None
     )
     assert not registry.remaining_of(broken)
     assert restored.runtime.workflow_settlement(broken).settled

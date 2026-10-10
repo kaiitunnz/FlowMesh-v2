@@ -977,6 +977,8 @@ class TaskRuntime:
         if not tasks:
             return None
         await self._vault_stored_credentials(workflow_id, tasks)
+        # A record stored with its source inline names it by digest at its next write.
+        await self._workflow_registry.keep_sources_async(workflow_id, tasks)
         remaining = await self._workflow_registry.get_remaining_tasks_async(workflow_id)
         sched = await self._workflow_registry.load_workflow_sched_async(workflow_id)
         snapshot = await self._workflow_registry.load_ledger_snapshot_async(workflow_id)
@@ -1048,6 +1050,7 @@ class TaskRuntime:
                 workflow_id,
                 exc_info=error,
             )
+        await self._workflow_registry.keep_sources_async(workflow_id, failed)
         await self._workflow_registry.commit_transition_async(
             workflow_id,
             records=failed,
@@ -1067,7 +1070,9 @@ class TaskRuntime:
         task_ids = list(dict.fromkeys([*wf_record.task_ids, *sorted(dynamic_ids)]))
         return [
             state
-            for state in await self._workflow_registry.load_task_states_async(*task_ids)
+            for state in await self._workflow_registry.load_task_states_async(
+                workflow_id, *task_ids
+            )
             if state
         ]
 
