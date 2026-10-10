@@ -124,13 +124,16 @@ class FrozenMap[K, V](dict[K, V]):
         return (type(self), (dict(self),))
 
 
+EMPTY_MAP: FrozenMap[Any, Any] = FrozenMap()
+
+
 def frozen(value: Any) -> Any:
     """A container as its immutable counterpart; any other value as it is."""
     match value:
         case FrozenMap():
             return value
         case dict():
-            return FrozenMap(value)
+            return freeze_mapping(value)
         case set():
             return frozenset(value)
         case list():
@@ -139,7 +142,10 @@ def frozen(value: Any) -> Any:
 
 
 def freeze_mapping[K, V](value: Mapping[K, V]) -> FrozenMap[K, V]:
-    return value if isinstance(value, FrozenMap) else FrozenMap(value)
+    """A mapping as a frozen one; every empty mapping is one shared map."""
+    if isinstance(value, FrozenMap):
+        return value
+    return FrozenMap(value) if value else EMPTY_MAP
 
 
 class TrackedDict[K: Hashable, V](dict[K, V]):

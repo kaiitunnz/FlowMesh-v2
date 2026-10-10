@@ -396,3 +396,14 @@ def test_an_unplaceable_field_is_a_layout_error() -> None:
 
     with pytest.raises(LedgerLayoutError, match="unknown ledger collection"):
         decode_ledger(image)
+
+
+def test_every_empty_frozen_mapping_is_one_shared_map() -> None:
+    events = [
+        OrchestrationEvent(seq=1, kind="k"),
+        OrchestrationEvent(seq=2, kind="k", detail={}),
+        OrchestrationEvent.model_validate_json('{"seq":3,"kind":"k","detail":{}}'),
+    ]
+
+    assert len({id(event.detail) for event in events}) == 1
+    assert freeze_mapping({}) is events[0].detail

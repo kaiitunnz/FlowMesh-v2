@@ -35,7 +35,7 @@ from ..task.v2.representations.operators import (
     SelectorStep,
 )
 from ..utils.time import now_iso
-from .journal import FrozenMap, JournaledModel, freeze_mapping
+from .journal import EMPTY_MAP, JournaledModel, freeze_mapping
 
 
 class WorkItemStatus(StrEnum):
@@ -172,7 +172,7 @@ ValueRef.model_rebuild()
 # Mappings a ledger entity holds, immutable so they change only by assignment.
 type FrozenRefs = Annotated[Mapping[str, ValueRef], AfterValidator(freeze_mapping)]
 type FrozenStrs = Annotated[Mapping[str, str], AfterValidator(freeze_mapping)]
-_EMPTY: Mapping[str, Any] = FrozenMap()
+_EMPTY: Mapping[str, Any] = EMPTY_MAP
 
 
 class BoundaryEvent(BaseModel):
