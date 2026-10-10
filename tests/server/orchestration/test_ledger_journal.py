@@ -140,6 +140,21 @@ def test_an_entity_held_in_one_slot_is_refused_another() -> None:
     others["wki-1"] = wi.model_copy()
 
 
+def test_a_refused_replacement_leaves_the_entry_journaling_its_entity() -> None:
+    journal = LedgerJournal()
+    items = TrackedDict[str, WorkItem](journal, "work_items")
+    held, other = _work_item("wki-1"), _work_item("wki-2")
+    items["wki-1"], items["wki-2"] = held, other
+
+    with pytest.raises(ValueError, match="already held"):
+        items["wki-1"] = other
+    journal.reset()
+    held.invocation_id = "inv-1"
+
+    assert items["wki-1"] is held
+    assert set(journal.pending) == {("work_items", "wki-1")}
+
+
 def test_an_entity_changes_its_containers_only_by_replacing_them() -> None:
     wi = _work_item()
     wi.attempt_ids = [*wi.attempt_ids, "att-1"]  # type: ignore[assignment]

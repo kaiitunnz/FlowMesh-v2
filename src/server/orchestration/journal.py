@@ -175,10 +175,10 @@ class TrackedDict[K: Hashable, V](dict[K, V]):
         self.journal.mark((self.name, key))
 
     def __setitem__(self, key: K, value: V) -> None:
-        if (old := self.get(key)) is not value and isinstance(old, JournaledModel):
-            old.release(self)
         if isinstance(value, JournaledModel):
             value.claim(self, key)
+        if (old := self.get(key)) is not value and isinstance(old, JournaledModel):
+            old.release(self)
         super().__setitem__(key, value)
         if key not in self.ordinals:
             if (
