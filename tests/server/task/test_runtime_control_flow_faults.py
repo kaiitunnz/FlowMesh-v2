@@ -383,6 +383,63 @@ async def test_a_finished_workflow_this_server_cannot_read_stays_as_stored() -> 
     assert not registry.control[finished].failure
 
 
+def _unrestorable(registry: FakeRegistry, workflow_id: str) -> None:
+    failure = registry.control[workflow_id].failure
+    assert _durable_status(registry, workflow_id) == "failed"
+    assert failure is not None and failure.startswith("UnsupportedWorkflowVersion")
+
+
+@pytest.mark.anyio
+async def test_a_loop_between_iterations_this_server_cannot_read_fails() -> None:
+    run = await _Run().start(_workflow(_LOOP_NODES, _LOOP))
+    run.run("seed")
+    (step,) = run.ready
+    run.ready.clear()
+    _succeed(run, step, {"route": "again"})
+    registry, workflow_id = run.registry, run.workflow_id
+    assert _durable_status(registry, workflow_id) == "pending"
+    registry.v2_blobs[workflow_id] = "{}"
+
+    restored = _Run(registry, run.reader)
+    await restored.runtime.rehydrate()
+    _unrestorable(registry, workflow_id)
+
+    await _Run(registry, run.reader).runtime.rehydrate()
+    _unrestorable(registry, workflow_id)
+
+
+@pytest.mark.anyio
+async def test_a_fan_out_awaiting_its_read_this_server_cannot_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = await _Run().start(_workflow(f"""
+      - name: planner
+        spec: {_ECHO}
+      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [planner]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+"""))
+    monkeypatch.setattr(
+        runtime_facade.fanout,
+        "read_fanout",
+        lambda *_: runtime_facade.fanout.FanoutRead(error="away", unavailable=True),
+    )
+    (planner,) = run.ready
+    run.ready.clear()
+    _succeed(run, planner, {"items": ["a"]})
+    registry, workflow_id = run.registry, run.workflow_id
+    assert _durable_status(registry, workflow_id) == "pending"
+    registry.ledger_blobs[workflow_id] = '{"garbage": 1}'
+
+    await _Run(registry, run.reader).runtime.rehydrate()
+    _unrestorable(registry, workflow_id)
+
+
 @pytest.mark.anyio
 async def test_a_workflow_this_server_cannot_read_settles_failed_and_closes(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch

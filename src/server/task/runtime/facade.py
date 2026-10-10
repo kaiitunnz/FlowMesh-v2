@@ -1004,9 +1004,9 @@ class TaskRuntime:
         other workflow to restore.
 
         Every task of it still open fails with the typed reason, written with that
-        reason in one transition; a workflow with no task open has settled and stays
-        as stored. Returns the workflow's task records, when they read, and the
-        revocation of each dispatch that failing ended.
+        reason in one transition; a workflow with neither a task nor control work
+        open has settled and stays as stored. Returns the workflow's task records,
+        when they read, and the revocation of each dispatch that failing ended.
         """
         reason = f"UnsupportedWorkflowVersion: {type(error).__name__}: {error}"[:500]
         try:
@@ -1033,7 +1033,7 @@ class TaskRuntime:
             record.finished_ts = time.time()
             failed.append(persisted)
         stored = await self._workflow_registry.get_workflow_record_async(workflow_id)
-        if tasks and not failed:
+        if tasks and not failed and stored is not None and not stored.control_open:
             self._logger.warning(
                 "Workflow %s cannot be read and has settled; it stays as stored: %s",
                 workflow_id,

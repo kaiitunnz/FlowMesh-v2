@@ -113,6 +113,7 @@ class FakeRegistry:
         return SimpleNamespace(
             task_ids=list(ids),
             submitted_at=self.submitted_at,
+            control_open=control.open if control else False,
             control_failure=(control.failure or "") if control else "",
         )
 
