@@ -128,6 +128,7 @@ def test_no_persisted_or_served_surface_holds_an_inline_credential(api_version):
         *registry.task_blobs.values(),
         *registry.v2_blobs.values(),
         *registry.ledger_texts(),
+        *registry.source_texts(),
     ]
     assert blobs and all(_no_secret(blob) for blob in blobs)
     for task_id in ids.values():
@@ -576,6 +577,7 @@ def test_a_credential_shaped_harness_param_is_vaulted_and_reaches_the_worker():
             *registry.task_blobs.values(),
             *registry.v2_blobs.values(),
             *registry.ledger_texts(),
+            *registry.source_texts(),
         ]
     )
     assert _DSN not in blobs and _JWT not in blobs

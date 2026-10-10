@@ -73,6 +73,10 @@ class StoredTaskStates:
         assert stored is not None, task_id
         return stored.record
 
+    def source_texts(self) -> list[str]:
+        """Each workflow source as stored."""
+        return [text for sources in self.sources.values() for text in sources.values()]
+
     def forget_workflow_tasks(self, workflow_id: str, task_ids: Sequence[str]) -> None:
         for task_id in task_ids:
             self.task_blobs.pop(task_id, None)
