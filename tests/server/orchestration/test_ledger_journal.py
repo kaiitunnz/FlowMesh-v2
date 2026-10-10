@@ -1,6 +1,7 @@
 """A ledger journals each change its collections take, and stores one field per
 entity in a layout a restore reads back in order or refuses."""
 
+import json
 import typing
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -306,6 +307,20 @@ def _repeat_ordinal(image: dict[str, str]) -> None:
     image[second] = f"{ordinal}:{image[second].partition(':')[2]}"
 
 
+def _respell(image: dict[str, str], name: str, spelling: str) -> None:
+    image[spelling] = image.pop(name)
+
+
+def _foundation_with(image: dict[str, str], **changes: Any) -> None:
+    foundation = json.loads(image["meta:foundation"])
+    foundation.update(changes)
+    image["meta:foundation"] = json.dumps(
+        {k: v for k, v in foundation.items() if v is not _ABSENT}
+    )
+
+
+_ABSENT = object()
+
 _CORRUPTIONS: dict[str, Callable[[dict[str, str]], Any]] = {
     "unknown layout": lambda f: f.update({"meta:layout": "0"}),
     "no foundation": lambda f: f.pop("meta:foundation"),
@@ -321,6 +336,26 @@ _CORRUPTIONS: dict[str, Callable[[dict[str, str]], Any]] = {
     "missing required field": lambda f: f.update(
         {"meta:foundation": '{"instance": null}'}
     ),
+    "missing next_seq": lambda f: f.pop("meta:next_seq"),
+    "missing instance_failure": lambda f: f.pop("meta:instance_failure"),
+    "missing control_failure": lambda f: f.pop("meta:control_failure"),
+    "missing instance_cancelled": lambda f: f.pop("meta:instance_cancelled"),
+    "foundation with a foreign field": lambda f: _foundation_with(f, next_seq=99),
+    "foundation missing a field": lambda f: _foundation_with(
+        f, max_loop_iterations=_ABSENT
+    ),
+    "malformed foundation": lambda f: f.update({"meta:foundation": "{not json"}),
+    "foundation not an object": lambda f: f.update({"meta:foundation": "[]"}),
+    "malformed scalar": lambda f: f.update({"meta:next_seq": "{bad"}),
+    "malformed entity": lambda f: f.update({_named(f, "work_items")[0]: "0:{not json"}),
+    "boolean history position": lambda f: _respell(f, "trace:[1]", "trace:[true]"),
+    "padded history position": lambda f: _respell(f, "trace:[1]", "trace:[ 1]"),
+    "fractional history position": lambda f: _respell(f, "trace:[1]", "trace:[1.0]"),
+    "one history position twice": lambda f: f.update({"trace:[ 0]": f["trace:[1]"]}),
+    "respelled failure reason": lambda f: _respell(
+        f, _named(f, "failure_reasons")[0], 'failure_reasons:[ "A"]'
+    ),
+    "respelled set member": lambda f: f.update({'released_scopes:[ "scp-x"]': "1"}),
 }
 
 
@@ -329,7 +364,7 @@ def test_a_stored_ledger_that_cannot_be_placed_is_refused(corruption: str) -> No
     image = encode_ledger(_stored())
     _CORRUPTIONS[corruption](image)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(LedgerLayoutError):
         decode_ledger(image)
 
 

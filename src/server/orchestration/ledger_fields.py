@@ -235,13 +235,33 @@ def _split_ordinal(collection: str, value: str) -> tuple[int, str]:
     return int(ordinal), encoded
 
 
+def _names_member(collection: str, parts: list[Any], name: str) -> bool:
+    return (
+        len(parts) == 1
+        and isinstance(parts[0], str)
+        and field_name(collection, parts[0]) == name
+    )
+
+
 def decode_ledger(fields: Mapping[str, str]) -> StoredLedger:
-    """Rebuild a stored ledger from its fields."""
+    """Rebuild a stored ledger from its fields, refusing one that does not hold
+    exactly the fields its layout places."""
+    try:
+        return _decode_ledger(fields)
+    except LedgerLayoutError:
+        raise
+    except ValueError as exc:
+        raise LedgerLayoutError(f"unreadable ledger: {exc}") from exc
+
+
+def _decode_ledger(fields: Mapping[str, str]) -> StoredLedger:
     if fields.get(_LAYOUT_FIELD) != LAYOUT:
         raise LedgerLayoutError(f"unknown ledger layout {fields.get(_LAYOUT_FIELD)!r}")
     if (foundation := fields.get(_FOUNDATION_FIELD)) is None:
         raise LedgerLayoutError("ledger has no foundation")
-    data: dict[str, Any] = json.loads(foundation)
+    data = json.loads(foundation)
+    if not isinstance(data, dict) or data.keys() != set(FOUNDATION):
+        raise LedgerLayoutError("ledger foundation does not hold its fields")
     keyed: dict[str, list[tuple[int, Any, Any]]] = {}
     histories: dict[str, dict[int, Any]] = {}
     sets: dict[str, list[Any]] = {}
@@ -267,19 +287,23 @@ def decode_ledger(fields: Mapping[str, str]) -> StoredLedger:
             keyed.setdefault(collection, []).append((ordinal, key, entity))
         elif collection in STRINGS:
             ordinal, body = _split_ordinal(collection, value)
-            if len(parts) != 1 or not isinstance(parts[0], str):
+            if not _names_member(collection, parts, name):
                 raise LedgerLayoutError(f"malformed key {name!r}")
             keyed.setdefault(collection, []).append(
                 (ordinal, parts[0], json.loads(body))
             )
         elif collection in HISTORIES:
-            if len(parts) != 1 or not isinstance(parts[0], int):
+            if (
+                len(parts) != 1
+                or type(parts[0]) is not int
+                or history_field(collection, parts[0]) != name
+            ):
                 raise LedgerLayoutError(f"malformed position {name!r}")
             histories.setdefault(collection, {})[parts[0]] = HISTORIES[
                 collection
             ].model_validate_json(value)
         elif collection in SETS:
-            if len(parts) != 1 or not isinstance(parts[0], str) or value != SET_MEMBER:
+            if not _names_member(collection, parts, name) or value != SET_MEMBER:
                 raise LedgerLayoutError(f"malformed member {name!r}")
             sets.setdefault(collection, []).append(parts[0])
         else:
@@ -301,5 +325,7 @@ def decode_ledger(fields: Mapping[str, str]) -> StoredLedger:
         data[collection] = [positions[i] for i in range(len(positions))]
     for collection, members in sets.items():
         data[collection] = sorted(members)
+    if scalars.keys() != set(SCALARS):
+        raise LedgerLayoutError("ledger does not hold every scalar")
     data.update(scalars)
     return StoredLedger(LedgerSnapshot.model_validate(data), ordinals)
