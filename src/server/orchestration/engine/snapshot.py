@@ -102,14 +102,14 @@ class SnapshotCodec:
         # A stored ledger may hold a nested level's aggregate after its root level's;
         # the root level's is the one delivered downstream.
         for aggregate in self._ledger.region_aggregates:
-            join_op = aggregate.occurrence or aggregate.join_operator_id
-            if join_op not in self._ledger.aggregate_by_join or not any(
+            join_key = aggregate.occurrence
+            if join_key not in self._ledger.aggregate_by_join or not any(
                 (act := self._ledger.activations.get(member.child_activation_id))
                 is not None
                 and not self._ledger.root_level(act.scope_id)
                 for member in aggregate.members
             ):
-                self._ledger.aggregate_by_join[join_op] = aggregate
+                self._ledger.aggregate_by_join[join_key] = aggregate
         self._ledger.invocations = {i.invocation_id: i for i in snapshot.invocations}
         self._ledger.attempts = {a.attempt_id: a for a in snapshot.attempts}
         self._embodiments.embodiment_selections = {
@@ -265,11 +265,7 @@ class SnapshotCodec:
         # A ledger stored without failure reasons names each failed work item's own.
         self._failures.failure_reasons = dict(snapshot.failure_reasons)
         self._failures.instance_failure = snapshot.instance_failure
-        self._failures.control_failure = (
-            snapshot.control_failure
-            if "control_failure" in snapshot.model_fields_set
-            else self._failed_control_reason()
-        )
+        self._failures.control_failure = snapshot.control_failure
         self._failures.instance_cancelled = snapshot.instance_cancelled
         for wi in self._ledger.work_items.values():
             if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
@@ -285,20 +281,6 @@ class SnapshotCodec:
             and d.operator_id
             and d.work_item_id is None
         }
-
-    def _failed_control_reason(self) -> str | None:
-        """The control failure a ledger stored without one records: its first failed
-        control's reason, else its first failed region."""
-        failed = sorted(
-            (key, state.reason or "control failed")
-            for key, state in self._ledger.control_states.items()
-            if state.status is ControlStatus.FAILED
-        )
-        if failed:
-            return failed[0][1]
-        if self._failures.failed_regions:
-            return f"region {min(self._failures.failed_regions)} failed"
-        return None
 
     def to_snapshot(self) -> LedgerSnapshot:
         return LedgerSnapshot(

@@ -275,7 +275,6 @@ class OrchestrationEngine:
             self._budget,
         )
         self._codec.restore(snapshot)
-        self._flow.adopt_stored_controls()
 
         # Binds the emitter to this engine's own live collections (mutated in place,
         # never reassigned) and re-derives every already-settled entity from them --
@@ -1076,16 +1075,6 @@ class OrchestrationEngine:
         ):
             return None
         return self._flow.edges.inputs(task_id)
-
-    def legacy_control_regions(self) -> list[str]:
-        """Branch and loop operators with no runnable contract: a branch with no
-        selection rule, or a loop with no body."""
-        return [
-            op.operator_id
-            for op in self._topology.operators.values()
-            if (isinstance(op, BranchRegion) and op.rule is None)
-            or (isinstance(op, LoopContextRegion) and op.body_ref is None)
-        ]
 
     def deny_spawn(
         self, spawn_op: str, interface: str, *, kind: DenialKind = DenialKind.AUTHORITY

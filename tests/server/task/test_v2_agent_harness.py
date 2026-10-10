@@ -131,7 +131,11 @@ def _region(
         completion=JoinCompletion.ALL_SETTLED,
     )
     ref = ChildRegionRef(name=role, spawn_ref=spawn_id)
-    return ref, [spawn, join], TemplateEdge(from_op=spawn_id, to_op=join_id)
+    return (
+        ref,
+        [spawn, join],
+        TemplateEdge(from_op=spawn_id, to_op=join_id, edge_id=f"{spawn_id}->{join_id}"),
+    )
 
 
 def _leaf(op_id: str) -> LeafOperator:
@@ -1009,7 +1013,14 @@ def _self_recursive_agent() -> PersistedV2Workflow:
     ref, ops, edge = _region("self", "A")
     return _bundle(
         [_agent("A", regions=(ref,)), *ops, _leaf("after")],
-        [edge, TemplateEdge(from_op="self:spawn:join", to_op="after")],
+        [
+            edge,
+            TemplateEdge(
+                from_op="self:spawn:join",
+                to_op="after",
+                edge_id="self:spawn:join->after",
+            ),
+        ],
         (_decl("out:A", "A"), _decl("out:after", "after")),
     )
 

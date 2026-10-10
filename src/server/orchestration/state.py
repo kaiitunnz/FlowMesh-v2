@@ -357,7 +357,7 @@ class RegionJoinAggregate(BaseModel):
     join_operator_id: str
     activation_id: str
     members: tuple[RegionAggregateMember, ...] = ()
-    occurrence: str = ""  # the join occurrence it froze at; "" for a root join
+    occurrence: str  # the join occurrence it froze at
 
 
 class AcceptedInputMember(BaseModel):
@@ -861,4 +861,4 @@ class LedgerSnapshot(BaseModel):
     iteration_resolutions: list[IterationResolution] = Field(default_factory=list)
     child_contexts: list[ChildContext] = Field(default_factory=list)
     # The loop-iteration bound the instance runs under, pinned at its first build.
-    max_loop_iterations: int | None = None
+    max_loop_iterations: int

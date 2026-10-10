@@ -609,20 +609,6 @@ class TransitionCommitter:
         work item also writes its record."""
         self._unwritten_children.setdefault(workflow_id, set()).add(child_task_id)
 
-    def holds_unwritten_locked(self, workflow_id: str) -> bool:
-        """Whether a workflow has materialized records its next ledger write owes."""
-        return bool(self._unwritten_children.get(workflow_id))
-
-    def retire_locked(self, workflow_id: str, retire: Sequence[str]) -> None:
-        """Drop tasks that are no longer the workflow's from its remaining set, with
-        its ledger, in one transaction."""
-        if not retire:
-            return
-        self._write_locked(workflow_id, _Snapshot(tuple(retire)))
-        # A retire drains the remaining set as a terminal does, and can drain its last
-        # entry.
-        self._actions.file_locked(workflow_id, Settled(workflow_id))
-
     def commit_cancelled_locked(
         self, workflow_id: str, touched: list[str], returned: list[str]
     ) -> None:

@@ -1,6 +1,6 @@
 from collections import Counter
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -66,7 +66,7 @@ class TemplateEdge(BaseModel):
     to_op: str
     from_port: str | None = None
     to_port: str | None = None
-    edge_id: str = ""
+    edge_id: str
     use: DependencyUse = DependencyUse.ORDER_ONLY
     projection: tuple[SelectorStep, ...] = ()
     projection_version: int = 1
@@ -74,26 +74,6 @@ class TemplateEdge(BaseModel):
     # The region definition the edge belongs to; None at the root.
     definition: str | None = None
     derived: bool = False
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_stored(cls, data: Any) -> Any:
-        """Name an edge stored without an identity by its endpoints and ports, read a
-        stored port binding as a value delivery, and a stored feedback flag as a
-        feedback boundary."""
-        if not isinstance(data, dict):
-            return data
-        data = data.copy()
-        if data.pop("feedback", False) and data.get("boundary") is None:
-            data["boundary"] = BoundaryKind.FEEDBACK
-        if "use" not in data and data.get("to_port") is not None:
-            data["use"] = DependencyUse.VALUE_REQUIRED
-        if not data.get("edge_id"):
-            data["edge_id"] = (
-                f"{data.get('from_op')}.{data.get('from_port') or ''}"
-                f"->{data.get('to_op')}.{data.get('to_port') or ''}"
-            )
-        return data
 
     @property
     def is_forward(self) -> bool:

@@ -40,7 +40,7 @@ from server.task.v2.representations.operators import (
     Port,
     SpawnRegion,
 )
-from server.task.v2.representations.template import TemplateEdge
+from server.task.v2.representations.template import DependencyUse, TemplateEdge
 from shared.tasks import TaskType
 from shared.tasks.result_binding import ResultBinding
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -83,7 +83,13 @@ def _accepted(activation: str, port: str, value_ref: ValueRef) -> AcceptedInput:
 def test_declared_input_agent_blocks_until_its_manifest_is_recorded() -> None:
     producer = _leaf("P")
     merge = _input_agent("M", ("reviews",))
-    edge = TemplateEdge(from_op="P", to_op="M", to_port="reviews")
+    edge = TemplateEdge(
+        from_op="P",
+        to_op="M",
+        to_port="reviews",
+        use=DependencyUse.VALUE_REQUIRED,
+        edge_id="P->M.reviews",
+    )
     engine = _engine(
         _bundle([producer, merge], [edge], (_decl("out:M", "M"),)),
         granted=frozenset({"model"}),
@@ -130,9 +136,15 @@ def test_join_feeding_an_agent_aggregates_children_in_declared_order() -> None:
     )
     merge = _input_agent("M", ("reviews",))
     edges = [
-        TemplateEdge(from_op="P", to_op="S"),
-        TemplateEdge(from_op="S", to_op="J"),
-        TemplateEdge(from_op="J", to_op="M", to_port="reviews"),
+        TemplateEdge(from_op="P", to_op="S", edge_id="P->S"),
+        TemplateEdge(from_op="S", to_op="J", edge_id="S->J"),
+        TemplateEdge(
+            from_op="J",
+            to_op="M",
+            to_port="reviews",
+            use=DependencyUse.VALUE_REQUIRED,
+            edge_id="J->M.reviews",
+        ),
     ]
     engine = _engine(
         _bundle([producer, child, spawn, join, merge], edges, (_decl("out:M", "M"),)),
@@ -170,7 +182,10 @@ def test_spawn_mints_a_typed_child_entry_input_not_spec_data() -> None:
         outputs=(Port(name="out"),),
         completion=JoinCompletion.ALL_SETTLED,
     )
-    edges = [TemplateEdge(from_op="P", to_op="S"), TemplateEdge(from_op="S", to_op="J")]
+    edges = [
+        TemplateEdge(from_op="P", to_op="S", edge_id="P->S"),
+        TemplateEdge(from_op="S", to_op="J", edge_id="S->J"),
+    ]
     engine = _engine(
         _bundle([producer, reviewer, spawn, join], edges, (_decl("out:J", "J"),)),
         granted=frozenset({"model"}),
@@ -211,9 +226,15 @@ def _fanout_bundle(
         residual_policy=residual,
     )
     edges = [
-        TemplateEdge(from_op="P", to_op="S"),
-        TemplateEdge(from_op="S", to_op="J"),
-        TemplateEdge(from_op="J", to_op="M", to_port="reviews"),
+        TemplateEdge(from_op="P", to_op="S", edge_id="P->S"),
+        TemplateEdge(from_op="S", to_op="J", edge_id="S->J"),
+        TemplateEdge(
+            from_op="J",
+            to_op="M",
+            to_port="reviews",
+            use=DependencyUse.VALUE_REQUIRED,
+            edge_id="J->M.reviews",
+        ),
     ]
     return _bundle(
         [_leaf("P"), child, spawn, join, _input_agent("M", ("reviews",))],
@@ -378,7 +399,15 @@ def _merge_engine() -> Any:
     engine = _engine(
         _bundle(
             [_leaf("P"), _input_agent("M", ("reviews",))],
-            [TemplateEdge(from_op="P", to_op="M", to_port="reviews")],
+            [
+                TemplateEdge(
+                    from_op="P",
+                    to_op="M",
+                    to_port="reviews",
+                    use=DependencyUse.VALUE_REQUIRED,
+                    edge_id="P->M.reviews",
+                )
+            ],
             (_decl("out:M", "M"),),
         ),
         granted=frozenset({"model"}),
@@ -468,7 +497,15 @@ def test_input_bindings_projection_is_deterministic() -> None:
     engine = _engine(
         _bundle(
             [_leaf("P"), merge],
-            [TemplateEdge(from_op="P", to_op="M", to_port="reviews")],
+            [
+                TemplateEdge(
+                    from_op="P",
+                    to_op="M",
+                    to_port="reviews",
+                    use=DependencyUse.VALUE_REQUIRED,
+                    edge_id="P->M.reviews",
+                )
+            ],
             (_decl("out:M", "M"),),
         ),
         granted=frozenset({"model"}),

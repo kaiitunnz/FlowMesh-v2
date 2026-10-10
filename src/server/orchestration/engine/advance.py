@@ -9,11 +9,6 @@ def dependency_failed(task_id: str) -> str:
     return f"Dependency {task_id} failed"
 
 
-def legacy_control_unsupported(operator_id: str, missing: str) -> str:
-    """The reason a branch or loop stored without its runnable contract fails for."""
-    return f"LegacyControlRegionUnsupported: {operator_id} was stored without {missing}"
-
-
 class RegionError(ValueError):
     """Raised when a structured-region operation is invalid, e.g. a child after seal."""
 

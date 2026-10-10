@@ -19,7 +19,7 @@ from ..state import (
     TimeFrame,
     ValueRef,
 )
-from .advance import Advance, RegionError, legacy_control_unsupported
+from .advance import Advance, RegionError
 from .dataflow import RegionFlow
 from .edges import Incoming
 from .ledger import OrchestrationLedger
@@ -104,9 +104,7 @@ class LoopProgress:
             )
             return
         loop = self._topology.operators[loop_op]
-        if not isinstance(loop, LoopContextRegion) or loop.body_ref is None:
-            self.fault(instance, legacy_control_unsupported(loop_op, "a body"), advance)
-            return
+        assert isinstance(loop, LoopContextRegion)
         frame = TimeFrame(loop=instance.scope_id, iteration=time)
         try:
             keys = self._factory.enter(

@@ -129,7 +129,7 @@ def chain_bundle() -> PersistedV2Workflow:
     """Leaf ``A`` publishing ``out:A``, with leaf ``B`` as its static successor."""
     return _bundle(
         [_leaf("A"), _leaf("B")],
-        [TemplateEdge(from_op="A", to_op="B")],
+        [TemplateEdge(from_op="A", to_op="B", edge_id="A->B")],
         (_decl("out:A", "A"), _decl("out:B", "B")),
     )
 
@@ -160,7 +160,13 @@ def spawning_agent_bundle() -> PersistedV2Workflow:
     )
     return _bundle(
         [agent, _leaf("wbody"), spawn, join],
-        [TemplateEdge(from_op="worker:spawn", to_op="worker:spawn:join")],
+        [
+            TemplateEdge(
+                from_op="worker:spawn",
+                to_op="worker:spawn:join",
+                edge_id="worker:spawn->worker:spawn:join",
+            )
+        ],
         (_decl("out:A", "A"),),
     )
 
@@ -201,12 +207,22 @@ def recursive_agent_bundle(
         outputs=(Port(name="out"),),
     )
     operators: list[LogicalOperator] = [agent, spawn, join]
-    edges = [TemplateEdge(from_op="worker:spawn", to_op="worker:spawn:join")]
+    edges = [
+        TemplateEdge(
+            from_op="worker:spawn",
+            to_op="worker:spawn:join",
+            edge_id="worker:spawn->worker:spawn:join",
+        )
+    ]
     results = [_decl("out:A", "A")]
     if downstream is not None:
         operators.append(downstream)
         edges.append(
-            TemplateEdge(from_op="worker:spawn:join", to_op=downstream.operator_id)
+            TemplateEdge(
+                from_op="worker:spawn:join",
+                to_op=downstream.operator_id,
+                edge_id=f"worker:spawn:join->{downstream.operator_id}",
+            )
         )
         results.append(_decl(f"out:{downstream.operator_id}", downstream.operator_id))
     return _bundle(operators, edges, tuple(results))

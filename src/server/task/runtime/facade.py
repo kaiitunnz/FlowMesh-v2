@@ -69,7 +69,6 @@ from ...orchestration import (
     ValueRef,
     WorkItemStatus,
 )
-from ...orchestration.engine.advance import legacy_control_unsupported
 from ...orchestration.engine.topology import (
     blueprint_operators,
     materialized_operators,
@@ -1226,25 +1225,9 @@ class TaskRuntime:
         The legacy dependency machinery stays unwired; the orchestration engine is the
         readiness authority. Terminal task facts reconcile the engine idempotently, so a
         crash between a task's terminal write and its ledger snapshot never loses a
-        settlement and never duplicates a publication or effect receipt. A workflow
-        stored with its child templates as tasks has them read as blueprints and
-        withdrawn from its remaining tasks.
+        settlement and never duplicates a publication or effect receipt.
         """
-        materialized = materialized_operators(engine.template)
-        prototypes = [p.record for p in tasks if p.record.task_id in materialized]
-        tasks = [p for p in tasks if p.record.task_id not in materialized]
-        # A workflow holding no blueprints makes a recursive agent's children from the
-        # agent's own root task.
-        covered = {record.task_id for record in [*prototypes, *blueprints]}
-        roots = [
-            p.record
-            for p in tasks
-            if p.record.task_id in blueprint_operators(engine.template)
-            and p.record.task_id not in covered
-        ]
-        self._occurrences.install_locked(
-            workflow_id, [*prototypes, *blueprints, *roots]
-        )
+        self._occurrences.install_locked(workflow_id, blueprints)
         for persisted in tasks:
             record = persisted.record
             task_id = record.task_id
@@ -1351,18 +1334,7 @@ class TaskRuntime:
         )
         if engine.awaits_control_reads():
             self._redrive.drive_now(workflow_id)
-        if withdrawn := sorted(p.task_id for p in prototypes if p.task_id in remaining):
-            self._committer.retire_locked(workflow_id, withdrawn)
         self._committer.save_ledger_locked(workflow_id)
-        # A branch or loop with no runnable contract may already have run, so nothing
-        # re-evaluates it: a workflow still running through one fails.
-        if (
-            legacy := engine.legacy_control_regions()
-        ) and not self._committer.workflow_settlement_locked(workflow_id).settled:
-            self._fail_workflow_locked(
-                workflow_id,
-                legacy_control_unsupported(legacy[0], "a runnable contract"),
-            )
 
     def _repair_work_records_locked(
         self, workflow_id: str, engine: OrchestrationEngine

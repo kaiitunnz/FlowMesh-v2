@@ -486,18 +486,6 @@ def test_a_template_nothing_enters_is_refused() -> None:
     assert _codes(text) == ["definition.orphan"]
 
 
-def test_stored_region_forms_decode_tolerantly() -> None:
-    merge = MergeRegion.model_validate(
-        {"operator_id": "m", "source_ref": "m", "combination": "zip"}
-    )
-    assert merge.combination is None
-    branch = BranchRegion.model_validate(
-        {"operator_id": "b", "source_ref": "b", "selection": "x"}
-    )
-    assert branch.rule is None
-    assert branch.selection == "x"
-
-
 def test_inspection_renders_definitions_and_dependency_uses() -> None:
     text = _workflow(_LOOP_NODES, _LOOP_TEMPLATE)
     parsed = parse_workflow(text, "native")

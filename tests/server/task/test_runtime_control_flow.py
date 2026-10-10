@@ -9,7 +9,6 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration import OrchestrationEngine, PublicationOutcome
-from server.registries.workflow import PersistedTask
 from server.task.models import TaskLoopTime, TaskOccurrence, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
@@ -369,28 +368,6 @@ async def test_an_unselected_spawn_makes_no_children_and_the_workflow_closes() -
     record = run.runtime.get_record(run.ids["after"])
     assert record is not None and record.result_skip is not None
     assert run.settled()
-
-
-@pytest.mark.anyio
-async def test_a_template_stored_as_a_task_reads_as_a_blueprint_after_a_restart() -> (
-    None
-):
-    run = await _Run().start(_workflow(_ARM_FANOUT, _CHILD))
-    work = run.ids["work"]
-    blueprint = run.runtime._occurrences.blueprint_locked(run.workflow_id, work)
-    assert blueprint is not None
-    # A workflow stored before blueprints held its template as one of its tasks.
-    registry = run.registry
-    registry.blueprints.pop(run.workflow_id)
-    registry.workflow_task_ids[run.workflow_id].append(work)
-    registry.task_blobs[work] = PersistedTask(record=blueprint).model_dump_json()
-    registry.remaining[run.workflow_id].add(work)
-
-    restored = await run.restart()
-    assert restored.runtime.get_record(work) is None
-    assert work not in registry.remaining_of(run.workflow_id)
-    restored.run("classify", {"label": "go", "items": ["a"]})
-    assert [restored.name(t) for t in restored.ready] == ["work"]
 
 
 _CAPTURING = f"""

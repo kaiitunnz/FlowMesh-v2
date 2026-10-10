@@ -21,10 +21,8 @@ class ScopeBudget:
     max_spawns_per_turn: int = 32  # spawn children admitted in one facade turn group
     max_spawns_per_region: int = 256  # spawn children admitted per child region
 
-    def pinned(self, max_loop_iterations: int | None) -> Self:
+    def pinned(self, max_loop_iterations: int) -> Self:
         """This budget with the loop bound a running instance was built under."""
-        if max_loop_iterations is None:
-            return self
         return replace(self, max_loop_iterations=max_loop_iterations)
 
     @classmethod

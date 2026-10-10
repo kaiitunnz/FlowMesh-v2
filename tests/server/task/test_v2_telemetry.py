@@ -191,7 +191,11 @@ def _region(
         completion=JoinCompletion.ALL_SETTLED,
     )
     ref = ChildRegionRef(name=role, spawn_ref=spawn_id)
-    return ref, [spawn, join], TemplateEdge(from_op=spawn_id, to_op=join_id)
+    return (
+        ref,
+        [spawn, join],
+        TemplateEdge(from_op=spawn_id, to_op=join_id, edge_id=f"{spawn_id}->{join_id}"),
+    )
 
 
 def _spawning_agent_bundle() -> PersistedV2Workflow:
@@ -212,7 +216,7 @@ def _spawn_join_bundle() -> PersistedV2Workflow:
     )
     return _bundle(
         [spawn, join, _leaf("body")],
-        [TemplateEdge(from_op="S", to_op="J")],
+        [TemplateEdge(from_op="S", to_op="J", edge_id="S->J")],
         (_decl("out:J", "J", release=ReleaseConditionKind.SCOPE_CLOSED),),
     )
 

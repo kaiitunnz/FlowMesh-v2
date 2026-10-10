@@ -2,7 +2,7 @@ from collections.abc import Iterable, Sequence
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import BoundaryEventKind
 from shared.inference import engine_profile_key
@@ -600,8 +600,7 @@ class BranchRegion(_OperatorBase):
     """Routes the record on its input to the one output port its rule selects."""
 
     kind: Literal[OperatorKind.BRANCH] = OperatorKind.BRANCH
-    selection: str | None = None  # a selection with no rule; such a branch never runs
-    rule: SelectionRule | None = None
+    rule: SelectionRule
 
 
 class MergeRegion(_OperatorBase):
@@ -609,14 +608,6 @@ class MergeRegion(_OperatorBase):
 
     kind: Literal[OperatorKind.MERGE] = OperatorKind.MERGE
     combination: MergeCombination | None = None
-
-    @field_validator("combination", mode="before")
-    @classmethod
-    def _tolerate_unknown_combination(cls, value: Any) -> Any:
-        # A combination this contract does not name combines every input.
-        if isinstance(value, str) and value not in MergeCombination:
-            return None
-        return value
 
 
 class SpawnRegion(_OperatorBase):
@@ -684,7 +675,7 @@ class LoopContextRegion(_OperatorBase):
     loop_coordinate: str
     carried: tuple[Port, ...] = ()
     invariants: tuple[Port, ...] = ()
-    body_ref: str | None = None
+    body_ref: str
 
 
 type LogicalOperator = Annotated[

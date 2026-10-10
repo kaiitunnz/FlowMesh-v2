@@ -175,14 +175,6 @@ def _check_branch(
     location = loc.get(op.operator_id)
     outputs = {port.name for port in op.outputs}
     diags: list[Diagnostic] = []
-    if op.rule is None:
-        return [
-            _error(
-                "branch.bad-selection",
-                "a branch selects through a {input, field, cases} rule",
-                location,
-            )
-        ]
     if op.rule.input not in {port.name for port in op.inputs}:
         diags.append(
             _error(
@@ -361,7 +353,7 @@ def _check_loop(
                 location,
             )
         )
-    body = definitions.get(op.body_ref or "")
+    body = definitions.get(op.body_ref)
     if body is None or body.kind is not DefinitionKind.LOOP_BODY:
         return [*diags, _error("loop.unknown-body", "loop names no body", location)]
     expected = {
@@ -608,7 +600,7 @@ def _check_definition_nesting(
     loops_in: dict[str, set[str]] = {d: set() for d in definitions}
     for definition in definitions.values():
         for member in definition.members:
-            if isinstance(op := ops.get(member), LoopContextRegion) and op.body_ref:
+            if isinstance(op := ops.get(member), LoopContextRegion):
                 loops_in[definition.definition_id].add(op.body_ref)
 
     def _reaches(start: str) -> bool:

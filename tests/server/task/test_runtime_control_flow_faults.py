@@ -2,20 +2,16 @@
 write leaves behind."""
 
 import copy
-import json
 from typing import Any, cast
 
 import pytest
 
 from server.orchestration import LedgerSnapshot, WorkItemStatus
-from server.orchestration.state import BoundaryEvent
 from server.registries.workflow import WorkflowRecord, WorkflowRegistry
 from server.task.models import TaskStatus
 from server.task.runtime import control_reads
 from server.task.runtime import facade as runtime_facade
-from server.task.v2 import PersistedV2Workflow
 from shared.harness import HarnessResult, HarnessResultKind
-from shared.harness.boundary import BoundaryEventKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
 from tests.server.task.test_runtime_control_flow import (
@@ -23,8 +19,6 @@ from tests.server.task.test_runtime_control_flow import (
     _ECHO,
     _LOOP,
     _LOOP_NODES,
-    _ROUTE_BODY,
-    _SEEDED_FROM_A_JOIN,
     _Run,
     _workflow,
 )
@@ -330,46 +324,6 @@ async def test_a_cancel_while_only_a_read_holds_the_workflow_reads_cancelled() -
     assert _durable_status(run.registry, run.workflow_id) == "cancelled"
 
 
-_RECURSIVE = """
-apiVersion: flowmesh/v2
-kind: Workflow
-metadata: {name: recursive}
-spec:
-  graph:
-    nodes:
-      - name: writer
-        spec:
-          taskType: agent
-          v2: {child: writer}
-          harness: {backend: scripted, version: v1, params: {script: []}}
-"""
-
-
-@pytest.mark.anyio
-async def test_a_recursive_agent_stored_before_blueprints_makes_its_children() -> None:
-    run = await _Run().start(_RECURSIVE)
-    (writer,) = run.ready
-    run.ready.clear()
-    # A workflow stored before blueprints keeps only its live tasks.
-    run.registry.blueprints.pop(run.workflow_id)
-    record_dispatch(run.runtime, writer, cast(Any, _worker()))
-    with run.runtime._lock:
-        (child,) = run.engine.route_boundary_event(
-            writer,
-            BoundaryEvent(
-                kind=BoundaryEventKind.SPAWN,
-                call_correlation="c0",
-                child_region_ref="writer",
-            ),
-        ).ready
-        run.runtime._committer.save_ledger_locked(run.workflow_id)
-
-    restored = await run.restart()
-    record = restored.runtime.get_record(child)
-    assert record is not None and record.status == TaskStatus.PENDING
-    assert child in restored.ready
-
-
 @pytest.mark.anyio
 async def test_work_with_no_blueprint_fails_its_workflow_by_name() -> None:
     run = await _Run().start(_workflow(_SPAWN_AND_LOOP, _LOOP))
@@ -450,33 +404,6 @@ async def test_a_workflow_this_server_cannot_read_settles_failed_and_closes(
     again = _Run(registry, run.reader)
     await again.runtime.rehydrate()
     assert not [r for r in caplog.records if r.exc_info is not None]
-
-
-@pytest.mark.anyio
-async def test_a_running_workflow_through_a_pre_contract_branch_fails_on_restart() -> (
-    None
-):
-    run = await _Run().start(_workflow(_DIAMOND))
-    run.run("classify", {"label": "yes"})
-    registry = run.registry
-    bundle = PersistedV2Workflow.model_validate_json(registry.v2_blobs[run.workflow_id])
-    decide = next(
-        e.logical_ref for e in bundle.template.source_map if e.source_id == "decide"
-    )
-    operators = tuple(
-        op.model_copy(update={"rule": None}) if op.operator_id == decide else op
-        for op in bundle.template.operators
-    )
-    registry.v2_blobs[run.workflow_id] = bundle.model_copy(
-        update={"template": bundle.template.model_copy(update={"operators": operators})}
-    ).model_dump_json()
-
-    restored = await run.restart()
-    failure = restored.engine.control_failure()
-    assert failure is not None
-    assert failure.startswith("LegacyControlRegionUnsupported")
-    record = restored.runtime.get_record(run.ids["left_work"])
-    assert record is not None and record.status == TaskStatus.FAILED
 
 
 _ZERO_FAN = f"""
@@ -565,23 +492,6 @@ async def test_a_cancel_of_a_settled_workflow_changes_nothing(
     assert _durable_status(run.registry, run.workflow_id) == "done"
     assert run.registry.control[run.workflow_id].cancelled is False
     assert _published(run) == published
-
-
-@pytest.mark.anyio
-async def test_a_ledger_stored_without_its_control_failure_keeps_failing() -> None:
-    run = await _Run().start(_workflow(_SEEDED_FROM_A_JOIN, _ROUTE_BODY))
-    run.run("plan", {"items": ["p"]})
-    run.run("kid", {"route": "done"})
-    failure = run.registry.control[run.workflow_id].failure
-    assert failure is not None and failure.startswith("BranchSelectionInvalid: ")
-    stored = json.loads(run.registry.ledger_blobs[run.workflow_id])
-    del stored["control_failure"]
-    run.registry.ledger_blobs[run.workflow_id] = json.dumps(stored)
-
-    await run.restart()
-
-    assert _durable_status(run.registry, run.workflow_id) == "failed"
-    assert run.registry.control[run.workflow_id].failure == failure
 
 
 _SOLO_AGENT = """

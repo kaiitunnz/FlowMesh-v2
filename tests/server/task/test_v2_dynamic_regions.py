@@ -166,7 +166,7 @@ def _spawn_join(
     body = _leaf("body")
     return _bundle(
         [spawn, join, body],
-        [TemplateEdge(from_op="S", to_op="J")],
+        [TemplateEdge(from_op="S", to_op="J", edge_id="S->J")],
         results=results
         or (_decl("out:J", "J", release=ReleaseConditionKind.SCOPE_CLOSED),),
     )
@@ -271,8 +271,8 @@ def test_nested_call_closes_inner_then_outer() -> None:
         _bundle(
             [outer_s, outer_j, inner_s, inner_j, _leaf("leaf")],
             [
-                TemplateEdge(from_op="So", to_op="Jo"),
-                TemplateEdge(from_op="Si", to_op="Ji"),
+                TemplateEdge(from_op="So", to_op="Jo", edge_id="So->Jo"),
+                TemplateEdge(from_op="Si", to_op="Ji", edge_id="Si->Ji"),
             ],
             results=(_decl("out:Jo", "Jo", release=ReleaseConditionKind.SCOPE_CLOSED),),
         )
@@ -358,9 +358,9 @@ def test_merge_combines_all_inputs_before_releasing() -> None:
         _bundle(
             [_leaf("A"), _leaf("B"), merge, _leaf("C", deps=True)],
             [
-                TemplateEdge(from_op="A", to_op="M"),
-                TemplateEdge(from_op="B", to_op="M"),
-                TemplateEdge(from_op="M", to_op="C"),
+                TemplateEdge(from_op="A", to_op="M", edge_id="A->M"),
+                TemplateEdge(from_op="B", to_op="M", edge_id="B->M"),
+                TemplateEdge(from_op="M", to_op="C", edge_id="M->C"),
             ],
         )
     )
@@ -467,8 +467,8 @@ def test_autoresearch_controller_fans_out_experiments() -> None:
         _bundle(
             [planner, spawn, join, _leaf("trial")],
             [
-                TemplateEdge(from_op="planner", to_op="exp"),
-                TemplateEdge(from_op="exp", to_op="collect"),
+                TemplateEdge(from_op="planner", to_op="exp", edge_id="planner->exp"),
+                TemplateEdge(from_op="exp", to_op="collect", edge_id="exp->collect"),
             ],
             results=(
                 _decl(
@@ -581,7 +581,7 @@ def _early_join(
     )
     return _bundle(
         [spawn, join, _leaf("body")],
-        [TemplateEdge(from_op="S", to_op="J")],
+        [TemplateEdge(from_op="S", to_op="J", edge_id="S->J")],
         results=(_decl("out:J", "J", release=ReleaseConditionKind.JOIN_WINNER),),
     )
 
@@ -735,7 +735,7 @@ def _recursive_bundle() -> PersistedV2Workflow:
     )
     return _bundle(
         [spawn, join, _leaf("leaf")],
-        [TemplateEdge(from_op="R", to_op="Rj")],
+        [TemplateEdge(from_op="R", to_op="Rj", edge_id="R->Rj")],
         results=(_decl("out:Rj", "Rj", release=ReleaseConditionKind.SCOPE_CLOSED),),
     )
 
@@ -888,8 +888,8 @@ def test_inner_scope_cancel_resolves_join_and_readies_downstream() -> None:
         _bundle(
             [spawn, join, _leaf("body"), _leaf("D", deps=True)],
             [
-                TemplateEdge(from_op="S", to_op="J"),
-                TemplateEdge(from_op="J", to_op="D"),
+                TemplateEdge(from_op="S", to_op="J", edge_id="S->J"),
+                TemplateEdge(from_op="J", to_op="D", edge_id="J->D"),
             ],
             results=(_decl("out:J", "J", release=ReleaseConditionKind.SCOPE_CLOSED),),
         )
@@ -915,7 +915,7 @@ def test_cancellation_residual_drain_lets_materialized_children_settle() -> None
     eng = _engine(
         _bundle(
             [spawn, join, _leaf("body")],
-            [TemplateEdge(from_op="S", to_op="J")],
+            [TemplateEdge(from_op="S", to_op="J", edge_id="S->J")],
             results=(_decl("out:J", "J", release=ReleaseConditionKind.JOIN_WINNER),),
         )
     )

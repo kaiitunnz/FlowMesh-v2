@@ -15,7 +15,7 @@ from server.orchestration import PublicationOutcome
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultReader
 from server.task.runtime import TaskRuntime, fanout
-from server.task.v2.representations.template import TemplateEdge
+from server.task.v2.representations.template import DependencyUse, TemplateEdge
 from shared.content import (
     OCTET_STREAM,
     ContentHydrationError,
@@ -162,7 +162,15 @@ def _agent_consuming(runtime: TaskRuntime, monkeypatch: pytest.MonkeyPatch) -> A
     engine = _engine(
         _bundle(
             [_leaf("P"), _input_agent("M", ("reviews",))],
-            [TemplateEdge(from_op="P", to_op="M", to_port="reviews")],
+            [
+                TemplateEdge(
+                    from_op="P",
+                    to_op="M",
+                    to_port="reviews",
+                    use=DependencyUse.VALUE_REQUIRED,
+                    edge_id="P->M.reviews",
+                )
+            ],
             (_decl("out:M", "M"),),
         ),
         granted=frozenset({"model"}),

@@ -1,4 +1,3 @@
-import json
 import logging
 from typing import Any, cast
 
@@ -17,10 +16,6 @@ from server.task.v2 import (
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import (
-    FakeRegistry,
-    _live_runtime,
-)
 
 REGIONS_WF = """
 apiVersion: flowmesh/v2
@@ -349,28 +344,3 @@ spec:
         dependsOn: [a]
         region: {kind: merge}
 """
-
-
-@pytest.mark.anyio
-async def test_a_stored_branch_bearing_workflow_rehydrates() -> None:
-    registry = FakeRegistry()
-    runtime = _live_runtime(registry)
-    workflow_id, _ = await runtime.register(
-        "owner", "org", _MERGE_ONLY, format="native"
-    )
-    # A stored bundle carrying a branch region, which compile refuses.
-    bundle = json.loads(registry.v2_blobs[workflow_id])
-    route = next(
-        op for op in bundle["template"]["operators"] if op["operator_id"] == "route"
-    )
-    route.pop("combination", None)
-    route.update(kind="branch", selection="s", outputs=[{"name": "p"}])
-    registry.v2_blobs[workflow_id] = json.dumps(bundle)
-
-    restored = _live_runtime(registry, "restored")
-    assert await restored.rehydrate() == 1
-    engine = restored.orchestration_engine(workflow_id)
-    assert engine is not None
-    assert any(
-        op.kind.value == "branch" for op in engine._topology.bundle.template.operators
-    )

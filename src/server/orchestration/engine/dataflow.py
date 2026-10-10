@@ -7,7 +7,6 @@ from ...task.v2.representations.operators import (
     BranchRegion,
     JoinCompletion,
     JoinRegion,
-    LoopContextRegion,
     MergeCombination,
     MergeRegion,
     OperatorKind,
@@ -43,7 +42,6 @@ from ..state import (
 from .advance import (
     Advance,
     dependency_failed,
-    legacy_control_unsupported,
 )
 from .authority import AuthorityLedger
 from .edges import EdgeResolver, EdgeState, Incoming
@@ -561,22 +559,8 @@ class RegionFlow:
         match op:
             case MergeRegion():
                 self._combine(key, op, inputs, advance)
-            case BranchRegion(rule=None):
-                self.fail_control(
-                    key,
-                    legacy_control_unsupported(op.operator_id, "a selection rule"),
-                    advance,
-                    fault=True,
-                )
-            case LoopContextRegion() if op.body_ref is None:
-                self.fail_control(
-                    key,
-                    legacy_control_unsupported(op.operator_id, "a body"),
-                    advance,
-                    fault=True,
-                )
-            case BranchRegion(rule=SelectionRule() as rule):
-                self._await_selection(key, op, rule, inputs, advance)
+            case BranchRegion():
+                self._await_selection(key, op, op.rule, inputs, advance)
             case SpawnRegion():
                 if any(i.state is EdgeState.DEAD for i in required):
                     self.mark_dead(key, advance)
@@ -1027,66 +1011,6 @@ class RegionFlow:
             )
             for member in (aggregate.members if aggregate else ())
         )
-
-    def adopt_stored_controls(self) -> None:
-        """Give each root control with no control state the state its ledger shows
-        it reached.
-
-        A failed region failed; a merge holding a record fired over its inputs; a
-        spawn whose scope opened is live with the values it captured; a join whose
-        scope released carries its result. A control with none of these is pending.
-        """
-        fired = {r.operator_id for r in self._ledger.records}
-        stored = [
-            op_id
-            for op_id in self._topology.operators
-            if self._topology.is_control(op_id)
-            and op_id not in self._topology.child_templates
-            and op_id not in self._topology.definition_of
-            and op_id not in self._ledger.control_states
-        ]
-        # A control fed by another stored control reads its state, so adopt in
-        # dependency order.
-        while adopted := [
-            op_id for op_id in stored if self._adopt_stored_control(op_id, fired)
-        ]:
-            stored = [op_id for op_id in stored if op_id not in adopted]
-
-    def _adopt_stored_control(self, op_id: str, fired: set[str]) -> bool:
-        op = self._topology.operators[op_id]
-        if self._failures.region_failed(op_id):
-            self._ledger.control_state(op_id).status = ControlStatus.FAILED
-            return True
-        match op:
-            case MergeRegion() if op_id in fired:
-                inputs = self.edges.incoming(op_id)
-                if any(i.state is EdgeState.PENDING for i in inputs):
-                    return False
-                state = self._ledger.control_state(op_id)
-                state.status = ControlStatus.LIVE
-                state.outputs = _port_outputs(op, _merged_value(op, inputs))
-            case SpawnRegion() if (
-                op_id not in self._topology.agent_region_spawns
-                and (scope_id := self._ledger.scope_id_for(op_id)) is not None
-            ):
-                state = self._ledger.control_state(op_id)
-                state.status = ControlStatus.LIVE
-                for item in self.edges.incoming(op_id):
-                    if item.value is not None:
-                        state.inputs[item.port or ""] = item.value
-                if scope_id not in self._ledger.scope_occurrence:
-                    self._ledger.bind_scope_occurrence(scope_id, op_id)
-            case JoinRegion() if self._ledger.region_closed(op_id) and (
-                scope_id := self._ledger.scope_id_for_join(op_id)
-            ):
-                _, value_ref = self._join_result(op, scope_id)
-                value_ref = self._delivered_join_value(op_id, value_ref)
-                state = self._ledger.control_state(op_id)
-                state.status = ControlStatus.LIVE
-                state.outputs = _port_outputs(op, value_ref or ValueRef(kind="empty"))
-            case _:
-                return False
-        return True
 
     def _fail_resolved_join(
         self, join_op: str, scope_id: str, children: list[Activation]
