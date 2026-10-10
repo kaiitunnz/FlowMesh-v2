@@ -134,13 +134,15 @@ class OrchestrationLedger:
         # collection, pruned as the walk finds one settled for good: per scope, its
         # occurrences, children and nested scopes that may still be open; work items a
         # task runs as that may still be unsettled; branch occurrences that may await
-        # a selector read; and spawn scopes that may still fan out.
+        # a selector read; spawn scopes that may still fan out; and work items whose
+        # declared input ports may still lack an accepted input.
         self.open_occurrences: dict[str, dict[str, None]] = {}
         self.open_children: dict[str, dict[str, None]] = {}
         self.open_subscopes: dict[str, dict[str, None]] = {}
         self.open_task_items: dict[str, None] = {}
         self.selection_candidates: dict[str, None] = {}
         self.fanout_candidates: dict[str, None] = {}
+        self.input_candidates: dict[str, None] = {}
 
     def occurrence(self, key: str) -> Occurrence:
         """An occurrence by key; a root key is its operator's implicit occurrence."""
@@ -177,6 +179,11 @@ class OrchestrationLedger:
         self.work_items[wi.work_item_id] = wi
         if wi.legacy_task_id:
             self.open_task_items[wi.work_item_id] = None
+
+    def set_continuation(self, continuation: Continuation) -> None:
+        self.continuations[continuation.work_item_id] = continuation
+        if continuation.required_ports:
+            self.input_candidates[continuation.work_item_id] = None
 
     def control_state(self, key: str) -> ControlState:
         """A control occurrence's state, created pending on first use."""

@@ -138,8 +138,8 @@ class SpawnRegions:
         entry_port = self._topology.agent_entry_port(wi.operator_id)
         if entry_port is None:
             return
-        self._ledger.continuations[wi.work_item_id] = Continuation(
-            work_item_id=wi.work_item_id, required_ports={entry_port}
+        self._ledger.set_continuation(
+            Continuation(work_item_id=wi.work_item_id, required_ports={entry_port})
         )
         if value_ref is not None and value_ref.kind == "inline":
             self._inputs.record_accepted_input(

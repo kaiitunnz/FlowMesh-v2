@@ -68,11 +68,14 @@ class TaskTable(dict[str, TaskRecord]):
         """A task of the workflow not in a terminal status, or None when every one
         is; the tasks found terminal before it are dropped from those still open."""
         open_ids = self._open.get(workflow_id, {})
-        for task_id in list(open_ids):
+        while open_ids:
+            task_id = next(iter(open_ids))
             record = self[task_id]
-            if record.status not in TERMINAL_TASK_STATUSES:
-                return task_id
             del open_ids[task_id]
+            if record.status not in TERMINAL_TASK_STATUSES:
+                # Behind the rest, so the next call reaches what settled since.
+                open_ids[task_id] = None
+                return task_id
             if record.finished_ts is not None:
                 self._last_finish[workflow_id] = max(
                     self._last_finish.get(workflow_id, record.finished_ts),

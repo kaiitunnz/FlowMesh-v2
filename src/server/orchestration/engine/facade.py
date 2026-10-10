@@ -1214,6 +1214,15 @@ class OrchestrationEngine:
         """Every task settled as a declared failure, with why."""
         return self._failures.declared_failures()
 
+    def unapplied_failures(self) -> list[tuple[str, str]]:
+        """Each task settled as a declared failure whose record has not yet been
+        failed for it, with why."""
+        return self._failures.unapplied_failures()
+
+    def mark_failure_applied(self, task_id: str) -> None:
+        """Note that a declared failure's task record no longer needs failing for it."""
+        self._failures.mark_applied(task_id)
+
     def recovery_disposition(self, task_id: str) -> RecoveryDisposition | None:
         """Whether the task's operation may be recomputed or must be restored."""
         return self._ledger.recovery_disposition(task_id)

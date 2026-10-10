@@ -15,6 +15,8 @@ from server.task.v2.representations.operators import BoundaryEventKind
 from shared.harness.adapter import HarnessResult, HarnessResultKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_agent_episode_runtime import _adapter, _step
+from tests.server.task.test_runtime_commit_then_act import _runtime as _durable_runtime
+from tests.server.task.test_runtime_durability_faults import _FaultyRegistry
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
@@ -1163,6 +1165,38 @@ async def test_a_restart_fails_a_task_the_ledger_already_failed() -> None:
     persisted = registry.load_task_states(after)[0]
     assert persisted is not None and persisted.record.status == TaskStatus.FAILED
     assert restored.workflow_settlement(workflow_id).settled
+
+
+@pytest.mark.anyio
+async def test_a_declared_failure_refused_by_the_store_is_written_on_its_retry() -> (
+    None
+):
+    registry = _FaultyRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, _HEAD + _NO_WINNER)
+    planner, after = ids["planner"], ids["after"]
+    pending = registry.task_blobs[after]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
+    registry.task_blobs[after] = pending
+    registry.remaining.setdefault(workflow_id, set()).add(after)
+
+    restored = _durable_runtime(registry, runtime._results)
+    registry.fail_from = registry.writes + 1
+    assert await restored.rehydrate() == 1
+    record = restored.get_record(after)
+    assert record is not None and record.status == TaskStatus.FAILED
+    assert registry.record(after).status == TaskStatus.PENDING
+    assert restored._durability.pending(workflow_id)
+
+    # Later saves of the ledger do not drop the record write it still owes.
+    restored._durability.run_due()
+    assert registry.record(after).status == TaskStatus.PENDING
+    registry.heal()
+    while restored._durability.pending(workflow_id):
+        restored._durability.run_due()
+    assert registry.record(after).status == TaskStatus.FAILED
+    assert registry.record(after).error == "join collect resolved no winner"
 
 
 def test_a_restart_fails_a_stored_reader_of_a_spawned_agents_region(

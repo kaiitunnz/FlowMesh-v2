@@ -77,6 +77,22 @@ def test_a_workflow_is_settled_once_its_last_open_task_is_terminal() -> None:
     assert table.holds("w") and not table.holds("other")
 
 
+def test_tasks_settling_behind_a_long_open_task_are_dropped_as_found() -> None:
+    table = TaskTable()
+    table["head"] = _record("head", "w")
+    for i in range(3):
+        table[f"t{i}"] = _record(f"t{i}", "w")
+    assert table.first_unsettled("w") == "head"
+    for i in range(3):
+        table[f"t{i}"].status = TaskStatus.DONE
+        table[f"t{i}"].finished_ts = float(i)
+    assert table.first_unsettled("w") == "head"
+    # Each call walks only up to an open task, so the settled ones leave the walk.
+    assert list(table._open["w"]) == ["head"]
+    assert table.last_finish("w") == 2.0
+    assert table.ids_of("w") == ["head", "t0", "t1", "t2"]
+
+
 @pytest.mark.anyio
 async def test_settlement_reads_only_its_workflows_tasks(
     monkeypatch: pytest.MonkeyPatch,

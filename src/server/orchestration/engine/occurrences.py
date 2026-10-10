@@ -79,8 +79,8 @@ class OccurrenceFactory:
             waiting = {e.from_op for e in self._topology.incoming.get(operator_id, ())}
             if not isinstance(op, (LeafOperator, AgentOperator)):
                 self._ledger.control_state(key)
-                self._ledger.continuations[control_key(key)] = Continuation(
-                    work_item_id=control_key(key), waiting_on=waiting
+                self._ledger.set_continuation(
+                    Continuation(work_item_id=control_key(key), waiting_on=waiting)
                 )
                 continue
             effect, recovery = effect_recovery(op)
@@ -97,14 +97,16 @@ class OccurrenceFactory:
             self._ledger.wi_by_activation[activation.activation_id] = wi.work_item_id
             self._ledger.wi_by_task[wi.legacy_task_id] = wi.work_item_id
             self._ledger.wi_by_occurrence[key] = wi.work_item_id
-            self._ledger.continuations[wi.work_item_id] = Continuation(
-                work_item_id=wi.work_item_id,
-                waiting_on=waiting,
-                required_ports=(
-                    set(op.declared_input_ports)
-                    if isinstance(op, AgentOperator)
-                    else set()
-                ),
+            self._ledger.set_continuation(
+                Continuation(
+                    work_item_id=wi.work_item_id,
+                    waiting_on=waiting,
+                    required_ports=(
+                        set(op.declared_input_ports)
+                        if isinstance(op, AgentOperator)
+                        else set()
+                    ),
+                )
             )
         self._ledger.emit(
             "definition_entered",

@@ -89,7 +89,10 @@ class SnapshotCodec:
         self._ledger.open_task_items = {}
         for wi in snapshot.work_items:
             self._ledger.add_work_item(wi)
-        self._ledger.continuations = {c.work_item_id: c for c in snapshot.continuations}
+        self._ledger.continuations = {}
+        self._ledger.input_candidates = {}
+        for continuation in snapshot.continuations:
+            self._ledger.set_continuation(continuation)
         self._ledger.records = list(snapshot.records)
         self._inputs.accepted_inputs = list(snapshot.accepted_inputs)
         self._inputs.accepted_by_activation = {}
@@ -272,6 +275,7 @@ class SnapshotCodec:
                 self._failures.failure_reasons.setdefault(
                     wi.legacy_task_id, wi.failure_reason or DECLARED_FAILURE_REASON
                 )
+        self._failures.unapplied = dict.fromkeys(self._failures.failure_reasons)
         # A spawn-site denial names no work item; an agent's denied boundary names one
         # and never refuses a later spawn.
         self._authority.denied_spawns = {

@@ -7,6 +7,7 @@ from ...task.v2.representations.operators import (
 )
 from ...task.v2.representations.template import TemplateEdge
 from ..state import (
+    TERMINAL_WORK_ITEM_STATUSES,
     AcceptedInput,
     AcceptedInputMember,
     Occurrence,
@@ -125,14 +126,18 @@ class AcceptedInputLedger:
     def blocked_input_agents(self) -> list[str]:
         """Task ids of agents blocked on an unsatisfied declared-input manifest."""
         pending: list[str] = []
-        for wi in self._ledger.work_items.values():
-            if wi.status is not WorkItemStatus.BLOCKED or not wi.legacy_task_id:
+        candidates = self._ledger.input_candidates
+        for wi_id in list(candidates):
+            wi = self._ledger.work_items.get(wi_id)
+            if wi is None or not wi.legacy_task_id:
+                del candidates[wi_id]
                 continue
-            cont = self._ledger.continuations.get(wi.work_item_id)
-            if cont is None or not cont.required_ports:
-                continue
+            cont = self._ledger.continuations[wi_id]
             have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
-            if not cont.required_ports <= have:
+            # Accepted inputs are only ever added, so a satisfied manifest stays so.
+            if wi.status in TERMINAL_WORK_ITEM_STATUSES or cont.required_ports <= have:
+                del candidates[wi_id]
+            elif wi.status is WorkItemStatus.BLOCKED:
                 pending.append(wi.legacy_task_id)
         return pending
 

@@ -617,23 +617,21 @@ class TransitionCommitter:
         self.commit_locked(*touched)
         self.commit_locked(*(task_id for task_id in returned if task_id not in touched))
 
-    def _persist_declared_failures_locked(
-        self, engine: OrchestrationEngine, new: Sequence[str] = ()
-    ) -> None:
+    def _persist_declared_failures_locked(self, engine: OrchestrationEngine) -> None:
         """Fail and persist each task the engine settled as a declared failure whose
-        record has not settled, ahead of a ledger write that reflects it. ``new`` are
-        records the write itself creates."""
+        record has not settled, ahead of a ledger write that reflects it.
+
+        A failure whose task has no record yet stays unapplied for a later write; once
+        failed, its record's durability is owed like any other commit's.
+        """
         failed: list[str] = []
-        for task_id, reason in engine.declared_failures().items():
-            record = self._tasks.get(task_id)
-            if (
-                record is None
-                or record.status in SETTLING_TASK_STATUSES
-                or task_id in new
-            ):
+        for task_id, reason in engine.unapplied_failures():
+            if (record := self._tasks.get(task_id)) is None:
                 continue
-            self._record_failures.fail_record_locked(record, reason)
-            failed.append(task_id)
+            if record.status not in SETTLING_TASK_STATUSES:
+                self._record_failures.fail_record_locked(record, reason)
+                failed.append(task_id)
+            engine.mark_failure_applied(task_id)
         if failed:
             self.commit_locked(*failed)
 
