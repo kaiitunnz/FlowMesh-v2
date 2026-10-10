@@ -228,10 +228,12 @@ fails everything downstream of it.
 
 #### Branches and merges
 
-A `branch` routes its input to exactly one of its `outputs`. Its `selection` names
+A `branch` routes a value to exactly one of its `outputs`. Its `selection` names
 the `input` it reads, the `field` path to a string inside it, and optionally
 `cases` mapping each value to a port; without `cases` the value names the port.
-A consumer depends on the arm it takes:
+The selected port carries the value of the input `forward` names, by default the
+one it selects on, so a loop can carry one node's result while another decides
+whether to go on. A consumer depends on the arm it takes:
 
 ```yaml
       - name: classify
@@ -249,14 +251,14 @@ A consumer depends on the arm it takes:
 ```
 
 Case values are strings, so quote any that YAML would read otherwise. A value
-that is not a string, or matches no case or port, fails the branch. A task on an
-arm the branch did not take finishes `DONE` without running, with a skipped
-result (`reason: route_not_taken`), and so does everything that needs it. A
-`merge` joins arms back together: `combination: one_live` forwards the one live
-arm's value, and `concat`, the default, collects every live input in declared
-order. A branch selects on, and a spawn fans out over, a `one_live` merge only
-when each of its arms carries one value rather than a join's or a `concat`
-merge's aggregate.
+that is not a string, or matches no case or port, fails the branch, and so does
+a selection or forwarded input that failed. A task on an arm the branch did not
+take finishes `DONE` without running, with a skipped result
+(`reason: route_not_taken`), and so does everything that needs it. A `merge`
+joins arms back together: `combination: one_live` forwards the one live arm's
+value, and `concat`, the default, collects every live input in declared order. A
+branch selects on, and a spawn fans out over, a `one_live` merge only when each of
+its arms carries one value rather than a join's or a `concat` merge's aggregate.
 
 #### Graph templates
 

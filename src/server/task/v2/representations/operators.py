@@ -601,6 +601,7 @@ class BranchRegion(_OperatorBase):
 
     kind: Literal[OperatorKind.BRANCH] = OperatorKind.BRANCH
     rule: SelectionRule
+    forward: str  # the input whose value the selected port carries
 
 
 class MergeRegion(_OperatorBase):

@@ -466,7 +466,7 @@ def _apply_result_visibility(
 
 _PUBLISHING_KINDS = frozenset({"spawn", "merge", "join", "loop"})
 _REGION_KEYS = {
-    "branch": frozenset({"kind", "inputs", "outputs", "selection"}),
+    "branch": frozenset({"kind", "inputs", "outputs", "selection", "forward"}),
     "loop": frozenset(
         {"kind", "body_ref", "loop_coordinate", "carried", "invariants", "result"}
     ),
@@ -782,7 +782,23 @@ def _branch(region: ParsedRegion) -> BranchRegion:
         inputs=inputs,
         outputs=outputs,
         rule=SelectionRule(input=selected_input, field=tuple(steps), cases=cases),
+        forward=_forward(region, selected_input),
     )
+
+
+def _forward(region: ParsedRegion, selected_input: str) -> str:
+    """The input a branch passes on: the one it declares, else the one it selects
+    on."""
+    raw = region.region.get("forward")
+    if raw is None:
+        return selected_input
+    if not isinstance(raw, str) or not raw.strip():
+        raise compile_error(
+            "branch.unknown-forward",
+            "region.forward names one of the branch's inputs",
+            region.authored_name,
+        )
+    return raw.strip()
 
 
 def _loop(region: ParsedRegion, definitions: set[str]) -> LoopContextRegion:

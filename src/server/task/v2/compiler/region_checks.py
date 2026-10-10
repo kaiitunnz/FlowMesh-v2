@@ -18,6 +18,7 @@ from ..representations.operators import (
     MergeRegion,
     PortKind,
     SpawnRegion,
+    branch_selection_index,
     is_spawn_fanout_port,
 )
 from ..representations.template import (
@@ -115,15 +116,24 @@ def releases_one_value(
     incoming: Mapping[str, Sequence[TemplateEdge]],
 ) -> bool:
     """Whether an operator releases one value rather than an aggregate: a task's
-    result, a branch arm, a loop's exit value, or a one_live merge each of whose arms
-    releases one; ``incoming`` holds each operator's incoming edges."""
+    result, a loop's exit value, a branch arm forwarding one, or a one_live merge each
+    of whose arms releases one; ``incoming`` holds each operator's incoming edges."""
 
     def _one(current: str, seen: frozenset[str]) -> bool:
         match ops.get(current):
-            case (
-                LeafOperator() | AgentOperator() | BranchRegion() | LoopContextRegion()
-            ):
+            case LeafOperator() | AgentOperator() | LoopContextRegion():
                 return True
+            case BranchRegion(forward=forward):
+                edges = incoming.get(current, ())
+                index = branch_selection_index([e.to_port for e in edges], forward)
+                if index is None:
+                    return False
+                edge = edges[index]
+                return (
+                    edge.boundary is BoundaryKind.ENTRY
+                    or edge.from_op in seen
+                    or _one(edge.from_op, seen | {current})
+                )
             case MergeRegion(combination=MergeCombination.ONE_LIVE):
                 return all(
                     edge.boundary is BoundaryKind.ENTRY
@@ -180,6 +190,14 @@ def _check_branch(
             _error(
                 "branch.bad-selection",
                 f"selection input {op.rule.input!r} is not an input of the branch",
+                location,
+            )
+        )
+    if op.forward not in {port.name for port in op.inputs}:
+        diags.append(
+            _error(
+                "branch.unknown-forward",
+                f"forwarded input {op.forward!r} is not an input of the branch",
                 location,
             )
         )

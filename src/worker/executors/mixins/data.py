@@ -427,6 +427,7 @@ class DataMixin(GovernanceMixin):
             items = data.get("items")
             context: dict[str, BaseExecutorResult] | None = None
             root_node: str | None = None
+            resolved_expr = ""
             if items is None:
                 expr = data.get("expr")
                 if not expr:

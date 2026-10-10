@@ -11,7 +11,6 @@ from ...task.v2.representations.operators import (
     MergeRegion,
     OperatorKind,
     ResidualPolicy,
-    SelectionRule,
     SpawnRegion,
     branch_selection_index,
     is_spawn_fanout_port,
@@ -274,7 +273,6 @@ class RegionFlow:
             op = self._topology.operators.get(self._ledger.occurrence(key).operator_id)
             if (
                 not isinstance(op, BranchRegion)
-                or op.rule is None
                 or state.status is not ControlStatus.PENDING
                 or key in self._ledger.branch_decisions
             ):
@@ -288,10 +286,10 @@ class RegionFlow:
     ) -> Advance:
         """Route a branch occurrence by the selector value read from its input.
 
-        Selects the one port the rule names and resolves every other port dead, or
-        fails the branch when the value selects nothing or ``error`` says its input
-        could not be read. An occurrence already decided, or no longer pending, is
-        left as it is.
+        Selects the one port the rule names, releasing on it the value of the input
+        the branch forwards, and resolves every other port dead, or fails the branch
+        when the value selects nothing or ``error`` says its input could not be read.
+        An occurrence already decided, or no longer pending, is left as it is.
         """
         advance = Advance()
         state = self._ledger.control_states.get(key)
@@ -302,8 +300,8 @@ class RegionFlow:
             or state.status is not ControlStatus.PENDING
             or key in self._ledger.branch_decisions
             or not isinstance(branch, BranchRegion)
-            or branch.rule is None
             or branch.rule.input not in state.inputs
+            or branch.forward not in state.inputs
         ):
             return advance
         port, case, reason = (
@@ -314,20 +312,20 @@ class RegionFlow:
                 key, f"BranchSelectionInvalid: {reason}", advance, fault=True
             )
             return advance
-        selected = state.inputs[branch.rule.input]
+        forwarded = state.inputs[branch.forward]
         self._ledger.branch_decisions[key] = BranchDecision(
             occurrence=key,
             port=port,
             case=case,
             rule_version=branch.rule.version,
-            input_ref=selected,
+            input_ref=state.inputs[branch.rule.input],
         )
         state.status = ControlStatus.LIVE
-        state.outputs[port] = selected
+        state.outputs[port] = forwarded
         self._ledger.emit(
             "branch_routed", operator_id=occurrence.operator_id, detail={"port": port}
         )
-        self.propagate(key, advance, value=selected, port=port)
+        self.propagate(key, advance, value=forwarded, port=port)
         return advance
 
     def cancel_one_scope(self, scope_id: str) -> Advance:
@@ -560,7 +558,7 @@ class RegionFlow:
             case MergeRegion():
                 self._combine(key, op, inputs, advance)
             case BranchRegion():
-                self._await_selection(key, op, op.rule, inputs, advance)
+                self._await_selection(key, op, inputs, advance)
             case SpawnRegion():
                 if any(i.state is EdgeState.DEAD for i in required):
                     self.mark_dead(key, advance)
@@ -663,22 +661,37 @@ class RegionFlow:
         self.propagate(key, advance, value=value)
 
     def _await_selection(
-        self,
-        key: str,
-        op: BranchRegion,
-        rule: SelectionRule,
-        inputs: list[Incoming],
-        advance: Advance,
+        self, key: str, op: BranchRegion, inputs: list[Incoming], advance: Advance
     ) -> None:
-        if any(
-            i.state is EdgeState.DEAD
-            for i in inputs
-            if i.use is not DependencyUse.ORDER_ONLY
-        ):
+        """Hold a branch whose inputs resolved for the read of its selector.
+
+        Its selection and forwarded inputs both take part: one that failed or was
+        cancelled fails the branch, and a dead one leaves it inactive. The values
+        both bind are fixed here, so the decision reads and releases exactly these.
+        """
+        ports = [i.port for i in inputs]
+        participating = {
+            index
+            for name in (op.rule.input, op.forward)
+            if (index := branch_selection_index(ports, name)) is not None
+        }
+        required = [
+            item
+            for index, item in enumerate(inputs)
+            if index in participating or item.use is not DependencyUse.ORDER_ONLY
+        ]
+        if broken := [i for i in required if i.state in _BROKEN_STATES]:
+            self.fail_control(
+                key, f"branch input {broken[0].edge.from_op} failed", advance
+            )
+            return
+        if any(i.state is EdgeState.DEAD for i in required):
             self.mark_dead(key, advance)
             return
-        index = branch_selection_index([i.port for i in inputs], rule.input)
+        index = branch_selection_index(ports, op.rule.input)
         selected = inputs[index] if index is not None else None
+        index = branch_selection_index(ports, op.forward)
+        forwarded = inputs[index] if index is not None else None
         if (
             selected is None
             or selected.state is EdgeState.EMPTY
@@ -692,7 +705,12 @@ class RegionFlow:
             )
             return
         state = self._ledger.control_state(key)
-        state.inputs[rule.input] = selected.value
+        state.inputs[op.rule.input] = selected.value
+        state.inputs[op.forward] = (
+            forwarded.value
+            if forwarded is not None and forwarded.value is not None
+            else ValueRef(kind="empty")
+        )
         self._ledger.selection_candidates[key] = None
         self._ledger.emit("branch_awaiting_selection", operator_id=op.operator_id)
 

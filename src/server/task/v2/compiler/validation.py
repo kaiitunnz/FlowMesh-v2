@@ -629,9 +629,20 @@ def _check_region_inputs(
                 )
             )
     for op in template.operators:
-        if not isinstance(op, BranchRegion) or op.rule is None:
+        if not isinstance(op, BranchRegion):
             continue
         branch_inputs = incoming.get(op.operator_id, [])
+        if (
+            branch_selection_index([edge.to_port for edge in branch_inputs], op.forward)
+            is None
+        ):
+            diags.append(
+                _region_input(
+                    op.operator_id,
+                    f"binds no edge to its forwarded input {op.forward!r}",
+                    loc,
+                )
+            )
         index = branch_selection_index(
             [edge.to_port for edge in branch_inputs], op.rule.input
         )
