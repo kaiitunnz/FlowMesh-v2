@@ -488,10 +488,7 @@ class SnapshotCodec:
         return encode_fields(
             self._foundation(),
             {
-                name: [
-                    (key, tracked.ordinals[key], value)
-                    for key, value in tracked.items()
-                ]
+                name: (tracked, tracked.ordinals)
                 for name, tracked in self._keyed.items()
             },
             self._histories,

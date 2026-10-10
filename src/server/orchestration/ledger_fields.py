@@ -98,7 +98,8 @@ SET_MEMBER = "1"
 
 
 type LedgerOrdinals = Mapping[str, Mapping[Hashable, int]]
-type KeyedEntries = Iterable[tuple[Hashable, int, BaseModel | str]]
+# A keyed collection's entries by key, with each key's insertion ordinal.
+type KeyedEntries = tuple[Mapping[Any, BaseModel | str], Mapping[Any, int]]
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,8 @@ def _key_part(part: Hashable) -> Any:
 
 
 def _encoded_part(part: Hashable) -> str:
+    if type(part) is int:
+        return str(part)
     if (
         type(part) is str
         and part.isascii()
@@ -191,12 +194,13 @@ def encode_fields(
 ) -> dict[str, str]:
     """Every field of a ledger."""
     fields = foundation_fields(foundation)
-    for collection, entries in keyed.items():
-        for key, ordinal, value in entries:
-            fields[field_name(collection, key)] = keyed_value(ordinal, value)
+    for collection, (entries, ordinals) in keyed.items():
+        for key, value in entries.items():
+            fields[field_name(collection, key)] = keyed_value(ordinals[key], value)
     for collection, history in histories.items():
+        prefix = f"{collection}:["
         for position, entry in enumerate(history):
-            fields[history_field(collection, position)] = entry.model_dump_json()
+            fields[f"{prefix}{position}]"] = entry.model_dump_json()
     for collection, members in sets.items():
         for member in members:
             fields[member_field(collection, member)] = SET_MEMBER
@@ -209,14 +213,13 @@ def encode_ledger(stored: StoredLedger) -> dict[str, str]:
     """Every field of a stored ledger."""
     snapshot, ordinals = stored.snapshot, stored.ordinals
 
-    def keyed(collection: str) -> list[tuple[Hashable, int, BaseModel | str]]:
+    def keyed(collection: str) -> KeyedEntries:
         order = ordinals.get(collection, {})
         if collection in STRINGS:
-            reasons: dict[str, str] = getattr(snapshot, collection)
-            return [(key, order[key], value) for key, value in reasons.items()]
+            return getattr(snapshot, collection), order
         key_of = KEYED[collection][1]
         entities: list[BaseModel] = getattr(snapshot, collection)
-        return [(key_of(e), order[key_of(e)], e) for e in entities]
+        return {key_of(e): e for e in entities}, order
 
     return encode_fields(
         {name: getattr(snapshot, name) for name in FOUNDATION},
