@@ -128,11 +128,13 @@ class SnapshotCodec:
         self._rewrite = 0
         self._rewritten = 0
         self._acknowledged: dict[str, str] | None = None
+        self._stored: LedgerOrdinals | None = None
 
     def _keyed_dict[K: Hashable, V](
         self, name: str, items: Iterable[tuple[K, V]] = ()
     ) -> TrackedDict[K, V]:
-        tracked = TrackedDict[K, V](self._journal, name, items)
+        stored = None if self._stored is None else self._stored.get(name, {})
+        tracked = TrackedDict[K, V](self._journal, name, items, stored)
         self._keyed[name] = tracked
         return tracked
 
@@ -153,6 +155,10 @@ class SnapshotCodec:
         each keyed entry when it is the stored ledger, which a write then changes only
         where the restore did. Without them the next write rewrites the ledger."""
         snapshot = _detached(snapshot)
+        self._stored = ordinals
+        for order in (ordinals or {}).values():
+            if order:
+                self._journal.seen_ordinal(max(order.values()))
         self._keyed.clear()
         self._histories.clear()
         self._sets.clear()
@@ -435,25 +441,18 @@ class SnapshotCodec:
     ) -> None:
         """Take the restored ledger as what is stored, owing what the restore changed
         of it, or a rewrite when it is not a stored ledger."""
-        self._journal.pending.clear()
+        self._stored = None
         self._written_lengths = {name: len(h) for name, h in self._histories.items()}
         self._written_scalars = self._scalars()
         self._acknowledged = None
         if ordinals is None:
+            self._journal.reset()
             self.owe_rewrite()
             return
-        for order in ordinals.values():
-            for ordinal in order.values():
-                self._journal.seen_ordinal(ordinal)
-        for name, tracked in self._keyed.items():
-            stored = ordinals.get(name, {})
-            for key in tracked:
-                if key in stored:
-                    tracked.ordinals[key] = stored[key]
-                else:
-                    tracked.ordinals[key] = self._journal.ordinal()
-                    self._journal.mark((name, key))
-            for key in stored.keys() - tracked.keys():
+        for tracked in self._keyed.values():
+            tracked.restoring = None
+        for name, stored in ordinals.items():
+            for key in stored.keys() - self._keyed.get(name, {}).keys():
                 self._journal.mark((name, key))
         if self.verify_changes:
             self._acknowledged = encode_ledger(StoredLedger(snapshot, ordinals))

@@ -252,6 +252,28 @@ def test_each_key_names_one_field() -> None:
     assert field_name("c", ("a", ProgressAxis.LOOP_TIME)) == 'c:["a","loop_time"]'
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "wki-1",
+        'quo"te',
+        "back\\slash",
+        "tab\there",
+        "\x7f",
+        "naïve",
+        "",
+        7,
+        True,
+        ("a", 1, ProgressAxis.LOOP_TIME),
+    ],
+)
+def test_a_field_name_is_its_key_as_compact_json(key: Any) -> None:
+    parts = key if isinstance(key, tuple) else (key,)
+    values = [p.value if isinstance(p, ProgressAxis) else p for p in parts]
+
+    assert field_name("c", key) == "c:" + json.dumps(values, separators=(",", ":"))
+
+
 def _stored() -> StoredLedger:
     eng = engine(chain_bundle())
     eng.on_dispatched("A", "w1")

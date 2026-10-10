@@ -10,7 +10,7 @@ other change.
 from collections.abc import Callable, Hashable, Iterable, Mapping
 from typing import Any, NoReturn, Self
 
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel
 
 type JournalKey = tuple[str, Hashable]
 
@@ -42,6 +42,10 @@ class LedgerJournal:
     def seen_ordinal(self, ordinal: int) -> None:
         self._next_ordinal = max(self._next_ordinal, ordinal + 1)
 
+    def reset(self) -> None:
+        """Drop every pending change, for a ledger written whole next."""
+        self.pending.clear()
+
     def captured(self) -> dict[JournalKey, int]:
         return dict(self.pending)
 
@@ -56,52 +60,38 @@ class JournaledModel(BaseModel):
     """A mutable ledger entity: each assignment marks the collection slot holding it,
     and a container assigned to it is stored frozen."""
 
-    _slot: tuple["TrackedDict[Any, Any]", Hashable] | None = PrivateAttr(default=None)
+    # The holding slot is a plain instance slot, not a pydantic private attribute: a
+    # restored entity then carries no private-state dict, and the slot is no part of
+    # the entity's value, its copies or its pickle.
+    __slots__ = ("_slot",)
+
+    def _held_at(self) -> tuple["TrackedDict[Any, Any]", Hashable] | None:
+        return getattr(self, "_slot", None)
+
+    def _hold(self, slot: tuple["TrackedDict[Any, Any]", Hashable] | None) -> None:
+        object.__setattr__(self, "_slot", slot)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name.startswith("_"):
-            super().__setattr__(name, value)
-            return
         super().__setattr__(name, frozen(value))
-        if (slot := self._slot) is not None:
+        if (slot := self._held_at()) is not None:
             slot[0].touch(slot[1])
 
     @property
     def held(self) -> bool:
-        return self._slot is not None
+        return self._held_at() is not None
 
     def claim(self, owner: "TrackedDict[Any, Any]", key: Hashable) -> None:
-        if (slot := self._slot) is not None and (
+        if (slot := self._held_at()) is not None and (
             slot[0] is not owner or slot[1] != key
         ):
             raise ValueError(
                 f"{type(self).__name__} {key!r} is already held at {slot[1]!r}"
             )
-        self._slot = (owner, key)
+        self._hold((owner, key))
 
     def release(self, owner: "TrackedDict[Any, Any]") -> None:
-        if (slot := self._slot) is not None and slot[0] is owner:
-            self._slot = None
-
-    def __eq__(self, other: Any) -> bool:
-        # The slot holding an entity is not part of its value.
-        if not isinstance(other, BaseModel):
-            return NotImplemented
-        return (
-            type(self) is type(other)
-            and self.__dict__ == other.__dict__
-            and self.__pydantic_extra__ == other.__pydantic_extra__
-        )
-
-    def __copy__(self) -> Self:
-        copied = super().__copy__()
-        copied._slot = None
-        return copied
-
-    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
-        copied = super().__deepcopy__(memo)
-        copied._slot = None
-        return copied
+        if (slot := self._held_at()) is not None and slot[0] is owner:
+            self._hold(None)
 
 
 def _refusal(message: str) -> Callable[..., NoReturn]:
@@ -154,18 +144,24 @@ def freeze_mapping[K, V](value: Mapping[K, V]) -> FrozenMap[K, V]:
 
 class TrackedDict[K: Hashable, V](dict[K, V]):
     """A keyed ledger collection that journals each entry it sets or removes, keeps
-    each key's insertion ordinal, and holds each mutable entity it stores."""
+    each key's insertion ordinal, and holds each mutable entity it stores.
+
+    While it is ``restoring`` a stored collection, an entry set under a key the store
+    holds takes the key's stored ordinal and is no change.
+    """
 
     def __init__(
         self,
         journal: LedgerJournal,
         name: str,
         items: Iterable[tuple[K, V]] = (),
+        restoring: Mapping[Hashable, int] | None = None,
     ) -> None:
         super().__init__()
         self.journal = journal
         self.name = name
         self.ordinals: dict[K, int] = {}
+        self.restoring = restoring
         for key, value in items:
             self[key] = value
 
@@ -179,6 +175,12 @@ class TrackedDict[K: Hashable, V](dict[K, V]):
             value.claim(self, key)
         super().__setitem__(key, value)
         if key not in self.ordinals:
+            if (
+                self.restoring is not None
+                and (ordinal := self.restoring.get(key)) is not None
+            ):
+                self.ordinals[key] = ordinal
+                return
             self.ordinals[key] = self.journal.ordinal()
         self.touch(key)
 
