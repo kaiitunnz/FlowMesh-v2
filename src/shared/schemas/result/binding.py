@@ -13,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from shared.tasks.result_binding import BindingKind, ResultBinding, ResultElementRef
 
+from ..artifact import ArtifactContext, ArtifactRef
 from ._base import BaseExecutorResult
 from .catalog import ResultEnvelope
 from .routed import RoutedValue, routed_root
@@ -186,12 +187,70 @@ def upstream_value(
     if binding.whole_result:
         return envelope_of(binding).result
     value = scoped_value(binding, envelope_of)
-    artifacts = (
-        envelope_of(binding).result.artifacts_
-        if binding.kind is BindingKind.RESULT
-        else None
+    contexts = artifact_contexts(binding, envelope_of)
+    return RoutedValue(
+        routed_value=value,
+        _artifacts=contexts.pop((), None),
+        _member_artifacts={".".join(at): ctx for at, ctx in contexts.items()},
     )
-    return RoutedValue(routed_value=value, _artifacts=artifacts)
+
+
+def artifact_contexts(
+    binding: ResultBinding, envelope_of: Callable[[ResultBinding], ResultEnvelope]
+) -> dict[tuple[str, ...], ArtifactContext]:
+    """The artifact context of each producer whose values a binding reads, by the
+    read path into the value under which that producer's values sit.
+
+    A value read out of one result sits under its producer whole; an aggregate
+    member's value under ``(i, "value")`` and a bundle's under its key resolve against
+    the member's own producer.
+    """
+    found: dict[tuple[str, ...], ArtifactContext] = {}
+
+    def collect(source: ResultBinding, at: tuple[str, ...]) -> None:
+        match source.kind:
+            case BindingKind.RESULT:
+                if (context := envelope_of(source).result.artifacts_) is not None:
+                    found[at] = context
+            case BindingKind.MEMBERS:
+                for index, member in enumerate(source.members):
+                    if member.binding is not None and member.outcome == _SUCCESS:
+                        collect(member.binding, (*at, str(index), "value"))
+            case BindingKind.BUNDLE:
+                for member in source.members:
+                    if member.binding is not None:
+                        collect(member.binding, (*at, member.key))
+
+    collect(binding.model_copy(update={"path": ()}), ())
+    path = tuple(str(step) for step in binding.path)
+    return {
+        at[len(path) :] if at[: len(path)] == path else (): context
+        for at, context in found.items()
+        if at[: len(path)] == path or path[: len(at)] == at
+    }
+
+
+def artifact_context(
+    value: Any, path: Sequence[str | int] = ()
+) -> ArtifactContext | None:
+    """The context an artifact ref at ``path`` inside an upstream value resolves
+    against: its producer's, the nearest one enclosing it."""
+    if isinstance(value, RoutedValue):
+        steps = tuple(str(step) for step in path)
+        for length in range(len(steps), 0, -1):
+            if (
+                context := value.member_artifacts_.get(".".join(steps[:length]))
+            ) is not None:
+                return context
+    return value.artifacts_ if isinstance(value, BaseExecutorResult) else None
+
+
+def artifact_ref_path(value: Any) -> str | None:
+    """The relative path an artifact ref names, or None for any other value."""
+    match value:
+        case ArtifactRef(path=path) | {"path": str() as path}:
+            return path or None
+    return None
 
 
 def _member_value(
@@ -218,6 +277,10 @@ def binding_text(
         value = scoped_value(binding, envelope_of)
     except IndexError:
         return None
+    if (ref := artifact_ref_path(value)) is not None and (
+        context := artifact_contexts(binding, envelope_of).get(())
+    ) is not None:
+        return context.url_for(ref)
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
     return _stringify(value)
@@ -249,6 +312,9 @@ def _stringify(value: Any) -> str:
 
 __all__ = [
     "NotAResultEnvelope",
+    "artifact_context",
+    "artifact_contexts",
+    "artifact_ref_path",
     "binding_text",
     "collection_element",
     "collection_elements",

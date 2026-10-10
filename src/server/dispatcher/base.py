@@ -2,20 +2,25 @@ import datetime
 import logging
 import time
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
 from shared.private_state import OwnerFence, PrivateStateUnavailableReason
-from shared.schemas.artifact import ArtifactRef
+from shared.schemas.artifact import ArtifactContext
 from shared.schemas.event import TaskEvent
 from shared.schemas.result import (
     BaseExecutorResult,
     ResultEnvelope,
 )
-from shared.schemas.result.binding import scoped_value
+from shared.schemas.result.binding import (
+    artifact_context,
+    artifact_ref_path,
+    scoped_value,
+    upstream_value,
+)
+from shared.schemas.result.routed import routed_root
 from shared.tasks import (
     MergedChildTaskStrict,
     TaskEnvelope,
@@ -24,7 +29,7 @@ from shared.tasks import (
     TaskSpecStrict,
 )
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
-from shared.tasks.result_binding import BindingKind, ResultBinding
+from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import (
     ConditionSpec,
     SSHSpecStrict,
@@ -1387,25 +1392,26 @@ class Dispatcher:
             raise ValueError(f"Unknown stage reference '{name.strip()}'")
         if dot and path.strip() == "task_id" and entry.task_id is not None:
             return entry.task_id
-        value = self._scoped_value(entry.binding)
-        if not dot:
-            return (
-                value.model_dump(mode="json") if isinstance(value, BaseModel) else value
-            )
-        value = self._dig_result_path(value, path.split("."))
-        if value is None:
+        upstream = self._upstream_value(entry.binding)
+        steps = path.split(".") if dot else []
+        value = routed_root(upstream)
+        if steps and (value := self._dig_result_path(value, steps)) is None:
             raise ValueError(f"Missing value for reference '{expr.strip()}'")
-        if entry.binding.kind is BindingKind.RESULT and (
-            rendered := self._render_artifact_ref(
-                value, self._runtime.read_binding(entry.binding)
-            )
+        if rendered := self._render_artifact_ref(
+            value, artifact_context(upstream, steps)
         ):
             return rendered
-        return value
+        return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
 
     def _scoped_value(self, binding: ResultBinding) -> Any:
         try:
             return scoped_value(binding, self._runtime.read_binding)
+        except IndexError as exc:
+            raise StageResultMissing(str(exc)) from exc
+
+    def _upstream_value(self, binding: ResultBinding) -> BaseExecutorResult:
+        try:
+            return upstream_value(binding, self._runtime.read_binding)
         except IndexError as exc:
             raise StageResultMissing(str(exc)) from exc
 
@@ -1465,31 +1471,19 @@ class Dispatcher:
         # legacy ``{path: ...}`` dict), render it as a full URL (when base_url
         # is set) or an absolute filesystem path using the producing stage's
         # top-level _artifacts context.
-        if rendered := self._render_artifact_ref(value, envelope):
+        if rendered := self._render_artifact_ref(value, envelope.result.artifacts_):
             return rendered
         return value
 
     @staticmethod
-    def _render_artifact_ref(value: Any, stage_result: ResultEnvelope) -> str | None:
-        if isinstance(value, ArtifactRef):
-            path_value: str | None = value.path
-        elif isinstance(value, dict):
-            path_value = value.get("path")
-        else:
+    def _render_artifact_ref(value: Any, context: ArtifactContext | None) -> str | None:
+        if (
+            context is None
+            or not context.base_dir
+            or (path := artifact_ref_path(value)) is None
+        ):
             return None
-        if not isinstance(path_value, str) or not path_value:
-            return None
-        ctx = stage_result.result.artifacts_
-        if ctx is None:
-            return None
-        base_url = ctx.base_url
-        base_dir = ctx.base_dir
-        if base_url and base_dir:
-            task_id = Path(base_dir).name
-            return f"{base_url.rstrip('/')}/api/v1/results/{task_id}/files/{path_value}"
-        if base_dir:
-            return (Path(base_dir) / "artifacts" / path_value).as_posix()
-        return None
+        return context.url_for(path)
 
     def _upstream_bindings(
         self, context: dict[str, TaskRecord], current_task_id: str

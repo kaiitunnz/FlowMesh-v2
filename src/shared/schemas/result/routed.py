@@ -10,6 +10,7 @@ from typing import Any, Final, Literal
 
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer
 
+from ..artifact import ArtifactContext
 from ._base import StrictExecutorResult
 
 # The key a serialized ``RoutedValue`` carries, which alone tells it from a task result.
@@ -22,6 +23,13 @@ class RoutedValue(StrictExecutorResult):
 
     routed: Literal[True] = Field(default=True, alias=ROUTED_TAG)
     routed_value: Any
+    member_artifacts_: dict[str, ArtifactContext] = Field(
+        default_factory=dict,
+        alias="_member_artifacts",
+        exclude_if=lambda v: not v,
+        description="The artifact context of each producer a member or bundle value "
+        "came from, by the dotted read path it sits under.",
+    )
 
     @model_serializer(mode="wrap")
     def _drop_none_fields(

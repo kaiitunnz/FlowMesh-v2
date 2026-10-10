@@ -30,6 +30,9 @@ class SpecReads:
     identities: frozenset[str] = frozenset()
     # Placeholders naming no ``stage.path``, which render to nothing.
     malformed: tuple[str, ...] = ()
+    # Each root placeholder reading a name whole, with the name: well formed only
+    # when the name is one of the task's named inputs.
+    whole: tuple[tuple[str, str], ...] = ()
     # SSH ``inputs[].stage`` names, which mount a task's result; also in ``values``.
     stages: frozenset[str] = frozenset()
 
@@ -40,13 +43,17 @@ def spec_reads(task: ParsedTask) -> SpecReads:
     identities: set[str] = set()
     stages: set[str] = set()
     malformed: list[str] = []
+    whole: list[tuple[str, str]] = []
     scoped = task.definition is not None
     for text in _strings(task.task.model_dump(mode="python")):
         for match in PLACEHOLDER_PATTERN.finditer(text):
             expr = match.group(1).strip()
             name, dot, path = expr.partition(".")
-            if not name.strip() or not (dot or scoped):
+            if not name.strip():
                 malformed.append(match.group(0))
+                continue
+            if not (dot or scoped):
+                whole.append((match.group(0), name.strip()))
             elif path.strip() == "task_id":
                 identities.add(name.strip())
             else:
@@ -61,7 +68,11 @@ def spec_reads(task: ParsedTask) -> SpecReads:
             stages.add(stage.strip())
     values.update(stages)
     return SpecReads(
-        frozenset(values), frozenset(identities), tuple(malformed), frozenset(stages)
+        frozenset(values),
+        frozenset(identities),
+        tuple(malformed),
+        tuple(whole),
+        frozenset(stages),
     )
 
 
@@ -163,7 +174,14 @@ def classify_reads(
     sources = [value_op.get(dep.source, dep.source) for dep in dependencies]
     # A root task without dependencies may carry ``${...}`` text that is not a read.
     checked = bool(dependencies) or task.definition is not None
-    unresolved: list[str] = list(reads.malformed) if checked else []
+    unresolved: list[str] = (
+        [
+            *reads.malformed,
+            *(text for text, name in reads.whole if name not in aliases),
+        ]
+        if checked
+        else []
+    )
 
     def _resolve(name: str) -> set[int] | str | None:
         """The dependencies a name reads, or the ancestor it reads past them."""
@@ -180,7 +198,7 @@ def classify_reads(
             unresolved.append(name)
         return None
 
-    value_deps: set[int] = set()
+    value_deps: set[int] = {aliases[name] for _, name in reads.whole if name in aliases}
     identity_deps: set[int] = set()
     derived: dict[str, DependencyUse] = {}
     for name in sorted(reads.values):

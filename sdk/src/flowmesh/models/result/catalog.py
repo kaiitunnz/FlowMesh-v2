@@ -13,7 +13,7 @@ from pydantic import (
     model_serializer,
 )
 
-from ..artifacts import ArtifactRef
+from ..artifacts import ArtifactContext, ArtifactRef
 from ..common import TaskType
 from ._base import BaseExecutorResult, StrictExecutorResult
 from .payloads import (
@@ -242,6 +242,9 @@ class RoutedValue(StrictExecutorResult):
 
     routed: Literal[True] = Field(default=True, alias=_ROUTED_TAG)
     routed_value: Any
+    member_artifacts_: dict[str, ArtifactContext] = Field(
+        default_factory=dict, alias="_member_artifacts", exclude_if=lambda v: not v
+    )
 
     @model_serializer(mode="wrap")
     def _drop_none_fields(

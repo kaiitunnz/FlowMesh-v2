@@ -335,11 +335,19 @@ merge delivers, reads as a list of `{key, outcome, value}`, where `value` is
 an upstream node by that node's name as the node's whole value; a node with
 several output ports, as a branch or a loop carrying several values, is read by
 the `input` name of a dependency naming one port. An SSH task's `inputs[].stage`
-names a task's result, never an aggregate. Inside a
-template, `${name}` reads a value whole, and `${name.task_id}` names the task
+names a task's result, never an aggregate. `${name}` reads a value whole: inside
+a template any name, and at the root a task's named input, while a bare upstream
+node name stays invalid there. Inside a template, `${name.task_id}` names the task
 another node of the template ran as in the same iteration and child. A template
 input, a projected input, or a region's value has no task, so `${name.task_id}`
 on one is refused at submission.
+
+A file a task produces, such as fine-tuned weights or an adapter, travels as an
+artifact reference inside its result. A consumer reading that reference, on any
+path a value takes, receives where to download the producer's file from: a URL on
+the server when the producer declares an `http` `output.destination`, else a path
+on the producer's node, which a task on another worker cannot read. A stored
+result or published output keeps the reference and its producer's `_artifacts`.
 
 Each task a template runs reports where it ran as `occurrence` in its task
 information: the template member, the child it belongs to, and the iteration of

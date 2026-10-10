@@ -29,7 +29,7 @@ from ..utils.artifacts import (
     resolve_artifact,
 )
 from ..utils.data_utils import normalize_prompt_payload
-from ..utils.expressions import project_expression
+from ..utils.expressions import expression_steps, item_steps, project_expression
 from ..utils.graph_templates import (
     _resolve_columns,
     build_prompts_from_graph_template,
@@ -447,8 +447,13 @@ class DataMixin(GovernanceMixin):
             if fetch_images:
                 items, image_group_sizes = self._flatten_grouped_image_items(items)
                 items = [
-                    maybe_resolve_artifact_ref(item, context, root_node)
-                    for item in items
+                    maybe_resolve_artifact_ref(
+                        item,
+                        context,
+                        root_node,
+                        item_steps(resolved_expr, context, index) if context else (),
+                    )
+                    for index, item in enumerate(items)
                 ]
 
                 s3_entries: list[tuple[int, str]] = []
@@ -537,8 +542,13 @@ class DataMixin(GovernanceMixin):
                 prompts = [x if isinstance(x, str) else "" for x in items]
             else:
                 items = [
-                    maybe_resolve_artifact_ref(item, context, root_node)
-                    for item in items
+                    maybe_resolve_artifact_ref(
+                        item,
+                        context,
+                        root_node,
+                        item_steps(resolved_expr, context, index) if context else (),
+                    )
+                    for index, item in enumerate(items)
                 ]
                 prompts, apply_chat_template, found_system_prompt = (
                     normalize_prompt_payload(items)
@@ -690,7 +700,10 @@ class DataMixin(GovernanceMixin):
                 resolved_node = expr.split(".", 1)[0].strip() or None
             image_embedding_spec: Any = project_expression(expr.strip(), context)
             artifact_source = maybe_resolve_artifact_ref(
-                image_embedding_spec, context, resolved_node
+                image_embedding_spec,
+                context,
+                resolved_node,
+                expression_steps(expr.strip()),
             )
             if not isinstance(artifact_source, str) or not artifact_source:
                 raise ExecutionError(

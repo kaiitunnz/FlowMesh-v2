@@ -113,6 +113,35 @@ def _maybe_deserialize_frames(value: Any) -> Any:
     return value
 
 
+def expression_steps(expr: str) -> list[str | int]:
+    """The read path an expression takes into its upstream input's value."""
+    steps: list[str | int] = []
+    for token in expr.split(".")[1:]:
+        attr, indexes = split_indexes(token)
+        if attr:
+            steps.append(attr)
+        steps.extend(indexes)
+    return steps
+
+
+def item_steps(
+    expr: str, context: dict[str, BaseExecutorResult], index: int
+) -> list[str | int]:
+    """The read path to one item of the list an expression projects: an expression
+    whose first token distributes over its input's list reads item ``index`` out of
+    that list's element ``index``."""
+    steps = expression_steps(expr)
+    root = context.get(expr.split(".", 1)[0])
+    if (
+        root is not None
+        and isinstance(routed_root(root), list)
+        and steps
+        and not isinstance(steps[0], int)
+    ):
+        return [index, *steps]
+    return [*steps, index]
+
+
 def split_indexes(token: str) -> tuple[str, list[int]]:
     """An expression token split into its attribute and its bracket indexes."""
     parts = token.split("[")

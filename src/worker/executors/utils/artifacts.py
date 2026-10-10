@@ -1,5 +1,6 @@
 import os
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import ParseResult, urlparse
@@ -7,6 +8,7 @@ from urllib.parse import ParseResult, urlparse
 import requests
 
 from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result.binding import artifact_context
 from shared.utils.http import auth_headers
 
 from ...utils.redaction import redact_urls
@@ -14,9 +16,13 @@ from ..base_executor import ExecutionError
 
 
 def artifact_to_source(
-    ref: dict[str, Any], context: dict[str, BaseExecutorResult] | None, node: str | None
+    ref: dict[str, Any],
+    context: dict[str, BaseExecutorResult] | None,
+    node: str | None,
+    path: Sequence[str | int] = (),
 ) -> str:
-    """Translate a `{path: ...}` artifact ref into a URL or local path."""
+    """Translate a `{path: ...}` artifact ref into a URL or local path, against the
+    producer of the value at ``path`` inside upstream ``node``."""
     rel_path = ref.get("path")
     if not isinstance(rel_path, str) or not rel_path:
         raise ExecutionError("Artifact ref must include a non-empty 'path' field")
@@ -25,7 +31,7 @@ def artifact_to_source(
         context
         and node
         and (node_result := context.get(node))
-        and (ctx := node_result.artifacts_)
+        and (ctx := artifact_context(node_result, path))
     ):
         base_url = ctx.base_url
         base_dir = ctx.base_dir
@@ -91,11 +97,14 @@ def is_flowmesh_origin_url(url: str) -> bool:
 
 
 def maybe_resolve_artifact_ref(
-    value: Any, context: dict[str, BaseExecutorResult] | None, node: str | None
+    value: Any,
+    context: dict[str, BaseExecutorResult] | None,
+    node: str | None,
+    path: Sequence[str | int] = (),
 ) -> Any:
     """Convert `{path: ...}` ref dicts to URL/path strings; pass others through."""
     if isinstance(value, dict) and "path" in value:
-        return artifact_to_source(value, context, node)
+        return artifact_to_source(value, context, node, path)
     return value
 
 
