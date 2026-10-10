@@ -21,11 +21,11 @@ from ..state import (
     Continuation,
     ControlState,
     ControlStatus,
+    DeliveryContext,
     Invocation,
     IterationResolution,
     LedgerSnapshot,
     LoopInstance,
-    NestedTime,
     Occurrence,
     OrchestrationEvent,
     ProgressAxis,
@@ -53,17 +53,15 @@ def control_key(occurrence: str) -> str:
     return f"control:{occurrence}"
 
 
-def occurrence_key(
-    operator_id: str, context_id: str = "", time: NestedTime = ()
-) -> str:
+def occurrence_key(operator_id: str, at: DeliveryContext) -> str:
     """The key of an operator's occurrence in a child context and nested loop time.
 
     A root occurrence is keyed by its operator id alone.
     """
-    if not context_id and not time:
+    if not at.context_id and not at.time:
         return operator_id
-    frames = "".join(f"/{frame.loop}:{frame.iteration}" for frame in time)
-    return f"{operator_id}@{context_id}{frames}"
+    frames = "".join(f"/{frame.loop}:{frame.iteration}" for frame in at.time)
+    return f"{operator_id}@{at.context_id}{frames}"
 
 
 class OrchestrationLedger:

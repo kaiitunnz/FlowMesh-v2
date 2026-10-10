@@ -687,7 +687,16 @@ class OccurrenceInput(BaseModel):
     task_id: str | None = None
 
 
-class Occurrence(BaseModel):
+class DeliveryContext(BaseModel):
+    """Where something occurs: a child context, the scope accounting for its progress,
+    and its nested loop time."""
+
+    context_id: str  # the child activation whose definition it runs in; "" at root
+    scope_id: str
+    time: NestedTime = ()
+
+
+class Occurrence(DeliveryContext):
     """One tagged occurrence of a template operator in a child context and time.
 
     A root operator's occurrence is implicit and keyed by its operator id; an operator
@@ -698,9 +707,6 @@ class Occurrence(BaseModel):
 
     key: str
     operator_id: str
-    context_id: str  # the child activation whose definition it runs in; "" at root
-    time: NestedTime = ()
-    scope_id: str  # the progress scope that accounts for it
     activation_id: str = ""
 
 
@@ -785,17 +791,15 @@ class LoopInstanceStatus(StrEnum):
     """A cancel withdrew the loop."""
 
 
-class LoopInstance(BaseModel):
-    """One entry of a loop: its scope, captured parent context and bound inputs.
+class LoopInstance(DeliveryContext):
+    """One entry of a loop: its body's context and scope, and its bound inputs.
 
-    ``carried`` holds the bundle the latest materialized time started from, and
-    ``invariants`` the values bound once at ingress.
+    Its body occurs at ``time`` extended by the loop's own frame. ``carried`` holds the
+    bundle the latest materialized time started from, and ``invariants`` the values
+    bound once at ingress.
     """
 
-    scope_id: str
     occurrence: str
-    context_id: str
-    parent_time: NestedTime = ()
     carried: dict[str, ValueRef] = Field(default_factory=dict)
     invariants: dict[str, ValueRef] = Field(default_factory=dict)
     times: int = 0  # logical times materialized so far
@@ -804,13 +808,11 @@ class LoopInstance(BaseModel):
     exit_bundle: dict[str, ValueRef] = Field(default_factory=dict)
 
 
-class ChildContext(BaseModel):
-    """A child activation running a region definition: its entry values and result."""
+class ChildContext(DeliveryContext):
+    """A child activation running a region definition, where its members occur: its
+    entry values and result."""
 
-    context_id: str
     definition_id: str
-    scope_id: str
-    time: NestedTime = ()
     entries: dict[str, ValueRef] = Field(default_factory=dict)
     result: ValueRef | None = None
     returned: bool = False

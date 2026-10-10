@@ -6,7 +6,7 @@ from ...task.v2.representations.operators import AgentOperator, LeafOperator
 from ..state import (
     Activation,
     Continuation,
-    NestedTime,
+    DeliveryContext,
     Occurrence,
     WorkItem,
 )
@@ -34,9 +34,7 @@ class OccurrenceFactory:
         self._topology = topology
         self._scope_progress = scope_progress
 
-    def enter(
-        self, definition_id: str, context_id: str, time: NestedTime, scope_id: str
-    ) -> list[str]:
+    def enter(self, definition_id: str, at: DeliveryContext) -> list[str]:
         """Create every member occurrence of a definition; returns their keys.
 
         The activation budget covers the whole batch before anything is created, so a
@@ -54,7 +52,7 @@ class OccurrenceFactory:
         self._scope_progress.charge_activations(len(members))
         keys: list[str] = []
         for operator_id in members:
-            key = occurrence_key(operator_id, context_id, time)
+            key = occurrence_key(operator_id, at)
             if key in self._ledger.occurrences:
                 keys.append(key)
                 continue
@@ -63,18 +61,18 @@ class OccurrenceFactory:
             activation = Activation(
                 activation_id=new_activation_id(),
                 instance_id=self._ledger.workflow_instance.instance_id,
-                scope_id=scope_id,
+                scope_id=at.scope_id,
                 operator_id=operator_id,
                 kind="occurrence",
             )
             self._ledger.add_activation(activation)
             self._ledger.add_occurrence(
                 Occurrence(
+                    context_id=at.context_id,
+                    scope_id=at.scope_id,
+                    time=at.time,
                     key=key,
                     operator_id=operator_id,
-                    context_id=context_id,
-                    time=time,
-                    scope_id=scope_id,
                     activation_id=activation.activation_id,
                 )
             )
@@ -110,6 +108,6 @@ class OccurrenceFactory:
             )
         self._ledger.emit(
             "definition_entered",
-            detail={"definition": definition_id, "context": context_id},
+            detail={"definition": definition_id, "context": at.context_id},
         )
         return keys

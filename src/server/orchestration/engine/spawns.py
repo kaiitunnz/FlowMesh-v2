@@ -395,25 +395,21 @@ class SpawnRegions:
         context_scope = self._scope_progress.open_context_scope(
             activation.activation_id, scope_id
         )
-        self._ledger.child_contexts[activation.activation_id] = ChildContext(
+        context = ChildContext(
             context_id=activation.activation_id,
-            definition_id=definition.definition_id,
             scope_id=context_scope,
             time=occurrence.time,
+            definition_id=definition.definition_id,
             entries=entries,
         )
+        self._ledger.child_contexts[activation.activation_id] = context
         self._ledger.active_contexts.add(activation.activation_id)
         self._ledger.emit(
             "child_spawned",
             operator_id=occurrence.operator_id,
             detail={"scope": scope_id, "index": str(activation.child_index)},
         )
-        for key in self._factory.enter(
-            definition.definition_id,
-            activation.activation_id,
-            occurrence.time,
-            context_scope,
-        ):
+        for key in self._factory.enter(definition.definition_id, context):
             self._flow.evaluate(key, advance)
         return advance
 

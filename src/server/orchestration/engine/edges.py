@@ -85,7 +85,7 @@ class EdgeResolver:
 
     def sibling(self, occurrence: Occurrence, operator_id: str) -> str:
         """The key of another operator's occurrence in the same context and time."""
-        return occurrence_key(operator_id, occurrence.context_id, occurrence.time)
+        return occurrence_key(operator_id, occurrence)
 
     def incoming(self, key: str) -> list[Incoming]:
         """Every input of an occurrence: its edges and its definition entry bindings."""

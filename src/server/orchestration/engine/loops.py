@@ -7,6 +7,7 @@ from ..guardrails import ScopeBudget
 from ..state import (
     CapabilityStatus,
     ControlStatus,
+    DeliveryContext,
     IterationKind,
     IterationResolution,
     LoopInstance,
@@ -81,7 +82,7 @@ class LoopProgress:
             scope_id=scope_id,
             occurrence=key,
             context_id=occurrence.context_id,
-            parent_time=occurrence.time,
+            time=occurrence.time,
             carried={p.name: bound.get(p.name, _EMPTY) for p in loop.carried},
             invariants={p.name: bound.get(p.name, _EMPTY) for p in loop.invariants},
         )
@@ -110,9 +111,11 @@ class LoopProgress:
         try:
             keys = self._factory.enter(
                 loop.body_ref,
-                instance.context_id,
-                (*instance.parent_time, frame),
-                instance.scope_id,
+                DeliveryContext(
+                    context_id=instance.context_id,
+                    scope_id=instance.scope_id,
+                    time=(*instance.time, frame),
+                ),
             )
         except RegionError as exc:
             self.fault(instance, f"ScopeBudgetExceeded: {exc}", advance)
