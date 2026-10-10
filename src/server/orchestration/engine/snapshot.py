@@ -166,6 +166,7 @@ class SnapshotCodec:
         )
         self._ledger.activations = self._keyed_dict("activations")
         self._ledger.children_by_scope = {}
+        self._ledger.static_activations = {}
         self._ledger.open_children = {}
         self._ledger.scope_population = Counter()
         self._ledger.scope_children = Counter()
@@ -321,6 +322,13 @@ class SnapshotCodec:
         self._ledger.wi_by_activation = {
             w.activation_id: w.work_item_id for w in self._ledger.work_items.values()
         }
+        self._ledger.succeeded_children = Counter(
+            scope_id
+            for scope_id, children in self._ledger.children_by_scope.items()
+            for child in children.values()
+            if (wi_id := self._ledger.wi_by_activation.get(child)) is not None
+            and self._ledger.work_items[wi_id].outcome is PublicationOutcome.SUCCESS
+        )
         self._publication.slots_by_operator = {}
         self._publication.slots_by_output = {}
         for slot in self._publication.slots.values():

@@ -120,7 +120,11 @@ class OrchestrationLedger:
         self.occurrences_by_scope: dict[str, set[str]] = {}
         self.occurrence_by_activation: dict[str, str] = {}
         self.subscopes: dict[str, set[str]] = {}
-        self.children_by_scope: dict[str, list[str]] = {}
+        # A scope's children by child index, and how many settled successfully.
+        self.children_by_scope: dict[str, dict[int, str]] = {}
+        self.succeeded_children: Counter[str] = Counter()
+        # Each operator's first activation outside every region and dynamic context.
+        self.static_activations: dict[str, str] = {}
         self.control_states: dict[str, ControlState] = {}
         self.branch_decisions: dict[str, BranchDecision] = {}
         self.loop_instances: dict[str, LoopInstance] = {}
@@ -246,14 +250,18 @@ class OrchestrationLedger:
         self.scope_population[activation.scope_id] += 1
         if activation.kind == "child":
             self.scope_children[activation.scope_id] += 1
-            self.children_by_scope.setdefault(activation.scope_id, []).append(
-                activation.activation_id
-            )
+            self.children_by_scope.setdefault(activation.scope_id, {})[
+                activation.child_index or 0
+            ] = activation.activation_id
             self.open_children.setdefault(activation.scope_id, {})[
                 activation.activation_id
             ] = None
         if activation.kind in DYNAMIC_ACTIVATION_KINDS:
             self.dynamic_activations += 1
+        elif activation.kind != "region":
+            self.static_activations.setdefault(
+                activation.operator_id, activation.activation_id
+            )
 
     def scope_closed(self, scope_id: str) -> bool:
         """Whether a scope closed: its join released, or it failed and every child it
@@ -403,14 +411,12 @@ class OrchestrationLedger:
         return self.invocations.get(wi.invocation_id)
 
     def control_activation(self, operator_id: str) -> str:
-        for a in self.activations.values():
-            if (
-                a.operator_id == operator_id
-                and a.kind not in DYNAMIC_ACTIVATION_KINDS
-                and a.kind != "region"
-            ):
-                return a.activation_id
-        return operator_id
+        return self.static_activations.get(operator_id, operator_id)
+
+    def scope_children_ordered(self, scope_id: str) -> list[Activation]:
+        """Return a scope's children ordered by ``child_index``."""
+        children = self.children_by_scope.get(scope_id, {})
+        return [self.activations[children[index]] for index in sorted(children)]
 
     def scope_id_for_join(self, join_op: str) -> str | None:
         for edge in self._topology.bundle.template.edges:

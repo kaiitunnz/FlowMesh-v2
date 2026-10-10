@@ -253,6 +253,8 @@ class RegionFlow:
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = outcome
         wi.value_ref = value_ref
+        if outcome is PublicationOutcome.SUCCESS:
+            self._ledger.succeeded_children[activation.scope_id] += 1
         self._ledger.emitter.emit_work_item(wi)
         self._ledger.emitter.emit_activation(wi.activation_id)
         self._ledger.private_state.release(wi.activation_id)
@@ -969,7 +971,7 @@ class RegionFlow:
         if not isinstance(join, JoinRegion) or join.completion not in _EARLY_JOINS:
             return None
         threshold, monotone = self._early_rule(join)
-        if not monotone or len(self._qualifiers(scope_id)) < threshold:
+        if not monotone or self._ledger.succeeded_children[scope_id] < threshold:
             return None
         return self._release_join(join_op, scope_id)
 
@@ -987,7 +989,7 @@ class RegionFlow:
         join = self._topology.operators[join_op]
         assert isinstance(join, JoinRegion)
         outcome, value_ref = self._join_result(join, scope_id)
-        children = self._materialized_children(scope_id)
+        children = self._ledger.scope_children_ordered(scope_id)
         if (frozen_at := self._join_key(scope_id, join_op)) is not None:
             self._freeze_region_aggregate(join, frozen_at, scope_id)
         if outcome is PublicationOutcome.DECLARED_FAILURE:
@@ -1105,7 +1107,7 @@ class RegionFlow:
         selected = (
             self._qualifiers(scope_id)
             if join.completion in _EARLY_JOINS
-            else self._materialized_children(scope_id)
+            else self._ledger.scope_children_ordered(scope_id)
         )
         members = tuple(
             RegionAggregateMember(
@@ -1156,7 +1158,7 @@ class RegionFlow:
             self._ledger.work_items[
                 self._ledger.wi_by_activation[c.activation_id]
             ].outcome
-            for c in self._materialized_children(scope_id)
+            for c in self._ledger.scope_children_ordered(scope_id)
         ]
         return (
             self._join_outcome(join, [o for o in outcomes if o is not None]),
@@ -1195,22 +1197,12 @@ class RegionFlow:
         """A scope's settled children that succeeded, ordered by ``child_index``."""
         return [
             child
-            for child in self._materialized_children(scope_id)
+            for child in self._ledger.scope_children_ordered(scope_id)
             if self._ledger.work_items[
                 self._ledger.wi_by_activation[child.activation_id]
             ].outcome
             is PublicationOutcome.SUCCESS
         ]
-
-    def _materialized_children(self, scope_id: str) -> list[Activation]:
-        return sorted(
-            (
-                a
-                for a in self._ledger.activations.values()
-                if a.scope_id == scope_id and a.kind == "child"
-            ),
-            key=lambda a: a.child_index if a.child_index is not None else 0,
-        )
 
     def _residual_policy(
         self, join: JoinRegion | None, default: ResidualPolicy
@@ -1230,7 +1222,7 @@ class RegionFlow:
         """Cancel a scope's unsettled children; returns their work items."""
         cap = self._ledger.capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         cancelled: list[WorkItem] = []
-        for child in self._materialized_children(scope_id):
+        for child in self._ledger.scope_children_ordered(scope_id):
             wi = self._ledger.work_items[
                 self._ledger.wi_by_activation[child.activation_id]
             ]

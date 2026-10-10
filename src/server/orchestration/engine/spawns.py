@@ -358,9 +358,8 @@ class SpawnRegions:
             occurrence.operator_id
         )
         scope_id = self._ledger.scope_by_activation.get(opener)
-        if scope_id is not None and any(
-            self._ledger.activations[child].child_index == index
-            for child in self._ledger.children_by_scope.get(scope_id, ())
+        if scope_id is not None and index in self._ledger.children_by_scope.get(
+            scope_id, {}
         ):
             return advance
         cap = self._scope_progress.capability(scope_id, ProgressAxis.CHILD_INIT)
