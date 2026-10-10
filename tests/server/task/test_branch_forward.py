@@ -4,9 +4,12 @@ from typing import Any, cast
 
 import pytest
 
+from server.orchestration.engine.dataflow import broken_input_reason
+from server.orchestration.engine.edges import EdgeState, Incoming
 from server.orchestration.state import ControlStatus
 from server.task.models import TaskStatus
 from server.task.v2.representations.operators import BranchRegion
+from server.task.v2.representations.template import TemplateEdge
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_file_inputs import _file, _trained
 from tests.server.task.test_runtime_control_flow import _Run, _workflow
@@ -227,6 +230,18 @@ async def test_a_failed_forwarded_input_fails_the_branch(failed_first: bool) -> 
     assert run.engine.control_failure() is None
     after = run.runtime.get_record(run.ids["after"])
     assert after is not None and after.status == TaskStatus.FAILED
+
+
+@pytest.mark.parametrize(
+    ("state", "ended"),
+    [(EdgeState.FAILED, "failed"), (EdgeState.CANCELLED, "was cancelled")],
+)
+def test_a_broken_input_says_how_it_ended(state: EdgeState, ended: str) -> None:
+    edge = TemplateEdge(from_op="payload", to_op="judge", edge_id="e-payload")
+
+    reason = broken_input_reason("branch", Incoming(edge, state))
+
+    assert reason == f"branch input payload {ended}"
 
 
 _GATED = f"""

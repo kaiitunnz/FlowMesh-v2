@@ -54,6 +54,12 @@ _LIVE_STATES = frozenset({EdgeState.LIVE, EdgeState.EMPTY})
 _BROKEN_STATES = frozenset({EdgeState.FAILED, EdgeState.CANCELLED})
 
 
+def broken_input_reason(region: str, broken: Incoming) -> str:
+    """Why a region failed on an input that failed or was cancelled."""
+    ended = "was cancelled" if broken.state is EdgeState.CANCELLED else "failed"
+    return f"{region} input {broken.edge.from_op} {ended}"
+
+
 class ContextRegions(Protocol):
     """What runs a region definition's occurrences: a loop or a spawned child."""
 
@@ -573,9 +579,9 @@ class RegionFlow:
                 # only on is live; a dead or failed one settles it instead.
                 if any(i.state is EdgeState.DEAD for i in required):
                     self.mark_dead(key, advance)
-                elif failed := [i for i in required if i.state in _BROKEN_STATES]:
+                elif broken := [i for i in required if i.state in _BROKEN_STATES]:
                     self.fail_control(
-                        key, f"join input {failed[0].edge.from_op} failed", advance
+                        key, broken_input_reason("join", broken[0]), advance
                     )
                 elif (scope_id := self._join_scope(occurrence, op)) is not None:
                     advance.extend(self.maybe_release_join(scope_id))
@@ -680,9 +686,7 @@ class RegionFlow:
             if index in participating or item.use is not DependencyUse.ORDER_ONLY
         ]
         if broken := [i for i in required if i.state in _BROKEN_STATES]:
-            self.fail_control(
-                key, f"branch input {broken[0].edge.from_op} failed", advance
-            )
+            self.fail_control(key, broken_input_reason("branch", broken[0]), advance)
             return
         if any(i.state is EdgeState.DEAD for i in required):
             self.mark_dead(key, advance)
