@@ -1,17 +1,19 @@
 """A file a task produced reaches its consumer as the producer's URL on every path
 its reference travels."""
 
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from PIL import Image
 
 from server.task.v2 import CompileError
 from tests.server.task.test_agent_region_inputs import _AGENT, _member_values, _ready
 from tests.server.task.test_runtime_control_flow import _Run, _workflow
-from tests.server.task.test_scoped_inputs import _dispatch, _worker_reads
+from tests.server.task.test_scoped_inputs import _dispatch
 from worker.executors.mixins.data import DataMixin
 from worker.executors.utils.artifacts import maybe_resolve_artifact_ref
-from worker.executors.utils.expressions import item_steps
+from worker.executors.utils.expressions import item_path, project_expression_paths
 
 _URL = "http://fm.example"
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
@@ -132,10 +134,10 @@ async def test_each_aggregate_members_file_reads_as_its_own_producers_url() -> N
 
     assert spec["data"]["items"] == [_file("tsk-left"), _file("tsk-right")]
     upstream = message.task.spec.upstreamResults or {}
-    expr = "all.value.final_lora_archive"
+    items, paths = project_expression_paths("all.value.final_lora_archive", upstream)
     assert [
-        maybe_resolve_artifact_ref(item, upstream, "all", item_steps(expr, upstream, i))
-        for i, item in enumerate(_worker_reads(message, expr))
+        maybe_resolve_artifact_ref(item, upstream, "all", item_path(paths, i))
+        for i, item in enumerate(items)
     ] == [_file("tsk-left"), _file("tsk-right")]
     assert DataMixin()._extract_source_data_ids(message.task.spec) == [
         "tsk-left",
@@ -155,3 +157,60 @@ async def test_an_agent_reading_a_projected_file_reads_its_url() -> None:
     run.run("train", _trained("tsk-train"))
 
     assert _member_values(run, _ready(run, "reader")) == {"x": [_file("tsk-train")]}
+
+
+def _images(task: str, *names: str) -> dict[str, Any]:
+    return _trained(task, images=[{"path": name} for name in names])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        ("all.value[0].images", ["tsk-left/files/a.png", "tsk-left/files/b.png"]),
+        (
+            "all.value.images",
+            [
+                "tsk-left/files/a.png",
+                "tsk-left/files/b.png",
+                "tsk-right/files/c.png",
+                "tsk-right/files/d.png",
+            ],
+        ),
+    ],
+)
+async def test_images_over_an_aggregate_read_from_their_own_producer(
+    expr: str, expected: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = await _Run().start(_workflow(f"""
+      - name: left
+        spec: {_ECHO}
+      - name: right
+        spec: {_ECHO}
+      - name: both
+        dependsOn: [{{node: left, input: l}}, {{node: right, input: r}}]
+        region: {{kind: merge, combination: concat}}
+      - name: use
+        dependsOn: [{{node: both, input: all}}]
+        spec: {_ECHO}
+"""))
+    run.run("left", _images("tsk-left", "a.png", "b.png"))
+    run.run("right", _images("tsk-right", "c.png", "d.png"))
+    _, message = _dispatch(run, "use")
+    spec = SimpleNamespace(
+        data={"type": "list", "expr": expr},
+        inference={},
+        upstreamResults=message.task.spec.upstreamResults,
+    )
+    loaded: list[str] = []
+
+    def load(_: Any, source: str) -> Any:
+        loaded.append(source)
+        return Image.new("RGB", (1, 1))
+
+    monkeypatch.setattr(DataMixin, "_load_image_from_artifact", load)
+    monkeypatch.setenv("FLOWMESH_BASE_URL", _URL)
+
+    DataMixin()._collect_prompts_for_spec(cast(Any, spec), "tsk-use", True)
+
+    assert loaded == [f"{_URL}/api/v1/results/{tail}" for tail in expected]
