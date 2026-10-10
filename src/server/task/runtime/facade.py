@@ -1004,17 +1004,11 @@ class TaskRuntime:
         other workflow to restore.
 
         Every task of it still open fails with the typed reason, written with that
-        reason in one transition; returns the workflow's task records, when they read,
-        and the revocation of each dispatch that failing ended.
+        reason in one transition; a workflow with no task open has settled and stays
+        as stored. Returns the workflow's task records, when they read, and the
+        revocation of each dispatch that failing ended.
         """
         reason = f"UnsupportedWorkflowVersion: {type(error).__name__}: {error}"[:500]
-        stored = await self._workflow_registry.get_workflow_record_async(workflow_id)
-        if stored is not None and stored.control_failure == reason:
-            self._logger.warning("Workflow %s stays failed: %s", workflow_id, reason)
-        else:
-            self._logger.exception(
-                "Workflow %s cannot be restored; failing it", workflow_id
-            )
         try:
             tasks = await self._stored_tasks(workflow_id)
         except Exception as exc:
@@ -1038,6 +1032,22 @@ class TaskRuntime:
             record.assigned_worker = None
             record.finished_ts = time.time()
             failed.append(persisted)
+        stored = await self._workflow_registry.get_workflow_record_async(workflow_id)
+        if tasks and not failed:
+            self._logger.warning(
+                "Workflow %s cannot be read and has settled; it stays as stored: %s",
+                workflow_id,
+                reason,
+            )
+            return tasks, revokes
+        if stored is not None and stored.control_failure == reason:
+            self._logger.warning("Workflow %s stays failed: %s", workflow_id, reason)
+        else:
+            self._logger.error(
+                "Workflow %s cannot be restored; failing it",
+                workflow_id,
+                exc_info=error,
+            )
         await self._workflow_registry.commit_transition_async(
             workflow_id,
             records=failed,

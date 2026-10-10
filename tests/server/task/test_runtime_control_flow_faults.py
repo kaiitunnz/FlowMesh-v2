@@ -361,6 +361,29 @@ async def test_a_workflow_this_server_cannot_read_fails_alone() -> None:
 
 
 @pytest.mark.anyio
+async def test_a_finished_workflow_this_server_cannot_read_stays_as_stored() -> None:
+    run = await _Run().start(_workflow(_DIAMOND))
+    registry = run.registry
+    finished, _ = await _register(
+        run.runtime,
+        _workflow(f"""
+      - name: only
+        spec: {_ECHO}
+"""),
+    )
+    (only,) = registry.workflow_task_ids[finished]
+    _succeed(run, only, {})
+    assert _durable_status(registry, finished) == "done"
+    registry.v2_blobs[finished] = "{}"
+
+    restored = _Run(registry, run.reader)
+    assert await restored.runtime.rehydrate() == 1
+    assert restored.runtime.orchestration_engine(run.workflow_id) is not None
+    assert _durable_status(registry, finished) == "done"
+    assert not registry.control[finished].failure
+
+
+@pytest.mark.anyio
 async def test_a_workflow_this_server_cannot_read_settles_failed_and_closes(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
