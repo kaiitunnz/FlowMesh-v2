@@ -113,6 +113,31 @@ def test_declared_input_agent_blocks_until_its_manifest_is_recorded() -> None:
     assert engine.work_item("M").status is WorkItemStatus.READY
 
 
+def test_only_an_agent_whose_inputs_resolved_is_offered_its_inputs() -> None:
+    agents = [_input_agent(f"A{i}", ("in",)) for i in range(3)]
+    edges = [
+        TemplateEdge(
+            from_op=source,
+            to_op=f"A{i}",
+            to_port="in",
+            use=DependencyUse.VALUE_REQUIRED,
+            edge_id=f"{source}->A{i}.in",
+        )
+        for i, source in enumerate(("P", "A0", "A1"))
+    ]
+    engine = _engine(
+        _bundle([_leaf("P"), *agents], edges, (_decl("out:A2", "A2"),)),
+        granted=frozenset({"model"}),
+    )
+
+    assert engine.blocked_input_agents() == []
+    assert not engine._ledger.input_candidates
+
+    engine.on_succeeded("P")
+
+    assert engine.blocked_input_agents() == ["A0"]
+
+
 def test_join_feeding_an_agent_aggregates_children_in_declared_order() -> None:
     producer = _leaf("P")
     child = LeafOperator(

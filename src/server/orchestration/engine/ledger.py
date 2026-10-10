@@ -140,8 +140,9 @@ class OrchestrationLedger:
         # collection, pruned as the walk finds one settled for good: per scope, its
         # occurrences, children and nested scopes that may still be open; work items a
         # task runs as that may still be unsettled; branch occurrences that may await
-        # a selector read; spawn scopes that may still fan out; and work items whose
-        # declared input ports may still lack an accepted input.
+        # a selector read; spawn scopes that may still fan out; and work items with
+        # every input resolved whose declared input ports may still lack an accepted
+        # input.
         self.open_occurrences: dict[str, dict[str, None]] = {}
         self.open_children: dict[str, dict[str, None]] = {}
         self.open_subscopes: dict[str, dict[str, None]] = {}
@@ -188,7 +189,12 @@ class OrchestrationLedger:
 
     def set_continuation(self, continuation: Continuation) -> None:
         self.continuations[continuation.work_item_id] = continuation
-        if continuation.required_ports:
+        self.offer_inputs(continuation)
+
+    def offer_inputs(self, continuation: Continuation) -> None:
+        """Make a declared-input work item an input candidate once nothing it waits
+        on is unresolved."""
+        if continuation.required_ports and not continuation.waiting_on:
             self.input_candidates[continuation.work_item_id] = None
 
     def control_state(self, key: str) -> ControlState:

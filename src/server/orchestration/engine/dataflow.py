@@ -522,6 +522,7 @@ class RegionFlow:
                 return
         cont.waiting_on = cont.waiting_on - {from_op}
         if not cont.waiting_on:
+            self._ledger.offer_inputs(cont)
             self.evaluate(target, advance)
 
     def evaluate(self, key: str, advance: Advance) -> None:
