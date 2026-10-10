@@ -146,6 +146,47 @@ async def test_each_aggregate_members_file_reads_as_its_own_producers_url() -> N
 
 
 @pytest.mark.anyio
+async def test_rendering_an_aggregate_reads_each_member_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = await _Run().start(_workflow(f"""
+      - name: plan
+        spec: {_ECHO}
+      - name: kid
+        spec: {_ECHO}
+      - name: fan
+        dependsOn: [plan]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: all_settled}}
+      - name: use
+        dependsOn: [{{node: collect, input: all}}]
+        spec:
+          taskType: echo
+          data:
+            type: list
+            items: ["${{all.0.value.v}}", "${{all.1.value.v}}", "${{all.2.value.v}}"]
+"""))
+    run.run("plan", {"items": [str(i) for i in range(4)]})
+    for i in range(4):
+        run.run("kid", {"v": i})
+    reads: list[Any] = []
+    read = run.runtime.read_binding
+
+    def counting(binding: Any) -> Any:
+        reads.append(binding.task_id)
+        return read(binding)
+
+    monkeypatch.setattr(run.runtime, "read_binding", counting)
+
+    spec, _ = _dispatch(run, "use")
+
+    assert spec["data"]["items"] == [0, 1, 2]
+    assert sorted(reads) == sorted(set(reads)) and len(reads) == 4
+
+
+@pytest.mark.anyio
 async def test_an_agent_reading_a_projected_file_reads_its_url() -> None:
     run = await _Run().start(_workflow(f"""
       - name: train

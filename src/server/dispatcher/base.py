@@ -1347,8 +1347,10 @@ class Dispatcher:
         resolved_task: TaskEnvelopeTemplate = task
         if scoped is not None:
             if task.has_placeholder():
+                values: dict[str, BaseExecutorResult] = {}
                 resolved_task = self._resolve_placeholders(
-                    task, lambda expr: self._resolve_scoped_reference(expr, scoped)
+                    task,
+                    lambda expr: self._resolve_scoped_reference(expr, scoped, values),
                 )
             upstream = {name: entry.binding for name, entry in scoped.items()}
         else:
@@ -1381,18 +1383,24 @@ class Dispatcher:
         return value
 
     def _resolve_scoped_reference(
-        self, expr: str, scoped: dict[str, ScopedInput]
+        self,
+        expr: str,
+        scoped: dict[str, ScopedInput],
+        values: dict[str, BaseExecutorResult],
     ) -> Any:
         """The value a placeholder reads from a scoped input: ``${name}`` the value
         whole, ``${name.path}`` a part of it, and ``${name.task_id}`` the identity of
-        the task whose whole result it is."""
+        the task whose whole result it is. ``values`` holds each input already read
+        for the task."""
         name, dot, path = expr.strip().partition(".")
-        entry = scoped.get(name.strip())
+        name = name.strip()
+        entry = scoped.get(name)
         if entry is None:
-            raise ValueError(f"Unknown stage reference '{name.strip()}'")
+            raise ValueError(f"Unknown stage reference '{name}'")
         if dot and path.strip() == "task_id" and entry.task_id is not None:
             return entry.task_id
-        upstream = self._upstream_value(entry.binding)
+        if (upstream := values.get(name)) is None:
+            upstream = values[name] = self._upstream_value(entry.binding)
         steps = path.split(".") if dot else []
         value = routed_root(upstream)
         if steps and (value := self._dig_result_path(value, steps)) is None:

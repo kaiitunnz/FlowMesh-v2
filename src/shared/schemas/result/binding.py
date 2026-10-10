@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from shared.content import ContentReference
 from shared.tasks.result_binding import BindingKind, ResultBinding, ResultElementRef
 
 from ..artifact import ArtifactContext, ArtifactRef
@@ -186,6 +187,7 @@ def upstream_value(
     """
     if binding.whole_result:
         return envelope_of(binding).result
+    envelope_of = _read_once(envelope_of)
     value = scoped_value(binding, envelope_of)
     contexts = artifact_contexts(binding, envelope_of)
     return RoutedValue(
@@ -206,8 +208,11 @@ def artifact_contexts(
     the member's own producer.
     """
     found: dict[tuple[str, ...], ArtifactContext] = {}
+    path = tuple(str(step) for step in binding.path)
 
     def collect(source: ResultBinding, at: tuple[str, ...]) -> None:
+        if at[: len(path)] != path[: len(at)]:
+            return
         match source.kind:
             case BindingKind.RESULT:
                 if (context := envelope_of(source).result.artifacts_) is not None:
@@ -221,13 +226,27 @@ def artifact_contexts(
                     if member.binding is not None:
                         collect(member.binding, (*at, member.key))
 
-    collect(binding.model_copy(update={"path": ()}), ())
-    path = tuple(str(step) for step in binding.path)
+    collect(binding, ())
     return {
         at[len(path) :] if at[: len(path)] == path else (): context
         for at, context in found.items()
-        if at[: len(path)] == path or path[: len(at)] == at
     }
+
+
+def _read_once(
+    envelope_of: Callable[[ResultBinding], ResultEnvelope],
+) -> Callable[[ResultBinding], ResultEnvelope]:
+    """``envelope_of`` reading each stored result at most once."""
+    read: dict[ContentReference, ResultEnvelope] = {}
+
+    def envelope(binding: ResultBinding) -> ResultEnvelope:
+        if (reference := binding.reference) is None:
+            return envelope_of(binding)
+        if (cached := read.get(reference)) is None:
+            cached = read[reference] = envelope_of(binding)
+        return cached
+
+    return envelope
 
 
 def artifact_context(
@@ -273,6 +292,7 @@ def binding_text(
     """
     if binding.whole_result:
         return value_text(envelope_of(binding), None)
+    envelope_of = _read_once(envelope_of)
     try:
         value = scoped_value(binding, envelope_of)
     except IndexError:
