@@ -282,7 +282,6 @@ class SSHResult(StrictExecutorResult):
 
 
 _BASE_TAG = "__base__"
-_ROUTED_TAG = ROUTED_TAG
 
 _RESULT_TAGS: frozenset[str] = frozenset(
     {
@@ -319,12 +318,12 @@ def _result_discriminator(value: Any) -> str:
     permissive base model.
     """
     if isinstance(value, dict):
-        if value.get(_ROUTED_TAG) is True:
-            return _ROUTED_TAG
+        if value.get(ROUTED_TAG) is True:
+            return ROUTED_TAG
         tag = value.get("task_type")
     else:
         if isinstance(value, RoutedValue):
-            return _ROUTED_TAG
+            return ROUTED_TAG
         tag = getattr(value, "task_type", None)
     if tag is None:
         return _BASE_TAG
@@ -358,7 +357,7 @@ AnyExecutorResult = Annotated[
         | Annotated[EchoResult, Tag(TaskType.ECHO.value)]
         | Annotated[APIResult, Tag(TaskType.API.value)]
         | Annotated[SSHResult, Tag(TaskType.SSH.value)]
-        | Annotated[RoutedValue, Tag(_ROUTED_TAG)]
+        | Annotated[RoutedValue, Tag(ROUTED_TAG)]
         | Annotated[BaseExecutorResult, Tag(_BASE_TAG)]
     ),
     Discriminator(_result_discriminator),

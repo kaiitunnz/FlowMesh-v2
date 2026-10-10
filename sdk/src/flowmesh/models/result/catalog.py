@@ -1,11 +1,10 @@
 # Necessary for the recursive ``children`` forward reference.
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import (
     BaseModel,
-    ConfigDict,
     Discriminator,
     Field,
     SerializeAsAny,
@@ -234,26 +233,26 @@ class SSHResult(StrictExecutorResult):
     port: int | None = None
 
 
-class RoutedValue(BaseExecutorResult):
+_ROUTED_TAG: Final = "__routed__"
+
+
+class RoutedValue(StrictExecutorResult):
     """A value that is not one whole task result, such as a projected part of one,
     an aggregate's members, or an explicit empty; ``routed_value`` carries it."""
 
-    model_config = ConfigDict(extra="forbid")
-
-    routed: Literal[True] = Field(default=True, alias="__routed__")
+    routed: Literal[True] = Field(default=True, alias=_ROUTED_TAG)
     routed_value: Any
 
     @model_serializer(mode="wrap")
     def _drop_none_fields(
         self, handler: SerializerFunctionWrapHandler
     ) -> dict[str, Any]:
-        dumped = BaseExecutorResult._drop_none_fields(self, handler)
+        dumped = StrictExecutorResult._drop_none_fields(self, handler)
         dumped.setdefault("routed_value", None)
         return dumped
 
 
 _BASE_TAG = "__base__"
-_ROUTED_TAG = "__routed__"
 
 _RESULT_TAGS: frozenset[str] = frozenset(
     {
