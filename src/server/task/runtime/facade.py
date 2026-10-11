@@ -1866,7 +1866,13 @@ class TaskRuntime:
     @contextmanager
     def event_tail(self, *task_ids: str) -> Iterator[None]:
         """Hold the workflows of ``task_ids``, and of each workflow settled on this
-        thread meanwhile, resident until this thread's outermost tail ends."""
+        thread meanwhile, resident until this thread's outermost tail ends.
+
+        Wrap every path that settles tasks and then acts on them, such as applying a
+        worker's report, recovering a lost worker's tasks or failing a dispatch: what
+        follows the settle, such as closing a task's log stream or reporting its usage,
+        reads task records a freed workflow no longer holds, so it runs inside the tail.
+        """
         self._tail.depth += 1
         try:
             if new := [t for t in task_ids if t not in self._tail.tasks]:
