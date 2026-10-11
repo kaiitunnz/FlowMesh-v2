@@ -13,7 +13,7 @@ import pytest
 
 from server.resident import ClaimState, ClaimTerminalReason, ResidentStores
 from server.resident.claim import ClaimTransitionError
-from server.resident.durability import MemoryResidentDurability
+from server.resident.durability import MemoryResidentDurability, ResidentStateError
 from server.resident.state import (
     InvocationSubject,
     InvocationSubjectKind,
@@ -79,19 +79,15 @@ def test_a_successor_after_retirement_takes_the_next_epoch_across_a_restart() ->
     svc, stores, _settled, _delivery = _served()
     svc.on_invocation_terminal("inv-1").result()
 
-    restarted = ResidentStores(stores.durability)
-    restarted.load_snapshot(
-        asyncio.run(stores.durability.load_snapshot_async())  # type: ignore[arg-type]
-    )
-    _fresh, _s, _st, _d = _build(durability=stores.durability)
-    successor = _fresh._admission.raise_claim(
+    fresh, fresh_stores, _st, _d = _build(durability=stores.durability)
+    successor = fresh._admission.raise_claim(
         invocation_id="inv-1", subject=_SUBJECT, family="m|chat", profile=PROFILE
     )
     assert successor.admission_epoch == 1
 
-    _fresh._admission.settle_invocation_terminal("inv-1", ClaimTerminalReason.FAILED)
-    assert _fresh._admission.retire("inv-1")
-    record = _record(_fresh._stores)
+    fresh._admission.settle_invocation_terminal("inv-1", ClaimTerminalReason.FAILED)
+    assert fresh._admission.retire("inv-1")
+    record = _record(fresh_stores)
     assert record.epoch_high == 1
     assert record.terminal_reason is ClaimTerminalReason.FAILED
 
@@ -234,7 +230,7 @@ def test_a_refused_retirement_writes_nothing() -> None:
     )
     before = dict(durability.live)
 
-    with pytest.raises(Exception, match="not terminal"):
+    with pytest.raises(ResidentStateError, match="not terminal"):
         svc._admission.retire("inv-1")
 
     assert durability.live == before and durability.retired == {}
