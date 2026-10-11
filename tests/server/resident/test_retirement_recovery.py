@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 import pytest
 
 from server.resident import (
+    AdmissionController,
     ClaimState,
     ClaimTerminalReason,
     InvocationSubject,
@@ -33,7 +34,7 @@ from server.resident.store_retry import SETTLEMENT
 from shared.content import reference_for
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import ResidentBootstrapOutcome, ResidentStreamStatus
-from tests.server.resident._helpers import PROFILE, stored_replica
+from tests.server.resident._helpers import PROFILE, stored_replica, warm_stores
 from tests.server.resident.test_serve_origination import (
     _FAMILY,
     _SERVE_TASK,
@@ -52,6 +53,7 @@ from tests.server.resident.test_serve_origination import (
 )
 from tests.server.resident.test_service import _ack, _build, _env, _outcome
 
+_SUBJECT = InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="wfl-1")
 _MANIFEST = OutcomeManifest(content=reference_for("s", b"ok", media_type="text/plain"))
 
 
@@ -496,3 +498,44 @@ def test_a_family_re_adopted_after_a_lost_archive_reply_is_stored_live_again() -
     assert fresh_stores.directory.by_family(_FAMILY)
     listed = asyncio.run(fresh.list_service_families_async())
     assert [family.family for family in listed].count(_FAMILY) == 1
+
+
+def test_an_unwritten_replica_change_leaves_a_retired_invocation_retired() -> None:
+    svc, stores, _settled, _delivery = _served()
+    svc.on_invocation_terminal("inv-1").result()
+    [replica] = stores.directory.all()
+    replica.report_epoch += 1
+    assert not stores.durable
+
+    assert svc.invocations_retired(["inv-1"])
+
+
+def test_an_unwritten_request_change_reads_nothing_retired() -> None:
+    svc, stores, _settled, _delivery = _served()
+    svc.on_invocation_terminal("inv-1").result()
+    request = stores.invocations.get("inv-1")
+    assert request is None
+    svc._admission.raise_claim(
+        invocation_id="inv-2", subject=_SUBJECT, family="m|chat", profile=PROFILE
+    )
+    request = stores.invocations.get("inv-2")
+    assert request is not None
+    stores.invocations.replace(request.model_copy(update={"replayable": False}))
+
+    assert not svc.invocations_retired(["inv-1"])
+
+
+def test_a_batch_claim_releases_its_whole_credit_at_once() -> None:
+    stores = warm_stores(slots=4, durability=MemoryResidentDurability())
+    admission = AdmissionController(stores)
+    profile = PROFILE.model_copy(update={"batch_size": 3})
+    claim = admission.raise_claim(
+        invocation_id="inv-1", subject=_SUBJECT, family="fam", profile=profile
+    )
+    admission.admit(claim, profile, idempotency_key=None)
+    assert stores.credit_ledger.held("rpl-1") == 3
+
+    admission.settle_invocation_terminal("inv-1", ClaimTerminalReason.COMPLETED)
+    assert stores.credit_ledger.held("rpl-1") == 0
+    assert admission.retire("inv-1")
+    assert stores.credit_ledger.held("rpl-1") == 0
