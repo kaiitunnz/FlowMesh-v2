@@ -22,7 +22,7 @@ _INDEX_BUILDING = "building:v1:"
 BATCH_SIZE = 64
 # The most stored tasks one scratch runtime restores at a time; a workflow holding more
 # is restored alone.
-BATCH_TASKS = 20_000
+BATCH_TASKS = 2_000
 
 
 class ScratchRuntime(Protocol):
