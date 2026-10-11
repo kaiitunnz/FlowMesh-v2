@@ -169,6 +169,7 @@ def _assert_ledger_never_leads(store: _Store, workflow_id: str) -> None:
 
 def _run_to_end(runtime: TaskRuntime, workflow_id: str) -> None:
     for _ in range(10):
+        runtime._redrive.run_due()
         if runtime.workflow_settlement(workflow_id).settled:
             return
         for record in runtime.task_records():
