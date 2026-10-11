@@ -13,7 +13,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from redis.asyncio.client import Pipeline as AsyncPipeline
 from redis.client import Pipeline
 
@@ -34,16 +34,22 @@ from ..clients.redis import (
 )
 from ..task.history import (
     CERTIFICATE_FIELD,
+    DECLARATIONS_FIELD,
     HISTORY_SCHEMA,
-    OUTPUTS_FIELD,
     HistoryCertificate,
+    OutputHistory,
     OutputsHistory,
     TaskHistory,
+    output_index_field,
+    output_member_field,
 )
 from ..task.models import TaskStatus
+from ..task.v2.representations.results import ResultDeclaration
 from .task_states import PersistedTask, load_context
 
 type _AnyPipeline = Pipeline | AsyncPipeline
+
+_DECLARATIONS = TypeAdapter(list[tuple[str, ResultDeclaration]])
 
 # Validates a prepared publication, then certifies it. Every key's type and every value
 # a write reads is checked before the first write, and the certificate is written last,
@@ -163,7 +169,7 @@ def _queue_preparation(pipe: _AnyPipeline, publication: HistoryPublication) -> N
         for task_id, history in publication.tasks.items()
     }
     if publication.outputs is not None:
-        fields[OUTPUTS_FIELD] = publication.outputs.model_dump_json()
+        fields.update(_output_fields(publication.outputs))
     history_key = workflow_history_key(publication.workflow_id)
     for chunk in _chunks(list(fields.items())):
         pipe.hset(history_key, mapping=dict(chunk))
@@ -176,6 +182,21 @@ def _queue_preparation(pipe: _AnyPipeline, publication: HistoryPublication) -> N
     for status, status_members in _by_status(publication).items():
         for part in _chunks(status_members):
             pipe.zadd(task_history_key(status), dict.fromkeys(part, 0))
+
+
+def _output_fields(outputs: OutputsHistory) -> dict[str, str]:
+    """The history hash fields a workflow's published outputs are stored in: the
+    declarations, each output's member list, and each member."""
+    fields = {
+        DECLARATIONS_FIELD: _DECLARATIONS.dump_json(outputs.declarations).decode()
+    }
+    index: dict[str, list[str]] = {name: [] for name, _ in outputs.declarations}
+    for member in outputs.members:
+        index.setdefault(member.name, []).append(member.field)
+        fields[member.field] = member.model_dump_json()
+    for name, member_fields in index.items():
+        fields[output_index_field(name)] = json.dumps(member_fields)
+    return fields
 
 
 def _chunks[T](items: Sequence[T]) -> Iterator[Sequence[T]]:
@@ -221,7 +242,8 @@ def _certify_args(
         revision,
         publication.certificate.model_dump_json(),
         publication.certificate.seq,
-        len(publication.tasks) + (publication.outputs is not None),
+        len(publication.tasks)
+        + (len(_output_fields(publication.outputs)) if publication.outputs else 0),
         workflow_id,
         done,
         len(grouped),
@@ -356,18 +378,81 @@ def _certified(replies: Sequence[Any]) -> list[bool]:
     return [reply is True or reply == 1 for reply in replies]
 
 
-def _outputs(
-    replies: Sequence[str | None],
-) -> tuple[HistoryCertificate, OutputsHistory | None] | None:
-    raw_certificate, raw_outputs = replies
-    if (certificate := _certificate(raw_certificate)) is None:
-        return None
-    if raw_outputs is None:
-        return certificate, None
+def _declarations(raw: str | None) -> list[tuple[str, ResultDeclaration]]:
+    if raw is None:
+        return []
     try:
-        return certificate, OutputsHistory.model_validate_json(raw_outputs)
+        return _DECLARATIONS.validate_json(raw)
     except ValidationError as exc:
-        raise HistoryUnreadable(f"unreadable output history: {exc}") from exc
+        raise HistoryUnreadable(f"unreadable output declarations: {exc}") from exc
+
+
+def _output_members(raws: Sequence[str | None]) -> list[OutputHistory]:
+    try:
+        members = [
+            OutputHistory.model_validate_json(raw) for raw in raws if raw is not None
+        ]
+    except ValidationError as exc:
+        raise HistoryUnreadable(f"unreadable output member: {exc}") from exc
+    if len(members) != len(raws):
+        raise HistoryUnreadable("a published output member is missing")
+    return members
+
+
+def _member_fields(raws: Sequence[str | None]) -> list[str]:
+    fields: list[str] = []
+    for raw in raws:
+        if raw is None:
+            raise HistoryUnreadable("a published output's member list is missing")
+        fields.extend(json.loads(raw))
+    return fields
+
+
+def _output_request(name: str | None) -> list[str]:
+    return [CERTIFICATE_FIELD, DECLARATIONS_FIELD] + (
+        [output_index_field(name)] if name is not None else []
+    )
+
+
+@dataclass(frozen=True)
+class _OutputsRead:
+    """What the first read of a freed workflow's outputs found: its declarations and,
+    when one output was named, its member fields."""
+
+    declarations: list[tuple[str, ResultDeclaration]]
+    member_fields: list[str] | None
+
+
+def _outputs_read(
+    name: str | None, replies: Sequence[str | None]
+) -> _OutputsRead | None:
+    if _certificate(replies[0]) is None:
+        return None
+    declarations = _declarations(replies[1])
+    if name is None:
+        return _OutputsRead(declarations, None)
+    if not any(declared == name for declared, _ in declarations):
+        return _OutputsRead([], [])
+    return _OutputsRead(declarations, _member_fields(replies[2:]))
+
+
+def _stored_output(
+    name: str, replies: Sequence[str | None]
+) -> tuple[ResultDeclaration | None, OutputHistory | None] | None:
+    raw_certificate, raw_declarations, raw_member = replies
+    if _certificate(raw_certificate) is None:
+        return None
+    declaration = next(
+        (
+            decl
+            for declared, decl in _declarations(raw_declarations)
+            if declared == name
+        ),
+        None,
+    )
+    if declaration is None or raw_member is None:
+        return declaration, None
+    return declaration, _output_members([raw_member])[0]
 
 
 def _range_bounds(bound: str | None, forward: bool) -> tuple[str, str]:
@@ -377,9 +462,7 @@ def _range_bounds(bound: str | None, forward: bool) -> tuple[str, str]:
 
 
 def _task_fields(fields: Sequence[str]) -> list[str]:
-    return [
-        field for field in fields if field not in (CERTIFICATE_FIELD, OUTPUTS_FIELD)
-    ]
+    return [field for field in fields if not field.startswith("@")]
 
 
 class WorkflowHistoryStore:
@@ -450,24 +533,106 @@ class WorkflowHistoryStore:
             _queue_certified(pipe, workflow_ids)
             return _certified(await pipe.execute(raise_on_error=False))
 
-    def outputs_history(
-        self, workflow_id: str
-    ) -> tuple[HistoryCertificate, OutputsHistory | None] | None:
-        """A freed workflow's certificate and published outputs, None while it is not
-        freed."""
-        return _outputs(
+    def stored_outputs(
+        self, workflow_id: str, name: str | None = None
+    ) -> OutputsHistory | None:
+        """A freed workflow's published output declarations and the members of every
+        output, or of the one named; None while the workflow is not freed."""
+        read = _outputs_read(
+            name,
             self._rds.sync.hash_mget(
-                workflow_history_key(workflow_id), [CERTIFICATE_FIELD, OUTPUTS_FIELD]
+                workflow_history_key(workflow_id), _output_request(name)
+            ),
+        )
+        if read is None:
+            return None
+        member_fields = read.member_fields
+        if member_fields is None:
+            member_fields = _member_fields(
+                self._rds.sync.hash_mget(
+                    workflow_history_key(workflow_id),
+                    [output_index_field(declared) for declared, _ in read.declarations],
+                )
+                if read.declarations
+                else []
             )
+        members = _output_members(
+            self._rds.sync.hash_mget(workflow_history_key(workflow_id), member_fields)
+            if member_fields
+            else []
+        )
+        return OutputsHistory(declarations=read.declarations, members=members)
+
+    async def stored_outputs_async(
+        self, workflow_id: str, name: str | None = None
+    ) -> OutputsHistory | None:
+        read = _outputs_read(
+            name,
+            await self._rds.asyncio.hash_mget(
+                workflow_history_key(workflow_id), _output_request(name)
+            ),
+        )
+        if read is None:
+            return None
+        member_fields = read.member_fields
+        if member_fields is None:
+            member_fields = _member_fields(
+                await self._rds.asyncio.hash_mget(
+                    workflow_history_key(workflow_id),
+                    [output_index_field(declared) for declared, _ in read.declarations],
+                )
+                if read.declarations
+                else []
+            )
+        members = _output_members(
+            await self._rds.asyncio.hash_mget(
+                workflow_history_key(workflow_id), member_fields
+            )
+            if member_fields
+            else []
+        )
+        return OutputsHistory(declarations=read.declarations, members=members)
+
+    def stored_output(
+        self,
+        workflow_id: str,
+        name: str,
+        scope_id: str | None,
+        key: str | None,
+        sequence: int | None,
+    ) -> tuple[ResultDeclaration | None, OutputHistory | None] | None:
+        """A freed workflow's declaration of a published output and its member at the
+        selectors; None while the workflow is not freed."""
+        return _stored_output(
+            name,
+            self._rds.sync.hash_mget(
+                workflow_history_key(workflow_id),
+                [
+                    CERTIFICATE_FIELD,
+                    DECLARATIONS_FIELD,
+                    output_member_field(name, scope_id, key, sequence),
+                ],
+            ),
         )
 
-    async def outputs_history_async(
-        self, workflow_id: str
-    ) -> tuple[HistoryCertificate, OutputsHistory | None] | None:
-        return _outputs(
+    async def stored_output_async(
+        self,
+        workflow_id: str,
+        name: str,
+        scope_id: str | None,
+        key: str | None,
+        sequence: int | None,
+    ) -> tuple[ResultDeclaration | None, OutputHistory | None] | None:
+        return _stored_output(
+            name,
             await self._rds.asyncio.hash_mget(
-                workflow_history_key(workflow_id), [CERTIFICATE_FIELD, OUTPUTS_FIELD]
-            )
+                workflow_history_key(workflow_id),
+                [
+                    CERTIFICATE_FIELD,
+                    DECLARATIONS_FIELD,
+                    output_member_field(name, scope_id, key, sequence),
+                ],
+            ),
         )
 
     def history_members(self, task_ids: Sequence[str]) -> list[str | None]:

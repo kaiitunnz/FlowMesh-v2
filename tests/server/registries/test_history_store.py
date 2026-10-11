@@ -17,11 +17,14 @@ from server.task.history import (
     CERTIFICATE_FIELD,
     HISTORY_SCHEMA,
     HistoryCertificate,
+    OutputHistory,
+    OutputsHistory,
     TaskHistory,
     history_member,
     member_task_id,
 )
 from server.task.models import TaskStatus
+from server.task.v2.representations.results import CardinalityKind, ResultDeclaration
 from tests.server.redis_helpers import fake_redis_client, raw_control
 from tests.server.test_workflow_sources import _V1, _register, _runtime
 
@@ -237,3 +240,78 @@ def test_a_large_publication_is_checked_in_full(damaged: str | None) -> None:
     assert outcome == ("ok" if damaged is None else "index incomplete")
     assert _certified(registry, workflow_id) is (damaged is None)
     assert registry.history_counts() == ((2500, 834) if damaged is None else (0, 0))
+
+
+def _with_outputs(
+    publication: HistoryPublication, members: dict[str, int]
+) -> HistoryPublication:
+    return HistoryPublication(
+        workflow_id=publication.workflow_id,
+        certificate=publication.certificate,
+        tasks=publication.tasks,
+        members=publication.members,
+        outputs=OutputsHistory(
+            declarations=[
+                (
+                    name,
+                    ResultDeclaration(
+                        output_id=f"out-{name}",
+                        source_ref=name,
+                        cardinality=CardinalityKind.KEYED_COLLECTION,
+                    ),
+                )
+                for name in [*members, "empty"]
+            ],
+            members=[
+                OutputHistory(name=name, scope_id="scp-1", key=str(index))
+                for name, count in members.items()
+                for index in range(count)
+            ],
+        ),
+    )
+
+
+def test_a_published_output_reads_only_the_members_it_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, workflow_id, task_ids = _registered()
+    publication = _with_outputs(
+        _publication(registry, workflow_id, task_ids), {"wide": 2000, "narrow": 3}
+    )
+    assert _publish(registry, publication, registry.workflow_revision(workflow_id)) == (
+        "ok"
+    )
+    read = registry._rds.sync.hash_mget
+    fields: list[int] = []
+
+    def counted(key: str, names: list[str]) -> list[str | None]:
+        fields.append(len(names))
+        return read(key, names)
+
+    monkeypatch.setattr(registry._rds.sync, "hash_mget", counted)
+
+    stored = registry.stored_output(workflow_id, "wide", "scp-1", "1999", None)
+    assert stored is not None
+    declaration, member = stored
+    assert declaration is not None and declaration.output_id == "out-wide"
+    assert member == OutputHistory(name="wide", scope_id="scp-1", key="1999")
+    assert max(fields) == 3
+
+    fields.clear()
+    narrow = registry.stored_outputs(workflow_id, "narrow")
+    assert narrow is not None
+    assert [member.key for member in narrow.members] == ["0", "1", "2"]
+    assert max(fields) == 3
+
+    assert registry.stored_output(workflow_id, "wide", "scp-1", "2000", None) == (
+        declaration,
+        None,
+    )
+    assert registry.stored_output(workflow_id, "unknown", None, None, None) == (
+        None,
+        None,
+    )
+    empty = registry.stored_outputs(workflow_id, "empty")
+    assert empty is not None and empty.members == []
+    every = registry.stored_outputs(workflow_id)
+    assert every is not None and len(every.members) == 2003

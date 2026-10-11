@@ -87,45 +87,21 @@ def published_member(
     return decl, _member(engine, name, decl, slot) if slot is not None else None
 
 
-def stored_members(
-    outputs: OutputsHistory, name: str | None = None
-) -> list[OutputMember]:
-    """Every member a freed workflow's published outputs hold, or one output's."""
+def stored_members(outputs: OutputsHistory) -> list[OutputMember]:
+    """The members a freed workflow's stored published outputs hold."""
+    declarations = dict(outputs.declarations)
     return [
-        _stored_member(member)
-        for member in outputs.members
-        if name is None or member.name == name
+        stored_member(declarations[member.name], member) for member in outputs.members
     ]
 
 
 def stored_member(
-    outputs: OutputsHistory,
-    name: str,
-    scope_id: str | None,
-    key: str | None,
-    sequence: int | None,
-) -> tuple[ResultDeclaration | None, OutputMember | None]:
-    """The declaration a freed workflow's public name refers to, and its member at
-    the selectors."""
-    decl = next((d for n, d in outputs.declarations if n == name), None)
-    if decl is None:
-        return None, None
-    member = next(
-        (
-            member
-            for member in outputs.members
-            if (member.name, member.scope_id, member.key, member.sequence)
-            == (name, scope_id, key, sequence)
-        ),
-        None,
-    )
-    return decl, _stored_member(member) if member is not None else None
-
-
-def _stored_member(member: OutputHistory) -> OutputMember:
+    declaration: ResultDeclaration, member: OutputHistory
+) -> OutputMember:
+    """A freed workflow's published output member, read through its stored value."""
     return OutputMember(
         name=member.name,
-        declaration=member.declaration,
+        declaration=declaration,
         scope_id=member.scope_id,
         key=member.key,
         sequence=member.sequence,

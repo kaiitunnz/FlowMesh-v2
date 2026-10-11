@@ -2014,7 +2014,6 @@ class TaskRuntime:
             outputs.append(
                 OutputHistory(
                     name=member.name,
-                    declaration=member.declaration,
                     scope_id=member.scope_id,
                     key=member.key,
                     sequence=member.sequence,
@@ -3554,9 +3553,12 @@ class TaskRuntime:
                 )
             if self._tasks.holds(workflow_id):
                 return None
-        if (outputs := self._stored_outputs(workflow_id)) is None:
+        if not self._settled_history.published_through:
             return None
-        return PublishedOutputs(members=stored_members(outputs, name), open=False)
+        outputs = self._workflow_registry.stored_outputs(workflow_id, name)
+        if outputs is None:
+            return None
+        return PublishedOutputs(members=stored_members(outputs), open=False)
 
     def published_output(
         self,
@@ -3582,17 +3584,23 @@ class TaskRuntime:
                 )
             if self._tasks.holds(workflow_id):
                 return None
-        if (outputs := self._stored_outputs(workflow_id)) is None:
-            return None
-        declaration, member = stored_member(outputs, name, scope_id, key, sequence)
-        return PublishedOutput(declaration=declaration, member=member, open=False)
-
-    def _stored_outputs(self, workflow_id: str) -> OutputsHistory | None:
-        """A freed v2 workflow's published outputs; None for any other workflow."""
         if not self._settled_history.published_through:
             return None
-        stored = self._workflow_registry.outputs_history(workflow_id)
-        return stored[1] if stored is not None else None
+        stored = self._workflow_registry.stored_output(
+            workflow_id, name, scope_id, key, sequence
+        )
+        if stored is None:
+            return None
+        declaration, history = stored
+        return PublishedOutput(
+            declaration=declaration,
+            member=(
+                stored_member(declaration, history)
+                if declaration is not None and history is not None
+                else None
+            ),
+            open=False,
+        )
 
     def read_output(self, member: OutputMember) -> BaseExecutorResult:
         """The value a published member settled with, as an input reading it would

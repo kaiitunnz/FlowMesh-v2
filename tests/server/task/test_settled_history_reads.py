@@ -10,7 +10,14 @@ from server.task.models import TaskOrder, TaskStatus, task_order
 from server.task.runtime import TaskRuntime
 from server.utils.query import QueryFilter
 from tests.server.dispatch_helpers import record_dispatch
-from tests.server.task.test_region_outputs import _CONCAT, _LOOP, _LOOP_BODY
+from tests.server.task.test_region_outputs import (
+    _CONCAT,
+    _FAN_OVER_CHILD,
+    _LOOP,
+    _LOOP_BODY,
+    _PENDING_OUTPUTS,
+    _TWO_RETURNS,
+)
 from tests.server.task.test_runtime_control_flow import _Run, _workflow
 from tests.server.task.test_settled_history import (
     _TS,
@@ -102,8 +109,15 @@ def _outputs(run: _Run) -> dict[str, Any]:
             run.runtime.read_output(member).model_dump(mode="json"),
             found.open,
         )
-    missing = run.runtime.published_output(run.workflow_id, "nothing", None, None, None)
-    served["missing"] = missing
+    for name in sorted({member.name for member in listed.members} | {"nothing"}):
+        named = run.runtime.published_outputs(run.workflow_id, name)
+        assert named is not None
+        served[f"named:{name}"] = sorted(
+            (member.cursor, member.publication) for member in named.members
+        )
+        served[f"absent:{name}"] = run.runtime.published_output(
+            run.workflow_id, name, "scp-absent", "absent", None
+        )
     return served
 
 
@@ -121,7 +135,18 @@ def _outputs(run: _Run) -> dict[str, Any]:
                 ("step", {"route": "done", "next": {"draft": "z"}}),
             ],
         ),
+        (
+            _FAN_OVER_CHILD,
+            _TWO_RETURNS,
+            [
+                ("plan", {"items": ["x", "y"]}),
+                ("work", {"value": "one"}),
+                ("work", {"value": "two"}),
+            ],
+        ),
+        (_PENDING_OUTPUTS, _LOOP_BODY, [("a", {"v": 1}), ("cancel", {})]),
     ],
+    ids=["merge", "loop", "spawn", "cancelled"],
 )
 async def test_a_freed_workflow_serves_its_published_outputs_as_it_did(
     nodes: str, templates: str, steps: list[tuple[str, dict[str, Any]]]
@@ -129,7 +154,10 @@ async def test_a_freed_workflow_serves_its_published_outputs_as_it_did(
     registry = _registry()
     run = await _Run(registry=registry).start(_workflow(nodes, templates))  # type: ignore[arg-type]
     for name, result in steps:
-        run.run(name, result)
+        if name == "cancel":
+            run.runtime.cancel_workflow(run.workflow_id)
+        else:
+            run.run(name, result)
     assert run.settled()
     served = _outputs(run)
     await run.runtime.start_settled_history()
