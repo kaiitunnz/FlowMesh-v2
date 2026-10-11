@@ -174,7 +174,7 @@ async def get_task(
     await require_permission(
         principal, ResourceKind.TASK, task_id, ResourceAction.READ, logger
     )
-    info = runtime.describe_task(task_id)
+    info = await asyncio.to_thread(runtime.describe_task, task_id)
     if not info:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="task not found"
@@ -202,7 +202,7 @@ async def stop_task(
     await require_permission(
         principal, ResourceKind.TASK, task_id, ResourceAction.CANCEL, logger
     )
-    record = runtime.get_record(task_id)
+    record = await asyncio.to_thread(runtime.task_record, task_id)
     if record is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
