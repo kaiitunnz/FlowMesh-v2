@@ -5689,6 +5689,19 @@ class TaskRuntime:
         stored = self._stored_task(task_id)
         return _stored_task_info(stored) if stored is not None else None
 
+    def describe_resident(self, task_ids: Sequence[str]) -> list[TaskInfo | None]:
+        """Each task's details at one moment, None for a task the runtime does not
+        hold; reads nothing from the store."""
+        with self._lock:
+            return [
+                (
+                    self._build_task_info_locked(task_id, record)
+                    if (record := self._tasks.get(task_id)) is not None
+                    else None
+                )
+                for task_id in task_ids
+            ]
+
     def task_record(self, task_id: str) -> TaskRecord | None:
         """A task's record, from the store once its workflow is freed."""
         if (record := self.get_record(task_id)) is not None:
