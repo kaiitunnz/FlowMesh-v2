@@ -3,7 +3,7 @@
 import logging
 import threading
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -286,6 +286,10 @@ class TransitionCommitter:
     def reporting(self, task_id: str) -> bool:
         """Whether an acknowledging caller is handling a report of the task."""
         return task_id in self._reports
+
+    def reported_tasks(self) -> Collection[str]:
+        """The tasks whose reports acknowledging callers are handling."""
+        return self._reports.keys()
 
     def end_reports_locked(self, acknowledged: bool) -> list[str]:
         """Release the reports this thread's handling took up, and when the caller

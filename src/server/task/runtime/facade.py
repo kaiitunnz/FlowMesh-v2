@@ -1938,10 +1938,15 @@ class TaskRuntime:
         engine = self._engines.get(workflow_id)
         if engine is not None and engine.holds_obligations():
             return None
-        held = (
+        # Each of these holds only work in flight, so it is read whole rather than
+        # once per task of the workflow.
+        in_flight: tuple[Iterable[str], ...] = (
+            committer.reported_tasks(),
             self._awaiting_reports,
             self._fence.publishing,
             self._reservations.held_dispatches,
+            (task_id for task_id, _ in self._parked_turns),
+            (op.agent_task_id for op in self._mediated_ops.pending_ops.values()),
             self._resident_tasks.dispatched_resident,
             self._inputs.input_checks,
             self._pending_facade_groups,
@@ -1949,13 +1954,10 @@ class TaskRuntime:
             self._merges.merge_parent_map,
         )
         if any(
-            committer.reporting(task_id) or any(task_id in each for each in held)
-            for task_id in task_ids
-        ):
-            return None
-        ids = set(task_ids)
-        if any(task_id in ids for task_id, _ in self._parked_turns) or any(
-            op.agent_task_id in ids for op in self._mediated_ops.pending_ops.values()
+            (record := self._tasks.get(task_id)) is not None
+            and record.workflow_id == workflow_id
+            for each in in_flight
+            for task_id in each
         ):
             return None
         return ReclaimCheck(
