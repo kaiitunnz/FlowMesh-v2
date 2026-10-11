@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from server.orchestration.ledger_fields import LedgerChanges
+from server.orchestration.ledger_layout import LedgerChanges
 from server.orchestration.state import TERMINAL_WORK_ITEM_STATUSES
 from server.task.models import SETTLING_TASK_STATUSES, TaskStatus
 from server.task.runtime import TaskRuntime

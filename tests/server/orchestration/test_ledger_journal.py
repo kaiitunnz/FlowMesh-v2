@@ -18,13 +18,13 @@ from server.orchestration.journal import (
     TrackedSet,
     freeze_mapping,
 )
-from server.orchestration.ledger_fields import (
+from server.orchestration.ledger_layout import (
     FOUNDATION,
     HISTORIES,
     KEYED,
+    KEYED_TEXTS,
     SCALARS,
     SETS,
-    STRINGS,
     LedgerLayoutError,
     StoredLedger,
     decode_ledger,
@@ -230,7 +230,7 @@ def test_every_value_a_ledger_stores_changes_only_through_its_collection() -> No
 
 
 def test_the_stored_layout_places_every_snapshot_field_once() -> None:
-    groups = [set(KEYED), set(STRINGS), set(HISTORIES), set(SETS)]
+    groups = [set(KEYED), set(KEYED_TEXTS), set(HISTORIES), set(SETS)]
     groups += [set(FOUNDATION), set(SCALARS)]
 
     assert set().union(*groups) == set(LedgerSnapshot.model_fields)

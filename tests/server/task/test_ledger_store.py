@@ -11,7 +11,7 @@ from redis.exceptions import ResponseError
 
 from server.clients.redis import workflow_ds_key
 from server.orchestration import OrchestrationEngine
-from server.orchestration.ledger_fields import LedgerChanges
+from server.orchestration.ledger_layout import LedgerChanges
 from server.registries.workflow import (
     WorkflowControl,
     WorkflowRegistry,

@@ -3,9 +3,9 @@
 A ledger is stored as one hash per workflow. Each keyed entity is a field named by its
 collection and its key, holding its insertion ordinal and its JSON; each history entry
 is a field named by its position; each set member is a field of its own; and ``meta``
-fields hold the instance's foundation, written once, and its scalars. A write carries
-only the fields that changed, and a restore rebuilds the ledger snapshot from all of
-them, refusing a field it cannot place.
+fields hold the instance's foundation, written only with the whole ledger, and its
+scalars. A write carries only the fields that changed, and a restore rebuilds the
+ledger snapshot from all of them, refusing a field it cannot place.
 """
 
 import json
@@ -78,7 +78,7 @@ KEYED: Mapping[str, tuple[type[BaseModel], Callable[[Any], Hashable]]] = {
     "child_contexts": (ChildContext, lambda e: e.context_id),
 }
 # Keyed collections of plain strings, keyed by task id.
-STRINGS = ("failure_reasons",)
+KEYED_TEXTS = ("failure_reasons",)
 HISTORIES: Mapping[str, type[BaseModel]] = {
     "records": Record,
     "accepted_inputs": AcceptedInput,
@@ -104,17 +104,23 @@ type KeyedEntries = tuple[Mapping[Any, BaseModel | str], Mapping[Any, int]]
 
 @dataclass(frozen=True)
 class LedgerChanges:
-    """The fields one ledger write sets and deletes, and whether it first drops the
-    whole stored ledger, with what of the ledger it captured: the journal's changes at
-    their versions, each history's length, the scalars, and the rewrite it makes."""
+    """One ledger write, and what of the ledger it captured."""
 
     fields: dict[str, str]
+    """The fields the write sets."""
     deleted: tuple[str, ...] = ()
+    """The fields the write deletes."""
     reset: bool = False
+    """Whether the write first drops the whole stored ledger."""
     captured: Mapping[JournalKey, int] = field(default_factory=dict)
+    """The journal's changes the write carries, at their versions."""
     lengths: Mapping[str, int] = field(default_factory=dict)
+    """Each history's length when captured."""
     scalars: Mapping[str, Any] = field(default_factory=dict)
+    """The scalars when captured."""
     rewrite: int = 0
+    """The count of whole-ledger rewrites owed up to the write, which its landing
+    settles; 0 for a write of changes only."""
 
 
 @dataclass(frozen=True)
@@ -162,14 +168,6 @@ def field_name(collection: str, key: Hashable) -> str:
     return f"{collection}:[{','.join([_encoded_part(p) for p in key])}]"
 
 
-def history_field(collection: str, position: int) -> str:
-    return field_name(collection, position)
-
-
-def member_field(collection: str, member: Hashable) -> str:
-    return field_name(collection, member)
-
-
 def keyed_value(ordinal: int, value: BaseModel | str) -> str:
     encoded = (
         value.model_dump_json() if isinstance(value, BaseModel) else json.dumps(value)
@@ -215,7 +213,7 @@ def encode_fields(
             fields[f"{prefix}{position}]"] = entry.model_dump_json()
     for collection, members in sets.items():
         for member in members:
-            fields[member_field(collection, member)] = SET_MEMBER
+            fields[field_name(collection, member)] = SET_MEMBER
     for name, value in scalars.items():
         fields[scalar_field(name)] = scalar_value(value)
     return fields
@@ -227,7 +225,7 @@ def encode_ledger(stored: StoredLedger) -> dict[str, str]:
 
     def keyed(collection: str) -> KeyedEntries:
         order = ordinals.get(collection, {})
-        if collection in STRINGS:
+        if collection in KEYED_TEXTS:
             return getattr(snapshot, collection), order
         key_of = KEYED[collection][1]
         entities: list[BaseModel] = getattr(snapshot, collection)
@@ -235,7 +233,7 @@ def encode_ledger(stored: StoredLedger) -> dict[str, str]:
 
     return encode_fields(
         {name: getattr(snapshot, name) for name in FOUNDATION},
-        {collection: keyed(collection) for collection in (*KEYED, *STRINGS)},
+        {collection: keyed(collection) for collection in (*KEYED, *KEYED_TEXTS)},
         {collection: getattr(snapshot, collection) for collection in HISTORIES},
         {collection: getattr(snapshot, collection) for collection in SETS},
         {name: getattr(snapshot, name) for name in SCALARS},
@@ -330,7 +328,7 @@ def _decode_ledger(fields: Mapping[str, str]) -> StoredLedger:
                     scalars[scalar] = json.loads(value)
                 elif name not in (_LAYOUT_FIELD, _FOUNDATION_FIELD):
                     raise LedgerLayoutError(f"unknown ledger field {name!r}")
-        elif collection in KEYED or collection in STRINGS:
+        elif collection in KEYED or collection in KEYED_TEXTS:
             data[collection], ordinals[collection] = _keyed_entries(
                 collection, names, values
             )
@@ -364,7 +362,7 @@ def _keyed_entries(
     if len(set(stored)) != len(stored):
         raise LedgerLayoutError(f"conflicting ordinals in {collection}")
     order = sorted(range(len(stored)), key=stored.__getitem__)
-    if collection in STRINGS:
+    if collection in KEYED_TEXTS:
         keys = [_member(collection, names[i]) for i in order]
         return (
             {key: json.loads(bodies[i]) for key, i in zip(keys, order)},

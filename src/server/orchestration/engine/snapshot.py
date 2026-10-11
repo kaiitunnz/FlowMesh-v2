@@ -8,10 +8,10 @@ from pydantic import BaseModel
 
 from ..guardrails import ScopeBudget
 from ..journal import AppendOnlyList, JournaledModel, TrackedDict, TrackedSet
-from ..ledger_fields import (
+from ..ledger_layout import (
     KEYED,
+    KEYED_TEXTS,
     SET_MEMBER,
-    STRINGS,
     LedgerChanges,
     LedgerOrdinals,
     StoredLedger,
@@ -19,9 +19,7 @@ from ..ledger_fields import (
     encode_fields,
     encode_ledger,
     field_name,
-    history_field,
     keyed_value,
-    member_field,
     scalar_field,
     scalar_value,
 )
@@ -444,7 +442,9 @@ class SnapshotCodec:
     def to_snapshot(self) -> LedgerSnapshot:
         fields: dict[str, Any] = {**self._foundation(), **self._scalars()}
         for name, tracked in self._keyed.items():
-            fields[name] = dict(tracked) if name in STRINGS else list(tracked.values())
+            fields[name] = (
+                dict(tracked) if name in KEYED_TEXTS else list(tracked.values())
+            )
         for name, history in self._histories.items():
             fields[name] = list(history)
         for name, members in self._sets.items():
@@ -491,12 +491,12 @@ class SnapshotCodec:
                     else:
                         deleted.append(field_name(name, key))
                 elif key in self._sets[name]:
-                    fields[member_field(name, key)] = SET_MEMBER
+                    fields[field_name(name, key)] = SET_MEMBER
                 else:
-                    deleted.append(member_field(name, key))
+                    deleted.append(field_name(name, key))
             for name, history in self._histories.items():
                 for position in range(self._written_lengths[name], len(history)):
-                    fields[history_field(name, position)] = history[
+                    fields[field_name(name, position)] = history[
                         position
                     ].model_dump_json()
             for name, value in scalars.items():
@@ -531,7 +531,7 @@ class SnapshotCodec:
     def _verify(self, changes: LedgerChanges) -> None:
         failures = SnapshotCodec.verify_failures
         for name, tracked in self._keyed.items():
-            if name in STRINGS:
+            if name in KEYED_TEXTS:
                 continue
             key_of = KEYED[name][1]
             failures.extend(

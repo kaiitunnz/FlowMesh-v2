@@ -18,7 +18,7 @@ from server.orchestration import (
     RecoveryDisposition,
     WorkItemStatus,
 )
-from server.orchestration.ledger_fields import LedgerChanges
+from server.orchestration.ledger_layout import LedgerChanges
 from server.orchestration.outcomes import (
     AdmissionError,
     check_admissible,

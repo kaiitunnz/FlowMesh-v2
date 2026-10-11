@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 
 from server.orchestration import OrchestrationEngine, PublicationOutcome
-from server.orchestration.ledger_fields import LedgerChanges
+from server.orchestration.ledger_layout import LedgerChanges
 from server.orchestration.state import BoundaryEvent, ProgressAxis
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime

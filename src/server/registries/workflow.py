@@ -49,7 +49,7 @@ from ..clients.redis import (
     workflow_tasks_key,
     workflow_v2_key,
 )
-from ..orchestration.ledger_fields import LedgerChanges, StoredLedger, decode_ledger
+from ..orchestration.ledger_layout import LedgerChanges, StoredLedger, decode_ledger
 from ..task.models import TaskRecord, TaskStatus
 from ..task.v2 import PersistedV2Workflow
 from ..utils.cursors import page_slice

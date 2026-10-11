@@ -9,7 +9,7 @@ import pytest
 
 from server.dispatcher.base import Dispatcher
 from server.orchestration import WorkItemStatus
-from server.orchestration.ledger_fields import LedgerChanges
+from server.orchestration.ledger_layout import LedgerChanges
 from server.registries.worker import Worker
 from server.services.monitoring import EventMonitor
 from server.services.watchdog import WorkerWatchdog

@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
-from server.orchestration.ledger_fields import LedgerChanges
+from server.orchestration.ledger_layout import LedgerChanges
 from server.orchestration.state import InvocationState
 from server.resident import ClaimState, ClaimTerminalReason
 from server.task.models import TaskStatus

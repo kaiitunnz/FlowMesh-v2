@@ -15,7 +15,7 @@ import pytest
 import redis.exceptions
 
 from server.config import OrchestrationConfig
-from server.orchestration.ledger_fields import LedgerChanges
+from server.orchestration.ledger_layout import LedgerChanges
 from server.services import monitoring
 from server.services.monitoring import TASK_EVENT_HANDLER_MAX_ATTEMPTS, EventMonitor
 from server.task.models import TaskStatus

@@ -59,7 +59,7 @@ from ...task.v2.representations.results import CardinalityKind, ResultDeclaratio
 from ...task.v2.representations.template import LogicalWorkflowTemplate
 from ..guardrails import ScopeBudget
 from ..journal import LedgerJournal
-from ..ledger_fields import LedgerChanges, LedgerOrdinals
+from ..ledger_layout import LedgerChanges, LedgerOrdinals
 from ..outcomes import check_admissible
 from ..state import (
     TERMINAL_WORK_ITEM_STATUSES,

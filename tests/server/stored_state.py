@@ -4,7 +4,7 @@ registry's codecs."""
 from collections.abc import Sequence
 
 from server.orchestration import LedgerSnapshot
-from server.orchestration.ledger_fields import (
+from server.orchestration.ledger_layout import (
     LedgerChanges,
     StoredLedger,
     applied_changes,
