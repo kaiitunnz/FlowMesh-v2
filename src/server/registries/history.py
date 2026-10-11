@@ -50,6 +50,7 @@ from .task_states import PersistedTask, load_context
 type _AnyPipeline = Pipeline | AsyncPipeline
 
 _DECLARATIONS = TypeAdapter(list[tuple[str, ResultDeclaration]])
+_OUTPUT_MEMBERS = TypeAdapter(list[OutputHistory])
 
 # Validates a prepared publication, then certifies it. Every key's type and every value
 # a write reads is checked before the first write, and the certificate is written last,
@@ -461,15 +462,13 @@ def _declarations(raw: str | None) -> list[tuple[str, ResultDeclaration]]:
 
 
 def _output_members(raws: Sequence[str | None]) -> list[OutputHistory]:
+    present = [raw for raw in raws if raw is not None]
+    if len(present) != len(raws):
+        raise HistoryUnreadable("a published output member is missing")
     try:
-        members = [
-            OutputHistory.model_validate_json(raw) for raw in raws if raw is not None
-        ]
+        return _OUTPUT_MEMBERS.validate_json(f"[{','.join(present)}]")
     except ValidationError as exc:
         raise HistoryUnreadable(f"unreadable output member: {exc}") from exc
-    if len(members) != len(raws):
-        raise HistoryUnreadable("a published output member is missing")
-    return members
 
 
 def _member_fields(raws: Sequence[str | None]) -> list[str]:
