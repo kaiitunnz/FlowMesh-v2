@@ -686,6 +686,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
   durably settled. The span's end is the last durable finish among its tasks, so a workflow that
   closes again after a restart closes the same way it did the first time.
+- **Settled workflows leave memory.** Once a workflow has settled and nothing still acts
+  on it — its writes are durable, every side effect its transitions caused is delivered,
+  its handlers have finished, it is closed, each task's logs are archived, and every
+  resident claim it raised is terminal — the root stores what its reads derive from and
+  frees its runtime state. The stored history is certified in one step that checks the
+  copy is complete and that nothing wrote the workflow since its state was read, so a
+  workflow leaves memory only behind a certified copy; one whose copy is not certified
+  stays resident and is tried again. A freed workflow's tasks, results, published
+  outputs, listings and counts read as they did, from the control store, and a late
+  event for one of its tasks changes nothing.
 - **Redis channels.** The runtime uses two Redis endpoints (separate instances in the
   stack):
   - control (`REDIS_CONTROL_URL`) — durable state and the control plane's
@@ -703,7 +713,8 @@ Any Compose service can be recreated in place with `flowmesh stack restart
 [SERVICE ...]`, without a full teardown. The root server survives its own
 restart without losing in-flight work, provided the control Redis keeps every
 write it acknowledged: scheduling state is persisted to Redis and rebuilt on
-startup (`TaskRuntime.rehydrate`), and task events replay from a durable stream.
+startup for every workflow not freed (`TaskRuntime.restart`), and task events
+replay from a durable stream.
 Rolling a new image across the cluster one node at a time is one application.
 See [`SERVICE_RESTARTS.md`](SERVICE_RESTARTS.md).
 

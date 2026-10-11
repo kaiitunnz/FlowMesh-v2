@@ -165,7 +165,7 @@ resident traffic and dials only with `NETWORK_PLANE_PEER_ENABLED=true`. See
 |--------|------|-------------|
 | GET | `/healthz` | Top-level health check. |
 | GET | `/api/v1/system/version` | Server version. |
-| GET | `/api/v1/system/metrics` | System metrics snapshot. |
+| GET | `/api/v1/system/metrics` | System metrics snapshot; `completed_tasks` counts the tasks that finished. |
 
 ## Cursor pagination
 
