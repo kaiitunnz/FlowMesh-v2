@@ -59,6 +59,14 @@ WORKFLOWS_SET_KEY = "workflows:ids"
 WORKFLOWS_BY_SUBMISSION_KEY = "workflows:by_submission"
 WORKFLOWS_OPEN_KEY = "workflows:open"
 
+# Freed workflows' history: each freed task's index member by task, the certified
+# counts, the highest certificate sequence, and how far the open-workflow index is
+# built over workflows registered before it.
+TASK_HISTORY_MEMBERS_KEY = "tasks:history:members"
+HISTORY_COUNTS_KEY = "history:counts"
+HISTORY_SEQ_KEY = "history:seq"
+HISTORY_INDEX_KEY = "history:index"
+
 TASK_LOGS_STREAM_PREFIX = "logs:task:"
 WORKFLOW_LOGS_STREAM_PREFIX = "logs:workflow:"
 
@@ -121,6 +129,16 @@ def workflow_sources_key(workflow_id: str) -> str:
 
 def workflow_revision_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:revision"
+
+
+def workflow_history_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:history"
+
+
+def task_history_key(status: str | None) -> str:
+    """The index of freed tasks by submission, of those that settled ``status`` when
+    given."""
+    return "tasks:history" if status is None else f"tasks:history:{status}"
 
 
 # The ``model_secret`` suffix is the persisted vault layout.
@@ -547,6 +565,11 @@ class SyncRedisClient:
     def sismember(self, key: str, member: str) -> bool:
         return bool(self._control.sismember(key, member))
 
+    def scan_set(self, key: str, cursor: int, count: int) -> tuple[int, list[str]]:
+        """One ``SSCAN`` step: the next cursor, 0 once done, and the members read."""
+        next_cursor, members = _sync(self._control.sscan(key, cursor, count=count))
+        return int(next_cursor), list(members)
+
     def sadd(self, key: str, *members: str) -> int:
         if not members:
             return 0
@@ -790,6 +813,14 @@ class AsyncRedisClient:
 
     async def sismember(self, key: str, member: str) -> bool:
         return bool(await _awaitable(self._control.sismember(key, member)))
+
+    async def scan_set(
+        self, key: str, cursor: int, count: int
+    ) -> tuple[int, list[str]]:
+        next_cursor, members = await _awaitable(
+            self._control.sscan(key, cursor, count=count)
+        )
+        return int(next_cursor), list(members)
 
     async def sadd(self, key: str, *members: str) -> int:
         if not members:
