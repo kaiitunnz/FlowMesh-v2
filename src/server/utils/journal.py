@@ -190,7 +190,7 @@ class TrackedDict[K: Hashable, V](dict[K, V]):
             self.on_change(key)
 
     def forget(self, key: K) -> None:
-        """Remove an entry the durable state no longer holds, journaling nothing.
+        """Remove an entry the durable state has dropped, journaling nothing.
 
         The entry must have no change pending, so nothing unwritten is dropped.
         """

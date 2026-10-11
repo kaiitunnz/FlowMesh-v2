@@ -135,9 +135,9 @@ class AdmissionController:
         """Record the durable invocation request and a fresh pending claim.
 
         Called only when no claim for the invocation is in flight. A permitted reissue
-        is a successor: the admission epoch advances past every prior claim, those still
-        live and those its retirement record counts, and no prior credit is released
-        here — release happens only through the fenced terminal fact. The successor's
+        is a successor: the admission epoch advances past every prior claim, live or
+        counted by its retirement record, and no prior credit is released here —
+        release happens only through the fenced terminal fact. The successor's
         request replaces one a consumed predecessor left, so it inherits no consumption.
         """
         live = self._stores.invocations.get(invocation_id)
@@ -428,7 +428,7 @@ class AdmissionController:
     def retired_record(self, invocation_id: str) -> RetiredInvocation | None:
         """The invocation's stored retirement record, read from the durable store.
 
-        A store failure or an unreadable record raises rather than reading as none.
+        A store failure or an unreadable record raises; neither reads as no record.
         """
         [value] = self._stores.durability.retired_invocations([invocation_id])
         return decode_retired(invocation_id, value) if value is not None else None

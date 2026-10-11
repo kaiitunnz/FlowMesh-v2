@@ -55,7 +55,7 @@ def live_field(kind: str, key: str) -> str:
 def decode_live(fields: Mapping[str, str]) -> ResidentSnapshot:
     """Decode the live hash into its facts, refusing any inconsistency.
 
-    A family definition that no longer validates is dropped, as the snapshot does; any
+    A family definition that fails validation is dropped, as the snapshot does; any
     other unreadable field, a claim whose request is missing, or a consumed request with
     a claim still open refuses the whole load.
     """
@@ -108,7 +108,7 @@ def check_retirement(
     """Refuse a retirement the stored state does not support, before any write.
 
     The request field (the first of ``fields``) must carry its consumption, every claim
-    field still stored must be terminal, an invocation whose live fields are already
+    field stored must be terminal, an invocation whose live fields are already
     gone must hold its record, and an existing record may not carry a higher epoch.
     """
     request = live.get(fields[0])

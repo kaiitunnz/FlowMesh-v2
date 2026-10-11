@@ -1223,10 +1223,10 @@ class ResidentCapacityControl:
         await self._relay_bootstrap(orig, claim, profile, handoff, replica)
 
     def _may_raise(self, orig: _Origination) -> bool:
-        """Whether the origination may still raise a fresh claim.
+        """Whether the origination may raise a fresh claim.
 
-        It checks, with no suspension before the raise, that the owner still awaits the
-        outcome: a workflow boundary still settleable, a serve request with no terminal
+        It checks, with no suspension before the raise, that the owner awaits the
+        outcome: a workflow boundary settleable, a serve request with no terminal
         recorded. A terminal that settled it while the origination waited leaves nothing
         to admit, and a workflow boundary's captured request is reaped.
         """
