@@ -15,6 +15,7 @@ family leaves them only once its durable record is in place.
 """
 
 from collections.abc import Callable, Hashable
+from typing import NamedTuple
 
 from pydantic import BaseModel
 
@@ -210,13 +211,30 @@ class InvocationStore:
             self._requests.forget(invocation_id)
 
 
+class _Filing(NamedTuple):
+    """The index keys a claim is filed under, ``None`` where it is in no bucket."""
+
+    invocation: str
+    replica: str | None
+    credit_replica: str | None
+    pending_family: str | None
+
+
+def _filing(claim: ServiceClaim) -> _Filing:
+    return _Filing(
+        invocation=claim.invocation_id,
+        replica=claim.replica_id,
+        credit_replica=claim.replica_id if claim.holds_credit else None,
+        pending_family=claim.family if claim.state is ClaimState.PENDING else None,
+    )
+
+
 class ClaimStore:
     """Authoritative ``ServiceClaim`` facts — the sole authority for credits.
 
-    Every change to a claim re-files it in the indexes by invocation, by the replica it
-    names, by the replica it holds credit on, and by the family it is pending for, so a
-    lookup reads only the claims it asks about. An index holds memberships, never
-    credit.
+    Each claim is indexed by invocation, by the replica it names, by the replica it
+    holds credit on, and by the family it is pending for, so a lookup reads only the
+    claims it asks about.
     """
 
     def __init__(self, journal: ChangeJournal) -> None:
@@ -227,29 +245,25 @@ class ClaimStore:
         self._by_replica: _Bucket = {}
         self._credit_by_replica: _Bucket = {}
         self._pending_by_family: _Bucket = {}
-        self._filed: dict[str, tuple[str, str | None, str | None, str | None]] = {}
+        # In the order of a filing's keys.
+        self._indexes = (
+            self._by_invocation,
+            self._by_replica,
+            self._credit_by_replica,
+            self._pending_by_family,
+        )
+        self._filed: dict[str, _Filing] = {}
 
     def _reindex(self, key: Hashable) -> None:
         claim_id = str(key)
         if (old := self._filed.pop(claim_id, None)) is not None:
-            invocation_id, replica_id, credit_replica, pending_family = old
-            _bucket_remove(self._by_invocation, invocation_id, claim_id)
-            _bucket_remove(self._by_replica, replica_id, claim_id)
-            _bucket_remove(self._credit_by_replica, credit_replica, claim_id)
-            _bucket_remove(self._pending_by_family, pending_family, claim_id)
+            for index, index_key in zip(self._indexes, old, strict=True):
+                _bucket_remove(index, index_key, claim_id)
         if (claim := self._claims.get(claim_id)) is None:
             return
-        filed = (
-            claim.invocation_id,
-            claim.replica_id,
-            claim.replica_id if claim.holds_credit else None,
-            claim.family if claim.state is ClaimState.PENDING else None,
-        )
-        self._filed[claim_id] = filed
-        _bucket_add(self._by_invocation, filed[0], claim_id)
-        _bucket_add(self._by_replica, filed[1], claim_id)
-        _bucket_add(self._credit_by_replica, filed[2], claim_id)
-        _bucket_add(self._pending_by_family, filed[3], claim_id)
+        self._filed[claim_id] = filing = _filing(claim)
+        for index, index_key in zip(self._indexes, filing, strict=True):
+            _bucket_add(index, index_key, claim_id)
 
     def _members(self, index: _Bucket, key: str) -> list[ServiceClaim]:
         return [self._claims[claim_id] for claim_id in index.get(key, ())]

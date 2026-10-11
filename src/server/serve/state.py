@@ -65,9 +65,9 @@ class ServeTerminalStore:
         self._terminals[terminal.invocation_id] = terminal
         return True
 
-    def drop(self, invocation_id: str) -> bool:
-        """Drop the fact of an invocation that retired; return whether one was held."""
-        return self._terminals.pop(invocation_id, None) is not None
+    def drop(self, invocation_id: str) -> None:
+        """Drop the fact of an invocation that retired."""
+        self._terminals.pop(invocation_id, None)
 
     def get(self, invocation_id: str) -> ServeStatusTerminal | None:
         return self._terminals.get(invocation_id)
