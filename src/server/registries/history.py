@@ -544,7 +544,7 @@ class _OutputsRead:
 def _outputs_read(
     name: str | None, replies: Sequence[str | None]
 ) -> _OutputsRead | None:
-    if _certificate(replies[0]) is None:
+    if _certificate(replies[0]) is None or replies[1] is None:
         return None
     declarations = _declarations(replies[1])
     if name is None:
@@ -558,7 +558,7 @@ def _stored_output(
     name: str, replies: Sequence[str | None]
 ) -> tuple[ResultDeclaration | None, OutputHistory | None] | None:
     raw_certificate, raw_declarations, raw_member = replies
-    if _certificate(raw_certificate) is None:
+    if _certificate(raw_certificate) is None or raw_declarations is None:
         return None
     declaration = next(
         (
@@ -744,8 +744,8 @@ class WorkflowHistoryStore:
         key: str | None,
         sequence: int | None,
     ) -> tuple[ResultDeclaration | None, OutputHistory | None] | None:
-        """A freed workflow's declaration of a published output and its member at the
-        selectors; None while the workflow is not freed."""
+        """Read a freed workflow's declaration of a published output and its member at
+        the selectors; None for a workflow not freed or freed with no ledger."""
         return _stored_output(
             name,
             self._rds.sync.hash_mget(

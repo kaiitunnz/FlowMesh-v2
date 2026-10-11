@@ -72,6 +72,8 @@ def test_a_freed_task_describes_records_and_reads_as_it_did(
     records = {t: runtime.task_record(t) for t in task_ids}
     bindings = {t: runtime.result_binding(t) for t in task_ids}
     results = {t: runtime.read_result_bytes(t) for t in task_ids}
+    outputs = runtime.published_outputs(workflow_id)
+    output = runtime.published_output(workflow_id, "a", None, None, None)
 
     runtime.settled_history.drain()
 
@@ -90,6 +92,8 @@ def test_a_freed_task_describes_records_and_reads_as_it_did(
     }
     assert {t: runtime.result_binding(t) for t in task_ids} == bindings
     assert {t: runtime.read_result_bytes(t) for t in task_ids} == results
+    assert runtime.published_outputs(workflow_id) == outputs
+    assert runtime.published_output(workflow_id, "a", None, None, None) == output
     assert runtime.describe_task("tsk-unknown") is None
     assert runtime.task_record("tsk-unknown") is None
 
