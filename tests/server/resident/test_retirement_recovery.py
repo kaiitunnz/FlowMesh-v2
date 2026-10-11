@@ -370,10 +370,15 @@ def test_a_serve_outcome_answers_its_client_while_the_store_is_down() -> None:
     assert delivery.completed and delivery.failed is None
     assert svc._store_retry.pending == [(SETTLEMENT, "inv-1")]
 
+    # No request gets a handoff while the release is not durable.
+    later = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(later, "inv-2")))
+    assert later.opened == [] and later.failed is not None
+
     outage.down = False
     svc.retry_store_failures()
 
-    assert not stores.live("inv-1")
+    assert not stores.live("inv-1") and not stores.live("inv-2")
     assert stores.credit_ledger.held(replica.replica_id) == 0
     assert svc._store_retry.pending == []
     [record] = outage.retired_invocations(["inv-1"])
