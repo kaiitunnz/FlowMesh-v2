@@ -125,6 +125,17 @@ class StoredLedger:
     ordinals: LedgerOrdinals
 
 
+def applied_changes(
+    fields: Mapping[str, str], changes: LedgerChanges
+) -> dict[str, str]:
+    """Return the fields a ledger stores once ``changes`` land on ``fields``."""
+    applied = {} if changes.reset else dict(fields)
+    applied.update(changes.fields)
+    for name in changes.deleted:
+        applied.pop(name, None)
+    return applied
+
+
 def _key_part(part: Hashable) -> Any:
     return part.value if isinstance(part, Enum) else part
 

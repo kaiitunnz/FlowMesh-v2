@@ -7,6 +7,7 @@ from server.orchestration import LedgerSnapshot
 from server.orchestration.ledger_fields import (
     LedgerChanges,
     StoredLedger,
+    applied_changes,
     decode_ledger,
 )
 from server.registries.workflow import (
@@ -93,11 +94,9 @@ class StoredLedgers:
 
     def put_ledger(self, workflow_id: str, changes: LedgerChanges) -> None:
         # A new dict per write, so a test holding an earlier ledger keeps it.
-        fields = {} if changes.reset else dict(self.ledgers.get(workflow_id, {}))
-        fields.update(changes.fields)
-        for name in changes.deleted:
-            fields.pop(name, None)
-        self.ledgers[workflow_id] = fields
+        self.ledgers[workflow_id] = applied_changes(
+            self.ledgers.get(workflow_id, {}), changes
+        )
 
     def load_ledger(self, workflow_id: str) -> StoredLedger | None:
         fields = self.ledgers.get(workflow_id)

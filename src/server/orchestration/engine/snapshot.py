@@ -1,7 +1,7 @@
 """Encodes and restores one workflow instance's ledger snapshot."""
 
 from collections import Counter
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import Hashable, Iterable
 from typing import Any, ClassVar
 
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ from ..ledger_fields import (
     LedgerChanges,
     LedgerOrdinals,
     StoredLedger,
+    applied_changes,
     encode_fields,
     encode_ledger,
     field_name,
@@ -53,14 +54,6 @@ def _detached(snapshot: LedgerSnapshot) -> LedgerSnapshot:
                 for e in entities
             ]
     return snapshot.model_copy(update=updates) if updates else snapshot
-
-
-def _applied(fields: Mapping[str, str], changes: LedgerChanges) -> dict[str, str]:
-    applied = {} if changes.reset else dict(fields)
-    applied.update(changes.fields)
-    for name in changes.deleted:
-        applied.pop(name, None)
-    return applied
 
 
 class SnapshotCodec:
@@ -529,7 +522,7 @@ class SnapshotCodec:
         self._written_scalars.update(changes.scalars)
         self._rewritten = max(self._rewritten, changes.rewrite)
         if self.verify_changes:
-            self._acknowledged = _applied(self._acknowledged or {}, changes)
+            self._acknowledged = applied_changes(self._acknowledged or {}, changes)
 
     def owe_rewrite(self) -> None:
         """Owe a rewrite of the whole ledger with the next write."""
@@ -549,7 +542,7 @@ class SnapshotCodec:
         if self._acknowledged is None and not changes.reset:
             failures.append("a write of a ledger no write stored carries no rewrite")
             return
-        expected = _applied(self._acknowledged or {}, changes)
+        expected = applied_changes(self._acknowledged or {}, changes)
         image = self.image()
         if expected != image:
             differing = sorted(
