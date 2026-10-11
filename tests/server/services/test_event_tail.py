@@ -1,8 +1,12 @@
 """What a report's handler does after it settles a task finds its workflow resident."""
 
 import asyncio
+from typing import Any
+
+import pytest
 
 from server.task.runtime import TaskRuntime
+from shared.schemas.event import TaskEvent
 from tests.server.services.test_monitor_commit_fence import (
     _dispatched,
     _monitor,
@@ -11,6 +15,7 @@ from tests.server.services.test_monitor_commit_fence import (
 )
 from tests.server.services.test_task_event_fence import _ECHO_V2, _event
 from tests.server.task.test_runtime_commit_then_act import _runtime
+from tests.server.task.test_settled_history import _registry, _settled
 from tests.server.task.test_v2_orchestration import LINEAR, _register
 
 
@@ -64,3 +69,28 @@ def test_a_report_applied_directly_finishes_its_side_effects_before_freeing() ->
     assert seen == [False]
     assert len(telemetry.sealed) == 1
     assert _reclaimable(runtime, workflow_id)
+
+
+def test_a_late_report_for_a_freed_task_is_acknowledged_from_the_store() -> None:
+    registry = _registry()
+    runtime, workflow_id = _settled(registry)
+    task_id = runtime._tasks.ids_of(workflow_id)[0]
+    runtime.settled_history.drain()
+    assert runtime.get_record(task_id) is None
+    monitor, telemetry, _ = _monitor(runtime)
+    late = TaskEvent(
+        type="TASK_SUCCEEDED", task_id=task_id, worker_id="wkr-1", payload={}
+    )
+
+    monitor.handle_task_event(late)
+
+    assert runtime.task_freed(task_id)
+    assert not runtime.task_freed("tsk-unknown")
+    assert telemetry.sealed == []
+    setattr(registry, "load_history", _unavailable)
+    with pytest.raises(ConnectionError):
+        monitor.handle_task_event(late)
+
+
+def _unavailable(*args: Any) -> Any:
+    raise ConnectionError("store unavailable")

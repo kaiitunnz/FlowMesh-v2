@@ -784,6 +784,12 @@ class EventMonitor:
         match effect:
             case EventEffect.APPLIED:
                 return False
+            case EventEffect.STALE if self._runtime.task_freed(event.task_id):
+                self._logger.debug(
+                    "Ignoring %s for task %s, whose workflow is freed",
+                    event.type,
+                    event.task_id,
+                )
             case EventEffect.STALE:
                 self._logger.info(
                     "Ignoring stale %s for task %s from worker %s (dispatch %s)",
