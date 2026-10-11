@@ -9,13 +9,7 @@ no write has touched since its runtime state was read.
 """
 
 import json
-from collections.abc import (
-    AsyncGenerator,
-    Generator,
-    Iterator,
-    Mapping,
-    Sequence,
-)
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -326,11 +320,16 @@ def _outputs(
         raise HistoryUnreadable(f"unreadable output history: {exc}") from exc
 
 
-def _scan_start(after: str | None, before: str | None) -> tuple[bool, str]:
-    """Whether a history scan runs forward, and its exclusive start bound."""
-    if after is not None:
-        return True, f"({after}"
-    return False, f"({before}" if before is not None else "+"
+def _range_bounds(bound: str | None, forward: bool) -> tuple[str, str]:
+    if forward:
+        return f"({bound}" if bound is not None else "-", "+"
+    return f"({bound}" if bound is not None else "+", "-"
+
+
+def _task_fields(fields: Sequence[str]) -> list[str]:
+    return [
+        field for field in fields if field not in (CERTIFICATE_FIELD, OUTPUTS_FIELD)
+    ]
 
 
 class WorkflowHistoryStore:
@@ -456,52 +455,31 @@ class WorkflowHistoryStore:
             replies = await pipe.execute()
         return _stored_tasks(located, grouped, replies)
 
-    def _history_scan(
-        self,
-        status: str | None,
-        sizes: Iterator[int],
-        after: str | None = None,
-        before: str | None = None,
-    ) -> Generator[list[str]]:
-        """Yield freed tasks' index members past a member in scan order: ascending
-        after ``after``, else descending before ``before`` or from the newest; only
-        tasks that settled ``status`` when given."""
-        forward, start = _scan_start(after, before)
-        for size in sizes:
-            members = self._rds.sync.lex_range(
-                task_history_key(status),
-                start,
-                "+" if forward else "-",
-                size,
-                reverse=not forward,
-            )
-            if members:
-                yield members
-            if len(members) < size:
-                return
-            start = f"({members[-1]}"
+    def history_range(
+        self, status: str | None, bound: str | None, forward: bool, count: int
+    ) -> list[str]:
+        """Up to ``count`` freed tasks' index members strictly past ``bound`` in scan
+        order, ascending when ``forward``, else descending; from the oldest or newest
+        when ``bound`` is None. Only tasks that settled ``status`` when given."""
+        return self._rds.sync.lex_range(
+            task_history_key(status), *_range_bounds(bound, forward), count, not forward
+        )
 
-    async def _history_scan_async(
-        self,
-        status: str | None,
-        sizes: Iterator[int],
-        after: str | None = None,
-        before: str | None = None,
-    ) -> AsyncGenerator[list[str]]:
-        forward, start = _scan_start(after, before)
-        for size in sizes:
-            members = await self._rds.asyncio.lex_range(
-                task_history_key(status),
-                start,
-                "+" if forward else "-",
-                size,
-                reverse=not forward,
-            )
-            if members:
-                yield members
-            if len(members) < size:
-                return
-            start = f"({members[-1]}"
+    async def history_range_async(
+        self, status: str | None, bound: str | None, forward: bool, count: int
+    ) -> list[str]:
+        return await self._rds.asyncio.lex_range(
+            task_history_key(status), *_range_bounds(bound, forward), count, not forward
+        )
+
+    def history_task_ids(self, workflow_id: str) -> list[str]:
+        """The ids of a freed workflow's tasks, as far as its history holds them."""
+        return _task_fields(self._rds.sync.hash_keys(workflow_history_key(workflow_id)))
+
+    async def history_task_ids_async(self, workflow_id: str) -> list[str]:
+        return _task_fields(
+            await self._rds.asyncio.hash_keys(workflow_history_key(workflow_id))
+        )
 
     def history_counts(self) -> tuple[int, int]:
         """How many certified freed tasks the store holds, and how many succeeded."""

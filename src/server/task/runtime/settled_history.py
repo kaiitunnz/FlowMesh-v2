@@ -169,6 +169,9 @@ class SettledHistory:
     def sealed_locked(self, workflow_id: str) -> bool:
         return workflow_id in self._sealed
 
+    def sealed_ids_locked(self) -> frozenset[str]:
+        return frozenset(self._sealed)
+
     def blocks_locked(self, workflow_id: str, task_ids: Collection[str]) -> bool:
         """Whether a hold, a missing closure or a missing archive disposition keeps
         the workflow resident."""

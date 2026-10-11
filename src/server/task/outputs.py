@@ -12,6 +12,7 @@ from typing import Any
 from ..orchestration import OrchestrationEngine
 from ..orchestration.state import ResultPublication, ResultSlot
 from ..utils.cursors import InvalidCursor, decode_cursor, encode_cursor, page_slice
+from .history import OutputHistory, OutputsHistory
 from .v2.representations.results import CardinalityKind, ResultDeclaration
 
 
@@ -25,6 +26,8 @@ class OutputMember:
     key: str | None
     sequence: int | None
     publication: ResultPublication | None
+    # A freed workflow's member, which its value reads through.
+    stored: OutputHistory | None = None
 
     @property
     def keyed(self) -> bool:
@@ -82,6 +85,53 @@ def published_member(
         return None, None
     slot = engine.output_slot(decl.output_id, scope_id, key, sequence)
     return decl, _member(engine, name, decl, slot) if slot is not None else None
+
+
+def stored_members(
+    outputs: OutputsHistory, name: str | None = None
+) -> list[OutputMember]:
+    """Every member a freed workflow's published outputs hold, or one output's."""
+    return [
+        _stored_member(member)
+        for member in outputs.members
+        if name is None or member.name == name
+    ]
+
+
+def stored_member(
+    outputs: OutputsHistory,
+    name: str,
+    scope_id: str | None,
+    key: str | None,
+    sequence: int | None,
+) -> tuple[ResultDeclaration | None, OutputMember | None]:
+    """The declaration a freed workflow's public name refers to, and its member at
+    the selectors."""
+    decl = next((d for n, d in outputs.declarations if n == name), None)
+    if decl is None:
+        return None, None
+    member = next(
+        (
+            member
+            for member in outputs.members
+            if (member.name, member.scope_id, member.key, member.sequence)
+            == (name, scope_id, key, sequence)
+        ),
+        None,
+    )
+    return decl, _stored_member(member) if member is not None else None
+
+
+def _stored_member(member: OutputHistory) -> OutputMember:
+    return OutputMember(
+        name=member.name,
+        declaration=member.declaration,
+        scope_id=member.scope_id,
+        key=member.key,
+        sequence=member.sequence,
+        publication=member.publication,
+        stored=member,
+    )
 
 
 def paginate_members(
@@ -148,4 +198,6 @@ __all__ = [
     "paginate_members",
     "published_member",
     "published_members",
+    "stored_member",
+    "stored_members",
 ]

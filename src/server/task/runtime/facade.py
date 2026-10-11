@@ -1,5 +1,7 @@
 """The task runtime: every workflow's task records, scheduling and dispatch."""
 
+import heapq
+import itertools
 import logging
 import threading
 import time
@@ -85,7 +87,7 @@ from ...orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from ...registries.history import HistoryPublication
+from ...registries.history import HistoryPublication, StoredTask
 from ...registries.worker import Worker, WorkerRegistry
 from ...registries.workflow import (
     PersistedTask,
@@ -115,6 +117,7 @@ from ..history import (
     OutputsHistory,
     TaskHistory,
     history_member,
+    member_task_id,
 )
 from ..models import (
     SERVE_TASK_TYPES,
@@ -146,6 +149,8 @@ from ..outputs import (
     PublishedOutputs,
     published_member,
     published_members,
+    stored_member,
+    stored_members,
 )
 from ..parser import ParsedWorkflow, parse_workflow
 from ..redrive import StoreRedriveScheduler
@@ -379,6 +384,33 @@ def _listing_fields(
         key: computed[key](task_id) if key in computed else getattr(record, key)
         for key in query.terms
     }
+
+
+def _stored_task_info(stored: StoredTask) -> TaskInfo:
+    """A freed task's ``TaskInfo``, from its stored record and history."""
+    history = stored.history
+    return TaskInfo(
+        **dict(stored.persisted.record),
+        depends_on=history.depends_on,
+        pending_dependencies=history.pending_dependencies,
+        dependents=history.dependents,
+        completed=history.completed,
+        failed=history.failed,
+        input_element=history.input_element,
+        occurrence=history.occurrence,
+    )
+
+
+# How many freed tasks a listing reads at a time, the first read and the most.
+_HISTORY_CHUNK_MIN = 64
+_HISTORY_CHUNK_MAX = 4096
+
+
+def _chunk_sizes(limit: int) -> Iterator[int]:
+    size = max(_HISTORY_CHUNK_MIN, limit)
+    while True:
+        yield size
+        size = min(_HISTORY_CHUNK_MAX, size * 2)
 
 
 class TaskRuntime:
@@ -3417,14 +3449,18 @@ class TaskRuntime:
         """
         with self._lock:
             engine = self._engines.get(workflow_id)
-            if engine is None:
+            if engine is not None:
+                return PublishedOutputs(
+                    members=published_members(engine, name),
+                    open=not self._committer.workflow_settlement_locked(
+                        workflow_id
+                    ).settled,
+                )
+            if self._tasks.holds(workflow_id):
                 return None
-            return PublishedOutputs(
-                members=published_members(engine, name),
-                open=not self._committer.workflow_settlement_locked(
-                    workflow_id
-                ).settled,
-            )
+        if (outputs := self._stored_outputs(workflow_id)) is None:
+            return None
+        return PublishedOutputs(members=stored_members(outputs, name), open=False)
 
     def published_output(
         self,
@@ -3437,18 +3473,30 @@ class TaskRuntime:
         """One published output's member at the selectors, or None with no ledger."""
         with self._lock:
             engine = self._engines.get(workflow_id)
-            if engine is None:
+            if engine is not None:
+                declaration, member = published_member(
+                    engine, name, scope_id, key, sequence
+                )
+                return PublishedOutput(
+                    declaration=declaration,
+                    member=member,
+                    open=not self._committer.workflow_settlement_locked(
+                        workflow_id
+                    ).settled,
+                )
+            if self._tasks.holds(workflow_id):
                 return None
-            declaration, member = published_member(
-                engine, name, scope_id, key, sequence
-            )
-            return PublishedOutput(
-                declaration=declaration,
-                member=member,
-                open=not self._committer.workflow_settlement_locked(
-                    workflow_id
-                ).settled,
-            )
+        if (outputs := self._stored_outputs(workflow_id)) is None:
+            return None
+        declaration, member = stored_member(outputs, name, scope_id, key, sequence)
+        return PublishedOutput(declaration=declaration, member=member, open=False)
+
+    def _stored_outputs(self, workflow_id: str) -> OutputsHistory | None:
+        """A freed v2 workflow's published outputs; None for any other workflow."""
+        if not self._settled_history.published_through:
+            return None
+        stored = self._workflow_registry.outputs_history(workflow_id)
+        return stored[1] if stored is not None else None
 
     def read_output(self, member: OutputMember) -> BaseExecutorResult:
         """The value a published member settled with, as an input reading it would
@@ -3461,8 +3509,13 @@ class TaskRuntime:
         if value_ref is None:
             raise ResultUnreadable(f"output {member.name} has no bound result")
         try:
-            with self._lock:
-                binding = self._content_bindings.value_binding_locked(value_ref)
+            if (stored := member.stored) is not None:
+                if stored.value is None:
+                    raise UnreadableInput(stored.unreadable or "no bound result")
+                binding = stored.value
+            else:
+                with self._lock:
+                    binding = self._content_bindings.value_binding_locked(value_ref)
             return upstream_value(binding, self._results.read)
         except (UnreadableInput, IndexError) as exc:
             raise ResultUnreadable(f"output {member.name}: {exc}") from exc
@@ -3483,7 +3536,10 @@ class TaskRuntime:
         resolves through the reference its success bound on its record.
         """
         with self._lock:
-            return self._content_bindings.result_binding_locked(task_id)
+            if task_id in self._tasks:
+                return self._content_bindings.result_binding_locked(task_id)
+        stored = self._stored_task(task_id)
+        return stored.history.result if stored is not None else None
 
     def scoped_inputs(self, task_id: str) -> dict[str, ScopedInput] | None:
         """The values a task reads through its incoming edges, by the names its spec
@@ -5447,11 +5503,26 @@ class TaskRuntime:
             return self._committer.workflow_settlement_locked(workflow_id)
 
     def describe_task(self, task_id: str) -> TaskInfo | None:
+        """A task's details, from the store once its workflow is freed."""
         with self._lock:
-            record = self._tasks.get(task_id)
-            if not record:
-                return None
-            return self._build_task_info_locked(task_id, record)
+            if (record := self._tasks.get(task_id)) is not None:
+                return self._build_task_info_locked(task_id, record)
+        stored = self._stored_task(task_id)
+        return _stored_task_info(stored) if stored is not None else None
+
+    def task_record(self, task_id: str) -> TaskRecord | None:
+        """A task's record, from the store once its workflow is freed."""
+        if (record := self.get_record(task_id)) is not None:
+            return record
+        stored = self._stored_task(task_id)
+        return stored.persisted.record if stored is not None else None
+
+    def _stored_task(self, task_id: str) -> StoredTask | None:
+        """A task freed with its workflow; none is stored before the first one is."""
+        if not self._settled_history.published_through:
+            return None
+        (stored,) = self._workflow_registry.load_history([task_id])
+        return stored
 
     def task_statuses(self) -> dict[str, str]:
         with self._lock:
@@ -5468,8 +5539,10 @@ class TaskRuntime:
         """Return the tasks matching ``query``, ordered by submission: the ``limit``
         just after or before a position, or the newest ``limit``.
 
-        One pass under the lock matches record attributes and copies out the page's
-        fields, so the page is one consistent snapshot; building runs outside it.
+        The page is one moment's listing. One pass under the lock matches resident
+        record attributes and copies out the fields of those nearest the position, and
+        notes which freed workflows that moment holds; the freed tasks are read off the
+        lock, and only those of workflows freed by that moment are listed.
         """
         workflow_ids = query.values("workflow_id")
         statuses = query.values("status")
@@ -5489,10 +5562,143 @@ class TaskRuntime:
             )
             window = page_slice(keys, limit, after=after, before=before, newest=True)
             fields = [
-                self._task_info_fields_locked(task_id, self._tasks[task_id])
-                for _, task_id in keys[window]
+                (key, self._task_info_fields_locked(key[1], self._tasks[key[1]]))
+                for key in keys[window]
             ]
-        return [TaskInfo(**task) for task in fields]
+            through = self._settled_history.published_through
+            sealed = self._settled_history.sealed_ids_locked()
+            freed_workflows = (
+                None
+                if workflow_ids is None
+                else [w for w in sorted(workflow_ids) if not self._tasks.holds(w)]
+            )
+        resident = [(key, TaskInfo(**task)) for key, task in fields]
+        if (
+            not through
+            or (statuses is not None and not statuses & TERMINAL_TASK_STATUSES)
+            or freed_workflows == []
+        ):
+            return [info for _, info in resident]
+        stored = self._stored_page(
+            query, limit, after, before, accessible, freed_workflows, through, sealed
+        )
+        merged = sorted(
+            {**dict(stored), **dict(resident)}.items(), key=lambda entry: entry[0]
+        )
+        window = page_slice(
+            [key for key, _ in merged], limit, after=after, before=before, newest=True
+        )
+        return [info for _, info in merged[window]]
+
+    def _stored_page(
+        self,
+        query: QueryFilter,
+        limit: int,
+        after: TaskOrder | None,
+        before: TaskOrder | None,
+        accessible: Collection[str] | None,
+        workflow_ids: list[str] | None,
+        through: int,
+        sealed: frozenset[str],
+    ) -> list[tuple[TaskOrder, TaskInfo]]:
+        """The freed tasks matching ``query`` nearest a position, at most ``limit``,
+        of workflows freed through sequence ``through`` and not still ``sealed``."""
+        forward = after is not None
+        bound = (
+            history_member(*after)
+            if after is not None
+            else history_member(*before) if before is not None else None
+        )
+        found: list[tuple[TaskOrder, TaskInfo]] = []
+        for members in self._history_candidates(
+            query, limit, bound, forward, accessible, workflow_ids
+        ):
+            for stored in self._workflow_registry.load_history(
+                [member_task_id(member) for member in members]
+            ):
+                if stored is None:
+                    continue
+                record = stored.persisted.record
+                if (
+                    stored.history.seq > through
+                    or record.workflow_id in sealed
+                    or (accessible is not None and record.task_id not in accessible)
+                ):
+                    continue
+                if not query.matches(info := _stored_task_info(stored)):
+                    continue
+                found.append((task_order(record), info))
+                if len(found) == limit:
+                    return found
+        return found
+
+    def _history_candidates(
+        self,
+        query: QueryFilter,
+        limit: int,
+        bound: str | None,
+        forward: bool,
+        accessible: Collection[str] | None,
+        workflow_ids: list[str] | None,
+    ) -> Iterator[list[str]]:
+        """Yield freed tasks' index members in scan order past ``bound``, in chunks:
+        those of the named workflows or accessible tasks when either is given, else
+        every freed task of the statuses the query names."""
+        registry = self._workflow_registry
+        if workflow_ids is not None or accessible is not None:
+            if workflow_ids is not None:
+                task_ids = [
+                    task_id
+                    for workflow_id in workflow_ids
+                    for task_id in registry.history_task_ids(workflow_id)
+                ]
+            else:
+                task_ids = list(accessible or ())
+            members: Iterator[str] = iter(
+                sorted(
+                    (
+                        member
+                        for member in registry.history_members(task_ids)
+                        if member is not None
+                        and (
+                            bound is None
+                            or (member > bound if forward else member < bound)
+                        )
+                    ),
+                    reverse=not forward,
+                )
+            )
+        else:
+            statuses = query.values("status")
+            members = heapq.merge(
+                *(
+                    self._history_stream(status, bound, forward, limit)
+                    for status in (
+                        [None]
+                        if statuses is None
+                        else sorted(statuses & TERMINAL_TASK_STATUSES)
+                    )
+                ),
+                reverse=not forward,
+            )
+        for size in _chunk_sizes(limit):
+            if not (chunk := list(itertools.islice(members, size))):
+                return
+            yield chunk
+
+    def _history_stream(
+        self, status: str | None, bound: str | None, forward: bool, limit: int
+    ) -> Iterator[str]:
+        """Every freed task's index member past ``bound`` in scan order, of one
+        status when given, read a chunk at a time."""
+        for size in _chunk_sizes(limit):
+            members = self._workflow_registry.history_range(
+                status, bound, forward, size
+            )
+            yield from members
+            if len(members) < size:
+                return
+            bound = members[-1]
 
     # ------------------------------------------------------------------ #
     # Misc helpers
@@ -5731,8 +5937,9 @@ class TaskRuntime:
                     and task_id not in self._ready.ready_index
                 ):
                     pending += 1
-            total = len(self._tasks)
-            return queueing, dispatched, pending, done, total
+            freed, freed_done = self._settled_history.counts_locked()
+            total = len(self._tasks) + freed
+            return queueing, dispatched, pending, done + freed_done, total
 
     def _listing_computed_locked(self) -> dict[str, Callable[[str], Any]]:
         empty: frozenset[str] = frozenset()

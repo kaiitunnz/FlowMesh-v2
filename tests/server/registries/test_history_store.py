@@ -89,12 +89,11 @@ def test_a_certified_workflow_reads_back_and_leaves_the_open_set() -> None:
     assert registry.history_counts() == (len(task_ids), len(task_ids))
     stored = registry.load_history(task_ids)
     assert [entry.persisted.record.task_id for entry in stored if entry] == task_ids
-    members = [
-        member
-        for chunk in registry._history_scan(None, iter([100]), None, None)
-        for member in chunk
-    ]
+    members = registry.history_range(None, None, False, 100)
     assert [member_task_id(member) for member in members] == task_ids[::-1]
+    assert registry.history_range(None, members[-1], True, 100) == members[-2::-1]
+    assert registry.history_range(TaskStatus.DONE, members[0], False, 1) == [members[1]]
+    assert sorted(registry.history_task_ids(workflow_id)) == sorted(task_ids)
 
 
 def test_a_write_after_the_revision_was_read_refuses_certification() -> None:
