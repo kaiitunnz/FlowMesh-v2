@@ -106,7 +106,7 @@ class TaskLogArchiver:
                     if archived is None:
                         continue
                     if archived:
-                        self._archived_ids.add(task_id)
+                        self._disposed(task_id)
                         continue
                 terminal.add(task_id)
             self._ensure_task(task_id, now)
@@ -168,11 +168,17 @@ class TaskLogArchiver:
                 if not self._finalize_manifest(task_id, maybe_state, now):
                     continue
                 maybe_state.done = True
-                self._archived_ids.add(task_id)
+                self._disposed(task_id)
             except Exception:
                 self._forget(task_id)
                 raise
             self._forget(task_id)
+
+    def _disposed(self, task_id: str) -> None:
+        """Record that a finished task's logs need no more archiving, and tell the
+        runtime."""
+        self._archived_ids.add(task_id)
+        self._runtime.task_archived(task_id)
 
     def _forget(self, task_id: str) -> None:
         self._buffers.pop(task_id, None)

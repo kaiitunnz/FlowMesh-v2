@@ -705,3 +705,25 @@ def test_a_failed_manifest_write_keeps_its_checkpoint_and_retries(
 
     assert _manifest(archiver, "tsk-1").is_file()
     assert archiver._archived("tsk-1") is True
+
+
+def test_a_finished_task_is_reported_once_its_logs_need_no_archiving(
+    archiver: TaskLogArchiver, runtime: MagicMock
+) -> None:
+    logs_path = archiver._base_dir("tsk-archived") / "logs" / "logs.jsonl"
+    logs_path.parent.mkdir(parents=True, exist_ok=True)
+    logs_path.write_text("")
+    runtime.task_statuses.return_value = {
+        "tsk-archived": TaskStatus.DONE,
+        "tsk-drained": TaskStatus.FAILED,
+        "tsk-running": TaskStatus.DISPATCHED,
+    }
+
+    with patch.object(log_archiver.time, "sleep"):
+        archiver._tick()
+        archiver._tick()
+
+    assert sorted(call.args[0] for call in runtime.task_archived.call_args_list) == [
+        "tsk-archived",
+        "tsk-drained",
+    ]
