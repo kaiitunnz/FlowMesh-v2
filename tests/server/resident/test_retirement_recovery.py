@@ -17,9 +17,15 @@ from server.resident import (
     InvocationSubjectKind,
     ReplicaState,
     RetiredInvocation,
+    ServiceFamily,
     StoredReplica,
 )
-from server.resident.durability import REPLICA, REQUEST, MemoryResidentDurability
+from server.resident.durability import (
+    FAMILY,
+    REPLICA,
+    REQUEST,
+    MemoryResidentDurability,
+)
 from shared.content import reference_for
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import ResidentBootstrapOutcome, ResidentStreamStatus
@@ -144,6 +150,33 @@ def test_a_replica_whose_archive_failed_moves_to_history_on_its_retry() -> None:
 
     assert stores.directory.get(claim.replica_id) is None
     assert stored_replica(stores, claim.replica_id).state is ReplicaState.STOPPED
+
+
+class _FamilyArchiveFailsOnce(MemoryResidentDurability):
+    fail = True
+
+    def archive_family(self, family: ServiceFamily, field: str) -> None:
+        if self.fail:
+            self.fail = False
+            raise ConnectionError("store unavailable")
+        super().archive_family(family, field)
+
+
+def test_a_family_whose_archive_failed_moves_to_history_on_its_retry() -> None:
+    svc, stores, _settled, _deps = _build_serve()
+    stores.durability = durability = _FamilyArchiveFailsOnce()
+    _adopt(svc)
+
+    svc.drain_serve_replica(_SERVE_TASK)
+    assert stores.directory.by_family(_FAMILY) == []
+    assert stores.families.get(_FAMILY) is not None
+    assert svc._retirements.pending == [(FAMILY, _FAMILY)]
+
+    svc.retry_retirements()
+
+    assert stores.families.get(_FAMILY) is None
+    assert _FAMILY in durability.families
+    assert svc._retirements.pending == []
 
 
 def test_a_drained_replica_moves_to_history_once_its_last_invocation_retires() -> None:
