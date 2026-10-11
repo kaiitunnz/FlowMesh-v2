@@ -664,7 +664,7 @@ class ResidentCapacityControl:
             self._lifecycle.retire_family(key)
 
     def retry_retirements(self) -> None:
-        """Retry every pending retirement now."""
+        """Retry every pending retirement immediately."""
         self._retirements.run()
 
     def _reap_attempt(self, invocation_id: str, reap_replicas: bool = False) -> None:
@@ -889,7 +889,7 @@ class ResidentCapacityControl:
 
         An invocation in the working set has not retired. An absent one reads as retired
         only once the stores are fully loaded, no request or claim change is pending,
-        and its retirement record reads.
+        and the stored retirement records are readable.
         """
         if not self._stores.complete or not self._stores.invocations_durable:
             return False
@@ -1292,7 +1292,7 @@ class ResidentCapacityControl:
         return self._boundary_settleable(orig.task_id, orig.call_correlation)
 
     def _abandon_origination(self, orig: _Origination) -> None:
-        """Drop an origination its owner no longer awaits, reaping a workflow
+        """Drop an origination its owner abandoned, reaping a workflow
         boundary's captured request when no attempt carries it."""
         if orig.serve is not None:
             return
@@ -1567,7 +1567,7 @@ class ResidentCapacityControl:
             if self._control.enabled
             else None
         )
-        # Nothing reaches the origin while a change it depends on is not yet durable.
+        # Nothing reaches the origin before every change it depends on is durable.
         self._stores.flush()
         if serve is not None:
             serve.open(session_id, handoff, plan, traceparent)

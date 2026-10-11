@@ -291,9 +291,7 @@ class InvocationRequest(BaseModel):
 
     It holds the admission profile, the tenant-scoped subject, and the request context.
     A workflow subject links to ``DS`` only by ``invocation_id`` and fenced outcomes; an
-    external subject has no ``DS`` state. Retries reuse this identity. ``consumed`` is
-    the reason of the first fenced terminal consumed for the invocation, recorded with
-    the claims it settles.
+    external subject has no ``DS`` state. Retries reuse this identity.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -303,24 +301,20 @@ class InvocationRequest(BaseModel):
     family: str
     profile: AdmissionProfile
     replayable: bool = True
+    # The first fenced terminal consumed, recorded with the claims it settles.
     consumed: ClaimTerminalReason | None = None
     created_at: str = Field(default_factory=now_iso)
 
 
 class RetiredInvocation(BaseModel):
-    """The durable record an invocation leaves when its claims and request retire.
-
-    It certifies that the invocation's fenced terminal was consumed and its claims
-    settled, and holds the highest admission epoch its claims reached, so a successor
-    raised later under the same ``invocation_id`` takes a fresh epoch. It owns no credit
-    and permits no reissue.
-    """
+    """The durable record of a retired invocation."""
 
     model_config = ConfigDict(frozen=True)
 
     invocation_id: str
     subject: InvocationSubject
     family: str
+    # The highest admission epoch its claims reached; a successor takes the next one.
     epoch_high: int = Field(ge=0)
     terminal_reason: ClaimTerminalReason
     retired_at: str = Field(default_factory=now_iso)

@@ -58,7 +58,6 @@ def build_resident_capacity(
     runtime hooks, and return it."""
     cfg = orchestration.resident
     stores = ResidentStores(registry)
-    # Nothing is known about the stored facts until the restart's load installs them.
     stores.complete = False
     limits = ResidentPolicyLimits(
         allowed_models=frozenset(cfg.allowed_models),

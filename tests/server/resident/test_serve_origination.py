@@ -791,7 +791,7 @@ def test_a_serve_request_finalized_during_the_attachment_wait_raises_no_claim() 
         svc._replicas_attached.clear()
         origination = asyncio.create_task(svc._originate_serve(_origination(delivery)))
         await asyncio.sleep(0)
-        # The request's terminal lands while it waits: a re-drive given up, say.
+        # The request's terminal lands while it waits, as when a re-drive is given up.
         svc.fail_serve("inv-1", delivery, "client gone")
         svc._replicas_attached.set()
         await origination

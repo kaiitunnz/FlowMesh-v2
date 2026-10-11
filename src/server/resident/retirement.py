@@ -48,7 +48,7 @@ class RetirementRetry:
         self._arm()
 
     def run(self) -> None:
-        """Retry every pending retirement now."""
+        """Retry every pending retirement immediately."""
         self.cancel()
         failed = False
         for kind, key in list(self._pending):

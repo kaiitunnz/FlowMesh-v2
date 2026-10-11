@@ -59,7 +59,7 @@ def decode_live(fields: Mapping[str, str]) -> ResidentSnapshot:
 
     A family definition that fails validation is dropped, as the snapshot does; any
     other unreadable field, a claim whose request is missing, or a consumed request with
-    a claim still open refuses the whole load.
+    an open claim refuses the whole load.
     """
     lists: dict[str, list[Any]] = {name: [] for name in _SNAPSHOT_LISTS.values()}
     for field, value in fields.items():

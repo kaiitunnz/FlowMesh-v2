@@ -281,7 +281,7 @@ class ClaimStore:
         return self._members(self._by_invocation, invocation_id)
 
     def by_replica(self, replica_id: str) -> list[ServiceClaim]:
-        """Every live claim naming the replica, terminal ones included."""
+        """List every live claim naming the replica, terminal ones included."""
         return self._members(self._by_replica, replica_id)
 
     def credit_bearing_for_replica(self, replica_id: str) -> list[ServiceClaim]:

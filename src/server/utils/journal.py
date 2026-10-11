@@ -42,7 +42,7 @@ class ChangeJournal:
         self._next_ordinal = max(self._next_ordinal, ordinal + 1)
 
     def reset(self) -> None:
-        """Drop every pending change, for a state written whole next."""
+        """Drop every pending change, for a state just loaded or written whole next."""
         self.pending.clear()
 
     def captured(self) -> dict[JournalKey, int]:

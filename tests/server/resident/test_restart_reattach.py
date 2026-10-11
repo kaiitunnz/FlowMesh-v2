@@ -309,7 +309,7 @@ def test_a_boundary_redriven_by_the_restart_resumes_on_the_reattached_replica() 
         assert relays_at_reattach == [[]]
         assert handoff_replicas(node) == [(replica.replica_id, replica.incarnation)]
         # The listener fence was durable before its first handoff, so the resumed
-        # handoff reuses it rather than binding the sidecar again.
+        # handoff reuses it and binds no sidecar.
         binds = [p for _w, k, p in node.delivery.relays if k == "resident_sidecar_bind"]
         assert binds == []
         listener = node.replica(replica.replica_id).listener
