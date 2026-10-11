@@ -7,9 +7,29 @@ invocation requests, and ``ServiceClaim`` facts are authoritative in their domai
 they cannot diverge: no cached credit exists for a report or a provisioning decision to
 overwrite or release. Capacity reports are evidence, fenced by incarnation and report
 epoch, never a credit authority.
+
+The persisted collections journal every change, and ``ResidentStores.flush`` makes the
+changed entities durable in one write: each actor flushes before anything acts on what
+it changed. The stores hold the live working set; a retired invocation, replica or
+family leaves them only once its durable record is in place.
 """
 
+from collections.abc import Callable, Hashable
+
+from pydantic import BaseModel
+
+from ..utils.journal import ChangeJournal, TrackedDict
 from .capacity import is_feasible, outstanding_slots
+from .durability import (
+    CLAIM,
+    FAMILY,
+    LEASE,
+    REPLICA,
+    REQUEST,
+    MemoryResidentDurability,
+    ResidentDurability,
+    live_field,
+)
 from .selection import ReplicaCandidate
 from .state import (
     AdmissionProfile,
@@ -25,16 +45,31 @@ from .state import (
     ServiceFamily,
 )
 
-_INERT_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
+INERT_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
     {ReplicaState.STOPPED, ReplicaState.PREEMPTED, ReplicaState.FAILED}
 )
+
+type _Bucket = dict[str, dict[str, None]]
+
+
+def _bucket_add(index: _Bucket, key: str | None, member: str) -> None:
+    if key is not None:
+        index.setdefault(key, {})[member] = None
+
+
+def _bucket_remove(index: _Bucket, key: str | None, member: str) -> None:
+    if key is None or (bucket := index.get(key)) is None:
+        return
+    bucket.pop(member, None)
+    if not bucket:
+        del index[key]
 
 
 class ServiceFamilyRegistry:
     """Policy-approved, plan-derived families. Registration materializes none."""
 
-    def __init__(self) -> None:
-        self._families: dict[str, ServiceFamily] = {}
+    def __init__(self, journal: ChangeJournal) -> None:
+        self._families: TrackedDict[str, ServiceFamily] = TrackedDict(journal, FAMILY)
 
     def register(self, family: ServiceFamily) -> None:
         """Record a family definition, refining only an existing one's warmth.
@@ -70,12 +105,17 @@ class ServiceFamilyRegistry:
     def all(self) -> list[ServiceFamily]:
         return list(self._families.values())
 
+    def forget(self, family: str) -> None:
+        self._families.forget(family)
+
 
 class ReplicaDirectory:
     """The source of truth for which replica incarnations exist and their fences."""
 
-    def __init__(self) -> None:
-        self._replicas: dict[str, ReplicaIncarnation] = {}
+    def __init__(self, journal: ChangeJournal) -> None:
+        self._replicas: TrackedDict[str, ReplicaIncarnation] = TrackedDict(
+            journal, REPLICA
+        )
 
     def add(self, replica: ReplicaIncarnation) -> None:
         self._replicas[replica.replica_id] = replica
@@ -93,11 +133,14 @@ class ReplicaDirectory:
         return [
             r
             for r in self._replicas.values()
-            if r.family == family and r.state not in _INERT_REPLICA_STATES
+            if r.family == family and r.state not in INERT_REPLICA_STATES
         ]
 
     def all(self) -> list[ReplicaIncarnation]:
         return list(self._replicas.values())
+
+    def forget(self, replica_id: str) -> None:
+        self._replicas.forget(replica_id)
 
 
 class DemandLedger:
@@ -123,8 +166,8 @@ class DemandLedger:
 class LeaseStore:
     """Allocation-lease records and their lifecycle ownership."""
 
-    def __init__(self) -> None:
-        self._leases: dict[str, AllocationLease] = {}
+    def __init__(self, journal: ChangeJournal) -> None:
+        self._leases: TrackedDict[str, AllocationLease] = TrackedDict(journal, LEASE)
 
     def add(self, lease: AllocationLease) -> None:
         self._leases[lease.lease_id] = lease
@@ -138,30 +181,82 @@ class LeaseStore:
     def all(self) -> list[AllocationLease]:
         return list(self._leases.values())
 
+    def forget(self, lease_id: str) -> None:
+        if lease_id in self._leases:
+            self._leases.forget(lease_id)
+
 
 class InvocationStore:
     """Durable ``CS`` request records keyed by ``invocation_id``."""
 
-    def __init__(self) -> None:
-        self._requests: dict[str, InvocationRequest] = {}
+    def __init__(self, journal: ChangeJournal) -> None:
+        self._requests: TrackedDict[str, InvocationRequest] = TrackedDict(
+            journal, REQUEST
+        )
 
     def put(self, request: InvocationRequest) -> None:
         self._requests.setdefault(request.invocation_id, request)
 
+    def replace(self, request: InvocationRequest) -> None:
+        self._requests[request.invocation_id] = request
+
     def get(self, invocation_id: str) -> InvocationRequest | None:
         return self._requests.get(invocation_id)
 
+    def all(self) -> list[InvocationRequest]:
+        return list(self._requests.values())
+
+    def forget(self, invocation_id: str) -> None:
+        if invocation_id in self._requests:
+            self._requests.forget(invocation_id)
+
 
 class ClaimStore:
-    """Authoritative ``ServiceClaim`` facts — the sole authority for credits."""
+    """Authoritative ``ServiceClaim`` facts — the sole authority for credits.
 
-    def __init__(self) -> None:
-        self._claims: dict[str, ServiceClaim] = {}
-        self._by_invocation: dict[str, dict[str, None]] = {}
+    Every change to a claim re-files it in the indexes by invocation, by the replica it
+    names, by the replica it holds credit on, and by the family it is pending for, so a
+    lookup reads only the claims it asks about. An index holds memberships, never
+    credit.
+    """
+
+    def __init__(self, journal: ChangeJournal) -> None:
+        self._claims: TrackedDict[str, ServiceClaim] = TrackedDict(
+            journal, CLAIM, on_change=self._reindex
+        )
+        self._by_invocation: _Bucket = {}
+        self._by_replica: _Bucket = {}
+        self._credit_by_replica: _Bucket = {}
+        self._pending_by_family: _Bucket = {}
+        self._filed: dict[str, tuple[str, str | None, str | None, str | None]] = {}
+
+    def _reindex(self, key: Hashable) -> None:
+        claim_id = str(key)
+        if (old := self._filed.pop(claim_id, None)) is not None:
+            invocation_id, replica_id, credit_replica, pending_family = old
+            _bucket_remove(self._by_invocation, invocation_id, claim_id)
+            _bucket_remove(self._by_replica, replica_id, claim_id)
+            _bucket_remove(self._credit_by_replica, credit_replica, claim_id)
+            _bucket_remove(self._pending_by_family, pending_family, claim_id)
+        if (claim := self._claims.get(claim_id)) is None:
+            return
+        filed = (
+            claim.invocation_id,
+            claim.replica_id,
+            claim.replica_id if claim.holds_credit else None,
+            claim.family if claim.state is ClaimState.PENDING else None,
+        )
+        self._filed[claim_id] = filed
+        _bucket_add(self._by_invocation, filed[0], claim_id)
+        _bucket_add(self._by_replica, filed[1], claim_id)
+        _bucket_add(self._credit_by_replica, filed[2], claim_id)
+        _bucket_add(self._pending_by_family, filed[3], claim_id)
+
+    def _members(self, index: _Bucket, key: str) -> list[ServiceClaim]:
+        return [self._claims[claim_id] for claim_id in index.get(key, ())]
 
     def add(self, claim: ServiceClaim) -> None:
         self._claims[claim.claim_id] = claim
-        self._by_invocation.setdefault(claim.invocation_id, {})[claim.claim_id] = None
 
     def get(self, claim_id: str) -> ServiceClaim | None:
         return self._claims.get(claim_id)
@@ -170,24 +265,27 @@ class ClaimStore:
         return list(self._claims.values())
 
     def by_invocation(self, invocation_id: str) -> list[ServiceClaim]:
-        return [
-            self._claims[claim_id]
-            for claim_id in self._by_invocation.get(invocation_id, ())
-        ]
+        return self._members(self._by_invocation, invocation_id)
+
+    def by_replica(self, replica_id: str) -> list[ServiceClaim]:
+        """Every live claim naming the replica, terminal ones included."""
+        return self._members(self._by_replica, replica_id)
 
     def credit_bearing_for_replica(self, replica_id: str) -> list[ServiceClaim]:
+        return self._members(self._credit_by_replica, replica_id)
+
+    def credit_bearing(self) -> list[ServiceClaim]:
         return [
-            c
-            for c in self._claims.values()
-            if c.replica_id == replica_id and c.holds_credit
+            self._claims[claim_id]
+            for bucket in self._credit_by_replica.values()
+            for claim_id in bucket
         ]
 
     def pending_for_family(self, family: str) -> list[ServiceClaim]:
-        return [
-            c
-            for c in self._claims.values()
-            if c.family == family and c.state is ClaimState.PENDING
-        ]
+        return self._members(self._pending_by_family, family)
+
+    def forget(self, claim_id: str) -> None:
+        self._claims.forget(claim_id)
 
 
 class ReportStore:
@@ -216,6 +314,9 @@ class ReportStore:
 
     def latest(self, replica_id: str) -> ReplicaCapacityReport | None:
         return self._latest.get(replica_id)
+
+    def forget(self, replica_id: str) -> None:
+        self._latest.pop(replica_id, None)
 
 
 class AdmissionCreditLedger:
@@ -264,39 +365,95 @@ class CapacityPools:
 
 
 class ResidentStores:
-    """The bundle of authoritative ``CS`` stores and their derived views."""
+    """The bundle of authoritative ``CS`` stores, their derived views, and the
+    durability their changes flush to.
 
-    def __init__(self) -> None:
-        self.families = ServiceFamilyRegistry()
-        self.directory = ReplicaDirectory()
+    ``complete`` is whether the stores hold every live fact: false from the start of a
+    restart's load until it finishes.
+    """
+
+    def __init__(self, durability: ResidentDurability | None = None) -> None:
+        self.journal = ChangeJournal()
+        self.durability: ResidentDurability = (
+            durability if durability is not None else MemoryResidentDurability()
+        )
+        self.complete = True
+        self.families = ServiceFamilyRegistry(self.journal)
+        self.directory = ReplicaDirectory(self.journal)
         self.demand = DemandLedger()
-        self.leases = LeaseStore()
-        self.invocations = InvocationStore()
-        self.claims = ClaimStore()
+        self.leases = LeaseStore(self.journal)
+        self.invocations = InvocationStore(self.journal)
+        self.claims = ClaimStore(self.journal)
         self.reports = ReportStore()
         self.credit_ledger = AdmissionCreditLedger(self.claims)
         self.pools = CapacityPools(self.directory, self.claims, self.reports)
+        self._readers: dict[str, Callable[[str], BaseModel | None]] = {
+            FAMILY: self.families.get,
+            REPLICA: self.directory.get,
+            LEASE: self.leases.get,
+            REQUEST: self.invocations.get,
+            CLAIM: self.claims.get,
+        }
+
+    def flush(self) -> None:
+        """Make every change since the last flush durable in one write.
+
+        A failed write raises and leaves its changes pending, so the next flush carries
+        them; nothing acts on a change before a flush including it has landed.
+        """
+        if not (captured := self.journal.captured()):
+            return
+        changes: dict[str, str | None] = {}
+        for kind, key in captured:
+            entity = self._readers[kind](str(key))
+            changes[live_field(kind, str(key))] = (
+                entity.model_dump_json() if entity is not None else None
+            )
+        self.durability.write(changes)
+        self.journal.clear(captured)
+
+    @property
+    def settled(self) -> bool:
+        """Whether every change has been made durable."""
+        return not self.journal.pending
+
+    def live(self, invocation_id: str) -> bool:
+        """Whether the invocation has a request or a claim in the working set."""
+        return self.invocations.get(invocation_id) is not None or bool(
+            self.claims.by_invocation(invocation_id)
+        )
+
+    def forget_invocation(self, invocation_id: str) -> None:
+        """Drop a retired invocation's claims, demand and request from the stores."""
+        for claim in self.claims.by_invocation(invocation_id):
+            self.demand.remove(claim.claim_id)
+            self.claims.forget(claim.claim_id)
+        self.invocations.forget(invocation_id)
+
+    def forget_replica(self, replica: ReplicaIncarnation) -> None:
+        """Drop a retired replica, its lease and its report from the stores."""
+        if replica.lease_id is not None:
+            self.leases.forget(replica.lease_id)
+        self.directory.forget(replica.replica_id)
+        self.reports.forget(replica.replica_id)
 
     def to_snapshot(self) -> ResidentSnapshot:
-        """Serialize only the authoritative ``CS`` facts for durable persistence."""
+        """A copy of the live facts."""
         return ResidentSnapshot(
             families=self.families.all(),
-            replicas=self.directory.all(),
-            leases=self.leases.all(),
-            invocations=[
-                request
-                for claim in self.claims.all()
-                if (request := self.invocations.get(claim.invocation_id)) is not None
-            ],
-            claims=self.claims.all(),
+            replicas=[r.model_copy() for r in self.directory.all()],
+            leases=[lease.model_copy() for lease in self.leases.all()],
+            invocations=self.invocations.all(),
+            claims=[c.model_copy() for c in self.claims.all()],
         )
 
     def load_snapshot(self, snapshot: ResidentSnapshot) -> None:
-        """Rehydrate authoritative facts and rebuild the DemandLedger from pending
+        """Install the stored live facts and rebuild the DemandLedger from pending
         claims.
 
         Derived views and capacity telemetry are not restored: they are recomputed on
-        read and refreshed by live reports.
+        read and refreshed by live reports. What is loaded is already durable, so it
+        leaves nothing to flush.
         """
         for family in snapshot.families:
             self.families.register(family)
@@ -310,6 +467,7 @@ class ResidentStores:
             self.claims.add(claim)
             if claim.state is ClaimState.PENDING:
                 self._reenqueue_demand(claim)
+        self.journal.reset()
 
     def _reenqueue_demand(self, claim: ServiceClaim) -> None:
         request = self.invocations.get(claim.invocation_id)

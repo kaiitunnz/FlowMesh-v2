@@ -4,8 +4,9 @@ It fair-orders claims from the DemandLedger, selects a compatible replica from t
 derived CapacityPools and Replica directory, atomically records the fenced
 ``ServiceClaim.RESERVED`` credit, and advances the claim FSM as engine acknowledgements
 and fenced ``DS`` terminal outcomes arrive. It writes only claim facts; capacity reports
-are evidence it reads, never credit it mints. Every authoritative mutation is persisted
-through the injected hook so the credit survives a restart.
+are evidence it reads, never credit it mints. Every authoritative mutation is flushed
+to the stores' durability before the step returns, so the credit survives a restart.
+Once a consumed invocation's cleanup is done it retires into its durable record.
 """
 
 from collections.abc import Callable
@@ -16,6 +17,7 @@ from shared.utils.ids import new_admission_handoff_token
 from ..utils.time import now_iso
 from .capacity import default_credit
 from .claim import (
+    ClaimTransitionError,
     accept,
     begin_stream,
     mark_uncertain,
@@ -24,6 +26,7 @@ from .claim import (
     reserve,
     settle_terminal,
 )
+from .durability import CLAIM, REQUEST, decode_retired, live_field
 from .selection import SelectionStrategy, build_selection_strategy
 from .state import (
     SERVABLE_REPLICA_STATES,
@@ -35,6 +38,7 @@ from .state import (
     InvocationSubject,
     ReplicaIncarnation,
     ReplicaState,
+    RetiredInvocation,
     ServiceClaim,
 )
 from .stores import ResidentStores
@@ -43,11 +47,9 @@ from .stores import ResidentStores
 class AdmissionController:
     """Orders claims, selects replicas, and advances the claim FSM and its credits."""
 
-    def __init__(
-        self, stores: ResidentStores, persist: Callable[[], None] | None = None
-    ) -> None:
+    def __init__(self, stores: ResidentStores) -> None:
         self._stores = stores
-        self._persist = persist or (lambda: None)
+        self._persist = stores.flush
         self._strategies: dict[str, SelectionStrategy] = {}
         self._on_release: Callable[[str], None] = lambda _replica_id: None
         # The replicas of each invocation whose release a terminal began and a failed
@@ -133,26 +135,34 @@ class AdmissionController:
         """Record the durable invocation request and a fresh pending claim.
 
         Called only when no claim for the invocation is in flight. A permitted reissue
-        is a successor: the admission epoch advances past every prior terminal claim,
-        and no prior credit is released here — release happens only through the fenced
-        terminal fact.
+        is a successor: the admission epoch advances past every prior claim, those still
+        live and those its retirement record counts, and no prior credit is released
+        here — release happens only through the fenced terminal fact. The successor's
+        request replaces one a consumed predecessor left, so it inherits no consumption.
         """
-        self._stores.invocations.put(
-            InvocationRequest(
-                invocation_id=invocation_id,
-                subject=subject,
-                family=family,
-                profile=profile,
-                replayable=replayable,
-            )
+        live = self._stores.invocations.get(invocation_id)
+        prior = self._stores.claims.by_invocation(invocation_id)
+        if prior or live is not None:
+            epoch = max((claim.admission_epoch + 1 for claim in prior), default=0)
+        elif (record := self.retired_record(invocation_id)) is not None:
+            if record.subject != subject or record.family != family:
+                raise ClaimTransitionError(
+                    f"invocation {invocation_id} was retired under another owner"
+                )
+            epoch = record.epoch_high + 1
+        else:
+            epoch = 0
+        request = InvocationRequest(
+            invocation_id=invocation_id,
+            subject=subject,
+            family=family,
+            profile=profile,
+            replayable=replayable,
         )
-        epoch = max(
-            (
-                prior.admission_epoch + 1
-                for prior in self._stores.claims.by_invocation(invocation_id)
-            ),
-            default=0,
-        )
+        if live is not None and live.consumed is not None:
+            self._stores.invocations.replace(request)
+        else:
+            self._stores.invocations.put(request)
         claim = new_claim(
             invocation_id=invocation_id, family=family, admission_epoch=epoch
         )
@@ -381,8 +391,10 @@ class AdmissionController:
         subject's fact is the orchestration engine's ``DS`` outcome; an external
         subject's is a durable external status-terminal fact. The controller consumes
         either by ``invocation_id``, tolerant of the claim's source state; it never
-        assumes a ``DS`` record exists. Return whether any claim released, now or in
-        the earlier consumption this one finishes.
+        assumes a ``DS`` record exists. The first consumption is recorded on the request
+        in the same write that settles its claims, whether or not any credit releases,
+        and a later one leaves that record as it is. Return whether any claim released,
+        now or in the earlier consumption this one finishes.
         """
         released: list[str | None] = []
         for claim in self._stores.claims.by_invocation(invocation_id):
@@ -391,8 +403,15 @@ class AdmissionController:
                 self._stores.demand.remove(claim.claim_id)
                 self._touch_replica(claim)
                 released.append(claim.replica_id)
+        if (
+            request := self._stores.invocations.get(invocation_id)
+        ) is not None and request.consumed is None:
+            self._stores.invocations.replace(
+                request.model_copy(update={"consumed": reason})
+            )
         unfinished = self._unfinished.get(invocation_id)
         if not released and unfinished is None:
+            self._persist()
             return False
         # A terminal handed over again finishes a release an earlier one began, so the
         # claim is persisted and each replica hears of its release once.
@@ -404,4 +423,58 @@ class AdmissionController:
                 self._on_release(replica_id)
             pending.pop(0)
         del self._unfinished[invocation_id]
+        return True
+
+    def retired_record(self, invocation_id: str) -> RetiredInvocation | None:
+        """The invocation's stored retirement record, read from the durable store.
+
+        A store failure or an unreadable record raises rather than reading as none.
+        """
+        [value] = self._stores.durability.retired_invocations([invocation_id])
+        return decode_retired(invocation_id, value) if value is not None else None
+
+    def retirable(self, invocation_id: str) -> bool:
+        """Whether a consumed invocation has nothing left that needs its live facts.
+
+        Its terminal was consumed and every claim settled, and no release it began is
+        left unfinished.
+        """
+        request = self._stores.invocations.get(invocation_id)
+        return (
+            request is not None
+            and request.consumed is not None
+            and invocation_id not in self._unfinished
+            and all(
+                claim.state is ClaimState.TERMINAL
+                for claim in self._stores.claims.by_invocation(invocation_id)
+            )
+        )
+
+    def retire(self, invocation_id: str) -> bool:
+        """Retire a consumed invocation whose cleanup is done into its durable record.
+
+        Its pending changes are flushed, the record is published and the live fields
+        deleted, and only then do its claims, demand and request leave the stores. A
+        failure at any point raises and leaves the invocation live, so a later call
+        retires it. Return whether it retired.
+        """
+        if not self.retirable(invocation_id):
+            return False
+        request = self._stores.invocations.get(invocation_id)
+        assert request is not None and request.consumed is not None
+        claims = self._stores.claims.by_invocation(invocation_id)
+        self._persist()
+        record = RetiredInvocation(
+            invocation_id=invocation_id,
+            subject=request.subject,
+            family=request.family,
+            epoch_high=max((claim.admission_epoch for claim in claims), default=0),
+            terminal_reason=request.consumed,
+        )
+        self._stores.durability.retire_invocation(
+            record,
+            [live_field(REQUEST, invocation_id)]
+            + [live_field(CLAIM, claim.claim_id) for claim in claims],
+        )
+        self._stores.forget_invocation(invocation_id)
         return True

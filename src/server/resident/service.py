@@ -71,6 +71,7 @@ from ..task.v2.representations.admission import ResidentAdmissionBinding
 from ..task.v2.representations.operators import ServiceDependency
 from ..task.v2.representations.plan import ResidencyWarmth
 from .admission import AdmissionController
+from .durability import decode_retired
 from .lifecycle import LifecycleScaleManager
 from .policy import ResidentPolicyLimits
 from .state import (
@@ -106,8 +107,8 @@ EndpointProbe = Callable[[str], ReplicaEndpoint | None]
 ServeTaskLiveness = Callable[[str], bool]
 # Whether any registered worker can host a serve task now.
 ServeTaskHostable = Callable[[str], Awaitable[bool]]
-# Persists the authoritative CS snapshot.
-PersistCallback = Callable[[], None]
+# Told the id of each invocation that left the working set once its terminal settled.
+RetiredHook = Callable[[str], None]
 
 
 def _subject_workflow_id(subject: InvocationSubject) -> str | None:
@@ -270,6 +271,11 @@ class ServeDelivery(Protocol):
         """Record the fenced external status fact before the credit releases."""
         ...
 
+    @property
+    def terminal_recorded(self) -> bool:
+        """Whether this request's external status fact has been recorded."""
+        ...
+
     def complete(self) -> None:
         """Finalize the client response on a successful terminal."""
         ...
@@ -375,7 +381,6 @@ class ResidentCapacityControl:
         serve_task_live: ServeTaskLiveness = lambda _task_id: True,
         serve_task_hostable: ServeTaskHostable | None = None,
         delivery: ResidentWorkerDelivery | None = None,
-        persist: PersistCallback | None = None,
         logger: logging.Logger | None = None,
         poll_interval_sec: float = 1.0,
         idle_sweep_interval_sec: float = 0.0,
@@ -400,7 +405,7 @@ class ResidentCapacityControl:
         self._serve_task_live = serve_task_live
         self._serve_task_hostable = serve_task_hostable
         self._delivery = delivery
-        self._persist = persist or (lambda: None)
+        self._on_retired: RetiredHook = lambda _invocation_id: None
         self._logger = logger or logging.getLogger("resident-capacity")
         self._poll_interval = poll_interval_sec
         self._idle_sweep_interval = idle_sweep_interval_sec
@@ -424,6 +429,15 @@ class ResidentCapacityControl:
     def stores(self) -> ResidentStores:
         """The control-state stores, for read-only observers such as fleet sampling."""
         return self._stores
+
+    def set_retired_hook(self, on_retired: RetiredHook) -> None:
+        """Call ``on_retired`` with each invocation id whose terminal settled and that
+        left the working set, or never entered it."""
+        self._on_retired = on_retired
+
+    def invocation_live(self, invocation_id: str) -> bool:
+        """Whether the invocation holds a request or a claim in the working set."""
+        return self._stores.live(invocation_id)
 
     def set_worker_delivery(self, delivery: ResidentWorkerDelivery) -> None:
         """Enable the worker-owned data path once the network plane is available."""
@@ -572,12 +586,33 @@ class ResidentCapacityControl:
 
     def _settle_terminal_local(self, invocation_id: str, failed: bool) -> bool:
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
-        released = self._admission.settle_invocation_terminal(invocation_id, reason)
-        self._transient_failures.pop(invocation_id, None)
-        self._reap_attempt(invocation_id, released)
+        released = self._consume(invocation_id, reason)
+        self._retire(invocation_id)
         return released
 
-    def _reap_attempt(self, invocation_id: str, released: bool = False) -> None:
+    def _consume(self, invocation_id: str, reason: ClaimTerminalReason) -> bool:
+        """Consume a fenced terminal and reap the invocation's attempt and requests."""
+        released = self._admission.settle_invocation_terminal(invocation_id, reason)
+        self._transient_failures.pop(invocation_id, None)
+        self._reap_attempt(invocation_id, reap_replicas=True)
+        return released
+
+    def _retire(self, invocation_id: str) -> None:
+        """Retire a consumed invocation into its durable record, best effort.
+
+        A store failure leaves it live for a later retirement; the hook hears of an
+        invocation only once it holds nothing in the working set.
+        """
+        try:
+            self._admission.retire(invocation_id)
+        except Exception:
+            self._logger.exception(
+                "retiring resident invocation %s failed", invocation_id
+            )
+        if not self._stores.live(invocation_id):
+            self._on_retired(invocation_id)
+
+    def _reap_attempt(self, invocation_id: str, reap_replicas: bool = False) -> None:
         """Reap both ends of a resident invocation on its fenced terminal.
 
         The origin reap cancels the origin driver's lane and drops the worker-private
@@ -585,8 +620,9 @@ class ResidentCapacityControl:
         session (a task-addressed serve invocation); the serve-worker reap tears down
         the replica's engine request; then the durable session record is deleted. Every
         step is best effort — a gone worker or an already-closed session simply has
-        nothing to reap. Without a live attempt, as after a restart, the replica's
-        request is reaped only when ``released`` reports this terminal released a claim.
+        nothing to reap. Without a live attempt, as after a restart, the request is
+        reaped on each replica the invocation's claims name when ``reap_replicas`` is
+        set, as it is for a consumed terminal.
         """
         attempt = self._attempts.pop(invocation_id, None)
         origination = self._originations.pop(invocation_id, None)
@@ -602,7 +638,7 @@ class ResidentCapacityControl:
                     "resident_reap",
                     {"task_id": task_id, "call_correlation": call_correlation},
                 )
-            if released:
+            if reap_replicas:
                 self._reap_replica_requests(invocation_id)
             return
         if attempt.serve is not None:
@@ -753,7 +789,7 @@ class ResidentCapacityControl:
             binding_generation=binding_generation,
             endpoint=endpoint,
         )
-        self._persist()
+        self._stores.flush()
 
     def drain_serve_replica(self, serve_task_id: str) -> None:
         """Drain the standing replica of a stopped serve task, denying new claims.
@@ -792,21 +828,59 @@ class ResidentCapacityControl:
         return self.claims_terminal(invocation_ids)
 
     def claims_terminal(self, invocation_ids: Collection[str]) -> bool:
-        """Whether every claim the invocations raised is terminal. Called on the loop
-        that owns the claim store, or before one is bound."""
-        return all(
-            claim.state is ClaimState.TERMINAL
-            for invocation_id in invocation_ids
-            for claim in self._stores.claims.by_invocation(invocation_id)
+        """Whether every invocation has settled: its terminal was consumed and it
+        retired into its durable record, or it never raised a claim. Called on the loop
+        that owns the claim store, or before one is bound.
+
+        An invocation still in the working set is unsettled, terminal or not. The answer
+        is False while the stores are loading or hold a change not yet durable, and when
+        a retirement record cannot be read or is unreadable, so only a complete lookup
+        reads an absent invocation as settled.
+        """
+        if not self._stores.complete or not self._stores.settled:
+            return False
+        ids = list(dict.fromkeys(invocation_ids))
+        if any(self._stores.live(invocation_id) for invocation_id in ids):
+            return False
+        if not ids:
+            return True
+        try:
+            records = self._stores.durability.retired_invocations(ids)
+            for invocation_id, record in zip(ids, records, strict=True):
+                if record is not None:
+                    decode_retired(invocation_id, record)
+        except Exception:
+            self._logger.warning(
+                "could not read resident retirement records", exc_info=True
+            )
+            return False
+        return True
+
+    async def list_service_families_async(self) -> list[ServiceFamily]:
+        """Every service family, live and retired, oldest first. Call on the loop that
+        owns the stores."""
+        live = self._stores.families.all()
+        known = {family.family for family in live}
+        stored = await self._stores.durability.stored_families_async()
+        merged = live + [family for family in stored if family.family not in known]
+        return sorted(merged, key=lambda family: (family.created_at, family.family))
+
+    async def list_replica_incarnations_async(self) -> list[ReplicaIncarnation]:
+        """Every replica incarnation, live and retired, oldest first. Call on the loop
+        that owns the stores.
+
+        The live replicas are copied before the stored history is read, so a replica
+        retired meanwhile is listed once, from either.
+        """
+        live = [replica.model_copy() for replica in self._stores.directory.all()]
+        known = {replica.replica_id for replica in live}
+        stored = await self._stores.durability.stored_replicas_async()
+        merged = live + [
+            entry.replica for entry in stored if entry.replica.replica_id not in known
+        ]
+        return sorted(
+            merged, key=lambda replica: (replica.created_at, replica.replica_id)
         )
-
-    def list_service_families(self) -> list[ServiceFamily]:
-        """The registered service families, for operator read access."""
-        return self._stores.families.all()
-
-    def list_replica_incarnations(self) -> list[ReplicaIncarnation]:
-        """Every replica incarnation in the directory, inert ones included."""
-        return self._stores.directory.all()
 
     def list_credit_bearing_claims(self) -> tuple[list[ServiceClaim], dict[str, int]]:
         """The credit-bearing claims and the per-replica held credit derived on read.
@@ -830,12 +904,14 @@ class ResidentCapacityControl:
         until the linked invocation reaches a fenced terminal outcome. A pending claim
         holds no credit and its acquisition ended with the process, so it expires; a
         re-driven boundary raises a successor. Admission waits until
-        ``reattach_replicas`` has re-attached the restored replicas.
+        ``reattach_replicas`` has re-attached the restored replicas. The stores read as
+        complete once the stored facts are in place.
         """
         self._replicas_attached.clear()
-        if snapshot is None:
-            return
-        self._stores.load_snapshot(snapshot)
+        self._stores.complete = False
+        if snapshot is not None:
+            self._stores.load_snapshot(snapshot)
+        self._stores.complete = True
         for claim in self._stores.claims.all():
             if claim.state in (
                 ClaimState.RESERVED,
@@ -955,6 +1031,22 @@ class ResidentCapacityControl:
             self._lifecycle.reconcile_serve_tasks(live_serve_tasks)
         finally:
             self._replicas_attached.set()
+
+    def recover_retirements(self) -> None:
+        """Finish the cleanup a restart interrupted, then retire what it frees.
+
+        Call once the restored replicas are re-attached. Each invocation whose terminal
+        was consumed before the restart has its request reaped on every replica its
+        claims name, best effort, and retires; then each inert replica no live claim
+        names, and each standing family nothing live uses, moves to stored history.
+        """
+        for request in self._stores.invocations.all():
+            if request.consumed is not None:
+                self._reap_attempt(request.invocation_id, reap_replicas=True)
+                self._retire(request.invocation_id)
+        self._lifecycle.retire_inert(
+            [replica.replica_id for replica in self._stores.directory.all()]
+        )
 
     async def _originate(self, env: ToolInvocationEnvelope) -> None:
         """Originate one resident boundary, settling an error at its call on any escape.
@@ -1100,6 +1192,8 @@ class ResidentCapacityControl:
                     f"model {model_ref!r} is not in the allowed catalog",
                 )
                 return
+            elif not self._may_raise(orig):
+                return
             else:
                 claim = self._admission.raise_claim(
                     invocation_id=orig.invocation_id,
@@ -1127,6 +1221,24 @@ class ResidentCapacityControl:
             )
             return
         await self._relay_bootstrap(orig, claim, profile, handoff, replica)
+
+    def _may_raise(self, orig: _Origination) -> bool:
+        """Whether the origination may still raise a fresh claim.
+
+        It checks, with no suspension before the raise, that the owner still awaits the
+        outcome: a workflow boundary still settleable, a serve request with no terminal
+        recorded. A terminal that settled it while the origination waited leaves nothing
+        to admit, and a workflow boundary's captured request is reaped.
+        """
+        if orig.serve is not None:
+            return not orig.serve.terminal_recorded
+        if self._boundary_settleable(orig.task_id, orig.call_correlation):
+            return True
+        if orig.invocation_id in self._attempts:
+            self._originations.pop(orig.invocation_id, None)
+        else:
+            self._reap_attempt(orig.invocation_id)
+        return False
 
     async def _originate_serve_inner(self, request: ServeOrigination) -> None:
         orig = _Origination(
@@ -1169,16 +1281,16 @@ class ResidentCapacityControl:
 
         The durable terminal fact is recorded before the credit releases, so a restart
         reconciles the claim against it. The release is idempotent and the reap
-        tolerates an already-gone attempt, so a duplicate or late report is a no-op.
+        tolerates an already-gone attempt, so a duplicate or late report is a no-op. The
+        invocation retires once the client response is finalized.
         """
         delivery.record_terminal(reason, detail)
-        released = self._admission.settle_invocation_terminal(invocation_id, reason)
-        self._transient_failures.pop(invocation_id, None)
-        self._reap_attempt(invocation_id, released)
+        self._consume(invocation_id, reason)
         if success:
             delivery.complete()
         else:
             delivery.fail(detail or "resident serve failed")
+        self._retire(invocation_id)
 
     def fail_serve(
         self, invocation_id: str, delivery: ServeDelivery, detail: str
@@ -1197,36 +1309,31 @@ class ResidentCapacityControl:
     def reconcile_workflow_terminals(
         self, completed: Callable[[str, str], bool | None]
     ) -> None:
-        """Release each workflow claim whose invocation the ledger already settled.
+        """Consume each workflow invocation terminal the ledger recorded before a crash.
 
-        A crash between a ledger terminal and its credit release leaves the claim
-        credit-bearing with nothing left to settle it. ``completed`` reads the restored
-        ledger by (workflow id, invocation id): a terminal settles the claim through the
-        claim FSM, and a claim without one keeps its credit.
+        A crash between a ledger terminal and its consumption leaves the invocation's
+        claims unsettled, or settled before acceptance but unconsumed, with nothing left
+        to consume the terminal. ``completed`` reads the restored ledger's invocation by
+        (workflow id, invocation id): a terminal is consumed through the claim FSM, and
+        an invocation without one keeps its claims as they are.
         """
-        for claim in self._stores.claims.all():
-            request = self._stores.invocations.get(claim.invocation_id)
-            if not claim.holds_credit or request is None:
+        for request in self._stores.invocations.all():
+            if request.consumed is not None:
                 continue
             if (workflow_id := _subject_workflow_id(request.subject)) is None:
                 continue
-            outcome = completed(workflow_id, claim.invocation_id)
+            outcome = completed(workflow_id, request.invocation_id)
             if outcome is not None:
-                self._settle_terminal_local(claim.invocation_id, failed=not outcome)
+                self._settle_terminal_local(request.invocation_id, failed=not outcome)
 
     def serve_invocations_holding_credit(self) -> list[str]:
         """Return each gated serve invocation whose claim holds credit."""
-        invocations: list[str] = []
-        for claim in self._stores.claims.all():
+        invocations: dict[str, None] = {}
+        for claim in self._stores.claims.credit_bearing():
             request = self._stores.invocations.get(claim.invocation_id)
-            if (
-                claim.holds_credit
-                and request is not None
-                and _subject_workflow_id(request.subject) is None
-                and claim.invocation_id not in invocations
-            ):
-                invocations.append(claim.invocation_id)
-        return invocations
+            if request is not None and _subject_workflow_id(request.subject) is None:
+                invocations[claim.invocation_id] = None
+        return list(invocations)
 
     def reconcile_serve_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason
@@ -1236,8 +1343,8 @@ class ResidentCapacityControl:
         On startup a recorded external status fact replays through the same FSM so a
         claim rehydrated UNCERTAIN releases; there is no live client to finalize.
         """
-        released = self._admission.settle_invocation_terminal(invocation_id, reason)
-        self._reap_attempt(invocation_id, released)
+        self._consume(invocation_id, reason)
+        self._retire(invocation_id)
 
     async def _relay_bootstrap(
         self,
@@ -1399,6 +1506,8 @@ class ResidentCapacityControl:
             if self._control.enabled
             else None
         )
+        # Nothing reaches the origin while a change it depends on is not yet durable.
+        self._stores.flush()
         if serve is not None:
             serve.open(session_id, handoff, plan, traceparent)
             return
@@ -1451,7 +1560,8 @@ class ResidentCapacityControl:
                     self._admission.on_stream_started(claim)
                 else:
                     # A resumed in-flight claim keeps its held credit; re-mint the
-                    # fence.
+                    # fence once what it names is durable.
+                    self._stores.flush()
                     auth = self._admission.reauthorize(
                         claim,
                         idempotency_key=attempt.idempotency_key,
@@ -1770,7 +1880,8 @@ class ResidentCapacityControl:
             protocols=(("resident", PEER_PROTOCOL) if peer_listener else ("resident",)),
             directly_routable=deps.directly_routable and peer_listener is not None,
         )
-        self._persist()
+        # The listener fence is durable before any handoff names it.
+        self._stores.flush()
         return replica.listener
 
     def _dials_peers(self, worker_id: str) -> bool:

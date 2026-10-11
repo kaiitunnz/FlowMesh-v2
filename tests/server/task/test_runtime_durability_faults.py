@@ -425,9 +425,10 @@ def test_a_crash_at_a_faulted_cut_restores_without_an_early_or_lost_release(
                 assert released_before == [], f"cut {cut}"
                 expected = [] if claim.holds_credit else [claim.replica_id]
                 assert resident.released == expected, f"cut {cut}"
-            assert [c.invocation_id for c in resident.stores.claims.all()] == [
-                claim.invocation_id
-            ], f"cut {cut}"
+            # No successor was raised, and a consumed terminal retired the invocation.
+            assert all(c is claim for c in resident.stores.claims.all()), f"cut {cut}"
+            if durable:
+                assert not resident.stores.live(claim.invocation_id), f"cut {cut}"
             resident.assert_durable_matches_memory()
 
 
@@ -444,11 +445,12 @@ def test_the_observer_catches_an_action_delivered_before_its_cause_is_durable(
             ),
         )
         resident.registry.fail_from = resident.registry.writes + 1
+        claim = resident.claim()
 
         _run(resident, _TRANSITIONS[0])
 
         assert resident.observer.violations
-        assert not resident.claim().holds_credit
+        assert not claim.holds_credit
 
 
 def test_a_failed_interrupt_is_retried_without_repeating_its_credit_release(

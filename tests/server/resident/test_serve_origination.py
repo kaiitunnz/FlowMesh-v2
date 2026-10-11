@@ -227,6 +227,10 @@ class _ServeDelivery:
     def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
         self.terminals.append((reason, detail))
 
+    @property
+    def terminal_recorded(self) -> bool:
+        return bool(self.terminals)
+
     def complete(self) -> None:
         self.completed = True
 
@@ -520,13 +524,14 @@ def test_definite_failure_finalizes_the_client_and_releases_credit() -> None:
     delivery = _ServeDelivery()
     asyncio.run(svc._originate_serve(_origination(delivery)))
     asyncio.run(svc._on_ack(_ack(svc, ResidentBootstrapOutcome.ACKED)))
+    claim = stores.claims.by_invocation("inv-1")[0]
     asyncio.run(
         svc._on_outcome(
             _outcome(svc, ResidentStreamStatus.DEFINITE_FAILURE, error="engine refused")
         )
     )
-    claim = stores.claims.by_invocation("inv-1")[0]
     assert claim.state is ClaimState.TERMINAL
+    assert not stores.live("inv-1")
     assert delivery.terminals[-1][0] is ClaimTerminalReason.FAILED
     assert delivery.failed is not None and "engine refused" in delivery.failed
 
@@ -542,10 +547,10 @@ def test_a_reject_on_a_standing_replica_fails_only_the_request() -> None:
     delivery = _ServeDelivery()
     asyncio.run(svc._originate_serve(_origination(delivery)))
     replica = stores.directory.by_family(_FAMILY)[0]
+    claim = stores.claims.by_invocation("inv-1")[0]
     asyncio.run(
         svc._on_ack(_ack(svc, ResidentBootstrapOutcome.REJECTED, rejection="stale"))
     )
-    claim = stores.claims.by_invocation("inv-1")[0]
     assert claim.state is ClaimState.TERMINAL
     assert delivery.terminals[-1][0] is ClaimTerminalReason.FAILED
     assert delivery.failed is not None
@@ -572,7 +577,6 @@ def test_redrive_exhaustion_on_a_standing_replica_fails_only_the_request() -> No
     # One loss short of the threshold; the next uncertain loss exhausts the re-drives.
     svc._transient_failures["inv-1"] = svc._max_transient_redrives - 1
     asyncio.run(svc._hold_and_redrive_claim(attempt, claim, "stream lost"))
-    claim = stores.claims.by_invocation("inv-1")[0]
     assert claim.state is ClaimState.TERMINAL
     assert delivery.terminals[-1][0] is ClaimTerminalReason.FAILED
     assert _held(stores, replica.replica_id) == 0
@@ -675,12 +679,12 @@ def test_drain_stops_a_drained_standing_replica_with_no_credit() -> None:
     reaped: list[str] = []
     svc, stores, _settled, _deps = _build(stop_fn=reaped.append)
     _adopt(svc)
-    svc.drain_serve_replica(_SERVE_TASK)
     replica = stores.directory.by_family(_FAMILY)[0]
+    svc.drain_serve_replica(_SERVE_TASK)
     # With no admitted work, the stopped serve task's replica leaves the live directory
     # rather than lingering DRAINING forever (the idle sweep skips standing replicas).
     assert replica.state is ReplicaState.STOPPED
-    assert stores.directory.live_by_family(_FAMILY) == []
+    assert stores.directory.by_family(_FAMILY) == []
     # The serve task owns its standing replica: a drain on its requeue leaves the task
     # to re-run, so stopping the replica never cancels it.
     assert reaped == []
@@ -755,8 +759,9 @@ def test_a_request_on_a_stopped_serve_replica_starts_no_replica() -> None:
     svc, stores, _settled, _deps = _build()
     materialized = _recording_materializations(svc)
     _adopt(svc)
+    replica = stores.directory.by_family(_FAMILY)[0]
     svc.drain_serve_replica(_SERVE_TASK)
-    assert stores.directory.by_family(_FAMILY)[0].state is ReplicaState.STOPPED
+    assert replica.state is ReplicaState.STOPPED
 
     delivery = _ServeDelivery()
     asyncio.run(svc._originate_serve(_origination(delivery)))
@@ -776,3 +781,24 @@ def test_a_serve_family_stays_standing_across_a_snapshot() -> None:
 
     family = restored.families.get(_FAMILY)
     assert family is not None and family.standing is True
+
+
+def test_a_serve_request_finalized_during_the_attachment_wait_raises_no_claim() -> None:
+    svc, stores, _settled, deps = _build()
+    _adopt(svc)
+    delivery = _ServeDelivery()
+
+    async def run() -> None:
+        svc._replicas_attached.clear()
+        origination = asyncio.create_task(svc._originate_serve(_origination(delivery)))
+        await asyncio.sleep(0)
+        # The request's terminal lands while it waits: a re-drive given up, say.
+        svc.fail_serve("inv-1", delivery, "client gone")
+        svc._replicas_attached.set()
+        await origination
+
+    asyncio.run(run())
+
+    assert stores.claims.all() == []
+    assert delivery.opened == []
+    assert "resident_sidecar_bind" not in deps.kinds()

@@ -52,6 +52,7 @@ class _FakeControl:
         self.drained: list[str] = []
         self.reconciled: list[tuple[str, ClaimTerminalReason]] = []
         self.relayed: list[tuple[str, str, dict]] = []
+        self.live: set[str] = set()
         self._endpoint = endpoint
         self._model_allowed = model_allowed
 
@@ -87,6 +88,9 @@ class _FakeControl:
         self, invocation_id: str, reason: ClaimTerminalReason
     ) -> None:
         self.reconciled.append((invocation_id, reason))
+
+    def invocation_live(self, invocation_id: str) -> bool:
+        return invocation_id in self.live
 
     def node_of_worker(self, worker_id: str) -> str | None:
         return f"node-{worker_id}" if worker_id else None
@@ -566,8 +570,11 @@ def test_reconcile_replays_recorded_terminals() -> None:
     edge._terminals.record(
         ServeStatusTerminal(invocation_id="inv-y", status=ServeTerminalStatus.FAILED)
     )
+    control.live = {"inv-y"}
     edge.reconcile_terminals()
     assert {inv for inv, _ in control.reconciled} == {"inv-x", "inv-y"}
+    # The fact of an invocation that holds nothing live leaves; a live one's stays.
+    assert [t.invocation_id for t in edge._terminals.all()] == ["inv-y"]
 
 
 def test_a_binding_is_refused_on_an_ingress_it_does_not_pin() -> None:

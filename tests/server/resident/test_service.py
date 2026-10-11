@@ -12,6 +12,7 @@ denies with no allocation; and a restart reconciles an in-flight claim to uncert
 import asyncio
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from server.network.state import (
@@ -37,6 +38,7 @@ from server.resident import (
     ResidentPolicyLimits,
     ResidentStores,
 )
+from server.resident.durability import ResidentDurability
 from server.resident.service import ResidentWorkerDelivery
 from server.resident.state import ReplicaIncarnation
 from server.task.v2.representations.admission import ResidentAdmissionBinding
@@ -191,8 +193,10 @@ def _build(
     dependency: ServiceDependency | None = None,
     warmth: ResidencyWarmth | None = None,
     content_scope: str = "",
+    durability: ResidentDurability | None = None,
+    boundary_settleable: Callable[[str, str], bool] = lambda _task, _call: True,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Delivery]:
-    stores = ResidentStores()
+    stores = ResidentStores(durability)
     limits = limits or ResidentPolicyLimits()
     settled: list[Any] = []
     redispatched: list[tuple[str, str]] = []
@@ -230,6 +234,7 @@ def _build(
         limits=limits,
         dependency_resolver=lambda task_id: _admission(dependency, warmth),
         content_scope_resolver=lambda _task_id: content_scope,
+        boundary_settleable=boundary_settleable,
         content_scope_authority=lambda idem, scope: assigned_scopes.append(
             (idem, scope)
         ),
@@ -772,9 +777,9 @@ def test_a_request_that_exhausts_its_redrives_settles_before_it_releases() -> No
     delivery.relays.clear()
     at_settle: list[tuple[ClaimState, list[str]]] = []
     settle = svc._settle
+    claim = stores.claims.by_invocation("inv-1")[-1]
 
     def recording_settle(*args: Any, **kwargs: Any) -> bool:
-        claim = stores.claims.by_invocation("inv-1")[-1]
         at_settle.append((claim.state, [kind for _, kind, _ in delivery.relays]))
         return settle(*args, **kwargs)
 
@@ -786,5 +791,5 @@ def test_a_request_that_exhausts_its_redrives_settles_before_it_releases() -> No
 
     ((state, relays),) = at_settle
     assert state is not ClaimState.TERMINAL and "resident_reap" not in relays
-    assert stores.claims.by_invocation("inv-1")[-1].state is ClaimState.TERMINAL
+    assert claim.state is ClaimState.TERMINAL
     assert [kind for _, kind, _ in delivery.relays].count("resident_reap") == 1

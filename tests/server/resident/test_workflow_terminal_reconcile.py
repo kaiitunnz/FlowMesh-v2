@@ -1,7 +1,8 @@
 """A root restart releases a resident credit its ledger already settled.
 
 A crash between the ledger terminal and the credit release leaves the claim holding
-its credit with nothing left to settle it; startup replays the ledger terminal.
+its credit with nothing left to settle it; startup replays the ledger terminal, and the
+consumed invocation retires into its durable record.
 """
 
 import asyncio
@@ -9,7 +10,13 @@ from typing import Any
 
 import pytest
 
-from server.resident.state import ClaimState, ClaimTerminalReason, ResidentSnapshot
+from server.resident.durability import decode_retired
+from server.resident.state import (
+    ClaimState,
+    ClaimTerminalReason,
+    ResidentSnapshot,
+    RetiredInvocation,
+)
 from server.startup import rehydrate_root_state
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from tests.server.resident.test_service import _admission, _build, _env
@@ -24,7 +31,8 @@ class _SnapshotRegistry:
         self._snapshot = snapshot
 
     async def load_snapshot_async(self) -> ResidentSnapshot:
-        return self._snapshot
+        # Each load decodes the stored facts afresh, as the store's does.
+        return ResidentSnapshot.model_validate_json(self._snapshot.model_dump_json())
 
 
 def _admit(workflow_id: str, invocation_id: str) -> ResidentSnapshot:
@@ -48,6 +56,15 @@ def _restart(registry: FakeRegistry, snapshot: ResidentSnapshot) -> Any:
     )
     svc.shutdown()
     return stores
+
+
+def _retired(stores: Any, snapshot: ResidentSnapshot) -> RetiredInvocation:
+    """The retirement record of the snapshot's one invocation, which held no credit."""
+    (claim,) = snapshot.claims
+    assert stores.claims.by_invocation(claim.invocation_id) == []
+    assert stores.credit_ledger.held(claim.replica_id) == 0
+    [value] = stores.durability.retired_invocations([claim.invocation_id])
+    return decode_retired(claim.invocation_id, value)
 
 
 def _held(registry: FakeRegistry) -> tuple[TaskRuntime, str, Any]:
@@ -81,9 +98,7 @@ def test_a_restart_releases_a_credit_the_ledger_settled(
         )
 
     stores = _restart(registry, snapshot)
-    (claim,) = stores.claims.by_invocation(env.invocation_id)
-    assert claim.state is ClaimState.TERMINAL and claim.terminal_reason is reason
-    assert stores.credit_ledger.held(claim.replica_id) == 0
+    assert _retired(stores, snapshot).terminal_reason is reason
 
 
 def test_a_restart_holds_a_credit_whose_invocation_is_still_open() -> None:
@@ -115,10 +130,7 @@ def test_a_restart_releases_a_credit_whose_cancel_only_its_records_hold() -> Non
     del registry.save_ledger
 
     stores = _restart(registry, snapshot)
-    (claim,) = stores.claims.by_invocation(env.invocation_id)
-    assert claim.state is ClaimState.TERMINAL
-    assert claim.terminal_reason is ClaimTerminalReason.FAILED
-    assert stores.credit_ledger.held(claim.replica_id) == 0
+    assert _retired(stores, snapshot).terminal_reason is ClaimTerminalReason.FAILED
 
 
 def test_a_restart_releases_a_credit_whose_failure_only_its_records_hold() -> None:
@@ -129,6 +141,4 @@ def test_a_restart_releases_a_credit_whose_failure_only_its_records_hold() -> No
     del scenario.registry.save_ledger
 
     stores = _restart(scenario.registry, snapshot)
-    (claim,) = stores.claims.by_invocation(scenario.invocation_id)
-    assert claim.state is ClaimState.TERMINAL
-    assert stores.credit_ledger.held(claim.replica_id) == 0
+    _retired(stores, snapshot)

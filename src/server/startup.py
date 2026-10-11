@@ -28,10 +28,11 @@ async def rehydrate_root_state(
     an empty store and strand (or re-admit a second) credit. Gated serve requests the
     restart ended settle once the runtime has restored the serve tasks, whose workers
     reap the replicas' requests, and before admission opens. Workflow terminals replay
-    once the runtime has restored each ledger, releasing a claim whose credit a crash
-    kept past its ledger terminal. Restored replicas re-attach to their serve tasks once
-    the runtime has restored those tasks' records, and resident admission waits until
-    they have. A worker reserved for a dispatch the restored runtime does not hold is
+    once the runtime has restored each ledger, consuming an invocation terminal a crash
+    left unconsumed. Restored replicas re-attach to their serve tasks once the runtime
+    has restored those tasks' records, and resident admission waits until they have;
+    an invocation consumed before the restart then finishes its replica reap and
+    retires. A worker reserved for a dispatch the restored runtime does not hold is
     released. The runtime restores the workflows not freed, first classifying the stored
     workflows of a store without the open-workflow index.
     """
@@ -49,6 +50,7 @@ async def rehydrate_root_state(
         resident.reattach_replicas(
             runtime.live_resident_task_ids() if runtime is not None else frozenset()
         )
+        resident.recover_retirements()
     if runtime is not None:
         await asyncio.to_thread(runtime.release_ended_reservations)
     if resident is not None:

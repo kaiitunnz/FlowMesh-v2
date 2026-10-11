@@ -25,7 +25,7 @@ from server.resident import (
     new_claim,
     reserve,
 )
-from tests.server.resident._helpers import PROFILE, warm_stores
+from tests.server.resident._helpers import PROFILE, stored_replica, warm_stores
 
 _SUBJECT = InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="w")
 _PAST = "2000-01-01T00:00:00Z"
@@ -200,7 +200,9 @@ def test_idle_teardown_only_stops_uncommitted_replica():
     mgr = _manager(stores, stop_fn=stop_fn)
     mgr.drain("rpl-1")
     mgr.stop("rpl-1")
-    assert stores.directory.get("rpl-1").state is ReplicaState.STOPPED
+    # A stopped replica no claim names moves to stored history.
+    assert stores.directory.get("rpl-1") is None
+    assert stored_replica(stores, "rpl-1").state is ReplicaState.STOPPED
     assert stopped == ["tsk-serve-1"]
 
 
@@ -214,7 +216,8 @@ def test_preempt_invalidates_incarnation_and_reaps_serve_task():
     stores.directory.get("rpl-1").serve_task_id = "tsk-serve-1"
     mgr = _manager(stores, stop_fn=stop_fn)
     mgr.on_preempt("rpl-1")
-    replica = stores.directory.get("rpl-1")
+    assert stores.directory.get("rpl-1") is None
+    replica = stored_replica(stores, "rpl-1")
     assert replica.state is ReplicaState.PREEMPTED
     assert replica.incarnation == 2
     assert stopped == ["tsk-serve-1"]
@@ -255,7 +258,7 @@ def test_idle_sweep_drains_then_stops_an_idle_replica():
     assert stopped == []  # drained first, stopped on the next sweep
 
     mgr.sweep_idle()
-    assert stores.directory.get("rpl-1").state is ReplicaState.STOPPED
+    assert stored_replica(stores, "rpl-1").state is ReplicaState.STOPPED
     assert stopped == ["tsk-serve-1"]
 
 

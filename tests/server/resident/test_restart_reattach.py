@@ -220,7 +220,7 @@ def test_a_restart_without_a_snapshot_keeps_a_cold_start_the_redrive_began() -> 
         replica = await admitted_boundary(node)
         # No resident state survived; the runtime still re-drives the boundary, which
         # cold-starts a replica afresh.
-        node.resident.blob = None
+        node.resident.live.clear()
         relays_at_reattach: list[list[Any]] = []
 
         def on_boot(booted: Node) -> None:
@@ -308,8 +308,12 @@ def test_a_boundary_redriven_by_the_restart_resumes_on_the_reattached_replica() 
 
         assert relays_at_reattach == [[]]
         assert handoff_replicas(node) == [(replica.replica_id, replica.incarnation)]
+        # The listener fence was durable before its first handoff, so the resumed
+        # handoff reuses it rather than binding the sidecar again.
         binds = [p for _w, k, p in node.delivery.relays if k == "resident_sidecar_bind"]
-        assert binds and all(b["engine"]["api_key"] is None for b in binds)
+        assert binds == []
+        listener = node.replica(replica.replica_id).listener
+        assert listener is not None and listener.incarnation == replica.incarnation
         assert len(node.control.stores.directory.all()) == 1
 
     asyncio.run(run())

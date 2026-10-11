@@ -128,6 +128,7 @@ def build_gated_serve(
         persist=_persist,
         logger=logger,
     )
+    control.set_retired_hook(gated_serve.retire_terminal)
     forward_ingress = build_forward_serve_ingress(port_forward, gated_serve, logger)
     return GatedServeWiring(
         gated_serve=gated_serve, forward_ingress=forward_ingress, bindings=bindings

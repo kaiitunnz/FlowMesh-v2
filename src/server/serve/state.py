@@ -4,7 +4,8 @@ A task-addressed external invocation has no ``DS`` activation, continuation, or 
 slot. Its terminal is a durable status fact keyed by ``invocation_id``, which the
 Admission controller consumes to release the resident credit exactly as it consumes a
 workflow's ``DS`` outcome. These facts are ``CS`` state, persisted and rehydrated so a
-restart reconciles an accepted external claim against its recorded terminal.
+restart reconciles an accepted external claim against its recorded terminal; a fact
+leaves once its invocation retires, as its retirement record then holds its terminal.
 """
 
 from enum import StrEnum
@@ -63,6 +64,10 @@ class ServeTerminalStore:
             return False
         self._terminals[terminal.invocation_id] = terminal
         return True
+
+    def drop(self, invocation_id: str) -> bool:
+        """Drop the fact of an invocation that retired; return whether one was held."""
+        return self._terminals.pop(invocation_id, None) is not None
 
     def get(self, invocation_id: str) -> ServeStatusTerminal | None:
         return self._terminals.get(invocation_id)

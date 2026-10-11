@@ -162,7 +162,9 @@ class TrackedDict[K: Hashable, V](dict[K, V]):
     each key's insertion ordinal, and holds each mutable entity it stores.
 
     While it is ``restoring`` a stored collection, an entry set under a key the store
-    holds takes the key's stored ordinal and is no change.
+    holds takes the key's stored ordinal and is no change. ``on_change`` is called with
+    a key after each change to its entry, including an assignment to the entity it
+    holds, once the change is in place.
     """
 
     def __init__(
@@ -171,17 +173,35 @@ class TrackedDict[K: Hashable, V](dict[K, V]):
         name: str,
         items: Iterable[tuple[K, V]] = (),
         restoring: Mapping[Hashable, int] | None = None,
+        on_change: Callable[[Any], None] | None = None,
     ) -> None:
         super().__init__()
         self.journal = journal
         self.name = name
         self.ordinals: dict[K, int] = {}
         self.restoring = restoring
+        self.on_change = on_change
         for key, value in items:
             self[key] = value
 
     def touch(self, key: Hashable) -> None:
         self.journal.mark((self.name, key))
+        if self.on_change is not None:
+            self.on_change(key)
+
+    def forget(self, key: K) -> None:
+        """Remove an entry the durable state no longer holds, journaling nothing.
+
+        The entry must have no change pending, so nothing unwritten is dropped.
+        """
+        if (self.name, key) in self.journal.pending:
+            raise ValueError(f"{self.name} {key!r} has a change pending")
+        if isinstance(old := self[key], JournaledModel):
+            old.release(self)
+        super().__delitem__(key)
+        del self.ordinals[key]
+        if self.on_change is not None:
+            self.on_change(key)
 
     def __setitem__(self, key: K, value: V) -> None:
         if isinstance(value, JournaledModel):
@@ -195,6 +215,8 @@ class TrackedDict[K: Hashable, V](dict[K, V]):
                 and (ordinal := self.restoring.get(key)) is not None
             ):
                 self.ordinals[key] = ordinal
+                if self.on_change is not None:
+                    self.on_change(key)
                 return
             self.ordinals[key] = self.journal.ordinal()
         self.touch(key)

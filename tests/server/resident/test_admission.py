@@ -6,6 +6,9 @@ a replica, an accepted credit releases only from a fenced terminal fact consumed
 in-flight claim rather than minting a successor before that terminal.
 """
 
+import json
+from collections.abc import Mapping
+
 import pytest
 
 from server.resident import (
@@ -14,7 +17,9 @@ from server.resident import (
     ClaimTerminalReason,
     InvocationSubject,
     InvocationSubjectKind,
+    ResidentStores,
 )
+from server.resident.durability import MemoryResidentDurability
 from tests.server.resident._helpers import PROFILE, warm_stores
 
 
@@ -158,53 +163,78 @@ def test_accept_and_authorize_issues_a_fenced_route_authorization():
     )  # authorizing the stream holds credit
 
 
-def test_persist_hook_fires_on_mutation():
-    stores = warm_stores()
-    calls = []
-    ctl = AdmissionController(stores, persist=lambda: calls.append(1))
+class _Durability(MemoryResidentDurability):
+    """Records each write's changed fields, and refuses writes while ``down``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: list[dict[str, str | None]] = []
+        self.down = False
+
+    def write(self, changes: Mapping[str, str | None]) -> None:
+        if self.down:
+            raise ConnectionError("control redis unavailable")
+        self.writes.append(dict(changes))
+        super().write(changes)
+
+
+def _durable_stores() -> tuple[ResidentStores, _Durability]:
+    durability = _Durability()
+    stores = warm_stores(durability=durability)
+    stores.flush()
+    durability.writes.clear()
+    return stores, durability
+
+
+def test_each_step_writes_only_what_it_changed():
+    stores, durability = _durable_stores()
+    ctl = AdmissionController(stores)
     claim = _raise(ctl)
     ctl.admit(claim, PROFILE, idempotency_key="idm-x")
     ctl.accept_and_authorize(claim, idempotency_key="idm-x", origin_id="rog-1")
     ctl.on_stream_started(claim)
     ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.COMPLETED)
-    assert len(calls) >= 4
+
+    claim_field, request_field = f"claim:{claim.claim_id}", "request:inv-1"
+    assert [sorted(write) for write in durability.writes] == [
+        sorted([claim_field, request_field]),
+        sorted([claim_field, "replica:rpl-1"]),
+        [claim_field],
+        [claim_field],
+        sorted([claim_field, request_field, "replica:rpl-1"]),
+    ]
 
 
 def test_a_terminal_whose_persist_failed_is_finished_by_its_replay():
-    stores = warm_stores()
-    persisted = []
-    down = [True]
-
-    def persist():
-        if down[0]:
-            raise ConnectionError("control redis unavailable")
-        persisted.extend(c.state for c in stores.claims.by_invocation("inv-1"))
-
-    ctl = AdmissionController(stores, persist)
+    stores, durability = _durable_stores()
+    ctl = AdmissionController(stores)
     released = []
     ctl.set_release_hook(released.append)
-    down[0] = False
     claim = _raise(ctl)
     ctl.admit(claim, PROFILE, idempotency_key="idm-x")
     ctl.accept_and_authorize(claim, idempotency_key="idm-x", origin_id="rog-1")
-    persisted.clear()
+    durability.writes.clear()
 
-    down[0] = True
+    durability.down = True
     with pytest.raises(ConnectionError):
         ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.FAILED)
     assert claim.state is ClaimState.TERMINAL
     assert released == []
-    down[0] = False
+    assert not stores.settled
+    durability.down = False
 
     # The replay persists the terminal and tells the replica once, keeping the first
     # terminal's reason.
     assert ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.COMPLETED)
     assert claim.terminal_reason is ClaimTerminalReason.FAILED
-    assert persisted == [ClaimState.TERMINAL]
+    stored = json.loads(durability.live[f"claim:{claim.claim_id}"])
+    assert stored["state"] == "terminal" and stored["terminal_reason"] == "failed"
+    assert json.loads(durability.live["request:inv-1"])["consumed"] == "failed"
     assert released == ["rpl-1"]
     assert stores.credit_ledger.held("rpl-1") == 0
 
     # A terminal handed over after its consumption finished does nothing more.
+    writes = len(durability.writes)
     assert not ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.COMPLETED)
-    assert persisted == [ClaimState.TERMINAL]
+    assert len(durability.writes) == writes
     assert released == ["rpl-1"]

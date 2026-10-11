@@ -53,7 +53,8 @@ async def list_resident_families(
     if control is None:
         return []
     return [
-        ResidentFamilyInfo.project(family) for family in control.list_service_families()
+        ResidentFamilyInfo.project(family)
+        for family in await control.list_service_families_async()
     ]
 
 
@@ -74,7 +75,7 @@ async def list_resident_replicas(
         return []
     replicas = [
         ResidentReplicaInfo.project(replica, control.serve_worker(replica))
-        for replica in control.list_replica_incarnations()
+        for replica in await control.list_replica_incarnations_async()
     ]
     return query.filter(replicas)
 

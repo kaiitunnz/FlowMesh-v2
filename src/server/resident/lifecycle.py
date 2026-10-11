@@ -5,10 +5,13 @@ demand-driven scale-from-zero for approved plan-derived families, and drains bef
 idle teardown so accepted work reaches a terminal outcome. It never mints or releases an
 admission credit: the capacity decision (join a warm replica, materialize one, or return
 a typed denial) is a pure function of the directory, leases, and policy, and the actual
-start and stop cross the flat worker plane through injected substrate hooks.
+start and stop cross the flat worker plane through injected substrate hooks. An inert
+replica no live claim names moves to stored history with its lease, as does a standing
+family nothing live uses.
 """
 
-from collections.abc import Awaitable, Callable, Set
+import logging
+from collections.abc import Awaitable, Callable, Iterable, Set
 from dataclasses import dataclass
 from typing import Literal
 
@@ -16,6 +19,7 @@ from shared.utils.ids import new_allocation_lease_id, new_replica_id
 
 from ..task.v2.representations.plan import ResidencyWarmth
 from ..utils.time import now_iso, parse_iso_ts
+from .durability import FAMILY, LEASE, REPLICA, live_field
 from .policy import ProvisioningDecision, ResidentPolicyLimits, decide_materialization
 from .state import (
     SERVABLE_REPLICA_STATES,
@@ -28,8 +32,11 @@ from .state import (
     ReplicaState,
     SafeCapacityVector,
     ServiceFamily,
+    StoredReplica,
 )
-from .stores import ResidentStores
+from .stores import INERT_REPLICA_STATES, ResidentStores
+
+_logger = logging.getLogger(__name__)
 
 # Submits the family's serve substrate and returns the backing serve task id.
 MaterializeFn = Callable[[ServiceFamily, ReplicaIncarnation], Awaitable[str]]
@@ -66,7 +73,6 @@ class LifecycleScaleManager:
         admission_slots: int,
         adapter_slots: int = 4,
         idle_retain_sec: float = 0.0,
-        persist: Callable[[], None] | None = None,
         materialize_fn: MaterializeFn | None = None,
         stop_fn: StopFn | None = None,
     ) -> None:
@@ -75,7 +81,7 @@ class LifecycleScaleManager:
         self._admission_slots = max(1, admission_slots)
         self._adapter_slots = max(1, adapter_slots)
         self._idle_retain_sec = max(0.0, idle_retain_sec)
-        self._persist = persist or (lambda: None)
+        self._persist = stores.flush
         self._materialize_fn = materialize_fn
         self._stop_fn = stop_fn
 
@@ -336,6 +342,7 @@ class LifecycleScaleManager:
         self._persist()
         if not replica.standing:
             self._reap_serve_task(replica.serve_task_id)
+        self.retire_inert([replica_id])
 
     def stop_if_drained(self, replica_id: str | None) -> None:
         """Stop a drained replica once its last admitted work has released.
@@ -417,6 +424,7 @@ class LifecycleScaleManager:
         self._promote_lease(replica_id, ReplicaState.PREEMPTED)
         self._persist()
         self._reap_serve_task(serve_task_id)
+        self.retire_inert([replica_id])
 
     def on_serve_task_end(self, serve_task_id: str, *, live: bool) -> None:
         """Retire the demand replica a serve task stopped serving.
@@ -495,3 +503,63 @@ class LifecycleScaleManager:
         if lease is not None:
             lease.state = state
             lease.updated_at = now_iso()
+
+    def retire_inert(self, replica_ids: Iterable[str]) -> None:
+        """Move each inert replica no live claim names to stored history.
+
+        Its history is stored before its live fields are deleted, and it leaves the
+        directory, with its lease and report, only then. A standing family left with no
+        live replica, request or claim moves to stored history too. A store failure
+        leaves what it did not move live, for a later retirement.
+        """
+        families: set[str] = set()
+        for replica_id in replica_ids:
+            replica = self._stores.directory.get(replica_id)
+            if (
+                replica is None
+                or replica.state not in INERT_REPLICA_STATES
+                or self._stores.claims.by_replica(replica_id)
+            ):
+                continue
+            lease = (
+                self._stores.leases.get(replica.lease_id)
+                if replica.lease_id is not None
+                else None
+            )
+            fields = [live_field(REPLICA, replica_id)]
+            if lease is not None:
+                fields.append(live_field(LEASE, lease.lease_id))
+            try:
+                self._persist()
+                self._stores.durability.archive_replica(
+                    StoredReplica(replica=replica, lease=lease), fields
+                )
+            except Exception:
+                _logger.exception("retiring resident replica %s failed", replica_id)
+                return
+            self._stores.forget_replica(replica)
+            families.add(replica.family)
+        for family in sorted(families):
+            self._retire_family(family)
+
+    def _retire_family(self, family: str) -> None:
+        definition = self._stores.families.get(family)
+        if (
+            definition is None
+            or not definition.standing
+            or self._stores.directory.by_family(family)
+            or self._stores.claims.pending_for_family(family)
+            or any(
+                request.family == family for request in self._stores.invocations.all()
+            )
+        ):
+            return
+        try:
+            self._persist()
+            self._stores.durability.archive_family(
+                definition, live_field(FAMILY, family)
+            )
+        except Exception:
+            _logger.exception("retiring resident family %s failed", family)
+            return
+        self._stores.families.forget(family)

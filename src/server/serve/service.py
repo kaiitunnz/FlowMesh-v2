@@ -177,6 +177,7 @@ class _ServeStream:
         self._closed = False
         self._flushed = False
         self._dropped = False
+        self._terminal_recorded = False
 
     @property
     def invocation_id(self) -> str:
@@ -266,6 +267,11 @@ class _ServeStream:
 
     def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
         self._edge.record_terminal(self.invocation_id, reason, detail)
+        self._terminal_recorded = True
+
+    @property
+    def terminal_recorded(self) -> bool:
+        return self._terminal_recorded
 
     def complete(self) -> None:
         self._finish(ServeEvent(kind="done"))
@@ -632,7 +638,8 @@ class GatedServe:
         so a ``FAILED`` terminal fact is first recorded for each one whose claim holds
         credit. Every recorded fact then replays through the FSM, releasing its claim
         and reaping the replica's request, so a crash between a fact and its release
-        also settles on the next start. Idempotent on a terminal claim.
+        also settles on the next start. Idempotent on a terminal claim. A fact whose
+        invocation then holds nothing live is dropped.
         """
         for invocation_id in self.control.serve_invocations_holding_credit():
             self.record_terminal(
@@ -644,3 +651,16 @@ class GatedServe:
             self.control.reconcile_serve_terminal(
                 terminal.invocation_id, _STATUS_REASON[terminal.status]
             )
+        retired = [
+            terminal.invocation_id
+            for terminal in self._terminals.all()
+            if not self.control.invocation_live(terminal.invocation_id)
+        ]
+        for invocation_id in retired:
+            self._terminals.drop(invocation_id)
+        if retired:
+            self._persist()
+
+    def retire_terminal(self, invocation_id: str) -> None:
+        """Drop a retired invocation's status fact; the next write omits it."""
+        self._terminals.drop(invocation_id)
