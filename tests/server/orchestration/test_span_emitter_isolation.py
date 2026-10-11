@@ -6,12 +6,15 @@ assert the ledger outcome -- the slot published, the successor released, the res
 completed -- rather than merely that nothing propagated out.
 """
 
+import gc
+import weakref
+
 import pytest
 
 from server.orchestration import WorkItemStatus
 from server.orchestration import telemetry as telemetry_module
 from server.orchestration.state import BoundaryEvent
-from server.orchestration.telemetry import TelemetrySpanEmitter
+from server.orchestration.telemetry import NULL_SPAN_EMITTER, TelemetrySpanEmitter
 from server.task.v2.representations.operators import BoundaryEventKind
 from shared.telemetry.config import TelemetryLevel
 from tests.server.orchestration.helpers import (
@@ -169,3 +172,15 @@ def test_a_failing_attach_still_builds_a_restartable_engine(
     restarted.on_dispatched("A", "w1")
     restarted.on_succeeded("A")
     assert restarted.output_publication("out:A") is not None
+
+
+def test_the_null_emitter_keeps_no_engine_state_alive() -> None:
+    eng = engine(chain_bundle(), emitter=NULL_SPAN_EMITTER)
+    eng.on_dispatched("A", "w1")
+    eng.on_succeeded("A")
+    collected = weakref.ref(eng.work_item("A"))
+
+    del eng
+    gc.collect()
+
+    assert collected() is None
