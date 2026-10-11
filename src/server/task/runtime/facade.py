@@ -245,11 +245,14 @@ class _Drain(threading.local):
 
 class _Tail(threading.local):
     depth = 0
-    # The workflows this thread's outermost event tail keeps resident.
+    # The workflows this thread's outermost event tail keeps resident, and the tasks
+    # whose workflows it has already looked up.
     held: set[str]
+    tasks: set[str]
 
     def __init__(self) -> None:
         self.held = set()
+        self.tasks = set()
 
 
 def _issue(env: ToolInvocationEnvelope) -> Issue:
@@ -1888,13 +1891,17 @@ class TaskRuntime:
         state."""
         self._tail.depth += 1
         try:
-            with self._lock:
-                for task_id in task_ids:
-                    if (record := self._tasks.get(task_id)) is not None:
-                        self._hold_tail_locked(record.workflow_id)
+            if new := [t for t in task_ids if t not in self._tail.tasks]:
+                self._tail.tasks.update(new)
+                with self._lock:
+                    for task_id in new:
+                        if (record := self._tasks.get(task_id)) is not None:
+                            self._hold_tail_locked(record.workflow_id)
             yield
         finally:
             self._tail.depth -= 1
+            if not self._tail.depth:
+                self._tail.tasks.clear()
             if not self._tail.depth and self._tail.held:
                 held, self._tail.held = self._tail.held, set()
                 with self._lock:

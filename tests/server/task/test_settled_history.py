@@ -696,3 +696,36 @@ def test_a_late_mediated_outcome_for_a_freed_or_sealed_task_reaps_its_worker() -
         ("reap", {"agent_task_id": task_ids[1], "call_correlation": "c-0"}),
     ]
     assert registry.workflow_revision(workflow_id) == revision
+
+
+class _CountingLock:
+    """A lock that counts how often it is taken."""
+
+    def __init__(self, lock: Any) -> None:
+        self._lock = lock
+        self.taken = 0
+
+    def __enter__(self) -> Any:
+        self.taken += 1
+        return self._lock.__enter__()
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._lock.__exit__(*exc)
+
+
+def test_a_nested_event_tail_looks_up_its_task_once() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    workflow_id = _register(runtime, CHAIN)
+    task_id = runtime._tasks.ids_of(workflow_id)[0]
+    counting = _CountingLock(runtime._lock)
+    cast(Any, runtime)._lock = counting
+
+    with runtime.event_tail(task_id):
+        taken = counting.taken
+        with runtime.event_tail(task_id):
+            pass
+        assert counting.taken == taken
+        with runtime.event_tail("tsk-other"):
+            pass
+        assert counting.taken == taken + 1
