@@ -75,9 +75,9 @@ def decode_live(fields: Mapping[str, str]) -> ResidentSnapshot:
         snapshot = ResidentSnapshot.model_validate(lists)
     except ValidationError as exc:
         raise ResidentStateError(f"unreadable resident state: {exc}") from exc
-    requests = {request.invocation_id: request for request in snapshot.invocations}
+    by_invocation = {request.invocation_id: request for request in snapshot.invocations}
     for claim in snapshot.claims:
-        if (request := requests.get(claim.invocation_id)) is None:
+        if (request := by_invocation.get(claim.invocation_id)) is None:
             raise ResidentStateError(f"claim {claim.claim_id} names no stored request")
         if request.consumed is not None and claim.state is not ClaimState.TERMINAL:
             raise ResidentStateError(
