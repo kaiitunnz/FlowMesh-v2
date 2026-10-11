@@ -198,3 +198,42 @@ def test_history_members_order_by_submission_then_id() -> None:
     members = [history_member(ts, task_id) for ts, task_id in keys]
 
     assert sorted(members) == [history_member(*key) for key in sorted(keys)]
+
+
+def _large_publication(workflow_id: str, count: int) -> HistoryPublication:
+    statuses = [TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED]
+    task_ids = [f"tsk-{index:05d}" for index in range(count)]
+    return HistoryPublication(
+        workflow_id=workflow_id,
+        certificate=HistoryCertificate(
+            schema_version=HISTORY_SCHEMA, nonce="n", seq=1, mode="v1", tasks=count
+        ),
+        tasks={task_id: TaskHistory(seq=1) for task_id in task_ids},
+        members={
+            task_id: (history_member(float(index), task_id), statuses[index % 3])
+            for index, task_id in enumerate(task_ids)
+        },
+        outputs=None,
+    )
+
+
+@pytest.mark.parametrize("damaged", [None, "member", "status"])
+def test_a_large_publication_is_checked_in_full(damaged: str | None) -> None:
+    registry, workflow_id, _ = _registered()
+    publication = _large_publication(workflow_id, 2500)
+    registry.prepare_history(publication)
+    last = "tsk-02498"
+    member, status = publication.members[last]
+    raw = raw_control(registry)
+    if damaged == "member":
+        raw.hset(TASK_HISTORY_MEMBERS_KEY, last, "other")
+    elif damaged == "status":
+        raw.zrem(task_history_key(status), member)
+
+    outcome = registry.certify_history(
+        publication, registry.workflow_revision(workflow_id)
+    )
+
+    assert outcome == ("ok" if damaged is None else "index incomplete")
+    assert _certified(registry, workflow_id) is (damaged is None)
+    assert registry.history_counts() == ((2500, 834) if damaged is None else (0, 0))

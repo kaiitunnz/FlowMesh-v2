@@ -9,7 +9,7 @@ no write has touched since its runtime state was read.
 """
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,11 +49,13 @@ type _AnyPipeline = Pipeline | AsyncPipeline
 # a write reads is checked before the first write, and the certificate is written last,
 # so a certificate is present only once every other write landed. KEYS: the workflow's
 # revision, history hash and record, the members hash, the all-history index, the
-# sequence, the counters, the open set, then each status index ARGV names. ARGV: the
-# revision read before sealing, the certificate, its sequence, the history hash's field
-# count, the workflow id, how many tasks succeeded, then per task its id, member and the
-# KEYS position of its status index.
-_CERTIFY = f"""
+# sequence, the counters, the open set, then each status index. ARGV: the revision read
+# before sealing, the certificate, its sequence, the history hash's field count, the
+# workflow id, how many tasks succeeded, how many tasks there are, how many of them each
+# status index holds, then the task ids and their members, grouped by status in KEYS
+# order. Lua unpacks a bounded number of values, so ids and members are checked a chunk
+# at a time.
+_CERTIFY = """
 local function is(key, kind)
   return redis.call('TYPE', key)['ok'] == kind
 end
@@ -64,11 +66,23 @@ end
 local function integer(value)
   return not value or string.match(value, '^%-?%d+$') ~= nil
 end
+local function all_in(command, key, from, count, expected)
+  for start = 0, count - 1, 1000 do
+    local size = math.min(1000, count - start)
+    local names = {}
+    for i = 1, size do names[i] = ARGV[from + start + i - 1] end
+    local found = redis.call(command, key, unpack(names))
+    for i = 1, size do
+      if not found[i] or (expected and found[i] ~= ARGV[expected + start + i - 1]) then
+        return false
+      end
+    end
+  end
+  return true
+end
 if (redis.call('GET', KEYS[1]) or '0') ~= ARGV[1] then return 'revision changed' end
 if not is(KEYS[2], 'hash') then return 'projection missing' end
-if redis.call('HEXISTS', KEYS[2], '{CERTIFICATE_FIELD}') == 1 then
-  return 'certified'
-end
+if redis.call('HEXISTS', KEYS[2], '<certificate>') == 1 then return 'certified' end
 if redis.call('HLEN', KEYS[2]) ~= tonumber(ARGV[4]) then
   return 'projection incomplete'
 end
@@ -80,31 +94,37 @@ if seq and not string.match(seq, '^%d+$') then return 'sequence unreadable' end
 for _, count in ipairs(redis.call('HMGET', KEYS[7], 'total', 'done')) do
   if not integer(count) then return 'counters unreadable' end
 end
-for i = 9, #KEYS do
-  if not is(KEYS[i], 'zset') then return 'index missing' end
-end
-if #ARGV > 6 and not (is(KEYS[4], 'hash') and is(KEYS[5], 'zset')) then
-  return 'index missing'
-end
-for i = 7, #ARGV, 3 do
-  local task, member = ARGV[i], ARGV[i + 1]
-  if redis.call('HEXISTS', KEYS[2], task) == 0 then return 'projection incomplete' end
-  if redis.call('HGET', KEYS[4], task) ~= member
-    or not redis.call('ZSCORE', KEYS[5], member)
-    or not redis.call('ZSCORE', KEYS[tonumber(ARGV[i + 2])], member) then
+local tasks = tonumber(ARGV[7])
+local ids = 8 + (#KEYS - 8)
+local members = ids + tasks
+if tasks > 0 then
+  if not (is(KEYS[4], 'hash') and is(KEYS[5], 'zset')) then return 'index missing' end
+  if not all_in('HMGET', KEYS[2], ids, tasks) then return 'projection incomplete' end
+  if not all_in('HMGET', KEYS[4], ids, tasks, members)
+    or not all_in('ZMSCORE', KEYS[5], members, tasks) then
     return 'index incomplete'
   end
+end
+local offset = members
+for i = 9, #KEYS do
+  if not is(KEYS[i], 'zset') then return 'index missing' end
+  local count = tonumber(ARGV[i - 1])
+  if not all_in('ZMSCORE', KEYS[i], offset, count) then return 'index incomplete' end
+  offset = offset + count
 end
 if tonumber(ARGV[3]) > tonumber(seq or '0') then
   redis.call('SET', KEYS[6], ARGV[3])
 end
-local tasks = (#ARGV - 6) / 3
 redis.call('HINCRBY', KEYS[7], 'total', tasks)
 redis.call('HINCRBY', KEYS[7], 'done', tonumber(ARGV[6]))
 redis.call('SREM', KEYS[8], ARGV[5])
-redis.call('HSET', KEYS[2], '{CERTIFICATE_FIELD}', ARGV[2])
+redis.call('HSET', KEYS[2], '<certificate>', ARGV[2])
 return 'ok'
-"""
+""".replace("<certificate>", CERTIFICATE_FIELD)
+
+# How many fields or members one preparation write carries, so no single command holds
+# the store for long.
+_PREPARE_CHUNK = 500
 
 
 class HistoryNotPrepared(Exception):
@@ -144,16 +164,23 @@ def _queue_preparation(pipe: _AnyPipeline, publication: HistoryPublication) -> N
     }
     if publication.outputs is not None:
         fields[OUTPUTS_FIELD] = publication.outputs.model_dump_json()
-    if fields:
-        pipe.hset(workflow_history_key(publication.workflow_id), mapping=fields)
-    if publication.members:
-        members = {
-            task_id: member for task_id, (member, _) in publication.members.items()
-        }
-        pipe.hset(TASK_HISTORY_MEMBERS_KEY, mapping=members)
-        pipe.zadd(task_history_key(None), dict.fromkeys(members.values(), 0))
-        for status, status_members in _by_status(publication).items():
-            pipe.zadd(task_history_key(status), dict.fromkeys(status_members, 0))
+    history_key = workflow_history_key(publication.workflow_id)
+    for chunk in _chunks(list(fields.items())):
+        pipe.hset(history_key, mapping=dict(chunk))
+    members = [
+        (task_id, member) for task_id, (member, _) in publication.members.items()
+    ]
+    for chunk in _chunks(members):
+        pipe.hset(TASK_HISTORY_MEMBERS_KEY, mapping=dict(chunk))
+        pipe.zadd(task_history_key(None), {member: 0 for _, member in chunk})
+    for status, status_members in _by_status(publication).items():
+        for part in _chunks(status_members):
+            pipe.zadd(task_history_key(status), dict.fromkeys(part, 0))
+
+
+def _chunks[T](items: Sequence[T]) -> Iterator[Sequence[T]]:
+    for start in range(0, len(items), _PREPARE_CHUNK):
+        yield items[start : start + _PREPARE_CHUNK]
 
 
 def _by_status(publication: HistoryPublication) -> dict[str, list[str]]:
@@ -174,7 +201,10 @@ def _certify_args(
     publication: HistoryPublication, revision: int
 ) -> tuple[list[str], list[str | int]]:
     workflow_id = publication.workflow_id
-    statuses = list(_by_status(publication))
+    by_status: dict[str, list[tuple[str, str]]] = {}
+    for task_id, (member, status) in publication.members.items():
+        by_status.setdefault(status, []).append((task_id, member))
+    grouped = [entry for entries in by_status.values() for entry in entries]
     keys = [
         workflow_revision_key(workflow_id),
         workflow_history_key(workflow_id),
@@ -184,10 +214,9 @@ def _certify_args(
         HISTORY_SEQ_KEY,
         HISTORY_COUNTS_KEY,
         WORKFLOWS_OPEN_KEY,
-        *(task_history_key(status) for status in statuses),
+        *(task_history_key(status) for status in by_status),
     ]
-    status_key = {status: 9 + index for index, status in enumerate(statuses)}
-    done = sum(status == TaskStatus.DONE for _, status in publication.members.values())
+    done = len(by_status.get(TaskStatus.DONE, ()))
     args: list[str | int] = [
         revision,
         publication.certificate.model_dump_json(),
@@ -195,9 +224,11 @@ def _certify_args(
         len(publication.tasks) + (publication.outputs is not None),
         workflow_id,
         done,
+        len(grouped),
+        *(len(entries) for entries in by_status.values()),
+        *(task_id for task_id, _ in grouped),
+        *(member for _, member in grouped),
     ]
-    for task_id, (member, status) in publication.members.items():
-        args.extend((task_id, member, status_key[status]))
     return keys, args
 
 
