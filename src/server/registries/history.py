@@ -59,8 +59,8 @@ _DECLARATIONS = TypeAdapter(list[tuple[str, ResultDeclaration]])
 # before sealing, the certificate, its sequence, the history hash's field count, the
 # workflow id, how many tasks succeeded, how many tasks there are, how many of them each
 # status index holds, then the task ids and their members, grouped by status in KEYS
-# order. Lua unpacks a bounded number of values, so ids and members are checked a chunk
-# at a time.
+# order. A projection field is checked by its presence alone, and the index a chunk at a
+# time, since Lua unpacks a bounded number of values.
 _CERTIFY = """
 local function is(key, kind)
   return redis.call('TYPE', key)['ok'] == kind
@@ -108,7 +108,11 @@ local ids = 8 + (#KEYS - 8)
 local members = ids + tasks
 if tasks > 0 then
   if not (is(KEYS[4], 'hash') and is(KEYS[5], 'zset')) then return 'index missing' end
-  if not all_in('HMGET', KEYS[2], ids, tasks) then return 'projection incomplete' end
+  for i = ids, ids + tasks - 1 do
+    if redis.call('HEXISTS', KEYS[2], ARGV[i]) == 0 then
+      return 'projection incomplete'
+    end
+  end
   if not all_in('HMGET', KEYS[4], ids, tasks, members)
     or not all_in('ZMSCORE', KEYS[5], members, tasks) then
     return 'index incomplete'
