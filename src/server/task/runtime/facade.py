@@ -4015,16 +4015,16 @@ class TaskRuntime:
 
         with self._cv:
             record = self._tasks.get(task_id)
-            if record is not None and not self._fence.accepts_event_locked(
-                record, worker_id, dispatch_id
-            ):
+            if record is None:
+                return SettleOutcome(EventEffect.STALE, None, [], [])
+            if not self._fence.accepts_event_locked(record, worker_id, dispatch_id):
                 if worker_id is not None:
                     self._fence.heal_returned_locked(task_id, worker_id, dispatch_id)
                     self._reap_stale_captures_locked(record, worker_id, payload)
                 return SettleOutcome(EventEffect.STALE, record.status, [], [])
             effect = (
                 EventEffect.SETTLED
-                if record is not None and record.status in TERMINAL_TASK_STATUSES
+                if record.status in TERMINAL_TASK_STATUSES
                 else EventEffect.APPLIED
             )
             if (prepared := payload.get("input_materialization")) is not None:
@@ -4034,7 +4034,7 @@ class TaskRuntime:
                 self._apply_input_materialization_locked(task_id, prepared)
                 return settle_outcome(effect, record, [], [])
             episode_step = payload.get("agent_episode")
-            if episode_step is not None and record is not None:
+            if episode_step is not None:
                 harness_result = HarnessResult.model_validate(episode_step)
                 # The holder seals its private state at the step's quiescence fence, so
                 # the generation the next resume binds is recorded before the step is
@@ -4119,50 +4119,49 @@ class TaskRuntime:
                     # terminal replay is excluded so it still reaches the idempotent
                     # done-branch below (its fan-out / re-persist heal must survive).
                     return settle_outcome(EventEffect.STALE, record, [], [])
-            if record:
-                if record.status == TaskStatus.CANCELLED:
-                    return settle_outcome(effect, record, [], usages)
-                if record.status == TaskStatus.DONE:
-                    # Idempotent: a replayed TASK_SUCCEEDED must not re-apply, but
-                    # re-persist in case the original completion's write failed
-                    # after its in-memory commit.
-                    self._committer.recommit_terminal_locked(record)
-                    # Recover a settlement or fan-out lost to a failed commit or a crash
-                    # between the producer's terminal persist and its children: both
-                    # are no-ops once applied.
-                    if self._finish_success_locked(record, fanout):
-                        self._cv.notify_all()
-                    return settle_outcome(effect, record, [], [])
-                if record.status == TaskStatus.FAILED:
-                    self._logger.warning(
-                        "Ignoring TASK_SUCCEEDED for task %s in terminal status FAILED",
-                        task_id,
-                    )
-                    return settle_outcome(effect, record, [], [])
-                if record.status == TaskStatus.CANCELLING:
-                    # The cancel already resolved this task's declared output to its
-                    # cancellation outcome and withheld the dispatch that would have
-                    # carried a terminal back, so its completion settles the
-                    # cancellation rather than reporting a success the ledger does
-                    # not publish.
-                    return settle_outcome(
-                        effect,
-                        record,
-                        [],
-                        self._settle_cancelled_usage_locked(
-                            record, payload, finished_ts, started_ts
-                        ),
-                    )
-                record.status = TaskStatus.DONE
-                record.error = None
-                record.finished_ts = finished_ts
-                if started_ts:
-                    record.started_ts = started_ts
-                record.merged_children = None
-                record.merged_dispatch_worker = None
-                self._content_bindings.bind_result_locked(record, reference, skip)
-                if usage is not None:
-                    record.usages.append(usage)
+            if record.status == TaskStatus.CANCELLED:
+                return settle_outcome(effect, record, [], usages)
+            if record.status == TaskStatus.DONE:
+                # Idempotent: a replayed TASK_SUCCEEDED must not re-apply, but
+                # re-persist in case the original completion's write failed
+                # after its in-memory commit.
+                self._committer.recommit_terminal_locked(record)
+                # Recover a settlement or fan-out lost to a failed commit or a crash
+                # between the producer's terminal persist and its children: both
+                # are no-ops once applied.
+                if self._finish_success_locked(record, fanout):
+                    self._cv.notify_all()
+                return settle_outcome(effect, record, [], [])
+            if record.status == TaskStatus.FAILED:
+                self._logger.warning(
+                    "Ignoring TASK_SUCCEEDED for task %s in terminal status FAILED",
+                    task_id,
+                )
+                return settle_outcome(effect, record, [], [])
+            if record.status == TaskStatus.CANCELLING:
+                # The cancel already resolved this task's declared output to its
+                # cancellation outcome and withheld the dispatch that would have
+                # carried a terminal back, so its completion settles the
+                # cancellation rather than reporting a success the ledger does
+                # not publish.
+                return settle_outcome(
+                    effect,
+                    record,
+                    [],
+                    self._settle_cancelled_usage_locked(
+                        record, payload, finished_ts, started_ts
+                    ),
+                )
+            record.status = TaskStatus.DONE
+            record.error = None
+            record.finished_ts = finished_ts
+            if started_ts:
+                record.started_ts = started_ts
+            record.merged_children = None
+            record.merged_dispatch_worker = None
+            self._content_bindings.bind_result_locked(record, reference, skip)
+            if usage is not None:
+                record.usages.append(usage)
 
             self._completed.add(task_id)
             self._failed.discard(task_id)
@@ -4188,8 +4187,7 @@ class TaskRuntime:
                     merged_children_ids, child_references
                 )
             )
-            if record is not None:
-                record.merged_children = settled_children or None
+            record.merged_children = settled_children or None
             for merged_child in settled_children:
                 ready_children.extend(
                     self._merges.finalize_merged_child_success_locked(
@@ -4205,17 +4203,15 @@ class TaskRuntime:
                 unsettled_children, unmerge=True
             )
 
-            if record is not None:
-                for workflow_id in self._merges.settle_workflows_locked(record):
-                    ready_children.extend(
-                        self._ready.try_advance_epoch_frontier_locked(workflow_id)
-                    )
+            for workflow_id in self._merges.settle_workflows_locked(record):
+                ready_children.extend(
+                    self._ready.try_advance_epoch_frontier_locked(workflow_id)
+                )
 
             self._committer.commit_locked(task_id, *settled_children, *returned)
 
             notify = bool(ready_children)
-            if record is not None:
-                notify |= self._finish_success_locked(record, fanout)
+            notify |= self._finish_success_locked(record, fanout)
             if notify:
                 self._cv.notify_all()
 
@@ -4577,46 +4573,47 @@ class TaskRuntime:
 
         with self._cv:
             record = self._tasks.get(task_id)
-            if record:
-                if record.status == TaskStatus.CANCELLED:
-                    return [], usages
-                if record.status == TaskStatus.FAILED:
-                    # Idempotent: a replayed TASK_FAILED must not re-apply, but
-                    # re-persist in case the original failure's write (including
-                    # its cascade) failed after the in-memory commit.
-                    self._committer.recommit_terminal_locked(record)
-                    return [], []
-                if record.status == TaskStatus.DONE:
-                    self._logger.warning(
-                        "Ignoring TASK_FAILED for task %s in terminal status DONE",
-                        task_id,
-                    )
-                    return [], []
-                if record.status == TaskStatus.CANCELLING:
-                    # The cancellation is the settled outcome, so a failure racing it
-                    # neither overrides it nor cascades into dependents the cancel has
-                    # already settled.
-                    return (
-                        [],
-                        self._settle_cancelled_usage_locked(
-                            record, payload, finished_ts, started_ts, unmerge=True
-                        ),
-                    )
-                record.status = TaskStatus.FAILED
-                record.error = message
-                record.finished_ts = finished_ts
-                # A facade captured on a turn that then failed is never rerouted; drop
-                # it so a replayed completion can't resurrect it against a failed task.
-                self._pending_facade_groups.pop(task_id, None)
-                record.pending_facade_group = None
-                if started_ts:
-                    record.started_ts = started_ts
-                if worker_id:
-                    record.assigned_worker = worker_id
-                record.merged_children = None
-                record.merged_dispatch_worker = None
-                if usage is not None:
-                    record.usages.append(usage)
+            if record is None:
+                return [], []
+            if record.status == TaskStatus.CANCELLED:
+                return [], usages
+            if record.status == TaskStatus.FAILED:
+                # Idempotent: a replayed TASK_FAILED must not re-apply, but
+                # re-persist in case the original failure's write (including
+                # its cascade) failed after the in-memory commit.
+                self._committer.recommit_terminal_locked(record)
+                return [], []
+            if record.status == TaskStatus.DONE:
+                self._logger.warning(
+                    "Ignoring TASK_FAILED for task %s in terminal status DONE",
+                    task_id,
+                )
+                return [], []
+            if record.status == TaskStatus.CANCELLING:
+                # The cancellation is the settled outcome, so a failure racing it
+                # neither overrides it nor cascades into dependents the cancel has
+                # already settled.
+                return (
+                    [],
+                    self._settle_cancelled_usage_locked(
+                        record, payload, finished_ts, started_ts, unmerge=True
+                    ),
+                )
+            record.status = TaskStatus.FAILED
+            record.error = message
+            record.finished_ts = finished_ts
+            # A facade captured on a turn that then failed is never rerouted; drop
+            # it so a replayed completion can't resurrect it against a failed task.
+            self._pending_facade_groups.pop(task_id, None)
+            record.pending_facade_group = None
+            if started_ts:
+                record.started_ts = started_ts
+            if worker_id:
+                record.assigned_worker = worker_id
+            record.merged_children = None
+            record.merged_dispatch_worker = None
+            if usage is not None:
+                record.usages.append(usage)
 
             self._failed.add(task_id)
             self._completed.discard(task_id)
@@ -4627,7 +4624,7 @@ class TaskRuntime:
 
             impacted = self._record_failures.fail_v1_dependents_locked(task_id)
 
-            engine = self._engines.get(record.workflow_id) if record else None
+            engine = self._engines.get(record.workflow_id)
             advance = Advance()
             if engine is not None:
                 advance = engine.on_failed(task_id, message, retryable=False)
@@ -4640,7 +4637,7 @@ class TaskRuntime:
             )
 
             failed_epoch = self._epochs.task_epoch_index.get(task_id)
-            if record and failed_epoch is not None:
+            if failed_epoch is not None:
                 blocked, blocked_returned = self._fail_later_epochs_locked(
                     record.workflow_id,
                     failed_epoch,
@@ -4655,7 +4652,7 @@ class TaskRuntime:
             # The ledger writes after the task terminal records -- the retire a ready
             # applies included -- so a crash can only leave the ledger behind durable
             # task state, never ahead of it, and rehydration then reconciles it.
-            if record is not None and engine is not None:
+            if engine is not None:
                 # A child's failure can release its scope's join, readying what follows.
                 if self._apply_advance_locked(
                     record.workflow_id,
@@ -4664,8 +4661,7 @@ class TaskRuntime:
                     self._cv.notify_all()
                 self._committer.save_ledger_locked(record.workflow_id)
 
-            if record is not None:
-                self._committer.settle_if_done_locked(record.workflow_id)
+            self._committer.settle_if_done_locked(record.workflow_id)
             return impacted, usages
 
     # ------------------------------------------------------------------ #

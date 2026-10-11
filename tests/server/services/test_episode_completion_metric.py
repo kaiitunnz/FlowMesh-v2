@@ -40,6 +40,16 @@ spec:
           harness: {backend: scripted, version: v1, params: {script: []}}
 """
 
+_ECHO_WF = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: ordinary-success}
+spec:
+  graph:
+    nodes:
+      - {name: echo, spec: {taskType: echo}}
+"""
+
 
 def _monitor(runtime, metrics: MagicMock) -> EventMonitor:
     return EventMonitor(
@@ -175,13 +185,15 @@ def test_a_rerouted_facade_turn_bills_its_dispatch_as_in_flight() -> None:
 
 
 def test_an_ordinary_success_counts_one_completion() -> None:
-    runtime, _ = _episode_task()
+    runtime = _runtime(FakeRegistry())
+    _, ids = asyncio.run(_register(runtime, _ECHO_WF))
+    record_dispatch(runtime, ids["echo"])
     metrics = MagicMock()
     monitor = _monitor(runtime, metrics)
     monitor.handle_task_event(
         TaskEvent(
             type="TASK_SUCCEEDED",
-            task_id="tsk-unknown",
+            task_id=ids["echo"],
             worker_id="wkr-1",
             payload={"result": "ok"},
             ts=_TS,
