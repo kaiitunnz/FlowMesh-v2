@@ -1217,10 +1217,6 @@ class OrchestrationEngine:
         """Why a task settled as a declared failure, or None for one that has not."""
         return self._failures.failure_reason(task_id)
 
-    def declared_failures(self) -> dict[str, str]:
-        """Every task settled as a declared failure, with why."""
-        return self._failures.declared_failures()
-
     def unapplied_failures(self) -> list[tuple[str, str]]:
         """Each task settled as a declared failure whose record has not yet been
         failed for it, with why."""

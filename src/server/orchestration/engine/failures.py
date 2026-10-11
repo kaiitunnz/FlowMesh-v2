@@ -51,10 +51,6 @@ class FailureLedger:
         """Why a task settled as a declared failure, or None for one that has not."""
         return self.failure_reasons.get(task_id)
 
-    def declared_failures(self) -> dict[str, str]:
-        """Every task settled as a declared failure, with why."""
-        return self.failure_reasons
-
     def unapplied_failures(self) -> list[tuple[str, str]]:
         """Each task settled as a declared failure whose record has not yet been
         failed for it, with why."""

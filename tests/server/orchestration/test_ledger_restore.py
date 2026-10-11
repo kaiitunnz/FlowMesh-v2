@@ -33,11 +33,11 @@ def test_a_ledger_stored_without_failure_reasons_names_each_failed_work_item() -
 
     restored = OrchestrationEngine(stored, live._topology.bundle)
 
-    assert live.declared_failures() == {"A": "boom", "B": "Dependency A failed"}
-    assert restored.declared_failures() == {
-        "A": "boom",
-        "B": "declared-failure obligation",
-    }
+    assert [live.failure_reason(t) for t in "AB"] == ["boom", "Dependency A failed"]
+    assert [restored.failure_reason(t) for t in "AB"] == [
+        "boom",
+        "declared-failure obligation",
+    ]
 
 
 def test_a_stored_failure_reason_wins_over_the_work_items_own() -> None:
