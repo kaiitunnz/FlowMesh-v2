@@ -89,8 +89,8 @@ metric, and the collector drops any attribute outside the published set.
 ## Control-plane stages
 
 A `flowmesh/v2` submission pays server-side control cost a `flowmesh/v1` static DAG does
-not: template compilation, orchestration-ledger drive and settle, ledger snapshot
-serialization, dispatch, resident admission, the authorization a resident invocation is
+not: template compilation, orchestration-ledger drive and settle, ledger write
+encoding, dispatch, resident admission, the authorization a resident invocation is
 issued, and relay establishment. Each is timed as its own span named
 `flowmesh.control.<stage>`, under the workflow for the stages that run inside a
 submission and under the boundary's invocation for admission, authorization and relay,

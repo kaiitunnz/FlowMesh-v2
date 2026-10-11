@@ -1,6 +1,7 @@
+import hashlib
 import time
 from enum import StrEnum
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Self
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -182,7 +183,16 @@ class FailureOutcome(NamedTuple):
     usages: list[tuple[str, TaskUsage]]
 
 
+def source_digest(source: str) -> str:
+    """Return the digest a workflow source is stored under."""
+    return hashlib.sha256(source.encode()).hexdigest()
+
+
 class TaskRecord(BaseModel):
+    # The digest of the workflow source, with the source text it was taken of: a
+    # plain slot, so it is no part of the record's value, and carried by a copy.
+    __slots__ = ("_source_digest",)
+
     task_id: str = Field(description="Task identifier.")
     workflow_id: str = Field(description="Workflow identifier.")
     owner_id: str = Field(description="Owner principal identifier.")
@@ -325,6 +335,30 @@ class TaskRecord(BaseModel):
     def last_failed_worker(self) -> str | None:
         """The most recent worker to have failed this task."""
         return self.failed_workers[-1] if self.failed_workers else None
+
+    def source_digest(self) -> str:
+        """Return the digest the record's workflow source is stored under."""
+        cached: tuple[str, str] | None = getattr(self, "_source_digest", None)
+        if cached is None or cached[0] is not self.raw_yaml:
+            cached = (self.raw_yaml, source_digest(self.raw_yaml))
+            object.__setattr__(self, "_source_digest", cached)
+        return cached[1]
+
+    def take_source_digest(self, digest: str) -> None:
+        """Take ``digest`` as the digest of the record's workflow source."""
+        object.__setattr__(self, "_source_digest", (self.raw_yaml, digest))
+
+    def __copy__(self) -> Self:
+        copied = super().__copy__()
+        if (cached := getattr(self, "_source_digest", None)) is not None:
+            object.__setattr__(copied, "_source_digest", cached)
+        return copied
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        copied = super().__deepcopy__(memo)
+        if (cached := getattr(self, "_source_digest", None)) is not None:
+            object.__setattr__(copied, "_source_digest", cached)
+        return copied
 
     def __setattr__(self, name: str, value: Any) -> None:
         # A terminal status is final; settlement and completion rely on it.

@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
+import fakeredis
 import pytest
 from lumid_hooks import PrincipalContext
 
+from server.clients.redis import task_state_key
 from server.config import OrchestrationConfig
 from server.registries.worker import Worker
 from server.registries.workflow import WorkflowRegistry
@@ -18,6 +20,7 @@ from server.routers.v1 import tasks as tasks_router
 from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatcher.helpers import CapturingDispatcher
+from tests.server.redis_helpers import fake_redis_client
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry
 
@@ -80,12 +83,12 @@ def test_a_submission_naming_mounts_is_rejected() -> None:
 
 
 def test_the_registry_loads_a_stored_task_carrying_mounts() -> None:
-    blob = json.dumps(_STORED)
-    registry = WorkflowRegistry.__new__(WorkflowRegistry)
-    registry._rds = mock.Mock()
-    registry._rds.sync.mget.return_value = [blob]
+    rds = fake_redis_client(fakeredis.FakeServer())
+    task_id = _STORED["record"]["task_id"]
+    rds.sync.set_value(task_state_key(task_id), json.dumps(_STORED))
+    registry = WorkflowRegistry(rds)
 
-    (loaded,) = registry.load_task_states(_STORED["record"]["task_id"])
+    (loaded,) = registry.load_task_states(_STORED["record"]["workflow_id"], task_id)
 
     assert loaded is not None
     assert "mounts" not in loaded.record.task.spec.model_dump()

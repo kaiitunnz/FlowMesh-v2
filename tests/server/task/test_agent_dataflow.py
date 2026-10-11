@@ -110,7 +110,33 @@ def test_declared_input_agent_blocks_until_its_manifest_is_recorded() -> None:
 
     advance = engine.reconsider_admission("M")
     assert advance.ready == ["M"]
-    assert engine.work_item("M").status is WorkItemStatus.READY
+    assert (wi := engine.work_item("M")) is not None
+    assert wi.status is WorkItemStatus.READY
+
+
+def test_only_an_agent_whose_inputs_resolved_is_offered_its_inputs() -> None:
+    agents = [_input_agent(f"A{i}", ("in",)) for i in range(3)]
+    edges = [
+        TemplateEdge(
+            from_op=source,
+            to_op=f"A{i}",
+            to_port="in",
+            use=DependencyUse.VALUE_REQUIRED,
+            edge_id=f"{source}->A{i}.in",
+        )
+        for i, source in enumerate(("P", "A0", "A1"))
+    ]
+    engine = _engine(
+        _bundle([_leaf("P"), *agents], edges, (_decl("out:A2", "A2"),)),
+        granted=frozenset({"model"}),
+    )
+
+    assert engine.blocked_input_agents() == []
+    assert not engine._ledger.input_candidates
+
+    engine.on_succeeded("P")
+
+    assert engine.blocked_input_agents() == ["A0"]
 
 
 def test_join_feeding_an_agent_aggregates_children_in_declared_order() -> None:
@@ -196,7 +222,8 @@ def test_spawn_mints_a_typed_child_entry_input_not_spec_data() -> None:
     ).ready[0]
     (accepted,) = engine.accepted_inputs_for_task(child)
     assert accepted.target_port == "facet" and accepted.provenance == "spawn_element"
-    assert accepted.members[0].value_ref.literal == '{"facet": "retrieval methods"}'
+    assert (value_ref := accepted.members[0].value_ref) is not None
+    assert value_ref.literal == '{"facet": "retrieval methods"}'
 
 
 def _fanout_bundle(
@@ -510,7 +537,8 @@ def test_input_bindings_projection_is_deterministic() -> None:
         ),
         granted=frozenset({"model"}),
     )
-    activation = engine.work_item("M").activation_id
+    assert (wi := engine.work_item("M")) is not None
+    activation = wi.activation_id
     engine.record_accepted_input(
         _accepted(activation, "reviews", ValueRef(kind="inline", literal="grounded")),
     )

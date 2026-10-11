@@ -1,6 +1,8 @@
 """Loop instances of one workflow instance: ingress, routed feedback and exit, and
 release once the loop's frontier closes."""
 
+from collections.abc import Mapping
+
 from ...task.v2.representations.operators import LoopContextRegion
 from ...task.v2.representations.template import BoundaryKind
 from ..guardrails import ScopeBudget
@@ -295,7 +297,7 @@ class LoopProgress:
         self,
         occurrence: Occurrence,
         outcome: PublicationOutcome,
-        bundle: dict[str, ValueRef],
+        bundle: Mapping[str, ValueRef],
     ) -> None:
         """Publish a root loop's declared output from the carried port it names."""
         if occurrence.context_id or occurrence.time:

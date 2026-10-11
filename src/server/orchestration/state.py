@@ -14,9 +14,11 @@ per-scope ``ProgressCapability`` accounting on the child-init and loop-time axes
 """
 
 import json
+from collections.abc import Mapping
 from enum import StrEnum
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from shared.content import ContentReference
 from shared.harness.boundary import DenialKind
@@ -33,6 +35,7 @@ from ..task.v2.representations.operators import (
     SelectorStep,
 )
 from ..utils.time import now_iso
+from .journal import EMPTY_MAP, JournaledModel, freeze_mapping
 
 
 class WorkItemStatus(StrEnum):
@@ -165,6 +168,11 @@ class ValueMember(BaseModel):
 
 
 ValueRef.model_rebuild()
+
+# Mappings a ledger entity holds, immutable so they change only by assignment.
+type FrozenRefs = Annotated[Mapping[str, ValueRef], AfterValidator(freeze_mapping)]
+type FrozenStrs = Annotated[Mapping[str, str], AfterValidator(freeze_mapping)]
+_EMPTY: Mapping[str, Any] = EMPTY_MAP
 
 
 class BoundaryEvent(BaseModel):
@@ -401,17 +409,17 @@ class AcceptedInput(BaseModel):
     ordinal: int = 0
 
 
-class Continuation(BaseModel):
+class Continuation(JournaledModel):
     """Suspended logical progress waiting on predecessor records."""
 
     work_item_id: str
-    waiting_on: set[str] = Field(default_factory=set)  # operator ids not settled
+    waiting_on: frozenset[str] = frozenset()  # operator ids not settled
     # Declared input ports that must each carry an accepted input before the work item
     # is admissible; empty for an operator with no declared dataflow inputs.
-    required_ports: set[str] = Field(default_factory=set)
+    required_ports: frozenset[str] = frozenset()
 
 
-class ProgressCapability(BaseModel):
+class ProgressCapability(JournaledModel):
     """One scope's outstanding-capability account on a single progress axis."""
 
     scope_id: str
@@ -429,7 +437,7 @@ class ProgressCapability(BaseModel):
         )
 
 
-class WorkItem(BaseModel):
+class WorkItem(JournaledModel):
     """Stable semantic identity for one bounded ready episode.
 
     Retries reuse this identity and its ``invocation_id``; only a new physical
@@ -457,10 +465,10 @@ class WorkItem(BaseModel):
     pending_outcome_group: str | None = None
     # why a non-retryable failure settled this work item
     failure_reason: str | None = None
-    attempt_ids: list[str] = Field(default_factory=list)
+    attempt_ids: tuple[str, ...] = ()
 
 
-class Invocation(BaseModel):
+class Invocation(JournaledModel):
     """Causal `invocation_id` linkage and terminal state held by `DS`.
 
     The request/admission record itself lives in the separate control facts (`CS`);
@@ -474,7 +482,7 @@ class Invocation(BaseModel):
     compensable: bool = False
 
 
-class Attempt(BaseModel):
+class Attempt(JournaledModel):
     """Placement- and lease-specific physical execution history."""
 
     attempt_id: str
@@ -601,14 +609,6 @@ class ResultSlot(BaseModel):
             self.sequence,
         )
 
-    @property
-    def legacy_slot_key(self) -> str:
-        """The unscoped key format, read only to re-key a publication stored under
-        it."""
-        key = "" if self.logical_key is None else f":{self.logical_key}"
-        seq = "" if self.sequence is None else f"#{self.sequence}"
-        return f"{self.instance_id}:{self.output_id}{key}{seq}"
-
 
 class ResultPublication(BaseModel):
     """Idempotent terminal publication of a declared logical output."""
@@ -622,7 +622,7 @@ class ResultPublication(BaseModel):
     at: str = Field(default_factory=now_iso)
 
 
-class PrivateStateLineage(BaseModel):
+class PrivateStateLineage(JournaledModel):
     """One activation's private-state lineage: its binding and live write authority.
 
     ``write_epoch`` is monotonic per lineage; each grant supersedes the previous one, so
@@ -647,7 +647,7 @@ class OrchestrationEvent(BaseModel):
     attempt_id: str | None = None
     invocation_id: str | None = None
     slot_key: str | None = None
-    detail: dict[str, str] = Field(default_factory=dict)
+    detail: FrozenStrs = _EMPTY
 
 
 class TimeFrame(BaseModel):
@@ -725,7 +725,7 @@ class ControlStatus(StrEnum):
     """Cancellation withdrew it."""
 
 
-class ControlState(BaseModel):
+class ControlState(JournaledModel):
     """The resolution of one control operator occurrence and the values it carries.
 
     ``inputs`` holds the value accepted on each named input; ``outputs`` the value
@@ -734,8 +734,8 @@ class ControlState(BaseModel):
 
     key: str
     status: ControlStatus = ControlStatus.PENDING
-    inputs: dict[str, ValueRef] = Field(default_factory=dict)
-    outputs: dict[str, ValueRef] = Field(default_factory=dict)
+    inputs: FrozenRefs = _EMPTY
+    outputs: FrozenRefs = _EMPTY
     reason: str | None = None
 
 
@@ -772,7 +772,7 @@ class IterationResolution(BaseModel):
     loop: str
     iteration: int
     kind: IterationKind
-    bundle: dict[str, ValueRef] = Field(default_factory=dict)
+    bundle: FrozenRefs = _EMPTY
     reason: str | None = None
 
 
@@ -791,7 +791,7 @@ class LoopInstanceStatus(StrEnum):
     """A cancel withdrew the loop."""
 
 
-class LoopInstance(DeliveryContext):
+class LoopInstance(DeliveryContext, JournaledModel):
     """One entry of a loop: its body's context and scope, and its bound inputs.
 
     Its body occurs at ``time`` extended by the loop's own frame. ``carried`` holds the
@@ -800,20 +800,20 @@ class LoopInstance(DeliveryContext):
     """
 
     occurrence: str
-    carried: dict[str, ValueRef] = Field(default_factory=dict)
-    invariants: dict[str, ValueRef] = Field(default_factory=dict)
+    carried: FrozenRefs = _EMPTY
+    invariants: FrozenRefs = _EMPTY
     times: int = 0  # logical times materialized so far
     status: LoopInstanceStatus = LoopInstanceStatus.OPEN
     exit_time: int | None = None
-    exit_bundle: dict[str, ValueRef] = Field(default_factory=dict)
+    exit_bundle: FrozenRefs = _EMPTY
 
 
-class ChildContext(DeliveryContext):
+class ChildContext(DeliveryContext, JournaledModel):
     """A child activation running a region definition, where its members occur: its
     entry values and result."""
 
     definition_id: str
-    entries: dict[str, ValueRef] = Field(default_factory=dict)
+    entries: FrozenRefs = _EMPTY
     result: ValueRef | None = None
     returned: bool = False
 

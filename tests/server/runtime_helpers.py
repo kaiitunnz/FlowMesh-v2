@@ -4,8 +4,9 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.orchestration.state import InvocationState
 from server.task.workflow_retry import WorkflowRetryScheduler
+from tests.server.stored_state import StoredLedgers
 
 
 def manual_durability_retry(
@@ -16,14 +17,17 @@ def manual_durability_retry(
 
 
 def durable_invocation(
-    ledger_blobs: dict[str, str], workflow_id: str, invocation_id: str
+    registry: StoredLedgers, workflow_id: str, invocation_id: str
 ) -> InvocationState | None:
     """The state an invocation has in a workflow's durable ledger, if any."""
-    if (blob := ledger_blobs.get(workflow_id)) is None:
+    if (stored := registry.load_ledger(workflow_id)) is None:
         return None
-    snapshot = LedgerSnapshot.model_validate_json(blob)
     return next(
-        (i.state for i in snapshot.invocations if i.invocation_id == invocation_id),
+        (
+            i.state
+            for i in stored.snapshot.invocations
+            if i.invocation_id == invocation_id
+        ),
         None,
     )
 
@@ -34,9 +38,9 @@ def refuse_ledger_saves(registry: Any) -> None:
     def down(*_: Any, **__: Any) -> None:
         raise ConnectionError("control redis unavailable")
 
-    setattr(registry, "save_ledger_snapshot", down)
+    setattr(registry, "save_ledger", down)
 
 
 def accept_ledger_saves(registry: Any) -> None:
     """Take ledger saves again after ``refuse_ledger_saves``."""
-    vars(registry).pop("save_ledger_snapshot", None)
+    vars(registry).pop("save_ledger", None)

@@ -8,7 +8,6 @@ from unittest import mock
 import pytest
 
 from server.config import OrchestrationConfig
-from server.registries.workflow import PersistedTask
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -103,10 +102,9 @@ def test_a_stored_foreign_dependency_never_renders_its_result() -> None:
     summarize = _register(runtime, "org-b", _CONSUMER)
     # A stored record whose dependency lies outside its workflow, which submission
     # refuses.
-    stored = PersistedTask.model_validate_json(registry.task_blobs[summarize])
-    registry.task_blobs[summarize] = stored.model_copy(
-        update={"depends_on": {extract}}
-    ).model_dump_json()
+    stored = registry.stored_task(summarize)
+    assert stored is not None
+    registry.put_tasks([stored.model_copy(update={"depends_on": {extract}})])
 
     restored = _runtime(registry, reader)
     assert asyncio.run(restored.rehydrate()) == 2

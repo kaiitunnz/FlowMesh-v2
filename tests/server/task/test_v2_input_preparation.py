@@ -152,7 +152,7 @@ async def test_a_preparation_commits_no_embodiment_and_no_attempt() -> None:
     # committed and the choice is still open.
     work_item = engine.work_item(task_id)
     assert work_item is not None
-    assert work_item.attempt_ids == []
+    assert work_item.attempt_ids == ()
     assert work_item.invocation_id is None
     assert engine.embodiment_selection(task_id) is None
     assert engine.embodiment_pinned(task_id) is False
@@ -308,11 +308,11 @@ class _FlakyLedger(FakeRegistry):
         super().__init__()
         self.fail_ledger = False
 
-    def save_ledger_snapshot(self, *args: Any, **kwargs: Any) -> None:
+    def save_ledger(self, *args: Any, **kwargs: Any) -> None:
         if self.fail_ledger:
             self.fail_ledger = False
             raise ConnectionError("control redis unavailable")
-        super().save_ledger_snapshot(*args, **kwargs)
+        super().save_ledger(*args, **kwargs)
 
 
 @pytest.mark.anyio
@@ -420,11 +420,11 @@ async def test_a_preparation_dispatch_lost_after_a_restart_prepares_again(
         source, "wkr-0", _planned(runtime, source, ["a", "b"]), now_iso(), "dsp-0"
     )
     assert _next(runtime) == task_id
-    saved = dict(registry.ledger_blobs)
+    saved = dict(registry.ledgers)
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1", input_preparation=True)
     if not ledger_saved:
-        registry.ledger_blobs.clear()
-        registry.ledger_blobs.update(saved)
+        registry.ledgers.clear()
+        registry.ledgers.update(saved)
     restored = _runtime(registry=registry)
     await restored.rehydrate()
 

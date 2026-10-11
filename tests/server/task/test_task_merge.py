@@ -102,7 +102,7 @@ class _Registry(FakeRegistry):
         return any(task_id in ids for ids in self.dispatched.values())
 
     def durable_status(self, task_id: str) -> str:
-        return PersistedTask.model_validate_json(self.task_blobs[task_id]).record.status
+        return self.stored_record(task_id).status
 
 
 class _InterruptRecorder(_WorkerRegistryStub):

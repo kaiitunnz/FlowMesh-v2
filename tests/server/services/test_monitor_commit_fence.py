@@ -17,7 +17,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from server.dispatcher.base import Dispatcher
-from server.registries.workflow import PersistedTask
 from server.services import monitoring
 from server.services.monitoring import EventMonitor
 from server.task.models import PublishGate, TaskStatus
@@ -75,7 +74,7 @@ class _Store(FakeRegistry):
         return self.task_record(task_id).status
 
     def task_record(self, task_id: str) -> Any:
-        return PersistedTask.model_validate_json(self.task_blobs[task_id]).record
+        return self.stored_record(task_id)
 
 
 class _Telemetry:

@@ -29,6 +29,10 @@ class PrivateStateLedger:
             for lineage in (lineages or [])
         }
 
+    def adopt(self, lineages: dict[str, PrivateStateLineage]) -> None:
+        """Hold each lineage in ``lineages``, keyed by its activation."""
+        self._lineages = lineages
+
     def lineages(self) -> list[PrivateStateLineage]:
         return list(self._lineages.values())
 

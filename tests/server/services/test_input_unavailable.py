@@ -212,13 +212,13 @@ async def test_returning_an_undispatched_task_saves_no_ledger() -> None:
     runtime = _live_runtime(registry)
     _, ids = await _register_v2(runtime, _V2)
     saves: list[str] = []
-    save = registry.save_ledger_snapshot
+    save = registry.save_ledger
 
-    def _counted(workflow_id: str, snapshot: Any, control: Any = None) -> Any:
+    def _counted(workflow_id: str, ledger: Any, control: Any = None) -> Any:
         saves.append(workflow_id)
-        return save(workflow_id, snapshot, control)
+        return save(workflow_id, ledger, control)
 
-    registry.save_ledger_snapshot = _counted  # type: ignore[method-assign]
+    registry.save_ledger = _counted  # type: ignore[method-assign]
     for _ in range(3):
         assert _pop_ready(runtime) == [ids["a"]]
         runtime.return_dispatch(ids["a"], None, increment_retry=False, front=False)

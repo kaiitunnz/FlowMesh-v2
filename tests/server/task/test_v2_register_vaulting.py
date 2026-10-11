@@ -94,7 +94,8 @@ async def test_inline_key_is_vaulted_and_absent_from_every_persisted_surface():
     blobs = [
         *registry.v2_blobs.values(),
         *registry.task_blobs.values(),
-        *registry.ledger_blobs.values(),
+        *registry.ledger_texts(),
+        *registry.source_texts(),
     ]
     assert blobs
     assert all(_RAW_KEY not in blob for blob in blobs)

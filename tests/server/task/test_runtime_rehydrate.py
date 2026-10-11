@@ -10,25 +10,30 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
-from server.registries.workflow import PersistedTask, WorkflowSched
+from server.registries.workflow import (
+    PersistedTask,
+    WorkflowSched,
+    load_task_state,
+    task_sources,
+)
 from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.runtime_helpers import manual_durability_retry
+from tests.server.stored_state import StoredLedgers, StoredTaskStates
 from tests.support.waiting import pop_ready
 
 
-class FakeWorkflowRegistry:
+class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
     """In-memory registry that round-trips state through the real model JSON."""
 
     def __init__(self) -> None:
-        self.task_blobs: dict[str, str] = {}
+        super().__init__()
         self.sched: dict[str, str] = {}
         self.workflow_task_ids: dict[str, list[str]] = {}
         self.v2_blobs: dict[str, str] = {}
-        self.ledger_blobs: dict[str, str] = {}
         self.dynamic_task_ids: dict[str, set[str]] = {}
         self.blueprints: dict[str, list[PersistedTask]] = {}
 
@@ -43,12 +48,13 @@ class FakeWorkflowRegistry:
         blueprints: Any = (),
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
-        self.save_task_states(tasks)
+        self.put_sources([*tasks, *blueprints])
+        self.put_tasks(tasks)
         self.sched[workflow_id] = sched.model_dump_json()
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
         if ledger is not None:
-            self.save_ledger_snapshot(workflow_id, ledger)
+            self.put_ledger(workflow_id, ledger)
         self.blueprints[workflow_id] = list(blueprints)
 
     async def load_blueprints_async(self, workflow_id: str) -> list[PersistedTask]:
@@ -60,19 +66,8 @@ class FakeWorkflowRegistry:
         blob = self.v2_blobs.get(workflow_id)
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: Any, control: Any = None
-    ) -> None:
-        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
-
-    def load_ledger_snapshot(self, workflow_id: str) -> Any:
-        from server.orchestration import LedgerSnapshot
-
-        blob = self.ledger_blobs.get(workflow_id)
-        return LedgerSnapshot.model_validate_json(blob) if blob else None
-
-    async def load_ledger_snapshot_async(self, workflow_id: str) -> Any:
-        return self.load_ledger_snapshot(workflow_id)
+    def save_ledger(self, workflow_id: str, ledger: Any, control: Any = None) -> None:
+        self.put_ledger(workflow_id, ledger)
 
     async def get_remaining_tasks_async(self, workflow_id: str) -> set[str]:
         ids = [
@@ -82,8 +77,8 @@ class FakeWorkflowRegistry:
         return {
             task_id
             for task_id in ids
-            if (blob := self.task_blobs.get(task_id))
-            and PersistedTask.model_validate_json(blob).record.status
+            if (stored := self.stored_task(task_id)) is not None
+            and stored.record.status
             not in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED)
         }
 
@@ -101,23 +96,11 @@ class FakeWorkflowRegistry:
         return self.get_workflow_record(workflow_id)
 
     def save_task_states(self, items: Sequence[PersistedTask]) -> None:
-        for item in items:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
+        self.put_sources(items)
+        self.put_tasks(items)
 
     async def save_task_states_async(self, items: list[PersistedTask]) -> None:
         self.save_task_states(items)
-
-    def _load_task_state(self, task_id: str) -> PersistedTask | None:
-        blob = self.task_blobs.get(task_id)
-        return PersistedTask.model_validate_json(blob) if blob else None
-
-    def load_task_states(self, *task_ids: str) -> list[PersistedTask | None]:
-        return [self._load_task_state(task_id) for task_id in task_ids]
-
-    async def load_task_states_async(
-        self, *task_ids: str
-    ) -> list[PersistedTask | None]:
-        return self.load_task_states(*task_ids)
 
     def save_workflow_sched(
         self, workflow_id: str, in_epoch_order: bool, frontier: int
@@ -151,8 +134,7 @@ class FakeWorkflowRegistry:
         sched: WorkflowSched | None = None,
         control: Any = None,
     ) -> None:
-        for item in records:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
+        self.put_tasks(records)
         if sched is not None:
             self.sched[workflow_id] = sched.model_dump_json()
 
@@ -160,16 +142,16 @@ class FakeWorkflowRegistry:
         self,
         workflow_id: str,
         records: Sequence[PersistedTask],
-        snapshot: Any,
+        ledger: Any,
         retire: Sequence[str] = (),
         **membership: Any,
     ) -> None:
+        self.put_tasks(records)
         for item in records:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
             self.dynamic_task_ids.setdefault(workflow_id, set()).add(
                 item.record.task_id
             )
-        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+        self.put_ledger(workflow_id, ledger)
 
     async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
         return set(self.dynamic_task_ids.get(workflow_id, set()))
@@ -280,7 +262,9 @@ async def test_persisted_task_round_trips_failed_workers_and_deps() -> None:
     record.failed_workers.append("wkr-dead")
 
     pt = PersistedTask(record=record, depends_on={a}, epoch_index=2)
-    restored = PersistedTask.model_validate_json(pt.model_dump_json())
+    restored = load_task_state(
+        pt.model_dump_json(), task_sources([pt])[pt.record.workflow_id]
+    )
 
     # failed_workers is exclude=True on TaskRecord but must survive persistence;
     # depends_on round-trips through a JSON list back to a set.
@@ -531,9 +515,7 @@ async def test_a_replayed_terminal_event_lands_the_cascade_its_store_refused(
     monkeypatch.setattr(registry, "commit_transition", flaky_commit)
 
     def persisted_status(task_id: str) -> str:
-        return PersistedTask.model_validate_json(
-            registry.task_blobs[task_id]
-        ).record.status
+        return registry.stored_record(task_id).status
 
     # The cascade applies in memory and its write is held.
     runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
@@ -572,7 +554,7 @@ class _RaisingOnce:
 
 
 def _persisted_status(registry: FakeWorkflowRegistry, task_id: str) -> str:
-    return PersistedTask.model_validate_json(registry.task_blobs[task_id]).record.status
+    return registry.stored_record(task_id).status
 
 
 @pytest.mark.anyio
@@ -694,9 +676,7 @@ async def test_mark_cancelled_repersists_on_replay_after_failed_write(
     monkeypatch.setattr(registry, "commit_transition", flaky_commit)
 
     def persisted_status(task_id: str) -> str:
-        return PersistedTask.model_validate_json(
-            registry.task_blobs[task_id]
-        ).record.status
+        return registry.stored_record(task_id).status
 
     # Attempt 1: cancellation applies in memory, but the durable write fails.
     with pytest.raises(RuntimeError):
@@ -721,9 +701,7 @@ async def test_cancel_workflow_commits_atomically_on_crash(
         raise RuntimeError("redis down")
 
     def persisted_status(task_id: str) -> str:
-        return PersistedTask.model_validate_json(
-            registry.task_blobs[task_id]
-        ).record.status
+        return registry.stored_record(task_id).status
 
     monkeypatch.setattr(registry, "commit_transition", boom)
     with pytest.raises(RuntimeError):

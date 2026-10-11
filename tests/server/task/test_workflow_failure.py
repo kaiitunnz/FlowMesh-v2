@@ -330,7 +330,7 @@ async def test_failing_a_workflow_writes_nothing_before_its_terminal_commit() ->
     ]
     side = ids["side"]
     assert interrupts == [side]
-    state = registry.load_task_states(side)[0]
+    state = registry.stored_task(side)
     assert state is not None and state.record.status == TaskStatus.FAILED
 
 

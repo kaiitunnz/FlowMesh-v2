@@ -10,6 +10,7 @@ shared machine measures the machine.
 from typing import Any
 
 from server.orchestration import OrchestrationEngine
+from server.orchestration.journal import AppendOnlyList, TrackedDict
 from server.orchestration.state import BoundaryEvent
 from server.orchestration.telemetry import TelemetrySpanEmitter
 from server.task.v2.representations.operators import BoundaryEventKind
@@ -44,10 +45,8 @@ class _Reads:
         self.count = 0
 
 
-class _CountingTrace(list):
-    def __init__(self, reads: _Reads, *args: Any) -> None:
-        super().__init__(*args)
-        self._reads = reads
+class _CountingTrace(AppendOnlyList[Any]):
+    _reads: _Reads
 
     def __iter__(self) -> Any:
         self._reads.count += len(self)
@@ -63,10 +62,8 @@ class _CountingTrace(list):
         return item
 
 
-class _CountingDict(dict):
-    def __init__(self, reads: _Reads, *args: Any) -> None:
-        super().__init__(*args)
-        self._reads = reads
+class _CountingDict(TrackedDict[Any, Any]):
+    _reads: _Reads
 
     def __iter__(self) -> Any:
         self._reads.count += len(self)
@@ -83,6 +80,11 @@ class _CountingDict(dict):
     def __getitem__(self, key: Any) -> Any:
         self._reads.count += 1
         return super().__getitem__(key)
+
+
+def _count_reads(collection: Any, counting: type, reads: _Reads) -> None:
+    collection.__class__ = counting
+    collection._reads = reads
 
 
 def _spawn_children(eng: OrchestrationEngine, count: int) -> list[str]:
@@ -117,22 +119,15 @@ def _drive(level: TelemetryLevel, children_count: int) -> tuple[int, int, int]:
     span_emitter, exporter = emitter(level)
     eng = engine(spawning_agent_bundle(), emitter=span_emitter)
     reads = _Reads()
-    # The emitter reads the collections the engine handed it at attach, so the counting
-    # ones have to replace those before anything binds to them.
-    eng._ledger.trace = _CountingTrace(reads, eng._ledger.trace)
-    eng._ledger.work_items = _CountingDict(reads, eng._ledger.work_items)
-    eng._ledger.activations = _CountingDict(reads, eng._ledger.activations)
-    eng._ledger.scopes = _CountingDict(reads, eng._ledger.scopes)
-    span_emitter.attach(
-        activations=eng._ledger.activations,
-        scopes=eng._ledger.scopes,
-        work_items=eng._ledger.work_items,
-        attempts=eng._ledger.attempts,
-        invocations=eng._ledger.invocations,
-        trace=eng._ledger.trace,
-        scope_closed=eng._ledger.scope_closed,
-        loop_time=eng._ledger.loop_time,
-    )
+    # The emitter reads the very collections the engine holds, so each is made to
+    # count its reads in place.
+    _count_reads(eng._ledger.trace, _CountingTrace, reads)
+    for collection in (
+        eng._ledger.work_items,
+        eng._ledger.activations,
+        eng._ledger.scopes,
+    ):
+        _count_reads(collection, _CountingDict, reads)
     children = _spawn_children(eng, children_count)
     assert len(children) == children_count
 

@@ -114,6 +114,10 @@ def workflow_blueprints_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:blueprints"
 
 
+def workflow_sources_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:sources"
+
+
 # The ``model_secret`` suffix is the persisted vault layout.
 WORKFLOW_CREDENTIAL_KEY_PATTERN = "workflow:*:model_secret"
 
@@ -508,6 +512,9 @@ class SyncRedisClient:
     def hash_getall(self, key: str) -> dict[str, Any]:
         return _sync(self._control.hgetall(key))
 
+    def hash_keys(self, key: str) -> list[str]:
+        return _sync(self._control.hkeys(key))
+
     def hash_mget(self, key: str, fields: list[str]) -> list[Any]:
         return _sync(self._control.hmget(key, fields))
 
@@ -748,6 +755,9 @@ class AsyncRedisClient:
     # ---- Hash helpers ----
     async def hash_getall(self, key: str) -> dict[str, Any]:
         return await _awaitable(self._control.hgetall(key))
+
+    async def hash_keys(self, key: str) -> list[str]:
+        return await _awaitable(self._control.hkeys(key))
 
     async def hash_mget(self, key: str, fields: list[str]) -> list[Any]:
         return await _awaitable(self._control.hmget(key, fields))

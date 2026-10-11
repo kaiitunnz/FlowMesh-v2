@@ -2,6 +2,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from server.orchestration.engine.snapshot import SnapshotCodec
 from server.supervisor.resource_manager import MachineEnv, ResourceManager
 from tests.server import lock_contract
 
@@ -41,3 +42,15 @@ def _runtime_lock_contract() -> Iterator[None]:
         }
     )
     assert not breaches, "lock contract broken:\n" + "\n".join(breaches)
+
+
+@pytest.fixture(autouse=True)
+def _verify_ledger_changes() -> Iterator[None]:
+    """Fail a test in which a ledger write misses a change the ledger took."""
+    SnapshotCodec.verify_changes = True
+    SnapshotCodec.verify_failures.clear()
+    yield
+    SnapshotCodec.verify_changes = False
+    failures = list(SnapshotCodec.verify_failures)
+    SnapshotCodec.verify_failures.clear()
+    assert not failures, "ledger changes missed:\n" + "\n".join(failures)

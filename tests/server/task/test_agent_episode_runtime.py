@@ -1004,17 +1004,17 @@ def test_a_boundary_whose_settle_a_crash_cut_short_is_issued_again() -> None:
         registry = FakeRegistry()
         runtime = _runtime(registry)
         workflow_id, writer, _, env = await _held_boundary(runtime)
-        save = registry.save_ledger_snapshot
+        save = registry.save_ledger
 
         def crash(*_: Any, **__: Any) -> None:
             raise _Crash()
 
-        registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+        registry.save_ledger = crash  # type: ignore[method-assign]
         with pytest.raises(_Crash):
             runtime.settle_episode_invocation(
                 writer, env.call_correlation, "model:draft"
             )
-        registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+        registry.save_ledger = save  # type: ignore[method-assign]
 
         restored = _runtime(registry)
         redriven: list[ToolInvocationEnvelope] = []
