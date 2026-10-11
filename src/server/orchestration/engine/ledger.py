@@ -1,7 +1,7 @@
 """The shared ledger state of one workflow instance and its observation helpers."""
 
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from ...task.v2.representations.admission import ResidentAdmissionBinding
 from ...task.v2.representations.operators import (
@@ -119,7 +119,8 @@ class OrchestrationLedger:
         self.occurrences: dict[str, Occurrence] = {}
         self.occurrences_by_scope: dict[str, set[str]] = {}
         self.occurrence_by_activation: dict[str, str] = {}
-        self.subscopes: dict[str, set[str]] = {}
+        self.subscopes: dict[str, dict[str, None]] = {}
+        self.activations_by_scope: dict[str, list[str]] = {}
         # A scope's children by child index, and how many settled successfully.
         self.children_by_scope: dict[str, dict[int, str]] = {}
         self.succeeded_children: Counter[str] = Counter()
@@ -218,10 +219,10 @@ class OrchestrationLedger:
         while cursor < len(order):
             current = order[cursor]
             cursor += 1
-            for scope in self.scopes.values():
-                if scope.parent_scope_id == current and scope.scope_id not in seen:
-                    seen.add(scope.scope_id)
-                    order.append(scope.scope_id)
+            for scope_id in self.subscopes.get(current, ()):
+                if scope_id not in seen:
+                    seen.add(scope_id)
+                    order.append(scope_id)
         return order
 
     def scope_work_items(
@@ -229,16 +230,23 @@ class OrchestrationLedger:
     ) -> list[WorkItem]:
         return [
             wi
-            for a in self.activations.values()
-            if a.scope_id == scope_id
-            and a.kind in kinds
+            for activation_id in self.activations_by_scope.get(scope_id, ())
+            if self.activations[activation_id].kind in kinds
             and (
-                wi := self.work_items.get(
-                    self.wi_by_activation.get(a.activation_id, "")
-                )
+                wi := self.work_items.get(self.wi_by_activation.get(activation_id, ""))
             )
             is not None
         ]
+
+    def scope_control_states(self, scope_id: str) -> list[ControlState]:
+        """The control states of the occurrences a scope holds."""
+        if scope_id == self.root_scope.scope_id:
+            keys: Iterable[str] = [
+                key for key in self.control_states if key not in self.occurrences
+            ]
+        else:
+            keys = self.occurrences_by_scope.get(scope_id, ())
+        return [state for key in keys if (state := self.control_states.get(key))]
 
     def root_level(self, scope_id: str) -> bool:
         return self.scopes[scope_id].parent_scope_id == self.root_scope.scope_id
@@ -246,13 +254,16 @@ class OrchestrationLedger:
     def add_scope(self, scope: Scope) -> None:
         self.scopes[scope.scope_id] = scope
         if scope.parent_scope_id is not None:
-            self.subscopes.setdefault(scope.parent_scope_id, set()).add(scope.scope_id)
+            self.subscopes.setdefault(scope.parent_scope_id, {})[scope.scope_id] = None
             self.open_subscopes.setdefault(scope.parent_scope_id, {})[
                 scope.scope_id
             ] = None
 
     def add_activation(self, activation: Activation) -> None:
         self.activations[activation.activation_id] = activation
+        self.activations_by_scope.setdefault(activation.scope_id, []).append(
+            activation.activation_id
+        )
         self.scope_population[activation.scope_id] += 1
         if activation.kind == "child":
             self.scope_children[activation.scope_id] += 1

@@ -173,6 +173,7 @@ class SnapshotCodec:
         self._ledger.activations = self._keyed_dict("activations")
         self._ledger.children_by_scope = {}
         self._ledger.static_activations = {}
+        self._ledger.activations_by_scope = {}
         self._ledger.open_children = {}
         self._ledger.scope_population = Counter()
         self._ledger.scope_children = Counter()

@@ -50,6 +50,47 @@ _SPAWN_BODY = f"""
             to: {{node: $egress, port: state}}
 """
 
+_CANCELLING_BODY = f"""
+    templates:
+      - name: one
+        inputs: [{{name: e, role: param}}]
+        returns: [{{name: out}}]
+        nodes:
+          - name: work
+            dependsOn: [{{node: $ingress, port: e, input: e}}]
+            spec: {_ECHO}
+        edges:
+          - from: {{node: work}}
+            to: {{node: $return, port: out}}
+      - name: body
+        inputs: [{{name: state, role: carried}}]
+        nodes:
+          - name: step
+            dependsOn: [{{node: $ingress, port: state, input: state}}]
+            spec: {_ECHO}
+          - name: fan
+            dependsOn: [step]
+            region: {{kind: spawn, child: one}}
+          - name: collect
+            dependsOn: [fan]
+            region: {{kind: join, completion: any, residual: cancel}}
+          - name: tally
+            dependsOn: [collect]
+            spec: {_ECHO}
+          - name: route
+            dependsOn: [{{node: tally, input: input}}]
+            region:
+              kind: branch
+              inputs: [{{name: input}}]
+              outputs: [{{name: again}}, {{name: done}}]
+              selection: {{input: input, field: [route]}}
+        edges:
+          - from: {{node: route, port: again}}
+            to: {{node: $feedback, port: state}}
+          - from: {{node: route, port: done}}
+            to: {{node: $egress, port: state}}
+"""
+
 _ITERATIONS = 40
 _CHILDREN = 2
 
@@ -131,3 +172,28 @@ async def test_an_early_join_child_settles_at_a_cost_its_sibling_count_leaves_fl
 ) -> None:
     few, many = await _settle_visits(walked, 8), await _settle_visits(walked, 40)
     assert max(many) <= max(few), (few, many)
+
+
+@pytest.mark.anyio
+async def test_a_loop_body_cancelling_a_scope_walks_no_more_ledger_late_than_early(
+    walked: Counter[str],
+) -> None:
+    config = OrchestrationConfig(
+        max_loop_iterations=_ITERATIONS + 1, max_activations=20 * _ITERATIONS + 100
+    )
+    run = await _Run(config=config).start(_workflow(_LOOP_NODES, _CANCELLING_BODY))
+    run.run("seed")
+
+    def iteration(last: bool) -> int:
+        before = walked.total()
+        run.run("step", {"items": ["a", "b"]})
+        run.run("work")
+        # The join released on the first child and cancelled the other.
+        run.ready[:] = [t for t in run.ready if run.name(t) != "work"]
+        run.run("tally", {"route": "done" if last else "again"})
+        return walked.total() - before
+
+    visits = [iteration(i == _ITERATIONS - 1) for i in range(_ITERATIONS)]
+    assert run.settled()
+    early, late = visits[5:10], visits[-6:-1]
+    assert max(late) <= max(early), (early, late)

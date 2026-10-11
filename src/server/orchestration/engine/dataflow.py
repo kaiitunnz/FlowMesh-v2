@@ -346,11 +346,8 @@ class RegionFlow:
             if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
                 self._cancel_work_item(wi)
                 cancelled.append(wi.legacy_task_id)
-        for key, state in self._ledger.control_states.items():
-            if (
-                state.status is ControlStatus.PENDING
-                and self._ledger.occurrence(key).scope_id == scope_id
-            ):
+        for state in self._ledger.scope_control_states(scope_id):
+            if state.status is ControlStatus.PENDING:
                 state.status = ControlStatus.CANCELLED
         if self.contexts is not None:
             self.contexts.on_cancelled(scope_id)
