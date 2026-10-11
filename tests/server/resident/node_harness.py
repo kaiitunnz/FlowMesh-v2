@@ -21,6 +21,7 @@ from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.resident.test_service import _Delivery
 from tests.server.result_store import make_result_reader
+from tests.server.runtime_helpers import never_closed
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
@@ -137,7 +138,9 @@ class Node:
         self.runtime, self.control = self._boot()
         if on_boot is not None:
             on_boot(self)
-        await rehydrate_root_state(self.runtime, self.control, cast(Any, self.resident))
+        await rehydrate_root_state(
+            self.runtime, self.control, cast(Any, self.resident), None, never_closed
+        )
 
     def materialize(self) -> ReplicaIncarnation:
         return asyncio.run(self.materialize_async())

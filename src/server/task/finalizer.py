@@ -24,7 +24,7 @@ from ..schemas.logs import LogEvent
 from ..utils.time import now_iso, ts_to_iso
 from .models import WorkflowSettlement
 from .runtime import TaskRuntime
-from .workflow_retry import WorkflowRetryScheduler
+from .workflow_retry import WorkflowRetryScheduler, manual_retry
 
 
 class CloseOutcome(StrEnum):
@@ -89,6 +89,10 @@ class WorkflowFinalizer:
         """Drain requests until stopped."""
         while not stop_event.is_set():
             self.drain(poll_interval)
+
+    def stop(self) -> None:
+        """Stop retrying the closes that failed."""
+        self._retry.stop()
 
     def drain(self, timeout: float = 0.0) -> None:
         """Close every workflow requested so far.
@@ -228,3 +232,27 @@ class WorkflowFinalizer:
             )
             return False
         return True
+
+
+def close_restored(
+    redis_client: SyncRedisClient,
+    runtime: TaskRuntime,
+    logger: logging.Logger,
+    workflow_span_emitter: WorkflowSpanEmitter,
+    log_stream_ttl_sec: int,
+    workflow_id: str,
+) -> bool:
+    """Close a settled workflow a restart restored, or find it closed; returns
+    whether it is closed. A close that fails is left to the caller."""
+    finalizer = WorkflowFinalizer(
+        redis_client,
+        runtime,
+        logger,
+        workflow_span_emitter,
+        log_stream_ttl_sec,
+        retry=manual_retry,
+    )
+    return finalizer.close(workflow_id) in (
+        CloseOutcome.CLOSED,
+        CloseOutcome.ALREADY_CLOSED,
+    )

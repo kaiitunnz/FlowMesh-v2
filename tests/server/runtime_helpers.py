@@ -47,7 +47,13 @@ def accept_ledger_saves(registry: Any) -> None:
     vars(registry).pop("save_ledger", None)
 
 
+def never_closed(runtime: TaskRuntime, workflow_id: str) -> bool:
+    """Close nothing a restart restores."""
+    return False
+
+
 def assert_reclaimable(runtime: TaskRuntime, workflow_id: str) -> None:
     """Assert that nothing in the runtime still needs the settled workflow's state."""
+    runtime.settled_history.require(closure=False, archive=False)
     with runtime._lock:
         assert runtime._reclaim_check_locked(workflow_id) is not None

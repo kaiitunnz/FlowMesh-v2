@@ -3,10 +3,8 @@ import asyncio
 import atexit
 import importlib
 import inspect
-import logging
 import os
 import threading
-from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from typing import cast
@@ -95,11 +93,10 @@ from .startup import (
     start_relay_bridge_pump,
 )
 from .supervisor import WorkerSupervisor
-from .task.finalizer import CloseOutcome, WorkflowFinalizer
+from .task.finalizer import close_restored
 from .task.results import ResultReader
 from .task.runtime import TaskRuntime
 from .task.v2.policy import build_policy_surface
-from .task.workflow_retry import WorkflowRetryScheduler
 from .telemetry import build_telemetry_store
 from .tools.fabric_tool_broker import FabricToolBroker
 from .utils.logging import get_logger
@@ -494,10 +491,6 @@ if IS_ROOT_NODE:
         flush_max_entries=config.log_stream.archive_flush_max_entries,
     )
 
-    # A settled workflow leaves memory only once it is closed, its logs archived, its
-    # resident claims terminal, and its history stored.
-    RUNTIME.settled_history.require_closure()
-    RUNTIME.settled_history.require_archive()
     RUNTIME.settled_history.set_on_freed(METRICS_RECORDER.forget_tasks)
     if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
         RUNTIME.settled_history.set_claims_settled(
@@ -537,26 +530,15 @@ STOP_EVENT = threading.Event()
 BACKGROUND_THREADS: list[threading.Thread] = []
 
 
-def _manual_close_retry(
-    fire: Callable[[str], None], log: logging.Logger
-) -> WorkflowRetryScheduler:
-    return WorkflowRetryScheduler(fire, log, run_thread=False)
-
-
 def _close_restored(runtime: TaskRuntime, workflow_id: str) -> bool:
-    """Close a settled workflow a restart restored to free it, or find it closed."""
     assert WORKFLOW_SPAN_EMITTER is not None
-    finalizer = WorkflowFinalizer(
+    return close_restored(
         REDIS_CLIENT.sync,
         runtime,
         logger,
         WORKFLOW_SPAN_EMITTER,
         config.log_stream.ttl_sec,
-        retry=_manual_close_retry,
-    )
-    return finalizer.close(workflow_id) in (
-        CloseOutcome.CLOSED,
-        CloseOutcome.ALREADY_CLOSED,
+        workflow_id,
     )
 
 

@@ -95,6 +95,7 @@ async def test_the_routes_answer_a_freed_workflow_as_they_did() -> None:
     run.run("b", {"v": 3})
     assert run.settled()
     answers = await _answers(run)
+    run.runtime.settled_history.require(closure=False, archive=False)
     await run.runtime.start_settled_history()
 
     run.runtime.settled_history.drain()

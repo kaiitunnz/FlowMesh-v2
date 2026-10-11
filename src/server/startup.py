@@ -11,16 +11,12 @@ from .serve import GatedServe
 from .task.runtime import TaskRuntime
 
 
-def _left_open(runtime: TaskRuntime, workflow_id: str) -> bool:
-    return False
-
-
 async def rehydrate_root_state(
     runtime: TaskRuntime | None,
     resident_control: ResidentCapacityControl | None,
     resident_registry: ResidentRegistry | None,
-    gated_serve: GatedServe | None = None,
-    close: Callable[[TaskRuntime, str], bool] = _left_open,
+    gated_serve: GatedServe | None,
+    close: Callable[[TaskRuntime, str], bool],
     archived: Callable[[str], bool | None] | None = None,
 ) -> None:
     """Rebuild durable root state on startup in a credit-safe order.

@@ -84,6 +84,7 @@ def _runtime(registry: WorkflowRegistry, workers: Any = None) -> TaskRuntime:
         ),
         durability_retry=manual_durability_retry,
     )
+    runtime.settled_history.require(closure=False, archive=False)
     asyncio.run(runtime.start_settled_history())
     return runtime
 
@@ -228,12 +229,12 @@ def _held(runtime: TaskRuntime, workflow_id: str) -> Callable[[], None]:
 
 
 def _unclosed(runtime: TaskRuntime, workflow_id: str) -> Callable[[], None]:
-    runtime.settled_history.require_closure()
+    runtime.settled_history.require(closure=True, archive=False)
     return lambda: runtime.workflow_closed(workflow_id)
 
 
 def _unarchived(runtime: TaskRuntime, workflow_id: str) -> Callable[[], None]:
-    runtime.settled_history.require_archive()
+    runtime.settled_history.require(closure=False, archive=True)
     task_ids = runtime._tasks.ids_of(workflow_id)
 
     def archive() -> None:
@@ -566,7 +567,7 @@ def test_archive_reports_ask_to_free_a_workflow_once_its_last_task_is_archived()
 ):
     registry = _registry()
     runtime, workflow_id = _settled(registry)
-    runtime.settled_history.require_archive()
+    runtime.settled_history.require(closure=False, archive=True)
     task_ids = runtime._tasks.ids_of(workflow_id)
     requested: list[str] = []
     request = runtime.settled_history.request
@@ -683,6 +684,7 @@ def test_a_late_mediated_outcome_for_a_freed_or_sealed_task_reaps_its_worker() -
     def late_while_sealed(publication: HistoryPublication) -> bool:
         runtime.settle_mediated_operation(outcome(task_ids[0]), "wkr-2")
         runtime.release_merge(task_ids[0])
+        assert registry.workflow_revision(workflow_id) == revision
         return prepare(publication)
 
     cast(Any, registry).prepare_history = late_while_sealed
@@ -695,7 +697,6 @@ def test_a_late_mediated_outcome_for_a_freed_or_sealed_task_reaps_its_worker() -
         ("reap", {"agent_task_id": task_ids[0], "call_correlation": "c-0"}),
         ("reap", {"agent_task_id": task_ids[1], "call_correlation": "c-0"}),
     ]
-    assert registry.workflow_revision(workflow_id) == revision
 
 
 class _CountingLock:

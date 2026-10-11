@@ -18,6 +18,8 @@ from .commits import store_unavailable
 
 # A workflow not freed by a request is evaluated again this often.
 SWEEP_INTERVAL_SEC = 30.0
+# The longest the freeing thread waits before it looks for a stop.
+_POLL_SEC = 1.0
 
 
 @dataclass(frozen=True)
@@ -61,7 +63,6 @@ class SettledHistory:
         registry: WorkflowRegistry,
         lock: threading.RLock,
         logger: logging.Logger,
-        sweep_interval_sec: float = SWEEP_INTERVAL_SEC,
     ) -> None:
         # Each reads or changes the runtime's state under its lock: whether it holds a
         # workflow, whether nothing in it still needs the workflow's state, the history
@@ -74,12 +75,11 @@ class SettledHistory:
         self._registry = registry
         self._lock = lock
         self._logger = logger
-        self._sweep_interval = sweep_interval_sec
         self._cv = threading.Condition()
         self._requested: set[str] = set()
         self._candidates: set[str] = set()
         self._started = False
-        self._next_sweep = time.monotonic() + sweep_interval_sec
+        self._next_sweep = time.monotonic() + SWEEP_INTERVAL_SEC
         # What the runtime lock guards.
         self._sealed: dict[str, _Seal] = {}
         self._tails: dict[str, int] = {}
@@ -92,8 +92,8 @@ class SettledHistory:
         self._counted_through = 0
         self._total = 0
         self._done = 0
-        self._requires_closure = False
-        self._requires_archive = False
+        self._requires_closure = True
+        self._requires_archive = True
         self._claims_settled: Callable[[Collection[str]], bool] | None = None
         self._on_freed: Callable[[list[str]], None] | None = None
 
@@ -113,15 +113,12 @@ class SettledHistory:
             self._started = True
             self._cv.notify_all()
 
-    def require_closure(self) -> None:
-        """Keep each workflow until its closure is reported."""
+    def require(self, closure: bool, archive: bool) -> None:
+        """Set whether each workflow is kept until its closure is reported, and until
+        every task's archive disposition is; both are by default."""
         with self._lock:
-            self._requires_closure = True
-
-    def require_archive(self) -> None:
-        """Keep each workflow until every task's archive disposition is reported."""
-        with self._lock:
-            self._requires_archive = True
+            self._requires_closure = closure
+            self._requires_archive = archive
 
     def set_claims_settled(self, settled: Callable[[Collection[str]], bool]) -> None:
         """Install the check that every resident claim the given invocations raised
@@ -208,13 +205,11 @@ class SettledHistory:
     # Evaluation
     # ------------------------------------------------------------------ #
 
-    def run(self, stop_event: threading.Event, poll_interval: float = 1.0) -> None:
+    def run(self, stop_event: threading.Event) -> None:
         """Free requested workflows until stopped, sweeping every candidate on each
         interval."""
         while not stop_event.is_set():
-            self.drain(
-                min(poll_interval, max(0.0, self._next_sweep - time.monotonic()))
-            )
+            self.drain(min(_POLL_SEC, max(0.0, self._next_sweep - time.monotonic())))
 
     def sweep(self) -> None:
         """Evaluate every workflow not yet freed on the next drain."""
@@ -231,7 +226,7 @@ class SettledHistory:
                 return
             if (now := time.monotonic()) >= self._next_sweep:
                 self._requested |= self._candidates
-                self._next_sweep = now + self._sweep_interval
+                self._next_sweep = now + SWEEP_INTERVAL_SEC
             pending, self._requested = self._requested, set()
         for workflow_id in sorted(pending):
             try:

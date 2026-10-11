@@ -5,6 +5,7 @@ import asyncio
 from typing import Any
 
 from server.startup import rehydrate_root_state
+from tests.server.runtime_helpers import never_closed
 
 
 class _Recorder:
@@ -67,7 +68,9 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
     calls: list[str] = []
     runtime, control, registry = _Runtime(calls), _Control(calls), _Registry(calls)
     asyncio.run(
-        rehydrate_root_state(runtime, control, registry)  # type: ignore[arg-type]
+        rehydrate_root_state(
+            runtime, control, registry, None, never_closed  # type: ignore[arg-type]
+        )
     )
     # The claim store is bound and loaded before the runtime
     # re-drives suspended boundaries (a resident boundary would otherwise terminalize
@@ -91,7 +94,9 @@ def test_root_startup_settles_serve_requests_before_admission_opens() -> None:
     runtime, control, registry = _Runtime(calls), _Control(calls), _Registry(calls)
     gated_serve = _GatedServe(calls)
     asyncio.run(
-        rehydrate_root_state(runtime, control, registry, gated_serve)  # type: ignore[arg-type]
+        rehydrate_root_state(
+            runtime, control, registry, gated_serve, never_closed  # type: ignore[arg-type]
+        )
     )
     # The serve requests the restart ended settle once the runtime has restored the
     # serve tasks whose workers reap them, and before re-attaching replicas opens

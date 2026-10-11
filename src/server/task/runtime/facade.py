@@ -159,7 +159,7 @@ from ..outputs import (
     stored_members,
 )
 from ..parser import ParsedWorkflow, parse_workflow
-from ..redrive import StoreRedriveScheduler
+from ..redrive import StoreRedriveScheduler, manual_redrive
 from ..results import ResultReader, ResultUnreadable
 from ..v2 import (
     ExecutionMode,
@@ -175,7 +175,7 @@ from ..v2.policy import PolicySurface
 from ..v2.representations.admission import ResidentAdmissionBinding
 from ..v2.representations.operators import AgentModelGatewayBinding
 from ..v2.representations.plan import InferenceEmbodimentMenu
-from ..workflow_retry import WorkflowRetryScheduler
+from ..workflow_retry import WorkflowRetryScheduler, manual_retry
 from . import (
     agent_inputs,
     control_reads,
@@ -267,18 +267,6 @@ def _durability_retry(
     fire: Callable[[str], None], logger: logging.Logger
 ) -> WorkflowRetryScheduler:
     return WorkflowRetryScheduler(fire, logger, thread_name="durability-retry")
-
-
-def _manual_redrive(
-    fire: Callable[[str], None], logger: logging.Logger
-) -> StoreRedriveScheduler:
-    return StoreRedriveScheduler(fire, logger, run_thread=False)
-
-
-def _manual_durability_retry(
-    fire: Callable[[str], None], logger: logging.Logger
-) -> WorkflowRetryScheduler:
-    return WorkflowRetryScheduler(fire, logger, run_thread=False)
 
 
 def _element(value: ValueRef, index: int) -> ValueRef:
@@ -454,6 +442,7 @@ class TaskRuntime:
         durability_retry: Callable[
             [Callable[[str], None], logging.Logger], WorkflowRetryScheduler
         ] = _durability_retry,
+        inert: bool = False,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
@@ -461,7 +450,7 @@ class TaskRuntime:
         self._n8n = n8n
         self._logger = logger
         # A runtime that restores stored workflows to classify them, delivering nothing.
-        self._inert = False
+        self._inert = inert
         self._results = results
         self._redrive = redrive(self._drive_workflow, logger)
         self._durability = durability_retry(self._retry_durability, logger)
@@ -1003,10 +992,12 @@ class TaskRuntime:
             tracer=self._tracer,
             telemetry=self._telemetry,
             n8n=self._n8n,
-            redrive=_manual_redrive,
-            durability_retry=_manual_durability_retry,
+            redrive=manual_redrive,
+            durability_retry=manual_retry,
+            inert=True,
         )
-        scratch._inert = True
+        # The classification checks closure and archiving itself before it frees.
+        scratch.settled_history.require(closure=False, archive=False)
         return scratch
 
     def workflow_task_ids(self, workflow_id: str) -> list[str]:

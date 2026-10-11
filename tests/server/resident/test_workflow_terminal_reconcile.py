@@ -13,6 +13,7 @@ from server.resident.state import ClaimState, ClaimTerminalReason, ResidentSnaps
 from server.startup import rehydrate_root_state
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from tests.server.resident.test_service import _admission, _build, _env
+from tests.server.runtime_helpers import never_closed
 from tests.server.task.test_agent_episode_runtime import _held_boundary
 from tests.server.task.test_held_termination_release import _Scenario
 from tests.server.task.test_v2_orchestration import FakeRegistry, _runtime
@@ -41,7 +42,9 @@ def _restart(registry: FakeRegistry, snapshot: ResidentSnapshot) -> Any:
     runtime = _runtime(registry)
     svc, stores, _settled, _delivery = _build()
     asyncio.run(
-        rehydrate_root_state(runtime, svc, _SnapshotRegistry(snapshot))  # type: ignore[arg-type]
+        rehydrate_root_state(
+            runtime, svc, _SnapshotRegistry(snapshot), None, never_closed  # type: ignore[arg-type]
+        )
     )
     svc.shutdown()
     return stores

@@ -280,6 +280,7 @@ class EventMonitor:
         for thread in self._threads:
             thread.join(timeout=thread_join_timeout)
         self._threads = None
+        self._finalizer.stop()
 
         with self._pending_coros_lock:
             pending = list(self._pending_coros)

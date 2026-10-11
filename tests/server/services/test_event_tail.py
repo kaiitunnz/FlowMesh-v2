@@ -20,6 +20,7 @@ from tests.server.task.test_v2_orchestration import LINEAR, _register
 
 
 def _reclaimable(runtime: TaskRuntime, workflow_id: str) -> bool:
+    runtime.settled_history.require(closure=False, archive=False)
     with runtime._lock:
         return runtime._reclaim_check_locked(workflow_id) is not None
 
@@ -87,7 +88,7 @@ def test_a_late_report_for_a_freed_task_is_acknowledged_from_the_store() -> None
     assert runtime.task_freed(task_id)
     assert not runtime.task_freed("tsk-unknown")
     assert telemetry.sealed == []
-    setattr(registry, "load_history", _unavailable)
+    setattr(registry, "history_members", _unavailable)
     with pytest.raises(ConnectionError):
         monitor.handle_task_event(late)
 

@@ -21,7 +21,7 @@ from server.config import OrchestrationConfig
 from server.orchestration.telemetry import NULL_WORKFLOW_SPAN_EMITTER
 from server.registries.history import HistoryPublication
 from server.registries.workflow import WorkflowRegistry
-from server.task.finalizer import CloseOutcome, WorkflowFinalizer
+from server.task.finalizer import close_restored
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from server.task.runtime.history_bootstrap import (
@@ -29,7 +29,6 @@ from server.task.runtime.history_bootstrap import (
     HistoryBootstrap,
     _batches,
 )
-from server.task.workflow_retry import WorkflowRetryScheduler
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.redis_helpers import raw_control
@@ -59,7 +58,7 @@ _LOGGER = logging.getLogger("test.history_bootstrap")
 
 
 def _unstarted(registry: WorkflowRegistry) -> TaskRuntime:
-    return TaskRuntime(
+    runtime = TaskRuntime(
         registry,
         cast(Any, _Workers()),
         OrchestrationConfig(),
@@ -71,21 +70,18 @@ def _unstarted(registry: WorkflowRegistry) -> TaskRuntime:
         ),
         durability_retry=manual_durability_retry,
     )
+    runtime.settled_history.require(closure=False, archive=False)
+    return runtime
 
 
 def _close(runtime: TaskRuntime, workflow_id: str) -> bool:
-    finalizer = WorkflowFinalizer(
+    return close_restored(
         cast(Any, runtime._workflow_registry)._rds.sync,
         runtime,
         _LOGGER,
         NULL_WORKFLOW_SPAN_EMITTER,
-        retry=lambda fire, logger: WorkflowRetryScheduler(
-            fire, logger, run_thread=False
-        ),
-    )
-    return finalizer.close(workflow_id) in (
-        CloseOutcome.CLOSED,
-        CloseOutcome.ALREADY_CLOSED,
+        0,
+        workflow_id,
     )
 
 

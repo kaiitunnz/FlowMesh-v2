@@ -160,6 +160,7 @@ async def test_a_freed_workflow_serves_its_published_outputs_as_it_did(
             run.run(name, result)
     assert run.settled()
     served = _outputs(run)
+    run.runtime.settled_history.require(closure=False, archive=False)
     await run.runtime.start_settled_history()
 
     run.runtime.settled_history.drain()
