@@ -1749,7 +1749,9 @@ class TaskRuntime:
         if workflow_id is None:
             return
         with self._lock:
-            drained = self._actions.delivered_locked(workflow_id)
+            drained = self._actions.delivered_locked(
+                workflow_id
+            ) and self._settled_locked(workflow_id)
         if drained:
             self._settled_history.request(workflow_id)
 
@@ -1900,9 +1902,14 @@ class TaskRuntime:
                         workflow_id
                         for workflow_id in held
                         if self._settled_history.release_locked(workflow_id)
+                        and self._settled_locked(workflow_id)
                     ]
                 for workflow_id in released:
                     self._settled_history.request(workflow_id)
+
+    def _settled_locked(self, workflow_id: str) -> bool:
+        """Whether a workflow has settled, which a request to free it waits for."""
+        return self._committer.workflow_settlement_locked(workflow_id).settled
 
     def _hold_tail_locked(self, workflow_id: str) -> None:
         # A sealed workflow's tasks take no report, so nothing follows to hold it for.
