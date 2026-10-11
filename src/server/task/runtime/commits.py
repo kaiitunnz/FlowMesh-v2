@@ -625,8 +625,8 @@ class TransitionCommitter:
         """Fail and persist each task the engine settled as a declared failure whose
         record has not settled, ahead of a ledger write that reflects it.
 
-        A failure whose task has no record yet stays unapplied for a later write; once
-        failed, its record's durability is owed like any other commit's.
+        A failure whose task has no record yet is applied by a later write; a failed
+        record is committed, and owed when its write is held, as any other is.
         """
         failed: list[str] = []
         for task_id, reason in engine.unapplied_failures():

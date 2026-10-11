@@ -103,7 +103,7 @@ def test_a_task_stored_with_its_source_inline_loads_and_names_it_once_written() 
     runtime = _runtime(registry)
     workflow_id, task_ids = _register(runtime, _V1)
     raw = raw_control(registry)
-    # A store written before sources moved out of the task states.
+    # Each task state holds its source inline, naming no stored source.
     for task_id in task_ids:
         record = runtime.get_record(task_id)
         assert record is not None

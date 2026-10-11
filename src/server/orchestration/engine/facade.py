@@ -1221,12 +1221,12 @@ class OrchestrationEngine:
         return self._failures.failure_reason(task_id)
 
     def unapplied_failures(self) -> list[tuple[str, str]]:
-        """Each task settled as a declared failure whose record has not yet been
-        failed for it, with why."""
+        """Return each task settled as a declared failure whose record is owed that
+        failure, with why."""
         return self._failures.unapplied_failures()
 
     def mark_failure_applied(self, task_id: str) -> None:
-        """Note that a declared failure's task record no longer needs failing for it."""
+        """Mark a declared failure's task record as failed for it."""
         self._failures.mark_applied(task_id)
 
     def recovery_disposition(self, task_id: str) -> RecoveryDisposition | None:
@@ -1487,7 +1487,7 @@ class OrchestrationEngine:
         return self._codec.to_snapshot()
 
     def ledger_changes(self) -> LedgerChanges:
-        """What a write of the ledger stores, from what the last landed write left."""
+        """Capture the ledger write that stores the ledger as it stands."""
         return self._codec.changes()
 
     def ledger_written(self, changes: LedgerChanges) -> None:

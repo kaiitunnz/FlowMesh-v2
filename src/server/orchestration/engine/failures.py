@@ -56,8 +56,8 @@ class FailureLedger:
         return self.failure_reasons.get(task_id)
 
     def unapplied_failures(self) -> list[tuple[str, str]]:
-        """Each task settled as a declared failure whose record has not yet been
-        failed for it, with why."""
+        """Return each task settled as a declared failure whose record is owed that
+        failure, with why."""
         return [(task_id, self.failure_reasons[task_id]) for task_id in self.unapplied]
 
     def mark_applied(self, task_id: str) -> None:

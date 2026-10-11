@@ -99,7 +99,6 @@ class PersistedTask(BaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         data = handler(self)
-        # The source is the whole workflow's, stored once beside its tasks.
         del data["record"]["raw_yaml"]
         data["source_digest"] = self.record.source_digest()
         # ``failed_workers`` is excluded from TaskRecord's dump but routes retries, so
@@ -420,8 +419,8 @@ def _queue_sources(
 
 
 def load_context(sources: Mapping[str, str]) -> dict[str, Any]:
-    """The validation context a stored task state of a workflow with ``sources``
-    loads under."""
+    """Return the validation context a stored task state loads under, given its
+    workflow's stored ``sources``."""
     return {**PERSISTED_LOAD_CONTEXT, _SOURCES: sources}
 
 
@@ -1043,8 +1042,8 @@ class WorkflowRegistry:
             await pipe.execute()
 
     def keep_sources(self, workflow_id: str, items: Sequence[PersistedTask]) -> None:
-        """Store each workflow source the tasks name that the workflow does not hold,
-        as a task state loaded with its source inline names."""
+        """Store each source the tasks name that their workflow does not hold, as a
+        task state stored with its source inline names."""
         sources = task_sources(items).get(workflow_id, {})
         held = set(self._rds.sync.hash_keys(workflow_sources_key(workflow_id)))
         if missing := {d: text for d, text in sources.items() if d not in held}:

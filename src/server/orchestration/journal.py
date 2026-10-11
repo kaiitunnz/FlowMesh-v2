@@ -16,9 +16,8 @@ type JournalKey = tuple[str, Hashable]
 
 
 class LedgerJournal:
-    """What of a ledger changed since its last durable write: each changed entry of a
-    keyed collection or set, by collection and key, with the version it last changed
-    at.
+    """Records each entry of a keyed collection or set changed since the ledger's
+    last durable write, by collection and key, at the version it last changed at.
 
     Versions let a write clear only the changes it captured, so a change made while
     the write is in flight stays pending.
@@ -34,7 +33,7 @@ class LedgerJournal:
         self.pending[key] = self._version
 
     def ordinal(self) -> int:
-        """The next insertion ordinal, which orders a keyed collection on restore."""
+        """Return the next insertion ordinal, which orders a collection on restore."""
         ordinal = self._next_ordinal
         self._next_ordinal += 1
         return ordinal
@@ -128,7 +127,7 @@ EMPTY_MAP: FrozenMap[Any, Any] = FrozenMap()
 
 
 def frozen(value: Any) -> Any:
-    """A container as its immutable counterpart; any other value as it is."""
+    """Return a container as its immutable counterpart, any other value as is."""
     match value:
         case FrozenMap():
             return value

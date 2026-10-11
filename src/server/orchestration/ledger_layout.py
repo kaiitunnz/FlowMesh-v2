@@ -180,7 +180,7 @@ def scalar_field(name: str) -> str:
 
 
 def foundation_fields(snapshot_fields: Mapping[str, Any]) -> dict[str, str]:
-    """The fields of a ledger's layout and foundation."""
+    """Encode the fields of a ledger's layout and foundation."""
     foundation = {
         name: (value.model_dump(mode="json") if isinstance(value, BaseModel) else value)
         for name, value in snapshot_fields.items()
@@ -202,7 +202,7 @@ def encode_fields(
     sets: Mapping[str, Iterable[str]],
     scalars: Mapping[str, Any],
 ) -> dict[str, str]:
-    """Every field of a ledger."""
+    """Encode every field of a ledger."""
     fields = foundation_fields(foundation)
     for collection, (entries, ordinals) in keyed.items():
         for key, value in entries.items():
@@ -220,7 +220,7 @@ def encode_fields(
 
 
 def encode_ledger(stored: StoredLedger) -> dict[str, str]:
-    """Every field of a stored ledger."""
+    """Encode every field of a stored ledger."""
     snapshot, ordinals = stored.snapshot, stored.ordinals
 
     def keyed(collection: str) -> KeyedEntries:

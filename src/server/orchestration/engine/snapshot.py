@@ -42,7 +42,7 @@ from .topology import PlanTopology
 
 
 def _detached(snapshot: LedgerSnapshot) -> LedgerSnapshot:
-    """The snapshot with a copy of each entity another ledger holds."""
+    """Return the snapshot with a copy of each entity another ledger holds."""
     updates: dict[str, list[BaseModel]] = {}
     for name in KEYED:
         entities: list[BaseModel] = getattr(snapshot, name)
@@ -124,9 +124,12 @@ class SnapshotCodec:
     def restore(
         self, snapshot: LedgerSnapshot, ordinals: LedgerOrdinals | None = None
     ) -> None:
-        """Restore a ledger snapshot; ``ordinals`` names the stored insertion ordinal of
-        each keyed entry when it is the stored ledger, which a write then changes only
-        where the restore did. Without them the next write rewrites the ledger."""
+        """Restore a ledger snapshot into the ledger's owners.
+
+        With ``ordinals``, the stored insertion ordinal of each keyed entry, the
+        snapshot is the stored ledger and the next write carries only what the restore
+        changed; without them the next write rewrites the whole ledger.
+        """
         snapshot = _detached(snapshot)
         self._stored = ordinals
         for order in (ordinals or {}).values():
@@ -405,8 +408,8 @@ class SnapshotCodec:
     def _settle(
         self, snapshot: LedgerSnapshot, ordinals: LedgerOrdinals | None
     ) -> None:
-        """Take the restored ledger as what is stored, owing what the restore changed
-        of it, or a rewrite when it is not a stored ledger."""
+        """Take the restored ledger as stored, owing what the restore changed, or a
+        rewrite when it is no stored ledger."""
         self._stored = None
         self._written_lengths = {name: len(h) for name, h in self._histories.items()}
         self._written_scalars = self._scalars()
@@ -452,7 +455,7 @@ class SnapshotCodec:
         return LedgerSnapshot(**fields)
 
     def image(self) -> dict[str, str]:
-        """Every field of the ledger as it stands."""
+        """Encode every field of the ledger as it stands."""
         return encode_fields(
             self._foundation(),
             {
@@ -465,8 +468,8 @@ class SnapshotCodec:
         )
 
     def changes(self) -> LedgerChanges:
-        """The fields a write makes to store the ledger as it stands, given what the
-        writes that landed stored. Nothing is taken as written until ``written``."""
+        """Capture the write that stores the ledger as it stands over what the landed
+        writes stored; ``written`` takes it as landed."""
         captured = self._journal.captured()
         lengths = {name: len(history) for name, history in self._histories.items()}
         scalars = self._scalars()
