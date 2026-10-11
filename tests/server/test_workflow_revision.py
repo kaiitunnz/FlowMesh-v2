@@ -1,4 +1,4 @@
-"""Every write of a workflow's stored state bumps its revision."""
+"""Every write of a workflow's stored state bumps its revision, once per write."""
 
 from collections.abc import Callable
 from typing import Any
@@ -36,17 +36,17 @@ _WRITES: dict[str, Callable[[WorkflowRegistry, str, list[Any]], None]] = {
         w, control=WorkflowControl(open=True)
     ),
     "dynamic tasks": lambda r, w, items: r.commit_dynamic_tasks(
-        w, items, LedgerChanges(fields={})
+        w, items, LedgerChanges(fields={"x": "1"})
     ),
     "standalone task states": lambda r, w, items: r.save_task_states(items),
     "missing sources": lambda r, w, items: _keep_lost_sources(r, w, items),
     "schedule": lambda r, w, items: r.save_workflow_sched(w, True, 1),
-    "ledger": lambda r, w, items: r.save_ledger(w, LedgerChanges(fields={})),
+    "ledger": lambda r, w, items: r.save_ledger(w, LedgerChanges(fields={"x": "1"})),
 }
 
 
 @pytest.mark.parametrize("write", list(_WRITES))
-def test_each_write_of_a_workflow_bumps_its_revision(write: str) -> None:
+def test_each_write_of_a_workflow_bumps_its_revision_once(write: str) -> None:
     registry = _registry()
     workflow_id, task_ids = _register(_runtime(registry), _V1)
     items = [item for item in registry.load_task_states(workflow_id, *task_ids) if item]
@@ -55,7 +55,7 @@ def test_each_write_of_a_workflow_bumps_its_revision(write: str) -> None:
 
     _WRITES[write](registry, workflow_id, items)
 
-    assert _revision(registry, workflow_id) > before
+    assert _revision(registry, workflow_id) == before + 1
 
 
 def test_a_registered_workflow_is_open_until_unregistered() -> None:
@@ -68,3 +68,10 @@ def test_a_registered_workflow_is_open_until_unregistered() -> None:
 
     assert not raw.sismember(WORKFLOWS_OPEN_KEY, workflow_id)
     assert raw.get(workflow_revision_key(workflow_id)) is None
+
+
+def test_a_registration_starts_the_revision_at_one() -> None:
+    registry = _registry()
+    workflow_id, _ = _register(_runtime(registry), _V1)
+
+    assert _revision(registry, workflow_id) == 1

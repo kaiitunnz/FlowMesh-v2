@@ -316,8 +316,8 @@ def _page_order(
 
 
 def _queue_revision(pipe: _AnyPipeline, *workflow_ids: str) -> None:
-    """Queue a bump of each workflow's revision, which every write of its state
-    makes, so a transaction watching it sees any of them."""
+    """Queue a bump of each workflow's revision, which every pipeline writing its
+    state makes once, so a certification checking it sees any of them."""
     for workflow_id in dict.fromkeys(workflow_ids):
         pipe.incr(workflow_revision_key(workflow_id))
 
@@ -325,7 +325,6 @@ def _queue_revision(pipe: _AnyPipeline, *workflow_ids: str) -> None:
 def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> None:
     for item in items:
         pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
-    _queue_revision(pipe, *(item.record.workflow_id for item in items))
 
 
 def task_sources(items: Sequence[PersistedTask]) -> dict[str, dict[str, str]]:
@@ -366,6 +365,7 @@ def _queue_registration(
     record, remaining_tasks, failed_tasks = _create_workflow_record(
         workflow_id, [item.record for item in tasks], submitted_at
     )
+    _queue_revision(pipe, workflow_id)
     pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
     pipe.sadd(WORKFLOWS_OPEN_KEY, workflow_id)
     pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, {_record_member(record): 0})
@@ -465,7 +465,6 @@ def _queue_ledger_changes(
     pipe: _AnyPipeline, workflow_id: str, changes: LedgerChanges
 ) -> None:
     key = workflow_ds_key(workflow_id)
-    _queue_revision(pipe, workflow_id)
     if changes.reset:
         pipe.delete(key)
     if changes.fields:
@@ -505,7 +504,6 @@ def _queue_workflow_sources(
     pipe: _AnyPipeline, workflow_id: str, sources: dict[str, str]
 ) -> None:
     pipe.hset(workflow_sources_key(workflow_id), mapping=sources)
-    _queue_revision(pipe, workflow_id)
 
 
 class WorkflowRegistry(WorkflowHistoryStore):
@@ -970,6 +968,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
         if not items:
             return
         with self._rds.sync.control_pipeline() as pipe:
+            _queue_revision(pipe, *(item.record.workflow_id for item in items))
             _queue_sources(pipe, items)
             _queue_task_states(pipe, items)
             pipe.execute()
@@ -979,6 +978,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
         if not items:
             return
         async with self._rds.asyncio.control_pipeline() as pipe:
+            _queue_revision(pipe, *(item.record.workflow_id for item in items))
             _queue_sources(pipe, items)
             _queue_task_states(pipe, items)
             await pipe.execute()
@@ -990,6 +990,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
         held = set(self._rds.sync.hash_keys(workflow_sources_key(workflow_id)))
         if missing := {d: text for d, text in sources.items() if d not in held}:
             with self._rds.sync.control_pipeline() as pipe:
+                _queue_revision(pipe, workflow_id)
                 _queue_workflow_sources(pipe, workflow_id, missing)
                 pipe.execute()
 
@@ -1001,6 +1002,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
         held = set(await self._rds.asyncio.hash_keys(workflow_sources_key(workflow_id)))
         if missing := {d: text for d, text in sources.items() if d not in held}:
             async with self._rds.asyncio.control_pipeline() as pipe:
+                _queue_revision(pipe, workflow_id)
                 _queue_workflow_sources(pipe, workflow_id, missing)
                 await pipe.execute()
 
@@ -1070,6 +1072,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
     ) -> None:
         """Store a workflow's ledger changes with what it holds beyond its tasks."""
         with self._rds.sync.control_pipeline() as pipe:
+            _queue_revision(pipe, workflow_id)
             _queue_ledger(pipe, workflow_id, ledger, control)
             pipe.execute()
 
@@ -1080,6 +1083,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
         control: WorkflowControl | None = None,
     ) -> None:
         async with self._rds.asyncio.control_pipeline() as pipe:
+            _queue_revision(pipe, workflow_id)
             _queue_ledger(pipe, workflow_id, ledger, control)
             await pipe.execute()
 
