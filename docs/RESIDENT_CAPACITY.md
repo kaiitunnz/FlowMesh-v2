@@ -66,8 +66,9 @@ highest admission epoch lands in `resident:cs:retired`, then its live fields are
 successor raised under the same `invocation_id` takes the next epoch. An inert replica that
 no live claim names moves with its lease to `resident:cs:replicas`, and a serve task's
 family with nothing live left moves to `resident:cs:families`; the listings read both. A
-retirement or move that fails is retried until it lands. A settled workflow is freed only
-once every resident invocation it raised has retired.
+retirement, move or gated serve settlement that a store failure interrupts is retried until
+it lands, its credit held meanwhile; the serve client is answered at once. A settled
+workflow is freed only once every resident invocation it raised has retired.
 
 A restart loads only `resident:cs`, and refuses a resident key of the wrong type (delete it
 and restart), a field it cannot read, or a claim without its request. The retired records
