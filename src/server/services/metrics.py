@@ -63,7 +63,7 @@ class MetricsRecorder:
         }
 
         self._task_meta: dict[str, dict[str, Any]] = {}
-        self._completed_tasks: set[str] = set()
+        self._completed_tasks = 0
 
         self._timings: dict[str, dict[str, dict[str, float]]] = {
             "overall": _fresh_timing_bucket(),
@@ -216,10 +216,16 @@ class MetricsRecorder:
                 "total": total_time,
                 "status": status,
             }
-            self._completed_tasks.add(task_id)
+            self._count_completed(meta)
             completion_anchor = finished_ts if finished_ts is not None else time.time()
             self._record_task_completion(completion_anchor)
             self._write_metrics()
+
+    def forget_tasks(self, task_ids: list[str]) -> None:
+        """Drop what is kept per task for tasks that will report nothing more."""
+        with self._lock:
+            for task_id in task_ids:
+                self._task_meta.pop(task_id, None)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -431,8 +437,13 @@ class MetricsRecorder:
             "total": total_time,
             "status": "succeeded",
         }
-        self._completed_tasks.add(event.task_id)
+        self._count_completed(meta)
         self._record_task_completion(finished_ts)
+
+    def _count_completed(self, meta: dict[str, Any]) -> None:
+        if not meta.get("completed"):
+            meta["completed"] = True
+            self._completed_tasks += 1
 
     def _on_task_failed(self, meta: dict[str, Any], event: TaskEvent) -> None:
         self._on_task_terminal(meta, event)
@@ -730,7 +741,7 @@ class MetricsRecorder:
             "task_timings": timings,
             "workers": workers,
             "active_workers_count": len(self._active_workers),
-            "completed_tasks": sorted(self._completed_tasks),
+            "completed_tasks": self._completed_tasks,
         }
         if self._density_plot_enabled:
             snapshot["density_bucket_seconds"] = self._density_bucket_sec
