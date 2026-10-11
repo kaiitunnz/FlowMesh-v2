@@ -609,14 +609,6 @@ class ResultSlot(BaseModel):
             self.sequence,
         )
 
-    @property
-    def legacy_slot_key(self) -> str:
-        """The unscoped key format, read only to re-key a publication stored under
-        it."""
-        key = "" if self.logical_key is None else f":{self.logical_key}"
-        seq = "" if self.sequence is None else f"#{self.sequence}"
-        return f"{self.instance_id}:{self.output_id}{key}{seq}"
-
 
 class ResultPublication(BaseModel):
     """Idempotent terminal publication of a declared logical output."""

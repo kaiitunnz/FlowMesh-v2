@@ -30,34 +30,16 @@ from ..state import (
     LedgerSnapshot,
     LoopInstanceStatus,
     PublicationOutcome,
-    ResultPublication,
-    ResultSlot,
 )
 from .attempts import AttemptLifecycle
 from .authority import AuthorityLedger
 from .boundaries import BoundaryLedger
 from .embodiments import EmbodimentLedger
-from .failures import DECLARED_FAILURE_REASON, FailureLedger
+from .failures import FailureLedger
 from .inputs import AcceptedInputLedger
 from .ledger import OrchestrationLedger
 from .publications import PublicationLedger
 from .topology import PlanTopology
-
-
-def _rekeyed_publications(
-    slots: Iterable[ResultSlot], publications: Iterable[ResultPublication]
-) -> dict[str, ResultPublication]:
-    """Index publications by slot identity, re-keying any stored under the unscoped
-    key format."""
-    current = {slot.legacy_slot_key: slot.slot_key for slot in slots}
-    identities = set(current.values())
-    indexed: dict[str, ResultPublication] = {}
-    for publication in publications:
-        key = publication.slot_key
-        if key not in identities and (rekeyed := current.get(key)) is not None:
-            publication = publication.model_copy(update={"slot_key": rekeyed})
-        indexed[publication.slot_key] = publication
-    return indexed
 
 
 def _detached(snapshot: LedgerSnapshot) -> LedgerSnapshot:
@@ -248,9 +230,7 @@ class SnapshotCodec:
         )
         self._publication.publications = self._keyed_dict(
             "result_publications",
-            _rekeyed_publications(
-                self._publication.slots.values(), snapshot.result_publications
-            ).items(),
+            ((p.slot_key, p) for p in snapshot.result_publications),
         )
         self._ledger.trace = self._history("trace", snapshot.trace)
         self._ledger.private_state.adopt(
@@ -413,18 +393,12 @@ class SnapshotCodec:
         self._failures.failed_scopes = self._set(
             "failed_scopes", snapshot.failed_scopes
         )
-        # A ledger stored without failure reasons names each failed work item's own.
         self._failures.failure_reasons = self._keyed_dict(
             "failure_reasons", snapshot.failure_reasons.items()
         )
         self._failures.instance_failure = snapshot.instance_failure
         self._failures.control_failure = snapshot.control_failure
         self._failures.instance_cancelled = snapshot.instance_cancelled
-        for wi in self._ledger.work_items.values():
-            if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
-                self._failures.failure_reasons.setdefault(
-                    wi.legacy_task_id, wi.failure_reason or DECLARED_FAILURE_REASON
-                )
         self._failures.unapplied = dict.fromkeys(self._failures.failure_reasons)
         # A spawn-site denial names no work item; an agent's denied boundary names one
         # and never refuses a later spawn.

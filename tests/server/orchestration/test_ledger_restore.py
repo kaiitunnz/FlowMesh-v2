@@ -25,26 +25,3 @@ def test_a_restored_ledger_captures_the_same_snapshot() -> None:
     assert (
         restored.to_snapshot().model_dump_json() == live.to_snapshot().model_dump_json()
     )
-
-
-def test_a_ledger_stored_without_failure_reasons_names_each_failed_work_item() -> None:
-    live = _failed_chain()
-    stored = live.to_snapshot().model_copy(update={"failure_reasons": {}})
-
-    restored = OrchestrationEngine(stored, live._topology.bundle)
-
-    assert [live.failure_reason(t) for t in "AB"] == ["boom", "Dependency A failed"]
-    assert [restored.failure_reason(t) for t in "AB"] == [
-        "boom",
-        "declared-failure obligation",
-    ]
-
-
-def test_a_stored_failure_reason_wins_over_the_work_items_own() -> None:
-    live = _failed_chain()
-    stored = live.to_snapshot().model_copy(update={"failure_reasons": {"A": "kept"}})
-
-    restored = OrchestrationEngine(stored, live._topology.bundle)
-
-    assert restored.failure_reason("A") == "kept"
-    assert restored.failure_reason("B") == "declared-failure obligation"
