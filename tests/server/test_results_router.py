@@ -235,7 +235,7 @@ async def test_upload_result_file_shares_the_task_directories_before_writing(
         await results_router.upload_result_file(
             task_id="task-1",
             file=UploadFile(file=io.BytesIO(b"x"), filename="out.txt"),
-            runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+            runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
             principal=_principal(),
             results_dir=tmp_path,
             logger=logger,
@@ -338,7 +338,7 @@ async def test_upload_result_file_copies_in_chunks_off_the_event_loop(
     await results_router.upload_result_file(
         task_id="task-1",
         file=upload,
-        runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+        runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
         principal=_principal(),
         results_dir=tmp_path,
         logger=logger,
@@ -646,7 +646,7 @@ async def test_an_upload_through_a_link_loop_is_refused(
         await results_router.upload_result_file(
             task_id="task-1",
             file=UploadFile(file=io.BytesIO(b"x"), filename="loop/out.txt"),
-            runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+            runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
             principal=_principal(),
             results_dir=tmp_path,
             logger=logger,

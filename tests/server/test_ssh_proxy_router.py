@@ -48,7 +48,7 @@ def _record(**ssh: Any) -> MagicMock:
 
 def _make_app(record: MagicMock, relay: Any) -> FastAPI:
     runtime = MagicMock()
-    runtime.get_record.return_value = record
+    runtime.task_record.return_value = record
     worker_registry = MagicMock()
     worker_registry.get_worker_async = AsyncMock(
         return_value=SimpleNamespace(id="wkr-1", node_id="nde-1")

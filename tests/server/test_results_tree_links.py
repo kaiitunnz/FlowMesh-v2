@@ -144,7 +144,7 @@ async def test_an_artifact_upload_writes_through_no_link(
         await results_router.upload_result_file(
             task_id="tsk-1",
             file=UploadFile(file=io.BytesIO(b"x"), filename=filename),
-            runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+            runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
             principal=cast(Any, None),
             results_dir=results,
             logger=_LOGGER,
@@ -164,7 +164,7 @@ async def test_an_artifact_upload_replaces_a_linked_file(
     await results_router.upload_result_file(
         task_id="tsk-1",
         file=UploadFile(file=io.BytesIO(b"x"), filename="out.txt"),
-        runtime=cast(Any, SimpleNamespace(get_record=lambda _task_id: None)),
+        runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
         principal=cast(Any, None),
         results_dir=results,
         logger=_LOGGER,
