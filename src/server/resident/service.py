@@ -778,7 +778,7 @@ class ResidentCapacityControl:
         Safe to call from any thread but the loop's own.
         """
         if self._loop is None:
-            return self._claims_terminal(invocation_ids)
+            return self.claims_terminal(invocation_ids)
         answer = asyncio.run_coroutine_threadsafe(
             self._claims_terminal_async(invocation_ids), self._loop
         )
@@ -789,9 +789,11 @@ class ResidentCapacityControl:
             return False
 
     async def _claims_terminal_async(self, invocation_ids: Collection[str]) -> bool:
-        return self._claims_terminal(invocation_ids)
+        return self.claims_terminal(invocation_ids)
 
-    def _claims_terminal(self, invocation_ids: Collection[str]) -> bool:
+    def claims_terminal(self, invocation_ids: Collection[str]) -> bool:
+        """Whether every claim the invocations raised is terminal. Called on the loop
+        that owns the claim store, or before one is bound."""
         return all(
             claim.state is ClaimState.TERMINAL
             for invocation_id in invocation_ids

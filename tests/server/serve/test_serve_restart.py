@@ -43,7 +43,7 @@ _LOST = "serve request lost in a root restart"
 class _Runtime:
     """The restored runtime: the serve task still runs on its worker."""
 
-    async def rehydrate(self) -> None:
+    async def restart(self, *args: Any) -> None:
         return None
 
     def live_resident_task_ids(self) -> frozenset[str]:

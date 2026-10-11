@@ -6,7 +6,14 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -193,6 +200,7 @@ from .content_bindings import ContentBindings, ScopedInput, UnreadableInput
 from .dispatch_fence import DispatchFence, Publish, supplier_id
 from .episode_dispatch import EpisodeDispatch, EpisodeFeasibility
 from .fanout import FanoutRead
+from .history_bootstrap import HistoryBootstrap
 from .input_checks import INPUT_VERDICT_REPORT, InputChecks
 from .mediated_ops import (
     MediatedOperations,
@@ -257,6 +265,18 @@ def _durability_retry(
     fire: Callable[[str], None], logger: logging.Logger
 ) -> WorkflowRetryScheduler:
     return WorkflowRetryScheduler(fire, logger, thread_name="durability-retry")
+
+
+def _manual_redrive(
+    fire: Callable[[str], None], logger: logging.Logger
+) -> StoreRedriveScheduler:
+    return StoreRedriveScheduler(fire, logger, run_thread=False)
+
+
+def _manual_durability_retry(
+    fire: Callable[[str], None], logger: logging.Logger
+) -> WorkflowRetryScheduler:
+    return WorkflowRetryScheduler(fire, logger, run_thread=False)
 
 
 def _element(value: ValueRef, index: int) -> ValueRef:
@@ -440,7 +460,11 @@ class TaskRuntime:
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
+        self._orchestration = orchestration
+        self._n8n = n8n
         self._logger = logger
+        # A runtime that restores stored workflows to classify them, delivering nothing.
+        self._inert = False
         self._results = results
         self._redrive = redrive(self._drive_workflow, logger)
         self._durability = durability_retry(self._retry_durability, logger)
@@ -938,16 +962,83 @@ class TaskRuntime:
     # Rehydration
     # ------------------------------------------------------------------ #
 
-    async def rehydrate(self) -> int:
+    async def restart(
+        self,
+        close: Callable[["TaskRuntime", str], bool],
+        claims_terminal: Callable[[Collection[str]], bool] | None = None,
+        archived: Callable[[str], bool | None] | None = None,
+    ) -> int:
+        """Restore every workflow not freed, then begin freeing settled ones.
+
+        A store holding workflows registered before the open-workflow index existed has
+        each classified first, a bounded batch at a time. ``close`` closes a settled
+        workflow restored in the given runtime and returns whether it is closed;
+        ``claims_terminal`` runs on the event loop that owns the resident claims.
+        Returns the number of workflows restored.
+        """
+        await HistoryBootstrap(
+            self._workflow_registry,
+            self._scratch_runtime,
+            close,
+            claims_terminal,
+            archived,
+            self._logger,
+        ).run()
+        restored = await self.rehydrate(
+            await self._workflow_registry.open_workflow_ids_async()
+        )
+        await self.start_settled_history()
+        return restored
+
+    def _scratch_runtime(self) -> "TaskRuntime":
+        """A runtime over the same store that restores workflows and delivers
+        nothing."""
+        scratch = TaskRuntime(
+            self._workflow_registry,
+            self._worker_registry,
+            self._orchestration,
+            self._results,
+            self._logger,
+            self._credential_vault,
+            surface=self._policy_surface,
+            control=self._control,
+            tracer=self._tracer,
+            telemetry=self._telemetry,
+            n8n=self._n8n,
+            redrive=_manual_redrive,
+            durability_retry=_manual_durability_retry,
+        )
+        scratch._inert = True
+        return scratch
+
+    def workflow_task_ids(self, workflow_id: str) -> list[str]:
+        """The ids of a resident workflow's tasks."""
+        with self._lock:
+            return self._tasks.ids_of(workflow_id)
+
+    def reclaim_invocations(self, workflow_id: str) -> frozenset[str] | None:
+        """The invocations whose resident claims freeing a workflow waits on, or None
+        while the runtime still needs its state."""
+        with self._lock:
+            check = self._reclaim_check_locked(workflow_id)
+        return check.invocation_ids if check is not None else None
+
+    async def rehydrate(self, workflow_ids: Collection[str] | None = None) -> int:
         """Rebuild in-memory scheduler state from durable Redis records.
 
-        Reconstructs every live workflow's DAG, ready queue, and epoch state from the
-        persisted per-task snapshots. In-flight (DISPATCHED / CANCELLING) tasks are left
-        assigned to their worker: completions that landed during the restart arrive via
-        the replayed task-event stream, and genuinely departed workers are recovered by
-        the watchdog. Returns the number of workflows restored.
+        Reconstructs each of ``workflow_ids``, or every stored workflow, its DAG, ready
+        queue, and epoch state from the persisted per-task snapshots. In-flight
+        (DISPATCHED / CANCELLING) tasks are left assigned to their worker: completions
+        that landed during the restart arrive via the replayed task-event stream, and
+        genuinely departed workers are recovered by the watchdog. Returns the number of
+        workflows restored.
         """
-        workflow_ids = await self._workflow_registry.get_workflow_ids_async()
+        if workflow_ids is None:
+            workflow_ids = await self._workflow_registry.get_workflow_ids_async()
+        return len(await self.restore(workflow_ids))
+
+    async def restore(self, workflow_ids: Collection[str]) -> list[str]:
+        """Rebuild the given workflows' scheduler state; returns those restored."""
         rehydrated_at = time.time()
         restored: list[str] = []
         for workflow_id in sorted(workflow_ids):
@@ -956,6 +1047,8 @@ class TaskRuntime:
             except Exception as exc:
                 if store_unavailable(exc):
                     raise
+                if self._inert:
+                    continue
                 tasks, revokes = await self._fail_unrestorable_workflow(
                     workflow_id, exc
                 )
@@ -1013,12 +1106,13 @@ class TaskRuntime:
             ]
         # Rehydrate completes before the API accepts a submission, so no workflow is
         # between vaulting its credentials and registering.
-        await self._credential_vault.retain_only(live)
-        if restored:
+        if not self._inert:
+            await self._credential_vault.retain_only(live)
+        if restored and not self._inert:
             self._logger.info(
                 "Rehydrated %d workflow(s) from durable state", len(restored)
             )
-        return len(restored)
+        return restored
 
     async def _load_stored_workflow(self, workflow_id: str) -> (
         tuple[
@@ -1608,14 +1702,16 @@ class TaskRuntime:
                 with self._lock:
                     ready = self._actions.take_ready()
                     ended = self._reservations.take_ended()
-                if failed := self._reservations.release_workers(ended):
+                if not self._inert and (
+                    failed := self._reservations.release_workers(ended)
+                ):
                     with self._lock:
                         self._reservations.requeue_ended(failed)
                 if not ready:
                     return
                 for workflow_id, action in ready:
                     try:
-                        delivered = self._deliver(workflow_id, action)
+                        delivered = self._inert or self._deliver(workflow_id, action)
                     except Exception:
                         self._logger.exception(
                             "Delivering %s failed", type(action).__name__

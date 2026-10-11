@@ -446,7 +446,7 @@ def test_finalizing_leaves_no_per_task_key(tmp_path: Path) -> None:
     restarted, _ = _streaming_archiver(
         tmp_path, {"tsk-1": TaskStatus.DONE}, streams=streams
     )
-    assert restarted._archived("tsk-1")
+    assert restarted.archived("tsk-1")
 
 
 def test_a_finalized_task_without_lines_reads_archived_after_a_restart(
@@ -467,7 +467,7 @@ def test_a_finalized_task_without_lines_reads_archived_after_a_restart(
     ):
         restarted._tick()
 
-    assert restarted._archived("tsk-1") is True
+    assert restarted.archived("tsk-1") is True
     finalize.assert_not_called()
 
 
@@ -676,7 +676,7 @@ def test_a_lineless_task_crashing_inside_finalize_finalizes_after_restart(
         restarted._tick()
 
     assert _manifest(restarted, "tsk-1").is_file()
-    assert restarted._archived("tsk-1") is True
+    assert restarted.archived("tsk-1") is True
 
 
 def test_a_failed_manifest_write_keeps_its_checkpoint_and_retries(
@@ -699,12 +699,12 @@ def test_a_failed_manifest_write_keeps_its_checkpoint_and_retries(
     ):
         archiver._tick()
         assert not _manifest(archiver, "tsk-1").exists()
-        assert archiver._archived("tsk-1") is False
+        assert archiver.archived("tsk-1") is False
         clock[0] += 60
         archiver._tick()
 
     assert _manifest(archiver, "tsk-1").is_file()
-    assert archiver._archived("tsk-1") is True
+    assert archiver.archived("tsk-1") is True
 
 
 def test_a_finished_task_is_reported_once_its_logs_need_no_archiving(

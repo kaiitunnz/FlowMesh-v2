@@ -306,6 +306,15 @@ def _stored_tasks(
     ]
 
 
+def _queue_certified(pipe: _AnyPipeline, workflow_ids: Sequence[str]) -> None:
+    for workflow_id in workflow_ids:
+        pipe.hexists(workflow_history_key(workflow_id), CERTIFICATE_FIELD)
+
+
+def _certified(replies: Sequence[Any]) -> list[bool]:
+    return [reply is True or reply == 1 for reply in replies]
+
+
 def _outputs(
     replies: Sequence[str | None],
 ) -> tuple[HistoryCertificate, OutputsHistory | None] | None:
@@ -387,6 +396,18 @@ class WorkflowHistoryStore:
             workflow_history_key(workflow_id), [CERTIFICATE_FIELD]
         )
         return _certificate(raw)
+
+    def history_certified(self, workflow_ids: Sequence[str]) -> list[bool]:
+        """Whether each workflow holds a certificate; one whose history key is not a
+        hash holds none."""
+        with self._rds.sync.control_pipeline(transaction=False) as pipe:
+            _queue_certified(pipe, workflow_ids)
+            return _certified(pipe.execute(raise_on_error=False))
+
+    async def history_certified_async(self, workflow_ids: Sequence[str]) -> list[bool]:
+        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
+            _queue_certified(pipe, workflow_ids)
+            return _certified(await pipe.execute(raise_on_error=False))
 
     def outputs_history(
         self, workflow_id: str

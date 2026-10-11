@@ -13,8 +13,8 @@ class _Recorder:
 
 
 class _Runtime(_Recorder):
-    async def rehydrate(self) -> None:
-        self.calls.append("runtime.rehydrate")
+    async def restart(self, *args: Any) -> None:
+        self.calls.append("runtime.restart")
 
     def release_ended_reservations(self) -> None:
         self.calls.append("runtime.release")
@@ -44,6 +44,9 @@ class _Control(_Recorder):
 
     def rehydrate(self, snapshot: Any) -> None:
         self.calls.append("control.rehydrate")
+
+    def claims_terminal(self, invocation_ids: Any) -> bool:
+        return True
 
     def reattach_replicas(self, live_serve_tasks: Any) -> None:
         self.calls.append("control.reattach")
@@ -75,7 +78,7 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
-        "runtime.rehydrate",
+        "runtime.restart",
         "control.reattach",
         "runtime.release",
         "control.reconcile",
@@ -97,7 +100,7 @@ def test_root_startup_settles_serve_requests_before_admission_opens() -> None:
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
-        "runtime.rehydrate",
+        "runtime.restart",
         "serve.reconcile",
         "control.reattach",
         "runtime.release",

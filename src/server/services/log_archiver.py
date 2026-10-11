@@ -102,7 +102,7 @@ class TaskLogArchiver:
                 if task_id in self._archived_ids:
                     continue
                 if task_id not in self._states:
-                    archived = self._archived(task_id)
+                    archived = self.archived(task_id)
                     if archived is None:
                         continue
                     if archived:
@@ -199,7 +199,7 @@ class TaskLogArchiver:
     def _base_dir(self, task_id: str) -> Path:
         return result_file_path(self._results_dir, task_id).parent
 
-    def _archived(self, task_id: str) -> bool | None:
+    def archived(self, task_id: str) -> bool | None:
         """Return whether a finished task's logs are archived: no stream checkpoint is
         held and something stands at its log path or where a directory holding it
         belongs. None when the path could not be checked."""

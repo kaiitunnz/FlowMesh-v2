@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 
 from .network.rendezvous import RootRendezvousBridge
 from .registries.node import NodeRegistry
@@ -10,11 +11,17 @@ from .serve import GatedServe
 from .task.runtime import TaskRuntime
 
 
+def _left_open(runtime: TaskRuntime, workflow_id: str) -> bool:
+    return False
+
+
 async def rehydrate_root_state(
     runtime: TaskRuntime | None,
     resident_control: ResidentCapacityControl | None,
     resident_registry: ResidentRegistry | None,
     gated_serve: GatedServe | None = None,
+    close: Callable[[TaskRuntime, str], bool] = _left_open,
+    archived: Callable[[str], bool | None] | None = None,
 ) -> None:
     """Rebuild durable root state on startup in a credit-safe order.
 
@@ -29,14 +36,18 @@ async def rehydrate_root_state(
     kept past its ledger terminal. Restored replicas re-attach to their serve tasks once
     the runtime has restored those tasks' records, and resident admission waits until
     they have. A worker reserved for a dispatch the restored runtime does not hold is
-    released.
+    released. The runtime restores the workflows not freed, freeing first the settled
+    ones a store kept from before it indexed them, with ``close`` closing each and
+    ``archived`` telling whether a task's logs need no more archiving.
     """
     resident = resident_control if resident_registry is not None else None
     if resident is not None and resident_registry is not None:
         resident.bind_loop(asyncio.get_running_loop())
         resident.rehydrate(await resident_registry.load_snapshot_async())
     if runtime is not None:
-        await runtime.rehydrate()
+        await runtime.restart(
+            close, resident.claims_terminal if resident is not None else None, archived
+        )
     if resident is not None:
         if gated_serve is not None:
             gated_serve.reconcile_terminals()
