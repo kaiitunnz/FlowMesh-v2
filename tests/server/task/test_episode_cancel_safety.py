@@ -9,7 +9,9 @@ and the per-step usage row it carries is tagged with the status the task is actu
 import asyncio
 from typing import Any, cast
 
-from server.orchestration import WorkItemStatus
+import pytest
+
+from server.orchestration import InvocationState, WorkItemStatus
 from server.orchestration.tool_dispatch import (
     FacadeCallMember,
     FacadeCompletionMode,
@@ -160,6 +162,55 @@ def test_cancelling_an_episode_suspended_on_a_boundary_settles_it() -> None:
         # A boundary outcome arriving afterwards settles nothing and revives nothing.
         assert runtime.settle_episode_invocation(writer, "m0", "late") is False
         assert runtime._tasks[writer].status == TaskStatus.CANCELLED
+        assert_reclaimable(runtime, workflow_id)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "state", [InvocationState.ACKNOWLEDGED, InvocationState.UNCERTAIN]
+)
+def test_a_cancelled_episode_stays_resident_while_its_boundary_is_in_flight(
+    state: InvocationState,
+) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="m0",
+                    interface="model",
+                    payload="draft",
+                ),
+                ScriptedStep(op="complete", value_from="m0"),
+            ],
+            "v1",
+        )
+        result = _run_step(runtime, adapter, writer)
+        runtime.mark_succeeded(
+            writer, "wkr-1", {"agent_episode": result.model_dump(mode="json")}, _TS
+        )
+        runtime.cancel_workflow(workflow_id)
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        ((_, invocation_id),) = engine._boundaries.unsettled_invocation_boundaries()
+        settled = engine._ledger.invocations[invocation_id]
+        assert_reclaimable(runtime, workflow_id)
+
+        # Its effect is still in flight, as a resident request whose delivery is
+        # unknown is: nothing may free the workflow until the invocation ends.
+        engine._ledger.invocations[invocation_id] = settled.model_copy(
+            update={"state": state}
+        )
+        with runtime._lock:
+            assert runtime._reclaim_check_locked(workflow_id) is None
+
+        engine._ledger.invocations[invocation_id] = settled
         assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
