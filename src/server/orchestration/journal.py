@@ -47,7 +47,7 @@ class LedgerJournal:
         self.pending.clear()
 
     def captured(self) -> dict[JournalKey, int]:
-        return dict(self.pending)
+        return self.pending.copy()
 
     def clear(self, captured: Mapping[JournalKey, int]) -> None:
         """Clear the captured changes not changed again since."""

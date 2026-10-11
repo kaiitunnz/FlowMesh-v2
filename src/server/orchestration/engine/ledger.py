@@ -90,7 +90,7 @@ class OrchestrationLedger:
         self.root_scope = snapshot.root_scope
         self.root_grant = snapshot.root_grant
         self.next_seq = snapshot.next_seq
-        self.private_state = PrivateStateLedger(snapshot.private_state)
+        self.private_state = PrivateStateLedger()
         self.scopes: TrackedDict[str, Scope] = TrackedDict(journal, "scopes")
         self.activations: TrackedDict[str, Activation] = TrackedDict(
             journal, "activations"
