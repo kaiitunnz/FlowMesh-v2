@@ -10,7 +10,16 @@ no write has touched since its runtime state was read.
 
 import itertools
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    Callable,
+    Collection,
+    Generator,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import aclosing, closing
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,11 +51,22 @@ from ..task.history import (
     OutputHistory,
     OutputsHistory,
     TaskHistory,
+    member_task_id,
     output_index_field,
     output_member_field,
 )
 from ..task.models import TaskStatus
 from ..task.v2.representations.results import ResultDeclaration
+from .scans import (
+    chunked,
+    chunked_async,
+    lex_bounds,
+    lex_scan,
+    lex_scan_async,
+    merged,
+    merged_async,
+    scan_sizes,
+)
 from .task_states import PersistedTask, load_context
 
 type _AnyPipeline = Pipeline | AsyncPipeline
@@ -542,10 +562,26 @@ def _stored_output(
     return declaration, _output_members([raw_member])[0]
 
 
-def _range_bounds(bound: str | None, forward: bool) -> tuple[str, str]:
-    if forward:
-        return f"({bound}" if bound is not None else "-", "+"
-    return f"({bound}" if bound is not None else "+", "-"
+# How many freed tasks a listing reads at a time, the first read and the most.
+_HISTORY_CHUNK_MIN = 64
+_HISTORY_CHUNK_MAX = 4096
+
+
+def _history_sizes(limit: int) -> Iterator[int]:
+    return scan_sizes(max(_HISTORY_CHUNK_MIN, limit), True, _HISTORY_CHUNK_MAX)
+
+
+def _past(member: str, bound: str | None, forward: bool) -> bool:
+    return bound is None or (member > bound if forward else member < bound)
+
+
+def _in_scan_order(
+    members: Sequence[str | None], bound: str | None, forward: bool
+) -> list[str]:
+    return sorted(
+        (m for m in members if m is not None and _past(m, bound, forward)),
+        reverse=not forward,
+    )
 
 
 def _task_fields(fields: Sequence[str]) -> list[str]:
@@ -786,15 +822,139 @@ class WorkflowHistoryStore:
         order, ascending when ``forward``, else descending; from the oldest or newest
         when ``bound`` is None. Only tasks that settled ``status`` when given."""
         return self._rds.sync.lex_range(
-            task_history_key(status), *_range_bounds(bound, forward), count, not forward
+            task_history_key(status), *lex_bounds(bound, forward), count, not forward
         )
 
     async def history_range_async(
         self, status: str | None, bound: str | None, forward: bool, count: int
     ) -> list[str]:
         return await self._rds.asyncio.lex_range(
-            task_history_key(status), *_range_bounds(bound, forward), count, not forward
+            task_history_key(status), *lex_bounds(bound, forward), count, not forward
         )
+
+    def task_history_page[T](
+        self,
+        select: Callable[[StoredTask], T | None],
+        limit: int,
+        bound: str | None,
+        forward: bool,
+        statuses: Collection[str] | None = None,
+        workflow_ids: Collection[str] | None = None,
+        task_ids: Collection[str] | None = None,
+    ) -> list[T]:
+        """Up to ``limit`` of what ``select`` makes of the freed tasks past the index
+        member ``bound`` in scan order, ascending when ``forward``, skipping each it
+        makes None of: the tasks of ``workflow_ids`` or among ``task_ids`` when either
+        is given, else those that settled one of ``statuses``, or every freed task."""
+        found: list[T] = []
+        with closing(
+            self._history_scan(bound, forward, limit, statuses, workflow_ids, task_ids)
+        ) as chunks:
+            for members in chunks:
+                for stored in self.load_history([member_task_id(m) for m in members]):
+                    if stored is not None and (item := select(stored)) is not None:
+                        found.append(item)
+                        if len(found) == limit:
+                            return found
+        return found
+
+    async def task_history_page_async[T](
+        self,
+        select: Callable[[StoredTask], T | None],
+        limit: int,
+        bound: str | None,
+        forward: bool,
+        statuses: Collection[str] | None = None,
+        workflow_ids: Collection[str] | None = None,
+        task_ids: Collection[str] | None = None,
+    ) -> list[T]:
+        found: list[T] = []
+        async with aclosing(
+            self._history_scan_async(
+                bound, forward, limit, statuses, workflow_ids, task_ids
+            )
+        ) as chunks:
+            async for members in chunks:
+                for stored in await self.load_history_async(
+                    [member_task_id(m) for m in members]
+                ):
+                    if stored is not None and (item := select(stored)) is not None:
+                        found.append(item)
+                        if len(found) == limit:
+                            return found
+        return found
+
+    def _history_scan(
+        self,
+        bound: str | None,
+        forward: bool,
+        limit: int,
+        statuses: Collection[str] | None,
+        workflow_ids: Collection[str] | None,
+        task_ids: Collection[str] | None,
+    ) -> Generator[list[str]]:
+        """Yield freed tasks' index members past ``bound`` in scan order, a chunk at
+        a time, read from the indexes or ordered from the named candidates."""
+        if workflow_ids is not None:
+            task_ids = [
+                task_id
+                for workflow_id in sorted(workflow_ids)
+                for task_id in self.history_task_ids(workflow_id)
+            ]
+        if task_ids is not None:
+            members = _in_scan_order(
+                self.history_members(list(task_ids)), bound, forward
+            )
+            yield from chunked(members, _history_sizes(limit))
+            return
+        scans = [
+            lex_scan(
+                self._rds.sync.lex_range,
+                task_history_key(status),
+                bound,
+                forward,
+                _history_sizes(limit),
+            )
+            for status in ([None] if statuses is None else sorted(statuses))
+        ]
+        yield from chunked(merged(scans, forward), _history_sizes(limit))
+
+    async def _history_scan_async(
+        self,
+        bound: str | None,
+        forward: bool,
+        limit: int,
+        statuses: Collection[str] | None,
+        workflow_ids: Collection[str] | None,
+        task_ids: Collection[str] | None,
+    ) -> AsyncGenerator[list[str]]:
+        if workflow_ids is not None:
+            task_ids = [
+                task_id
+                for workflow_id in sorted(workflow_ids)
+                for task_id in await self.history_task_ids_async(workflow_id)
+            ]
+        if task_ids is not None:
+            members = _in_scan_order(
+                await self.history_members_async(list(task_ids)), bound, forward
+            )
+            for chunk in chunked(members, _history_sizes(limit)):
+                yield chunk
+            return
+        scans = [
+            lex_scan_async(
+                self._rds.asyncio.lex_range,
+                task_history_key(status),
+                bound,
+                forward,
+                _history_sizes(limit),
+            )
+            for status in ([None] if statuses is None else sorted(statuses))
+        ]
+        async for chunk in chunked_async(
+            merged_async(scans, forward), _history_sizes(limit)
+        ):
+            yield chunk
 
     def history_task_ids(self, workflow_id: str) -> list[str]:
         """The ids of a freed workflow's tasks, as far as its history holds them."""

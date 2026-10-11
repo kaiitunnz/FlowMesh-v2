@@ -52,6 +52,7 @@ from ..utils.cursors import page_slice
 from ..utils.query import QueryFilter
 from ..utils.time import now_iso
 from .history import WorkflowHistoryStore
+from .scans import chunked, lex_scan, lex_scan_async, scan_sizes
 from .task_states import PersistedTask, load_context, load_task_state
 
 
@@ -157,8 +158,6 @@ type WorkflowOrder = tuple[int, str]
 # position is an exclusive lexical bound.
 _SUBMISSION_DIGITS = 16
 SUBMISSION_US_MAX = 10**_SUBMISSION_DIGITS - 1
-# The most index entries one filtered scan step reads.
-_SCAN_CHUNK_MAX = 1000
 # The most index entries one backfill command adds.
 _BACKFILL_BATCH = 1000
 
@@ -198,15 +197,6 @@ def _record_member(record: WorkflowRecord) -> str:
 
 def _indexed_id(member: str) -> str:
     return member[_SUBMISSION_DIGITS + 1 :]
-
-
-def _scan_sizes(limit: int, filtered: bool) -> Iterator[int]:
-    """Yield the entries each scan step reads: ``limit``, then doubling up to the
-    larger of ``limit`` and the chunk cap while a filter rejects entries."""
-    size, cap = limit, max(limit, _SCAN_CHUNK_MAX) if filtered else limit
-    while True:
-        yield size
-        size = min(size * 2, cap)
 
 
 def _create_workflow_record(
@@ -282,7 +272,7 @@ def _index_scan_start(
     """Whether an index scan runs forward, and its exclusive start member."""
     forward = after is not None
     bound = after if forward else before
-    return forward, f"({_index_member(bound)}" if bound is not None else None
+    return forward, _index_member(bound) if bound is not None else None
 
 
 def _candidate_chunks(
@@ -300,12 +290,8 @@ def _candidate_chunks(
     )
     window = keys[page_slice(keys, len(keys), after=after, before=before)]
     scan = window if after is not None else window[::-1]
-    start = 0
-    for size in sizes:
-        if start >= len(scan):
-            return
-        yield [workflow_id for _, workflow_id in scan[start : start + size]]
-        start += size
+    for chunk in chunked(scan, sizes):
+        yield [workflow_id for _, workflow_id in chunk]
 
 
 def _page_order(
@@ -693,7 +679,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
         Without candidates the page reads the submission index from the position;
         with them it orders just the candidates.
         """
-        sizes = _scan_sizes(limit, bool(query))
+        sizes = scan_sizes(limit, bool(query))
         scan = (
             self._indexed_ids(sizes, after, before)
             if candidates is None
@@ -716,7 +702,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
         candidates: Collection[str] | None = None,
     ) -> list[Workflow]:
         """Return the page ``workflow_page`` does."""
-        sizes = _scan_sizes(limit, bool(query))
+        sizes = scan_sizes(limit, bool(query))
         scan = (
             self._indexed_ids_async(sizes, after, before)
             if candidates is None
@@ -739,19 +725,14 @@ class WorkflowRegistry(WorkflowHistoryStore):
         """Yield the indexed workflow ids past a position in scan order: ascending
         after ``after``, else descending before ``before`` or from the newest."""
         forward, start = _index_scan_start(after, before)
-        for size in sizes:
-            members = self._rds.sync.lex_range(
-                WORKFLOWS_BY_SUBMISSION_KEY,
-                start or ("-" if forward else "+"),
-                "+" if forward else "-",
-                size,
-                reverse=not forward,
-            )
-            if members:
-                yield [_indexed_id(member) for member in members]
-            if len(members) < size:
-                return
-            start = f"({members[-1]}"
+        for members in lex_scan(
+            self._rds.sync.lex_range,
+            WORKFLOWS_BY_SUBMISSION_KEY,
+            start,
+            forward,
+            sizes,
+        ):
+            yield [_indexed_id(member) for member in members]
 
     async def _indexed_ids_async(
         self,
@@ -760,19 +741,14 @@ class WorkflowRegistry(WorkflowHistoryStore):
         before: WorkflowOrder | None,
     ) -> AsyncGenerator[list[str]]:
         forward, start = _index_scan_start(after, before)
-        for size in sizes:
-            members = await self._rds.asyncio.lex_range(
-                WORKFLOWS_BY_SUBMISSION_KEY,
-                start or ("-" if forward else "+"),
-                "+" if forward else "-",
-                size,
-                reverse=not forward,
-            )
-            if members:
-                yield [_indexed_id(member) for member in members]
-            if len(members) < size:
-                return
-            start = f"({members[-1]}"
+        async for members in lex_scan_async(
+            self._rds.asyncio.lex_range,
+            WORKFLOWS_BY_SUBMISSION_KEY,
+            start,
+            forward,
+            sizes,
+        ):
+            yield [_indexed_id(member) for member in members]
 
     def _candidate_ids(
         self,

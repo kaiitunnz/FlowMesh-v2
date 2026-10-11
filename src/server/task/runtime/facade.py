@@ -1,6 +1,5 @@
 """The task runtime: every workflow's task records, scheduling and dispatch."""
 
-import heapq
 import itertools
 import logging
 import threading
@@ -125,7 +124,6 @@ from ..history import (
     TaskDerived,
     TaskHistory,
     history_member,
-    member_task_id,
 )
 from ..models import (
     SERVE_TASK_TYPES,
@@ -430,17 +428,6 @@ def _stored_task_info(stored: StoredTask) -> TaskInfo:
 # How many tasks or output members one hold of the runtime lock reads into a settled
 # workflow's history.
 _HISTORY_BUILD_CHUNK = 256
-
-# How many freed tasks a listing reads at a time, the first read and the most.
-_HISTORY_CHUNK_MIN = 64
-_HISTORY_CHUNK_MAX = 4096
-
-
-def _chunk_sizes(limit: int) -> Iterator[int]:
-    size = max(_HISTORY_CHUNK_MIN, limit)
-    while True:
-        yield size
-        size = min(_HISTORY_CHUNK_MAX, size * 2)
 
 
 class TaskRuntime:
@@ -5802,102 +5789,31 @@ class TaskRuntime:
     ) -> list[tuple[TaskOrder, TaskInfo]]:
         """The freed tasks matching ``query`` nearest a position, at most ``limit``,
         of workflows freed through sequence ``through`` and not still ``sealed``."""
-        forward = after is not None
-        bound = (
-            history_member(*after)
-            if after is not None
-            else history_member(*before) if before is not None else None
-        )
-        found: list[tuple[TaskOrder, TaskInfo]] = []
-        for members in self._history_candidates(
-            query, limit, bound, forward, accessible, workflow_ids
-        ):
-            for stored in self._workflow_registry.load_history(
-                [member_task_id(member) for member in members]
+        position = after if after is not None else before
+
+        def select(stored: StoredTask) -> tuple[TaskOrder, TaskInfo] | None:
+            record = stored.persisted.record
+            if (
+                stored.certificate.seq > through
+                or record.workflow_id in sealed
+                or (accessible is not None and record.task_id not in accessible)
+                or not query.matches(info := _stored_task_info(stored))
             ):
-                if stored is None:
-                    continue
-                record = stored.persisted.record
-                if (
-                    stored.certificate.seq > through
-                    or record.workflow_id in sealed
-                    or (accessible is not None and record.task_id not in accessible)
-                ):
-                    continue
-                if not query.matches(info := _stored_task_info(stored)):
-                    continue
-                found.append((task_order(record), info))
-                if len(found) == limit:
-                    return found
-        return found
+                return None
+            return task_order(record), info
 
-    def _history_candidates(
-        self,
-        query: QueryFilter,
-        limit: int,
-        bound: str | None,
-        forward: bool,
-        accessible: Collection[str] | None,
-        workflow_ids: list[str] | None,
-    ) -> Iterator[list[str]]:
-        """Yield freed tasks' index members in scan order past ``bound``, in chunks:
-        those of the named workflows or accessible tasks when either is given, else
-        every freed task of the statuses the query names."""
-        registry = self._workflow_registry
-        if workflow_ids is not None or accessible is not None:
-            if workflow_ids is not None:
-                task_ids = [
-                    task_id
-                    for workflow_id in workflow_ids
-                    for task_id in registry.history_task_ids(workflow_id)
-                ]
-            else:
-                task_ids = list(accessible or ())
-            members: Iterator[str] = iter(
-                sorted(
-                    (
-                        member
-                        for member in registry.history_members(task_ids)
-                        if member is not None
-                        and (
-                            bound is None
-                            or (member > bound if forward else member < bound)
-                        )
-                    ),
-                    reverse=not forward,
-                )
-            )
-        else:
-            statuses = query.values("status")
-            members = heapq.merge(
-                *(
-                    self._history_stream(status, bound, forward, limit)
-                    for status in (
-                        [None]
-                        if statuses is None
-                        else sorted(statuses & TERMINAL_TASK_STATUSES)
-                    )
-                ),
-                reverse=not forward,
-            )
-        for size in _chunk_sizes(limit):
-            if not (chunk := list(itertools.islice(members, size))):
-                return
-            yield chunk
-
-    def _history_stream(
-        self, status: str | None, bound: str | None, forward: bool, limit: int
-    ) -> Iterator[str]:
-        """Every freed task's index member past ``bound`` in scan order, of one
-        status when given, read a chunk at a time."""
-        for size in _chunk_sizes(limit):
-            members = self._workflow_registry.history_range(
-                status, bound, forward, size
-            )
-            yield from members
-            if len(members) < size:
-                return
-            bound = members[-1]
+        statuses = query.values("status")
+        return self._workflow_registry.task_history_page(
+            select,
+            limit,
+            history_member(*position) if position is not None else None,
+            after is not None,
+            statuses=(
+                statuses & TERMINAL_TASK_STATUSES if statuses is not None else None
+            ),
+            workflow_ids=workflow_ids,
+            task_ids=accessible if workflow_ids is None else None,
+        )
 
     # ------------------------------------------------------------------ #
     # Misc helpers

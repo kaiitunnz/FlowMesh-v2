@@ -49,6 +49,10 @@ def _published() -> tuple[WorkflowRegistry, str, list[str], str]:
     return registry, freed, task_ids, running
 
 
+def _task_id(stored: Any) -> str:
+    return stored.persisted.record.task_id
+
+
 def _reads(freed: str, task_ids: list[str], running: str) -> dict[str, Any]:
     """Each read of the history store, with the arguments it is asked with."""
     return {
@@ -63,6 +67,10 @@ def _reads(freed: str, task_ids: list[str], running: str) -> dict[str, Any]:
         "history_range": (None, None, False, 100),
         "history_range:status": (TaskStatus.DONE, None, True, 1),
         "history_task_ids": (freed,),
+        "task_history_page": (_task_id, 2, None, False),
+        "task_history_page:status": (_task_id, 10, None, True, {TaskStatus.DONE}),
+        "task_history_page:workflow": (_task_id, 10, None, False, None, [freed]),
+        "task_history_page:tasks": (_task_id, 1, None, True, None, None, task_ids),
         "history_counts": (),
         "history_census": (),
         "history_seq": (),
