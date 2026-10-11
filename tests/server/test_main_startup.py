@@ -46,7 +46,7 @@ class _Control(_Recorder):
     def rehydrate(self, snapshot: Any) -> None:
         self.calls.append("control.rehydrate")
 
-    def claims_terminal(self, invocation_ids: Any) -> bool:
+    def invocations_retired(self, invocation_ids: Any) -> bool:
         return True
 
     def reattach_replicas(self, live_serve_tasks: Any) -> None:

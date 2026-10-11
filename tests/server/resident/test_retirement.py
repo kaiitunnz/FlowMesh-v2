@@ -13,7 +13,7 @@ import pytest
 
 from server.resident import ClaimState, ClaimTerminalReason, ResidentStores
 from server.resident.claim import ClaimTransitionError
-from server.resident.durability import MemoryResidentDurability, decode_retired
+from server.resident.durability import MemoryResidentDurability
 from server.resident.state import (
     InvocationSubject,
     InvocationSubjectKind,
@@ -45,9 +45,9 @@ def _served(durability: MemoryResidentDurability | None = None):
 
 
 def _record(stores: ResidentStores, invocation_id: str = "inv-1") -> RetiredInvocation:
-    [value] = stores.durability.retired_invocations([invocation_id])
-    assert value is not None
-    return decode_retired(invocation_id, value)
+    [record] = stores.durability.retired_invocations([invocation_id])
+    assert record is not None
+    return record
 
 
 def _durability(stores: ResidentStores) -> MemoryResidentDurability:

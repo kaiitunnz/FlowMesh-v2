@@ -4,7 +4,7 @@ fails closed on anything it cannot vouch for."""
 
 import asyncio
 import json
-from typing import Any
+from collections.abc import Sequence
 
 import fakeredis
 import pytest
@@ -115,27 +115,24 @@ def test_a_stored_claim_still_open_refuses_retirement() -> None:
     assert _live(registry) == before and _retired(registry) == {}
 
 
-class _ReplyLost:
-    """Runs each retirement against the store, then loses its reply once."""
+class _ReplyLost(ResidentRegistry):
+    """Applies each retirement, then loses its reply once."""
 
-    def __init__(self, registry: ResidentRegistry) -> None:
-        self._registry = registry
-        self.lose = True
+    lose = True
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._registry, name)
-
-    def retire_invocation(self, record: RetiredInvocation, fields: Any) -> None:
-        self._registry.retire_invocation(record, fields)
+    def retire_invocation(
+        self, record: RetiredInvocation, fields: Sequence[str]
+    ) -> None:
+        super().retire_invocation(record, fields)
         if self.lose:
             self.lose = False
             raise ConnectionError("reply lost")
 
 
 def test_a_retirement_applied_but_unanswered_retries_to_the_same_result() -> None:
-    registry = _registry()
+    registry = _ReplyLost(fake_redis_client(fakeredis.FakeServer()))
     stores, admission = _consumed(registry)
-    stores.durability = _ReplyLost(registry)  # type: ignore[assignment]
+    registry.lose = True
 
     with pytest.raises(ConnectionError):
         admission.retire("inv-1")
@@ -182,6 +179,24 @@ def test_a_replica_the_store_holds_live_is_never_archived() -> None:
 
     assert "replica:rpl-1" in _live(registry)
     assert raw_control(registry).hgetall(resident_replica_history_key()) == {}
+
+
+def test_a_history_key_of_the_wrong_type_refuses_an_archive_before_any_write() -> None:
+    registry = _registry()
+    stores = warm_stores(durability=registry)
+    stores.flush()
+    raw_control(registry).set(resident_replica_history_key(), "not a hash")
+    before = _live(registry)
+    replica = stores.directory.get("rpl-1")
+    assert replica is not None
+    stopped = StoredReplica(
+        replica=replica.model_copy(update={"state": ReplicaState.STOPPED})
+    )
+
+    with pytest.raises(ResidentStateError, match="WRONGTYPE"):
+        registry.archive_replica(stopped, ["replica:rpl-1"])
+
+    assert _live(registry) == before
 
 
 def test_a_load_refuses_the_single_value_state_naming_its_key() -> None:

@@ -23,6 +23,7 @@ from shared.tasks import TaskType
 from shared.tasks.specs.common import ModelSpecStrict, ModelSpecTemplate
 from tests.server.registries.test_worker_cordon import _Registry
 from tests.server.registries.test_worker_registry import _worker
+from tests.server.resident._helpers import stored_snapshot
 from tests.server.resident.node_harness import TS, Node
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
@@ -149,7 +150,7 @@ def test_a_family_stored_without_a_size_restores_at_the_default() -> None:
             update={"serving_size": _SIZE}
         )
     )
-    blob = json.loads(stores.to_snapshot().model_dump_json())
+    blob = json.loads(stored_snapshot(stores).model_dump_json())
     blob["families"].append(
         {"family": "old", "engine_batch_key": "k", "model_ref": "m"}
     )

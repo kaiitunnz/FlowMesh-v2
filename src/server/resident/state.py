@@ -77,6 +77,9 @@ class ReplicaState(StrEnum):
 SERVABLE_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
     {ReplicaState.WARM, ReplicaState.BUSY}
 )
+INERT_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
+    {ReplicaState.STOPPED, ReplicaState.PREEMPTED, ReplicaState.FAILED}
+)
 
 
 class ProvisioningDenialReason(StrEnum):

@@ -42,7 +42,9 @@ async def rehydrate_root_state(
         resident.rehydrate(await resident_registry.load_snapshot_async())
     if runtime is not None:
         await runtime.restart(
-            close, resident.claims_terminal if resident is not None else None, archived
+            close,
+            resident.invocations_retired if resident is not None else None,
+            archived,
         )
     if resident is not None:
         if gated_serve is not None:

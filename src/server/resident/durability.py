@@ -4,20 +4,26 @@ The live facts — families, replica incarnations, allocation leases, invocation
 and claims — persist as one hash with a field per entity, so a step writes only the
 entities it changed and a restart loads only what is live. A retired invocation leaves a
 compact ``RetiredInvocation`` record, and a retired replica or serve-task family moves
-to stored history; neither is loaded at startup. Retirement publishes its record before
-it removes the live fields, and refuses before writing anything when the stored state
-does not support it, so a failure at any point leaves the evidence recoverable.
+to stored history; neither is loaded at startup.
+
+Retiring an invocation and archiving a replica or family each run as one atomic step.
+It refuses, before writing anything, a key of the wrong type or stored state that does
+not support the move: an unconsumed request, an open claim, a stored record with a
+higher epoch, an invocation with neither live fields nor a record, or a replica stored
+live and not inert. It then writes the record or history before deleting the live
+fields it replaces, so a failure at any point leaves the evidence in one place or both,
+and a retry after a lost reply converges on the same result.
 """
 
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from .state import (
+    INERT_REPLICA_STATES,
     ClaimState,
-    ReplicaState,
     ResidentSnapshot,
     RetiredInvocation,
     ServiceFamily,
@@ -38,10 +44,6 @@ _SNAPSHOT_LISTS = {
     REQUEST: "invocations",
     CLAIM: "claims",
 }
-_INERT = frozenset(
-    state.value
-    for state in (ReplicaState.STOPPED, ReplicaState.PREEMPTED, ReplicaState.FAILED)
-)
 
 
 class ResidentStateError(RuntimeError):
@@ -87,7 +89,7 @@ def decode_live(fields: Mapping[str, str]) -> ResidentSnapshot:
 
 
 def decode_retired(invocation_id: str, value: str) -> RetiredInvocation:
-    """Decode a stored retirement record, refusing one that names another invocation."""
+    """Decode a stored retirement record, refusing one naming another invocation."""
     try:
         record = RetiredInvocation.model_validate_json(value)
     except ValidationError as exc:
@@ -99,6 +101,14 @@ def decode_retired(invocation_id: str, value: str) -> RetiredInvocation:
     return record
 
 
+def decode_stored[M: BaseModel](model: type[M], value: str) -> M:
+    """Decode one stored history entry."""
+    try:
+        return model.model_validate_json(value)
+    except ValidationError as exc:
+        raise ResidentStateError(f"unreadable stored {model.__name__}") from exc
+
+
 def check_retirement(
     live: Mapping[str, str],
     retired: str | None,
@@ -107,9 +117,7 @@ def check_retirement(
 ) -> None:
     """Refuse a retirement the stored state does not support, before any write.
 
-    The request field (the first of ``fields``) must carry its consumption, every claim
-    field stored must be terminal, an invocation whose live fields are already
-    gone must hold its record, and an existing record may not carry a higher epoch.
+    ``fields`` are the invocation's live fields, its request's first.
     """
     request = live.get(fields[0])
     if request is not None and json.loads(request).get("consumed") is None:
@@ -117,32 +125,31 @@ def check_retirement(
     for field in fields[1:]:
         if (claim := live.get(field)) is not None and json.loads(claim).get(
             "state"
-        ) != ClaimState.TERMINAL.value:
+        ) != ClaimState.TERMINAL:
             raise ResidentStateError(f"{field} is not terminal")
     if retired is None:
         if request is None:
             raise ResidentStateError(
                 f"invocation {record.invocation_id} has no evidence to retire"
             )
-    elif int(json.loads(retired).get("epoch_high", -1)) > record.epoch_high:
+    elif decode_retired(record.invocation_id, retired).epoch_high > record.epoch_high:
         raise ResidentStateError(
             f"invocation {record.invocation_id} has a higher stored epoch"
         )
 
 
 def check_replica_archive(live: Mapping[str, str], fields: Sequence[str]) -> None:
-    """Refuse to archive a replica (the first of ``fields``) that is stored live."""
+    """Refuse to archive a replica, the first of ``fields``, stored live and active."""
     if (replica := live.get(fields[0])) is not None and json.loads(replica).get(
         "state"
-    ) not in _INERT:
+    ) not in INERT_REPLICA_STATES:
         raise ResidentStateError(f"{fields[0]} is not inert")
 
 
 class ResidentDurability(Protocol):
     """Where the resident-capacity control facts are made durable.
 
-    Every method raises on a store failure or a refused write and never reports success
-    it did not get.
+    Every method raises on a store failure, a refused write or an unreadable entry.
     """
 
     def write(self, changes: Mapping[str, str | None]) -> None:
@@ -155,8 +162,10 @@ class ResidentDurability(Protocol):
         """Publish an invocation's retirement record, then delete its live fields."""
         ...
 
-    def retired_invocations(self, invocation_ids: Sequence[str]) -> list[str | None]:
-        """The stored retirement record of each invocation, or ``None`` for none."""
+    def retired_invocations(
+        self, invocation_ids: Sequence[str]
+    ) -> list[RetiredInvocation | None]:
+        """Read each invocation's stored retirement record, ``None`` for none."""
         ...
 
     def archive_replica(self, stored: StoredReplica, fields: Sequence[str]) -> None:
@@ -167,16 +176,20 @@ class ResidentDurability(Protocol):
         """Store a retired family's definition, then delete its live field."""
         ...
 
+    def stored_family(self, family: str) -> ServiceFamily | None:
+        """Read one retired family's stored definition, ``None`` when it has none."""
+        ...
+
     async def load_snapshot_async(self) -> ResidentSnapshot | None:
-        """The live facts, or ``None`` when nothing is stored."""
+        """Load the live facts, ``None`` when nothing is stored."""
         ...
 
     async def stored_replicas_async(self) -> list[StoredReplica]:
-        """Every retired replica incarnation, in no particular order."""
+        """Read every retired replica incarnation, in no particular order."""
         ...
 
     async def stored_families_async(self) -> list[ServiceFamily]:
-        """Every retired family definition, in no particular order."""
+        """Read every retired family definition, in no particular order."""
         ...
 
 
@@ -206,8 +219,17 @@ class MemoryResidentDurability:
         for field in fields:
             self.live.pop(field, None)
 
-    def retired_invocations(self, invocation_ids: Sequence[str]) -> list[str | None]:
-        return [self.retired.get(invocation_id) for invocation_id in invocation_ids]
+    def retired_invocations(
+        self, invocation_ids: Sequence[str]
+    ) -> list[RetiredInvocation | None]:
+        return [
+            (
+                decode_retired(invocation_id, value)
+                if (value := self.retired.get(invocation_id)) is not None
+                else None
+            )
+            for invocation_id in invocation_ids
+        ]
 
     def archive_replica(self, stored: StoredReplica, fields: Sequence[str]) -> None:
         check_replica_archive(self.live, fields)
@@ -219,11 +241,15 @@ class MemoryResidentDurability:
         self.families[family.family] = family.model_dump_json()
         self.live.pop(field, None)
 
+    def stored_family(self, family: str) -> ServiceFamily | None:
+        value = self.families.get(family)
+        return decode_stored(ServiceFamily, value) if value is not None else None
+
     async def load_snapshot_async(self) -> ResidentSnapshot | None:
         return decode_live(self.live) if self.live else None
 
     async def stored_replicas_async(self) -> list[StoredReplica]:
-        return [StoredReplica.model_validate_json(v) for v in self.replicas.values()]
+        return [decode_stored(StoredReplica, v) for v in self.replicas.values()]
 
     async def stored_families_async(self) -> list[ServiceFamily]:
-        return [ServiceFamily.model_validate_json(v) for v in self.families.values()]
+        return [decode_stored(ServiceFamily, v) for v in self.families.values()]

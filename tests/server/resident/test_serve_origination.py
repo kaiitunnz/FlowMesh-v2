@@ -59,6 +59,7 @@ from shared.resident.reports import (
 from shared.schemas.network import PEER_PROTOCOL
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.ids import SpanIdKind, derived_span_id
+from tests.server.resident._helpers import stored_replica, stored_snapshot
 from tests.server.telemetry_helpers import recording_control_tracer
 
 _SERVE_TASK = "tsk-serve"
@@ -706,12 +707,10 @@ def test_drain_keeps_an_in_flight_standing_replica_draining_until_it_settles() -
     assert replica.state is ReplicaState.DRAINING
 
     # When the in-flight claim settles, its last credit release stops the drained
-    # standing replica so it does not linger DRAINING in the directory (the idle sweep
-    # is off by default and never reaps it).
+    # standing replica, and once its invocation retires the replica moves to history.
     asyncio.run(svc._on_outcome(_outcome(svc, ResidentStreamStatus.SUCCESS)))
-    settled_replica = stores.directory.get(replica.replica_id)
-    assert settled_replica is not None and settled_replica.state is ReplicaState.STOPPED
-    assert stores.directory.live_by_family(_FAMILY) == []
+    assert stores.directory.get(replica.replica_id) is None
+    assert stored_replica(stores, replica.replica_id).state is ReplicaState.STOPPED
     assert reaped == []
 
 
@@ -776,7 +775,7 @@ def test_a_serve_family_stays_standing_across_a_snapshot() -> None:
     _adopt(svc)
     restored = ResidentStores()
     restored.load_snapshot(
-        ResidentSnapshot.model_validate_json(stores.to_snapshot().model_dump_json())
+        ResidentSnapshot.model_validate_json(stored_snapshot(stores).model_dump_json())
     )
 
     family = restored.families.get(_FAMILY)

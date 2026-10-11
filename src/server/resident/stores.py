@@ -32,6 +32,7 @@ from .durability import (
 )
 from .selection import ReplicaCandidate
 from .state import (
+    INERT_REPLICA_STATES,
     AdmissionProfile,
     AllocationLease,
     ClaimState,
@@ -39,14 +40,9 @@ from .state import (
     InvocationRequest,
     ReplicaCapacityReport,
     ReplicaIncarnation,
-    ReplicaState,
     ResidentSnapshot,
     ServiceClaim,
     ServiceFamily,
-)
-
-INERT_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
-    {ReplicaState.STOPPED, ReplicaState.PREEMPTED, ReplicaState.FAILED}
 )
 
 type _Bucket = dict[str, dict[str, None]]
@@ -205,6 +201,9 @@ class InvocationStore:
 
     def all(self) -> list[InvocationRequest]:
         return list(self._requests.values())
+
+    def any_for_family(self, family: str) -> bool:
+        return any(request.family == family for request in self._requests.values())
 
     def forget(self, invocation_id: str) -> None:
         if invocation_id in self._requests:
@@ -366,17 +365,14 @@ class CapacityPools:
 
 class ResidentStores:
     """The bundle of authoritative ``CS`` stores, their derived views, and the
-    durability their changes flush to.
-
-    ``complete`` is whether the stores hold every live fact: false from the start of a
-    restart's load until it finishes.
-    """
+    durability their changes flush to."""
 
     def __init__(self, durability: ResidentDurability | None = None) -> None:
         self.journal = ChangeJournal()
         self.durability: ResidentDurability = (
             durability if durability is not None else MemoryResidentDurability()
         )
+        # Whether the stores hold every live fact; false while a restart loads them.
         self.complete = True
         self.families = ServiceFamilyRegistry(self.journal)
         self.directory = ReplicaDirectory(self.journal)
@@ -398,8 +394,8 @@ class ResidentStores:
     def flush(self) -> None:
         """Make every change since the last flush durable in one write.
 
-        A failed write raises and leaves its changes pending, so the next flush carries
-        them; nothing acts on a change before a flush including it has landed.
+        Call before acting on a change. A failed write raises and leaves its changes
+        pending for the next flush.
         """
         if not (captured := self.journal.captured()):
             return
@@ -413,12 +409,17 @@ class ResidentStores:
         self.journal.clear(captured)
 
     @property
-    def settled(self) -> bool:
-        """Whether every change has been made durable."""
+    def durable(self) -> bool:
+        """Report whether every change has been made durable."""
         return not self.journal.pending
 
+    @property
+    def invocations_durable(self) -> bool:
+        """Report whether every request and claim change has been made durable."""
+        return not any(kind in (REQUEST, CLAIM) for kind, _ in self.journal.pending)
+
     def live(self, invocation_id: str) -> bool:
-        """Whether the invocation has a request or a claim in the working set."""
+        """Report whether the invocation has a request or a claim in the working set."""
         return self.invocations.get(invocation_id) is not None or bool(
             self.claims.by_invocation(invocation_id)
         )
@@ -437,23 +438,22 @@ class ResidentStores:
         self.directory.forget(replica.replica_id)
         self.reports.forget(replica.replica_id)
 
-    def to_snapshot(self) -> ResidentSnapshot:
-        """A copy of the live facts."""
-        return ResidentSnapshot(
-            families=self.families.all(),
-            replicas=[r.model_copy() for r in self.directory.all()],
-            leases=[lease.model_copy() for lease in self.leases.all()],
-            invocations=self.invocations.all(),
-            claims=[c.model_copy() for c in self.claims.all()],
-        )
+    def register_family(self, family: ServiceFamily) -> None:
+        """Register a family definition, first restoring a retired family's stored one
+        so it keeps its identity and creation time. Raises on a store failure."""
+        if (
+            family.family not in self.families
+            and (stored := self.durability.stored_family(family.family)) is not None
+        ):
+            self.families.register(stored)
+        self.families.register(family)
 
     def load_snapshot(self, snapshot: ResidentSnapshot) -> None:
         """Install the stored live facts and rebuild the DemandLedger from pending
         claims.
 
-        Derived views and capacity telemetry are not restored: they are recomputed on
-        read and refreshed by live reports. What is loaded is already durable, so it
-        leaves nothing to flush.
+        Derived views and capacity telemetry are recomputed on read and refreshed by
+        live reports. What is loaded is already durable, so it leaves nothing to flush.
         """
         for family in snapshot.families:
             self.families.register(family)

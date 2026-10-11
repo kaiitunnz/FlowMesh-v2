@@ -61,6 +61,7 @@ from shared.resident.reports import (
     ResidentRouteObservation,
     ResidentStreamStatus,
 )
+from tests.server.resident._helpers import stored_snapshot
 
 
 def _dependency(model_ref: str = "m") -> ServiceDependency:
@@ -616,7 +617,7 @@ def test_originate_leaves_a_boundary_to_its_caller_while_control_is_stopped():
 def test_rehydrate_reconciles_in_flight_claim():
     svc, stores, _settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))
-    snapshot = stores.to_snapshot()
+    snapshot = stored_snapshot(stores)
 
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc.rehydrate(snapshot)
@@ -628,7 +629,7 @@ def test_rehydrate_reconciles_in_flight_claim():
 def test_reattach_reports_a_warm_replica_so_it_is_admittable_again():
     svc, stores, _settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))
-    snapshot = stores.to_snapshot()
+    snapshot = stored_snapshot(stores)
 
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc.rehydrate(snapshot)
@@ -642,7 +643,7 @@ def test_reattach_reports_a_warm_replica_so_it_is_admittable_again():
 def test_reattach_preempts_a_warm_replica_whose_serve_task_is_gone():
     svc, stores, _settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))
-    snapshot = stores.to_snapshot()
+    snapshot = stored_snapshot(stores)
 
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc._probe_endpoint = lambda serve_task_id: None  # serve task is gone

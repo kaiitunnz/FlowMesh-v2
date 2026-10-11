@@ -220,7 +220,7 @@ def test_a_terminal_whose_persist_failed_is_finished_by_its_replay():
         ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.FAILED)
     assert claim.state is ClaimState.TERMINAL
     assert released == []
-    assert not stores.settled
+    assert not stores.durable
     durability.down = False
 
     # The replay persists the terminal and tells the replica once, keeping the first

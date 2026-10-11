@@ -37,6 +37,7 @@ from .service import (
 )
 from .state import (
     CREDIT_BEARING_CLAIM_STATES,
+    INERT_REPLICA_STATES,
     SERVABLE_REPLICA_STATES,
     AdmissionProfile,
     AllocationLease,
@@ -52,9 +53,11 @@ from .state import (
     ReplicaIncarnation,
     ReplicaState,
     ResidentSnapshot,
+    RetiredInvocation,
     SafeCapacityVector,
     ServiceClaim,
     ServiceFamily,
+    StoredReplica,
 )
 from .stores import (
     AdmissionCreditLedger,
@@ -72,6 +75,7 @@ from .stores import (
 __all__ = [
     "CREDIT_BEARING_CLAIM_STATES",
     "DEFAULT_SELECTION_STRATEGY",
+    "INERT_REPLICA_STATES",
     "SERVABLE_REPLICA_STATES",
     "AdmissionController",
     "AdmissionCreditLedger",
@@ -110,6 +114,7 @@ __all__ = [
     "ResidentPolicyLimits",
     "ResidentSnapshot",
     "ResidentStores",
+    "RetiredInvocation",
     "RouteAuthorization",
     "RoundRobin",
     "SafeCapacityVector",
@@ -117,6 +122,7 @@ __all__ = [
     "ServiceClaim",
     "ServiceFamily",
     "ServiceFamilyRegistry",
+    "StoredReplica",
     "accept",
     "begin_stream",
     "build_selection_strategy",

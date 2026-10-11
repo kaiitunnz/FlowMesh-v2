@@ -8,6 +8,7 @@ from server.resident import (
     ReplicaEndpoint,
     ReplicaIncarnation,
     ReplicaState,
+    ResidentSnapshot,
     ResidentStores,
     SafeCapacityVector,
     ServiceFamily,
@@ -55,3 +56,11 @@ def stored_replica(stores: ResidentStores, replica_id: str) -> ReplicaIncarnatio
     """The replica the stores moved to stored history."""
     stored = asyncio.run(stores.durability.stored_replicas_async())
     return next(e.replica for e in stored if e.replica.replica_id == replica_id)
+
+
+def stored_snapshot(stores: ResidentStores) -> ResidentSnapshot:
+    """Flush the stores and load their live facts back, as a restart does."""
+    stores.flush()
+    snapshot = asyncio.run(stores.durability.load_snapshot_async())
+    assert snapshot is not None
+    return snapshot

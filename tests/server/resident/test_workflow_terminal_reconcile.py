@@ -10,7 +10,6 @@ from typing import Any
 
 import pytest
 
-from server.resident.durability import decode_retired
 from server.resident.state import (
     ClaimState,
     ClaimTerminalReason,
@@ -19,6 +18,7 @@ from server.resident.state import (
 )
 from server.startup import rehydrate_root_state
 from server.task.runtime import TaskRuntime, TransitionNotDurable
+from tests.server.resident._helpers import stored_snapshot
 from tests.server.resident.test_service import _admission, _build, _env
 from tests.server.runtime_helpers import never_closed
 from tests.server.task.test_agent_episode_runtime import _held_boundary
@@ -43,7 +43,7 @@ def _admit(workflow_id: str, invocation_id: str) -> ResidentSnapshot:
     asyncio.run(svc._originate(_env(invocation_id)))
     (claim,) = stores.claims.by_invocation(invocation_id)
     assert claim.holds_credit
-    return stores.to_snapshot()
+    return stored_snapshot(stores)
 
 
 def _restart(registry: FakeRegistry, snapshot: ResidentSnapshot) -> Any:
@@ -63,8 +63,9 @@ def _retired(stores: Any, snapshot: ResidentSnapshot) -> RetiredInvocation:
     (claim,) = snapshot.claims
     assert stores.claims.by_invocation(claim.invocation_id) == []
     assert stores.credit_ledger.held(claim.replica_id) == 0
-    [value] = stores.durability.retired_invocations([claim.invocation_id])
-    return decode_retired(claim.invocation_id, value)
+    [record] = stores.durability.retired_invocations([claim.invocation_id])
+    assert record is not None
+    return record
 
 
 def _held(registry: FakeRegistry) -> tuple[TaskRuntime, str, Any]:

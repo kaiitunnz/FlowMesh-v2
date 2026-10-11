@@ -13,6 +13,7 @@ from server.resident import (
     InvocationSubject,
     InvocationSubjectKind,
     ResidentStores,
+    RetiredInvocation,
     ServiceClaim,
 )
 from server.resident.durability import MemoryResidentDurability
@@ -104,18 +105,31 @@ def test_an_incomplete_load_reads_nothing_as_settled() -> None:
     assert not _control(stores).invocations_settled(["inv-9"], 1.0)
 
 
-def test_a_change_not_yet_durable_reads_nothing_as_settled() -> None:
+def test_a_claim_change_not_yet_durable_reads_nothing_as_settled() -> None:
+    stores = warm_stores()
+    admission = _raised(stores, "inv-1", "inv-2")
+    _retired(admission, "inv-1")
+    [claim] = stores.claims.by_invocation("inv-2")
+    claim.updated_at = "2026-01-01T00:00:00Z"
+
+    assert not _control(stores).invocations_settled(["inv-1"], 1.0)
+
+
+def test_a_replica_change_not_yet_durable_leaves_the_answer_alone() -> None:
     stores = warm_stores()
     _retired(_raised(stores, "inv-1"), "inv-1")
     replica = stores.directory.get("rpl-1")
     assert replica is not None
     replica.last_active_at = "2026-01-01T00:00:00Z"
 
-    assert not _control(stores).invocations_settled(["inv-1"], 1.0)
+    assert not stores.durable
+    assert _control(stores).invocations_settled(["inv-1"], 1.0)
 
 
 class _Unreadable(MemoryResidentDurability):
-    def retired_invocations(self, invocation_ids: Sequence[str]) -> list[str | None]:
+    def retired_invocations(
+        self, invocation_ids: Sequence[str]
+    ) -> list[RetiredInvocation | None]:
         raise ConnectionError("store unavailable")
 
 
@@ -125,9 +139,15 @@ def test_an_unreadable_store_reads_nothing_as_settled() -> None:
     assert not _control(stores).invocations_settled(["inv-9"], 1.0)
 
 
-def test_a_corrupt_retirement_record_is_not_a_settled_answer() -> None:
+def test_a_record_naming_another_invocation_is_not_a_settled_answer() -> None:
     durability = MemoryResidentDurability()
-    durability.retired["inv-1"] = '{"invocation_id": "inv-2"}'
+    durability.retired["inv-1"] = RetiredInvocation(
+        invocation_id="inv-2",
+        subject=_SUBJECT,
+        family="fam",
+        epoch_high=0,
+        terminal_reason=ClaimTerminalReason.COMPLETED,
+    ).model_dump_json()
 
     assert not _control(ResidentStores(durability)).invocations_settled(["inv-1"], 1.0)
 

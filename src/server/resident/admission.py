@@ -26,7 +26,7 @@ from .claim import (
     reserve,
     settle_terminal,
 )
-from .durability import CLAIM, REQUEST, decode_retired, live_field
+from .durability import CLAIM, REQUEST, live_field
 from .selection import SelectionStrategy, build_selection_strategy
 from .state import (
     SERVABLE_REPLICA_STATES,
@@ -49,7 +49,6 @@ class AdmissionController:
 
     def __init__(self, stores: ResidentStores) -> None:
         self._stores = stores
-        self._persist = stores.flush
         self._strategies: dict[str, SelectionStrategy] = {}
         self._on_release: Callable[[str], None] = lambda _replica_id: None
         # The replicas of each invocation whose release a terminal began and a failed
@@ -176,7 +175,7 @@ class AdmissionController:
                 deadline_at=profile.deadline_at,
             )
         )
-        self._persist()
+        self._stores.flush()
         return claim
 
     def rebuild_handoff(
@@ -254,7 +253,7 @@ class AdmissionController:
         )
         replica.last_active_at = now_iso()
         self._stores.demand.mark_admitted(claim.claim_id)
-        self._persist()
+        self._stores.flush()
         return self._build_handoff(
             claim,
             replica,
@@ -282,7 +281,7 @@ class AdmissionController:
         durable claim on a resume.
         """
         accept(claim)
-        self._persist()
+        self._stores.flush()
         return self._mint_authorization(
             claim,
             idempotency_key=idempotency_key,
@@ -343,13 +342,13 @@ class AdmissionController:
     def on_stream_started(self, claim: ServiceClaim) -> None:
         """Record the start of the authorized response stream for an accepted claim."""
         begin_stream(claim)
-        self._persist()
+        self._stores.flush()
 
     def on_enqueue_failed(self, claim: ServiceClaim) -> None:
         """Release a reserved credit on a known pre-acceptance enqueue failure."""
         settle_terminal(claim, ClaimTerminalReason.ENQUEUE_FAILED)
         self._touch_replica(claim)
-        self._persist()
+        self._stores.flush()
         if claim.replica_id is not None:
             self._on_release(claim.replica_id)
 
@@ -364,13 +363,13 @@ class AdmissionController:
         """Terminate a still-pending claim a policy denial refused before any credit."""
         settle_terminal(claim, ClaimTerminalReason.CANCELLED)
         self._stores.demand.remove(claim.claim_id)
-        self._persist()
+        self._stores.flush()
 
     def on_expired(self, claim: ServiceClaim) -> None:
         """Terminate a still-pending claim whose cold-start budget elapsed."""
         settle_terminal(claim, ClaimTerminalReason.EXPIRED)
         self._stores.demand.remove(claim.claim_id)
-        self._persist()
+        self._stores.flush()
 
     def on_route_loss(self, claim: ServiceClaim) -> None:
         """Hold the credit after a post-acceptance route loss, pending reconciliation.
@@ -380,7 +379,7 @@ class AdmissionController:
         """
         if claim.holds_credit and claim.state is not ClaimState.UNCERTAIN:
             mark_uncertain(claim)
-            self._persist()
+            self._stores.flush()
 
     def settle_invocation_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason
@@ -411,13 +410,13 @@ class AdmissionController:
             )
         unfinished = self._unfinished.get(invocation_id)
         if not released and unfinished is None:
-            self._persist()
+            self._stores.flush()
             return False
         # A terminal handed over again finishes a release an earlier one began, so the
         # claim is persisted and each replica hears of its release once.
         pending = self._unfinished.setdefault(invocation_id, [])
         pending += released
-        self._persist()
+        self._stores.flush()
         while pending:
             if (replica_id := pending[0]) is not None:
                 self._on_release(replica_id)
@@ -426,19 +425,13 @@ class AdmissionController:
         return True
 
     def retired_record(self, invocation_id: str) -> RetiredInvocation | None:
-        """The invocation's stored retirement record, read from the durable store.
-
-        A store failure or an unreadable record raises; neither reads as no record.
-        """
-        [value] = self._stores.durability.retired_invocations([invocation_id])
-        return decode_retired(invocation_id, value) if value is not None else None
+        """Read the invocation's stored retirement record, raising on a store failure
+        or an unreadable record."""
+        [record] = self._stores.durability.retired_invocations([invocation_id])
+        return record
 
     def retirable(self, invocation_id: str) -> bool:
-        """Whether a consumed invocation has nothing left that needs its live facts.
-
-        Its terminal was consumed and every claim settled, and no release it began is
-        left unfinished.
-        """
+        """Report whether a consumed invocation's cleanup is done."""
         request = self._stores.invocations.get(invocation_id)
         return (
             request is not None
@@ -463,7 +456,7 @@ class AdmissionController:
         request = self._stores.invocations.get(invocation_id)
         assert request is not None and request.consumed is not None
         claims = self._stores.claims.by_invocation(invocation_id)
-        self._persist()
+        self._stores.flush()
         record = RetiredInvocation(
             invocation_id=invocation_id,
             subject=request.subject,

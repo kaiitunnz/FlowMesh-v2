@@ -22,6 +22,7 @@ from ..utils.time import now_iso, parse_iso_ts
 from .durability import FAMILY, LEASE, REPLICA, live_field
 from .policy import ProvisioningDecision, ResidentPolicyLimits, decide_materialization
 from .state import (
+    INERT_REPLICA_STATES,
     SERVABLE_REPLICA_STATES,
     AdmissionProfile,
     AllocationLease,
@@ -34,9 +35,9 @@ from .state import (
     ServiceFamily,
     StoredReplica,
 )
-from .stores import INERT_REPLICA_STATES, ResidentStores
+from .stores import ResidentStores
 
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger("resident-capacity")
 
 # Submits the family's serve substrate and returns the backing serve task id.
 MaterializeFn = Callable[[ServiceFamily, ReplicaIncarnation], Awaitable[str]]
@@ -81,7 +82,7 @@ class LifecycleScaleManager:
         self._admission_slots = max(1, admission_slots)
         self._adapter_slots = max(1, adapter_slots)
         self._idle_retain_sec = max(0.0, idle_retain_sec)
-        self._persist = stores.flush
+        self._retry: Callable[[str, str], None] = lambda _kind, _key: None
         self._materialize_fn = materialize_fn
         self._stop_fn = stop_fn
 
@@ -173,7 +174,7 @@ class LifecycleScaleManager:
         replica.lease_id = lease.lease_id
         self._stores.leases.add(lease)
         self._stores.directory.add(replica)
-        self._persist()
+        self._stores.flush()
         try:
             serve_task_id = await self._materialize_fn(family, replica)
         except BaseException:
@@ -183,7 +184,7 @@ class LifecycleScaleManager:
             raise
         replica.serve_task_id = serve_task_id
         replica.updated_at = now_iso()
-        self._persist()
+        self._stores.flush()
         return replica
 
     def adopt_standing_replica(
@@ -226,7 +227,7 @@ class LifecycleScaleManager:
         self._stores.leases.add(lease)
         self._stores.directory.add(replica)
         self.refresh_report(replica.replica_id)
-        self._persist()
+        self._stores.flush()
         return replica
 
     def on_replica_ready(self, replica_id: str, endpoint: ReplicaEndpoint) -> None:
@@ -240,7 +241,7 @@ class LifecycleScaleManager:
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.WARM)
         self.refresh_report(replica_id)
-        self._persist()
+        self._stores.flush()
 
     def refresh_report(self, replica_id: str) -> None:
         """Ingest a conservative normalized capacity report for a replica's current
@@ -321,7 +322,7 @@ class LifecycleScaleManager:
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.DRAINING)
         self.refresh_report(replica_id)
-        self._persist()
+        self._stores.flush()
 
     def stop(self, replica_id: str) -> None:
         """Stop a drained replica once it holds no admitted work.
@@ -339,7 +340,7 @@ class LifecycleScaleManager:
         replica.healthy = False
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.STOPPED)
-        self._persist()
+        self._stores.flush()
         if not replica.standing:
             self._reap_serve_task(replica.serve_task_id)
         self.retire_inert([replica_id])
@@ -422,7 +423,7 @@ class LifecycleScaleManager:
         replica.incarnation += 1
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.PREEMPTED)
-        self._persist()
+        self._stores.flush()
         self._reap_serve_task(serve_task_id)
         self.retire_inert([replica_id])
 
@@ -504,62 +505,69 @@ class LifecycleScaleManager:
             lease.state = state
             lease.updated_at = now_iso()
 
-    def retire_inert(self, replica_ids: Iterable[str]) -> None:
-        """Move each inert replica no live claim names to stored history.
+    def set_retirement_retry(self, retry: Callable[[str, str], None]) -> None:
+        """Register ``retry``, called with the kind and key of a retirement a store
+        failure interrupted."""
+        self._retry = retry
 
-        Its history is stored before its live fields are deleted, and it leaves the
-        directory, with its lease and report, only then. A standing family left with no
-        live replica, request or claim moves to stored history too. A store failure
-        leaves what it did not move live, for a later retirement.
-        """
+    def retire_inert(self, replica_ids: Iterable[str]) -> None:
+        """Move each inert replica no live claim names, and then each standing family
+        it leaves unused, to stored history, handing a store failure to the retry."""
         families: set[str] = set()
         for replica_id in replica_ids:
-            replica = self._stores.directory.get(replica_id)
-            if (
-                replica is None
-                or replica.state not in INERT_REPLICA_STATES
-                or self._stores.claims.by_replica(replica_id)
-            ):
-                continue
-            lease = (
-                self._stores.leases.get(replica.lease_id)
-                if replica.lease_id is not None
-                else None
-            )
-            fields = [live_field(REPLICA, replica_id)]
-            if lease is not None:
-                fields.append(live_field(LEASE, lease.lease_id))
             try:
-                self._persist()
-                self._stores.durability.archive_replica(
-                    StoredReplica(replica=replica, lease=lease), fields
-                )
+                if (family := self.retire_replica(replica_id)) is not None:
+                    families.add(family)
             except Exception:
                 _logger.exception("retiring resident replica %s failed", replica_id)
-                return
-            self._stores.forget_replica(replica)
-            families.add(replica.family)
+                self._retry(REPLICA, replica_id)
         for family in sorted(families):
-            self._retire_family(family)
+            try:
+                self.retire_family(family)
+            except Exception:
+                _logger.exception("retiring resident family %s failed", family)
+                self._retry(FAMILY, family)
 
-    def _retire_family(self, family: str) -> None:
+    def retire_replica(self, replica_id: str) -> str | None:
+        """Move an inert replica no live claim names, with its lease, to stored history,
+        returning its family. Raises on a store failure.
+
+        It leaves the directory, with its lease and report, once its history is stored.
+        """
+        replica = self._stores.directory.get(replica_id)
+        if (
+            replica is None
+            or replica.state not in INERT_REPLICA_STATES
+            or self._stores.claims.by_replica(replica_id)
+        ):
+            return None
+        lease = (
+            self._stores.leases.get(replica.lease_id)
+            if replica.lease_id is not None
+            else None
+        )
+        fields = [live_field(REPLICA, replica_id)]
+        if lease is not None:
+            fields.append(live_field(LEASE, lease.lease_id))
+        self._stores.flush()
+        self._stores.durability.archive_replica(
+            StoredReplica(replica=replica, lease=lease), fields
+        )
+        self._stores.forget_replica(replica)
+        return replica.family
+
+    def retire_family(self, family: str) -> None:
+        """Move a standing family with no live replica, request or claim to stored
+        history. Raises on a store failure."""
         definition = self._stores.families.get(family)
         if (
             definition is None
             or not definition.standing
             or self._stores.directory.by_family(family)
             or self._stores.claims.pending_for_family(family)
-            or any(
-                request.family == family for request in self._stores.invocations.all()
-            )
+            or self._stores.invocations.any_for_family(family)
         ):
             return
-        try:
-            self._persist()
-            self._stores.durability.archive_family(
-                definition, live_field(FAMILY, family)
-            )
-        except Exception:
-            _logger.exception("retiring resident family %s failed", family)
-            return
+        self._stores.flush()
+        self._stores.durability.archive_family(definition, live_field(FAMILY, family))
         self._stores.families.forget(family)

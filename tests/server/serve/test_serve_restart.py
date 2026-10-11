@@ -13,7 +13,6 @@ from typing import Any, cast
 import pytest
 
 from server.resident import ClaimState, ReplicaState, ResidentSnapshot
-from server.resident.durability import decode_retired
 from server.resident.state import ClaimTerminalReason
 from server.serve import (
     ServeBindingStore,
@@ -26,6 +25,7 @@ from server.serve.ingress import ServeIngressRegistry
 from server.serve.service import GatedServe
 from server.startup import rehydrate_root_state
 from shared.resident.reports import ResidentBootstrapOutcome
+from tests.server.resident._helpers import stored_snapshot
 from tests.server.resident.test_serve_origination import (
     _FAMILY,
     _SERVE_TASK,
@@ -100,7 +100,7 @@ def _in_flight(*, drain: bool = False, uncertain: bool = False) -> ResidentSnaps
         svc.drain_serve_replica(_SERVE_TASK)
     (replica,) = stores.directory.by_family(_FAMILY)
     assert stores.credit_ledger.held(replica.replica_id) == 2
-    return stores.to_snapshot()
+    return stored_snapshot(stores)
 
 
 def _edge(control: Any, terminals: ServeTerminalStore) -> GatedServe:
@@ -150,8 +150,8 @@ def test_a_restart_fails_each_serve_request_it_ended_and_frees_its_slot(
     assert terminals.all() == []
     for invocation_id in ("inv-1", "inv-2"):
         assert not stores.live(invocation_id)
-        [value] = stores.durability.retired_invocations([invocation_id])
-        record = decode_retired(invocation_id, value)
+        [record] = stores.durability.retired_invocations([invocation_id])
+        assert record is not None
         assert record.terminal_reason is ClaimTerminalReason.FAILED
         terminal = recorded.recorded[invocation_id]
         assert (terminal.status, terminal.detail) == (ServeTerminalStatus.FAILED, _LOST)
@@ -253,7 +253,7 @@ def test_a_restart_reaps_nothing_for_requests_that_already_settled() -> None:
         )
         svc.reconcile_serve_terminal(invocation_id, ClaimTerminalReason.COMPLETED)
 
-    _svc, _stores, deps, _terminals = _restart(stores.to_snapshot(), terminals)
+    _svc, _stores, deps, _terminals = _restart(stored_snapshot(stores), terminals)
 
     assert [r for r in deps.relays if r[1] == "resident_sidecar_reap"] == []
 
