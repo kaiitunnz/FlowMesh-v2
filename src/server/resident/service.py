@@ -17,6 +17,7 @@ the same invocation identity rather than falling through to a wrong terminal.
 """
 
 import asyncio
+import functools
 import logging
 from collections.abc import Awaitable, Callable, Collection, Coroutine, Set
 from concurrent.futures import Future
@@ -71,10 +72,9 @@ from ..task.v2.representations.admission import ResidentAdmissionBinding
 from ..task.v2.representations.operators import ServiceDependency
 from ..task.v2.representations.plan import ResidencyWarmth
 from .admission import AdmissionController
-from .durability import REPLICA, REQUEST
+from .durability import REQUEST
 from .lifecycle import LifecycleScaleManager
 from .policy import ResidentPolicyLimits
-from .retirement import RetirementRetry
 from .state import (
     SERVABLE_REPLICA_STATES,
     AdmissionProfile,
@@ -89,6 +89,7 @@ from .state import (
     ServiceClaim,
     ServiceFamily,
 )
+from .store_retry import SETTLEMENT, StoreRetry
 from .stores import ResidentStores
 
 # The port of the claim-gated resident peer listener a worker hosts, or 0.
@@ -422,8 +423,8 @@ class ResidentCapacityControl:
         self._delivery = delivery
         self._on_retired: RetiredHook = lambda _invocation_id: None
         self._logger = logger or logging.getLogger("resident-capacity")
-        self._retirements = RetirementRetry(self._retry_retirement, self._logger)
-        lifecycle.set_retirement_retry(self._retirements.add)
+        self._store_retry = StoreRetry(self._logger)
+        lifecycle.set_store_retry(self._store_retry.add)
         self._poll_interval = poll_interval_sec
         self._idle_sweep_interval = idle_sweep_interval_sec
         self._redrive_backoff = redrive_backoff_sec
@@ -463,7 +464,7 @@ class ResidentCapacityControl:
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Capture the event loop the origination coroutines run on."""
         self._loop = loop
-        self._retirements.bind_loop(loop)
+        self._store_retry.bind_loop(loop)
 
     def start(self) -> None:
         """Begin the background idle-teardown sweep when a sweep interval is set."""
@@ -474,11 +475,11 @@ class ResidentCapacityControl:
         self._sweep_task = self._loop.create_task(self._maintenance_loop())
 
     def shutdown(self) -> None:
-        """Cancel the background idle-teardown sweep and the retirement retries."""
+        """Cancel the background idle-teardown sweep and the store-failure retries."""
         if self._sweep_task is not None:
             self._sweep_task.cancel()
             self._sweep_task = None
-        self._retirements.cancel()
+        self._store_retry.cancel()
 
     async def _maintenance_loop(self) -> None:
         try:
@@ -529,15 +530,9 @@ class ResidentCapacityControl:
             # A claim the origination raised settles through the fenced terminal, so
             # its credit never strands with no owner left to consume it.
             if self._admission.active_claim(request.invocation_id) is not None:
-                try:
-                    self.fail_serve(request.invocation_id, request.delivery, detail)
-                    return
-                except Exception:
-                    self._logger.exception(
-                        "settling resident serve invocation %s failed",
-                        request.invocation_id,
-                    )
-            request.delivery.fail(detail)
+                self.fail_serve(request.invocation_id, request.delivery, detail)
+            else:
+                request.delivery.fail(detail)
 
     def on_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None:
         """Consume an origin worker's bootstrap-phase report off the calling lane."""
@@ -636,36 +631,31 @@ class ResidentCapacityControl:
             self._logger.exception(
                 "retiring resident invocation %s failed", invocation_id
             )
-            self._retirements.add(REQUEST, invocation_id)
+            self._store_retry.add(
+                REQUEST,
+                invocation_id,
+                functools.partial(self._retire_invocation, invocation_id),
+            )
 
     def _retire_invocation(self, invocation_id: str) -> None:
-        """Retire a consumed invocation, then each inert replica its claims named.
+        """Retire a consumed invocation, then each inert replica and unused standing
+        family its claims named.
 
         Raises on a store failure, leaving the invocation live. The hook hears of an
         invocation once it holds nothing in the working set.
         """
-        replica_ids = {
-            claim.replica_id
-            for claim in self._stores.claims.by_invocation(invocation_id)
-            if claim.replica_id is not None
-        }
+        claims = self._stores.claims.by_invocation(invocation_id)
+        replica_ids = {c.replica_id for c in claims if c.replica_id is not None}
+        families = {claim.family for claim in claims}
         self._admission.retire(invocation_id)
         if self._stores.live(invocation_id):
             return
         self._on_retired(invocation_id)
-        self._lifecycle.retire_inert(sorted(replica_ids))
+        self._lifecycle.retire_inert(sorted(replica_ids), families)
 
-    def _retry_retirement(self, kind: str, key: str) -> None:
-        if kind == REQUEST:
-            self._retire_invocation(key)
-        elif kind == REPLICA:
-            self._lifecycle.retire_replica(key)
-        else:
-            self._lifecycle.retire_family(key)
-
-    def retry_retirements(self) -> None:
-        """Retry every pending retirement immediately."""
-        self._retirements.run()
+    def retry_store_failures(self) -> None:
+        """Retry every write a store failure interrupted immediately."""
+        self._store_retry.run()
 
     def _reap_attempt(self, invocation_id: str, reap_replicas: bool = False) -> None:
         """Reap both ends of a resident invocation on its fenced terminal.
@@ -1102,7 +1092,12 @@ class ResidentCapacityControl:
                     request.invocation_id, ClaimTerminalReason.FAILED
                 )
         self._lifecycle.retire_inert(
-            [replica.replica_id for replica in self._stores.directory.all()]
+            [replica.replica_id for replica in self._stores.directory.all()],
+            [
+                family.family
+                for family in self._stores.families.all()
+                if family.standing
+            ],
         )
 
     async def _originate(self, env: ToolInvocationEnvelope) -> None:
@@ -1338,20 +1333,66 @@ class ResidentCapacityControl:
         *,
         success: bool,
     ) -> None:
-        """Record the fenced external status fact, release the credit, and finalize.
+        """Settle a serve invocation from its fenced terminal and answer its client.
 
-        The durable terminal fact is recorded before the credit releases, so a restart
-        reconciles the claim against it. The release is idempotent and the reap
-        tolerates an already-gone attempt, so a duplicate or late report is a no-op. The
-        invocation retires once the client response is finalized.
+        The client is answered once, with this outcome, whether or not the store takes
+        the settlement; a settlement a store failure interrupts is retried until it
+        lands, the credit held meanwhile. A duplicate or late report is a no-op.
         """
-        delivery.record_terminal(reason, detail)
-        self._consume(invocation_id, reason)
+        try:
+            self._settle_serve(invocation_id, delivery, reason, detail)
+        except Exception:
+            self._logger.exception(
+                "settling resident serve invocation %s failed", invocation_id
+            )
+            self._store_retry.add(
+                SETTLEMENT,
+                invocation_id,
+                functools.partial(
+                    self._settle_serve_and_retire,
+                    invocation_id,
+                    delivery,
+                    reason,
+                    detail,
+                ),
+            )
+            settled = False
+        else:
+            settled = True
         if success:
             delivery.complete()
         else:
             delivery.fail(detail or "resident serve failed")
-        self._retire(invocation_id)
+        if settled:
+            self._retire(invocation_id)
+
+    def _settle_serve(
+        self,
+        invocation_id: str,
+        delivery: ServeDelivery,
+        reason: ClaimTerminalReason,
+        detail: str | None,
+    ) -> None:
+        """Record the fenced external status fact, then release the credit. Raises on a
+        store failure.
+
+        The fact is durable before the credit releases, so a restart reconciles the
+        claim against it.
+        """
+        delivery.record_terminal(reason, detail)
+        self._consume(invocation_id, reason)
+
+    def _settle_serve_and_retire(
+        self,
+        invocation_id: str,
+        delivery: ServeDelivery,
+        reason: ClaimTerminalReason,
+        detail: str | None,
+    ) -> None:
+        if not self._stores.live(invocation_id):
+            return
+        self._settle_serve(invocation_id, delivery, reason, detail)
+        self._retire_invocation(invocation_id)
 
     def fail_serve(
         self, invocation_id: str, delivery: ServeDelivery, detail: str

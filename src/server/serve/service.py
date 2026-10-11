@@ -345,8 +345,15 @@ class GatedServe:
         self.control = control
         self.relay = relay
         self._persist = persist or (lambda: None)
+        # Set while a write of the edge's state has not landed.
+        self._unsaved = False
         self._logger = logger or logging.getLogger("gated-serve")
         self._streams: dict[str, _ServeStream] = {}
+
+    def _save(self) -> None:
+        self._unsaved = True
+        self._persist()
+        self._unsaved = False
 
     def set_forward_listener(self, listener: RootForwardIngress) -> None:
         """Attach the root forward listener the edge binds and releases ports on."""
@@ -498,7 +505,7 @@ class GatedServe:
             )
             if exposure is None:
                 return
-            self._persist()
+            self._save()
             self._advertise_route(serve_task_id)
 
         self.control.call_on_loop(_commit)
@@ -587,7 +594,7 @@ class GatedServe:
                 # Reserve a public port on the public host and bind its listener; the
                 # exposure goes live only on the listener's bound evidence.
                 self._reserve_and_bind(binding, forward_port)
-            self._persist()
+            self._save()
 
         self.control.call_on_loop(_adopt)
 
@@ -611,7 +618,7 @@ class GatedServe:
             if exposure is not None and self._forward_listener is not None:
                 self._forward_listener.schedule_release(exposure.public_port)
             self._bindings.remove(serve_task_id)
-            self._persist()
+            self._save()
 
         self.control.call_on_loop(_drain)
 
@@ -622,14 +629,16 @@ class GatedServe:
     def record_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason, detail: str | None
     ) -> None:
-        """Record the fenced external status fact before the credit releases."""
+        """Record the fenced external status fact before the credit releases, writing
+        it again after a failed write."""
         status = _TERMINAL_STATUS.get(reason, ServeTerminalStatus.FAILED)
-        if self._terminals.record(
+        recorded = self._terminals.record(
             ServeStatusTerminal(
                 invocation_id=invocation_id, status=status, detail=detail
             )
-        ):
-            self._persist()
+        )
+        if recorded or self._unsaved:
+            self._save()
 
     def reconcile_terminals(self) -> None:
         """Settle on startup every gated serve request the restart ended.
@@ -659,7 +668,7 @@ class GatedServe:
         for invocation_id in retired:
             self._terminals.drop(invocation_id)
         if retired:
-            self._persist()
+            self._save()
 
     def retire_terminal(self, invocation_id: str) -> None:
         """Drop a retired invocation's status fact; the next write omits it."""

@@ -1,4 +1,4 @@
-"""Retries of the retirements a store failure interrupted."""
+"""Retries of the resident writes a store failure interrupted."""
 
 import asyncio
 import logging
@@ -7,30 +7,35 @@ from collections.abc import Callable
 DEFAULT_BASE_DELAY_SEC = 1.0
 DEFAULT_MAX_DELAY_SEC = 30.0
 
+type Attempt = Callable[[], None]
 
-class RetirementRetry:
-    """Retries each failed retirement on the control loop, with capped backoff.
+# The kind of a gated serve settlement entry; retirements use their durable kinds.
+SETTLEMENT = "settlement"
 
-    ``retire`` takes a retirement's kind and key and raises when the store fails again;
-    it is idempotent, so a retry after a reply was lost converges on the same result.
-    Pending retirements run together after ``base_delay_sec``, the delay doubling up to
-    ``max_delay_sec`` while a retry fails. Use from the loop's own thread.
+
+class StoreRetry:
+    """Retries each write a store failure interrupted on the control loop, with capped
+    backoff, until it lands.
+
+    An entry is a kind and key with the attempt that lands it. An attempt is idempotent,
+    so a retry after a lost reply converges on the same result; it fails by raising or
+    by handing its entry back. Pending entries run together after ``base_delay_sec``,
+    the delay doubling up to ``max_delay_sec`` while any fails. Use from the loop's own
+    thread.
     """
 
     def __init__(
         self,
-        retire: Callable[[str, str], None],
         logger: logging.Logger,
         *,
         base_delay_sec: float = DEFAULT_BASE_DELAY_SEC,
         max_delay_sec: float = DEFAULT_MAX_DELAY_SEC,
     ) -> None:
-        self._retire = retire
         self._logger = logger
         self._base = base_delay_sec
         self._max = max_delay_sec
         self._delay = base_delay_sec
-        self._pending: dict[tuple[str, str], None] = {}
+        self._pending: dict[tuple[str, str], Attempt] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._handle: asyncio.TimerHandle | None = None
 
@@ -42,29 +47,27 @@ class RetirementRetry:
         self._loop = loop
         self._arm()
 
-    def add(self, kind: str, key: str) -> None:
-        """Retry a retirement after the current backoff."""
-        self._pending[(kind, key)] = None
+    def add(self, kind: str, key: str, attempt: Attempt) -> None:
+        """Retry an interrupted write after the current backoff."""
+        self._pending[(kind, key)] = attempt
         self._arm()
 
     def run(self) -> None:
-        """Retry every pending retirement immediately."""
+        """Retry every pending write immediately."""
         self.cancel()
         failed = False
-        for kind, key in list(self._pending):
+        for entry, attempt in list(self._pending.items()):
+            del self._pending[entry]
             try:
-                self._retire(kind, key)
+                attempt()
             except Exception:
                 self._logger.warning(
-                    "retrying the retirement of resident %s %s failed",
-                    kind,
-                    key,
-                    exc_info=True,
+                    "retrying resident %s %s failed", *entry, exc_info=True
                 )
-                failed = True
-                continue
-            self._pending.pop((kind, key), None)
+                self._pending.setdefault(entry, attempt)
+            failed = failed or entry in self._pending
         self._delay = min(self._max, self._delay * 2) if failed else self._base
+        self.cancel()
         self._arm()
 
     def cancel(self) -> None:

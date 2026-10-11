@@ -109,6 +109,10 @@ class ServiceFamilyRegistry:
     def forget(self, family: str) -> None:
         self._families.forget(family)
 
+    def rewrite(self, family: str) -> None:
+        """Journal a family again, so the next flush writes its live field."""
+        self._families.touch(family)
+
 
 class ReplicaDirectory:
     """The source of truth for which replica incarnations exist and their fences."""

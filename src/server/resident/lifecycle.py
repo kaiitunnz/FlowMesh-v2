@@ -10,6 +10,7 @@ replica no live claim names moves to stored history with its lease, as does a st
 family nothing live uses.
 """
 
+import functools
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Set
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from .state import (
     ServiceFamily,
     StoredReplica,
 )
+from .store_retry import Attempt
 from .stores import ResidentStores
 
 _logger = logging.getLogger("resident-capacity")
@@ -82,7 +84,7 @@ class LifecycleScaleManager:
         self._admission_slots = max(1, admission_slots)
         self._adapter_slots = max(1, adapter_slots)
         self._idle_retain_sec = max(0.0, idle_retain_sec)
-        self._retry: Callable[[str, str], None] = lambda _kind, _key: None
+        self._retry: Callable[[str, str, Attempt], None] = lambda *_: None
         self._materialize_fn = materialize_fn
         self._stop_fn = stop_fn
 
@@ -505,28 +507,37 @@ class LifecycleScaleManager:
             lease.state = state
             lease.updated_at = now_iso()
 
-    def set_retirement_retry(self, retry: Callable[[str, str], None]) -> None:
-        """Register ``retry``, called with the kind and key of a retirement a store
-        failure interrupted."""
+    def set_store_retry(self, retry: Callable[[str, str, Attempt], None]) -> None:
+        """Register ``retry``, called with the kind, key and attempt of a retirement a
+        store failure interrupted."""
         self._retry = retry
 
-    def retire_inert(self, replica_ids: Iterable[str]) -> None:
-        """Move each inert replica no live claim names, and then each standing family
-        it leaves unused, to stored history, handing a store failure to the retry."""
-        families: set[str] = set()
+    def retire_inert(
+        self, replica_ids: Iterable[str], families: Iterable[str] = ()
+    ) -> None:
+        """Move each inert replica no live claim names to stored history, then each of
+        ``families`` and of their families that is standing and unused, handing a store
+        failure to the retry."""
+        unused = set(families)
         for replica_id in replica_ids:
             try:
                 if (family := self.retire_replica(replica_id)) is not None:
-                    families.add(family)
+                    unused.add(family)
             except Exception:
                 _logger.exception("retiring resident replica %s failed", replica_id)
-                self._retry(REPLICA, replica_id)
-        for family in sorted(families):
+                self._retry(
+                    REPLICA,
+                    replica_id,
+                    functools.partial(self.retire_inert, [replica_id]),
+                )
+        for family in sorted(unused):
             try:
                 self.retire_family(family)
             except Exception:
                 _logger.exception("retiring resident family %s failed", family)
-                self._retry(FAMILY, family)
+                self._retry(
+                    FAMILY, family, functools.partial(self._retry_family, family)
+                )
 
     def retire_replica(self, replica_id: str) -> str | None:
         """Move an inert replica no live claim names, with its lease, to stored history,
@@ -560,14 +571,24 @@ class LifecycleScaleManager:
         """Move a standing family with no live replica, request or claim to stored
         history. Raises on a store failure."""
         definition = self._stores.families.get(family)
-        if (
-            definition is None
-            or not definition.standing
-            or self._stores.directory.by_family(family)
-            or self._stores.claims.pending_for_family(family)
-            or self._stores.invocations.any_for_family(family)
-        ):
+        if definition is None or not definition.standing or self._family_used(family):
             return
         self._stores.flush()
         self._stores.durability.archive_family(definition, live_field(FAMILY, family))
         self._stores.families.forget(family)
+
+    def _retry_family(self, family: str) -> None:
+        """Retry a family's archive. A family in use again is written live once more,
+        since an archive whose reply was lost has deleted its live field."""
+        if family in self._stores.families and self._family_used(family):
+            self._stores.families.rewrite(family)
+            self._stores.flush()
+            return
+        self.retire_family(family)
+
+    def _family_used(self, family: str) -> bool:
+        return bool(
+            self._stores.directory.by_family(family)
+            or self._stores.claims.pending_for_family(family)
+            or self._stores.invocations.any_for_family(family)
+        )
