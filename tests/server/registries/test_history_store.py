@@ -49,13 +49,7 @@ def _publication(
     }
     return HistoryPublication(
         workflow_id=workflow_id,
-        certificate=HistoryCertificate(
-            schema_version=HISTORY_SCHEMA,
-            nonce="nonce",
-            seq=seq,
-            mode="v1",
-            tasks=len(task_ids),
-        ),
+        certificate=HistoryCertificate(schema_version=HISTORY_SCHEMA, seq=seq),
         tasks={task_id: TaskHistory(completed=True) for task_id in task_ids},
         members=members,
         outputs=None,
@@ -208,9 +202,7 @@ def _large_publication(workflow_id: str, count: int) -> HistoryPublication:
     task_ids = [f"tsk-{index:05d}" for index in range(count)]
     return HistoryPublication(
         workflow_id=workflow_id,
-        certificate=HistoryCertificate(
-            schema_version=HISTORY_SCHEMA, nonce="n", seq=1, mode="v1", tasks=count
-        ),
+        certificate=HistoryCertificate(schema_version=HISTORY_SCHEMA, seq=1),
         tasks={task_id: TaskHistory() for task_id in task_ids},
         members={
             task_id: (history_member(float(index), task_id), statuses[index % 3])

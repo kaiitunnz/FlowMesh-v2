@@ -1977,16 +1977,13 @@ class TaskRuntime:
             frozenset(engine.invocation_ids()) if engine is not None else frozenset()
         )
 
-    def _history_publication(
-        self, workflow_id: str, seq: int, nonce: str
-    ) -> HistoryPublication:
+    def _history_publication(self, workflow_id: str, seq: int) -> HistoryPublication:
         """The history a sealed workflow's task and output reads derive from, read a
         bounded chunk at a time under the lock. The seal keeps every part of it
         unchanged between chunks."""
         with self._lock:
             task_ids = self._tasks.ids_of(workflow_id)
             engine = self._engines.get(workflow_id)
-            finished_ts = self._tasks.last_finish(workflow_id)
         tasks: dict[str, TaskHistory] = {}
         members: dict[str, tuple[str, str]] = {}
         for chunk in self._locked_chunks(task_ids):
@@ -1995,9 +1992,6 @@ class TaskRuntime:
                 tasks[task_id] = TaskHistory.model_construct(
                     **self._derived_locked(task_id, record).info_fields(),
                     result=self._content_bindings.result_binding_locked(task_id),
-                    settled_unbound=self._content_bindings.settled_unbound_locked(
-                        task_id
-                    ),
                 )
                 members[task_id] = (
                     history_member(record.submitted_ts, task_id),
@@ -2005,14 +1999,7 @@ class TaskRuntime:
                 )
         return HistoryPublication(
             workflow_id=workflow_id,
-            certificate=HistoryCertificate(
-                schema_version=HISTORY_SCHEMA,
-                nonce=nonce,
-                seq=seq,
-                mode="v1" if engine is None else "v2",
-                tasks=len(tasks),
-                finished_ts=finished_ts,
-            ),
+            certificate=HistoryCertificate(schema_version=HISTORY_SCHEMA, seq=seq),
             tasks=tasks,
             members=members,
             outputs=self._outputs_history(engine) if engine else None,

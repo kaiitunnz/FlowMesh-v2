@@ -3,7 +3,7 @@ state, kept beside its stored task records once the runtime frees it."""
 
 import json
 import struct
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -45,8 +45,6 @@ class TaskHistory(TaskDerived):
     """The task-info fields and result a freed task's runtime state derived."""
 
     result: ResultBinding | None = None
-    # A success with no result bound to read.
-    settled_unbound: bool = False
 
 
 class OutputHistory(BaseModel):
@@ -90,14 +88,10 @@ def output_member_field(
 
 class HistoryCertificate(BaseModel):
     """That a settled workflow's history is complete and nothing still needs its
-    runtime state."""
+    runtime state, and the sequence the workflow was freed at."""
 
     schema_version: int
-    nonce: str
     seq: int
-    mode: Literal["v1", "v2"]
-    tasks: int
-    finished_ts: float | None = None
 
 
 def history_member(submitted_ts: float, task_id: str) -> str:

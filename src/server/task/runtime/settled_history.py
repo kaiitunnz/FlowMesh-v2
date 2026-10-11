@@ -7,7 +7,6 @@ resident and unsealed for the next attempt.
 """
 
 import logging
-import os
 import threading
 import time
 from collections.abc import Callable, Collection
@@ -57,7 +56,7 @@ class SettledHistory:
         self,
         holds: Callable[[str], bool],
         check: Callable[[str], ReclaimCheck | None],
-        publication: Callable[[str, int, str], HistoryPublication],
+        publication: Callable[[str, int], HistoryPublication],
         forget: Callable[[str], Freed],
         registry: WorkflowRegistry,
         lock: threading.RLock,
@@ -66,7 +65,7 @@ class SettledHistory:
     ) -> None:
         # Each reads or changes the runtime's state under its lock: whether it holds a
         # workflow, whether nothing in it still needs the workflow's state, the history
-        # a sealed workflow's reads derive from, certified under a sequence and nonce,
+        # a sealed workflow's reads derive from, certified under a sequence,
         # which takes the lock itself, and its removal.
         self._holds = holds
         self._check = check
@@ -273,7 +272,7 @@ class SettledHistory:
             self._next_seq += 1
             seal = self._sealed[workflow_id] = _Seal()
         try:
-            publication = self._publication(workflow_id, seq, os.urandom(16).hex())
+            publication = self._publication(workflow_id, seq)
         except Exception:
             self._unseal(workflow_id, "its history could not be read")
             raise
