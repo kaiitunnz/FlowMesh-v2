@@ -374,8 +374,8 @@ class EventMonitor:
 
             if isinstance(event, TaskEvent):
                 try:
-                    # The tail encloses the acknowledgement, where what the handling
-                    # owes is delivered.
+                    # The acknowledgement delivers what the handling owes, which can
+                    # settle the workflow, so the tail outlasts it.
                     with (
                         self._runtime.event_tail(event.task_id),
                         self._runtime.acknowledging(),

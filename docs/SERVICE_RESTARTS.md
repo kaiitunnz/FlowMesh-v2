@@ -95,8 +95,9 @@ restart safe:
 - **Durable scheduler state.** Each task's mutable state (status, attempts,
   assigned worker, failed workers, merge linkage), its dependency edges, and its
   epoch index are persisted to Redis on every transition, along with per-workflow
-  epoch ordering and frontier. On startup the server rebuilds the full task DAG,
-  ready queue, and epoch frontiers from these records (`TaskRuntime.restart`).
+  epoch ordering and frontier. On startup the server rebuilds each open workflow's
+  task DAG, ready queue, and epoch frontiers from these records
+  (`TaskRuntime.restart`).
   A transition's task records, workflow status-set membership, and schedule
   snapshot are written as a single atomic Redis transaction
   (`WorkflowRegistry.commit_transition`), so a crash mid-persist commits the whole
@@ -116,11 +117,11 @@ restart safe:
   genuinely departed are reclaimed by the watchdog. A task still being cancelled
   has its worker interrupted again.
 - **Freed workflows stay freed.** Startup restores only the workflows not yet
-  freed; a freed workflow is served from its stored history. The first start over a
-  store written before freed workflows were tracked classifies each stored workflow
-  once, in bounded batches that resume where a crash stopped: a settled workflow
-  nothing still needs is closed, if its closure was lost, and freed, and every other
-  is restored.
+  freed; a freed workflow is served from its stored history. A start over a store
+  without the open-workflow index, or one holding workflows neither open nor freed,
+  classifies each stored workflow in bounded batches that resume where a crash
+  stopped: a settled workflow nothing still needs is closed, if its closure was lost,
+  and freed, and every other is restored.
 - **Heartbeat grace for rehydrated work.** Worker heartbeats are dropped while
   the root is down, so a surviving worker briefly looks stale once the root is
   back. The watchdog gives any worker that owns rehydrated in-flight tasks an

@@ -151,7 +151,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `TaskRuntime`/dispatcher, so placement stays physical. Retries reuse the work item and
   its `invocation_id`; outputs publish idempotently to logical result slots. The ledger
   persists at `workflow:{id}:ds`, one hash field per entity, and each transition writes
-  only the entities it changed; `TaskRuntime.rehydrate` rebuilds it on restart. A v1
+  only the entities it changed; a restart rebuilds it (`TaskRuntime.restart`). A v1
   submission keeps the static-DAG path.
 - **Structured dynamic regions.** The engine executes the compiler's semi-static regions:
   control operators (`Branch`/`Merge`/`Loop`/`Spawn`/`Join`) settle in-ledger and never
@@ -686,16 +686,12 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
   durably settled. The span's end is the last durable finish among its tasks, so a workflow that
   closes again after a restart closes the same way it did the first time.
-- **Settled workflows leave memory.** Once a workflow has settled and nothing still acts
-  on it — its writes are durable, every side effect its transitions caused is delivered,
-  its handlers have finished, it is closed, each task's logs are archived, and every
-  resident claim it raised is terminal — the root stores what its reads derive from and
-  frees its runtime state. The stored history is certified in one step that checks the
-  copy is complete and that nothing wrote the workflow since its state was read, so a
-  workflow leaves memory only behind a certified copy; one whose copy is not certified
-  stays resident and is tried again. A freed workflow's tasks, results, published
-  outputs, listings and counts read as they did, from the control store, and a late
-  event for one of its tasks changes nothing.
+- **Settled workflows leave memory.** Once a workflow has settled, is closed, has its
+  logs archived and its side effects delivered, and every resident claim it raised is
+  terminal, the root stores a certified copy of what its reads derive from and frees its
+  runtime state. Its tasks,
+  results, published outputs, listings and counts are then read from the control store,
+  and a late event for one of its tasks is acknowledged without effect.
 - **Redis channels.** The runtime uses two Redis endpoints (separate instances in the
   stack):
   - control (`REDIS_CONTROL_URL`) — durable state and the control plane's

@@ -957,11 +957,9 @@ class TaskRuntime:
     ) -> int:
         """Restore every workflow not freed, then begin freeing settled ones.
 
-        A store holding workflows registered before the open-workflow index existed has
-        each classified first, a bounded batch at a time. ``close`` closes a settled
-        workflow restored in the given runtime and returns whether it is closed;
-        ``claims_terminal`` runs on the event loop that owns the resident claims.
-        Returns the number of workflows restored.
+        A store without the open-workflow index has its stored workflows classified
+        first, as ``HistoryBootstrap`` describes with the callbacks it takes. Returns
+        the number of workflows restored.
         """
         await HistoryBootstrap(
             self._workflow_registry,
@@ -1015,8 +1013,8 @@ class TaskRuntime:
     async def rehydrate(self, workflow_ids: Collection[str] | None = None) -> int:
         """Rebuild in-memory scheduler state from durable Redis records.
 
-        Reconstructs each of ``workflow_ids``, or every workflow not freed, its DAG,
-        ready queue, and epoch state from the persisted per-task snapshots. In-flight
+        Reconstructs the DAG, ready queue and epoch state of each of ``workflow_ids``,
+        or of every workflow not freed, from the persisted per-task snapshots. In-flight
         (DISPATCHED / CANCELLING) tasks are left assigned to their worker: completions
         that landed during the restart arrive via the replayed task-event stream, and
         genuinely departed workers are recovered by the watchdog. Returns the number of
@@ -1835,7 +1833,8 @@ class TaskRuntime:
         return self._settled_history
 
     async def start_settled_history(self) -> None:
-        """Begin freeing settled workflows, after the stored history read so far."""
+        """Begin freeing settled workflows, numbering certificates after the stored
+        sequence and counting the freed tasks the store holds."""
         seq = await self._workflow_registry.history_seq_async()
         total, done = await self._workflow_registry.history_counts_async()
         self._settled_history.start(seq, total, done)
@@ -1863,10 +1862,8 @@ class TaskRuntime:
 
     @contextmanager
     def event_tail(self, *task_ids: str) -> Iterator[None]:
-        """Keep resident, until this thread's outermost tail ends, the workflows of
-        ``task_ids`` and of every workflow whose settlement is delivered on this thread
-        meanwhile, so what a caller does after a report settles a task still finds its
-        state."""
+        """Hold the workflows of ``task_ids``, and of each workflow settled on this
+        thread meanwhile, resident until this thread's outermost tail ends."""
         self._tail.depth += 1
         try:
             if new := [t for t in task_ids if t not in self._tail.tasks]:
@@ -1915,10 +1912,8 @@ class TaskRuntime:
         return record
 
     def _reclaim_check_locked(self, workflow_id: str) -> ReclaimCheck | None:
-        """What freeing a workflow still depends on outside the runtime, or None while
-        the runtime still needs its state: it has not settled durably, owes an action
-        or a write, a report or hold of it is under way, or any of its tasks is still
-        being dispatched, merged, checked or exposed."""
+        """Return the invocations whose resident claims freeing a workflow waits on,
+        or None while the runtime still needs its state."""
         committer = self._committer
         if (
             not committer.durable(workflow_id)
@@ -3569,7 +3564,7 @@ class TaskRuntime:
     ) -> PublishedOutputs | None:
         """A workflow's published outputs, or one output's, in no particular order.
 
-        None for a workflow with no ledger.
+        None for a v1 workflow, resident or freed, or one never known.
         """
         with self._lock:
             engine = self._engines.get(workflow_id)
@@ -3597,7 +3592,8 @@ class TaskRuntime:
         key: str | None,
         sequence: int | None,
     ) -> PublishedOutput | None:
-        """One published output's member at the selectors, or None with no ledger."""
+        """One published output's member at the selectors; None for a v1 workflow,
+        resident or freed, or one never known."""
         with self._lock:
             engine = self._engines.get(workflow_id)
             if engine is not None:
@@ -3662,7 +3658,8 @@ class TaskRuntime:
             return engine.resolve_legacy_task(task_id) if engine else None
 
     def result_binding(self, task_id: str) -> ResultBinding | None:
-        """What a task's result reads as, or None when it has no readable result.
+        """What a task's result reads as, from the store once its workflow is freed;
+        None for a task never known or with no readable result.
 
         A v2 task resolves through the ledger — its induced output slot, or for a task
         materialized at run time the value its work item settled with. A v1 task
@@ -5150,7 +5147,8 @@ class TaskRuntime:
                 for record in self._tasks.of_workflow(workflow_id)
             ]
             if not workflow_tasks or self._settled_history.sealed_locked(workflow_id):
-                return touched  # Unknown workflow: no records to move
+                # Unknown, or sealed while it is freed: no record of it moves.
+                return touched
             owed = self._terminate_workflow_locked(workflow_id, reason, None)
             for task_id, record in workflow_tasks:
                 if (moved := self._cancel_record_locked(record, reason)) is None:
@@ -5708,9 +5706,9 @@ class TaskRuntime:
         just after or before a position, or the newest ``limit``.
 
         The page is one moment's listing. One pass under the lock matches resident
-        record attributes and copies out the fields of those nearest the position, and
-        notes which freed workflows that moment holds; the freed tasks are read off the
-        lock, and only those of workflows freed by that moment are listed.
+        records, copies out the fields of those nearest the position, and reads the
+        sequence freed through and the workflows being freed; the freed tasks are read
+        off the lock, and only those of workflows freed by that moment are listed.
         """
         workflow_ids = query.values("workflow_id")
         statuses = query.values("status")

@@ -279,8 +279,8 @@ class TelemetrySpanEmitter:
         scope_closed: Callable[[str], bool],
         loop_time: Callable[[str], int],
     ) -> None:
-        # An emitter that never emits, as the shared null one, holds no ledger, so it
-        # keeps no workflow's state alive.
+        # The shared null emitter outlives every workflow, so binding its collections
+        # would keep the last workflow's ledger alive.
         if not self._emits(TelemetryLevel.COARSE):
             return
         self._activations = activations

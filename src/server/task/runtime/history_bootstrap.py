@@ -1,10 +1,10 @@
-"""Classifying workflows stored before the open-workflow index existed.
+"""Classifying the stored workflows of a store without the open-workflow index.
 
-A restart restores only the workflows the open set names. A store holding workflows
-registered before that set was kept has each of them classified once, a bounded batch
-at a time: a settled one nothing still needs is closed and freed behind its certified
-history, and every other joins the open set. A cursor recorded after each batch lets a
-crash resume where it stopped.
+A restart restores only the workflows the open set names. A store without that set, or
+one whose registered workflows are not each open or freed, has every stored workflow
+classified, a bounded batch at a time: a settled one nothing still needs is closed and
+freed behind its certified history, and every other joins the open set. A cursor
+recorded after each batch lets a crash resume where it stopped.
 """
 
 import asyncio
@@ -56,7 +56,13 @@ class ScratchRuntime(Protocol):
 
 
 class HistoryBootstrap[R: ScratchRuntime]:
-    """Builds the open-workflow index over every registered workflow, once."""
+    """Builds the open-workflow index over every registered workflow.
+
+    ``close`` closes a settled workflow restored in the given runtime, or finds it
+    closed, and returns whether it is. ``claims_terminal`` runs on the event loop that
+    owns the resident claims. ``archived`` answers whether a finished task's logs need
+    no more archiving, None when that cannot be told.
+    """
 
     def __init__(
         self,
@@ -68,10 +74,6 @@ class HistoryBootstrap[R: ScratchRuntime]:
         logger: logging.Logger,
         batch_tasks: int = BATCH_TASKS,
     ) -> None:
-        # ``close`` closes a settled workflow restored in the given runtime, or finds
-        # it closed, and returns whether it is. ``claims_terminal`` runs on the event
-        # loop that owns the resident claims; ``archived`` answers whether a finished
-        # task's logs need no more archiving, None when that cannot be told.
         self._registry = registry
         self._scratch_runtime = scratch_runtime
         self._close = close

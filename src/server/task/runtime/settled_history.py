@@ -50,8 +50,12 @@ class SettledHistory:
     """Frees each settled workflow's runtime state behind its certified history.
 
     A workflow is evaluated when a request names it and again on every sweep until it
-    is freed. Every field but the request queue is read and changed under the runtime
-    lock, which ``evaluate`` takes itself.
+    is freed. ``holds``, ``check`` and ``forget`` read or change the runtime's state
+    under its lock, and ``publication`` reads a sealed workflow's history taking the
+    lock itself. The requests, candidates and sweep clock are guarded by a condition of
+    their own; seals, holds, closure and archive reports, sequences and counts by the
+    runtime lock, which ``evaluate`` takes itself. The claims check and the freed
+    callback are installed before freeing starts.
     """
 
     def __init__(
@@ -64,10 +68,6 @@ class SettledHistory:
         lock: threading.RLock,
         logger: logging.Logger,
     ) -> None:
-        # Each reads or changes the runtime's state under its lock: whether it holds a
-        # workflow, whether nothing in it still needs the workflow's state, the history
-        # a sealed workflow's reads derive from, certified under a sequence,
-        # which takes the lock itself, and its removal.
         self._holds = holds
         self._check = check
         self._publication = publication
@@ -80,7 +80,6 @@ class SettledHistory:
         self._candidates: set[str] = set()
         self._started = False
         self._next_sweep = time.monotonic() + SWEEP_INTERVAL_SEC
-        # What the runtime lock guards.
         self._sealed: dict[str, _Seal] = {}
         self._tails: dict[str, int] = {}
         self._closed: set[str] = set()
@@ -126,7 +125,7 @@ class SettledHistory:
         self._claims_settled = settled
 
     def set_on_freed(self, on_freed: Callable[[list[str]], None]) -> None:
-        """Install the callback told the tasks of each workflow freed, off the lock."""
+        """Install the callback handed each freed workflow's task ids, off the lock."""
         self._on_freed = on_freed
 
     # ------------------------------------------------------------------ #
@@ -134,8 +133,8 @@ class SettledHistory:
     # ------------------------------------------------------------------ #
 
     def request(self, workflow_id: str) -> None:
-        """Ask for a workflow to be freed once it can be. Cheap and safe from any
-        thread, the runtime lock held or not."""
+        """Ask for a workflow to be freed once it can be, from any thread, with the
+        runtime lock held or not."""
         with self._cv:
             self._candidates.add(workflow_id)
             self._requested.add(workflow_id)
@@ -194,7 +193,9 @@ class SettledHistory:
 
     @property
     def published_through(self) -> int:
-        """The highest sequence of a freed workflow, read under the runtime lock."""
+        """The highest sequence of a freed workflow. A reader that first found a task
+        not resident under the runtime lock reads it after the free that removed the
+        task."""
         return self._published_through
 
     def counts_locked(self) -> tuple[int, int]:
@@ -212,7 +213,7 @@ class SettledHistory:
             self.drain(min(_POLL_SEC, max(0.0, self._next_sweep - time.monotonic())))
 
     def sweep(self) -> None:
-        """Evaluate every workflow not yet freed on the next drain."""
+        """Request every workflow not yet freed, for the next drain to evaluate."""
         with self._cv:
             self._requested |= self._candidates
             self._cv.notify_all()
@@ -235,7 +236,7 @@ class SettledHistory:
                 if not store_unavailable(exc):
                     self._logger.exception("Freeing workflow %s failed", workflow_id)
                     continue
-                # Every candidate stays for the next sweep.
+                # The workflows left unevaluated stay candidates for the next sweep.
                 self._logger.warning(
                     "Freeing settled workflows waits for the store: %s", exc
                 )

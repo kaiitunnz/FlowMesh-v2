@@ -605,7 +605,7 @@ class WorkflowHistoryStore:
     _rds: RedisClient
 
     def workflow_revision(self, workflow_id: str) -> int:
-        """How many writes of the workflow's state have landed."""
+        """Return how many writes of the workflow's state have landed."""
         return int(self._rds.sync.get(workflow_revision_key(workflow_id)) or 0)
 
     async def workflow_revision_async(self, workflow_id: str) -> int:
@@ -650,7 +650,7 @@ class WorkflowHistoryStore:
         )
 
     def history_certificate(self, workflow_id: str) -> HistoryCertificate | None:
-        """The workflow's certificate, None while it is not freed."""
+        """Return the workflow's certificate, None while it is not freed."""
         (raw,) = self._rds.sync.hash_mget(
             workflow_history_key(workflow_id), [CERTIFICATE_FIELD]
         )
@@ -665,8 +665,8 @@ class WorkflowHistoryStore:
         return _certificate(raw)
 
     def history_certified(self, workflow_ids: Sequence[str]) -> list[bool]:
-        """Whether each workflow holds a certificate; one whose history key is not a
-        hash holds none."""
+        """Return whether each workflow holds a certificate; one whose history key is
+        not a hash holds none."""
         with self._rds.sync.control_pipeline(transaction=False) as pipe:
             _queue_certified(pipe, workflow_ids)
             return _certified(pipe.execute(raise_on_error=False))
@@ -679,8 +679,9 @@ class WorkflowHistoryStore:
     def stored_outputs(
         self, workflow_id: str, name: str | None = None
     ) -> OutputsHistory | None:
-        """A freed workflow's published output declarations and the members of every
-        output, or of the one named; None while the workflow is not freed."""
+        """Read a freed workflow's published output declarations and the members of
+        every output, or of the one named; None for a workflow not freed or freed with
+        no ledger."""
         read = _outputs_read(
             name,
             self._rds.sync.hash_mget(
@@ -779,7 +780,7 @@ class WorkflowHistoryStore:
         )
 
     def history_members(self, task_ids: Sequence[str]) -> list[str | None]:
-        """Each task's member in the history indexes, None for one not freed."""
+        """Return each task's member in the history indexes, None for one not freed."""
         if not task_ids:
             return []
         return self._rds.sync.hash_mget(TASK_HISTORY_MEMBERS_KEY, list(task_ids))
@@ -792,7 +793,7 @@ class WorkflowHistoryStore:
         )
 
     def load_history(self, task_ids: Sequence[str]) -> list[StoredTask | None]:
-        """Each freed task with its history, None for a task not freed.
+        """Load each freed task with its history, None for a task not freed.
 
         Raises ``HistoryUnreadable`` for a freed task whose history is incomplete.
         """
@@ -828,9 +829,9 @@ class WorkflowHistoryStore:
     def history_range(
         self, status: str | None, bound: str | None, forward: bool, count: int
     ) -> list[str]:
-        """Up to ``count`` freed tasks' index members strictly past ``bound`` in scan
-        order, ascending when ``forward``, else descending; from the oldest or newest
-        when ``bound`` is None. Only tasks that settled ``status`` when given."""
+        """Return up to ``count`` freed tasks' index members strictly past ``bound`` in
+        scan order, ascending when ``forward``, else descending; from the oldest or
+        newest when ``bound`` is None. Only tasks that settled ``status`` when given."""
         return self._rds.sync.lex_range(
             task_history_key(status), *lex_bounds(bound, forward), count, not forward
         )
@@ -852,10 +853,11 @@ class WorkflowHistoryStore:
         workflow_ids: Collection[str] | None = None,
         task_ids: Collection[str] | None = None,
     ) -> list[T]:
-        """Up to ``limit`` of what ``select`` makes of the freed tasks past the index
-        member ``bound`` in scan order, ascending when ``forward``, skipping each it
-        makes None of: the tasks of ``workflow_ids`` or among ``task_ids`` when either
-        is given, else those that settled one of ``statuses``, or every freed task."""
+        """Return up to ``limit`` of what ``select`` makes of the freed tasks past the
+        index member ``bound`` in scan order, ascending when ``forward``, skipping each
+        it makes None of: the tasks of ``workflow_ids`` or among ``task_ids`` when
+        either is given, else those that settled one of ``statuses``, or every freed
+        task."""
         found: list[T] = []
         with closing(
             self._history_scan(bound, forward, limit, statuses, workflow_ids, task_ids)
@@ -967,7 +969,7 @@ class WorkflowHistoryStore:
             yield chunk
 
     def history_task_ids(self, workflow_id: str) -> list[str]:
-        """The ids of a freed workflow's tasks, as far as its history holds them."""
+        """Return the ids of a freed workflow's tasks, as its history holds them."""
         return _task_fields(self._rds.sync.hash_keys(workflow_history_key(workflow_id)))
 
     async def history_task_ids_async(self, workflow_id: str) -> list[str]:
@@ -976,7 +978,8 @@ class WorkflowHistoryStore:
         )
 
     def history_counts(self) -> tuple[int, int]:
-        """How many certified freed tasks the store holds, and how many succeeded."""
+        """Return how many certified freed tasks the store holds, and how many
+        succeeded."""
         total, done = self._rds.sync.hash_mget(HISTORY_COUNTS_KEY, ["total", "done"])
         return int(total or 0), int(done or 0)
 
@@ -987,21 +990,21 @@ class WorkflowHistoryStore:
         return int(total or 0), int(done or 0)
 
     def history_seq(self) -> int:
-        """The highest sequence any published certificate carries."""
+        """Return the highest sequence any published certificate carries."""
         return int(self._rds.sync.get(HISTORY_SEQ_KEY) or 0)
 
     async def history_seq_async(self) -> int:
         return int(await self._rds.asyncio.get(HISTORY_SEQ_KEY) or 0)
 
     def open_workflow_ids(self) -> set[str]:
-        """Every workflow registered and not freed."""
+        """Return every workflow registered and not freed."""
         return self._rds.sync.set_members(WORKFLOWS_OPEN_KEY)
 
     async def open_workflow_ids_async(self) -> set[str]:
         return await self._rds.asyncio.set_members(WORKFLOWS_OPEN_KEY)
 
     def history_census(self) -> HistoryCensus:
-        """How many workflows are registered, open and freed, at one moment."""
+        """Read how many workflows are registered, open and freed, at one moment."""
         with self._rds.sync.control_pipeline() as pipe:
             _queue_census(pipe)
             return _census(pipe.execute())
@@ -1046,7 +1049,7 @@ class WorkflowHistoryStore:
             await self._rds.asyncio.srem(WORKFLOWS_OPEN_KEY, *workflow_ids)
 
     def stored_task_counts(self, workflow_ids: Sequence[str]) -> list[int]:
-        """How many tasks each stored workflow holds: those it registered with and
+        """Count the tasks each stored workflow holds: those it registered with and
         those it added since."""
         with self._rds.sync.control_pipeline(transaction=False) as pipe:
             _queue_task_counts(pipe, workflow_ids)
@@ -1058,7 +1061,7 @@ class WorkflowHistoryStore:
             return _task_counts(await pipe.execute())
 
     def reopen_workflows(self, *workflow_ids: str) -> None:
-        """Count workflows among the open ones."""
+        """Add workflows to the open set."""
         if workflow_ids:
             self._rds.sync.sadd(WORKFLOWS_OPEN_KEY, *workflow_ids)
 
@@ -1067,8 +1070,7 @@ class WorkflowHistoryStore:
             await self._rds.asyncio.sadd(WORKFLOWS_OPEN_KEY, *workflow_ids)
 
     def history_index_state(self) -> str | None:
-        """How far the open-workflow index has been built over workflows registered
-        before it existed."""
+        """Return how far the open-workflow index is built over a store without it."""
         return self._rds.sync.get(HISTORY_INDEX_KEY)
 
     async def history_index_state_async(self) -> str | None:
@@ -1081,7 +1083,7 @@ class WorkflowHistoryStore:
         await self._rds.asyncio.set_value(HISTORY_INDEX_KEY, state)
 
     def scan_workflow_ids(self, cursor: int, count: int) -> tuple[int, list[str]]:
-        """One step of a scan over every registered workflow id."""
+        """Read one step of a scan over every registered workflow id."""
         return self._rds.sync.scan_set(WORKFLOWS_SET_KEY, cursor, count)
 
     async def scan_workflow_ids_async(

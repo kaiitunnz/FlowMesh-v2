@@ -29,8 +29,8 @@ from shared.tasks.result_binding import ResultBinding
 
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
 # What a cached entry holds besides its payload: its reference key, the payload's object
-# header and its slot, about 1.3 KiB measured, so the budget bounds memory rather than
-# payload bytes alone.
+# header and its slot, about 1.3 KiB measured. The budget counts it, so it bounds the
+# memory the cache holds.
 _CACHE_ENTRY_OVERHEAD_BYTES = 1536
 
 

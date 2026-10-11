@@ -32,9 +32,8 @@ async def rehydrate_root_state(
     kept past its ledger terminal. Restored replicas re-attach to their serve tasks once
     the runtime has restored those tasks' records, and resident admission waits until
     they have. A worker reserved for a dispatch the restored runtime does not hold is
-    released. The runtime restores the workflows not freed, freeing first the settled
-    ones a store kept from before it indexed them, with ``close`` closing each and
-    ``archived`` telling whether a task's logs need no more archiving.
+    released. The runtime restores the workflows not freed, first classifying the stored
+    workflows of a store without the open-workflow index.
     """
     resident = resident_control if resident_registry is not None else None
     if resident is not None and resident_registry is not None:

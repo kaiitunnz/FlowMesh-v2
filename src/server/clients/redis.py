@@ -65,7 +65,7 @@ WORKFLOWS_OPEN_KEY = "workflows:open"
 
 # Freed workflows' history: each freed task's index member by task, the certified
 # counts, the highest certificate sequence, and how far the open-workflow index is
-# built over workflows registered before it.
+# built over a store without it.
 TASK_HISTORY_MEMBERS_KEY = "tasks:history:members"
 HISTORY_COUNTS_KEY = "history:counts"
 HISTORY_SEQ_KEY = "history:seq"
@@ -139,9 +139,8 @@ def workflow_history_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:history"
 
 
+# The index of freed tasks by submission, or of those that settled one status.
 def task_history_key(status: str | None) -> str:
-    """The index of freed tasks by submission, of those that settled ``status`` when
-    given."""
     return "tasks:history" if status is None else f"tasks:history:{status}"
 
 
@@ -570,7 +569,7 @@ class SyncRedisClient:
         return bool(self._control.sismember(key, member))
 
     def scan_set(self, key: str, cursor: int, count: int) -> tuple[int, list[str]]:
-        """One ``SSCAN`` step: the next cursor, 0 once done, and the members read."""
+        """Read one ``SSCAN`` step: the next cursor, 0 once done, and the members."""
         next_cursor, members = _sync(self._control.sscan(key, cursor, count=count))
         return int(next_cursor), list(members)
 
