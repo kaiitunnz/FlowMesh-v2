@@ -257,7 +257,7 @@ class Dispatcher:
         ``no_worker_grace_sec``.
         """
         self._runtime.release_merge(task_id)
-        record.last_error = message
+        self._runtime.note_dispatch_error(task_id, message)
         now = time.time()
         if record.no_dispatch_since is None:
             record.no_dispatch_since = now

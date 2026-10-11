@@ -3861,6 +3861,13 @@ class TaskRuntime:
                 return PublishGate.NOT_PENDING
             return PublishGate.PUBLISH
 
+    def note_dispatch_error(self, task_id: str, message: str) -> None:
+        """Record why a pending task could not be dispatched, as its latest error."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is not None and record.status == TaskStatus.PENDING:
+                record.last_error = message
+
     def abandon_publish(self, task_id: str) -> bool:
         """Drop the mark of a dispatch whose publish failed.
 
