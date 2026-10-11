@@ -729,3 +729,22 @@ def test_a_nested_event_tail_looks_up_its_task_once() -> None:
         with runtime.event_tail("tsk-other"):
             pass
         assert counting.taken == taken + 1
+
+
+def test_a_running_workflow_is_not_asked_to_be_freed() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    workflow_id = _register(runtime, CHAIN)
+    task_id = pop_ready(runtime)
+    assert task_id is not None
+    requested: list[str] = []
+    cast(Any, runtime.settled_history).request = requested.append
+
+    with runtime.event_tail(task_id):
+        record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+        runtime.mark_started(task_id, "wkr-1", {}, _TS)
+        payload = result_payload(runtime._results, task_id, {"ok": True}, "org")
+        runtime.mark_succeeded(task_id, "wkr-1", payload, _TS, "dsp-1")
+
+    assert requested == []
+    assert _resident(runtime, workflow_id)
