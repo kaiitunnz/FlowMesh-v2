@@ -704,7 +704,8 @@ Any Compose service can be recreated in place with `flowmesh stack restart
 restart without losing in-flight work, provided the control Redis keeps every
 write it acknowledged: scheduling state is persisted to Redis and rebuilt on
 startup (`TaskRuntime.rehydrate`), and task events replay from a durable stream.
-Rolling a new image across the cluster one node at a time is one application. See [`SERVICE_RESTARTS.md`](SERVICE_RESTARTS.md).
+Rolling a new image across the cluster one node at a time is one application.
+See [`SERVICE_RESTARTS.md`](SERVICE_RESTARTS.md).
 
 ## Plugin extension points
 
