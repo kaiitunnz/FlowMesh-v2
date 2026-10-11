@@ -455,7 +455,7 @@ def test_a_cancel_during_a_cold_start_ends_the_origination(
 
 
 def test_a_credit_release_the_admission_store_refused_is_finished_once(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = TaskRuntime(
         cast(Any, FakeRegistry()),
@@ -468,7 +468,6 @@ def test_a_credit_release_the_admission_store_refused_is_finished_once(
     )
     svc, stores, _, loop, originated = _wire_resident_service(runtime)
     admission = svc._admission
-    persist = admission._persist
     told: list[str] = []
     on_release = admission._on_release
 
@@ -476,7 +475,7 @@ def test_a_credit_release_the_admission_store_refused_is_finished_once(
         told.append(replica_id)
         on_release(replica_id)
 
-    def refused() -> None:
+    def refused(changes: Any) -> None:
         raise ConnectionError("control redis unavailable")
 
     admission._on_release = released
@@ -489,12 +488,12 @@ def test_a_credit_release_the_admission_store_refused_is_finished_once(
         (claim,) = stores.claims.by_invocation(env.invocation_id)
         assert claim.holds_credit
 
-        admission._persist = refused
+        monkeypatch.setattr(stores.durability, "write", refused)
         assert runtime.settle_episode_invocation(writer, env.call_correlation, "done")
         loop.run_until_complete(asyncio.sleep(0.05))
         assert told == []
         assert runtime._durability.pending(workflow_id)
-        admission._persist = persist
+        monkeypatch.undo()
 
         assert runtime._durability.run_due() == [workflow_id]
         loop.run_until_complete(asyncio.sleep(0.05))
