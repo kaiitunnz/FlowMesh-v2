@@ -100,7 +100,7 @@ if not absent_or(KEYS[6], 'string') or not absent_or(KEYS[7], 'hash')
   or not absent_or(KEYS[8], 'set') then return 'index type' end
 local seq = redis.call('GET', KEYS[6])
 if seq and not string.match(seq, '^%d+$') then return 'sequence unreadable' end
-for _, count in ipairs(redis.call('HMGET', KEYS[7], 'total', 'done')) do
+for _, count in ipairs(redis.call('HMGET', KEYS[7], 'total', 'done', 'workflows')) do
   if not integer(count) then return 'counters unreadable' end
 end
 local tasks = tonumber(ARGV[7])
@@ -126,6 +126,7 @@ if tonumber(ARGV[3]) > tonumber(seq or '0') then
 end
 redis.call('HINCRBY', KEYS[7], 'total', tasks)
 redis.call('HINCRBY', KEYS[7], 'done', tonumber(ARGV[6]))
+redis.call('HINCRBY', KEYS[7], 'workflows', 1)
 redis.call('SREM', KEYS[8], ARGV[5])
 redis.call('HSET', KEYS[2], '<certificate>', ARGV[2])
 return 'ok'
@@ -145,6 +146,19 @@ end
 redis.call('HSET', KEYS[1], unpack(ARGV, 2))
 return 1
 """.replace("<certificate>", CERTIFICATE_FIELD)
+
+# Removes from the open set every workflow no longer registered, then records how many
+# registered workflows are freed: after every one was classified, each is either open
+# or certified. KEYS: the open set, the registered set, the counters.
+_SETTLE_OPEN = """
+local stray = redis.call('SDIFF', KEYS[1], KEYS[2])
+for start = 1, #stray, 1000 do
+  redis.call('SREM', KEYS[1], unpack(stray, start, math.min(start + 999, #stray)))
+end
+local freed = redis.call('SCARD', KEYS[2]) - redis.call('SCARD', KEYS[1])
+redis.call('HSET', KEYS[3], 'workflows', freed)
+return freed
+"""
 
 # How many fields or members one preparation write carries, so no single command holds
 # the store for long.
@@ -169,6 +183,20 @@ class HistoryPublication:
     # Each task's member in the history indexes, and its terminal status.
     members: Mapping[str, tuple[str, str]]
     outputs: OutputsHistory | None
+
+
+@dataclass(frozen=True)
+class HistoryCensus:
+    """How many workflows are registered, open, and freed."""
+
+    registered: int
+    open: int
+    freed: int
+
+    @property
+    def consistent(self) -> bool:
+        """Whether every registered workflow is either open or freed, by count."""
+        return self.registered == self.open + self.freed
 
 
 @dataclass(frozen=True)
@@ -397,6 +425,17 @@ def _stored_tasks(
     return [
         found.get(entry.task_id) if entry is not None else None for entry in located
     ]
+
+
+def _queue_census(pipe: _AnyPipeline) -> None:
+    pipe.scard(WORKFLOWS_SET_KEY)
+    pipe.scard(WORKFLOWS_OPEN_KEY)
+    pipe.hget(HISTORY_COUNTS_KEY, "workflows")
+
+
+def _census(replies: Sequence[Any]) -> HistoryCensus:
+    registered, open_count, freed = replies
+    return HistoryCensus(int(registered), int(open_count), int(freed or 0))
 
 
 def _queue_certified(pipe: _AnyPipeline, workflow_ids: Sequence[str]) -> None:
@@ -773,6 +812,51 @@ class WorkflowHistoryStore:
     async def open_workflow_ids_async(self) -> set[str]:
         return await self._rds.asyncio.set_members(WORKFLOWS_OPEN_KEY)
 
+    def history_census(self) -> HistoryCensus:
+        """How many workflows are registered, open and freed, at one moment."""
+        with self._rds.sync.control_pipeline() as pipe:
+            _queue_census(pipe)
+            return _census(pipe.execute())
+
+    async def history_census_async(self) -> HistoryCensus:
+        async with self._rds.asyncio.control_pipeline() as pipe:
+            _queue_census(pipe)
+            return _census(await pipe.execute())
+
+    def settle_open_set(self) -> int:
+        """Remove every workflow no longer registered from the open set and record
+        every other registered workflow as freed; returns how many are. Run once
+        every registered workflow is either open or certified."""
+        return int(
+            self._rds.sync.eval(
+                _SETTLE_OPEN,
+                3,
+                WORKFLOWS_OPEN_KEY,
+                WORKFLOWS_SET_KEY,
+                HISTORY_COUNTS_KEY,
+            )
+        )
+
+    async def settle_open_set_async(self) -> int:
+        return int(
+            await self._rds.asyncio.eval(
+                _SETTLE_OPEN,
+                3,
+                WORKFLOWS_OPEN_KEY,
+                WORKFLOWS_SET_KEY,
+                HISTORY_COUNTS_KEY,
+            )
+        )
+
+    def close_workflows(self, *workflow_ids: str) -> None:
+        """Remove freed workflows from the open set."""
+        if workflow_ids:
+            self._rds.sync.srem(WORKFLOWS_OPEN_KEY, *workflow_ids)
+
+    async def close_workflows_async(self, *workflow_ids: str) -> None:
+        if workflow_ids:
+            await self._rds.asyncio.srem(WORKFLOWS_OPEN_KEY, *workflow_ids)
+
     def reopen_workflows(self, *workflow_ids: str) -> None:
         """Count workflows among the open ones."""
         if workflow_ids:
@@ -807,6 +891,7 @@ class WorkflowHistoryStore:
 
 
 __all__ = [
+    "HistoryCensus",
     "HistoryNotPrepared",
     "HistoryPublication",
     "HistoryUnreadable",

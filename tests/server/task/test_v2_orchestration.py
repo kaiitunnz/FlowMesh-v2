@@ -26,6 +26,7 @@ from server.orchestration.outcomes import (
     is_replayable,
     next_on_uncertain,
 )
+from server.registries.history import HistoryCensus
 from server.registries.workflow import PersistedTask, WorkflowControl, WorkflowSched
 from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
@@ -118,6 +119,11 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
 
     async def history_counts_async(self) -> tuple[int, int]:
         return 0, 0
+
+    async def history_census_async(self) -> HistoryCensus:
+        return HistoryCensus(
+            len(self.workflow_task_ids), len(self.workflow_task_ids), 0
+        )
 
     def get_workflow_record(self, workflow_id: str) -> Any:
         ids = self.workflow_task_ids.get(workflow_id)

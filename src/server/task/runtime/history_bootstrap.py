@@ -63,18 +63,27 @@ class HistoryBootstrap[R: ScratchRuntime]:
         self._batch_size = batch_size
 
     async def run(self) -> None:
-        """Classify every registered workflow not yet classified."""
+        """Classify every registered workflow not yet classified, or every one again
+        when the registered, open and freed workflows disagree."""
         state = await self._registry.history_index_state_async()
+        cursor = 0
         if state == INDEX_COMPLETE:
-            return
-        cursor = _cursor(state)
-        if cursor is None:
-            if state is not None:
-                self._logger.warning(
-                    "Rebuilding the open-workflow index over unrecognized state %r",
-                    state,
-                )
-            cursor = 0
+            census = await self._registry.history_census_async()
+            if census.consistent:
+                return
+            self._logger.warning(
+                "%d registered workflows are not %d open and %d freed; classifying "
+                "them again",
+                census.registered,
+                census.open,
+                census.freed,
+            )
+        elif (resumed := _cursor(state)) is not None:
+            cursor = resumed
+        elif state is not None:
+            self._logger.warning(
+                "Rebuilding the open-workflow index over unrecognized state %r", state
+            )
         self._logger.info("Classifying stored workflows for the open-workflow index")
         outcomes: Counter[str] = Counter()
         while True:
@@ -88,6 +97,7 @@ class HistoryBootstrap[R: ScratchRuntime]:
             await self._registry.set_history_index_state_async(
                 f"{_INDEX_BUILDING}{cursor}"
             )
+        await self._registry.settle_open_set_async()
         await self._registry.set_history_index_state_async(INDEX_COMPLETE)
         self._logger.info(
             "Classified stored workflows: %s",
@@ -98,8 +108,10 @@ class HistoryBootstrap[R: ScratchRuntime]:
     async def _classify(self, workflow_ids: list[str]) -> Counter[str]:
         outcomes: Counter[str] = Counter()
         certified = await self._registry.history_certified_async(workflow_ids)
+        freed = [w for w, done in zip(workflow_ids, certified) if done]
         pending = [w for w, done in zip(workflow_ids, certified) if not done]
-        outcomes["already freed"] = len(workflow_ids) - len(pending)
+        await self._registry.close_workflows_async(*freed)
+        outcomes["already freed"] = len(freed)
         if not pending:
             return outcomes
         scratch = self._scratch_runtime()

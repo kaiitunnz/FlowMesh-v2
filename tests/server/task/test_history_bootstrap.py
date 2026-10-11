@@ -12,6 +12,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from server.clients.redis import (
     HISTORY_INDEX_KEY,
     WORKFLOWS_OPEN_KEY,
+    WORKFLOWS_SET_KEY,
     workflow_log_closed_key,
     workflow_log_stream_key,
     workflow_sched_key,
@@ -26,10 +27,12 @@ from server.task.runtime import TaskRuntime
 from server.task.runtime.history_bootstrap import INDEX_COMPLETE
 from server.task.workflow_retry import WorkflowRetryScheduler
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.redis_helpers import raw_control
-from tests.server.result_store import make_result_reader
+from tests.server.result_store import make_result_reader, result_payload
 from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.task.test_settled_history import (
+    _TS,
     CHAIN,
     _certified,
     _register,
@@ -46,6 +49,7 @@ from tests.server.task.test_settled_history_reads import (
     _query,
 )
 from tests.server.task.test_v2_orchestration import LINEAR
+from tests.support.waiting import pop_ready
 
 _LOGGER = logging.getLogger("test.history_bootstrap")
 
@@ -442,3 +446,77 @@ def test_a_lost_answer_while_classifying_is_freed_by_the_same_start() -> None:
     again, loads = _restarted(registry)
     assert loads.ids == []
     _freed_once(registry, again, task_ids)
+
+
+def test_a_workflow_neither_open_nor_freed_is_restored_and_recovers() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    freed = _register(runtime, CHAIN)
+    freed_tasks = _succeed_ready(runtime)
+    runtime.settled_history.drain()
+    assert not _resident(runtime, freed)
+    unindexed = _register(runtime, CHAIN)
+    task_id = pop_ready(runtime)
+    assert task_id is not None
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    runtime.mark_started(task_id, "wkr-1", {}, _TS)
+    registry.set_history_index_state(INDEX_COMPLETE)
+    raw_control(registry).srem(WORKFLOWS_OPEN_KEY, unindexed)
+    before = _reads(runtime, freed_tasks)
+
+    restarted, loads = _restarted(registry, _close)
+
+    assert loads.ids == [unindexed]
+    assert _open(registry) == {unindexed}
+    assert registry.history_census().consistent
+    assert _reads(restarted, freed_tasks)[0] == before[0]
+    listed = _page(restarted, _query(), 100)
+    assert len(listed) == len(set(listed)) == 6
+    info = restarted.describe_task(task_id)
+    assert info is not None and info.status == "DISPATCHED"
+    payload = result_payload(restarted._results, task_id, {"ok": True}, "org")
+    restarted.mark_succeeded(task_id, "wkr-1", payload, _TS, "dsp-1")
+    assert pop_ready(restarted) is not None
+    scanned = _scans(registry)
+    _, loads = _restarted(registry, _close)
+    assert scanned == []
+    assert loads.ids == [unindexed]
+
+
+def test_a_deleted_freed_workflow_is_recounted_once() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    deleted, kept = _register(runtime, CHAIN), _register(runtime, CHAIN)
+    _succeed_ready(runtime)
+    runtime.settled_history.drain()
+    registry.set_history_index_state(INDEX_COMPLETE)
+    raw_control(registry).srem(WORKFLOWS_SET_KEY, deleted)
+    assert not registry.history_census().consistent
+    scanned = _scans(registry)
+
+    _, loads = _restarted(registry, _close)
+
+    assert scanned and loads.ids == []
+    assert registry.history_census().consistent
+    scanned = _scans(registry)
+    _restarted(registry, _close)
+    assert scanned == []
+    assert _certified(registry, kept)
+
+
+def test_a_freed_workflow_left_open_is_closed_and_not_restored() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    workflow_id = _register(runtime, CHAIN)
+    task_ids = _succeed_ready(runtime)
+    runtime.settled_history.drain()
+    before = _reads(runtime, task_ids)
+    registry.set_history_index_state(INDEX_COMPLETE)
+    registry.reopen_workflows(workflow_id)
+
+    restarted, loads = _restarted(registry, _close)
+
+    assert loads.ids == []
+    assert _open(registry) == set()
+    assert registry.history_census().consistent
+    assert _reads(restarted, task_ids) == before
