@@ -3,7 +3,7 @@ state, kept beside its stored task records once the runtime frees it."""
 
 import json
 import struct
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -25,8 +25,8 @@ _FLIP_ALL = 0xFFFF_FFFF_FFFF_FFFF
 _FLIP_SIGN = 0x8000_0000_0000_0000
 
 
-class TaskHistory(BaseModel):
-    """The task-info fields and result a freed task's runtime state derived."""
+class TaskDerived(BaseModel):
+    """The task-info fields a task's runtime state derives beside its record."""
 
     depends_on: list[str] = Field(default_factory=list)
     pending_dependencies: list[str] = Field(default_factory=list)
@@ -35,6 +35,15 @@ class TaskHistory(BaseModel):
     failed: bool = False
     input_element: TaskInputElement | None = None
     occurrence: TaskOccurrence | None = None
+
+    def info_fields(self) -> dict[str, Any]:
+        """The derived fields, by name, as a task's details carry them."""
+        return {name: getattr(self, name) for name in TaskDerived.model_fields}
+
+
+class TaskHistory(TaskDerived):
+    """The task-info fields and result a freed task's runtime state derived."""
+
     result: ResultBinding | None = None
     # A success with no result bound to read.
     settled_unbound: bool = False
@@ -110,6 +119,7 @@ __all__ = [
     "HistoryCertificate",
     "OutputHistory",
     "OutputsHistory",
+    "TaskDerived",
     "TaskHistory",
     "history_member",
     "member_task_id",

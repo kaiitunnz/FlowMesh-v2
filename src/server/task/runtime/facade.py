@@ -122,6 +122,7 @@ from ..history import (
     HistoryCertificate,
     OutputHistory,
     OutputsHistory,
+    TaskDerived,
     TaskHistory,
     history_member,
     member_task_id,
@@ -408,18 +409,12 @@ def _listing_fields(
 
 def _stored_task_info(stored: StoredTask) -> TaskInfo:
     """A freed task's ``TaskInfo``, from its stored record and history."""
-    history = stored.history
-    return TaskInfo(
-        **dict(stored.persisted.record),
-        depends_on=history.depends_on,
-        pending_dependencies=history.pending_dependencies,
-        dependents=history.dependents,
-        completed=history.completed,
-        failed=history.failed,
-        input_element=history.input_element,
-        occurrence=history.occurrence,
-    )
+    return TaskInfo(**dict(stored.persisted.record), **stored.history.info_fields())
 
+
+# How many tasks or output members one hold of the runtime lock reads into a settled
+# workflow's history.
+_HISTORY_BUILD_CHUNK = 256
 
 # How many freed tasks a listing reads at a time, the first read and the most.
 _HISTORY_CHUNK_MIN = 64
@@ -611,7 +606,7 @@ class TaskRuntime:
         self._settled_history = SettledHistory(
             self._tasks.holds,
             self._reclaim_check_locked,
-            self._history_publication_locked,
+            self._history_publication,
             self._forget_workflow_locked,
             self._workflow_registry,
             self._lock,
@@ -1945,13 +1940,13 @@ class TaskRuntime:
             self._awaiting_reports,
             self._fence.publishing,
             self._reservations.held_dispatches,
-            (task_id for task_id, _ in self._parked_turns),
-            (op.agent_task_id for op in self._mediated_ops.pending_ops.values()),
             self._resident_tasks.dispatched_resident,
             self._inputs.input_checks,
             self._pending_facade_groups,
             self._merges.merge_children_map,
             self._merges.merge_parent_map,
+            (task_id for task_id, _ in self._parked_turns),
+            (op.agent_task_id for op in self._mediated_ops.pending_ops.values()),
         )
         if any(
             (record := self._tasks.get(task_id)) is not None
@@ -1964,31 +1959,32 @@ class TaskRuntime:
             frozenset(engine.invocation_ids()) if engine is not None else frozenset()
         )
 
-    def _history_publication_locked(
+    def _history_publication(
         self, workflow_id: str, seq: int, nonce: str
     ) -> HistoryPublication:
-        """The history a settled workflow's task and output reads derive from."""
-        engine = self._engines.get(workflow_id)
+        """The history a sealed workflow's task and output reads derive from, read a
+        bounded chunk at a time under the lock. The seal keeps every part of it
+        unchanged between chunks."""
+        with self._lock:
+            task_ids = self._tasks.ids_of(workflow_id)
+            engine = self._engines.get(workflow_id)
+            finished_ts = self._tasks.last_finish(workflow_id)
         tasks: dict[str, TaskHistory] = {}
         members: dict[str, tuple[str, str]] = {}
-        for record in self._tasks.of_workflow(workflow_id):
-            task_id = record.task_id
-            fields = self._task_info_fields_locked(task_id, record)
-            tasks[task_id] = TaskHistory(
-                depends_on=fields["depends_on"],
-                pending_dependencies=fields["pending_dependencies"],
-                dependents=fields["dependents"],
-                completed=fields["completed"],
-                failed=fields["failed"],
-                input_element=fields["input_element"],
-                occurrence=fields["occurrence"],
-                result=self._content_bindings.result_binding_locked(task_id),
-                settled_unbound=self._content_bindings.settled_unbound_locked(task_id),
-            )
-            members[task_id] = (
-                history_member(record.submitted_ts, task_id),
-                record.status,
-            )
+        for chunk in self._locked_chunks(task_ids):
+            for task_id in chunk:
+                record = self._tasks[task_id]
+                tasks[task_id] = TaskHistory.model_construct(
+                    **self._derived_locked(task_id, record).info_fields(),
+                    result=self._content_bindings.result_binding_locked(task_id),
+                    settled_unbound=self._content_bindings.settled_unbound_locked(
+                        task_id
+                    ),
+                )
+                members[task_id] = (
+                    history_member(record.submitted_ts, task_id),
+                    record.status,
+                )
         return HistoryPublication(
             workflow_id=workflow_id,
             certificate=HistoryCertificate(
@@ -1997,38 +1993,56 @@ class TaskRuntime:
                 seq=seq,
                 mode="v1" if engine is None else "v2",
                 tasks=len(tasks),
-                finished_ts=self._tasks.last_finish(workflow_id),
+                finished_ts=finished_ts,
             ),
             tasks=tasks,
             members=members,
-            outputs=self._outputs_history_locked(engine) if engine else None,
+            outputs=self._outputs_history(engine) if engine else None,
         )
 
-    def _outputs_history_locked(self, engine: OrchestrationEngine) -> OutputsHistory:
+    def _locked_chunks[T](self, items: Sequence[T]) -> Iterator[tuple[T, ...]]:
+        """Yield ``items`` a bounded chunk at a time, each with the lock held, and
+        yield the processor between chunks so a waiter takes the lock."""
+        for chunk in itertools.batched(items, _HISTORY_BUILD_CHUNK):
+            with self._lock:
+                yield chunk
+            time.sleep(0)
+
+    def _outputs_history(self, engine: OrchestrationEngine) -> OutputsHistory:
+        with self._lock:
+            declarations = engine.published_outputs()
+            slots = [
+                (name, declaration.output_id, slot)
+                for name, declaration in declarations
+                for slot in engine.output_slots(declaration.output_id)
+            ]
         outputs: list[OutputHistory] = []
-        for member in published_members(engine):
-            value: ResultBinding | None = None
-            unreadable: str | None = None
-            publication = member.publication
-            if publication is not None and publication.value_ref is not None:
-                try:
-                    value = self._content_bindings.value_binding_locked(
-                        publication.value_ref
-                    )
-                except UnreadableInput as exc:
-                    unreadable = str(exc)
-            outputs.append(
-                OutputHistory(
-                    name=member.name,
-                    scope_id=member.scope_id,
-                    key=member.key,
-                    sequence=member.sequence,
-                    publication=member.publication,
-                    value=value,
-                    unreadable=unreadable,
+        for chunk in self._locked_chunks(slots):
+            for name, output_id, slot in chunk:
+                publication = engine.output_publication(
+                    output_id, slot.scope_id, slot.logical_key, slot.sequence
                 )
-            )
-        return OutputsHistory(declarations=engine.published_outputs(), members=outputs)
+                value: ResultBinding | None = None
+                unreadable: str | None = None
+                if publication is not None and publication.value_ref is not None:
+                    try:
+                        value = self._content_bindings.value_binding_locked(
+                            publication.value_ref
+                        )
+                    except UnreadableInput as exc:
+                        unreadable = str(exc)
+                outputs.append(
+                    OutputHistory.model_construct(
+                        name=name,
+                        scope_id=slot.scope_id,
+                        key=slot.logical_key,
+                        sequence=slot.sequence,
+                        publication=publication,
+                        value=value,
+                        unreadable=unreadable,
+                    )
+                )
+        return OutputsHistory(declarations=declarations, members=outputs)
 
     def _forget_workflow_locked(self, workflow_id: str) -> Freed:
         """Remove every trace of a freed workflow from the runtime."""
@@ -6078,20 +6092,27 @@ class TaskRuntime:
     ) -> dict[str, Any]:
         """Return a task's ``TaskInfo`` fields to build from after the lock is
         released, duplicating the containers a record appends to in place."""
-        element = self._content_bindings.input_element_locked(task_id)
-        engine = self._engines.get(record.workflow_id)
-        place = engine.occurrence_place(task_id) if engine is not None else None
         return {
             **{
                 name: value.copy() if isinstance(value, (list, dict)) else value
                 for name, value in record
             },
-            "depends_on": sorted(self._original_deps.get(task_id, set())),
-            "pending_dependencies": sorted(self._dag.pending_deps.get(task_id, set())),
-            "dependents": sorted(self._dag.dependents.get(task_id, set())),
-            "completed": task_id in self._completed,
-            "failed": task_id in self._failed,
-            "input_element": (
+            **self._derived_locked(task_id, record).info_fields(),
+        }
+
+    def _derived_locked(self, task_id: str, record: TaskRecord) -> TaskDerived:
+        """The task-info fields a task's runtime state derives, built unvalidated
+        from values this runtime already holds."""
+        element = self._content_bindings.input_element_locked(task_id)
+        engine = self._engines.get(record.workflow_id)
+        place = engine.occurrence_place(task_id) if engine is not None else None
+        return TaskDerived.model_construct(
+            depends_on=sorted(self._original_deps.get(task_id, set())),
+            pending_dependencies=sorted(self._dag.pending_deps.get(task_id, set())),
+            dependents=sorted(self._dag.dependents.get(task_id, set())),
+            completed=task_id in self._completed,
+            failed=task_id in self._failed,
+            input_element=(
                 TaskInputElement(
                     producer_task_id=element.producer_task_id,
                     index=element.ref.element,
@@ -6100,7 +6121,7 @@ class TaskRuntime:
                 if element is not None
                 else None
             ),
-            "occurrence": (
+            occurrence=(
                 TaskOccurrence(
                     member=place.member,
                     context=place.context,
@@ -6112,4 +6133,4 @@ class TaskRuntime:
                 if place is not None
                 else None
             ),
-        }
+        )

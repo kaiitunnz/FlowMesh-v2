@@ -64,9 +64,10 @@ class SettledHistory:
         logger: logging.Logger,
         sweep_interval_sec: float = SWEEP_INTERVAL_SEC,
     ) -> None:
-        # Each reads or changes the runtime's state under its lock: whether nothing in
-        # the runtime still needs a workflow's state, the history its reads derive
-        # from, certified under a sequence and nonce, and its removal.
+        # Each reads or changes the runtime's state under its lock: whether it holds a
+        # workflow, whether nothing in it still needs the workflow's state, the history
+        # a sealed workflow's reads derive from, certified under a sequence and nonce,
+        # which takes the lock itself, and its removal.
         self._holds = holds
         self._check = check
         self._publication = publication
@@ -262,8 +263,12 @@ class SettledHistory:
                 return False
             seq = self._next_seq
             self._next_seq += 1
-            publication = self._publication(workflow_id, seq, os.urandom(16).hex())
             seal = self._sealed[workflow_id] = _Seal()
+        try:
+            publication = self._publication(workflow_id, seq, os.urandom(16).hex())
+        except Exception:
+            self._unseal(workflow_id, "its history could not be read")
+            raise
         try:
             prepared = self._registry.prepare_history(publication)
         except Exception as exc:
