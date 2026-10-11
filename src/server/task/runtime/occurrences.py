@@ -72,7 +72,7 @@ class OccurrenceMaterializer:
         self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
     ) -> list[str]:
         """Give each work item an advance readies without a record its record, owed
-        with the ledger snapshot that holds its work; returns the operators that have
+        with the ledger write that holds its work; returns the operators that have
         no blueprint to make one from."""
         missing: list[str] = []
         for task_id in advance.ready:

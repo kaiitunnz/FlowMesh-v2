@@ -1240,7 +1240,7 @@ class TaskRuntime:
 
         The legacy dependency machinery stays unwired; the orchestration engine is the
         readiness authority. Terminal task facts reconcile the engine idempotently, so a
-        crash between a task's terminal write and its ledger snapshot never loses a
+        crash between a task's terminal write and its ledger write never loses a
         settlement and never duplicates a publication or effect receipt.
         """
         self._occurrences.install_locked(workflow_id, blueprints)
@@ -1791,7 +1791,7 @@ class TaskRuntime:
         """Carry an episode's boundary event into the ledger and dispatch its effect.
 
         Routes the event into the engine, synthesizes a task record for any dispatchable
-        child it materializes, applies the advance, and writes the ledger snapshot after
+        child it materializes, applies the advance, and writes the ledger after
         the task records so the ledger never leads durable state.
         """
         with self._transition():
@@ -4680,7 +4680,7 @@ class TaskRuntime:
                 returned += moved
                 touched.append(task_id)
             self._committer.commit_cancelled_locked(workflow_id, touched, returned)
-            # The ledger snapshot follows the committed task state so it never leads
+            # The ledger write follows the committed task state so it never leads
             # it.
             if workflow_id in self._engines:
                 self._settle_suspended_cancels_locked(self._engines[workflow_id])
@@ -5080,7 +5080,7 @@ class TaskRuntime:
         if usage is not None:
             record.usages.append(usage)
         returned = self._mark_cancelled_locked(record, finished_ts, unmerge=unmerge)
-        # Persist the task terminal record first and snapshot the ledger last, so the
+        # Persist the task terminal record first and write the ledger last, so the
         # ledger never leads task state.
         self._committer.commit_locked(task_id, *returned, sched=False)
         self._committer.save_ledger_locked(record.workflow_id)

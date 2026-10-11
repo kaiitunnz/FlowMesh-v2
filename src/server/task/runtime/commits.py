@@ -123,14 +123,14 @@ class _Records:
 
 
 @dataclass(frozen=True)
-class _Snapshot:
-    """A write of the workflow's ledger, with the records of the children it
+class _Ledger:
+    """A write of the workflow's ledger changes, with the records of the children it
     materialized and has not written, removing ``retire`` from its remaining set."""
 
     retire: tuple[str, ...] = ()
 
 
-type _Write = _Records | _Snapshot
+type _Write = _Records | _Ledger
 
 
 @dataclass
@@ -141,7 +141,7 @@ class _Debt:
     # Each owed task record, and whether its status-set membership is owed with it.
     records: dict[str, bool] = field(default_factory=dict)
     sched: bool = False
-    snapshot: bool = False
+    ledger: bool = False
     retire: set[str] = field(default_factory=set)
 
     def owe(self, write: _Write) -> None:
@@ -150,15 +150,15 @@ class _Debt:
                 for task_id in task_ids:
                     self.records[task_id] = self.records.get(task_id, False) or moves
                 self.sched |= sched
-            case _Snapshot(retire=retire):
-                self.snapshot = True
+            case _Ledger(retire=retire):
+                self.ledger = True
                 self.retire.update(retire)
 
     def copy(self) -> "_Debt":
-        return _Debt(self.records.copy(), self.sched, self.snapshot, self.retire.copy())
+        return _Debt(self.records.copy(), self.sched, self.ledger, self.retire.copy())
 
     def __bool__(self) -> bool:
-        return bool(self.records or self.sched or self.snapshot or self.retire)
+        return bool(self.records or self.sched or self.ledger or self.retire)
 
 
 class _Scope(threading.local):
@@ -337,7 +337,7 @@ class TransitionCommitter:
                 sched=True,
             )
         )
-        owed.owe(_Snapshot())
+        owed.owe(_Ledger())
         if (engine := self._engines.get(workflow_id)) is not None:
             engine.owe_ledger_rewrite()
 
@@ -408,14 +408,14 @@ class TransitionCommitter:
             for task_id in ids:
                 del owed.records[task_id]
             owed.sched = False
-        if not (owed.snapshot or owed.retire or owed.records):
+        if not (owed.ledger or owed.retire or owed.records):
             return
         retire = sorted(owed.retire)
         # The ledger writes the children it materialized from their current state,
         # membership included, so it settles what they owe.
-        for task_id in self._save_snapshot_raw(workflow_id, retire):
+        for task_id in self._save_ledger_raw(workflow_id, retire):
             owed.records.pop(task_id, None)
-        owed.snapshot = False
+        owed.ledger = False
         owed.retire.difference_update(retire)
 
     def _note_held(self, workflow_id: str, error: BaseException) -> None:
@@ -512,7 +512,7 @@ class TransitionCommitter:
         self, workflow_id: str, retire: Sequence[str]
     ) -> list[str]:
         """Commit a workflow's unwritten children, with their status-set membership and
-        the schedule, with its ledger snapshot and the retire, as one atomic
+        the schedule, with its ledger changes and the retire, as one atomic
         transaction; returns the children it wrote."""
         engine = self._engines.get(workflow_id)
         children = sorted(self._unwritten_children.get(workflow_id, ()))
@@ -543,8 +543,8 @@ class TransitionCommitter:
                 del self._unwritten_children[workflow_id]
         return children
 
-    def _save_snapshot_raw(self, workflow_id: str, retire: Sequence[str]) -> list[str]:
-        """Save a workflow's ledger snapshot; returns the children it wrote with it."""
+    def _save_ledger_raw(self, workflow_id: str, retire: Sequence[str]) -> list[str]:
+        """Save a workflow's ledger changes; returns the children it wrote with them."""
         engine = self._engines.get(workflow_id)
         if engine is None:
             return []
@@ -606,10 +606,10 @@ class TransitionCommitter:
             self._persist_declared_failures_locked(engine)
         elif workflow_id not in self.debt:
             return
-        self._write_locked(workflow_id, _Snapshot())
+        self._write_locked(workflow_id, _Ledger())
 
     def note_child_locked(self, workflow_id: str, child_task_id: str) -> None:
-        """Mark a child materialized in memory, so the ledger snapshot that carries its
+        """Mark a child materialized in memory, so the ledger write that carries its
         work item also writes its record."""
         self._unwritten_children.setdefault(workflow_id, set()).add(child_task_id)
 
