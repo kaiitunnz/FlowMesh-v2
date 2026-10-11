@@ -461,12 +461,12 @@ class TransitionCommitter:
     ) -> None:
         """Commit task records of one workflow, the status-set membership of ``moves``
         and its schedule, as one atomic transaction."""
-        ids = [
-            task_id
-            for task_id in dict.fromkeys(task_ids)
+        ids = {
+            task_id: None
+            for task_id in task_ids
             if (record := self._tasks.get(task_id)) is not None
             and record.workflow_id == workflow_id
-        ]
+        }
         by_status: dict[str, list[str]] = defaultdict(list)
         for task_id in dict.fromkeys(moves):
             if task_id in ids:

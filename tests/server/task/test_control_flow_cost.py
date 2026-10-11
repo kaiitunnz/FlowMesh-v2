@@ -1,10 +1,11 @@
-"""A loop's per-iteration control-plane work is bounded by what the iteration does, not
-by the history the loop has accumulated."""
+"""Control-plane work is bounded by what a transition does, not by the history or the
+open work its workflow has accumulated."""
 
 import time
 from collections import Counter
 from collections.abc import Iterator
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -12,6 +13,8 @@ from server.config import OrchestrationConfig
 from server.orchestration.engine.snapshot import SnapshotCodec
 from server.orchestration.journal import TrackedDict
 from server.orchestration.state import WorkItem
+from server.task.models import TaskStatus
+from server.task.runtime.commits import TransitionCommitter
 from tests.server.orchestration.helpers import chain_bundle, engine
 from tests.server.task.test_runtime_control_flow import (
     _ECHO,
@@ -223,3 +226,45 @@ def _per_unsettled_task_check(open_items: int) -> float:
 def test_an_unsettled_task_check_costs_the_same_however_many_items_are_open() -> None:
     few, many = _per_unsettled_task_check(1_000), _per_unsettled_task_check(100_000)
     assert many < 5 * few, (few, many)
+
+
+_comparisons = Counter[str]()
+
+
+class _CountedId(str):
+    """A task id that counts the equality checks it takes part in."""
+
+    __hash__ = str.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        _comparisons["eq"] += 1
+        return str.__eq__(self, other)
+
+
+def _records_commit_comparisons(size: int) -> int:
+    tasks = {
+        f"t{i}": SimpleNamespace(
+            workflow_id="w", status=TaskStatus.DONE, residual_cancel=False
+        )
+        for i in range(size)
+    }
+    committer = SimpleNamespace(
+        _tasks=tasks,
+        _engines={},
+        _records_locked=lambda *ids: [],
+        _sched_locked=lambda workflow_id: None,
+        _workflow_registry=SimpleNamespace(commit_transition=lambda *a, **k: None),
+        _after_records_locked=lambda *a: None,
+    )
+    ids = [_CountedId(task_id) for task_id in tasks]
+    moves = [_CountedId(task_id) for task_id in tasks]
+    _comparisons.clear()
+    TransitionCommitter._commit_records_raw(
+        cast(Any, committer), "w", ids, moves, sched=False
+    )
+    return _comparisons["eq"]
+
+
+def test_a_records_commit_compares_each_task_a_bounded_number_of_times() -> None:
+    small, large = _records_commit_comparisons(500), _records_commit_comparisons(2_000)
+    assert large <= 4 * small + 100, (small, large)
