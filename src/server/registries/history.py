@@ -21,6 +21,7 @@ from collections.abc import (
 )
 from contextlib import aclosing, closing
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
@@ -155,6 +156,7 @@ redis.call('HINCRBY', KEYS[7], 'total', tasks)
 redis.call('HINCRBY', KEYS[7], 'done', tonumber(ARGV[6]))
 redis.call('HINCRBY', KEYS[7], 'workflows', 1)
 redis.call('SREM', KEYS[8], ARGV[5])
+redis.call('DEL', KEYS[1])
 redis.call('HSET', KEYS[2], '<certificate>', ARGV[2])
 return 'ok'
 """.replace("<certificate>", CERTIFICATE_FIELD)
@@ -190,6 +192,15 @@ return freed
 # How many fields or members one preparation write carries, so no single command holds
 # the store for long.
 _PREPARE_CHUNK = 500
+
+
+class Certification(StrEnum):
+    """A certification's answer other than a refusal."""
+
+    # The workflow is freed behind this certificate.
+    OK = "ok"
+    # The workflow already held a certificate.
+    CERTIFIED = "certified"
 
 
 class HistoryNotPrepared(Exception):
@@ -624,10 +635,9 @@ class WorkflowHistoryStore:
 
     def certify_history(self, publication: HistoryPublication, revision: int) -> str:
         """Certify a prepared publication, unless the workflow was written since its
-        state was read at ``revision`` or the preparation is incomplete. Returns
-        ``"ok"``; ``"certified"`` when the workflow already holds a certificate,
-        having removed it from the open set; or why it was refused, having then
-        written nothing."""
+        state was read at ``revision`` or the preparation is incomplete. Returns a
+        ``Certification``, removing the workflow from the open set either way, or why
+        it was refused, having then written nothing."""
         keys, args = _certify_args(publication, revision)
         return str(self._rds.sync.eval(_CERTIFY, len(keys), *keys, *map(str, args)))
 
@@ -1081,6 +1091,7 @@ class WorkflowHistoryStore:
 
 
 __all__ = [
+    "Certification",
     "HistoryCensus",
     "HistoryNotPrepared",
     "HistoryPublication",

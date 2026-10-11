@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 
-from ...registries.history import HistoryPublication
+from ...registries.history import Certification, HistoryPublication
 from ...registries.workflow import WorkflowRegistry
 from .commits import store_unavailable
 
@@ -292,9 +292,9 @@ class SettledHistory:
                 exc,
             )
             return self._read_back(workflow_id, seal)
-        if outcome == "certified":
+        if outcome == Certification.CERTIFIED:
             return self._read_back(workflow_id, seal)
-        if outcome != "ok":
+        if outcome != Certification.OK:
             self._unseal(workflow_id, f"its certification was refused ({outcome})")
             return False
         self._free(workflow_id, publication.certificate.seq)

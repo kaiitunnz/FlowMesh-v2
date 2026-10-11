@@ -10,6 +10,7 @@ from server.clients.redis import (
     WORKFLOWS_OPEN_KEY,
     task_history_key,
     workflow_history_key,
+    workflow_revision_key,
 )
 from server.registries.history import HistoryNotPrepared, HistoryPublication
 from server.registries.workflow import WorkflowRegistry
@@ -83,6 +84,7 @@ def test_a_certified_workflow_reads_back_and_leaves_the_open_set() -> None:
 
     assert registry.history_certificate(workflow_id) == publication.certificate
     assert not _is_open(registry, workflow_id)
+    assert not raw_control(registry).exists(workflow_revision_key(workflow_id))
     assert registry.history_counts() == (len(task_ids), len(task_ids))
     stored = registry.load_history(task_ids)
     assert [entry.persisted.record.task_id for entry in stored if entry] == task_ids
