@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 from .network.rendezvous import RootRendezvousBridge
 from .registries.node import NodeRegistry
-from .registries.resident import ResidentRegistry
+from .resident.durability import ResidentDurability
 from .resident.service import ResidentCapacityControl
 from .serve import GatedServe
 from .task.runtime import TaskRuntime
@@ -14,7 +14,7 @@ from .task.runtime import TaskRuntime
 async def rehydrate_root_state(
     runtime: TaskRuntime | None,
     resident_control: ResidentCapacityControl | None,
-    resident_registry: ResidentRegistry | None,
+    resident_registry: ResidentDurability | None,
     gated_serve: GatedServe | None,
     close: Callable[[TaskRuntime, str], bool],
     archived: Callable[[str], bool | None] | None = None,

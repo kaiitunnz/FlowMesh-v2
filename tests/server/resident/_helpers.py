@@ -13,7 +13,7 @@ from server.resident import (
     SafeCapacityVector,
     ServiceFamily,
 )
-from server.resident.durability import ResidentDurability
+from server.resident.durability import MemoryResidentDurability, ResidentDurability
 
 PROFILE = AdmissionProfile(engine_batch_key="fam")
 
@@ -56,6 +56,23 @@ def stored_replica(stores: ResidentStores, replica_id: str) -> ReplicaIncarnatio
     """The replica the stores moved to stored history."""
     stored = asyncio.run(stores.durability.stored_replicas_async())
     return next(e.replica for e in stored if e.replica.replica_id == replica_id)
+
+
+def durability_holding(snapshot: ResidentSnapshot) -> MemoryResidentDurability:
+    """A durability whose live facts are exactly ``snapshot``'s."""
+    stores = ResidentStores(durability := MemoryResidentDurability())
+    for family in snapshot.families:
+        stores.families.register(family.model_copy())
+    for replica in snapshot.replicas:
+        stores.directory.add(replica.model_copy())
+    for lease in snapshot.leases:
+        stores.leases.add(lease.model_copy())
+    for request in snapshot.invocations:
+        stores.invocations.put(request.model_copy())
+    for claim in snapshot.claims:
+        stores.claims.add(claim.model_copy())
+    stores.flush()
+    return durability
 
 
 def stored_snapshot(stores: ResidentStores) -> ResidentSnapshot:

@@ -25,7 +25,7 @@ from server.serve.ingress import ServeIngressRegistry
 from server.serve.service import GatedServe
 from server.startup import rehydrate_root_state
 from shared.resident.reports import ResidentBootstrapOutcome
-from tests.server.resident._helpers import stored_snapshot
+from tests.server.resident._helpers import durability_holding, stored_snapshot
 from tests.server.resident.test_serve_origination import (
     _FAMILY,
     _SERVE_TASK,
@@ -73,15 +73,6 @@ class _Runtime:
         return None
 
 
-class _SnapshotRegistry:
-    def __init__(self, snapshot: ResidentSnapshot) -> None:
-        self._snapshot = snapshot
-
-    async def load_snapshot_async(self) -> ResidentSnapshot:
-        # Each load decodes the stored facts afresh, as the store's does.
-        return ResidentSnapshot.model_validate_json(self._snapshot.model_dump_json())
-
-
 def _in_flight(*, drain: bool = False, uncertain: bool = False) -> ResidentSnapshot:
     """A root holding both of a standing replica's slots for gated serve requests: one
     accepted and streaming, one reserved."""
@@ -120,7 +111,7 @@ def _start(runtime: Any, control: Any, snapshot: ResidentSnapshot, edge: GatedSe
             await rehydrate_root_state(
                 runtime,
                 control,
-                cast(Any, _SnapshotRegistry(snapshot)),
+                durability_holding(snapshot),
                 edge,
                 never_closed,
             )
