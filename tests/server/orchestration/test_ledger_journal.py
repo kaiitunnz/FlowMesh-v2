@@ -1,6 +1,7 @@
 """A ledger journals each change its collections take, and stores one field per
 entity in a layout a restore reads back in order or refuses."""
 
+import gc
 import json
 import typing
 from collections.abc import Callable, Mapping
@@ -307,6 +308,51 @@ def test_a_stored_ledger_reads_back_as_it_was_written() -> None:
 
     assert stored.snapshot == eng.to_snapshot()
     assert encode_ledger(stored) == image
+
+
+@pytest.fixture
+def collections() -> typing.Iterator[list[int]]:
+    """Each automatic collection that runs, under a threshold that runs one at almost
+    every allocation."""
+    started: list[int] = []
+    threshold = gc.get_threshold()
+
+    def note(phase: str, info: dict[str, int]) -> None:
+        if phase == "start":
+            started.append(info["generation"])
+
+    gc.set_threshold(1)
+    gc.callbacks.append(note)
+    try:
+        yield started
+    finally:
+        gc.callbacks.remove(note)
+        gc.set_threshold(*threshold)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_a_restore_decodes_without_collecting_and_keeps_the_collector_state(
+    collections: list[int], enabled: bool
+) -> None:
+    image = encode_ledger(_stored())
+    if not enabled:
+        gc.disable()
+    collections.clear()
+    try:
+        stored = decode_ledger(image)
+        assert gc.isenabled() is enabled
+    finally:
+        gc.enable()
+    assert stored.snapshot.work_items
+    assert not collections
+
+
+def test_a_refused_ledger_leaves_the_collector_enabled() -> None:
+    image = encode_ledger(_stored())
+    image["meta:layout"] = "unknown"
+    with pytest.raises(LedgerLayoutError):
+        decode_ledger(image)
+    assert gc.isenabled()
 
 
 def _named(image: dict[str, str], collection: str) -> list[str]:

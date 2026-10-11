@@ -8,6 +8,7 @@ scalars. A write carries only the fields that changed, and a restore rebuilds th
 ledger snapshot from all of them, refusing a field it cannot place.
 """
 
+import gc
 import json
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -288,12 +289,19 @@ def _member(collection: str, name: str) -> str:
 def decode_ledger(fields: Mapping[str, str]) -> StoredLedger:
     """Rebuild a stored ledger from its fields, refusing one that does not hold
     exactly the fields its layout places."""
+    # Each entity's validators run Python code, which lets automatic collection run
+    # mid-decode, again and again, over a heap the decode only grows.
+    enabled = gc.isenabled()
+    gc.disable()
     try:
         return _decode_ledger(fields)
     except LedgerLayoutError:
         raise
     except ValueError as exc:
         raise LedgerLayoutError(f"unreadable ledger: {exc}") from exc
+    finally:
+        if enabled:
+            gc.enable()
 
 
 def _decode_ledger(fields: Mapping[str, str]) -> StoredLedger:
