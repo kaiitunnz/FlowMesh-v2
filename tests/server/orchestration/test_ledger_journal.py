@@ -39,6 +39,7 @@ from server.orchestration.state import (
     OrchestrationEvent,
     ProgressAxis,
     WorkItem,
+    WorkItemStatus,
 )
 from tests.server.orchestration.helpers import chain_bundle, engine
 
@@ -125,6 +126,32 @@ def test_an_entity_marks_only_the_collection_slot_holding_it() -> None:
     journal.pending.clear()
     wi.invocation_id = "inv-2"
     assert not journal.pending
+
+
+@pytest.mark.parametrize(
+    ("field", "stored", "assigned", "marks"),
+    [
+        ("status", WorkItemStatus.READY, WorkItemStatus.READY, False),
+        ("status", WorkItemStatus.READY, WorkItemStatus.DISPATCHED, True),
+        ("status", WorkItemStatus.READY, "ready", True),
+        ("attempt_ids", ("att-1", "att-2"), ["att-1", "att-2"], False),
+    ],
+    ids=["equal", "different", "equal-other-type", "list-equal-to-tuple"],
+)
+def test_an_entity_marks_an_assignment_only_when_it_changes_the_value(
+    field: str, stored: Any, assigned: Any, marks: bool
+) -> None:
+    journal = LedgerJournal()
+    items = TrackedDict[str, WorkItem](journal, "work_items")
+    wi = _work_item()
+    setattr(wi, field, stored)
+    items[wi.work_item_id] = wi
+    journal.pending.clear()
+
+    setattr(wi, field, assigned)
+
+    assert bool(journal.pending) is marks
+    assert getattr(wi, field) == (assigned if marks else stored)
 
 
 def test_an_entity_held_in_one_slot_is_refused_another() -> None:
