@@ -62,9 +62,11 @@ from ..journal import LedgerJournal
 from ..ledger_layout import LedgerChanges, LedgerOrdinals
 from ..outcomes import check_admissible
 from ..state import (
+    TERMINAL_INVOCATION_STATES,
     TERMINAL_WORK_ITEM_STATUSES,
     AcceptedInput,
     Activation,
+    AttemptStatus,
     AuthorityGrant,
     BoundaryEvent,
     Continuation,
@@ -75,6 +77,7 @@ from ..state import (
     InputPreparation,
     InputResolution,
     Invocation,
+    InvocationState,
     IterationResolution,
     LedgerSnapshot,
     LoopInstance,
@@ -957,6 +960,31 @@ class OrchestrationEngine:
         """Whether any of the instance's work is still to settle: a task, or a value
         read a branch or spawn waits on."""
         return self.has_unsettled_tasks() or self.awaits_control_reads()
+
+    def holds_obligations(self) -> bool:
+        """Whether anything of the instance is still in flight: work to settle, an
+        issued invocation not yet terminal, an attempt still running, or a holder
+        attached to an activation's private state."""
+        return (
+            self.is_open()
+            or any(
+                invocation.state is not InvocationState.UNISSUED
+                and invocation.state not in TERMINAL_INVOCATION_STATES
+                for invocation in self._ledger.invocations.values()
+            )
+            or any(
+                attempt.status in (AttemptStatus.ISSUED, AttemptStatus.RUNNING)
+                for attempt in self._ledger.attempts.values()
+            )
+            or any(
+                lineage.attachment is not None
+                for lineage in self._ledger.private_state.lineages()
+            )
+        )
+
+    def invocation_ids(self) -> list[str]:
+        """The id of every invocation the instance issued."""
+        return list(self._ledger.invocations)
 
     def awaits_control_reads(self) -> bool:
         """Whether the instance still waits on a value read to route a branch or fan

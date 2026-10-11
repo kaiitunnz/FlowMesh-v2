@@ -105,6 +105,9 @@ class AfterCommitActions:
         self.failed: dict[str, list[AfterCommit]] = {}
         # How many open transitions filed actions of each workflow.
         self._filing: dict[str, int] = {}
+        # How many of each workflow's actions are filed and not yet delivered, whether
+        # parked, queued, handed out for delivery or kept for a retry.
+        self._owed: dict[str, int] = {}
         self._scope = _Filing()
 
     def open_scope(self) -> None:
@@ -130,6 +133,7 @@ class AfterCommitActions:
             for action in actions:
                 if action not in parked:
                     parked.append(action)
+                    self._owed[workflow_id] = self._owed.get(workflow_id, 0) + 1
 
     def queue_locked(self, *actions: AfterCommit) -> None:
         """Queue actions whose cause is already durable for delivery."""
@@ -161,6 +165,19 @@ class AfterCommitActions:
 
     def has_failed(self, workflow_id: str) -> bool:
         return workflow_id in self.failed
+
+    def delivered_locked(self, workflow_id: str) -> bool:
+        """Count one of the workflow's actions delivered; returns whether it is owed
+        none."""
+        if (count := self._owed[workflow_id] - 1) > 0:
+            self._owed[workflow_id] = count
+            return False
+        del self._owed[workflow_id]
+        return True
+
+    def owes(self, workflow_id: str) -> bool:
+        """Whether any action of the workflow is still to be delivered."""
+        return workflow_id in self._owed
 
     @staticmethod
     def interrupt_for(record: TaskRecord, reason: str) -> Interrupt | None:

@@ -36,6 +36,9 @@ class OccurrenceMaterializer:
             (record.task_id, record) for record in blueprints
         )
 
+    def forget_locked(self, workflow_id: str) -> None:
+        self._blueprints.pop(workflow_id, None)
+
     def blueprint_locked(self, workflow_id: str, operator_id: str) -> TaskRecord | None:
         return self._blueprints.get(workflow_id, {}).get(operator_id)
 

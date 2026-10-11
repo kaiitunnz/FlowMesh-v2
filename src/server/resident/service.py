@@ -769,6 +769,35 @@ class ResidentCapacityControl:
                 # keeps it draining until its own terminal releases the last credit.
                 self._lifecycle.stop(replica.replica_id)
 
+    def invocations_settled(
+        self, invocation_ids: Collection[str], timeout_sec: float
+    ) -> bool:
+        """Whether every claim the invocations raised is terminal, read on the loop
+        that owns the claim store; False when the loop does not answer in time.
+
+        Safe to call from any thread but the loop's own.
+        """
+        if self._loop is None:
+            return self._claims_terminal(invocation_ids)
+        answer = asyncio.run_coroutine_threadsafe(
+            self._claims_terminal_async(invocation_ids), self._loop
+        )
+        try:
+            return answer.result(timeout_sec)
+        except TimeoutError:
+            answer.cancel()
+            return False
+
+    async def _claims_terminal_async(self, invocation_ids: Collection[str]) -> bool:
+        return self._claims_terminal(invocation_ids)
+
+    def _claims_terminal(self, invocation_ids: Collection[str]) -> bool:
+        return all(
+            claim.state is ClaimState.TERMINAL
+            for invocation_id in invocation_ids
+            for claim in self._stores.claims.by_invocation(invocation_id)
+        )
+
     def list_service_families(self) -> list[ServiceFamily]:
         """The registered service families, for operator read access."""
         return self._stores.families.all()

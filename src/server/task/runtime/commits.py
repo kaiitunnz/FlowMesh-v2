@@ -608,6 +608,9 @@ class TransitionCommitter:
             return
         self._write_locked(workflow_id, _Ledger())
 
+    def has_unwritten_children(self, workflow_id: str) -> bool:
+        return workflow_id in self._unwritten_children
+
     def note_child_locked(self, workflow_id: str, child_task_id: str) -> None:
         """Mark a child materialized in memory, so the ledger write that carries its
         work item also writes its record."""
