@@ -86,6 +86,7 @@ class SettledHistory:
         self._tails: dict[str, int] = {}
         self._closed: set[str] = set()
         self._archived: set[str] = set()
+        self._archived_count: dict[str, int] = {}
         self._next_seq = 1
         self._published_through = 0
         # Every certificate sequenced at or below this is in the counts read at start.
@@ -151,8 +152,15 @@ class SettledHistory:
         self._closed.add(workflow_id)
         return True
 
-    def archived_locked(self, task_id: str) -> None:
-        self._archived.add(task_id)
+    def archived_locked(self, task_id: str, workflow_id: str, tasks: int) -> bool:
+        """Record that a task of a workflow holding ``tasks`` tasks is archived;
+        returns whether every one of them is."""
+        if task_id not in self._archived:
+            self._archived.add(task_id)
+            self._archived_count[workflow_id] = (
+                self._archived_count.get(workflow_id, 0) + 1
+            )
+        return self._archived_count[workflow_id] >= tasks
 
     def hold_locked(self, workflow_id: str) -> None:
         """Keep a workflow resident until a matching ``release_locked``."""
@@ -176,15 +184,15 @@ class SettledHistory:
     def sealed_ids_locked(self) -> frozenset[str]:
         return frozenset(self._sealed)
 
-    def blocks_locked(self, workflow_id: str, task_ids: Collection[str]) -> bool:
-        """Whether a hold, a missing closure or a missing archive disposition keeps
-        the workflow resident."""
+    def blocks_locked(self, workflow_id: str, tasks: int) -> bool:
+        """Whether a hold, a missing closure or a missing archive disposition of one
+        of its ``tasks`` tasks keeps the workflow resident."""
         return (
             workflow_id in self._tails
             or (self._requires_closure and workflow_id not in self._closed)
             or (
                 self._requires_archive
-                and not all(task_id in self._archived for task_id in task_ids)
+                and self._archived_count.get(workflow_id, 0) < tasks
             )
         )
 
@@ -338,6 +346,7 @@ class SettledHistory:
             self._tails.pop(workflow_id, None)
             self._closed.discard(workflow_id)
             self._archived.difference_update(freed.task_ids)
+            self._archived_count.pop(workflow_id, None)
             self._published_through = max(self._published_through, seq)
             if seq > self._counted_through:
                 self._total += len(freed.task_ids)

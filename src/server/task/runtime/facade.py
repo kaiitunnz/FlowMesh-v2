@@ -1859,8 +1859,12 @@ class TaskRuntime:
         with self._lock:
             if (record := self._tasks.get(task_id)) is None:
                 return
-            self._settled_history.archived_locked(task_id)
-        self._settled_history.request(record.workflow_id)
+            workflow_id = record.workflow_id
+            complete = self._settled_history.archived_locked(
+                task_id, workflow_id, self._tasks.count_of(workflow_id)
+            )
+        if complete:
+            self._settled_history.request(workflow_id)
 
     @contextmanager
     def event_tail(self, *task_ids: str) -> Iterator[None]:
@@ -1927,8 +1931,9 @@ class TaskRuntime:
             )
         ):
             return None
-        task_ids = self._tasks.ids_of(workflow_id)
-        if self._settled_history.blocks_locked(workflow_id, task_ids):
+        if self._settled_history.blocks_locked(
+            workflow_id, self._tasks.count_of(workflow_id)
+        ):
             return None
         engine = self._engines.get(workflow_id)
         if engine is not None and engine.holds_obligations():

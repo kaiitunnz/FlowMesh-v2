@@ -554,3 +554,32 @@ def test_a_tail_during_the_seal_leaves_nothing_behind_the_free() -> None:
     assert workflow_id not in history._tails
     assert workflow_id not in history._candidates
     assert workflow_id not in history._requested
+
+
+def test_archive_reports_ask_to_free_a_workflow_once_its_last_task_is_archived() -> (
+    None
+):
+    registry = _registry()
+    runtime, workflow_id = _settled(registry)
+    runtime.settled_history.require_archive()
+    task_ids = runtime._tasks.ids_of(workflow_id)
+    requested: list[str] = []
+    request = runtime.settled_history.request
+
+    def recorded(workflow_id: str) -> None:
+        requested.append(workflow_id)
+        request(workflow_id)
+
+    cast(Any, runtime.settled_history).request = recorded
+    for task_id in [*task_ids[:-1], task_ids[0]]:
+        runtime.task_archived(task_id)
+    assert requested == []
+    runtime.settled_history.sweep()
+    runtime.settled_history.drain()
+    assert _resident(runtime, workflow_id)
+
+    runtime.task_archived(task_ids[-1])
+
+    assert requested == [workflow_id]
+    runtime.settled_history.drain()
+    assert not _resident(runtime, workflow_id)
