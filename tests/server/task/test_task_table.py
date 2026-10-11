@@ -65,15 +65,15 @@ def test_a_workflow_is_settled_once_its_last_open_task_is_terminal() -> None:
     table["a"] = _record("a", "w", TaskStatus.DONE, finished_ts=5.0)
     table["b"] = _record("b", "w")
     table["c"] = _record("c", "w", TaskStatus.FAILED, finished_ts=9.0)
-    assert table.first_unsettled("w") == "b"
+    assert table.has_unsettled("w")
     assert table.last_finish("w") == 5.0
     table["b"].status = TaskStatus.CANCELLED
     table["b"].finished_ts = 7.0
-    assert table.first_unsettled("w") is None
+    assert not table.has_unsettled("w")
     assert table.last_finish("w") == 9.0
     # A task added after the workflow settled opens it again.
     table["d"] = _record("d", "w")
-    assert table.first_unsettled("w") == "d"
+    assert table.has_unsettled("w")
     assert table.holds("w") and not table.holds("other")
 
 
@@ -82,11 +82,11 @@ def test_tasks_settling_behind_a_long_open_task_are_dropped_as_found() -> None:
     table["head"] = _record("head", "w")
     for i in range(3):
         table[f"t{i}"] = _record(f"t{i}", "w")
-    assert table.first_unsettled("w") == "head"
+    assert table.has_unsettled("w")
     for i in range(3):
         table[f"t{i}"].status = TaskStatus.DONE
         table[f"t{i}"].finished_ts = float(i)
-    assert table.first_unsettled("w") == "head"
+    assert table.has_unsettled("w")
     # Each call walks only up to an open task, so the settled ones leave the walk.
     assert list(table._open["w"]) == ["head"]
     assert table.last_finish("w") == 2.0

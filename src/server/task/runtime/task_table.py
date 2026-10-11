@@ -64,9 +64,9 @@ class TaskTable(dict[str, TaskRecord]):
         """Whether the table holds any task of the workflow."""
         return workflow_id in self._by_workflow
 
-    def first_unsettled(self, workflow_id: str) -> str | None:
-        """A task of the workflow not in a terminal status, or None when every one
-        is; the tasks found terminal before it are dropped from those still open."""
+    def has_unsettled(self, workflow_id: str) -> bool:
+        """Return whether any task of the workflow is not in a terminal status; the
+        tasks found terminal before one is are dropped from those still open."""
         open_ids = self._open.get(workflow_id, {})
         while open_ids:
             task_id = next(iter(open_ids))
@@ -75,13 +75,13 @@ class TaskTable(dict[str, TaskRecord]):
             if record.status not in TERMINAL_TASK_STATUSES:
                 # Behind the rest, so the next call reaches what settled since.
                 open_ids[task_id] = None
-                return task_id
+                return True
             if record.finished_ts is not None:
                 self._last_finish[workflow_id] = max(
                     self._last_finish.get(workflow_id, record.finished_ts),
                     record.finished_ts,
                 )
-        return None
+        return False
 
     def last_finish(self, workflow_id: str) -> float | None:
         """The last finish among the workflow's tasks found terminal."""

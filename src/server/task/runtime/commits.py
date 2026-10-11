@@ -684,7 +684,7 @@ class TransitionCommitter:
         engine = self._engines.get(workflow_id)
         if (
             not self._tasks.holds(workflow_id)
-            or self._tasks.first_unsettled(workflow_id) is not None
+            or self._tasks.has_unsettled(workflow_id)
             or (engine is not None and engine.awaits_control_reads())
         ):
             return WorkflowSettlement(settled=False, finished_ts=None)
