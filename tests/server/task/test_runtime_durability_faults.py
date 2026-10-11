@@ -36,7 +36,7 @@ from server.task.runtime.after_commit import (
     Settled,
 )
 from tests.server.dispatch_helpers import record_dispatch
-from tests.server.runtime_helpers import durable_invocation
+from tests.server.runtime_helpers import durable_invocation, manual_redrive
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
@@ -513,8 +513,9 @@ class _Spawning:
 
 
 def _restarted(runtime: TaskRuntime, registry: FakeRegistry) -> TaskRuntime:
-    """A new runtime over the same durable state and shared content store."""
-    return _runtime(registry, runtime._results)
+    """A new runtime over the same durable state and shared content store, whose
+    re-drives run only when the test drives them."""
+    return _runtime(registry, runtime._results, redrive=manual_redrive)
 
 
 def _spawn_writes() -> int:
@@ -550,6 +551,7 @@ def test_a_faulted_fan_out_keeps_its_children_whole(applied: bool, crash: bool) 
             # The success was never acknowledged, so its stream redelivers it.
             spawning.succeed()
         for _ in range(5):
+            spawning.runtime._redrive.run_due()
             spawning.runtime._durability.run_due()
         assert not spawning.runtime._durability.pending(spawning.workflow_id)
         spawning.assert_consistent()

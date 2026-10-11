@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 from unittest import mock
 
@@ -12,6 +12,7 @@ from server.config import OrchestrationConfig
 from server.orchestration import OrchestrationEngine
 from server.orchestration.state import InvocationState
 from server.task.models import PublishGate, TaskStatus
+from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.inference import InputResolutionBinding, UpstreamProvenance
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -42,7 +43,13 @@ from tests.server.task.test_worker_originated_boundary import _WorkerStub
 from tests.support.waiting import pop_ready
 
 
-def _runtime(registry: FakeRegistry, results: Any = None) -> TaskRuntime:
+def _runtime(
+    registry: FakeRegistry,
+    results: Any = None,
+    redrive: Callable[
+        [Callable[[str], None], logging.Logger], StoreRedriveScheduler
+    ] = StoreRedriveScheduler,
+) -> TaskRuntime:
     """A runtime whose durability retry runs only when a test drives it."""
     return TaskRuntime(
         cast(Any, registry),
@@ -51,6 +58,7 @@ def _runtime(registry: FakeRegistry, results: Any = None) -> TaskRuntime:
         results or make_result_reader(),
         logging.getLogger("commit-then-act"),
         credential_vault=InMemoryCredentialVault(),
+        redrive=redrive,
         durability_retry=manual_durability_retry,
     )
 
