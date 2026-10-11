@@ -5685,10 +5685,14 @@ class TaskRuntime:
 
     def task_freed(self, task_id: str) -> bool:
         """Whether a task the runtime does not hold was freed with its workflow,
-        rather than never known; raises while the store cannot answer."""
-        return (
-            self.get_record(task_id) is None and self._stored_task(task_id) is not None
-        )
+        rather than never known, as its index member in the stored history tells;
+        raises while the store cannot answer."""
+        if self.get_record(task_id) is not None:
+            return False
+        if not self._settled_history.published_through:
+            return False
+        (member,) = self._workflow_registry.history_members([task_id])
+        return member is not None
 
     def _stored_task(self, task_id: str) -> StoredTask | None:
         """A task freed with its workflow; none is stored before the first one is."""
