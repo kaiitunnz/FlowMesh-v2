@@ -263,3 +263,24 @@ def test_a_restart_drops_each_status_fact_whose_invocation_holds_nothing_live() 
 
     assert terminals.all() == []
     assert persisted[-1] == 0
+
+
+def test_a_status_fact_whose_write_failed_is_written_on_the_next_record() -> None:
+    terminals = ServeTerminalStore()
+    svc, _stores, _settled, _deps = _build()
+    edge = _edge(svc, terminals)
+    writes: list[int] = []
+
+    def persist() -> None:
+        writes.append(len(terminals.all()))
+        if len(writes) == 1:
+            raise ConnectionError("store unavailable")
+
+    edge._persist = persist
+    with pytest.raises(ConnectionError):
+        edge.record_terminal("inv-1", ClaimTerminalReason.COMPLETED, None)
+
+    edge.record_terminal("inv-1", ClaimTerminalReason.COMPLETED, None)
+    edge.record_terminal("inv-1", ClaimTerminalReason.COMPLETED, None)
+
+    assert writes == [1, 1]
