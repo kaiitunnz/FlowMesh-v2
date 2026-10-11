@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from server.orchestration.state import InvocationState
+from server.task.runtime import TaskRuntime
 from server.task.workflow_retry import WorkflowRetryScheduler
 from tests.server.stored_state import StoredLedgers
 
@@ -44,3 +45,9 @@ def refuse_ledger_saves(registry: Any) -> None:
 def accept_ledger_saves(registry: Any) -> None:
     """Take ledger saves again after ``refuse_ledger_saves``."""
     vars(registry).pop("save_ledger", None)
+
+
+def assert_reclaimable(runtime: TaskRuntime, workflow_id: str) -> None:
+    """Assert that nothing in the runtime still needs the settled workflow's state."""
+    with runtime._lock:
+        assert runtime._reclaim_check_locked(workflow_id) is not None

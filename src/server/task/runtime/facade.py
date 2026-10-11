@@ -1814,7 +1814,6 @@ class TaskRuntime:
             self._pending_facade_groups,
             self._merges.merge_children_map,
             self._merges.merge_parent_map,
-            self._ready.ready_index,
         )
         if any(
             committer.reporting(task_id) or any(task_id in each for each in held)
@@ -1903,6 +1902,8 @@ class TaskRuntime:
         task_ids = self._tasks.ids_of(workflow_id)
         done = 0
         for task_id in task_ids:
+            # A settled task still queued is one the dispatcher would drop unsent.
+            self._ready.remove_from_ready_locked(task_id)
             if self._tasks.pop(task_id).status == TaskStatus.DONE:
                 done += 1
             self._original_deps.pop(task_id, None)

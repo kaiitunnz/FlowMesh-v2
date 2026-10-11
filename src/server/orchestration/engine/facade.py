@@ -66,7 +66,6 @@ from ..state import (
     TERMINAL_WORK_ITEM_STATUSES,
     AcceptedInput,
     Activation,
-    AttemptStatus,
     AuthorityGrant,
     BoundaryEvent,
     Continuation,
@@ -77,7 +76,6 @@ from ..state import (
     InputPreparation,
     InputResolution,
     Invocation,
-    InvocationState,
     IterationResolution,
     LedgerSnapshot,
     LoopInstance,
@@ -962,19 +960,23 @@ class OrchestrationEngine:
         return self.has_unsettled_tasks() or self.awaits_control_reads()
 
     def holds_obligations(self) -> bool:
-        """Whether anything of the instance is still in flight: work to settle, an
-        issued invocation not yet terminal, an attempt still running, or a holder
-        attached to an activation's private state."""
+        """Whether anything of the instance is still in flight: work to settle, a
+        mediated boundary whose invocation is not terminal, or a holder attached to an
+        activation's private state.
+
+        A settled work item's own invocation and attempt are not: its attempts share
+        the invocation, which stays issued once the work item fails or is cancelled, and
+        an attempt a cancel ended can stay running here while the task's record and
+        dispatch say whether its worker still holds it.
+        """
         return (
             self.is_open()
             or any(
-                invocation.state is not InvocationState.UNISSUED
+                (invocation := self._ledger.invocations.get(invocation_id)) is not None
                 and invocation.state not in TERMINAL_INVOCATION_STATES
-                for invocation in self._ledger.invocations.values()
-            )
-            or any(
-                attempt.status in (AttemptStatus.ISSUED, AttemptStatus.RUNNING)
-                for attempt in self._ledger.attempts.values()
+                for _, invocation_id in (
+                    self._boundaries.unsettled_invocation_boundaries()
+                )
             )
             or any(
                 lineage.attachment is not None

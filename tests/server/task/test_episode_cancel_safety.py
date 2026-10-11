@@ -19,6 +19,7 @@ from server.task.models import DispatchEnd, PublishGate, TaskStatus
 from shared.harness import BoundaryEventKind, HarnessCapsule, HarnessResult
 from shared.private_state import OwnerFence
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.runtime_helpers import assert_reclaimable
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _register,
@@ -159,6 +160,7 @@ def test_cancelling_an_episode_suspended_on_a_boundary_settles_it() -> None:
         # A boundary outcome arriving afterwards settles nothing and revives nothing.
         assert runtime.settle_episode_invocation(writer, "m0", "late") is False
         assert runtime._tasks[writer].status == TaskStatus.CANCELLED
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
 
@@ -283,6 +285,7 @@ def test_a_return_settles_a_cancelling_episode() -> None:
         assert end is DispatchEnd.CANCELLED
         assert runtime._tasks[writer].status == TaskStatus.CANCELLED
         assert writer not in runtime._ready.ready_index
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
 
@@ -320,6 +323,7 @@ def test_a_completion_racing_a_cancel_settles_cancelled() -> None:
         wi = engine.work_item(writer)
         assert wi is not None and wi.status is WorkItemStatus.CANCELLED
         assert registry.remaining_of(workflow_id) == set()
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
 
@@ -345,6 +349,7 @@ def test_a_failure_racing_a_cancel_settles_cancelled() -> None:
         assert impacted == []
         assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
         assert registry.remaining_of(workflow_id) == set()
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
 
@@ -397,5 +402,6 @@ def test_a_completion_with_a_facade_group_racing_a_cancel_settles_cancelled() ->
         assert record.pending_facade_group is None
         assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
         assert registry.remaining_of(workflow_id) == set()
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
