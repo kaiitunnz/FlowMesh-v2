@@ -880,3 +880,61 @@ async def test_rehydrate_keeps_a_requeued_serve_tasks_first_start() -> None:
     assert restored_record.status == TaskStatus.PENDING
     assert restored_record.started_ts is None
     assert restored_record.first_started_ts == first_started
+
+
+CHAIN = """
+apiVersion: flowmesh/v1
+kind: Workflow
+metadata:
+  name: chain
+spec:
+  graph:
+    nodes:
+      - {name: a, spec: {taskType: echo}}
+      - {name: b, dependsOn: [a], spec: {taskType: echo}}
+      - {name: c, dependsOn: [b], spec: {taskType: echo}}
+"""
+
+
+def _succeed_all(runtime: TaskRuntime, ids: dict[str, str]) -> None:
+    for name in ("a", "b", "c"):
+        record_dispatch(runtime, ids[name], "wkr-1")
+        runtime.mark_succeeded(ids[name], "wkr-1", {}, "2026-06-01T00:00:00Z")
+
+
+def _fail_first(runtime: TaskRuntime, ids: dict[str, str]) -> None:
+    record_dispatch(runtime, ids["a"], "wkr-1")
+    runtime.mark_failed(ids["a"], "wkr-1", {}, "2026-06-01T00:00:00Z")
+
+
+def _cancel(runtime: TaskRuntime, ids: dict[str, str]) -> None:
+    record = runtime.get_record(ids["a"])
+    assert record is not None
+    runtime.cancel_workflow(record.workflow_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("settle", "status"),
+    [
+        (_succeed_all, TaskStatus.DONE),
+        (_fail_first, TaskStatus.FAILED),
+        (_cancel, TaskStatus.CANCELLED),
+    ],
+)
+async def test_a_restart_describes_settled_v1_tasks_as_the_server_that_ran_them(
+    settle: Callable[[TaskRuntime, dict[str, str]], None], status: TaskStatus
+) -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    _, ids = await _register(runtime, CHAIN)
+    settle(runtime, ids)
+    live = {name: runtime.describe_task(task_id) for name, task_id in ids.items()}
+    assert {info.status for info in live.values() if info} == {status}
+
+    restored = _runtime(registry)
+    assert await restored.rehydrate() == 1
+
+    assert {
+        name: restored.describe_task(task_id) for name, task_id in ids.items()
+    } == live

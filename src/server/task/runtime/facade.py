@@ -1165,7 +1165,15 @@ class TaskRuntime:
             task_id = record.task_id
             original = self._original_deps.get(task_id) or set()
             for dep in original:
-                self._dag.dependents[dep].add(task_id)
+                # A dependency that succeeded or failed released its dependents when
+                # it settled; a cancelled one keeps them.
+                if (
+                    upstream := self._tasks.get(dep)
+                ) is None or upstream.status not in (
+                    TaskStatus.DONE,
+                    TaskStatus.FAILED,
+                ):
+                    self._dag.dependents[dep].add(task_id)
             if record.status in terminal:
                 continue
             # Only completed deps are subtracted, not failed ones: a failure
