@@ -75,6 +75,7 @@ def _reads(freed: str, task_ids: list[str], running: str) -> dict[str, Any]:
         "history_census": (),
         "history_seq": (),
         "open_workflow_ids": (),
+        "workflows_open": ([freed, running, "wfl-unknown"],),
         "history_index_state": (),
         "scan_workflow_ids": (0, 100),
         "stored_task_counts": ([freed, running, "wfl-unknown"],),

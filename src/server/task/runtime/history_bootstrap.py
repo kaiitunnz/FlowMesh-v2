@@ -1,10 +1,11 @@
 """Classifying the stored workflows of a store without the open-workflow index.
 
-A restart restores only the workflows the open set names. A store without that set, or
-one whose registered workflows are not each open or freed, has every stored workflow
-classified, a bounded batch at a time: a settled one nothing still needs is closed and
-freed behind its certified history, and every other joins the open set. A cursor
-recorded after each batch lets a crash resume where it stopped.
+A restart restores only the workflows the open set names. A store without that set has
+every stored workflow classified, a bounded batch at a time: a settled one nothing still
+needs is closed and freed behind its certified history, and every other joins the open
+set. A store whose registered workflows are not each open or freed has those not open,
+or open though freed, classified the same way. A cursor recorded after each batch lets
+a crash resume where it stopped.
 """
 
 import asyncio
@@ -20,6 +21,7 @@ from .settled_history import SettledHistory
 
 INDEX_COMPLETE = "complete:v1"
 _INDEX_BUILDING = "building:v1:"
+_INDEX_REPAIRING = "repairing:v1:"
 BATCH_SIZE = 64
 # The most stored tasks one scratch runtime restores at a time; a workflow holding more
 # is restored alone.
@@ -83,23 +85,27 @@ class HistoryBootstrap[R: ScratchRuntime]:
         self._batch_tasks = batch_tasks
 
     async def run(self) -> None:
-        """Classify every registered workflow not yet classified, or every one again
-        when the registered, open and freed workflows disagree."""
+        """Classify every registered workflow not yet classified, or those not open or
+        open though freed when the registered, open and freed workflows disagree."""
         state = await self._registry.history_index_state_async()
         cursor = 0
+        repairing = False
         if state == INDEX_COMPLETE:
             census = await self._registry.history_census_async()
             if census.consistent:
                 return
             self._logger.warning(
                 "%d registered workflows are not %d open and %d freed; classifying "
-                "them again",
+                "those not open",
                 census.registered,
                 census.open,
                 census.freed,
             )
-        elif (resumed := _cursor(state)) is not None:
+            repairing = True
+        elif (resumed := _cursor(state, _INDEX_BUILDING)) is not None:
             cursor = resumed
+        elif (resumed := _cursor(state, _INDEX_REPAIRING)) is not None:
+            cursor, repairing = resumed, True
         elif state is not None:
             self._logger.warning(
                 "Rebuilding the open-workflow index over unrecognized state %r", state
@@ -110,12 +116,14 @@ class HistoryBootstrap[R: ScratchRuntime]:
             cursor, workflow_ids = await self._registry.scan_workflow_ids_async(
                 cursor, BATCH_SIZE
             )
+            if repairing and workflow_ids:
+                workflow_ids = await self._unaccounted(workflow_ids)
             if workflow_ids:
                 outcomes.update(await self._classify(sorted(set(workflow_ids))))
             if cursor == 0:
                 break
             await self._registry.set_history_index_state_async(
-                f"{_INDEX_BUILDING}{cursor}"
+                f"{_INDEX_REPAIRING if repairing else _INDEX_BUILDING}{cursor}"
             )
         await self._registry.settle_open_set_async()
         await self._registry.set_history_index_state_async(INDEX_COMPLETE)
@@ -124,6 +132,18 @@ class HistoryBootstrap[R: ScratchRuntime]:
             ", ".join(f"{count} {why}" for why, count in sorted(outcomes.items()))
             or "none",
         )
+
+    async def _unaccounted(self, workflow_ids: list[str]) -> list[str]:
+        """The workflows not open, or open though freed."""
+        is_open = await self._registry.workflows_open_async(workflow_ids)
+        certified = await self._registry.history_certified_async(workflow_ids)
+        return [
+            workflow_id
+            for workflow_id, open_, freed in zip(
+                workflow_ids, is_open, certified, strict=True
+            )
+            if freed or not open_
+        ]
 
     async def _classify(self, workflow_ids: list[str]) -> Counter[Classification]:
         outcomes: Counter[Classification] = Counter()
@@ -210,11 +230,11 @@ def _batches(
     return batches
 
 
-def _cursor(state: str | None) -> int | None:
-    if state is None or not state.startswith(_INDEX_BUILDING):
+def _cursor(state: str | None, prefix: str) -> int | None:
+    if state is None or not state.startswith(prefix):
         return None
     try:
-        return int(state.removeprefix(_INDEX_BUILDING))
+        return int(state.removeprefix(prefix))
     except ValueError:
         return None
 

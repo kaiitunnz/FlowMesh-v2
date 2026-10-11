@@ -1039,6 +1039,19 @@ class WorkflowHistoryStore:
             )
         )
 
+    def workflows_open(self, workflow_ids: Sequence[str]) -> list[bool]:
+        """Return whether each workflow is in the open set."""
+        with self._rds.sync.control_pipeline(transaction=False) as pipe:
+            for workflow_id in workflow_ids:
+                pipe.sismember(WORKFLOWS_OPEN_KEY, workflow_id)
+            return [bool(member) for member in pipe.execute()]
+
+    async def workflows_open_async(self, workflow_ids: Sequence[str]) -> list[bool]:
+        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
+            for workflow_id in workflow_ids:
+                pipe.sismember(WORKFLOWS_OPEN_KEY, workflow_id)
+            return [bool(member) for member in await pipe.execute()]
+
     def close_workflows(self, *workflow_ids: str) -> None:
         """Remove freed workflows from the open set."""
         if workflow_ids:

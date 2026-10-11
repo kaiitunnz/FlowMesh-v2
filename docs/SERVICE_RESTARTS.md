@@ -118,10 +118,10 @@ restart safe:
   has its worker interrupted again.
 - **Freed workflows stay freed.** Startup restores only the workflows not yet
   freed; a freed workflow is served from its stored history. A start over a store
-  without the open-workflow index, or one holding workflows neither open nor freed,
-  classifies each stored workflow in bounded batches that resume where a crash
-  stopped: a settled workflow nothing still needs is closed, if its closure was lost,
-  and freed, and every other is restored.
+  without the open-workflow index classifies each stored workflow in bounded batches
+  that resume where a crash stopped: a settled workflow nothing still needs is closed,
+  if its closure was lost, and freed, and every other is restored. A start over a
+  store holding workflows neither open nor freed classifies those the same way.
 - **Heartbeat grace for rehydrated work.** Worker heartbeats are dropped while
   the root is down, so a surviving worker briefly looks stale once the root is
   back. The watchdog gives any worker that owns rehydrated in-flight tasks an

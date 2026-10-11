@@ -3,6 +3,7 @@ open-workflow index existed is classified into it once, resumably."""
 
 import asyncio
 import logging
+from collections import Counter
 from collections.abc import Callable, Collection
 from typing import Any, cast
 
@@ -520,6 +521,32 @@ def test_a_freed_workflow_left_open_is_closed_and_not_restored() -> None:
     assert _open(registry) == set()
     assert registry.history_census().consistent
     assert _reads(restarted, task_ids) == before
+
+
+@pytest.mark.parametrize("state", [INDEX_COMPLETE, "repairing:v1:0"])
+def test_a_repair_classifies_only_the_workflows_not_open(
+    state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    running, lost = _register(runtime, CHAIN), _register(runtime, CHAIN)
+    registry.set_history_index_state(state)
+    raw_control(registry).srem(WORKFLOWS_OPEN_KEY, lost)
+    loaded: Counter[str] = Counter()
+    load = TaskRuntime._load_stored_workflow
+
+    async def recorded(self: TaskRuntime, workflow_id: str) -> Any:
+        loaded[workflow_id] += 1
+        return await load(self, workflow_id)
+
+    monkeypatch.setattr(TaskRuntime, "_load_stored_workflow", recorded)
+
+    _restarted(registry, _close)
+
+    assert loaded == {running: 1, lost: 2}
+    assert _open(registry) == {running, lost}
+    assert registry.history_census().consistent
+    assert registry.history_index_state() == INDEX_COMPLETE
 
 
 def test_classification_batches_bound_the_tasks_restored_together() -> None:
