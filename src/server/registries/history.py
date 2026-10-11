@@ -86,9 +86,12 @@ local function all_in(command, key, from, count, expected)
   end
   return true
 end
-if (redis.call('GET', KEYS[1]) or '0') ~= ARGV[1] then return 'revision changed' end
 if not is(KEYS[2], 'hash') then return 'projection missing' end
-if redis.call('HEXISTS', KEYS[2], '<certificate>') == 1 then return 'certified' end
+if redis.call('HEXISTS', KEYS[2], '<certificate>') == 1 then
+  if is(KEYS[8], 'set') then redis.call('SREM', KEYS[8], ARGV[5]) end
+  return 'certified'
+end
+if (redis.call('GET', KEYS[1]) or '0') ~= ARGV[1] then return 'revision changed' end
 if redis.call('HLEN', KEYS[2]) ~= tonumber(ARGV[4]) then
   return 'projection incomplete'
 end
@@ -128,6 +131,21 @@ redis.call('HSET', KEYS[2], '<certificate>', ARGV[2])
 return 'ok'
 """.replace("<certificate>", CERTIFICATE_FIELD)
 
+# Writes fields of a workflow's history hash unless it already holds a certificate, in
+# which case the workflow leaves the open set instead. KEYS: the history hash, the open
+# set. ARGV: the workflow id, then field and value pairs.
+_PREPARE = """
+if redis.call('TYPE', KEYS[1])['ok'] == 'hash'
+  and redis.call('HEXISTS', KEYS[1], '<certificate>') == 1 then
+  if redis.call('TYPE', KEYS[2])['ok'] == 'set' then
+    redis.call('SREM', KEYS[2], ARGV[1])
+  end
+  return 0
+end
+redis.call('HSET', KEYS[1], unpack(ARGV, 2))
+return 1
+""".replace("<certificate>", CERTIFICATE_FIELD)
+
 # How many fields or members one preparation write carries, so no single command holds
 # the store for long.
 _PREPARE_CHUNK = 500
@@ -163,7 +181,9 @@ class StoredTask:
     certificate: HistoryCertificate
 
 
-def _queue_preparation(pipe: _AnyPipeline, publication: HistoryPublication) -> None:
+def _queue_preparation(pipe: _AnyPipeline, publication: HistoryPublication) -> int:
+    """Queue a publication's writes; returns how many leading replies answer whether
+    the history hash took its fields."""
     fields = {
         task_id: history.model_dump_json()
         for task_id, history in publication.tasks.items()
@@ -171,8 +191,16 @@ def _queue_preparation(pipe: _AnyPipeline, publication: HistoryPublication) -> N
     if publication.outputs is not None:
         fields.update(_output_fields(publication.outputs))
     history_key = workflow_history_key(publication.workflow_id)
-    for chunk in _chunks(list(fields.items())):
-        pipe.hset(history_key, mapping=dict(chunk))
+    field_chunks = list(_chunks(list(fields.items())))
+    for chunk in field_chunks:
+        pipe.eval(
+            _PREPARE,
+            2,
+            history_key,
+            WORKFLOWS_OPEN_KEY,
+            publication.workflow_id,
+            *(part for field in chunk for part in field),
+        )
     members = [
         (task_id, member) for task_id, (member, _) in publication.members.items()
     ]
@@ -182,6 +210,7 @@ def _queue_preparation(pipe: _AnyPipeline, publication: HistoryPublication) -> N
     for status, status_members in _by_status(publication).items():
         for part in _chunks(status_members):
             pipe.zadd(task_history_key(status), dict.fromkeys(part, 0))
+    return len(field_chunks)
 
 
 def _output_fields(outputs: OutputsHistory) -> dict[str, str]:
@@ -211,11 +240,12 @@ def _by_status(publication: HistoryPublication) -> dict[str, list[str]]:
     return by_status
 
 
-def _prepared(replies: Sequence[Any], workflow_id: str) -> None:
+def _prepared(replies: Sequence[Any], workflow_id: str, guarded: int) -> bool:
     if errors := [reply for reply in replies if isinstance(reply, Exception)]:
         raise HistoryNotPrepared(
             f"preparing the history of {workflow_id} failed: {errors[0]}"
         )
+    return all(reply != 0 for reply in replies[:guarded])
 
 
 def _certify_args(
@@ -477,24 +507,34 @@ class WorkflowHistoryStore:
     async def workflow_revision_async(self, workflow_id: str) -> int:
         return int(await self._rds.asyncio.get(workflow_revision_key(workflow_id)) or 0)
 
-    def prepare_history(self, publication: HistoryPublication) -> None:
-        """Write a workflow's projection and index entries, uncertified.
+    def prepare_history(self, publication: HistoryPublication) -> bool:
+        """Write a workflow's projection and index entries, uncertified; returns
+        False, having written no projection field past it, when the workflow already
+        holds a certificate.
 
         Raises ``HistoryNotPrepared`` when any of the writes failed.
         """
         with self._rds.sync.control_pipeline(transaction=False) as pipe:
-            _queue_preparation(pipe, publication)
-            _prepared(pipe.execute(raise_on_error=False), publication.workflow_id)
+            guarded = _queue_preparation(pipe, publication)
+            return _prepared(
+                pipe.execute(raise_on_error=False), publication.workflow_id, guarded
+            )
 
-    async def prepare_history_async(self, publication: HistoryPublication) -> None:
+    async def prepare_history_async(self, publication: HistoryPublication) -> bool:
         async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
-            _queue_preparation(pipe, publication)
-            _prepared(await pipe.execute(raise_on_error=False), publication.workflow_id)
+            guarded = _queue_preparation(pipe, publication)
+            return _prepared(
+                await pipe.execute(raise_on_error=False),
+                publication.workflow_id,
+                guarded,
+            )
 
     def certify_history(self, publication: HistoryPublication, revision: int) -> str:
         """Certify a prepared publication, unless the workflow was written since its
-        state was read at ``revision`` or the preparation is incomplete; returns
-        ``"ok"`` or why it was refused, having then written nothing."""
+        state was read at ``revision`` or the preparation is incomplete. Returns
+        ``"ok"``; ``"certified"`` when the workflow already holds a certificate,
+        having removed it from the open set; or why it was refused, having then
+        written nothing."""
         keys, args = _certify_args(publication, revision)
         return str(self._rds.sync.eval(_CERTIFY, len(keys), *keys, *map(str, args)))
 

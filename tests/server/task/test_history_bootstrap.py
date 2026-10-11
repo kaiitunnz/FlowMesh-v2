@@ -364,3 +364,81 @@ def test_a_workflow_that_cannot_be_restored_is_left_to_the_restart() -> None:
     assert scratch_failures == []
     assert broken in _open(registry)
     assert _certified(registry, healthy)
+
+
+def _freed_once(
+    registry: WorkflowRegistry, runtime: TaskRuntime, task_ids: list[str]
+) -> None:
+    listed = _page(runtime, _query(), 100)
+    assert len(listed) == len(set(listed)) and set(listed) == set(task_ids)
+    assert registry.history_counts() == (len(task_ids), len(task_ids))
+    assert runtime.settled_history.counts_locked() == (len(task_ids), len(task_ids))
+    assert runtime.task_status_counts()[-2:] == (len(task_ids), len(task_ids))
+
+
+def test_a_certification_landing_after_its_answer_was_lost_frees_the_workflow() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    workflow_id = _register(runtime, CHAIN)
+    task_ids = _succeed_ready(runtime)
+    before = _reads(runtime, task_ids)
+    certify = registry.certify_history
+    queued: list[tuple[HistoryPublication, int]] = []
+
+    def lost(publication: HistoryPublication, revision: int) -> str:
+        queued.append((publication, revision))
+        raise RedisConnectionError("reply lost")
+
+    cast(Any, registry).certify_history = lost
+    runtime.settled_history.drain()
+    assert _resident(runtime, workflow_id)
+    assert not runtime.settled_history.sealed_locked(workflow_id)
+
+    assert certify(*queued[0]) == "ok"
+    cast(Any, registry).certify_history = certify
+    runtime.settled_history.sweep()
+    runtime.settled_history.drain()
+
+    assert not _resident(runtime, workflow_id)
+    assert workflow_id not in _open(registry)
+    _freed_once(registry, runtime, task_ids)
+    assert _reads(runtime, task_ids) == before
+    restarted, loads = _restarted(registry)
+    assert loads.ids == []
+    _freed_once(registry, restarted, task_ids)
+    assert _reads(restarted, task_ids) == before
+
+
+def test_a_lost_answer_while_classifying_is_freed_by_the_same_start() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    workflow_id = _register(runtime, CHAIN)
+    task_ids = _succeed_ready(runtime)
+    before = _reads(runtime, task_ids)
+    _before_the_index(registry)
+    certify, read_back = registry.certify_history, registry.history_certificate
+
+    def lost(publication: HistoryPublication, revision: int) -> str:
+        certify(publication, revision)
+        raise RedisConnectionError("reply lost")
+
+    def unreadable(workflow_id: str) -> Any:
+        raise RedisConnectionError("store unavailable")
+
+    cast(Any, registry).certify_history = lost
+    cast(Any, registry).history_certificate = unreadable
+    restarted, loads = _restarted(registry, _close)
+    cast(Any, registry).certify_history = certify
+    cast(Any, registry).history_certificate = read_back
+    assert loads.ids == [workflow_id]
+    assert _certified(registry, workflow_id)
+
+    restarted.settled_history.drain()
+
+    assert not _resident(restarted, workflow_id)
+    assert workflow_id not in _open(registry)
+    _freed_once(registry, restarted, task_ids)
+    assert _reads(restarted, task_ids) == before
+    again, loads = _restarted(registry)
+    assert loads.ids == []
+    _freed_once(registry, again, task_ids)

@@ -56,7 +56,7 @@ def _publication(
             mode="v1",
             tasks=len(task_ids),
         ),
-        tasks={task_id: TaskHistory(seq=seq, completed=True) for task_id in task_ids},
+        tasks={task_id: TaskHistory(completed=True) for task_id in task_ids},
         members=members,
         outputs=None,
     )
@@ -211,7 +211,7 @@ def _large_publication(workflow_id: str, count: int) -> HistoryPublication:
         certificate=HistoryCertificate(
             schema_version=HISTORY_SCHEMA, nonce="n", seq=1, mode="v1", tasks=count
         ),
-        tasks={task_id: TaskHistory(seq=1) for task_id in task_ids},
+        tasks={task_id: TaskHistory() for task_id in task_ids},
         members={
             task_id: (history_member(float(index), task_id), statuses[index % 3])
             for index, task_id in enumerate(task_ids)
@@ -315,3 +315,31 @@ def test_a_published_output_reads_only_the_members_it_names(
     assert empty is not None and empty.members == []
     every = registry.stored_outputs(workflow_id)
     assert every is not None and len(every.members) == 2003
+
+
+def test_a_certified_history_takes_no_later_preparation_and_leaves_the_open_set() -> (
+    None
+):
+    registry, workflow_id, task_ids = _registered()
+    publication = _publication(registry, workflow_id, task_ids)
+    revision = registry.workflow_revision(workflow_id)
+    assert _publish(registry, publication, revision) == "ok"
+    raw = raw_control(registry)
+    projection = raw.hgetall(workflow_history_key(workflow_id))
+    later = HistoryPublication(
+        workflow_id=workflow_id,
+        certificate=publication.certificate,
+        tasks={task_id: TaskHistory(failed=True) for task_id in task_ids},
+        members=publication.members,
+        outputs=None,
+    )
+
+    registry.reopen_workflows(workflow_id)
+    assert registry.prepare_history(later) is False
+    assert raw.hgetall(workflow_history_key(workflow_id)) == projection
+    assert not _is_open(registry, workflow_id)
+
+    registry.reopen_workflows(workflow_id)
+    assert registry.certify_history(later, revision) == "certified"
+    assert not _is_open(registry, workflow_id)
+    assert registry.history_counts() == (len(task_ids), len(task_ids))

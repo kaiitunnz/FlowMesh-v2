@@ -360,10 +360,11 @@ def test_a_write_after_the_revision_is_read_refuses_and_a_later_attempt_frees() 
     prepare = registry.prepare_history
     task_id = runtime._tasks.ids_of(workflow_id)[0]
 
-    def prepare_then_write(publication: HistoryPublication) -> None:
-        prepare(publication)
+    def prepare_then_write(publication: HistoryPublication) -> bool:
+        prepared = prepare(publication)
         stored = registry.load_task_states(workflow_id, task_id)
         registry.save_task_states([state for state in stored if state])
+        return prepared
 
     cast(Any, registry).prepare_history = prepare_then_write
     runtime.settled_history.drain()

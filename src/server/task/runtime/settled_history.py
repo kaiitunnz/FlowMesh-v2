@@ -39,11 +39,9 @@ class Freed:
 
 @dataclass
 class _Seal:
-    """A workflow whose publication is under way, and whether its certification's
-    outcome is unknown."""
+    """A workflow whose publication is under way, and whether it holds a
+    certificate is to be read back."""
 
-    publication: HistoryPublication
-    revision: int
     ambiguous: bool = False
 
 
@@ -87,6 +85,8 @@ class SettledHistory:
         self._archived: set[str] = set()
         self._next_seq = 1
         self._published_through = 0
+        # Every certificate sequenced at or below this is in the counts read at start.
+        self._counted_through = 0
         self._total = 0
         self._done = 0
         self._requires_closure = False
@@ -104,6 +104,7 @@ class SettledHistory:
         with self._lock:
             self._next_seq = max(self._next_seq, seq + 1)
             self._published_through = max(self._published_through, seq)
+            self._counted_through = seq
             self._total, self._done = total, done
         with self._cv:
             self._started = True
@@ -245,7 +246,7 @@ class SettledHistory:
             seal = self._sealed.get(workflow_id)
             check = None if seal else self._check(workflow_id)
         if seal is not None:
-            return seal.ambiguous and self._resolve_ambiguous(workflow_id, seal)
+            return seal.ambiguous and self._resolve_ambiguous(workflow_id)
         if check is None:
             return False
         if check.invocation_ids and self._claims_settled is not None:
@@ -258,12 +259,14 @@ class SettledHistory:
             seq = self._next_seq
             self._next_seq += 1
             publication = self._publication(workflow_id, seq, os.urandom(16).hex())
-            seal = self._sealed[workflow_id] = _Seal(publication, revision)
+            seal = self._sealed[workflow_id] = _Seal()
         try:
-            self._registry.prepare_history(publication)
+            prepared = self._registry.prepare_history(publication)
         except Exception as exc:
             self._unseal(workflow_id, "its preparation failed", exc)
             return False
+        if not prepared:
+            return self._read_back(workflow_id, seal)
         try:
             outcome = self._registry.certify_history(publication, revision)
         except Exception as exc:
@@ -272,19 +275,26 @@ class SettledHistory:
                 workflow_id,
                 exc,
             )
-            with self._lock:
-                seal.ambiguous = True
-            return self._resolve_ambiguous(workflow_id, seal)
+            return self._read_back(workflow_id, seal)
+        if outcome == "certified":
+            return self._read_back(workflow_id, seal)
         if outcome != "ok":
             self._unseal(workflow_id, f"its certification was refused ({outcome})")
             return False
-        self._free(workflow_id, seal)
+        self._free(workflow_id, publication.certificate.seq)
         return True
 
-    def _resolve_ambiguous(self, workflow_id: str, seal: _Seal) -> bool:
-        """Settle a certification whose answer was lost by reading the certificate
-        back: ours frees the workflow, none unseals it, and an unreadable one keeps it
-        sealed for the next evaluation."""
+    def _read_back(self, workflow_id: str, seal: _Seal) -> bool:
+        with self._lock:
+            seal.ambiguous = True
+        return self._resolve_ambiguous(workflow_id)
+
+    def _resolve_ambiguous(self, workflow_id: str) -> bool:
+        """Settle whether a sealed workflow holds a certificate by reading it back.
+        Any certificate frees the workflow: every publisher certifies a settled
+        workflow at a revision nothing wrote since, whether it is this attempt, an
+        earlier one whose answer was lost, or an earlier process. None unseals it,
+        and an unreadable one keeps it sealed for the next evaluation."""
         try:
             certificate = self._registry.history_certificate(workflow_id)
         except Exception as exc:
@@ -297,13 +307,7 @@ class SettledHistory:
         if certificate is None:
             self._unseal(workflow_id, "its certification did not land")
             return False
-        if certificate.nonce != seal.publication.certificate.nonce:
-            self._logger.error(
-                "Workflow %s holds a certificate it did not publish; it stays sealed",
-                workflow_id,
-            )
-            return False
-        self._free(workflow_id, seal)
+        self._free(workflow_id, certificate.seq)
         return True
 
     def _unseal(
@@ -318,17 +322,16 @@ class SettledHistory:
             f": {error}" if error is not None else "",
         )
 
-    def _free(self, workflow_id: str, seal: _Seal) -> None:
+    def _free(self, workflow_id: str, seq: int) -> None:
         with self._lock:
             freed = self._forget(workflow_id)
             del self._sealed[workflow_id]
             self._closed.discard(workflow_id)
             self._archived.difference_update(freed.task_ids)
-            self._published_through = max(
-                self._published_through, seal.publication.certificate.seq
-            )
-            self._total += len(freed.task_ids)
-            self._done += freed.done
+            self._published_through = max(self._published_through, seq)
+            if seq > self._counted_through:
+                self._total += len(freed.task_ids)
+                self._done += freed.done
         self._logger.debug(
             "Freed workflow %s (%d tasks)", workflow_id, len(freed.task_ids)
         )

@@ -1968,7 +1968,6 @@ class TaskRuntime:
             task_id = record.task_id
             fields = self._task_info_fields_locked(task_id, record)
             tasks[task_id] = TaskHistory(
-                seq=seq,
                 depends_on=fields["depends_on"],
                 pending_dependencies=fields["pending_dependencies"],
                 dependents=fields["dependents"],
@@ -5731,7 +5730,7 @@ class TaskRuntime:
                     continue
                 record = stored.persisted.record
                 if (
-                    stored.history.seq > through
+                    stored.certificate.seq > through
                     or record.workflow_id in sealed
                     or (accessible is not None and record.task_id not in accessible)
                 ):

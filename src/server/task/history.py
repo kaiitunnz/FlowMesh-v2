@@ -28,7 +28,6 @@ _FLIP_SIGN = 0x8000_0000_0000_0000
 class TaskHistory(BaseModel):
     """The task-info fields and result a freed task's runtime state derived."""
 
-    seq: int
     depends_on: list[str] = Field(default_factory=list)
     pending_dependencies: list[str] = Field(default_factory=list)
     dependents: list[str] = Field(default_factory=list)
