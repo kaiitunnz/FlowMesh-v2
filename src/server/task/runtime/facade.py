@@ -1037,15 +1037,15 @@ class TaskRuntime:
     async def rehydrate(self, workflow_ids: Collection[str] | None = None) -> int:
         """Rebuild in-memory scheduler state from durable Redis records.
 
-        Reconstructs each of ``workflow_ids``, or every stored workflow, its DAG, ready
-        queue, and epoch state from the persisted per-task snapshots. In-flight
+        Reconstructs each of ``workflow_ids``, or every workflow not freed, its DAG,
+        ready queue, and epoch state from the persisted per-task snapshots. In-flight
         (DISPATCHED / CANCELLING) tasks are left assigned to their worker: completions
         that landed during the restart arrive via the replayed task-event stream, and
         genuinely departed workers are recovered by the watchdog. Returns the number of
         workflows restored.
         """
         if workflow_ids is None:
-            workflow_ids = await self._workflow_registry.get_workflow_ids_async()
+            workflow_ids = await self._workflow_registry.open_workflow_ids_async()
         return len(await self.restore(workflow_ids))
 
     async def restore(self, workflow_ids: Collection[str]) -> list[str]:

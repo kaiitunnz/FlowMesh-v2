@@ -567,3 +567,15 @@ def test_a_store_is_classified_one_bounded_batch_at_a_time() -> None:
     assert _open(registry) == kinds["running"]
     restarted, _ = _restarted(registry, _close)
     assert _reads(restarted, task_ids) == before
+
+
+def test_a_rehydrate_restores_the_open_workflows_alone() -> None:
+    registry = _registry()
+    runtime, kinds = _mixed_store(registry, 2)
+    runtime.settled_history.drain()
+    restarted = _unstarted(registry)
+    loads = _Loads(restarted)
+
+    asyncio.run(restarted.rehydrate())
+
+    assert set(loads.ids) == kinds["running"]

@@ -89,6 +89,10 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
     async def get_workflow_ids_async(self) -> set[str]:
         return self.get_workflow_ids()
 
+    # Nothing here is ever freed, so every workflow it holds is open.
+    async def open_workflow_ids_async(self) -> set[str]:
+        return self.get_workflow_ids()
+
     def get_workflow_record(self, workflow_id: str) -> Any:
         ids = self.workflow_task_ids.get(workflow_id)
         return SimpleNamespace(task_ids=list(ids)) if ids is not None else None
