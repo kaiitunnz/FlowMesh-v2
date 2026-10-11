@@ -197,11 +197,13 @@ class SettledHistory:
     # Evaluation
     # ------------------------------------------------------------------ #
 
-    def run(self, stop_event: threading.Event) -> None:
+    def run(self, stop_event: threading.Event, poll_interval: float = 1.0) -> None:
         """Free requested workflows until stopped, sweeping every candidate on each
         interval."""
         while not stop_event.is_set():
-            self.drain(max(0.0, self._next_sweep - time.monotonic()))
+            self.drain(
+                min(poll_interval, max(0.0, self._next_sweep - time.monotonic()))
+            )
 
     def sweep(self) -> None:
         """Evaluate every workflow not yet freed on the next drain."""

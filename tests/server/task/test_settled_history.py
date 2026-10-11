@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import logging
+import threading
 import weakref
 from collections.abc import Callable
 from typing import Any, cast
@@ -29,7 +30,7 @@ from tests.server.redis_helpers import fake_redis_client, raw_control
 from tests.server.result_store import make_result_reader, result_payload
 from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.task.test_v2_orchestration import LINEAR, _WorkerRegistryStub
-from tests.support.waiting import pop_ready
+from tests.support.waiting import pop_ready, until
 
 _TS = "2026-06-01T00:00:00Z"
 
@@ -476,3 +477,18 @@ def test_a_cancelled_task_is_counted_freed_but_not_done() -> None:
         TaskStatus.CANCELLED
     }
     assert not raw_control(registry).sismember(WORKFLOWS_OPEN_KEY, workflow_id)
+
+
+def test_the_freeing_thread_frees_a_settled_workflow_and_stops_promptly() -> None:
+    registry = _registry()
+    runtime, workflow_id = _settled(registry)
+    stop = threading.Event()
+    thread = threading.Thread(target=runtime.settled_history.run, args=(stop,))
+    thread.start()
+    try:
+        asyncio.run(until(lambda: not _resident(runtime, workflow_id)))
+    finally:
+        stop.set()
+        thread.join(timeout=5.0)
+
+    assert not thread.is_alive()
