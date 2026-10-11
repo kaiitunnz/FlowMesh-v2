@@ -6,8 +6,8 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
+from ...utils.journal import AppendOnlyList, JournaledModel, TrackedDict, TrackedSet
 from ..guardrails import ScopeBudget
-from ..journal import AppendOnlyList, JournaledModel, TrackedDict, TrackedSet
 from ..ledger_layout import (
     KEYED,
     KEYED_TEXTS,

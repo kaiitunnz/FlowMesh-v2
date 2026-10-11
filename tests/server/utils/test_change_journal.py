@@ -11,14 +11,6 @@ import pytest
 from pydantic import AfterValidator, BaseModel
 
 from server.orchestration import LedgerSnapshot
-from server.orchestration.journal import (
-    AppendOnlyList,
-    JournaledModel,
-    LedgerJournal,
-    TrackedDict,
-    TrackedSet,
-    freeze_mapping,
-)
 from server.orchestration.ledger_layout import (
     FOUNDATION,
     HISTORIES,
@@ -41,6 +33,14 @@ from server.orchestration.state import (
     WorkItem,
     WorkItemStatus,
 )
+from server.utils.journal import (
+    AppendOnlyList,
+    ChangeJournal,
+    JournaledModel,
+    TrackedDict,
+    TrackedSet,
+    freeze_mapping,
+)
 from tests.server.orchestration.helpers import chain_bundle, engine
 
 
@@ -54,7 +54,7 @@ def _work_item(work_item_id: str = "wki-1") -> WorkItem:
 
 
 def test_a_tracked_dict_journals_each_entry_it_sets_or_removes_in_order() -> None:
-    journal = LedgerJournal()
+    journal = ChangeJournal()
     tracked = TrackedDict[str, str](journal, "c", [("a", "1"), ("b", "2")])
     tracked["c"] = "3"
     first = dict(tracked.ordinals)
@@ -74,7 +74,7 @@ def test_a_tracked_dict_journals_each_entry_it_sets_or_removes_in_order() -> Non
 
 
 def test_a_tracked_set_journals_each_member_it_adds_or_removes() -> None:
-    journal = LedgerJournal()
+    journal = ChangeJournal()
     members = TrackedSet(journal, "s", ["a"])
     members.add("a")
     assert not journal.pending
@@ -112,7 +112,7 @@ def test_a_history_refuses_every_change_but_an_append(edit: str) -> None:
 
 
 def test_an_entity_marks_only_the_collection_slot_holding_it() -> None:
-    journal = LedgerJournal()
+    journal = ChangeJournal()
     items = TrackedDict[str, WorkItem](journal, "work_items")
     wi = _work_item()
     items[wi.work_item_id] = wi
@@ -141,7 +141,7 @@ def test_an_entity_marks_only_the_collection_slot_holding_it() -> None:
 def test_an_entity_marks_an_assignment_only_when_it_changes_the_value(
     field: str, stored: Any, assigned: Any, marks: bool
 ) -> None:
-    journal = LedgerJournal()
+    journal = ChangeJournal()
     items = TrackedDict[str, WorkItem](journal, "work_items")
     wi = _work_item()
     setattr(wi, field, stored)
@@ -155,7 +155,7 @@ def test_an_entity_marks_an_assignment_only_when_it_changes_the_value(
 
 
 def test_an_entity_held_in_one_slot_is_refused_another() -> None:
-    journal = LedgerJournal()
+    journal = ChangeJournal()
     items = TrackedDict[str, WorkItem](journal, "work_items")
     others = TrackedDict[str, WorkItem](journal, "others")
     wi = _work_item()
@@ -169,7 +169,7 @@ def test_an_entity_held_in_one_slot_is_refused_another() -> None:
 
 
 def test_a_refused_replacement_leaves_the_entry_journaling_its_entity() -> None:
-    journal = LedgerJournal()
+    journal = ChangeJournal()
     items = TrackedDict[str, WorkItem](journal, "work_items")
     held, other = _work_item("wki-1"), _work_item("wki-2")
     items["wki-1"], items["wki-2"] = held, other
@@ -266,7 +266,7 @@ def test_the_stored_layout_places_every_snapshot_field_once() -> None:
 
 
 def test_a_clear_keeps_a_change_made_after_it_was_captured() -> None:
-    journal = LedgerJournal()
+    journal = ChangeJournal()
     journal.mark(("c", "a"))
     journal.mark(("c", "b"))
     captured = journal.captured()
