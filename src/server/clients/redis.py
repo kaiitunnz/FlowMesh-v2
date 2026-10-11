@@ -52,6 +52,10 @@ def _keepalive_kwargs() -> dict[str, Any]:
 
 
 TASK_EVENT_STREAM_KEY = "tasks:events:stream"
+# How many keys one step of a keyspace scan visits; a pattern matching few keys of a
+# large keyspace otherwise costs one round trip per ten keys.
+_SCAN_KEYS_COUNT = 1000
+
 TASK_EVENT_CURSOR_KEY = "tasks:events:cursor"
 TASK_EVENT_STREAM_MAXLEN = 100_000
 
@@ -526,7 +530,7 @@ class SyncRedisClient:
         return bool(self._control.persist(key))
 
     def scan_keys(self, pattern: str) -> list[str]:
-        return list(self._control.scan_iter(match=pattern))
+        return list(self._control.scan_iter(match=pattern, count=_SCAN_KEYS_COUNT))
 
     def expire_telemetry(self, key: str, ttl_sec: int) -> bool:
         return bool(self._telemetry.expire(key, max(0, int(ttl_sec))))
@@ -775,7 +779,12 @@ class AsyncRedisClient:
         return bool(await _awaitable(self._control.persist(key)))
 
     async def scan_keys(self, pattern: str) -> list[str]:
-        return [key async for key in self._control.scan_iter(match=pattern)]
+        return [
+            key
+            async for key in self._control.scan_iter(
+                match=pattern, count=_SCAN_KEYS_COUNT
+            )
+        ]
 
     async def expire_telemetry(self, key: str, ttl_sec: int) -> bool:
         return bool(await _awaitable(self._telemetry.expire(key, max(0, int(ttl_sec)))))
