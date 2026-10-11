@@ -18,7 +18,7 @@ from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
-from tests.server.redis_helpers import fake_redis_client
+from tests.server.redis_helpers import fake_redis_client, raw_control
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_runtime_control_flow import _CONSUMED, _LOOP, _workflow
 from tests.server.task.test_v2_orchestration import _WorkerRegistryStub
@@ -56,11 +56,6 @@ def _registry() -> WorkflowRegistry:
     return WorkflowRegistry(fake_redis_client(fakeredis.FakeServer()))
 
 
-def _raw(registry: WorkflowRegistry) -> Any:
-    # redis-py types a sync reply as possibly awaitable.
-    return registry._rds.sync._control
-
-
 def _register(runtime: TaskRuntime, text: str) -> tuple[str, list[str]]:
     workflow_id, results = asyncio.run(
         runtime.register("owner", "org", text, format="native")
@@ -72,7 +67,7 @@ def _register(runtime: TaskRuntime, text: str) -> tuple[str, list[str]]:
 def test_a_workflow_stores_its_source_once_beside_its_tasks(text: str) -> None:
     registry = _registry()
     workflow_id, task_ids = _register(_runtime(registry), text)
-    raw = _raw(registry)
+    raw = raw_control(registry)
 
     sources = raw.hgetall(workflow_sources_key(workflow_id))
     (source,) = sources.values()
@@ -91,7 +86,7 @@ def test_a_workflow_stores_its_source_once_beside_its_tasks(text: str) -> None:
 def test_a_task_naming_a_source_the_store_lost_does_not_load() -> None:
     registry = _registry()
     workflow_id, task_ids = _register(_runtime(registry), _V1)
-    _raw(registry).delete(workflow_sources_key(workflow_id))
+    raw_control(registry).delete(workflow_sources_key(workflow_id))
 
     with pytest.raises(pydantic.ValidationError, match="is not stored"):
         registry.load_task_states(workflow_id, *task_ids)
@@ -107,7 +102,7 @@ def test_a_task_stored_with_its_source_inline_loads_and_names_it_once_written() 
     registry = _registry()
     runtime = _runtime(registry)
     workflow_id, task_ids = _register(runtime, _V1)
-    raw = _raw(registry)
+    raw = raw_control(registry)
     # A store written before sources moved out of the task states.
     for task_id in task_ids:
         record = runtime.get_record(task_id)
@@ -137,7 +132,7 @@ def test_unregistering_a_workflow_removes_its_sources() -> None:
 
     registry.unregister_workflows(workflow_id)
 
-    assert not _raw(registry).exists(workflow_sources_key(workflow_id))
+    assert not raw_control(registry).exists(workflow_sources_key(workflow_id))
 
 
 def test_a_workflow_digests_its_source_once_however_often_its_tasks_are_written(

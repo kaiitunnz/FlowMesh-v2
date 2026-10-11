@@ -21,7 +21,7 @@ from server.orchestration.ledger_layout import (
 )
 from server.registries.workflow import WorkflowRegistry, WorkflowSched
 from server.utils.query import QueryFilter
-from tests.server.redis_helpers import fake_redis_client
+from tests.server.redis_helpers import fake_redis_client, raw_control
 from tests.server.task.test_v2_orchestration import AUTORESEARCH, _bundle
 from tests.server.test_workflow_listing import _Fabric, _seed
 
@@ -111,7 +111,7 @@ def _seed_ids(count: int) -> list[str]:
 
 
 def _server(registry: WorkflowRegistry) -> fakeredis.FakeServer:
-    return registry._rds.sync._control.connection_pool.connection_kwargs["server"]
+    return raw_control(registry).connection_pool.connection_kwargs["server"]
 
 
 @pytest.fixture
@@ -191,7 +191,7 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
     sync.save_task_states(records)
     asyncio.run(async_.save_task_states_async(records))
     for twin in (sync, async_):
-        twin._rds.sync.delete(workflow_sources_key(workflow_id))
+        raw_control(twin).delete(workflow_sources_key(workflow_id))
     sync.keep_sources(workflow_id, records)
     asyncio.run(async_.keep_sources_async(workflow_id, records))
     sync.commit_transition(

@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import AfterValidator, BaseModel
 
 from server.orchestration import LedgerSnapshot
 from server.orchestration.journal import (
@@ -200,7 +200,7 @@ def _annotation_breaches(
     args = typing.get_args(annotation)
     if origin is typing.Annotated:
         frozen = any(
-            getattr(meta, "func", None) is freeze_mapping
+            isinstance(meta, AfterValidator) and meta.func is freeze_mapping
             for meta in annotation.__metadata__
         )
         return _annotation_breaches(args[0], where, seen, frozen)

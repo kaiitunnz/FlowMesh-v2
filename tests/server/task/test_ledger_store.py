@@ -18,7 +18,7 @@ from server.registries.workflow import (
     WorkflowSched,
 )
 from tests.server.orchestration.helpers import WORKFLOW_ID, chain_bundle, engine
-from tests.server.redis_helpers import fake_redis_client
+from tests.server.redis_helpers import fake_redis_client, raw_control
 from tests.server.result_store import result_payload
 from tests.server.task.test_runtime_control_flow import (
     _CONSUMED,
@@ -43,8 +43,7 @@ class _Store(WorkflowRegistry):
 
     @property
     def raw(self) -> Any:
-        # redis-py types a sync reply as possibly awaitable.
-        return self._rds.sync._control
+        return raw_control(self)
 
     def _ledger_write(
         self, workflow_id: str, ledger: LedgerChanges, write: Callable[[], None]
@@ -145,6 +144,10 @@ async def test_a_loop_restores_from_its_stored_ledger_after_a_write_fault(
     assert not store.raw.exists(workflow_ds_key(run.workflow_id))
 
 
+def _bytes(write: LedgerChanges) -> int:
+    return sum(len(name) + len(value) for name, value in write.fields.items())
+
+
 @pytest.mark.anyio
 async def test_a_transition_writes_only_the_ledger_facts_it_changed() -> None:
     store = _Store()
@@ -160,8 +163,8 @@ async def test_a_transition_writes_only_the_ledger_facts_it_changed() -> None:
     assert not any(w.reset for w in writes)
     assert not any("meta:foundation" in w.fields for w in writes)
     early, late = writes[: len(writes) // 3], writes[-len(writes) // 3 :]
-    largest = max(len(w.fields) for w in early)
-    assert max(len(w.fields) for w in late) <= largest
+    assert max(len(w.fields) for w in late) <= max(len(w.fields) for w in early)
+    assert max(_bytes(w) for w in late) <= max(_bytes(w) for w in early)
     assert store.stored(run.workflow_id) == run.engine.to_snapshot()
 
 
