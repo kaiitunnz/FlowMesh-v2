@@ -138,8 +138,7 @@ restart safe:
   is re-attached and reused; any other is invalidated and re-materialized on demand.
   A gated serve request in flight at the restart fails, as its client connection ends
   with the root, and frees its replica slot. Startup loads only live resident state; a
-  resident key in an earlier build's format stops it with an error naming the key to
-  delete. See
+  resident key of the wrong type stops it with an error naming the key to delete. See
   [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **SSH forward ports.** A running SSH task's `forward` session is served again
   on the port it was published on. A session whose port another process took

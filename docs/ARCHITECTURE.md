@@ -117,7 +117,7 @@ src/
       runtime/              Task runtime, its scheduling, commits and dispatch fence
       v2/                   versioned representations, compiler
     tools/                Fabric-served external-tool control authority (broker)
-    utils/                concurrent, cursors, helpers, logging, query, time
+    utils/                concurrent, cursors, helpers, journal, logging, query, time
   shared/
     grpc/supervisor/v1/   Generated proto stubs (server + worker)
     schemas/              Cross-cutting schemas
@@ -391,9 +391,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   cursor, or window; a lost or ambiguous delivery is `UNCERTAIN`, holds the credit, and
   re-drives from the materialized manifest, releasing only on the fenced terminal, and a
   cancellation reaps both ends. The stores hold only live work: each step writes the
-  entities it changed, and an invocation whose terminal was consumed retires into a
-  compact durable record that keeps its admission-epoch high-water. Enable with
-  `RESIDENT_CAPACITY_ENABLED=true` (which requires the network plane). See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
+  entities it changed, and an invocation whose terminal was consumed retires to a compact
+  durable record. Enable with `RESIDENT_CAPACITY_ENABLED=true` (which requires the
+  network plane). See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Unified task-ID-gated resident serve surface.** Every public user-declared `serve`
   task is a resident-gated standing allocation reached only by its task ID, over one
   FlowMesh-authenticated, claim-gated endpoint
@@ -690,10 +690,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   closes again after a restart closes the same way it did the first time.
 - **Settled workflows leave memory.** Once a workflow has settled, is closed, has its
   logs archived and its side effects delivered, and every resident invocation it raised
-  has retired, the root stores a certified copy of what its reads derive from and frees its
-  runtime state. Its tasks,
-  results, published outputs, listings and counts are then read from the control store,
-  and a late event for one of its tasks is acknowledged without effect.
+  has retired, the root stores a certified copy of what its reads derive from and frees
+  its runtime state. Its tasks, results, published outputs, listings and counts are then
+  read from the control store, and a late event for one of its tasks is acknowledged
+  without effect.
 - **Redis channels.** The runtime uses two Redis endpoints (separate instances in the
   stack):
   - control (`REDIS_CONTROL_URL`) — durable state and the control plane's

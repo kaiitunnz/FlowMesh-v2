@@ -54,39 +54,24 @@ in `CS`, so both persist to survive a restart.
 
 ### Persistence and retention
 
-The stores hold the live working set. It persists in one Redis hash, `resident:cs`, with a
+The stores hold the live working set, persisted in one Redis hash, `resident:cs`, with a
 field per family, replica incarnation, allocation lease, invocation request and claim. Each
 step writes only the entities it changed, in one transaction, before anything acts on them:
-a reservation before its handoff, an acceptance before its route authorization, a replica's
-listener fence before a handoff names it, and a terminal before the release reaches its
-replica. A write that fails raises, and its changes ride the next one.
+a reservation before its handoff, a replica's listener fence before a handoff names it, an
+acceptance before its route authorization, and a terminal before its release.
 
-An invocation leaves the working set once its fenced terminal has been consumed, its
-release has finished and its requests have been reaped. Consuming the terminal records it on
-the request, in the write that settles the claims, whether or not any credit releases. The
-invocation then publishes a retirement record — its subject, family, highest admission
-epoch and terminal reason — to `resident:cs:retired`, and only then are its live fields
-deleted and its claims dropped from memory. The record owns no credit: a successor raised
-later under the same `invocation_id` takes the epoch after it, and a live successor answers
-for the invocation over its record.
+An invocation retires once its fenced terminal has been consumed, its release has finished
+and its requests have been reaped: a record of its subject, family, terminal reason and
+highest admission epoch lands in `resident:cs:retired`, then its live fields are deleted. A
+successor raised under the same `invocation_id` takes the next epoch. An inert replica that
+no live claim names moves with its lease to `resident:cs:replicas`, and a serve task's
+family with nothing live left moves to `resident:cs:families`; the listings read both. A
+retirement or move that fails is retried until it lands. A settled workflow is freed only
+once every resident invocation it raised has retired.
 
-A stopped, preempted or failed replica that no live claim names moves with its lease to
-`resident:cs:replicas`, and a serve task's family with no live replica or invocation left
-moves to `resident:cs:families`. The replica and family listings read them from there.
-
-Retiring and archiving refuse, before writing anything, a key of the wrong type or a live
-state that does not support the move, and they store the record before deleting what it
-replaces, so a failure at any point leaves the evidence in one place or both. Nothing
-leaves memory until its record is confirmed stored. Freeing a settled workflow waits for
-each resident invocation it raised to retire: a live invocation is unsettled, terminal or
-not, and an absent one counts as settled only from a complete load with every change
-written and its retirement record readable.
-
-A restart loads only `resident:cs`. It refuses a resident key of the wrong type, such as
-the single-value state an earlier build wrote (delete `resident:cs` and restart), and a
-field it cannot read or a claim without its request. The retired records and history grow
-by one entry per retired invocation, replica or family and are never loaded at startup;
-nothing deletes them.
+A restart loads only `resident:cs`, and refuses a resident key of the wrong type (delete it
+and restart), a field it cannot read, or a claim without its request. The retired records
+and history grow by one entry per retired invocation, replica or family, and are kept.
 
 ## Claim admission FSM
 
