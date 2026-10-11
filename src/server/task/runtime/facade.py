@@ -91,6 +91,7 @@ from ...registries.worker import Worker, WorkerRegistry
 from ...registries.workflow import (
     PersistedTask,
     WorkflowControl,
+    WorkflowRecord,
     WorkflowRegistry,
     WorkflowSched,
 )
@@ -1043,9 +1044,10 @@ class TaskRuntime:
                 continue
             if stored is None:
                 continue
-            tasks, remaining, sched, engine, blueprints = stored
+            tasks, remaining, sched, engine, blueprints, control = stored
             with self._transition():
                 if engine is not None:
+                    self._committer.stored_control_locked(workflow_id, control)
                     self._install_rehydrated_v2_workflow_locked(
                         workflow_id,
                         tasks,
@@ -1101,14 +1103,17 @@ class TaskRuntime:
             WorkflowSched | None,
             OrchestrationEngine | None,
             list[PersistedTask],
+            WorkflowControl,
         ]
         | None
     ):
         """Read a stored workflow and restore its orchestration engine, without
-        installing either: its tasks, remaining set, schedule, engine and task
-        blueprints, or None when it holds no task."""
-        tasks = await self._stored_tasks(workflow_id)
-        if not tasks:
+        installing either: its tasks, remaining set, schedule, engine, task
+        blueprints and control, or None when it holds no task."""
+        wf_record = await self._workflow_registry.get_workflow_record_async(workflow_id)
+        if wf_record is None or not (
+            tasks := await self._record_tasks(workflow_id, wf_record)
+        ):
             return None
         await self._vault_stored_credentials(workflow_id, tasks)
         # A record stored with its source inline names it by digest at its next write.
@@ -1122,7 +1127,7 @@ class TaskRuntime:
             else None
         )
         if ledger is None or bundle is None:
-            return tasks, remaining, sched, None, []
+            return tasks, remaining, sched, None, [], wf_record.control
         blueprints = await self._workflow_registry.load_blueprints_async(workflow_id)
         engine = OrchestrationEngine(
             ledger.snapshot,
@@ -1132,7 +1137,7 @@ class TaskRuntime:
             emitter=build_span_emitter(self._tracer, self._telemetry, workflow_id),
             ordinals=ledger.ordinals,
         )
-        return tasks, remaining, sched, engine, blueprints
+        return tasks, remaining, sched, engine, blueprints, wf_record.control
 
     async def _fail_unrestorable_workflow(
         self, workflow_id: str, error: Exception
@@ -1199,6 +1204,11 @@ class TaskRuntime:
         wf_record = await self._workflow_registry.get_workflow_record_async(workflow_id)
         if wf_record is None:
             return []
+        return await self._record_tasks(workflow_id, wf_record)
+
+    async def _record_tasks(
+        self, workflow_id: str, wf_record: WorkflowRecord
+    ) -> list[PersistedTask]:
         dynamic_ids = await self._workflow_registry.get_dynamic_task_ids_async(
             workflow_id
         )

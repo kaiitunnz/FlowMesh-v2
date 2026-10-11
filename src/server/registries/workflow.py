@@ -130,6 +130,14 @@ class WorkflowRecord(BaseModel):
         default=False, description="Whether the workflow was cancelled as a whole."
     )
 
+    @property
+    def control(self) -> WorkflowControl:
+        return WorkflowControl(
+            open=self.control_open,
+            failure=self.control_failure or None,
+            cancelled=self.control_cancelled,
+        )
+
     @field_serializer("control_open", "control_cancelled")
     def serialize_control_flag(self, flag: bool) -> str:
         return "1" if flag else ""

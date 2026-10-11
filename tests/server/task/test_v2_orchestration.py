@@ -27,7 +27,12 @@ from server.orchestration.outcomes import (
     next_on_uncertain,
 )
 from server.registries.history import HistoryCensus
-from server.registries.workflow import PersistedTask, WorkflowControl, WorkflowSched
+from server.registries.workflow import (
+    PersistedTask,
+    WorkflowControl,
+    WorkflowRecord,
+    WorkflowSched,
+)
 from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
 from server.task.redrive import StoreRedriveScheduler
@@ -130,11 +135,13 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
         if ids is None:
             return None
         control = self.control.get(workflow_id)
-        return SimpleNamespace(
+        return WorkflowRecord(
+            workflow_id=workflow_id,
             task_ids=list(ids),
             submitted_at=self.submitted_at,
             control_open=control.open if control else False,
             control_failure=(control.failure or "") if control else "",
+            control_cancelled=control.cancelled if control else False,
         )
 
     async def get_workflow_record_async(self, workflow_id: str) -> Any:

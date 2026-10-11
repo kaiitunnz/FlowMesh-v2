@@ -12,6 +12,7 @@ from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
 from server.registries.workflow import (
     PersistedTask,
+    WorkflowRecord,
     WorkflowSched,
     load_task_state,
     task_sources,
@@ -96,7 +97,11 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
 
     def get_workflow_record(self, workflow_id: str) -> Any:
         ids = self.workflow_task_ids.get(workflow_id)
-        return SimpleNamespace(task_ids=list(ids)) if ids is not None else None
+        return (
+            WorkflowRecord(workflow_id=workflow_id, task_ids=list(ids))
+            if ids is not None
+            else None
+        )
 
     async def get_workflow_record_async(self, workflow_id: str) -> Any:
         return self.get_workflow_record(workflow_id)

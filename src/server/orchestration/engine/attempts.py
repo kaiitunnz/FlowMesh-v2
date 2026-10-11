@@ -258,7 +258,10 @@ class AttemptLifecycle:
                 for a in self._inputs.accepted_inputs_for(wi.activation_id)
             }
         ):
-            wi.status = WorkItemStatus.BLOCKED
+            # Assigning a work item marks it for the next ledger write, even when the
+            # value is the one it holds.
+            if wi.status is not WorkItemStatus.BLOCKED:
+                wi.status = WorkItemStatus.BLOCKED
             return False
         if (
             wi.status is WorkItemStatus.BLOCKED
@@ -277,7 +280,8 @@ class AttemptLifecycle:
                 work_item_id=wi.work_item_id,
                 operator_id=wi.operator_id,
             )
-        wi.status = WorkItemStatus.READY
+        if wi.status is not WorkItemStatus.READY:
+            wi.status = WorkItemStatus.READY
         return True
 
     def latest_attempt_open(self, task_id: str) -> bool:
