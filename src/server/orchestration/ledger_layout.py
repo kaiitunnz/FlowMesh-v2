@@ -148,6 +148,8 @@ def _key_part(part: Hashable) -> Any:
 
 
 def _encoded_part(part: Hashable) -> str:
+    # Exact types: str() spells a bool "True", and a str subclass can format as
+    # something other than its value.
     if type(part) is int:
         return str(part)
     if (

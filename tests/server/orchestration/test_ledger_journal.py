@@ -268,6 +268,11 @@ def test_each_key_names_one_field() -> None:
     assert field_name("c", ("a", ProgressAxis.LOOP_TIME)) == 'c:["a","loop_time"]'
 
 
+class _Renamed(str):
+    def __str__(self) -> str:
+        return "renamed"
+
+
 @pytest.mark.parametrize(
     "key",
     [
@@ -281,6 +286,7 @@ def test_each_key_names_one_field() -> None:
         7,
         True,
         ("a", 1, ProgressAxis.LOOP_TIME),
+        _Renamed("wki-1"),
     ],
 )
 def test_a_field_name_is_its_key_as_compact_json(key: Any) -> None:
