@@ -107,12 +107,12 @@ class _Loads:
 def _restarted(
     registry: WorkflowRegistry,
     close: Callable[[TaskRuntime, str], bool] = _never_closed,
-    claims_terminal: Callable[[Collection[str]], bool] | None = None,
+    invocations_retired: Callable[[Collection[str]], bool] | None = None,
     archived: Callable[[str], bool | None] | None = None,
 ) -> tuple[TaskRuntime, _Loads]:
     runtime = _unstarted(registry)
     loads = _Loads(runtime)
-    asyncio.run(runtime.restart(close, claims_terminal, archived))
+    asyncio.run(runtime.restart(close, invocations_retired, archived))
     return runtime, loads
 
 
@@ -329,13 +329,13 @@ def test_a_workflow_something_still_needs_joins_the_open_set() -> None:
     def close(scratch: TaskRuntime, workflow_id: str) -> bool:
         return workflow_id != unclosed and _close(scratch, workflow_id)
 
-    def claims_terminal(invocation_ids: Collection[str]) -> bool:
+    def invocations_retired(invocation_ids: Collection[str]) -> bool:
         return not set(invocation_ids) & claimed_invocations.invocation_ids
 
     def archived(task_id: str) -> bool:
         return task_id not in archiving_tasks
 
-    _, loads = _restarted(registry, close, claims_terminal, archived)
+    _, loads = _restarted(registry, close, invocations_retired, archived)
 
     assert _open(registry) == {claimed, archiving, unclosed} == set(loads.ids)
     assert _certified(registry, freed)

@@ -61,9 +61,9 @@ class HistoryBootstrap[R: ScratchRuntime]:
     """Builds the open-workflow index over every registered workflow.
 
     ``close`` closes a settled workflow restored in the given runtime, or finds it
-    closed, and returns whether it is. ``claims_terminal`` runs on the event loop that
-    owns the resident claims. ``archived`` answers whether a finished task's logs need
-    no more archiving, None when that cannot be told.
+    closed, and returns whether it is. ``invocations_retired`` runs on the event loop
+    that owns the resident claims. ``archived`` answers whether a finished task's logs
+    need no more archiving, None when that cannot be told.
     """
 
     def __init__(
@@ -71,7 +71,7 @@ class HistoryBootstrap[R: ScratchRuntime]:
         registry: WorkflowHistoryStore,
         scratch_runtime: Callable[[], R],
         close: Callable[[R, str], bool],
-        claims_terminal: Callable[[Collection[str]], bool] | None,
+        invocations_retired: Callable[[Collection[str]], bool] | None,
         archived: Callable[[str], bool | None] | None,
         logger: logging.Logger,
         batch_tasks: int = BATCH_TASKS,
@@ -79,7 +79,7 @@ class HistoryBootstrap[R: ScratchRuntime]:
         self._registry = registry
         self._scratch_runtime = scratch_runtime
         self._close = close
-        self._claims_terminal = claims_terminal
+        self._invocations_retired = invocations_retired
         self._archived = archived
         self._logger = logger
         self._batch_tasks = batch_tasks
@@ -192,8 +192,8 @@ class HistoryBootstrap[R: ScratchRuntime]:
             return Classification.IN_USE
         if (
             invocation_ids
-            and self._claims_terminal is not None
-            and not self._claims_terminal(invocation_ids)
+            and self._invocations_retired is not None
+            and not self._invocations_retired(invocation_ids)
         ):
             return Classification.HOLDING_CLAIMS
         if (archived := self._archived) is not None and not await asyncio.to_thread(
