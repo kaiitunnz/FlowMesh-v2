@@ -1722,9 +1722,11 @@ class TaskRuntime:
         self._settled_history.start(seq, total, done)
 
     def workflow_closed(self, workflow_id: str) -> None:
-        """Record that a workflow's closure is durable."""
+        """Record that a resident workflow's closure is durable."""
         with self._lock:
-            new = self._settled_history.closed_locked(workflow_id)
+            new = self._tasks.holds(workflow_id) and (
+                self._settled_history.closed_locked(workflow_id)
+            )
         if new:
             self._settled_history.request(workflow_id)
 
