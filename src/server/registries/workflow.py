@@ -1,4 +1,3 @@
-import hashlib
 import json
 from collections import defaultdict
 from collections.abc import (
@@ -11,14 +10,14 @@ from collections.abc import (
 )
 from contextlib import aclosing, closing
 from enum import StrEnum
-from functools import lru_cache
 from itertools import batched
-from typing import Any
+from typing import Any, Self
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ModelWrapValidatorHandler,
     SerializerFunctionWrapHandler,
     ValidationInfo,
     field_serializer,
@@ -61,12 +60,6 @@ from ..utils.time import now_iso
 _SOURCES = "workflow_sources"
 
 
-@lru_cache(maxsize=64)
-def source_digest(source: str) -> str:
-    """The digest a task's stored state names its workflow source by."""
-    return hashlib.sha256(source.encode()).hexdigest()
-
-
 class PersistedTask(BaseModel):
     """A durable per-task snapshot sufficient to rebuild scheduler state.
 
@@ -80,18 +73,24 @@ class PersistedTask(BaseModel):
     depends_on: set[str] = Field(default_factory=set)
     epoch_index: int | None = None
 
-    @model_validator(mode="before")
+    @model_validator(mode="wrap")
     @classmethod
-    def _attach_source(cls, data: Any, info: ValidationInfo) -> Any:
+    def _attach_source(
+        cls, data: Any, handler: ModelWrapValidatorHandler[Self], info: ValidationInfo
+    ) -> Self:
         if not isinstance(data, dict) or (digest := data.get("source_digest")) is None:
-            return data
+            return handler(data)
         sources = (info.context or {}).get(_SOURCES, {})
         if (source := sources.get(digest)) is None:
             raise ValueError(f"workflow source {digest} is not stored")
-        return {
-            **{key: value for key, value in data.items() if key != "source_digest"},
-            "record": {**data["record"], "raw_yaml": source},
-        }
+        task = handler(
+            {
+                **{key: value for key, value in data.items() if key != "source_digest"},
+                "record": {**data["record"], "raw_yaml": source},
+            }
+        )
+        task.record.take_source_digest(digest)
+        return task
 
     @field_serializer("depends_on")
     def _serialize_depends_on(self, value: set[str]) -> list[str]:
@@ -102,7 +101,7 @@ class PersistedTask(BaseModel):
         data = handler(self)
         # The source is the whole workflow's, stored once beside its tasks.
         del data["record"]["raw_yaml"]
-        data["source_digest"] = source_digest(self.record.raw_yaml)
+        data["source_digest"] = self.record.source_digest()
         # ``failed_workers`` is excluded from TaskRecord's dump but routes retries, so
         # it must survive a restart.
         data["record"]["failed_workers"] = self.record.failed_workers.copy()
@@ -396,25 +395,28 @@ def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> No
 
 
 def task_sources(items: Sequence[PersistedTask]) -> dict[str, dict[str, str]]:
-    """The workflow sources the tasks name, by workflow and digest."""
+    """Return the workflow sources the tasks name, by workflow and digest; tasks
+    holding one source text share its digest."""
     sources: dict[str, dict[str, str]] = defaultdict(dict)
+    previous: TaskRecord | None = None
     for item in items:
-        source = item.record.raw_yaml
-        sources[item.record.workflow_id][source_digest(source)] = source
+        record = item.record
+        if previous is not None and previous.raw_yaml is record.raw_yaml:
+            record.take_source_digest(previous.source_digest())
+        sources[record.workflow_id][record.source_digest()] = record.raw_yaml
+        previous = record
     return sources
 
 
-def _queue_sources(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> None:
-    for workflow_id, sources in task_sources(items).items():
-        pipe.hset(workflow_sources_key(workflow_id), mapping=sources)
-
-
-def _queue_workflow_sources(
-    pipe: _AnyPipeline, workflow_id: str, items: Sequence[PersistedTask]
+def _queue_sources(
+    pipe: _AnyPipeline,
+    items: Sequence[PersistedTask],
+    workflow_id: str | None = None,
 ) -> None:
-    sources = {source_digest(i.record.raw_yaml): i.record.raw_yaml for i in items}
-    if sources:
-        pipe.hset(workflow_sources_key(workflow_id), mapping=sources)
+    """Queue the sources the tasks name, each under its task's workflow, or all
+    under ``workflow_id`` when given."""
+    for owner, sources in task_sources(items).items():
+        pipe.hset(workflow_sources_key(workflow_id or owner), mapping=sources)
 
 
 def load_context(sources: Mapping[str, str]) -> dict[str, Any]:
@@ -443,7 +445,7 @@ def _queue_registration(
     pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
     pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, {_record_member(record): 0})
     pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
-    _queue_workflow_sources(pipe, workflow_id, [*tasks, *blueprints])
+    _queue_sources(pipe, [*tasks, *blueprints], workflow_id)
     if remaining_tasks:
         pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
     if failed_tasks:

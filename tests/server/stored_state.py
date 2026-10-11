@@ -12,7 +12,6 @@ from server.orchestration.ledger_fields import (
 from server.registries.workflow import (
     PersistedTask,
     load_task_state,
-    source_digest,
     task_sources,
 )
 from server.task.models import TaskRecord
@@ -44,7 +43,7 @@ class StoredTaskStates:
     def put_tasks(self, items: Sequence[PersistedTask]) -> None:
         for item in items:
             record = item.record
-            digest = source_digest(record.raw_yaml)
+            digest = record.source_digest()
             assert digest in self.sources.get(record.workflow_id, {}), digest
             self.task_blobs[record.task_id] = item.model_dump_json()
             self.task_workflows[record.task_id] = record.workflow_id

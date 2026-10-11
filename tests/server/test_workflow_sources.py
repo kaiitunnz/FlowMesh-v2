@@ -11,8 +11,9 @@ import pytest
 
 from server.clients.redis import task_state_key, workflow_sources_key
 from server.config import OrchestrationConfig
-from server.registries.workflow import WorkflowRegistry, source_digest
-from server.task.models import TaskStatus
+from server.registries.workflow import WorkflowRegistry
+from server.task import models
+from server.task.models import TaskStatus, source_digest
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -137,3 +138,48 @@ def test_unregistering_a_workflow_removes_its_sources() -> None:
     registry.unregister_workflows(workflow_id)
 
     assert not _raw(registry).exists(workflow_sources_key(workflow_id))
+
+
+def test_a_workflow_digests_its_source_once_however_often_its_tasks_are_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digested: list[str] = []
+
+    def counted(source: str) -> str:
+        digested.append(source)
+        return source_digest(source)
+
+    monkeypatch.setattr(models, "source_digest", counted)
+    registry = _registry()
+    runtime = _runtime(registry)
+    workflow_id, task_ids = _register(runtime, _workflow(_CONSUMED, _LOOP))
+    for task_id in task_ids:
+        record_dispatch(runtime, task_id)
+    assert len(digested) == 1
+
+    restored = _runtime(registry)
+    assert asyncio.run(restored.rehydrate()) == 1
+    for task_id in task_ids:
+        record = restored.get_record(task_id)
+        assert record is not None and record.status == TaskStatus.DISPATCHED
+    restored.cancel_workflow(workflow_id)
+    assert len(digested) == 1
+
+
+def test_interleaved_workflows_each_digest_their_source_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digested: list[str] = []
+
+    def counted(source: str) -> str:
+        digested.append(source)
+        return source_digest(source)
+
+    monkeypatch.setattr(models, "source_digest", counted)
+    runtime = _runtime(_registry())
+    workflows = [_register(runtime, _V1.replace("sources", f"w{i}")) for i in range(70)]
+    for stage in (0, 1):
+        for _, task_ids in workflows:
+            record_dispatch(runtime, task_ids[stage])
+
+    assert len(digested) == len(set(digested)) == 70
