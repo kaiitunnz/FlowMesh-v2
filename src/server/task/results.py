@@ -28,6 +28,10 @@ from shared.schemas.result.binding import (
 from shared.tasks.result_binding import ResultBinding
 
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
+# What a cached entry holds besides its payload: its reference key, the payload's object
+# header and its slot, about 1.3 KiB measured, so the budget bounds memory rather than
+# payload bytes alone.
+_CACHE_ENTRY_OVERHEAD_BYTES = 1536
 
 
 class ResultUnreadable(RuntimeError):
@@ -101,16 +105,20 @@ class ResultReader:
         return data
 
     def _remember(self, key: ContentReference, data: bytes) -> None:
-        if len(data) > self._cache_max_bytes:
+        if _charge(data) > self._cache_max_bytes:
             return
         with self._lock:
             if key in self._cache:
                 return
             self._cache[key] = data
-            self._cached_bytes += len(data)
+            self._cached_bytes += _charge(data)
             while self._cached_bytes > self._cache_max_bytes:
                 _, evicted = self._cache.popitem(last=False)
-                self._cached_bytes -= len(evicted)
+                self._cached_bytes -= _charge(evicted)
+
+
+def _charge(data: bytes) -> int:
+    return len(data) + _CACHE_ENTRY_OVERHEAD_BYTES
 
 
 def _envelope(data: bytes, source: str) -> ResultEnvelope:
