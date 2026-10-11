@@ -8,6 +8,7 @@ certificate, so a certificate is present only over a complete preparation of a w
 no write has touched since its runtime state was read.
 """
 
+import itertools
 import json
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from ..clients.redis import (
     RedisClient,
     task_history_key,
     task_state_key,
+    workflow_dynamic_tasks_key,
     workflow_history_key,
     workflow_key,
     workflow_revision_key,
@@ -441,6 +443,19 @@ def _queue_census(pipe: _AnyPipeline) -> None:
 def _census(replies: Sequence[Any]) -> HistoryCensus:
     registered, open_count, freed = replies
     return HistoryCensus(int(registered), int(open_count), int(freed or 0))
+
+
+def _queue_task_counts(pipe: _AnyPipeline, workflow_ids: Sequence[str]) -> None:
+    for workflow_id in workflow_ids:
+        pipe.hget(workflow_key(workflow_id), "task_ids")
+        pipe.scard(workflow_dynamic_tasks_key(workflow_id))
+
+
+def _task_counts(replies: Sequence[Any]) -> list[int]:
+    return [
+        (len(json.loads(task_ids)) if task_ids else 0) + int(dynamic or 0)
+        for task_ids, dynamic in itertools.batched(replies, 2)
+    ]
 
 
 def _queue_certified(pipe: _AnyPipeline, workflow_ids: Sequence[str]) -> None:
@@ -859,6 +874,18 @@ class WorkflowHistoryStore:
     async def close_workflows_async(self, *workflow_ids: str) -> None:
         if workflow_ids:
             await self._rds.asyncio.srem(WORKFLOWS_OPEN_KEY, *workflow_ids)
+
+    def stored_task_counts(self, workflow_ids: Sequence[str]) -> list[int]:
+        """How many tasks each stored workflow holds: those it registered with and
+        those it added since."""
+        with self._rds.sync.control_pipeline(transaction=False) as pipe:
+            _queue_task_counts(pipe, workflow_ids)
+            return _task_counts(pipe.execute())
+
+    async def stored_task_counts_async(self, workflow_ids: Sequence[str]) -> list[int]:
+        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
+            _queue_task_counts(pipe, workflow_ids)
+            return _task_counts(await pipe.execute())
 
     def reopen_workflows(self, *workflow_ids: str) -> None:
         """Count workflows among the open ones."""

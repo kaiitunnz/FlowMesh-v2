@@ -24,7 +24,11 @@ from server.registries.workflow import WorkflowRegistry
 from server.task.finalizer import CloseOutcome, WorkflowFinalizer
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
-from server.task.runtime.history_bootstrap import INDEX_COMPLETE
+from server.task.runtime.history_bootstrap import (
+    INDEX_COMPLETE,
+    HistoryBootstrap,
+    _batches,
+)
 from server.task.workflow_retry import WorkflowRetryScheduler
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
@@ -519,4 +523,47 @@ def test_a_freed_workflow_left_open_is_closed_and_not_restored() -> None:
     assert loads.ids == []
     assert _open(registry) == set()
     assert registry.history_census().consistent
+    assert _reads(restarted, task_ids) == before
+
+
+def test_classification_batches_bound_the_tasks_restored_together() -> None:
+    assert _batches(["a", "b", "c", "d", "e"], [3, 4, 9, 1, 1], 8) == [
+        ["a", "b"],
+        ["c"],
+        ["d", "e"],
+    ]
+    assert _batches([], [], 8) == []
+
+
+def test_a_store_is_classified_one_bounded_batch_at_a_time() -> None:
+    registry = _registry()
+    runtime, kinds = _mixed_store(registry, 3)
+    task_ids = _settled_task_ids(runtime, kinds)
+    before = _reads(runtime, task_ids)
+    _before_the_index(registry)
+    restarted = _unstarted(registry)
+    batches: list[int] = []
+    scratch_runtime = restarted._scratch_runtime
+
+    def counted() -> TaskRuntime:
+        scratch = scratch_runtime()
+        restore = scratch.restore
+
+        async def recorded(workflow_ids: Collection[str]) -> list[str]:
+            batches.append(len(workflow_ids))
+            return await restore(workflow_ids)
+
+        cast(Any, scratch).restore = recorded
+        return scratch
+
+    cast(Any, restarted)._scratch_runtime = counted
+    bootstrap = HistoryBootstrap(
+        registry, counted, _close, None, None, _LOGGER, batch_tasks=6
+    )
+
+    asyncio.run(bootstrap.run())
+
+    assert batches and max(batches) <= 2 and sum(batches) == 12
+    assert _open(registry) == kinds["running"]
+    restarted, _ = _restarted(registry, _close)
     assert _reads(restarted, task_ids) == before

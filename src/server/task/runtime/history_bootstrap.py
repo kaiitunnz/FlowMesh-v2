@@ -8,6 +8,7 @@ crash resume where it stopped.
 """
 
 import asyncio
+import gc
 import logging
 from collections import Counter
 from collections.abc import Callable, Collection
@@ -19,6 +20,9 @@ from .settled_history import SettledHistory
 INDEX_COMPLETE = "complete:v1"
 _INDEX_BUILDING = "building:v1:"
 BATCH_SIZE = 64
+# The most stored tasks one scratch runtime restores at a time; a workflow holding more
+# is restored alone.
+BATCH_TASKS = 20_000
 
 
 class ScratchRuntime(Protocol):
@@ -49,6 +53,7 @@ class HistoryBootstrap[R: ScratchRuntime]:
         archived: Callable[[str], bool | None] | None,
         logger: logging.Logger,
         batch_size: int = BATCH_SIZE,
+        batch_tasks: int = BATCH_TASKS,
     ) -> None:
         # ``close`` closes a settled workflow restored in the given runtime, or finds
         # it closed, and returns whether it is. ``claims_terminal`` runs on the event
@@ -61,6 +66,7 @@ class HistoryBootstrap[R: ScratchRuntime]:
         self._archived = archived
         self._logger = logger
         self._batch_size = batch_size
+        self._batch_tasks = batch_tasks
 
     async def run(self) -> None:
         """Classify every registered workflow not yet classified, or every one again
@@ -112,8 +118,17 @@ class HistoryBootstrap[R: ScratchRuntime]:
         pending = [w for w, done in zip(workflow_ids, certified) if not done]
         await self._registry.close_workflows_async(*freed)
         outcomes["already freed"] = len(freed)
-        if not pending:
-            return outcomes
+        counts = await self._registry.stored_task_counts_async(pending)
+        for batch in _batches(pending, counts, self._batch_tasks):
+            outcomes.update(await self._classify_restored(batch))
+            # A scratch runtime's state is cyclic, so it is collected before the next
+            # batch is restored beside it.
+            gc.collect()
+        return outcomes
+
+    async def _classify_restored(self, pending: list[str]) -> Counter[str]:
+        """Restore workflows into one scratch runtime and free or reopen each."""
+        outcomes: Counter[str] = Counter()
         scratch = self._scratch_runtime()
         try:
             scratch.settled_history.start(
@@ -161,6 +176,25 @@ class HistoryBootstrap[R: ScratchRuntime]:
         return all(self._archived(task_id) for task_id in task_ids)
 
 
+def _batches(
+    workflow_ids: list[str], task_counts: list[int], limit: int
+) -> list[list[str]]:
+    """Split workflows into batches holding at most ``limit`` tasks between them, a
+    workflow holding more in a batch of its own."""
+    batches: list[list[str]] = []
+    batch: list[str] = []
+    tasks = 0
+    for workflow_id, count in zip(workflow_ids, task_counts, strict=True):
+        if batch and tasks + count > limit:
+            batches.append(batch)
+            batch, tasks = [], 0
+        batch.append(workflow_id)
+        tasks += count
+    if batch:
+        batches.append(batch)
+    return batches
+
+
 def _cursor(state: str | None) -> int | None:
     if state is None or not state.startswith(_INDEX_BUILDING):
         return None
@@ -170,4 +204,10 @@ def _cursor(state: str | None) -> int | None:
         return None
 
 
-__all__ = ["BATCH_SIZE", "INDEX_COMPLETE", "HistoryBootstrap", "ScratchRuntime"]
+__all__ = [
+    "BATCH_SIZE",
+    "BATCH_TASKS",
+    "INDEX_COMPLETE",
+    "HistoryBootstrap",
+    "ScratchRuntime",
+]
