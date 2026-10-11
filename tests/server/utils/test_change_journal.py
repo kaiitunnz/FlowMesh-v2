@@ -1,13 +1,31 @@
-"""A tracked collection tells its observer of every change to an entry, and forgets an
-entry without journaling it only once the entry has nothing left to write."""
+"""A tracked collection journals each change to an entry and tells its observer of it,
+an entity marks only the slot holding it, and an entry is forgotten without journaling
+only once it has nothing left to write."""
+
+from collections.abc import Callable
+from enum import StrEnum
+from typing import Any
 
 import pytest
 
-from server.utils.journal import ChangeJournal, JournaledModel, TrackedDict
+from server.utils.journal import (
+    AppendOnlyList,
+    ChangeJournal,
+    JournaledModel,
+    TrackedDict,
+    TrackedSet,
+)
+
+
+class _Status(StrEnum):
+    READY = "ready"
+    DONE = "done"
 
 
 class _Entity(JournaledModel):
-    state: str
+    state: str = ""
+    status: _Status = _Status.READY
+    ids: tuple[str, ...] = ()
 
 
 def _observed() -> tuple[ChangeJournal, TrackedDict[str, _Entity], list[str]]:
@@ -70,3 +88,146 @@ def test_forget_refuses_an_entry_with_a_change_still_to_write() -> None:
     with pytest.raises(ValueError, match="pending"):
         tracked.forget("a")
     assert "a" in tracked
+
+
+def test_a_tracked_dict_journals_each_entry_it_sets_or_removes_in_order() -> None:
+    journal = ChangeJournal()
+    tracked = TrackedDict[str, str](journal, "c", [("a", "1"), ("b", "2")])
+    tracked["c"] = "3"
+    first = dict(tracked.ordinals)
+
+    tracked["b"] = "4"
+    del tracked["a"]
+    tracked["a"] = "5"
+    tracked.setdefault("d", "6")
+    tracked.update({"e": "7"})
+    tracked.pop("e")
+
+    assert list(tracked) == ["b", "c", "a", "d"]
+    assert tracked.ordinals["b"] == first["b"]
+    assert tracked.ordinals["a"] > first["c"]
+    assert sorted(tracked, key=tracked.ordinals.__getitem__) == list(tracked)
+    assert set(journal.pending) == {("c", key) for key in "abcde"}
+
+
+def test_a_tracked_set_journals_each_member_it_adds_or_removes() -> None:
+    journal = ChangeJournal()
+    members = TrackedSet(journal, "s", ["a"])
+    members.add("a")
+    assert not journal.pending
+
+    members |= {"b"}
+    members -= {"a"}
+    members.discard("z")
+
+    assert set(members) == {"b"}
+    assert set(journal.pending) == {("s", "a"), ("s", "b")}
+
+
+_EDITS: dict[str, Callable[[list[Any]], Any]] = {
+    "set": lambda h: h.__setitem__(0, "x"),
+    "delete": lambda h: h.__delitem__(0),
+    "insert": lambda h: h.insert(0, "x"),
+    "pop": lambda h: h.pop(),
+    "remove": lambda h: h.remove("a"),
+    "clear": lambda h: h.clear(),
+    "sort": lambda h: h.sort(),
+    "reverse": lambda h: h.reverse(),
+    "repeat": lambda h: h.__imul__(2),
+}
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_a_history_refuses_every_change_but_an_append(edit: str) -> None:
+    history = AppendOnlyList(["a", "b"])
+
+    with pytest.raises(TypeError):
+        _EDITS[edit](history)
+    history.append("c")
+    history += ["d"]
+    assert history == ["a", "b", "c", "d"]
+
+
+def test_an_entity_marks_only_the_collection_slot_holding_it() -> None:
+    journal = ChangeJournal()
+    items = TrackedDict[str, _Entity](journal, "items")
+    entity = _Entity()
+    items["a"] = entity
+    journal.pending.clear()
+
+    entity.state = "held"
+    assert journal.pending.keys() == {("items", "a")}
+
+    journal.pending.clear()
+    del items["a"]
+    journal.pending.clear()
+    entity.state = "gone"
+    assert not journal.pending
+
+
+@pytest.mark.parametrize(
+    ("field", "stored", "assigned", "marks"),
+    [
+        ("status", _Status.READY, _Status.READY, False),
+        ("status", _Status.READY, _Status.DONE, True),
+        ("status", _Status.READY, "ready", True),
+        ("ids", ("a", "b"), ["a", "b"], False),
+    ],
+    ids=["equal", "different", "equal-other-type", "list-equal-to-tuple"],
+)
+def test_an_entity_marks_an_assignment_only_when_it_changes_the_value(
+    field: str, stored: Any, assigned: Any, marks: bool
+) -> None:
+    journal = ChangeJournal()
+    items = TrackedDict[str, _Entity](journal, "items")
+    entity = _Entity()
+    setattr(entity, field, stored)
+    items["a"] = entity
+    journal.pending.clear()
+
+    setattr(entity, field, assigned)
+
+    assert bool(journal.pending) is marks
+    assert getattr(entity, field) == (assigned if marks else stored)
+
+
+def test_an_entity_held_in_one_slot_is_refused_another() -> None:
+    journal = ChangeJournal()
+    items = TrackedDict[str, _Entity](journal, "items")
+    others = TrackedDict[str, _Entity](journal, "others")
+    entity = _Entity()
+    items["a"] = entity
+
+    with pytest.raises(ValueError, match="already held"):
+        others["a"] = entity
+    with pytest.raises(ValueError, match="already held"):
+        items["b"] = entity
+    others["a"] = entity.model_copy()
+
+
+def test_a_refused_replacement_leaves_the_entry_journaling_its_entity() -> None:
+    journal = ChangeJournal()
+    items = TrackedDict[str, _Entity](journal, "items")
+    held, other = _Entity(), _Entity()
+    items["a"], items["b"] = held, other
+
+    with pytest.raises(ValueError, match="already held"):
+        items["a"] = other
+    journal.reset()
+    held.state = "changed"
+
+    assert items["a"] is held
+    assert set(journal.pending) == {("items", "a")}
+
+
+def test_a_clear_keeps_a_change_made_after_it_was_captured() -> None:
+    journal = ChangeJournal()
+    journal.mark(("c", "a"))
+    journal.mark(("c", "b"))
+    captured = journal.captured()
+    journal.mark(("c", "b"))
+    journal.mark(("c", "d"))
+
+    journal.clear(captured)
+
+    assert set(journal.pending) == {("c", "b"), ("c", "d")}

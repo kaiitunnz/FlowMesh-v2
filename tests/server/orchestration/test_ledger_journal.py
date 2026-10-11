@@ -31,16 +31,8 @@ from server.orchestration.state import (
     OrchestrationEvent,
     ProgressAxis,
     WorkItem,
-    WorkItemStatus,
 )
-from server.utils.journal import (
-    AppendOnlyList,
-    ChangeJournal,
-    JournaledModel,
-    TrackedDict,
-    TrackedSet,
-    freeze_mapping,
-)
+from server.utils.journal import JournaledModel, freeze_mapping
 from tests.server.orchestration.helpers import chain_bundle, engine
 
 
@@ -51,136 +43,6 @@ def _work_item(work_item_id: str = "wki-1") -> WorkItem:
         operator_id="op",
         legacy_task_id="op",
     )
-
-
-def test_a_tracked_dict_journals_each_entry_it_sets_or_removes_in_order() -> None:
-    journal = ChangeJournal()
-    tracked = TrackedDict[str, str](journal, "c", [("a", "1"), ("b", "2")])
-    tracked["c"] = "3"
-    first = dict(tracked.ordinals)
-
-    tracked["b"] = "4"
-    del tracked["a"]
-    tracked["a"] = "5"
-    tracked.setdefault("d", "6")
-    tracked.update({"e": "7"})
-    tracked.pop("e")
-
-    assert list(tracked) == ["b", "c", "a", "d"]
-    assert tracked.ordinals["b"] == first["b"]
-    assert tracked.ordinals["a"] > first["c"]
-    assert sorted(tracked, key=tracked.ordinals.__getitem__) == list(tracked)
-    assert set(journal.pending) == {("c", key) for key in "abcde"}
-
-
-def test_a_tracked_set_journals_each_member_it_adds_or_removes() -> None:
-    journal = ChangeJournal()
-    members = TrackedSet(journal, "s", ["a"])
-    members.add("a")
-    assert not journal.pending
-
-    members |= {"b"}
-    members -= {"a"}
-    members.discard("z")
-
-    assert set(members) == {"b"}
-    assert set(journal.pending) == {("s", "a"), ("s", "b")}
-
-
-_EDITS: dict[str, Callable[[list[Any]], Any]] = {
-    "set": lambda h: h.__setitem__(0, "x"),
-    "delete": lambda h: h.__delitem__(0),
-    "insert": lambda h: h.insert(0, "x"),
-    "pop": lambda h: h.pop(),
-    "remove": lambda h: h.remove("a"),
-    "clear": lambda h: h.clear(),
-    "sort": lambda h: h.sort(),
-    "reverse": lambda h: h.reverse(),
-    "repeat": lambda h: h.__imul__(2),
-}
-
-
-@pytest.mark.parametrize("edit", _EDITS)
-def test_a_history_refuses_every_change_but_an_append(edit: str) -> None:
-    history = AppendOnlyList(["a", "b"])
-
-    with pytest.raises(TypeError):
-        _EDITS[edit](history)
-    history.append("c")
-    history += ["d"]
-    assert history == ["a", "b", "c", "d"]
-
-
-def test_an_entity_marks_only_the_collection_slot_holding_it() -> None:
-    journal = ChangeJournal()
-    items = TrackedDict[str, WorkItem](journal, "work_items")
-    wi = _work_item()
-    items[wi.work_item_id] = wi
-    journal.pending.clear()
-
-    wi.invocation_id = "inv-1"
-    assert journal.pending.keys() == {("work_items", "wki-1")}
-
-    journal.pending.clear()
-    del items["wki-1"]
-    journal.pending.clear()
-    wi.invocation_id = "inv-2"
-    assert not journal.pending
-
-
-@pytest.mark.parametrize(
-    ("field", "stored", "assigned", "marks"),
-    [
-        ("status", WorkItemStatus.READY, WorkItemStatus.READY, False),
-        ("status", WorkItemStatus.READY, WorkItemStatus.DISPATCHED, True),
-        ("status", WorkItemStatus.READY, "ready", True),
-        ("attempt_ids", ("att-1", "att-2"), ["att-1", "att-2"], False),
-    ],
-    ids=["equal", "different", "equal-other-type", "list-equal-to-tuple"],
-)
-def test_an_entity_marks_an_assignment_only_when_it_changes_the_value(
-    field: str, stored: Any, assigned: Any, marks: bool
-) -> None:
-    journal = ChangeJournal()
-    items = TrackedDict[str, WorkItem](journal, "work_items")
-    wi = _work_item()
-    setattr(wi, field, stored)
-    items[wi.work_item_id] = wi
-    journal.pending.clear()
-
-    setattr(wi, field, assigned)
-
-    assert bool(journal.pending) is marks
-    assert getattr(wi, field) == (assigned if marks else stored)
-
-
-def test_an_entity_held_in_one_slot_is_refused_another() -> None:
-    journal = ChangeJournal()
-    items = TrackedDict[str, WorkItem](journal, "work_items")
-    others = TrackedDict[str, WorkItem](journal, "others")
-    wi = _work_item()
-    items["wki-1"] = wi
-
-    with pytest.raises(ValueError, match="already held"):
-        others["wki-1"] = wi
-    with pytest.raises(ValueError, match="already held"):
-        items["wki-2"] = wi
-    others["wki-1"] = wi.model_copy()
-
-
-def test_a_refused_replacement_leaves_the_entry_journaling_its_entity() -> None:
-    journal = ChangeJournal()
-    items = TrackedDict[str, WorkItem](journal, "work_items")
-    held, other = _work_item("wki-1"), _work_item("wki-2")
-    items["wki-1"], items["wki-2"] = held, other
-
-    with pytest.raises(ValueError, match="already held"):
-        items["wki-1"] = other
-    journal.reset()
-    held.invocation_id = "inv-1"
-
-    assert items["wki-1"] is held
-    assert set(journal.pending) == {("work_items", "wki-1")}
 
 
 def test_an_entity_changes_its_containers_only_by_replacing_them() -> None:
@@ -263,19 +125,6 @@ def test_the_stored_layout_places_every_snapshot_field_once() -> None:
 
     assert set().union(*groups) == set(LedgerSnapshot.model_fields)
     assert sum(map(len, groups)) == len(LedgerSnapshot.model_fields)
-
-
-def test_a_clear_keeps_a_change_made_after_it_was_captured() -> None:
-    journal = ChangeJournal()
-    journal.mark(("c", "a"))
-    journal.mark(("c", "b"))
-    captured = journal.captured()
-    journal.mark(("c", "b"))
-    journal.mark(("c", "d"))
-
-    journal.clear(captured)
-
-    assert set(journal.pending) == {("c", "b"), ("c", "d")}
 
 
 def test_each_key_names_one_field() -> None:
