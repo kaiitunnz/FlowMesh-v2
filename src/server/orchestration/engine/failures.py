@@ -1,5 +1,7 @@
 """Declared-failure facts of one workflow instance."""
 
+from ..journal import LedgerJournal, TrackedDict, TrackedSet
+
 DECLARED_FAILURE_REASON = "declared-failure obligation"
 
 
@@ -7,16 +9,18 @@ class FailureLedger:
     """Holds which control regions and child-init scopes settled as a declared failure,
     and why each task failed."""
 
-    def __init__(self) -> None:
+    def __init__(self, journal: LedgerJournal) -> None:
         # Control operators settled as a declared failure; a late record from another
         # input never fires one.
-        self.failed_regions: set[str] = set()
+        self.failed_regions: TrackedSet[str] = TrackedSet(journal, "failed_regions")
         # Child-init scopes a failed agent opened and that had not released: each
         # one's join never releases.
-        self.failed_scopes: set[str] = set()
+        self.failed_scopes: TrackedSet[str] = TrackedSet(journal, "failed_scopes")
         # Why each task settled as a declared failure: its own reason, or the failure
         # it depends on.
-        self.failure_reasons: dict[str, str] = {}
+        self.failure_reasons: TrackedDict[str, str] = TrackedDict(
+            journal, "failure_reasons"
+        )
         # The declared failures not yet applied to their task records.
         self.unapplied: dict[str, None] = {}
         # Why the whole instance failed, once it has.

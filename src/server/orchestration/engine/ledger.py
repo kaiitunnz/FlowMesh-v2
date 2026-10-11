@@ -11,7 +11,7 @@ from ...task.v2.representations.operators import (
     operator_service_dependency,
 )
 from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
-from ..journal import LedgerJournal
+from ..journal import AppendOnlyList, LedgerJournal, TrackedDict, TrackedSet
 from ..outcomes import classify_recovery
 from ..private_state import PrivateStateLedger
 from ..state import (
@@ -80,31 +80,40 @@ class OrchestrationLedger:
         topology: PlanTopology,
         failures: FailureLedger,
         emitter: TelemetrySpanEmitter,
+        journal: LedgerJournal,
     ) -> None:
         self._topology = topology
         self._failures = failures
         self.emitter = emitter
-        self.journal = LedgerJournal()
+        self.journal = journal
         self.workflow_instance = snapshot.instance
         self.root_scope = snapshot.root_scope
         self.root_grant = snapshot.root_grant
         self.next_seq = snapshot.next_seq
         self.private_state = PrivateStateLedger(snapshot.private_state)
-        self.scopes: dict[str, Scope] = {}
-        self.activations: dict[str, Activation] = {}
+        self.scopes: TrackedDict[str, Scope] = TrackedDict(journal, "scopes")
+        self.activations: TrackedDict[str, Activation] = TrackedDict(
+            journal, "activations"
+        )
         # Per-scope and dynamic activation counts that number and budget each child.
         self.scope_population: Counter[str] = Counter()
         self.scope_children: Counter[str] = Counter()
         self.dynamic_activations = 0
-        self.work_items: dict[str, WorkItem] = {}
-        self.continuations: dict[str, Continuation] = {}
-        self.records: list[Record] = []
-        self.region_aggregates: list[RegionJoinAggregate] = []
+        self.work_items: TrackedDict[str, WorkItem] = TrackedDict(journal, "work_items")
+        self.continuations: TrackedDict[str, Continuation] = TrackedDict(
+            journal, "continuations"
+        )
+        self.records: AppendOnlyList[Record] = AppendOnlyList()
+        self.region_aggregates: AppendOnlyList[RegionJoinAggregate] = AppendOnlyList()
         self.aggregate_by_join: dict[str, RegionJoinAggregate] = {}
-        self.invocations: dict[str, Invocation] = {}
-        self.attempts: dict[str, Attempt] = {}
-        self.capabilities: dict[tuple[str, ProgressAxis], ProgressCapability] = {}
-        self.trace: list[OrchestrationEvent] = []
+        self.invocations: TrackedDict[str, Invocation] = TrackedDict(
+            journal, "invocations"
+        )
+        self.attempts: TrackedDict[str, Attempt] = TrackedDict(journal, "attempts")
+        self.capabilities: TrackedDict[tuple[str, ProgressAxis], ProgressCapability] = (
+            TrackedDict(journal, "progress_capabilities")
+        )
+        self.trace: AppendOnlyList[OrchestrationEvent] = AppendOnlyList()
         # (agent activation, region operator) -> the synthetic opener activation that
         # owns that region's child-init scope.
         self.region_openers: dict[tuple[str, str], str] = {}
@@ -113,10 +122,12 @@ class OrchestrationLedger:
         self.wi_by_activation: dict[str, str] = {}
         self.scope_by_activation: dict[str, str] = {}
         self.owner_acts_by_operator: dict[str, list[str]] = {}
-        self.released_scopes: set[str] = set()
+        self.released_scopes: TrackedSet[str] = TrackedSet(journal, "released_scopes")
         # Occurrences of operators inside region definitions; a root operator's
         # occurrence is implicit.
-        self.occurrences: dict[str, Occurrence] = {}
+        self.occurrences: TrackedDict[str, Occurrence] = TrackedDict(
+            journal, "occurrences"
+        )
         self.occurrences_by_scope: dict[str, set[str]] = {}
         self.occurrence_by_activation: dict[str, str] = {}
         self.subscopes: dict[str, dict[str, None]] = {}
@@ -126,12 +137,22 @@ class OrchestrationLedger:
         self.succeeded_children: Counter[str] = Counter()
         # Each operator's first activation outside every region and dynamic context.
         self.static_activations: dict[str, str] = {}
-        self.control_states: dict[str, ControlState] = {}
-        self.branch_decisions: dict[str, BranchDecision] = {}
-        self.loop_instances: dict[str, LoopInstance] = {}
+        self.control_states: TrackedDict[str, ControlState] = TrackedDict(
+            journal, "control_states"
+        )
+        self.branch_decisions: TrackedDict[str, BranchDecision] = TrackedDict(
+            journal, "branch_decisions"
+        )
+        self.loop_instances: TrackedDict[str, LoopInstance] = TrackedDict(
+            journal, "loop_instances"
+        )
         self.loop_by_occurrence: dict[str, str] = {}
-        self.iterations: dict[tuple[str, int], IterationResolution] = {}
-        self.child_contexts: dict[str, ChildContext] = {}
+        self.iterations: TrackedDict[tuple[str, int], IterationResolution] = (
+            TrackedDict(journal, "iteration_resolutions")
+        )
+        self.child_contexts: TrackedDict[str, ChildContext] = TrackedDict(
+            journal, "child_contexts"
+        )
         # Loop instances and definition children not yet closed.
         self.active_loops: set[str] = set()
         self.active_contexts: set[str] = set()
