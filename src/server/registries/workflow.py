@@ -1046,7 +1046,7 @@ class WorkflowRegistry:
         """Store each workflow source the tasks name that the workflow does not hold,
         as a task state loaded with its source inline names."""
         sources = task_sources(items).get(workflow_id, {})
-        held = self._rds.sync.hash_getall(workflow_sources_key(workflow_id))
+        held = set(self._rds.sync.hash_keys(workflow_sources_key(workflow_id)))
         if missing := {d: text for d, text in sources.items() if d not in held}:
             self._rds.sync.hash_set(workflow_sources_key(workflow_id), missing)
 
@@ -1055,7 +1055,7 @@ class WorkflowRegistry:
     ) -> None:
         """Store missing sources as ``keep_sources`` does."""
         sources = task_sources(items).get(workflow_id, {})
-        held = await self._rds.asyncio.hash_getall(workflow_sources_key(workflow_id))
+        held = set(await self._rds.asyncio.hash_keys(workflow_sources_key(workflow_id)))
         if missing := {d: text for d, text in sources.items() if d not in held}:
             await self._rds.asyncio.hash_set(workflow_sources_key(workflow_id), missing)
 

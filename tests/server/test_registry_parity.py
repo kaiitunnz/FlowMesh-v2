@@ -9,7 +9,11 @@ import fakeredis
 import pytest
 from starlette.datastructures import QueryParams
 
-from server.clients.redis import AsyncRedisClient, SyncRedisClient
+from server.clients.redis import (
+    AsyncRedisClient,
+    SyncRedisClient,
+    workflow_sources_key,
+)
 from server.orchestration.ledger_fields import (
     LedgerChanges,
     encode_ledger,
@@ -175,12 +179,21 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
     stored = sync.load_ledger(workflow_id)
     assert records and stored is not None
     assert asyncio.run(async_.load_ledger_async(workflow_id)) == stored
+    assert records == [
+        state
+        for state in asyncio.run(async_.load_task_states_async(workflow_id, *task_ids))
+        if state
+    ]
     rewrite = LedgerChanges(encode_ledger(stored), reset=True)
     dropped = next(name for name in rewrite.fields if name.startswith("work_items:"))
     delta = LedgerChanges({scalar_field("next_seq"): "7"}, deleted=(dropped,))
 
     sync.save_task_states(records)
     asyncio.run(async_.save_task_states_async(records))
+    for twin in (sync, async_):
+        twin._rds.sync.delete(workflow_sources_key(workflow_id))
+    sync.keep_sources(workflow_id, records)
+    asyncio.run(async_.keep_sources_async(workflow_id, records))
     sync.commit_transition(
         workflow_id, records=records[:1], dispatched=task_ids[:1], failed=task_ids[1:2]
     )
