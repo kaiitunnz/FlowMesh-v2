@@ -24,6 +24,7 @@ from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.stored_state import StoredLedgers, StoredTaskStates
+from tests.server.task.test_settled_history import CHAIN
 from tests.support.waiting import pop_ready
 
 
@@ -885,20 +886,6 @@ async def test_rehydrate_keeps_a_requeued_serve_tasks_first_start() -> None:
     assert restored_record.status == TaskStatus.PENDING
     assert restored_record.started_ts is None
     assert restored_record.first_started_ts == first_started
-
-
-CHAIN = """
-apiVersion: flowmesh/v1
-kind: Workflow
-metadata:
-  name: chain
-spec:
-  graph:
-    nodes:
-      - {name: a, spec: {taskType: echo}}
-      - {name: b, dependsOn: [a], spec: {taskType: echo}}
-      - {name: c, dependsOn: [b], spec: {taskType: echo}}
-"""
 
 
 def _succeed_all(runtime: TaskRuntime, ids: dict[str, str]) -> None:

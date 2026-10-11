@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlencode
 
 import pytest
 from starlette.datastructures import QueryParams
@@ -174,7 +175,7 @@ async def test_a_freed_workflow_serves_its_published_outputs_as_it_did(
 
 
 def _query(**terms: str | list[str]) -> QueryFilter:
-    return QueryFilter.parse(QueryParams(terms), _FIELDS)  # type: ignore[arg-type]
+    return QueryFilter.parse(QueryParams(urlencode(terms, doseq=True)), _FIELDS)
 
 
 def _page(

@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent
+from tests.server.runtime_helpers import reclaimable
 from tests.server.services.test_monitor_commit_fence import (
     _dispatched,
     _monitor,
@@ -19,12 +19,6 @@ from tests.server.task.test_settled_history import _registry, _settled
 from tests.server.task.test_v2_orchestration import LINEAR, _register
 
 
-def _reclaimable(runtime: TaskRuntime, workflow_id: str) -> bool:
-    runtime.settled_history.require(closure=False, archive=False)
-    with runtime._lock:
-        return runtime._reclaim_check_locked(workflow_id) is not None
-
-
 def test_a_workflow_settled_inside_a_tail_stays_resident_until_it_ends() -> None:
     runtime = _runtime(_Store())
     workflow_id, _ = asyncio.run(_register(runtime, LINEAR))
@@ -35,9 +29,9 @@ def test_a_workflow_settled_inside_a_tail_stays_resident_until_it_ends() -> None
         with runtime.event_tail():
             runtime.cancel_workflow(workflow_id)
         assert runtime.workflow_settlement(workflow_id).settled
-        assert not _reclaimable(runtime, workflow_id)
+        assert not reclaimable(runtime, workflow_id)
 
-    assert _reclaimable(runtime, workflow_id)
+    assert reclaimable(runtime, workflow_id)
     assert workflow_id in requested
 
 
@@ -48,8 +42,8 @@ def test_a_tail_holds_the_workflow_of_the_task_it_names() -> None:
     task_id = runtime._tasks.ids_of(workflow_id)[0]
 
     with runtime.event_tail(task_id, "tsk-unknown"):
-        assert not _reclaimable(runtime, workflow_id)
-    assert _reclaimable(runtime, workflow_id)
+        assert not reclaimable(runtime, workflow_id)
+    assert reclaimable(runtime, workflow_id)
 
 
 def test_a_report_applied_directly_finishes_its_side_effects_before_freeing() -> None:
@@ -59,7 +53,7 @@ def test_a_report_applied_directly_finishes_its_side_effects_before_freeing() ->
     close = monitor._close_task_log_stream
 
     def closing(closed_task_id: str) -> None:
-        seen.append(_reclaimable(runtime, workflow_id))
+        seen.append(reclaimable(runtime, workflow_id))
         close(closed_task_id)
 
     setattr(monitor, "_close_task_log_stream", closing)
@@ -69,7 +63,7 @@ def test_a_report_applied_directly_finishes_its_side_effects_before_freeing() ->
 
     assert seen == [False]
     assert len(telemetry.sealed) == 1
-    assert _reclaimable(runtime, workflow_id)
+    assert reclaimable(runtime, workflow_id)
 
 
 def test_a_late_report_for_a_freed_task_is_acknowledged_from_the_store() -> None:

@@ -15,7 +15,7 @@ from collections.abc import Callable, Collection
 from enum import StrEnum
 from typing import Protocol
 
-from ...registries.workflow import WorkflowRegistry
+from ...registries.history import WorkflowHistoryStore
 from .settled_history import SettledHistory
 
 INDEX_COMPLETE = "complete:v1"
@@ -66,7 +66,7 @@ class HistoryBootstrap[R: ScratchRuntime]:
 
     def __init__(
         self,
-        registry: WorkflowRegistry,
+        registry: WorkflowHistoryStore,
         scratch_runtime: Callable[[], R],
         close: Callable[[R, str], bool],
         claims_terminal: Callable[[Collection[str]], bool] | None,
@@ -176,8 +176,8 @@ class HistoryBootstrap[R: ScratchRuntime]:
             and not self._claims_terminal(invocation_ids)
         ):
             return Classification.HOLDING_CLAIMS
-        if self._archived is not None and not await asyncio.to_thread(
-            self._all_archived, scratch.workflow_task_ids(workflow_id)
+        if (archived := self._archived) is not None and not await asyncio.to_thread(
+            _all_archived, archived, scratch.workflow_task_ids(workflow_id)
         ):
             return Classification.ARCHIVING
         if not await asyncio.to_thread(self._close, scratch, workflow_id):
@@ -186,9 +186,9 @@ class HistoryBootstrap[R: ScratchRuntime]:
             return Classification.NOT_CERTIFIED
         return Classification.FREED
 
-    def _all_archived(self, task_ids: list[str]) -> bool:
-        assert self._archived is not None
-        return all(self._archived(task_id) for task_id in task_ids)
+
+def _all_archived(archived: Callable[[str], bool | None], task_ids: list[str]) -> bool:
+    return all(archived(task_id) for task_id in task_ids)
 
 
 def _batches(

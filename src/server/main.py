@@ -181,8 +181,6 @@ SSH_RELAY: SshRelayOrigin | None = None
 WATCHDOG = None
 EVENT_MONITOR = None
 WORKFLOW_SPAN_EMITTER = None
-# How long freeing a workflow waits for the resident claim store to answer.
-_CLAIMS_CHECK_TIMEOUT_SEC = 5.0
 LOG_ARCHIVER = None
 AGENT_MODEL_GATEWAY = None
 FABRIC_TOOL_BROKER = None
@@ -496,7 +494,7 @@ if IS_ROOT_NODE:
         RUNTIME.settled_history.set_claims_settled(
             partial(
                 RESIDENT_CONTROL.invocations_settled,
-                timeout_sec=_CLAIMS_CHECK_TIMEOUT_SEC,
+                timeout_sec=5.0,
             )
         )
 

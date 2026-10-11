@@ -52,8 +52,12 @@ def never_closed(runtime: TaskRuntime, workflow_id: str) -> bool:
     return False
 
 
-def assert_reclaimable(runtime: TaskRuntime, workflow_id: str) -> None:
-    """Assert that nothing in the runtime still needs the settled workflow's state."""
+def reclaimable(runtime: TaskRuntime, workflow_id: str) -> bool:
+    """Whether nothing in the runtime still needs the settled workflow's state."""
     runtime.settled_history.require(closure=False, archive=False)
     with runtime._lock:
-        assert runtime._reclaim_check_locked(workflow_id) is not None
+        return runtime._reclaim_check_locked(workflow_id) is not None
+
+
+def assert_reclaimable(runtime: TaskRuntime, workflow_id: str) -> None:
+    assert reclaimable(runtime, workflow_id)

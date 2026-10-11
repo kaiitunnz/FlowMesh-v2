@@ -5,14 +5,7 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import (
-    Callable,
-    Collection,
-    Iterable,
-    Iterator,
-    Mapping,
-    Sequence,
-)
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field

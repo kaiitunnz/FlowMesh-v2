@@ -12,8 +12,11 @@ import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 
-from ...registries.history import Certification, HistoryPublication
-from ...registries.workflow import WorkflowRegistry
+from ...registries.history import (
+    Certification,
+    HistoryPublication,
+    WorkflowHistoryStore,
+)
 from .commits import store_unavailable
 
 # A workflow not freed by a request is evaluated again this often.
@@ -64,7 +67,7 @@ class SettledHistory:
         check: Callable[[str], ReclaimCheck | None],
         publication: Callable[[str, int], HistoryPublication],
         forget: Callable[[str], Freed],
-        registry: WorkflowRegistry,
+        registry: WorkflowHistoryStore,
         lock: threading.RLock,
         logger: logging.Logger,
     ) -> None:
