@@ -8,7 +8,9 @@ the stored layout as the store does.
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+
+import pytest
 
 from server.resident import (
     ClaimState,
@@ -280,3 +282,38 @@ def test_a_re_adopted_serve_family_keeps_its_stored_definition() -> None:
     assert json.loads(listed.model_dump_json()) == json.loads(
         restored.model_dump_json()
     )
+
+
+class _HistoryReadFailsOnce(MemoryResidentDurability):
+    fail = True
+
+    def stored_family(self, family: str) -> ServiceFamily | None:
+        if self.fail:
+            self.fail = False
+            raise ConnectionError("store unavailable")
+        return super().stored_family(family)
+
+
+def _unreadable_history() -> MemoryResidentDurability:
+    durability = MemoryResidentDurability()
+    durability.families[_FAMILY] = "not json"
+    return durability
+
+
+@pytest.mark.parametrize(
+    "durability",
+    [_HistoryReadFailsOnce, _unreadable_history],
+    ids=["read-fails", "unreadable"],
+)
+def test_a_serve_task_adopts_when_its_family_history_cannot_be_read(
+    durability: Callable[[], MemoryResidentDurability],
+) -> None:
+    svc, stores, _settled, _deps = _build_serve()
+    stores.durability = durability()
+
+    _adopt(svc)
+
+    assert stores.families.get(_FAMILY) is not None
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+    assert delivery.opened and delivery.failed is None

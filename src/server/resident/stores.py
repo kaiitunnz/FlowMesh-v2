@@ -14,6 +14,7 @@ it changed. The stores hold the live working set; a retired invocation, replica 
 family leaves them only once its durable record is in place.
 """
 
+import logging
 from collections.abc import Callable, Hashable
 from typing import NamedTuple
 
@@ -60,6 +61,9 @@ def _bucket_remove(index: _Bucket, key: str | None, member: str) -> None:
     bucket.pop(member, None)
     if not bucket:
         del index[key]
+
+
+_logger = logging.getLogger("resident-capacity")
 
 
 class ServiceFamilyRegistry:
@@ -453,13 +457,23 @@ class ResidentStores:
         self.reports.forget(replica.replica_id)
 
     def register_family(self, family: ServiceFamily) -> None:
-        """Register a family definition, first restoring a retired family's stored one
-        so it keeps its identity and creation time. Raises on a store failure."""
-        if (
-            family.family not in self.families
-            and (stored := self.durability.stored_family(family.family)) is not None
-        ):
-            self.families.register(stored)
+        """Register a family definition, first restoring a retired standing family's
+        stored one so it keeps its identity and creation time.
+
+        A history that cannot be read registers the incoming definition.
+        """
+        if family.standing and family.family not in self.families:
+            try:
+                stored = self.durability.stored_family(family.family)
+            except Exception:
+                _logger.warning(
+                    "reading resident family %s from history failed",
+                    family.family,
+                    exc_info=True,
+                )
+            else:
+                if stored is not None:
+                    self.families.register(stored)
         self.families.register(family)
 
     def load_snapshot(self, snapshot: ResidentSnapshot) -> None:
