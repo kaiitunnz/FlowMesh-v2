@@ -609,6 +609,7 @@ class TaskRuntime:
             self._cv,
         )
         self._settled_history = SettledHistory(
+            self._tasks.holds,
             self._reclaim_check_locked,
             self._history_publication_locked,
             self._forget_workflow_locked,
@@ -1893,7 +1894,11 @@ class TaskRuntime:
                     self._settled_history.request(workflow_id)
 
     def _hold_tail_locked(self, workflow_id: str) -> None:
-        if workflow_id not in self._tail.held:
+        # A sealed workflow's tasks take no report, so nothing follows to hold it for.
+        if (
+            workflow_id not in self._tail.held
+            and not self._settled_history.sealed_locked(workflow_id)
+        ):
             self._tail.held.add(workflow_id)
             self._settled_history.hold_locked(workflow_id)
 

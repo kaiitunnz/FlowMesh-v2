@@ -525,3 +525,32 @@ def test_the_freeing_thread_frees_a_settled_workflow_and_stops_promptly() -> Non
         thread.join(timeout=5.0)
 
     assert not thread.is_alive()
+
+
+def test_a_tail_during_the_seal_leaves_nothing_behind_the_free() -> None:
+    registry = _registry()
+    runtime, workflow_id = _settled(registry)
+    task_id = runtime._tasks.ids_of(workflow_id)[0]
+    prepare = registry.prepare_history
+
+    def tail_while_sealed(publication: HistoryPublication) -> bool:
+        assert runtime.settled_history.sealed_locked(workflow_id)
+        with runtime.event_tail(task_id):
+            pass
+        return prepare(publication)
+
+    cast(Any, registry).prepare_history = tail_while_sealed
+    runtime.settled_history.drain()
+    cast(Any, registry).prepare_history = prepare
+    assert not _resident(runtime, workflow_id)
+
+    with runtime.event_tail(task_id):
+        pass
+    runtime.settled_history.request(workflow_id)
+    runtime.settled_history.sweep()
+    runtime.settled_history.drain()
+
+    history = runtime.settled_history
+    assert workflow_id not in history._tails
+    assert workflow_id not in history._candidates
+    assert workflow_id not in history._requested

@@ -55,6 +55,7 @@ class SettledHistory:
 
     def __init__(
         self,
+        holds: Callable[[str], bool],
         check: Callable[[str], ReclaimCheck | None],
         publication: Callable[[str, int, str], HistoryPublication],
         forget: Callable[[str], Freed],
@@ -66,6 +67,7 @@ class SettledHistory:
         # Each reads or changes the runtime's state under its lock: whether nothing in
         # the runtime still needs a workflow's state, the history its reads derive
         # from, certified under a sequence and nonce, and its removal.
+        self._holds = holds
         self._check = check
         self._publication = publication
         self._forget = forget
@@ -157,10 +159,10 @@ class SettledHistory:
 
     def release_locked(self, workflow_id: str) -> bool:
         """Release one hold; returns whether the workflow is held no more."""
-        if (count := self._tails[workflow_id] - 1) > 0:
+        if (count := self._tails.get(workflow_id, 0) - 1) > 0:
             self._tails[workflow_id] = count
             return False
-        del self._tails[workflow_id]
+        self._tails.pop(workflow_id, None)
         return True
 
     # ------------------------------------------------------------------ #
@@ -225,7 +227,7 @@ class SettledHistory:
             pending, self._requested = self._requested, set()
         for workflow_id in sorted(pending):
             try:
-                freed = self.evaluate(workflow_id)
+                self.evaluate(workflow_id)
             except Exception as exc:
                 if not store_unavailable(exc):
                     self._logger.exception("Freeing workflow %s failed", workflow_id)
@@ -235,16 +237,18 @@ class SettledHistory:
                     "Freeing settled workflows waits for the store: %s", exc
                 )
                 return
-            if freed:
-                with self._cv:
-                    self._candidates.discard(workflow_id)
 
     def evaluate(self, workflow_id: str) -> bool:
         """Free the workflow if nothing needs its runtime state; returns whether it is
         freed. A failure leaves it resident for a later evaluation."""
         with self._lock:
+            held = self._holds(workflow_id)
             seal = self._sealed.get(workflow_id)
-            check = None if seal else self._check(workflow_id)
+            check = None if seal or not held else self._check(workflow_id)
+        if not held:
+            with self._cv:
+                self._candidates.discard(workflow_id)
+            return False
         if seal is not None:
             return seal.ambiguous and self._resolve_ambiguous(workflow_id)
         if check is None:
@@ -326,12 +330,16 @@ class SettledHistory:
         with self._lock:
             freed = self._forget(workflow_id)
             del self._sealed[workflow_id]
+            self._tails.pop(workflow_id, None)
             self._closed.discard(workflow_id)
             self._archived.difference_update(freed.task_ids)
             self._published_through = max(self._published_through, seq)
             if seq > self._counted_through:
                 self._total += len(freed.task_ids)
                 self._done += freed.done
+        with self._cv:
+            self._candidates.discard(workflow_id)
+            self._requested.discard(workflow_id)
         self._logger.debug(
             "Freed workflow %s (%d tasks)", workflow_id, len(freed.task_ids)
         )
