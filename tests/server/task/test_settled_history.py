@@ -13,6 +13,8 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from server.clients.redis import (
+    HISTORY_COUNTS_KEY,
+    HISTORY_SEQ_KEY,
     TASK_HISTORY_MEMBERS_KEY,
     WORKFLOWS_OPEN_KEY,
     workflow_history_key,
@@ -320,6 +322,36 @@ def test_a_failed_preparation_leaves_the_workflow_resident_and_uncounted(
     assert registry.history_counts() == (0, 0)
     assert runtime.settled_history.counts_locked() == (0, 0)
     assert {task_id: runtime.describe_task(task_id) for task_id in before} == before
+
+
+@pytest.mark.parametrize(
+    ("key", "field", "value"),
+    [
+        (HISTORY_SEQ_KEY, None, "not a number"),
+        (HISTORY_COUNTS_KEY, "total", "not a number"),
+        (HISTORY_COUNTS_KEY, "done", "1.5"),
+    ],
+    ids=["sequence", "total", "done"],
+)
+def test_an_unreadable_counter_refuses_the_certification_before_any_write(
+    key: str, field: str | None, value: str
+) -> None:
+    registry = _registry()
+    runtime, workflow_id = _settled(registry)
+    raw = raw_control(registry)
+    if field is None:
+        raw.set(key, value)
+    else:
+        raw.hset(key, field, value)
+    before = {name: raw.dump(name) for name in (HISTORY_SEQ_KEY, HISTORY_COUNTS_KEY)}
+
+    runtime.settled_history.drain()
+
+    assert _resident(runtime, workflow_id)
+    assert not runtime.settled_history.sealed_locked(workflow_id)
+    assert not _certified(registry, workflow_id)
+    assert workflow_id in registry.open_workflow_ids()
+    assert {name: raw.dump(name) for name in before} == before
 
 
 def test_a_write_after_the_revision_is_read_refuses_and_a_later_attempt_frees() -> None:

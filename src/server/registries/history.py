@@ -45,12 +45,14 @@ from .task_states import PersistedTask, load_context
 
 type _AnyPipeline = Pipeline | AsyncPipeline
 
-# Validates a prepared publication, then certifies it. KEYS: the workflow's revision,
-# history hash and record, the members hash, the all-history index, the sequence, the
-# counters, the open set, then each status index ARGV names. ARGV: the revision read
-# before sealing, the certificate, its sequence, the history hash's field count, the
-# workflow id, how many tasks succeeded, then per task its id, member and the KEYS
-# position of its status index.
+# Validates a prepared publication, then certifies it. Every key's type and every value
+# a write reads is checked before the first write, and the certificate is written last,
+# so a certificate is present only once every other write landed. KEYS: the workflow's
+# revision, history hash and record, the members hash, the all-history index, the
+# sequence, the counters, the open set, then each status index ARGV names. ARGV: the
+# revision read before sealing, the certificate, its sequence, the history hash's field
+# count, the workflow id, how many tasks succeeded, then per task its id, member and the
+# KEYS position of its status index.
 _CERTIFY = f"""
 local function is(key, kind)
   return redis.call('TYPE', key)['ok'] == kind
@@ -58,6 +60,9 @@ end
 local function absent_or(key, kind)
   local found = redis.call('TYPE', key)['ok']
   return found == kind or found == 'none'
+end
+local function integer(value)
+  return not value or string.match(value, '^%-?%d+$') ~= nil
 end
 if (redis.call('GET', KEYS[1]) or '0') ~= ARGV[1] then return 'revision changed' end
 if not is(KEYS[2], 'hash') then return 'projection missing' end
@@ -70,6 +75,11 @@ end
 if not is(KEYS[3], 'hash') then return 'workflow missing' end
 if not absent_or(KEYS[6], 'string') or not absent_or(KEYS[7], 'hash')
   or not absent_or(KEYS[8], 'set') then return 'index type' end
+local seq = redis.call('GET', KEYS[6])
+if seq and not string.match(seq, '^%d+$') then return 'sequence unreadable' end
+for _, count in ipairs(redis.call('HMGET', KEYS[7], 'total', 'done')) do
+  if not integer(count) then return 'counters unreadable' end
+end
 for i = 9, #KEYS do
   if not is(KEYS[i], 'zset') then return 'index missing' end
 end
@@ -85,14 +95,14 @@ for i = 7, #ARGV, 3 do
     return 'index incomplete'
   end
 end
-redis.call('HSET', KEYS[2], '{CERTIFICATE_FIELD}', ARGV[2])
-if tonumber(ARGV[3]) > tonumber(redis.call('GET', KEYS[6]) or '0') then
+if tonumber(ARGV[3]) > tonumber(seq or '0') then
   redis.call('SET', KEYS[6], ARGV[3])
 end
 local tasks = (#ARGV - 6) / 3
 redis.call('HINCRBY', KEYS[7], 'total', tasks)
 redis.call('HINCRBY', KEYS[7], 'done', tonumber(ARGV[6]))
 redis.call('SREM', KEYS[8], ARGV[5])
+redis.call('HSET', KEYS[2], '{CERTIFICATE_FIELD}', ARGV[2])
 return 'ok'
 """
 
