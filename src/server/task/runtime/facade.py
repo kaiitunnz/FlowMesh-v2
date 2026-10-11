@@ -462,7 +462,7 @@ class TaskRuntime:
             content_scope_authority,
             self._control,
         )
-        self._actions = AfterCommitActions(self._tasks)
+        self._actions = AfterCommitActions()
         self._resident_tasks = ResidentServeTasks(self._tasks)
         self._content_bindings = ContentBindings(
             self._tasks, self._engines, self._original_deps, self._logger
@@ -934,8 +934,8 @@ class TaskRuntime:
                     workflow_id,
                     *(
                         interrupt
-                        for _, interrupt in self._actions.cancelling_interrupts_locked(
-                            lambda record: record.workflow_id == workflow_id
+                        for _, interrupt in self._actions.cancelling_interrupts(
+                            self._tasks.of_workflow(workflow_id)
                         )
                     ),
                     Settled(workflow_id),
@@ -2163,8 +2163,10 @@ class TaskRuntime:
         """
         with self._transition():
             pending = self._mediated_ops.pending_for_worker(worker_id)
-            for workflow_id, interrupt in self._actions.cancelling_interrupts_locked(
-                lambda record: record.assigned_worker == worker_id
+            for workflow_id, interrupt in self._actions.cancelling_interrupts(
+                record
+                for record in self._tasks.values()
+                if record.assigned_worker == worker_id
             ):
                 self._actions.file_locked(workflow_id, interrupt)
         for task_id, call in sorted(pending):

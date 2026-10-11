@@ -18,6 +18,7 @@ from server.registries.workflow import (
 )
 from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime
+from server.task.runtime.task_table import TaskTable
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
@@ -938,3 +939,33 @@ async def test_a_restart_describes_settled_v1_tasks_as_the_server_that_ran_them(
     assert {
         name: restored.describe_task(task_id) for name, task_id in ids.items()
     } == live
+
+
+async def _whole_table_walks_in_rehydrate(
+    workflows: int, monkeypatch: pytest.MonkeyPatch
+) -> int:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    for _ in range(workflows):
+        await _register(runtime, GRAPH)
+    walks = 0
+    values = TaskTable.values
+
+    def counted(self: TaskTable) -> Any:
+        nonlocal walks
+        walks += 1
+        return values(self)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(TaskTable, "values", counted)
+        assert await _runtime(registry).rehydrate() == workflows
+    return walks
+
+
+@pytest.mark.anyio
+async def test_rehydrate_walks_the_whole_task_table_a_fixed_number_of_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert await _whole_table_walks_in_rehydrate(
+        2, monkeypatch
+    ) == await _whole_table_walks_in_rehydrate(10, monkeypatch)

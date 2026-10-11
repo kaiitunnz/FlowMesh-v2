@@ -1,7 +1,7 @@
 """What a runtime transition owes workers and other consumers once it is durable."""
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from shared.schemas.command import InterruptMessage, RevokeMessage
@@ -96,8 +96,7 @@ class AfterCommitActions:
     actions for delivery off the lock, and keeps each action whose delivery failed for
     a retry."""
 
-    def __init__(self, tasks: dict[str, TaskRecord]) -> None:
-        self._tasks = tasks
+    def __init__(self) -> None:
         # Actions whose workflow has writes not yet durable, or whose transition is
         # still running.
         self.parked: dict[str, list[AfterCommit]] = {}
@@ -191,15 +190,15 @@ class AfterCommitActions:
             node_id,
         )
 
-    def cancelling_interrupts_locked(
-        self, include: Callable[[TaskRecord], bool]
+    @classmethod
+    def cancelling_interrupts(
+        cls, records: Iterable[TaskRecord]
     ) -> list[tuple[str, Interrupt]]:
-        """Build an interrupt for each task being cancelled that ``include`` selects,
-        with its workflow."""
+        """Build an interrupt for each of ``records`` being cancelled, with its
+        workflow."""
         return [
             (record.workflow_id, interrupt)
-            for record in self._tasks.values()
+            for record in records
             if record.status == TaskStatus.CANCELLING
-            and include(record)
-            and (interrupt := self.interrupt_for(record, record.error or "cancelled"))
+            and (interrupt := cls.interrupt_for(record, record.error or "cancelled"))
         ]
