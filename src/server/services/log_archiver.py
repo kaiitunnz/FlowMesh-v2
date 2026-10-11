@@ -102,11 +102,11 @@ class TaskLogArchiver:
                 if task_id in self._archived_ids:
                     continue
                 if task_id not in self._states:
-                    archived = self._archived(task_id)
+                    archived = self.archived(task_id)
                     if archived is None:
                         continue
                     if archived:
-                        self._archived_ids.add(task_id)
+                        self._disposed(task_id)
                         continue
                 terminal.add(task_id)
             self._ensure_task(task_id, now)
@@ -168,11 +168,17 @@ class TaskLogArchiver:
                 if not self._finalize_manifest(task_id, maybe_state, now):
                     continue
                 maybe_state.done = True
-                self._archived_ids.add(task_id)
+                self._disposed(task_id)
             except Exception:
                 self._forget(task_id)
                 raise
             self._forget(task_id)
+
+    def _disposed(self, task_id: str) -> None:
+        """Record that a finished task's logs need no more archiving, and tell the
+        runtime."""
+        self._archived_ids.add(task_id)
+        self._runtime.task_archived(task_id)
 
     def _forget(self, task_id: str) -> None:
         self._buffers.pop(task_id, None)
@@ -193,7 +199,7 @@ class TaskLogArchiver:
     def _base_dir(self, task_id: str) -> Path:
         return result_file_path(self._results_dir, task_id).parent
 
-    def _archived(self, task_id: str) -> bool | None:
+    def archived(self, task_id: str) -> bool | None:
         """Return whether a finished task's logs are archived: no stream checkpoint is
         held and something stands at its log path or where a directory holding it
         belongs. None when the path could not be checked."""

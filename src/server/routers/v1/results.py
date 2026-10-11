@@ -135,7 +135,7 @@ async def upload_result_file(
     relative_path = _resolve_artifact_path(file.filename or "")
     target_path = base_dir / relative_path
 
-    record = runtime.get_record(task_id)
+    record = await asyncio.to_thread(runtime.task_record, task_id)
     expected_artifacts = record.task.spec.get_artifacts() if record else []
     try:
         await asyncio.to_thread(_store_artifact, file, base_dir, relative_path)

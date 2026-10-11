@@ -52,11 +52,24 @@ def _keepalive_kwargs() -> dict[str, Any]:
 
 
 TASK_EVENT_STREAM_KEY = "tasks:events:stream"
+# How many keys one step of a keyspace scan visits; a pattern matching few keys of a
+# large keyspace otherwise costs one round trip per ten keys.
+_SCAN_KEYS_COUNT = 1000
+
 TASK_EVENT_CURSOR_KEY = "tasks:events:cursor"
 TASK_EVENT_STREAM_MAXLEN = 100_000
 
 WORKFLOWS_SET_KEY = "workflows:ids"
 WORKFLOWS_BY_SUBMISSION_KEY = "workflows:by_submission"
+WORKFLOWS_OPEN_KEY = "workflows:open"
+
+# Freed workflows' history: each freed task's index member by task, the certified
+# counts, the highest certificate sequence, and how far the open-workflow index is
+# built over a store without it.
+TASK_HISTORY_MEMBERS_KEY = "tasks:history:members"
+HISTORY_COUNTS_KEY = "history:counts"
+HISTORY_SEQ_KEY = "history:seq"
+HISTORY_INDEX_KEY = "history:index"
 
 TASK_LOGS_STREAM_PREFIX = "logs:task:"
 WORKFLOW_LOGS_STREAM_PREFIX = "logs:workflow:"
@@ -116,6 +129,19 @@ def workflow_blueprints_key(workflow_id: str) -> str:
 
 def workflow_sources_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:sources"
+
+
+def workflow_revision_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:revision"
+
+
+def workflow_history_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:history"
+
+
+# The index of freed tasks by submission, or of those that settled one status.
+def task_history_key(status: str | None) -> str:
+    return "tasks:history" if status is None else f"tasks:history:{status}"
 
 
 # The ``model_secret`` suffix is the persisted vault layout.
@@ -503,7 +529,7 @@ class SyncRedisClient:
         return bool(self._control.persist(key))
 
     def scan_keys(self, pattern: str) -> list[str]:
-        return list(self._control.scan_iter(match=pattern))
+        return list(self._control.scan_iter(match=pattern, count=_SCAN_KEYS_COUNT))
 
     def expire_telemetry(self, key: str, ttl_sec: int) -> bool:
         return bool(self._telemetry.expire(key, max(0, int(ttl_sec))))
@@ -541,6 +567,11 @@ class SyncRedisClient:
 
     def sismember(self, key: str, member: str) -> bool:
         return bool(self._control.sismember(key, member))
+
+    def scan_set(self, key: str, cursor: int, count: int) -> tuple[int, list[str]]:
+        """Read one ``SSCAN`` step: the next cursor, 0 once done, and the members."""
+        next_cursor, members = _sync(self._control.sscan(key, cursor, count=count))
+        return int(next_cursor), list(members)
 
     def sadd(self, key: str, *members: str) -> int:
         if not members:
@@ -747,7 +778,12 @@ class AsyncRedisClient:
         return bool(await _awaitable(self._control.persist(key)))
 
     async def scan_keys(self, pattern: str) -> list[str]:
-        return [key async for key in self._control.scan_iter(match=pattern)]
+        return [
+            key
+            async for key in self._control.scan_iter(
+                match=pattern, count=_SCAN_KEYS_COUNT
+            )
+        ]
 
     async def expire_telemetry(self, key: str, ttl_sec: int) -> bool:
         return bool(await _awaitable(self._telemetry.expire(key, max(0, int(ttl_sec)))))
@@ -785,6 +821,14 @@ class AsyncRedisClient:
 
     async def sismember(self, key: str, member: str) -> bool:
         return bool(await _awaitable(self._control.sismember(key, member)))
+
+    async def scan_set(
+        self, key: str, cursor: int, count: int
+    ) -> tuple[int, list[str]]:
+        next_cursor, members = await _awaitable(
+            self._control.sscan(key, cursor, count=count)
+        )
+        return int(next_cursor), list(members)
 
     async def sadd(self, key: str, *members: str) -> int:
         if not members:

@@ -26,11 +26,18 @@ from server.orchestration.outcomes import (
     is_replayable,
     next_on_uncertain,
 )
-from server.registries.workflow import PersistedTask, WorkflowControl, WorkflowSched
+from server.registries.history import HistoryCensus
+from server.registries.workflow import (
+    PersistedTask,
+    WorkflowControl,
+    WorkflowRecord,
+    WorkflowSched,
+)
 from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
+from server.task.runtime.history_bootstrap import INDEX_COMPLETE
 from server.task.v2 import FrontendWorkflowSource, compile_bundle
 from server.task.v2.representations.operators import (
     BoundaryEventKind,
@@ -105,16 +112,36 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
     async def get_workflow_ids_async(self) -> set[str]:
         return set(self.workflow_task_ids)
 
+    # Nothing here is ever freed, so every workflow it holds is open.
+    async def history_index_state_async(self) -> str:
+        return INDEX_COMPLETE
+
+    async def open_workflow_ids_async(self) -> set[str]:
+        return set(self.workflow_task_ids)
+
+    async def history_seq_async(self) -> int:
+        return 0
+
+    async def history_counts_async(self) -> tuple[int, int]:
+        return 0, 0
+
+    async def history_census_async(self) -> HistoryCensus:
+        return HistoryCensus(
+            len(self.workflow_task_ids), len(self.workflow_task_ids), 0
+        )
+
     def get_workflow_record(self, workflow_id: str) -> Any:
         ids = self.workflow_task_ids.get(workflow_id)
         if ids is None:
             return None
         control = self.control.get(workflow_id)
-        return SimpleNamespace(
+        return WorkflowRecord(
+            workflow_id=workflow_id,
             task_ids=list(ids),
             submitted_at=self.submitted_at,
             control_open=control.open if control else False,
             control_failure=(control.failure or "") if control else "",
+            control_cancelled=control.cancelled if control else False,
         )
 
     async def get_workflow_record_async(self, workflow_id: str) -> Any:

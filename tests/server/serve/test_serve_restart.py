@@ -35,6 +35,7 @@ from tests.server.resident.test_serve_origination import (
 )
 from tests.server.resident.test_service import _build as _build_workflow_control
 from tests.server.resident.test_workflow_terminal_reconcile import _admit, _held
+from tests.server.runtime_helpers import never_closed
 from tests.server.task.test_v2_orchestration import FakeRegistry, _runtime
 
 _LOST = "serve request lost in a root restart"
@@ -43,7 +44,7 @@ _LOST = "serve request lost in a root restart"
 class _Runtime:
     """The restored runtime: the serve task still runs on its worker."""
 
-    async def rehydrate(self) -> None:
+    async def restart(self, *args: Any) -> None:
         return None
 
     def live_resident_task_ids(self) -> frozenset[str]:
@@ -102,7 +103,11 @@ def _start(runtime: Any, control: Any, snapshot: ResidentSnapshot, edge: GatedSe
     async def start() -> None:
         try:
             await rehydrate_root_state(
-                runtime, control, cast(Any, _SnapshotRegistry(snapshot)), edge
+                runtime,
+                control,
+                cast(Any, _SnapshotRegistry(snapshot)),
+                edge,
+                never_closed,
             )
         finally:
             control.shutdown()

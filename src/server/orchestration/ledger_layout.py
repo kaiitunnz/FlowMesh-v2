@@ -123,6 +123,11 @@ class LedgerChanges:
     """The count of whole-ledger rewrites owed up to the write, which its landing
     settles; 0 for a write of changes only."""
 
+    @property
+    def stores_nothing(self) -> bool:
+        """Whether the write leaves the stored ledger as it is."""
+        return not (self.fields or self.deleted or self.reset)
+
 
 @dataclass(frozen=True)
 class StoredLedger:

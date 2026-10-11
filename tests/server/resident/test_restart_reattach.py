@@ -276,10 +276,10 @@ def _observe_reattach(node: Node, relays_at_reattach: list[list[Any]]) -> None:
     rehydrate = node.runtime.rehydrate
     reattach = node.control.reattach_replicas
 
-    async def rehydrated() -> int:
+    async def rehydrated(workflow_ids: Any = None) -> int:
         directory = node.control.stores.directory
         restored = {replica.replica_id for replica in directory.all()}
-        rehydrated_count = await rehydrate()
+        rehydrated_count = await rehydrate(workflow_ids)
         await until(
             lambda: gate.parked
             or bool(node.delivery.relays)

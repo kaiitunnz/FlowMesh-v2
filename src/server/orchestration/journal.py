@@ -2,9 +2,9 @@
 
 The ledger's collections record each change they take in a ``LedgerJournal``, so a
 durable write carries only what changed since the last one. A mutable entity reports
-an assignment to the one collection slot that holds it, and keeps its container fields
-immutable so it can only change by assignment. An append-only history refuses any
-other change.
+each assignment that changes its value to the one collection slot that holds it, and
+keeps its container fields immutable so it can only change by assignment. An
+append-only history refuses any other change.
 """
 
 from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -55,9 +55,12 @@ class LedgerJournal:
                 del self.pending[key]
 
 
+_UNSET = object()
+
+
 class JournaledModel(BaseModel):
-    """A mutable ledger entity: each assignment marks the collection slot holding it,
-    and a container assigned to it is stored frozen."""
+    """A mutable ledger entity: each assignment that changes a value marks the
+    collection slot holding it, and a container assigned to it is stored frozen."""
 
     # The holding slot is a plain instance slot, not a pydantic private attribute: a
     # restored entity then carries no private-state dict, and the slot is no part of
@@ -71,7 +74,14 @@ class JournaledModel(BaseModel):
         object.__setattr__(self, "_slot", slot)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, frozen(value))
+        value = frozen(value)
+        # An entity's values never change in place, so an equal value of the same type
+        # is the stored value, and assigning it changes nothing to write. Only declared
+        # fields live in the instance dict, so any other name reaches pydantic.
+        stored = self.__dict__.get(name, _UNSET)
+        if type(stored) is type(value) and stored == value:
+            return
+        super().__setattr__(name, value)
         if (slot := self._held_at()) is not None:
             slot[0].touch(slot[1])
 

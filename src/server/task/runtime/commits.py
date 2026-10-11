@@ -3,7 +3,7 @@
 import logging
 import threading
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -234,6 +234,8 @@ class TransitionCommitter:
         self._making: set[str] = set()
         # Children materialized in memory whose records the ledger seam has not written.
         self._unwritten_children: dict[str, set[str]] = {}
+        # The control each v2 workflow's last landed write stored.
+        self._written_control: dict[str, WorkflowControl] = {}
         self.unacknowledged: dict[str, _Unacknowledged] = {}
         # How many acknowledging handlings have taken up a report of each task.
         self._reports: dict[str, int] = {}
@@ -286,6 +288,10 @@ class TransitionCommitter:
     def reporting(self, task_id: str) -> bool:
         """Whether an acknowledging caller is handling a report of the task."""
         return task_id in self._reports
+
+    def reported_tasks(self) -> Collection[str]:
+        """The tasks whose reports acknowledging callers are handling."""
+        return self._reports.keys()
 
     def end_reports_locked(self, acknowledged: bool) -> list[str]:
         """Release the reports this thread's handling took up, and when the caller
@@ -473,6 +479,7 @@ class TransitionCommitter:
                 by_status[membership(self._tasks[task_id])].append(task_id)
         records = self._records_locked(*ids)
         engine = self._engines.get(workflow_id)
+        control = _control(engine) if engine is not None else None
         self._workflow_registry.commit_transition(
             workflow_id,
             records=records,
@@ -482,8 +489,10 @@ class TransitionCommitter:
             failed=by_status[TaskStatus.FAILED],
             cancelled=by_status[TaskStatus.CANCELLED],
             sched=self._sched_locked(workflow_id) if sched else None,
-            control=_control(engine) if engine is not None else None,
+            control=control,
         )
+        if control is not None:
+            self._written_control[workflow_id] = control
         self._after_records_locked(workflow_id, records, by_status)
 
     def _after_records_locked(
@@ -523,6 +532,7 @@ class TransitionCommitter:
         for persisted in records:
             by_status[membership(persisted.record)].append(persisted.record.task_id)
         changes = engine.ledger_changes()
+        control = _control(engine)
         self._workflow_registry.commit_dynamic_tasks(
             workflow_id,
             records,
@@ -533,8 +543,9 @@ class TransitionCommitter:
             failed=by_status[TaskStatus.FAILED],
             cancelled=by_status[TaskStatus.CANCELLED],
             sched=self._sched_locked(workflow_id) if children else None,
-            control=_control(engine),
+            control=control,
         )
+        self._written_control[workflow_id] = control
         engine.ledger_written(changes)
         self._after_records_locked(workflow_id, records, by_status)
         if unwritten := self._unwritten_children.get(workflow_id):
@@ -552,7 +563,12 @@ class TransitionCommitter:
             return self._commit_children_raw(workflow_id, retire)
         with self._control.ledger_snapshot(workflow_id):
             changes = engine.ledger_changes()
-            self._workflow_registry.save_ledger(workflow_id, changes, _control(engine))
+            control = _control(engine)
+            if not changes.stores_nothing or (
+                self._written_control.get(workflow_id) != control
+            ):
+                self._workflow_registry.save_ledger(workflow_id, changes, control)
+                self._written_control[workflow_id] = control
         engine.ledger_written(changes)
         return []
 
@@ -607,6 +623,23 @@ class TransitionCommitter:
         elif workflow_id not in self.debt:
             return
         self._write_locked(workflow_id, _Ledger())
+
+    def has_unwritten_children(self, workflow_id: str) -> bool:
+        return workflow_id in self._unwritten_children
+
+    def forget_locked(self, workflow_id: str) -> bool:
+        """Drop what the committer keeps for a freed workflow; returns whether a
+        write of it was still owed."""
+        owed = self.debt.pop(workflow_id, None) is not None
+        self.faulted.discard(workflow_id)
+        self._unwritten_children.pop(workflow_id, None)
+        self._written_control.pop(workflow_id, None)
+        return owed
+
+    def stored_control_locked(self, workflow_id: str, control: WorkflowControl) -> None:
+        """Note the control a restored workflow's store holds, so a ledger write that
+        changes neither its ledger nor its control writes nothing."""
+        self._written_control[workflow_id] = control
 
     def note_child_locked(self, workflow_id: str, child_task_id: str) -> None:
         """Mark a child materialized in memory, so the ledger write that carries its

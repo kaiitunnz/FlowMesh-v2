@@ -97,4 +97,11 @@ class StoreRedriveScheduler(WorkflowRetryScheduler):
         self._recheck_streak.clear()
 
 
-__all__ = ["StoreRedriveScheduler"]
+def manual_redrive(
+    fire: Callable[[str], None], logger: logging.Logger
+) -> StoreRedriveScheduler:
+    """A re-drive scheduler its owner drives itself, which starts no thread."""
+    return StoreRedriveScheduler(fire, logger, run_thread=False)
+
+
+__all__ = ["StoreRedriveScheduler", "manual_redrive"]

@@ -6,6 +6,7 @@ import inspect
 import os
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
+from functools import partial
 from typing import cast
 
 import uvicorn
@@ -92,6 +93,7 @@ from .startup import (
     start_relay_bridge_pump,
 )
 from .supervisor import WorkerSupervisor
+from .task.finalizer import close_restored
 from .task.results import ResultReader
 from .task.runtime import TaskRuntime
 from .task.v2.policy import build_policy_surface
@@ -178,6 +180,7 @@ PORT_FORWARD_SERVICE = None
 SSH_RELAY: SshRelayOrigin | None = None
 WATCHDOG = None
 EVENT_MONITOR = None
+WORKFLOW_SPAN_EMITTER = None
 LOG_ARCHIVER = None
 AGENT_MODEL_GATEWAY = None
 FABRIC_TOOL_BROKER = None
@@ -439,6 +442,7 @@ if IS_ROOT_NODE:
             logger=logger,
         )
 
+    WORKFLOW_SPAN_EMITTER = build_workflow_span_emitter(SERVER_TRACER, config.telemetry)
     EVENT_MONITOR = EventMonitor(
         redis_client=REDIS_CLIENT.sync,
         logger=logger,
@@ -454,9 +458,7 @@ if IS_ROOT_NODE:
         port_forward=PORT_FORWARD_SERVICE,
         log_stream_ttl_sec=config.log_stream.ttl_sec,
         server_base_url=config.identity.base_url,
-        workflow_span_emitter=build_workflow_span_emitter(
-            SERVER_TRACER, config.telemetry
-        ),
+        workflow_span_emitter=WORKFLOW_SPAN_EMITTER,
         on_node_removed=(
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None
         ),
@@ -486,6 +488,15 @@ if IS_ROOT_NODE:
         flush_interval_sec=config.log_stream.archive_flush_interval_sec,
         flush_max_entries=config.log_stream.archive_flush_max_entries,
     )
+
+    RUNTIME.settled_history.set_on_freed(METRICS_RECORDER.forget_tasks)
+    if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
+        RUNTIME.settled_history.set_claims_settled(
+            partial(
+                RESIDENT_CONTROL.invocations_settled,
+                timeout_sec=5.0,
+            )
+        )
 
 # --------------------------------------------------------------------------- # Metrics
 # export hook
@@ -517,11 +528,24 @@ STOP_EVENT = threading.Event()
 BACKGROUND_THREADS: list[threading.Thread] = []
 
 
+def _close_restored(runtime: TaskRuntime, workflow_id: str) -> bool:
+    assert WORKFLOW_SPAN_EMITTER is not None
+    return close_restored(
+        REDIS_CLIENT.sync,
+        runtime,
+        logger,
+        WORKFLOW_SPAN_EMITTER,
+        config.log_stream.ttl_sec,
+        workflow_id,
+    )
+
+
 def _start_root_threads() -> None:
     """Start orchestrator background threads. Only called on root nodes."""
     assert DISPATCHER is not None
     assert LOG_ARCHIVER is not None
     assert WATCHDOG is not None
+    assert RUNTIME is not None
 
     dispatcher = DISPATCHER
     dispatch_thread = threading.Thread(
@@ -537,6 +561,15 @@ def _start_root_threads() -> None:
     )
     log_archiver_thread.start()
     BACKGROUND_THREADS.append(log_archiver_thread)
+
+    settled_history_thread = threading.Thread(
+        target=RUNTIME.settled_history.run,
+        args=(STOP_EVENT,),
+        name="settled-history",
+        daemon=True,
+    )
+    settled_history_thread.start()
+    BACKGROUND_THREADS.append(settled_history_thread)
 
     watchdog_thread = WATCHDOG.start(STOP_EVENT)
     if watchdog_thread and watchdog_thread not in BACKGROUND_THREADS:
@@ -664,7 +697,12 @@ async def _lifespan(_: FastAPI):
                 if indexed:
                     logger.info("Indexed %d workflow(s) by submission", indexed)
             await rehydrate_root_state(
-                RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY, GATED_SERVE
+                RUNTIME,
+                RESIDENT_CONTROL,
+                RESIDENT_REGISTRY,
+                GATED_SERVE,
+                _close_restored,
+                LOG_ARCHIVER.archived if LOG_ARCHIVER is not None else None,
             )
             if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
                 edge_ids = (SERVE_EDGE_STREAM_ID,) if GATED_SERVE is not None else ()

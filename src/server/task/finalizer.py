@@ -9,6 +9,8 @@ publishing an event reaches here through the runtime's own notification.
 import json
 import logging
 import threading
+from collections.abc import Callable
+from enum import StrEnum
 
 from ..clients.redis import (
     SyncRedisClient,
@@ -22,6 +24,23 @@ from ..schemas.logs import LogEvent
 from ..utils.time import now_iso, ts_to_iso
 from .models import WorkflowSettlement
 from .runtime import TaskRuntime
+from .workflow_retry import WorkflowRetryScheduler, manual_retry
+
+
+class CloseOutcome(StrEnum):
+    """What one request to close a workflow found."""
+
+    CLOSED = "closed"
+    ALREADY_CLOSED = "already_closed"
+    NOT_COMPLETE = "not_complete"
+    # Its completion could not be read or its log stream not sealed; it is retried.
+    FAILED = "failed"
+
+
+def _close_retry(
+    fire: Callable[[str], None], logger: logging.Logger
+) -> WorkflowRetryScheduler:
+    return WorkflowRetryScheduler(fire, logger, thread_name="workflow-close-retry")
 
 
 class WorkflowFinalizer:
@@ -39,6 +58,9 @@ class WorkflowFinalizer:
         logger: logging.Logger,
         workflow_span_emitter: WorkflowSpanEmitter,
         log_stream_ttl_sec: int = 0,
+        retry: Callable[
+            [Callable[[str], None], logging.Logger], WorkflowRetryScheduler
+        ] = _close_retry,
     ) -> None:
         self._redis_client = redis_client
         self._runtime = runtime
@@ -48,6 +70,7 @@ class WorkflowFinalizer:
         self._finalize_lock = threading.Lock()
         self._requests: set[str] = set()
         self._requests_cv = threading.Condition()
+        self._retry = retry(self.request, logger)
 
     def request(self, workflow_id: str) -> None:
         """Ask for a workflow to be closed when it is complete.
@@ -67,6 +90,10 @@ class WorkflowFinalizer:
         while not stop_event.is_set():
             self.drain(poll_interval)
 
+    def stop(self) -> None:
+        """Stop retrying the closes that failed."""
+        self._retry.stop()
+
     def drain(self, timeout: float = 0.0) -> None:
         """Close every workflow requested so far.
 
@@ -83,24 +110,42 @@ class WorkflowFinalizer:
             pending, self._requests = self._requests, set()
             return pending
 
-    def close(self, workflow_id: str) -> None:
-        """Close the workflow if it is complete; otherwise do nothing."""
+    def close(self, workflow_id: str) -> CloseOutcome:
+        """Close the workflow if it is complete and unclosed.
+
+        A closure, made here or found made, is reported to the runtime; a close that
+        could not be made is retried with backoff.
+        """
         if not workflow_id:
-            return
+            return CloseOutcome.NOT_COMPLETE
         with self._finalize_lock:
             try:
-                settlement = self._settlement_if_complete(workflow_id)
+                outcome = self._close(workflow_id)
             except Exception as exc:
                 self._logger.debug(
                     "Failed to evaluate workflow completion for %s: %s",
                     workflow_id,
                     exc,
                 )
-                return
-            if settlement is None:
-                return
-            self._emit_workflow_span(workflow_id, settlement)
-            self._close_log_stream(workflow_id)
+                outcome = CloseOutcome.FAILED
+        match outcome:
+            case CloseOutcome.CLOSED | CloseOutcome.ALREADY_CLOSED:
+                self._retry.settle(workflow_id)
+                self._runtime.workflow_closed(workflow_id)
+            case CloseOutcome.FAILED:
+                self._retry.schedule(workflow_id)
+        return outcome
+
+    def _close(self, workflow_id: str) -> CloseOutcome:
+        if self._redis_client.exists(workflow_log_closed_key(workflow_id)):
+            return CloseOutcome.ALREADY_CLOSED
+        settlement = self._settlement_if_complete(workflow_id)
+        if settlement is None:
+            return CloseOutcome.NOT_COMPLETE
+        self._emit_workflow_span(workflow_id, settlement)
+        if not self._close_log_stream(workflow_id):
+            return CloseOutcome.FAILED
+        return CloseOutcome.CLOSED
 
     def close_task_workflow(self, task_id: str) -> None:
         """Close the workflow owning a task that just settled."""
@@ -109,9 +154,7 @@ class WorkflowFinalizer:
             self.close(record.workflow_id)
 
     def _settlement_if_complete(self, workflow_id: str) -> WorkflowSettlement | None:
-        """The workflow's settlement when it is complete and unclosed, else None."""
-        if self._redis_client.exists(workflow_log_closed_key(workflow_id)):
-            return None
+        """The workflow's settlement when it is complete, else None."""
         if self._redis_client.set_members(workflow_tasks_key(workflow_id)):
             return None
         if not self._redis_client.exists(workflow_key(workflow_id)):
@@ -154,7 +197,9 @@ class WorkflowFinalizer:
                 "Failed to emit the workflow span for %s: %s", workflow_id, exc
             )
 
-    def _close_log_stream(self, workflow_id: str) -> None:
+    def _close_log_stream(self, workflow_id: str) -> bool:
+        """Seal the workflow's log stream and mark it closed; returns whether both
+        were written."""
         event = LogEvent(
             ts=now_iso(),
             workflow_id=workflow_id,
@@ -180,6 +225,34 @@ class WorkflowFinalizer:
                 )
                 self._redis_client.expire(closed_key, self._log_stream_ttl_sec)
         except Exception as exc:
-            self._logger.debug(
-                "Failed to append log sentinel for workflow %s: %s", workflow_id, exc
+            self._logger.warning(
+                "Failed to close the log stream of workflow %s; retrying: %s",
+                workflow_id,
+                exc,
             )
+            return False
+        return True
+
+
+def close_restored(
+    redis_client: SyncRedisClient,
+    runtime: TaskRuntime,
+    logger: logging.Logger,
+    workflow_span_emitter: WorkflowSpanEmitter,
+    log_stream_ttl_sec: int,
+    workflow_id: str,
+) -> bool:
+    """Close a settled workflow a restart restored, or find it closed; returns
+    whether it is closed. A close that fails is left to the caller."""
+    finalizer = WorkflowFinalizer(
+        redis_client,
+        runtime,
+        logger,
+        workflow_span_emitter,
+        log_stream_ttl_sec,
+        retry=manual_retry,
+    )
+    return finalizer.close(workflow_id) in (
+        CloseOutcome.CLOSED,
+        CloseOutcome.ALREADY_CLOSED,
+    )

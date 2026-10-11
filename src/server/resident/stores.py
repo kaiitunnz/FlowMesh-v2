@@ -157,9 +157,11 @@ class ClaimStore:
 
     def __init__(self) -> None:
         self._claims: dict[str, ServiceClaim] = {}
+        self._by_invocation: dict[str, dict[str, None]] = {}
 
     def add(self, claim: ServiceClaim) -> None:
         self._claims[claim.claim_id] = claim
+        self._by_invocation.setdefault(claim.invocation_id, {})[claim.claim_id] = None
 
     def get(self, claim_id: str) -> ServiceClaim | None:
         return self._claims.get(claim_id)
@@ -168,7 +170,10 @@ class ClaimStore:
         return list(self._claims.values())
 
     def by_invocation(self, invocation_id: str) -> list[ServiceClaim]:
-        return [c for c in self._claims.values() if c.invocation_id == invocation_id]
+        return [
+            self._claims[claim_id]
+            for claim_id in self._by_invocation.get(invocation_id, ())
+        ]
 
     def credit_bearing_for_replica(self, replica_id: str) -> list[ServiceClaim]:
         return [

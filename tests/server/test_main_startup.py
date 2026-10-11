@@ -5,6 +5,7 @@ import asyncio
 from typing import Any
 
 from server.startup import rehydrate_root_state
+from tests.server.runtime_helpers import never_closed
 
 
 class _Recorder:
@@ -13,8 +14,8 @@ class _Recorder:
 
 
 class _Runtime(_Recorder):
-    async def rehydrate(self) -> None:
-        self.calls.append("runtime.rehydrate")
+    async def restart(self, *args: Any) -> None:
+        self.calls.append("runtime.restart")
 
     def release_ended_reservations(self) -> None:
         self.calls.append("runtime.release")
@@ -45,6 +46,9 @@ class _Control(_Recorder):
     def rehydrate(self, snapshot: Any) -> None:
         self.calls.append("control.rehydrate")
 
+    def claims_terminal(self, invocation_ids: Any) -> bool:
+        return True
+
     def reattach_replicas(self, live_serve_tasks: Any) -> None:
         self.calls.append("control.reattach")
 
@@ -64,7 +68,9 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
     calls: list[str] = []
     runtime, control, registry = _Runtime(calls), _Control(calls), _Registry(calls)
     asyncio.run(
-        rehydrate_root_state(runtime, control, registry)  # type: ignore[arg-type]
+        rehydrate_root_state(
+            runtime, control, registry, None, never_closed  # type: ignore[arg-type]
+        )
     )
     # The claim store is bound and loaded before the runtime
     # re-drives suspended boundaries (a resident boundary would otherwise terminalize
@@ -75,7 +81,7 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
-        "runtime.rehydrate",
+        "runtime.restart",
         "control.reattach",
         "runtime.release",
         "control.reconcile",
@@ -88,7 +94,9 @@ def test_root_startup_settles_serve_requests_before_admission_opens() -> None:
     runtime, control, registry = _Runtime(calls), _Control(calls), _Registry(calls)
     gated_serve = _GatedServe(calls)
     asyncio.run(
-        rehydrate_root_state(runtime, control, registry, gated_serve)  # type: ignore[arg-type]
+        rehydrate_root_state(
+            runtime, control, registry, gated_serve, never_closed  # type: ignore[arg-type]
+        )
     )
     # The serve requests the restart ended settle once the runtime has restored the
     # serve tasks whose workers reap them, and before re-attaching replicas opens
@@ -97,7 +105,7 @@ def test_root_startup_settles_serve_requests_before_admission_opens() -> None:
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
-        "runtime.rehydrate",
+        "runtime.restart",
         "serve.reconcile",
         "control.reattach",
         "runtime.release",

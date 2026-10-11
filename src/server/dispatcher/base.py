@@ -257,7 +257,7 @@ class Dispatcher:
         ``no_worker_grace_sec``.
         """
         self._runtime.release_merge(task_id)
-        record.last_error = message
+        self._runtime.note_dispatch_error(task_id, message)
         now = time.time()
         if record.no_dispatch_since is None:
             record.no_dispatch_since = now
@@ -1139,28 +1139,29 @@ class Dispatcher:
         failure_payload = payload.copy() if isinstance(payload, dict) else {}
         if error_message and "error" not in failure_payload:
             failure_payload["error"] = error_message
-        impacted, _ = self._runtime.mark_failed(
-            task_id,
-            worker_id,
-            failure_payload,
-            now_iso(),
-            error=error_message,
-        )
-        self._emit_task_event(
-            "TASK_FAILED",
-            task_id,
-            worker_id=worker_id,
-            payload=failure_payload,
-            error=error_message,
-        )
-        for dep_id, reason in impacted:
-            dependent_payload = {"dependency_failure": task_id, "error": reason}
+        with self._runtime.event_tail(task_id):
+            impacted, _ = self._runtime.mark_failed(
+                task_id,
+                worker_id,
+                failure_payload,
+                now_iso(),
+                error=error_message,
+            )
             self._emit_task_event(
                 "TASK_FAILED",
-                dep_id,
-                payload=dependent_payload,
-                error=reason,
+                task_id,
+                worker_id=worker_id,
+                payload=failure_payload,
+                error=error_message,
             )
+            for dep_id, reason in impacted:
+                dependent_payload = {"dependency_failure": task_id, "error": reason}
+                self._emit_task_event(
+                    "TASK_FAILED",
+                    dep_id,
+                    payload=dependent_payload,
+                    error=reason,
+                )
 
     def _emit_task_event(
         self,

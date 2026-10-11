@@ -280,6 +280,7 @@ class EventMonitor:
         for thread in self._threads:
             thread.join(timeout=thread_join_timeout)
         self._threads = None
+        self._finalizer.stop()
 
         with self._pending_coros_lock:
             pending = list(self._pending_coros)
@@ -373,7 +374,12 @@ class EventMonitor:
 
             if isinstance(event, TaskEvent):
                 try:
-                    with self._runtime.acknowledging():
+                    # The acknowledgement delivers what the handling owes, which can
+                    # settle the workflow, so the tail outlasts it.
+                    with (
+                        self._runtime.event_tail(event.task_id),
+                        self._runtime.acknowledging(),
+                    ):
                         self.handle_task_event(event)
                 except REDIS_CONN_ERRORS:
                     # Propagate so the loop backs off and replays from this cursor.
@@ -497,6 +503,10 @@ class EventMonitor:
         }
 
     def handle_task_event(self, event: TaskEvent) -> None:
+        with self._runtime.event_tail(event.task_id):
+            self._handle_task_event(event)
+
+    def _handle_task_event(self, event: TaskEvent) -> None:
         worker_id = event.worker_id
         if not worker_id:
             self._logger.info(
@@ -702,8 +712,9 @@ class EventMonitor:
     ) -> None:
         """Apply the side effects of v2 tasks resolved as their worker's loss, for
         ``reason``."""
-        for loss in losses:
-            self._record_loss(worker_id, loss, None, reason=reason)
+        with self._runtime.event_tail(*(loss.task_id for loss in losses)):
+            for loss in losses:
+                self._record_loss(worker_id, loss, None, reason=reason)
 
     def _record_loss(
         self,
@@ -774,6 +785,12 @@ class EventMonitor:
         match effect:
             case EventEffect.APPLIED:
                 return False
+            case EventEffect.STALE if self._runtime.task_freed(event.task_id):
+                self._logger.debug(
+                    "Ignoring %s for task %s, whose workflow is freed",
+                    event.type,
+                    event.task_id,
+                )
             case EventEffect.STALE:
                 self._logger.info(
                     "Ignoring stale %s for task %s from worker %s (dispatch %s)",
@@ -905,7 +922,8 @@ class EventMonitor:
                     self._revoke_orphan_run(worker_id, event)
             case "MEDIATED_OP_OUTCOME":
                 self._runtime.settle_mediated_operation(
-                    MediatedOperationOutcome.model_validate(event.payload["outcome"])
+                    MediatedOperationOutcome.model_validate(event.payload["outcome"]),
+                    worker_id or None,
                 )
             case "MEDIATED_OP_PROPOSE":
                 self._runtime.authorize_model_turn(
@@ -1087,36 +1105,37 @@ class EventMonitor:
     def _resolve_disowned_dispatch(
         self, worker_id: str, task_id: str, dispatch_id: str, ttl_sec: float
     ) -> None:
-        outcome = self._runtime.resolve_disowned_dispatch(
-            task_id, dispatch_id, worker_id, self._watchdog.death_bound_sec(ttl_sec)
-        )
-        if outcome is None:
-            return
-        self._logger.warning(
-            "Worker %s kept reporting it does not hold dispatch %s of task %s; "
-            "resolving it as lost",
-            worker_id,
-            dispatch_id,
-            task_id,
-        )
-        if (end := _GIVEN_UP_ENDS.get(outcome.effect)) is not None:
-            self._record_loss(
+        with self._runtime.event_tail(task_id):
+            outcome = self._runtime.resolve_disowned_dispatch(
+                task_id, dispatch_id, worker_id, self._watchdog.death_bound_sec(ttl_sec)
+            )
+            if outcome is None:
+                return
+            self._logger.warning(
+                "Worker %s kept reporting it does not hold dispatch %s of task %s; "
+                "resolving it as lost",
                 worker_id,
-                LossOutcome(task_id, end, outcome.impacted, outcome.spent),
                 dispatch_id,
-                reason="worker_disowned_dispatch",
+                task_id,
             )
-        elif outcome.status == TaskStatus.CANCELLED:
-            self._record_cancellation(
-                TaskEvent(
-                    type="TASK_CANCELLED",
-                    task_id=task_id,
-                    worker_id=worker_id,
-                    dispatch_id=dispatch_id,
-                    ts=now_iso(),
-                ),
-                [],
-            )
+            if (end := _GIVEN_UP_ENDS.get(outcome.effect)) is not None:
+                self._record_loss(
+                    worker_id,
+                    LossOutcome(task_id, end, outcome.impacted, outcome.spent),
+                    dispatch_id,
+                    reason="worker_disowned_dispatch",
+                )
+            elif outcome.status == TaskStatus.CANCELLED:
+                self._record_cancellation(
+                    TaskEvent(
+                        type="TASK_CANCELLED",
+                        task_id=task_id,
+                        worker_id=worker_id,
+                        dispatch_id=dispatch_id,
+                        ts=now_iso(),
+                    ),
+                    [],
+                )
 
     def _return_lost_tasks(
         self, worker_id: str, graceful: bool, node_id: str | None = None
@@ -1129,7 +1148,7 @@ class EventMonitor:
         requeued: list[str] = []
         ts = now_iso()
         # What the recovery and each return owe is delivered once all have committed.
-        with self._runtime.transition():
+        with self._runtime.event_tail(), self._runtime.transition():
             recovery = self._runtime.recover_tasks_for_worker(
                 worker_id, spend_attempt=not graceful, node_id=node_id
             )
@@ -1391,9 +1410,13 @@ class EventMonitor:
             return
         if self._loop is None:
             return
+        # The rows are read here, on the thread whose report settled the tasks, while
+        # their workflow is still held in memory.
+        if not (rows := self._usage_rows(usages)):
+            return
         try:
             fut = asyncio.run_coroutine_threadsafe(
-                self._emit_usage_async(usages), self._loop
+                self._emit_usage_async(rows), self._loop
             )
         except RuntimeError as exc:
             self._logger.debug("Failed to schedule usage delivery: %s", exc)
@@ -1484,9 +1507,7 @@ class EventMonitor:
             return
         self._track_pending(fut)
 
-    async def _emit_usage_async(self, usages: list[tuple[str, TaskUsage]]) -> None:
-        if not usages or not USAGE_SINKS:
-            return
+    def _usage_rows(self, usages: list[tuple[str, TaskUsage]]) -> list[UsageRow]:
         rows: list[UsageRow] = []
         for task_id, usage in usages:
             record = self._runtime.get_record(task_id)
@@ -1518,8 +1539,9 @@ class EventMonitor:
                     task_status=str(usage.status),
                 )
             )
-        if not rows:
-            return
+        return rows
+
+    async def _emit_usage_async(self, rows: list[UsageRow]) -> None:
         for sink in USAGE_SINKS:
             try:
                 await sink.emit(rows, self._logger)

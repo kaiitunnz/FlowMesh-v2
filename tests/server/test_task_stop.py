@@ -27,7 +27,7 @@ def _stop(task_type: TaskType) -> MagicMock:
         dispatch_id="dsp-1",
     )
     runtime = MagicMock()
-    runtime.get_record.return_value = record
+    runtime.task_record.return_value = record
     workers = MagicMock()
     workers.get_worker_async = AsyncMock(return_value=SimpleNamespace(id="wkr-1"))
     workers.publish_stop_async = AsyncMock()

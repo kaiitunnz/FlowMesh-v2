@@ -74,7 +74,7 @@ async def ssh_proxy(
         await websocket.close(code=4403, reason="proxy disabled")
         return
 
-    record = runtime.get_record(task_id)
+    record = await asyncio.to_thread(runtime.task_record, task_id)
     if record is None:
         await websocket.close(code=4404, reason="task not found")
         return

@@ -180,6 +180,10 @@ async def submit_workflow(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to register workflow: {exc}",
         ) from exc
+    # The tasks as they stand at submission, before their workflow can be freed.
+    infos = await asyncio.to_thread(
+        runtime.describe_resident, [entry.task_id for entry in entries]
+    )
 
     await register_resource(
         principal,
@@ -199,9 +203,8 @@ async def submit_workflow(
 
     results: list[WorkflowSubmitTaskEntry] = []
 
-    for entry in entries:
+    for entry, info in zip(entries, infos, strict=True):
         task_id = entry.task_id
-        info = runtime.describe_task(task_id)
         if not info:
             continue
         task_type = info.task.spec.taskType

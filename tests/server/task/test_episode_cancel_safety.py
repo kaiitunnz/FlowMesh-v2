@@ -9,7 +9,9 @@ and the per-step usage row it carries is tagged with the status the task is actu
 import asyncio
 from typing import Any, cast
 
-from server.orchestration import WorkItemStatus
+import pytest
+
+from server.orchestration import InvocationState, WorkItemStatus
 from server.orchestration.tool_dispatch import (
     FacadeCallMember,
     FacadeCompletionMode,
@@ -19,6 +21,7 @@ from server.task.models import DispatchEnd, PublishGate, TaskStatus
 from shared.harness import BoundaryEventKind, HarnessCapsule, HarnessResult
 from shared.private_state import OwnerFence
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.runtime_helpers import assert_reclaimable
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _register,
@@ -159,6 +162,56 @@ def test_cancelling_an_episode_suspended_on_a_boundary_settles_it() -> None:
         # A boundary outcome arriving afterwards settles nothing and revives nothing.
         assert runtime.settle_episode_invocation(writer, "m0", "late") is False
         assert runtime._tasks[writer].status == TaskStatus.CANCELLED
+        assert_reclaimable(runtime, workflow_id)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "state", [InvocationState.ACKNOWLEDGED, InvocationState.UNCERTAIN]
+)
+def test_a_cancelled_episode_stays_resident_while_its_boundary_is_in_flight(
+    state: InvocationState,
+) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="m0",
+                    interface="model",
+                    payload="draft",
+                ),
+                ScriptedStep(op="complete", value_from="m0"),
+            ],
+            "v1",
+        )
+        result = _run_step(runtime, adapter, writer)
+        runtime.mark_succeeded(
+            writer, "wkr-1", {"agent_episode": result.model_dump(mode="json")}, _TS
+        )
+        runtime.cancel_workflow(workflow_id)
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        ((_, invocation_id),) = engine._boundaries.unsettled_invocation_boundaries()
+        settled = engine._ledger.invocations[invocation_id]
+        assert_reclaimable(runtime, workflow_id)
+
+        # Its effect is still in flight, as a resident request whose delivery is
+        # unknown is: nothing may free the workflow until the invocation ends.
+        engine._ledger.invocations[invocation_id] = settled.model_copy(
+            update={"state": state}
+        )
+        with runtime._lock:
+            assert runtime._reclaim_check_locked(workflow_id) is None
+
+        engine._ledger.invocations[invocation_id] = settled
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
 
@@ -283,6 +336,7 @@ def test_a_return_settles_a_cancelling_episode() -> None:
         assert end is DispatchEnd.CANCELLED
         assert runtime._tasks[writer].status == TaskStatus.CANCELLED
         assert writer not in runtime._ready.ready_index
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
 
@@ -320,6 +374,7 @@ def test_a_completion_racing_a_cancel_settles_cancelled() -> None:
         wi = engine.work_item(writer)
         assert wi is not None and wi.status is WorkItemStatus.CANCELLED
         assert registry.remaining_of(workflow_id) == set()
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
 
@@ -345,6 +400,7 @@ def test_a_failure_racing_a_cancel_settles_cancelled() -> None:
         assert impacted == []
         assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
         assert registry.remaining_of(workflow_id) == set()
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())
 
@@ -397,5 +453,6 @@ def test_a_completion_with_a_facade_group_racing_a_cancel_settles_cancelled() ->
         assert record.pending_facade_group is None
         assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
         assert registry.remaining_of(workflow_id) == set()
+        assert_reclaimable(runtime, workflow_id)
 
     asyncio.run(run())

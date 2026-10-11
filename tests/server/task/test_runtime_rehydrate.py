@@ -12,17 +12,20 @@ from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
 from server.registries.workflow import (
     PersistedTask,
+    WorkflowRecord,
     WorkflowSched,
     load_task_state,
     task_sources,
 )
 from server.task.models import PublishGate, TaskStatus
 from server.task.runtime import TaskRuntime
+from server.task.runtime.task_table import TaskTable
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.runtime_helpers import manual_durability_retry
 from tests.server.stored_state import StoredLedgers, StoredTaskStates
+from tests.server.task.test_settled_history import CHAIN
 from tests.support.waiting import pop_ready
 
 
@@ -88,9 +91,17 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
     async def get_workflow_ids_async(self) -> set[str]:
         return self.get_workflow_ids()
 
+    # Nothing here is ever freed, so every workflow it holds is open.
+    async def open_workflow_ids_async(self) -> set[str]:
+        return self.get_workflow_ids()
+
     def get_workflow_record(self, workflow_id: str) -> Any:
         ids = self.workflow_task_ids.get(workflow_id)
-        return SimpleNamespace(task_ids=list(ids)) if ids is not None else None
+        return (
+            WorkflowRecord(workflow_id=workflow_id, task_ids=list(ids))
+            if ids is not None
+            else None
+        )
 
     async def get_workflow_record_async(self, workflow_id: str) -> Any:
         return self.get_workflow_record(workflow_id)
@@ -880,3 +891,77 @@ async def test_rehydrate_keeps_a_requeued_serve_tasks_first_start() -> None:
     assert restored_record.status == TaskStatus.PENDING
     assert restored_record.started_ts is None
     assert restored_record.first_started_ts == first_started
+
+
+def _succeed_all(runtime: TaskRuntime, ids: dict[str, str]) -> None:
+    for name in ("a", "b", "c"):
+        record_dispatch(runtime, ids[name], "wkr-1")
+        runtime.mark_succeeded(ids[name], "wkr-1", {}, "2026-06-01T00:00:00Z")
+
+
+def _fail_first(runtime: TaskRuntime, ids: dict[str, str]) -> None:
+    record_dispatch(runtime, ids["a"], "wkr-1")
+    runtime.mark_failed(ids["a"], "wkr-1", {}, "2026-06-01T00:00:00Z")
+
+
+def _cancel(runtime: TaskRuntime, ids: dict[str, str]) -> None:
+    record = runtime.get_record(ids["a"])
+    assert record is not None
+    runtime.cancel_workflow(record.workflow_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("settle", "status"),
+    [
+        (_succeed_all, TaskStatus.DONE),
+        (_fail_first, TaskStatus.FAILED),
+        (_cancel, TaskStatus.CANCELLED),
+    ],
+)
+async def test_a_restart_describes_settled_v1_tasks_as_the_server_that_ran_them(
+    settle: Callable[[TaskRuntime, dict[str, str]], None], status: TaskStatus
+) -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    _, ids = await _register(runtime, CHAIN)
+    settle(runtime, ids)
+    live = {name: runtime.describe_task(task_id) for name, task_id in ids.items()}
+    assert {info.status for info in live.values() if info} == {status}
+
+    restored = _runtime(registry)
+    assert await restored.rehydrate() == 1
+
+    assert {
+        name: restored.describe_task(task_id) for name, task_id in ids.items()
+    } == live
+
+
+async def _whole_table_walks_in_rehydrate(
+    workflows: int, monkeypatch: pytest.MonkeyPatch
+) -> int:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    for _ in range(workflows):
+        await _register(runtime, GRAPH)
+    walks = 0
+    values = TaskTable.values
+
+    def counted(self: TaskTable) -> Any:
+        nonlocal walks
+        walks += 1
+        return values(self)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(TaskTable, "values", counted)
+        assert await _runtime(registry).rehydrate() == workflows
+    return walks
+
+
+@pytest.mark.anyio
+async def test_rehydrate_walks_the_whole_task_table_a_fixed_number_of_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert await _whole_table_walks_in_rehydrate(
+        2, monkeypatch
+    ) == await _whole_table_walks_in_rehydrate(10, monkeypatch)

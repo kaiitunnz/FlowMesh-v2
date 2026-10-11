@@ -97,7 +97,7 @@ async def list_outputs(
 ) -> WorkflowOutputPage:
     after_bound, before_bound = page_bounds(after, before, decode_member_cursor)
     await _authorize(workflow_id, principal, logger)
-    outputs = runtime.published_outputs(workflow_id, output)
+    outputs = await asyncio.to_thread(runtime.published_outputs, workflow_id, output)
     if outputs is None:
         raise _no_outputs(workflow_id)
     members = [m for m in outputs.members if scope is None or m.scope_id == scope]
@@ -135,7 +135,9 @@ async def get_output(
     logger: logging.Logger = Depends(get_logger),
 ) -> WorkflowOutputValue:
     await _authorize(workflow_id, principal, logger)
-    found = runtime.published_output(workflow_id, output_name, scope, key, sequence)
+    found = await asyncio.to_thread(
+        runtime.published_output, workflow_id, output_name, scope, key, sequence
+    )
     if found is None:
         raise _no_outputs(workflow_id)
     if (declaration := found.declaration) is None:

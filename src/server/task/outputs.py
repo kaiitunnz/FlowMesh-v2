@@ -12,6 +12,7 @@ from typing import Any
 from ..orchestration import OrchestrationEngine
 from ..orchestration.state import ResultPublication, ResultSlot
 from ..utils.cursors import InvalidCursor, decode_cursor, encode_cursor, page_slice
+from .history import OutputHistory, OutputsHistory
 from .v2.representations.results import CardinalityKind, ResultDeclaration
 
 
@@ -25,6 +26,8 @@ class OutputMember:
     key: str | None
     sequence: int | None
     publication: ResultPublication | None
+    # A freed workflow's member, which its value reads through.
+    stored: OutputHistory | None = None
 
     @property
     def keyed(self) -> bool:
@@ -82,6 +85,29 @@ def published_member(
         return None, None
     slot = engine.output_slot(decl.output_id, scope_id, key, sequence)
     return decl, _member(engine, name, decl, slot) if slot is not None else None
+
+
+def stored_members(outputs: OutputsHistory) -> list[OutputMember]:
+    """The members a freed workflow's stored published outputs hold."""
+    declarations = dict(outputs.declarations)
+    return [
+        stored_member(declarations[member.name], member) for member in outputs.members
+    ]
+
+
+def stored_member(
+    declaration: ResultDeclaration, member: OutputHistory
+) -> OutputMember:
+    """A freed workflow's published output member, read through its stored value."""
+    return OutputMember(
+        name=member.name,
+        declaration=declaration,
+        scope_id=member.scope_id,
+        key=member.key,
+        sequence=member.sequence,
+        publication=member.publication,
+        stored=member,
+    )
 
 
 def paginate_members(
@@ -148,4 +174,6 @@ __all__ = [
     "paginate_members",
     "published_member",
     "published_members",
+    "stored_member",
+    "stored_members",
 ]

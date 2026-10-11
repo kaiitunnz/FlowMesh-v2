@@ -65,6 +65,10 @@ class TaskTable(dict[str, TaskRecord]):
         """Whether the table holds any task of the workflow."""
         return workflow_id in self._by_workflow
 
+    def count_of(self, workflow_id: str) -> int:
+        """How many tasks of the workflow the table holds."""
+        return len(self._by_workflow.get(workflow_id, ()))
+
     def has_unsettled(self, workflow_id: str) -> bool:
         """Return whether any task of the workflow is not in a terminal status; the
         tasks found terminal before one is are dropped from those still open."""

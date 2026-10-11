@@ -7,6 +7,7 @@ registry are available. The materialized serve task is owned by the resolved sys
 principal so an operator reads its logs through the normal owner-scoped path.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -124,7 +125,7 @@ def build_resident_capacity(
         return record is not None and record.status not in SETTLING_TASK_STATUSES
 
     async def serve_task_hostable(serve_task_id: str) -> bool:
-        record = runtime.get_record(serve_task_id)
+        record = await asyncio.to_thread(runtime.task_record, serve_task_id)
         if record is None or worker_registry is None:
             return True
         return bool(await worker_registry.satisfying_workers_async(record.task))

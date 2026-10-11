@@ -145,4 +145,11 @@ class WorkflowRetryScheduler:
             self.run_due()
 
 
-__all__ = ["WorkflowRetryScheduler"]
+def manual_retry(
+    fire: Callable[[str], None], logger: logging.Logger
+) -> WorkflowRetryScheduler:
+    """A retry scheduler its owner drives itself, which starts no thread."""
+    return WorkflowRetryScheduler(fire, logger, run_thread=False)
+
+
+__all__ = ["WorkflowRetryScheduler", "manual_retry"]
