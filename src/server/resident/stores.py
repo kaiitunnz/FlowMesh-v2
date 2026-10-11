@@ -47,6 +47,8 @@ from .state import (
     ServiceFamily,
 )
 
+_logger = logging.getLogger("resident-capacity")
+
 type _Bucket = dict[str, dict[str, None]]
 
 
@@ -61,9 +63,6 @@ def _bucket_remove(index: _Bucket, key: str | None, member: str) -> None:
     bucket.pop(member, None)
     if not bucket:
         del index[key]
-
-
-_logger = logging.getLogger("resident-capacity")
 
 
 class ServiceFamilyRegistry:
