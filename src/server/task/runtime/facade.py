@@ -229,6 +229,15 @@ class _Drain(threading.local):
     active = False
 
 
+class _Tail(threading.local):
+    depth = 0
+    # The workflows this thread's outermost event tail keeps resident.
+    held: set[str]
+
+    def __init__(self) -> None:
+        self.held = set()
+
+
 def _issue(env: ToolInvocationEnvelope) -> Issue:
     return Issue(env.task_id, env.call_correlation, env.invocation_id)
 
@@ -404,6 +413,7 @@ class TaskRuntime:
         self._redrive = redrive(self._drive_workflow, logger)
         self._durability = durability_retry(self._retry_durability, logger)
         self._draining = _Drain()
+        self._tail = _Tail()
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._credential_vault = credential_vault
@@ -1662,6 +1672,9 @@ class TaskRuntime:
                         return True
                 self._credential_vault.purge(purged)
             case Settled(workflow_id=settled):
+                if self._tail.depth:
+                    with self._lock:
+                        self._hold_tail_locked(settled)
                 self._committer.notify_terminal_transition(settled)
             case AuthorizeTurn(proposal=proposal, proposer_id=proposer_id):
                 self._answer_model_turn(proposal, proposer_id, action)
@@ -1722,6 +1735,37 @@ class TaskRuntime:
                 return
             self._settled_history.archived_locked(task_id)
         self._settled_history.request(record.workflow_id)
+
+    @contextmanager
+    def event_tail(self, *task_ids: str) -> Iterator[None]:
+        """Keep resident, until this thread's outermost tail ends, the workflows of
+        ``task_ids`` and of every workflow whose settlement is delivered on this thread
+        meanwhile, so what a caller does after a report settles a task still finds its
+        state."""
+        self._tail.depth += 1
+        try:
+            with self._lock:
+                for task_id in task_ids:
+                    if (record := self._tasks.get(task_id)) is not None:
+                        self._hold_tail_locked(record.workflow_id)
+            yield
+        finally:
+            self._tail.depth -= 1
+            if not self._tail.depth and self._tail.held:
+                held, self._tail.held = self._tail.held, set()
+                with self._lock:
+                    released = [
+                        workflow_id
+                        for workflow_id in held
+                        if self._settled_history.release_locked(workflow_id)
+                    ]
+                for workflow_id in released:
+                    self._settled_history.request(workflow_id)
+
+    def _hold_tail_locked(self, workflow_id: str) -> None:
+        if workflow_id not in self._tail.held:
+            self._tail.held.add(workflow_id)
+            self._settled_history.hold_locked(workflow_id)
 
     def _reported_record_locked(self, task_id: str) -> TaskRecord | None:
         """The record a report or request about a task changes, or None when the
