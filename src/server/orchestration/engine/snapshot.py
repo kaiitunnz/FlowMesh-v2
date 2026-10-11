@@ -1,6 +1,6 @@
 """Encodes and restores one workflow instance's ledger snapshot."""
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Hashable, Iterable
 from typing import Any, ClassVar
 
@@ -157,7 +157,7 @@ class SnapshotCodec:
         for activation in snapshot.activations:
             self._ledger.add_activation(activation)
         self._ledger.work_items = self._keyed_dict("work_items")
-        self._ledger.open_task_items = {}
+        self._ledger.open_task_items = OrderedDict()
         for wi in snapshot.work_items:
             self._ledger.add_work_item(wi)
         self._ledger.continuations = self._keyed_dict("continuations")

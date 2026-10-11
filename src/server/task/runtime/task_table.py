@@ -1,5 +1,6 @@
 """The runtime's task records, indexed by the workflow each belongs to."""
 
+from collections import OrderedDict
 from typing import Any
 
 from ..models import TERMINAL_TASK_STATUSES, TaskRecord
@@ -17,7 +18,7 @@ class TaskTable(dict[str, TaskRecord]):
     def __init__(self) -> None:
         super().__init__()
         self._by_workflow: dict[str, dict[str, None]] = {}
-        self._open: dict[str, dict[str, None]] = {}
+        self._open: dict[str, OrderedDict[str, None]] = {}
         self._last_finish: dict[str, float] = {}
 
     def __setitem__(self, task_id: str, record: TaskRecord) -> None:
@@ -25,7 +26,7 @@ class TaskTable(dict[str, TaskRecord]):
             self._forget(task_id, previous.workflow_id)
         super().__setitem__(task_id, record)
         self._by_workflow.setdefault(record.workflow_id, {})[task_id] = None
-        self._open.setdefault(record.workflow_id, {})[task_id] = None
+        self._open.setdefault(record.workflow_id, OrderedDict())[task_id] = None
 
     def __delitem__(self, task_id: str) -> None:
         self._forget(task_id, self[task_id].workflow_id)
@@ -67,11 +68,10 @@ class TaskTable(dict[str, TaskRecord]):
     def has_unsettled(self, workflow_id: str) -> bool:
         """Return whether any task of the workflow is not in a terminal status; the
         tasks found terminal before one is are dropped from those still open."""
-        open_ids = self._open.get(workflow_id, {})
+        open_ids = self._open.get(workflow_id)
         while open_ids:
-            task_id = next(iter(open_ids))
+            task_id, _ = open_ids.popitem(last=False)
             record = self[task_id]
-            del open_ids[task_id]
             if record.status not in TERMINAL_TASK_STATUSES:
                 # Behind the rest, so the next call reaches what settled since.
                 open_ids[task_id] = None

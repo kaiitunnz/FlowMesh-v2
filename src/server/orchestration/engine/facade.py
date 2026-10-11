@@ -967,8 +967,7 @@ class OrchestrationEngine:
         """Whether any work item a task runs as is still to settle."""
         candidates = self._ledger.open_task_items
         while candidates:
-            wi_id = next(iter(candidates))
-            del candidates[wi_id]
+            wi_id, _ = candidates.popitem(last=False)
             if self._ledger.work_items[wi_id].status not in TERMINAL_WORK_ITEM_STATUSES:
                 # Behind the rest, so the next call reaches what settled since.
                 candidates[wi_id] = None

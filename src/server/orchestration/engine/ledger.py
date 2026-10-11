@@ -1,6 +1,6 @@
 """The shared ledger state of one workflow instance and its observation helpers."""
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable
 
 from ...task.v2.representations.admission import ResidentAdmissionBinding
@@ -168,7 +168,7 @@ class OrchestrationLedger:
         self.open_occurrences: dict[str, dict[str, None]] = {}
         self.open_children: dict[str, dict[str, None]] = {}
         self.open_subscopes: dict[str, dict[str, None]] = {}
-        self.open_task_items: dict[str, None] = {}
+        self.open_task_items: OrderedDict[str, None] = OrderedDict()
         self.selection_candidates: dict[str, None] = {}
         self.fanout_candidates: dict[str, None] = {}
         self.input_candidates: dict[str, None] = {}

@@ -1,6 +1,7 @@
 """A loop's per-iteration control-plane work is bounded by what the iteration does, not
 by the history the loop has accumulated."""
 
+import time
 from collections import Counter
 from collections.abc import Iterator
 from typing import Any
@@ -10,6 +11,8 @@ import pytest
 from server.config import OrchestrationConfig
 from server.orchestration.engine.snapshot import SnapshotCodec
 from server.orchestration.journal import TrackedDict
+from server.orchestration.state import WorkItem
+from tests.server.orchestration.helpers import chain_bundle, engine
 from tests.server.task.test_runtime_control_flow import (
     _ECHO,
     _LOOP_NODES,
@@ -197,3 +200,26 @@ async def test_a_loop_body_cancelling_a_scope_walks_no_more_ledger_late_than_ear
     assert run.settled()
     early, late = visits[5:10], visits[-6:-1]
     assert max(late) <= max(early), (early, late)
+
+
+def _per_unsettled_task_check(open_items: int) -> float:
+    eng = engine(chain_bundle())
+    for i in range(open_items):
+        eng._ledger.add_work_item(
+            WorkItem(
+                work_item_id=f"wki-{i}",
+                activation_id=f"act-{i}",
+                operator_id="A",
+                legacy_task_id=f"t{i}",
+            )
+        )
+    calls = 4 * open_items
+    start = time.perf_counter()
+    for _ in range(calls):
+        assert eng.has_unsettled_tasks()
+    return (time.perf_counter() - start) / calls
+
+
+def test_an_unsettled_task_check_costs_the_same_however_many_items_are_open() -> None:
+    few, many = _per_unsettled_task_check(1_000), _per_unsettled_task_check(100_000)
+    assert many < 5 * few, (few, many)

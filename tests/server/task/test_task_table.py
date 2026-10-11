@@ -1,5 +1,6 @@
 """The runtime's task table answers for one workflow from that workflow's own tasks."""
 
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -91,6 +92,22 @@ def test_tasks_settling_behind_a_long_open_task_are_dropped_as_found() -> None:
     assert list(table._open["w"]) == ["head"]
     assert table.last_finish("w") == 2.0
     assert table.ids_of("w") == ["head", "t0", "t1", "t2"]
+
+
+def _per_unsettled_check(open_tasks: int) -> float:
+    table = TaskTable()
+    for i in range(open_tasks):
+        table[f"t{i}"] = _record(f"t{i}", "w")
+    calls = 4 * open_tasks
+    start = time.perf_counter()
+    for _ in range(calls):
+        assert table.has_unsettled("w")
+    return (time.perf_counter() - start) / calls
+
+
+def test_an_unsettled_check_costs_the_same_however_many_tasks_are_open() -> None:
+    few, many = _per_unsettled_check(1_000), _per_unsettled_check(100_000)
+    assert many < 5 * few, (few, many)
 
 
 @pytest.mark.anyio
