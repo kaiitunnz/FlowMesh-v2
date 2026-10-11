@@ -367,6 +367,18 @@ _OP_PERMIT_SLACK_SEC = 60.0
 _OP_REDRIVE_BACKOFF_SEC = 30.0
 
 
+def _step_captures(
+    payload: dict[str, Any],
+) -> tuple[HarnessResult | None, FacadeTurnGroup | None]:
+    """The agent step and facade group a success report carries."""
+    step = payload.get("agent_episode")
+    carried = payload.get("agent_episode_facade_group")
+    return (
+        HarnessResult.model_validate(step) if step is not None else None,
+        FacadeTurnGroup.model_validate(carried) if carried is not None else None,
+    )
+
+
 def _captured_calls(
     step: HarnessResult | None, group: FacadeTurnGroup | None
 ) -> list[tuple[str, str | None]]:
@@ -1755,9 +1767,9 @@ class TaskRuntime:
                     )
                     return False
             case Reap(worker_id=worker_id, task_id=task_id, call_correlation=call):
-                if action.resident:
+                if action.resident is not False:
                     self._mediated_ops.relay_resident_reap(worker_id, task_id, call)
-                else:
+                if action.resident is not True:
                     self._mediated_ops.reap_mediated_op(worker_id, task_id, call)
             case Interrupt(message=interrupt):
                 worker = self._worker_registry.get_worker(interrupt.worker_id)
@@ -2074,6 +2086,11 @@ class TaskRuntime:
         self._epochs.forget_workflow(workflow_id)
         self._redrive.settle(workflow_id)
         self._durability.settle(workflow_id)
+        if self._committer.forget_locked(workflow_id):
+            # The seal refuses every write, so none can be owed once it certified.
+            self._logger.error(
+                "Freed workflow %s still owed a write, which is dropped", workflow_id
+            )
         return Freed(task_ids, done)
 
     # ------------------------------------------------------------------ #
@@ -2962,39 +2979,47 @@ class TaskRuntime:
                 self._mediated_ops.stamped_permit_payload(permit, agent),
             )
 
-    def settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
+    def settle_mediated_operation(
+        self, outcome: MediatedOperationOutcome, worker_id: str | None = None
+    ) -> None:
         """Settle an agent boundary from its origin worker's fenced outcome report.
 
         The report carries exactly one of a reference-backed outcome, a bounded inline
         outcome, or a worker-fault error; each settles the originating boundary. The
         terminal fact commits before the worker-private request custody is reaped, so a
         lost report leaves the boundary pending for a same-idempotency-key re-drive. A
-        duplicate or late report is absorbing at the boundary.
+        duplicate or late report is absorbing at the boundary. ``worker_id`` names the
+        reporting worker.
         """
         with self._transition():
-            self._settle_mediated_operation(outcome)
+            self._settle_mediated_operation(outcome, worker_id)
 
-    def _settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
+    def _settle_mediated_operation(
+        self, outcome: MediatedOperationOutcome, reporter: str | None
+    ) -> None:
         with self._cv:
             pending = self._mediated_ops.take_settled(outcome)
             worker_id = (
                 pending.worker_id
                 if pending
-                else self._assigned_worker_locked(outcome.agent_task_id)
+                else self._assigned_worker_locked(outcome.agent_task_id) or reporter
             )
             agent_task_id = outcome.agent_task_id
             call = outcome.call_correlation
-            record = self._tasks.get(agent_task_id)
+            record = self._reported_record_locked(agent_task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if engine is None or not engine.boundary_settleable(agent_task_id, call):
                 # No settle follows a duplicate or late report, so the request its
                 # worker holds is reaped here, once the terminal it lost to is durable.
-                if record is not None:
-                    self._committer.close_locked(record.workflow_id)
+                # A task the runtime no longer holds, or is freeing, settled long ago,
+                # so its reap waits on nothing.
                 if worker_id:
-                    self._file_locked(
-                        agent_task_id, Reap(worker_id, agent_task_id, call)
-                    )
+                    reap = Reap(worker_id, agent_task_id, call)
+                    if record is None:
+                        self._actions.queue_locked(reap)
+                    else:
+                        self._committer.close_locked(record.workflow_id)
+                        self._file_locked(agent_task_id, reap)
                 return
             if outcome.error is not None:
                 self._settle_episode_invocation(
@@ -4228,7 +4253,8 @@ class TaskRuntime:
 
     def release_merge(self, task_id: str) -> None:
         with self._transition():
-            self._merges.release_merge_locked(task_id)
+            if self._reported_record_locked(task_id) is not None:
+                self._merges.release_merge_locked(task_id)
 
     def merged_child_record(self, task_id: str, child_id: str) -> TaskRecord | None:
         """A child's record while it is still merged into ``task_id``'s dispatch."""
@@ -4473,6 +4499,8 @@ class TaskRuntime:
         with self._cv:
             record = self._reported_record_locked(task_id)
             if record is None:
+                if worker_id is not None:
+                    self._reap_unheld_captures_locked(task_id, worker_id, payload)
                 return SettleOutcome(EventEffect.STALE, None, [], [])
             if not self._fence.accepts_event_locked(record, worker_id, dispatch_id):
                 if worker_id is not None:
@@ -4964,6 +4992,25 @@ class TaskRuntime:
             self._cv.notify_all()
         self._committer.commit_locked(*moved)
 
+    def _reap_unheld_captures_locked(
+        self, task_id: str, worker_id: str, payload: dict[str, Any]
+    ) -> None:
+        """Reap the requests a step captured for a task the runtime no longer holds,
+        or is freeing, which settled with no dispatch left to run them. Whether a
+        model request went to resident capacity is no longer known, so the worker is
+        told to drop it from both."""
+        self._actions.queue_locked(
+            *(
+                Reap(
+                    worker_id,
+                    task_id,
+                    call,
+                    resident=None if interface == MODEL_INTERFACE else False,
+                )
+                for call, interface in _captured_calls(*_step_captures(payload))
+            )
+        )
+
     def _reap_stale_captures_locked(
         self, record: TaskRecord, worker_id: str, payload: dict[str, Any]
     ) -> None:
@@ -4974,19 +5021,8 @@ class TaskRuntime:
         """
         if self._fence.holds_dispatch_locked(record, worker_id, None):
             return
-        step = payload.get("agent_episode")
-        carried = payload.get("agent_episode_facade_group")
         reaps = self._mediated_ops.reap_captures_locked(
-            worker_id,
-            record.task_id,
-            _captured_calls(
-                HarnessResult.model_validate(step) if step is not None else None,
-                (
-                    FacadeTurnGroup.model_validate(carried)
-                    if carried is not None
-                    else None
-                ),
-            ),
+            worker_id, record.task_id, _captured_calls(*_step_captures(payload))
         )
         self._file_locked(record.task_id, *reaps)
 

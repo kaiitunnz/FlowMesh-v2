@@ -25,7 +25,8 @@ class Reap:
     worker_id: str
     task_id: str
     call_correlation: str
-    resident: bool = False
+    # Whether the request went to resident capacity; None when that is not known.
+    resident: bool | None = False
 
 
 @dataclass(frozen=True)

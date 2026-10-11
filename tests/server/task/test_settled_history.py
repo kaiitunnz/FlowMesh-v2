@@ -6,6 +6,7 @@ import logging
 import threading
 import weakref
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 
 import fakeredis
@@ -26,6 +27,10 @@ from server.task.history import CERTIFICATE_FIELD
 from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
+from shared.harness.adapter import HarnessResult, HarnessResultKind
+from shared.harness.boundary import BoundaryEventKind, BoundaryRequest
+from shared.tools.contract import MediatedOperationOutcome
+from shared.tools.search.schema import SEARCH_INTERFACE
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.redis_helpers import fake_redis_client, raw_control
@@ -583,3 +588,111 @@ def test_archive_reports_ask_to_free_a_workflow_once_its_last_task_is_archived()
     assert requested == [workflow_id]
     runtime.settled_history.drain()
     assert not _resident(runtime, workflow_id)
+
+
+def _captured_step(call: str, interface: str) -> dict[str, Any]:
+    return {
+        "agent_episode": HarnessResult(
+            kind=HarnessResultKind.BOUNDARY,
+            request=BoundaryRequest(
+                kind=BoundaryEventKind.INVOCATION,
+                call_correlation=call,
+                interface=interface,
+                request_digest="sha256:0",
+            ),
+        ).model_dump(mode="json")
+    }
+
+
+class _ReapWorkers(_Workers):
+    """A worker registry that records each mediated-op frame it relays."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.frames: list[tuple[str, dict[str, Any]]] = []
+
+    def get_worker(self, worker_id: str) -> Any:
+        return SimpleNamespace(worker_id=worker_id, node_id="node-1")
+
+    def publish_mediated_op(self, worker: Any, message: Any) -> int:
+        self.frames.append((message.frame_kind, message.payload))
+        return 1
+
+
+@pytest.mark.parametrize("freed", [True, False], ids=["freed", "sealed"])
+def test_a_stale_step_for_a_freed_or_sealed_task_reaps_its_captures(
+    freed: bool,
+) -> None:
+    registry = _registry()
+    workers = _ReapWorkers()
+    runtime = _runtime(registry, workers)
+    workflow_id = _register(runtime, CHAIN)
+    task_id = _succeed_ready(runtime)[0]
+    prepare = registry.prepare_history
+
+    def report(publication: Any = None) -> None:
+        for call, interface in (("c-search", SEARCH_INTERFACE), ("c-model", "model")):
+            runtime.mark_succeeded(
+                task_id, "wkr-2", _captured_step(call, interface), _TS, "dsp-old"
+            )
+
+    if freed:
+        runtime.settled_history.drain()
+        assert not _resident(runtime, workflow_id)
+        report()
+    else:
+
+        def report_while_sealed(publication: HistoryPublication) -> bool:
+            report()
+            return prepare(publication)
+
+        cast(Any, registry).prepare_history = report_while_sealed
+        runtime.settled_history.drain()
+        assert not _resident(runtime, workflow_id)
+
+    assert sorted(workers.frames, key=str) == sorted(
+        [
+            ("reap", {"agent_task_id": task_id, "call_correlation": "c-search"}),
+            ("reap", {"agent_task_id": task_id, "call_correlation": "c-model"}),
+            ("resident_reap", {"task_id": task_id, "call_correlation": "c-model"}),
+        ],
+        key=str,
+    )
+    assert not runtime._actions.owes(workflow_id)
+
+
+def test_a_late_mediated_outcome_for_a_freed_or_sealed_task_reaps_its_worker() -> None:
+    registry = _registry()
+    workers = _ReapWorkers()
+    runtime = _runtime(registry, workers)
+    workflow_id = _register(runtime, CHAIN)
+    task_ids = _succeed_ready(runtime)
+    prepare = registry.prepare_history
+    revision = registry.workflow_revision(workflow_id)
+
+    def outcome(task_id: str) -> MediatedOperationOutcome:
+        return MediatedOperationOutcome(
+            permit_id="mop-1",
+            agent_task_id=task_id,
+            call_correlation="c-0",
+            invocation_id="inv-1",
+            idempotency_key=None,
+            error="late",
+        )
+
+    def late_while_sealed(publication: HistoryPublication) -> bool:
+        runtime.settle_mediated_operation(outcome(task_ids[0]), "wkr-2")
+        runtime.release_merge(task_ids[0])
+        return prepare(publication)
+
+    cast(Any, registry).prepare_history = late_while_sealed
+    runtime.settled_history.drain()
+    assert not _resident(runtime, workflow_id)
+    assert not runtime._committer.forget_locked(workflow_id)
+    runtime.settle_mediated_operation(outcome(task_ids[1]), "wkr-3")
+
+    assert workers.frames == [
+        ("reap", {"agent_task_id": task_ids[0], "call_correlation": "c-0"}),
+        ("reap", {"agent_task_id": task_ids[1], "call_correlation": "c-0"}),
+    ]
+    assert registry.workflow_revision(workflow_id) == revision

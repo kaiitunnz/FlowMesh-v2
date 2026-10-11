@@ -615,6 +615,14 @@ class TransitionCommitter:
     def has_unwritten_children(self, workflow_id: str) -> bool:
         return workflow_id in self._unwritten_children
 
+    def forget_locked(self, workflow_id: str) -> bool:
+        """Drop what the committer keeps for a freed workflow; returns whether a
+        write of it was still owed."""
+        owed = self.debt.pop(workflow_id, None) is not None
+        self.faulted.discard(workflow_id)
+        self._unwritten_children.pop(workflow_id, None)
+        return owed
+
     def note_child_locked(self, workflow_id: str, child_task_id: str) -> None:
         """Mark a child materialized in memory, so the ledger write that carries its
         work item also writes its record."""

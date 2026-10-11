@@ -921,7 +921,8 @@ class EventMonitor:
                     self._revoke_orphan_run(worker_id, event)
             case "MEDIATED_OP_OUTCOME":
                 self._runtime.settle_mediated_operation(
-                    MediatedOperationOutcome.model_validate(event.payload["outcome"])
+                    MediatedOperationOutcome.model_validate(event.payload["outcome"]),
+                    worker_id or None,
                 )
             case "MEDIATED_OP_PROPOSE":
                 self._runtime.authorize_model_turn(
