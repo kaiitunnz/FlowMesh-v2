@@ -33,6 +33,7 @@ from shared.utils.time import iso_to_ns
 
 from ..clients.redis import (
     WORKFLOWS_BY_SUBMISSION_KEY,
+    WORKFLOWS_OPEN_KEY,
     WORKFLOWS_SET_KEY,
     RedisClient,
     task_state_key,
@@ -44,6 +45,7 @@ from ..clients.redis import (
     workflow_dynamic_tasks_key,
     workflow_failed_tasks_key,
     workflow_key,
+    workflow_revision_key,
     workflow_sched_key,
     workflow_sources_key,
     workflow_tasks_key,
@@ -388,9 +390,17 @@ def _page_order(
     return page if after is not None else page[::-1]
 
 
+def _queue_revision(pipe: _AnyPipeline, *workflow_ids: str) -> None:
+    """Queue a bump of each workflow's revision, which every write of its state
+    makes, so a transaction watching it sees any of them."""
+    for workflow_id in dict.fromkeys(workflow_ids):
+        pipe.incr(workflow_revision_key(workflow_id))
+
+
 def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> None:
     for item in items:
         pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
+    _queue_revision(pipe, *(item.record.workflow_id for item in items))
 
 
 def task_sources(items: Sequence[PersistedTask]) -> dict[str, dict[str, str]]:
@@ -415,7 +425,7 @@ def _queue_sources(
     """Queue the sources the tasks name, each under its task's workflow, or all
     under ``workflow_id`` when given."""
     for owner, sources in task_sources(items).items():
-        pipe.hset(workflow_sources_key(workflow_id or owner), mapping=sources)
+        _queue_workflow_sources(pipe, workflow_id or owner, sources)
 
 
 def load_context(sources: Mapping[str, str]) -> dict[str, Any]:
@@ -442,6 +452,7 @@ def _queue_registration(
         workflow_id, [item.record for item in tasks], submitted_at
     )
     pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
+    pipe.sadd(WORKFLOWS_OPEN_KEY, workflow_id)
     pipe.zadd(WORKFLOWS_BY_SUBMISSION_KEY, {_record_member(record): 0})
     pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
     _queue_sources(pipe, [*tasks, *blueprints], workflow_id)
@@ -476,6 +487,7 @@ def _queue_transition(
 ) -> None:
     terminal = (*done, *failed, *cancelled)
     touched_membership = bool(dispatched or pending or terminal)
+    _queue_revision(pipe, workflow_id)
     _queue_task_states(pipe, records)
     if dispatched:
         pipe.sadd(workflow_dispatched_tasks_key(workflow_id), *dispatched)
@@ -510,6 +522,7 @@ def _queue_dynamic_tasks(
 ) -> None:
     ids = [item.record.task_id for item in records]
     settled = {*done, *failed, *cancelled}
+    _queue_revision(pipe, workflow_id)
     _queue_task_states(pipe, records)
     if ids:
         pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
@@ -537,6 +550,7 @@ def _queue_ledger_changes(
     pipe: _AnyPipeline, workflow_id: str, changes: LedgerChanges
 ) -> None:
     key = workflow_ds_key(workflow_id)
+    _queue_revision(pipe, workflow_id)
     if changes.reset:
         pipe.delete(key)
     if changes.fields:
@@ -564,10 +578,19 @@ def _blueprints(
     return TaskBlueprints.model_validate_json(blob, context=load_context(sources)).tasks
 
 
-def _sched_payload(in_epoch_order: bool, epoch_frontier: int) -> str:
-    return WorkflowSched(
-        in_epoch_order=in_epoch_order, epoch_frontier=epoch_frontier
-    ).model_dump_json()
+def _queue_sched(
+    pipe: _AnyPipeline, workflow_id: str, in_epoch_order: bool, epoch_frontier: int
+) -> None:
+    sched = WorkflowSched(in_epoch_order=in_epoch_order, epoch_frontier=epoch_frontier)
+    pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
+    _queue_revision(pipe, workflow_id)
+
+
+def _queue_workflow_sources(
+    pipe: _AnyPipeline, workflow_id: str, sources: dict[str, str]
+) -> None:
+    pipe.hset(workflow_sources_key(workflow_id), mapping=sources)
+    _queue_revision(pipe, workflow_id)
 
 
 class WorkflowRegistry:
@@ -613,6 +636,7 @@ class WorkflowRegistry:
         task_ids, members = self._collect(workflow_ids)
         with self._rds.sync.control_pipeline() as pipe:
             pipe.srem(WORKFLOWS_SET_KEY, *workflow_ids)
+            pipe.srem(WORKFLOWS_OPEN_KEY, *workflow_ids)
             if members:
                 pipe.zrem(WORKFLOWS_BY_SUBMISSION_KEY, *members)
             pipe.delete(*(workflow_key(wid) for wid in workflow_ids))
@@ -627,6 +651,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_blueprints_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sources_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_revision_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
             pipe.execute()
@@ -635,6 +660,7 @@ class WorkflowRegistry:
         task_ids, members = await self._collect_async(workflow_ids)
         async with self._rds.asyncio.control_pipeline() as pipe:
             pipe.srem(WORKFLOWS_SET_KEY, *workflow_ids)
+            pipe.srem(WORKFLOWS_OPEN_KEY, *workflow_ids)
             if members:
                 pipe.zrem(WORKFLOWS_BY_SUBMISSION_KEY, *members)
             pipe.delete(*(workflow_key(wid) for wid in workflow_ids))
@@ -649,6 +675,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_blueprints_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sources_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_revision_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
             await pipe.execute()
@@ -1047,7 +1074,9 @@ class WorkflowRegistry:
         sources = task_sources(items).get(workflow_id, {})
         held = set(self._rds.sync.hash_keys(workflow_sources_key(workflow_id)))
         if missing := {d: text for d, text in sources.items() if d not in held}:
-            self._rds.sync.hash_set(workflow_sources_key(workflow_id), missing)
+            with self._rds.sync.control_pipeline() as pipe:
+                _queue_workflow_sources(pipe, workflow_id, missing)
+                pipe.execute()
 
     async def keep_sources_async(
         self, workflow_id: str, items: Sequence[PersistedTask]
@@ -1056,7 +1085,9 @@ class WorkflowRegistry:
         sources = task_sources(items).get(workflow_id, {})
         held = set(await self._rds.asyncio.hash_keys(workflow_sources_key(workflow_id)))
         if missing := {d: text for d, text in sources.items() if d not in held}:
-            await self._rds.asyncio.hash_set(workflow_sources_key(workflow_id), missing)
+            async with self._rds.asyncio.control_pipeline() as pipe:
+                _queue_workflow_sources(pipe, workflow_id, missing)
+                await pipe.execute()
 
     def load_task_states(
         self, workflow_id: str, *task_ids: str
@@ -1085,18 +1116,16 @@ class WorkflowRegistry:
     def save_workflow_sched(
         self, workflow_id: str, in_epoch_order: bool, epoch_frontier: int
     ) -> None:
-        self._rds.sync.set_value(
-            workflow_sched_key(workflow_id),
-            _sched_payload(in_epoch_order, epoch_frontier),
-        )
+        with self._rds.sync.control_pipeline() as pipe:
+            _queue_sched(pipe, workflow_id, in_epoch_order, epoch_frontier)
+            pipe.execute()
 
     async def save_workflow_sched_async(
         self, workflow_id: str, in_epoch_order: bool, epoch_frontier: int
     ) -> None:
-        await self._rds.asyncio.set_value(
-            workflow_sched_key(workflow_id),
-            _sched_payload(in_epoch_order, epoch_frontier),
-        )
+        async with self._rds.asyncio.control_pipeline() as pipe:
+            _queue_sched(pipe, workflow_id, in_epoch_order, epoch_frontier)
+            await pipe.execute()
 
     def load_workflow_sched(self, workflow_id: str) -> WorkflowSched | None:
         blob = self._rds.sync.get(workflow_sched_key(workflow_id))

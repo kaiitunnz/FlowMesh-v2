@@ -57,6 +57,7 @@ TASK_EVENT_STREAM_MAXLEN = 100_000
 
 WORKFLOWS_SET_KEY = "workflows:ids"
 WORKFLOWS_BY_SUBMISSION_KEY = "workflows:by_submission"
+WORKFLOWS_OPEN_KEY = "workflows:open"
 
 TASK_LOGS_STREAM_PREFIX = "logs:task:"
 WORKFLOW_LOGS_STREAM_PREFIX = "logs:workflow:"
@@ -116,6 +117,10 @@ def workflow_blueprints_key(workflow_id: str) -> str:
 
 def workflow_sources_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:sources"
+
+
+def workflow_revision_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:revision"
 
 
 # The ``model_secret`` suffix is the persisted vault layout.
