@@ -138,8 +138,10 @@ class SpawnRegions:
         entry_port = self._topology.agent_entry_port(wi.operator_id)
         if entry_port is None:
             return
-        self._ledger.continuations[wi.work_item_id] = Continuation(
-            work_item_id=wi.work_item_id, required_ports={entry_port}
+        self._ledger.set_continuation(
+            Continuation(
+                work_item_id=wi.work_item_id, required_ports=frozenset({entry_port})
+            )
         )
         if value_ref is not None and value_ref.kind == "inline":
             self._inputs.record_accepted_input(
@@ -356,9 +358,8 @@ class SpawnRegions:
             occurrence.operator_id
         )
         scope_id = self._ledger.scope_by_activation.get(opener)
-        if scope_id is not None and any(
-            self._ledger.activations[child].child_index == index
-            for child in self._ledger.children_by_scope.get(scope_id, ())
+        if scope_id is not None and index in self._ledger.children_by_scope.get(
+            scope_id, {}
         ):
             return advance
         cap = self._scope_progress.capability(scope_id, ProgressAxis.CHILD_INIT)

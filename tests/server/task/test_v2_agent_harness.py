@@ -883,7 +883,7 @@ def test_terminal_failure_fails_a_never_entered_region() -> None:
     # A failed agent's unused region is not an empty one: it opens no scope, seals
     # nothing, and its join fails with it. Its template is a blueprint, no task.
     assert failed == ["A"]
-    assert not {"rbody", "vbody"} & set(eng.declared_failures())
+    assert eng.failure_reason("rbody") is None and eng.failure_reason("vbody") is None
     for role in ("researcher", "reviewer"):
         assert eng.region_scope_for(act, role) is None
     assert set(eng.to_snapshot().failed_regions) == {

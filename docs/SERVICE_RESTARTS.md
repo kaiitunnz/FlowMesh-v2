@@ -197,5 +197,8 @@ the container or the server process:
 
 Persistence is snapshot-based (RDB), not write-synchronous, so a *graceful*
 restart preserves everything, but an abrupt loss of a Redis container (kill,
-OOM, host crash) can drop up to the last snapshot window — 60s for control,
-300s for telemetry.
+OOM, host crash) loses the writes made since its last snapshot, which the stack
+takes about every 60s for control and 300s for telemetry. Recovery requires the
+control Redis to keep every write it acknowledged, so a deployment that must
+survive an abrupt loss of it runs the control Redis with append-only persistence
+that syncs every write (`appendonly yes`, `appendfsync always`).

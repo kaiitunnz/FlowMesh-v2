@@ -24,6 +24,12 @@ def _sync_client[C: SyncRedisClient](cls: type[C], server: fakeredis.FakeServer)
     return client
 
 
+def raw_control(registry: Any) -> Any:
+    """A registry's control Redis connection, for reading and corrupting raw keys."""
+    # redis-py types a sync reply as possibly awaitable.
+    return registry._rds.sync._control
+
+
 def fake_redis_client(server: fakeredis.FakeServer) -> RedisClient:
     async_client = AsyncRedisClient.__new__(AsyncRedisClient)
     cast(Any, async_client)._control = fakeredis.FakeAsyncRedis(

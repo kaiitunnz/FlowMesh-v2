@@ -615,23 +615,23 @@ class TaskRuntime:
         except BaseException:
             self._discard_credentials(workflow_id)
             raise
+        engine = staged.v2_engine
+        ledger = engine.ledger_changes() if engine is not None else None
         try:
             await self._workflow_registry.register_workflow_async(
                 workflow_id,
                 staged.persisted(),
                 WorkflowSched(in_epoch_order=staged.in_epoch_order),
                 v2=staged.v2_bundle,
-                ledger=(
-                    staged.v2_engine.to_snapshot()
-                    if staged.v2_engine is not None
-                    else None
-                ),
+                ledger=ledger,
                 submitted_at=submitted_at,
                 blueprints=[PersistedTask(record=r) for r in staged.blueprints],
             )
         except BaseException:
             await self._discard_registration(workflow_id)
             raise
+        if engine is not None and ledger is not None:
+            engine.ledger_written(ledger)
         self._install_registration(workflow_id, staged)
         return workflow_id, staged.results
 
@@ -977,23 +977,26 @@ class TaskRuntime:
         if not tasks:
             return None
         await self._vault_stored_credentials(workflow_id, tasks)
+        # A record stored with its source inline names it by digest at its next write.
+        await self._workflow_registry.keep_sources_async(workflow_id, tasks)
         remaining = await self._workflow_registry.get_remaining_tasks_async(workflow_id)
         sched = await self._workflow_registry.load_workflow_sched_async(workflow_id)
-        snapshot = await self._workflow_registry.load_ledger_snapshot_async(workflow_id)
+        ledger = await self._workflow_registry.load_ledger_async(workflow_id)
         bundle = (
             await self._workflow_registry.get_v2_workflow_async(workflow_id)
-            if snapshot is not None
+            if ledger is not None
             else None
         )
-        if snapshot is None or bundle is None:
+        if ledger is None or bundle is None:
             return tasks, remaining, sched, None, []
         blueprints = await self._workflow_registry.load_blueprints_async(workflow_id)
         engine = OrchestrationEngine(
-            snapshot,
+            ledger.snapshot,
             bundle,
             budget=self._scope_budget,
             control=self._control,
             emitter=build_span_emitter(self._tracer, self._telemetry, workflow_id),
+            ordinals=ledger.ordinals,
         )
         return tasks, remaining, sched, engine, blueprints
 
@@ -1048,6 +1051,7 @@ class TaskRuntime:
                 workflow_id,
                 exc_info=error,
             )
+        await self._workflow_registry.keep_sources_async(workflow_id, failed)
         await self._workflow_registry.commit_transition_async(
             workflow_id,
             records=failed,
@@ -1067,7 +1071,9 @@ class TaskRuntime:
         task_ids = list(dict.fromkeys([*wf_record.task_ids, *sorted(dynamic_ids)]))
         return [
             state
-            for state in await self._workflow_registry.load_task_states_async(*task_ids)
+            for state in await self._workflow_registry.load_task_states_async(
+                workflow_id, *task_ids
+            )
             if state
         ]
 
@@ -1234,7 +1240,7 @@ class TaskRuntime:
 
         The legacy dependency machinery stays unwired; the orchestration engine is the
         readiness authority. Terminal task facts reconcile the engine idempotently, so a
-        crash between a task's terminal write and its ledger snapshot never loses a
+        crash between a task's terminal write and its ledger write never loses a
         settlement and never duplicates a publication or effect receipt.
         """
         self._occurrences.install_locked(workflow_id, blueprints)
@@ -1785,7 +1791,7 @@ class TaskRuntime:
         """Carry an episode's boundary event into the ledger and dispatch its effect.
 
         Routes the event into the engine, synthesizes a task record for any dispatchable
-        child it materializes, applies the advance, and writes the ledger snapshot after
+        child it materializes, applies the advance, and writes the ledger after
         the task records so the ledger never leads durable state.
         """
         with self._transition():
@@ -4674,7 +4680,7 @@ class TaskRuntime:
                 returned += moved
                 touched.append(task_id)
             self._committer.commit_cancelled_locked(workflow_id, touched, returned)
-            # The ledger snapshot follows the committed task state so it never leads
+            # The ledger write follows the committed task state so it never leads
             # it.
             if workflow_id in self._engines:
                 self._settle_suspended_cancels_locked(self._engines[workflow_id])
@@ -5074,7 +5080,7 @@ class TaskRuntime:
         if usage is not None:
             record.usages.append(usage)
         returned = self._mark_cancelled_locked(record, finished_ts, unmerge=unmerge)
-        # Persist the task terminal record first and snapshot the ledger last, so the
+        # Persist the task terminal record first and write the ledger last, so the
         # ledger never leads task state.
         self._committer.commit_locked(task_id, *returned, sched=False)
         self._committer.save_ledger_locked(record.workflow_id)

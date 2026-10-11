@@ -1,13 +1,13 @@
 """A failed input fails the control region it feeds and everything downstream of it."""
 
 import asyncio
-import json
 from typing import Any, cast
 
 import pytest
 
 from server.orchestration import OrchestrationEngine, PublicationOutcome
-from server.orchestration.state import BoundaryEvent, LedgerSnapshot, ProgressAxis
+from server.orchestration.ledger_layout import LedgerChanges
+from server.orchestration.state import BoundaryEvent, ProgressAxis
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from server.task.v2.compiler import validation
@@ -15,6 +15,8 @@ from server.task.v2.representations.operators import BoundaryEventKind
 from shared.harness.adapter import HarnessResult, HarnessResultKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_agent_episode_runtime import _adapter, _step
+from tests.server.task.test_runtime_commit_then_act import _runtime as _durable_runtime
+from tests.server.task.test_runtime_durability_faults import _FaultyRegistry
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
@@ -340,10 +342,10 @@ async def test_a_crash_before_the_ledger_save_converges_on_restart() -> None:
     workflow_id, ids = await _register(
         runtime, _HEAD + _spawn_join(_JOINS["all_settled"])
     )
-    stale = registry.ledger_blobs[workflow_id]
+    stale = registry.ledgers[workflow_id]
     _fail(runtime, ids["a"])
     # The task records committed; the ledger save that follows them did not.
-    registry.ledger_blobs[workflow_id] = stale
+    registry.ledgers[workflow_id] = stale
 
     restored = _live_runtime(registry, "restored", reader=runtime._results)
     await restored.rehydrate()
@@ -368,9 +370,11 @@ async def _stored_hang(
     with monkeypatch.context() as patch:
         patch.setattr(engine._flow, "_fail_region", lambda *_args: None)
         _fail(runtime, ids["a"])
-    blob = json.loads(registry.ledger_blobs[workflow_id])
-    del blob["failed_regions"]
-    registry.ledger_blobs[workflow_id] = json.dumps(blob)
+    registry.ledgers[workflow_id] = {
+        name: value
+        for name, value in registry.ledgers[workflow_id].items()
+        if not name.startswith("failed_regions:")
+    }
     assert not runtime.workflow_settlement(workflow_id).settled
     return runtime, workflow_id, ids
 
@@ -389,7 +393,7 @@ def test_a_restart_closes_a_workflow_stored_hung_behind_a_failed_region(
         finalizer.drain()
 
         _assert_failed_downstream(restored, ids, "a", "kid", "after")
-        persisted = registry.load_task_states(ids["after"])[0]
+        persisted = registry.stored_task(ids["after"])
         assert persisted is not None and persisted.record.status == TaskStatus.FAILED
         assert registry.remaining_of(workflow_id) == set()
         assert f"workflow:{workflow_id}:logs:closed" in redis.keys
@@ -942,16 +946,16 @@ async def test_a_failed_join_stays_failed_across_a_crash_before_its_ledger_save(
     first, last = _pop_ready(runtime)
     record_dispatch(runtime, first, cast(Any, _worker()))
     runtime.mark_succeeded(first, "wkr-1", {}, _TS)
-    save = registry.save_ledger_snapshot
+    save = registry.save_ledger
 
     def crash(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("root crashed")
 
     record_dispatch(runtime, last, cast(Any, _worker()))
-    registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+    registry.save_ledger = crash  # type: ignore[method-assign]
     with pytest.raises(RuntimeError):
         runtime.mark_failed(last, "wkr-1", {}, _TS, error="boom")
-    registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+    registry.save_ledger = save  # type: ignore[method-assign]
 
     restored = _live_runtime(registry, "restored", reader=runtime._results)
     assert await restored.rehydrate() == 1
@@ -1009,7 +1013,7 @@ def test_a_failed_agent_persists_its_records_before_the_ledger(path: str) -> Non
         commit, dynamic, save = (
             registry.commit_transition,
             registry.commit_dynamic_tasks,
-            registry.save_ledger_snapshot,
+            registry.save_ledger,
         )
 
         def commit_transition(workflow_id: str, **kwargs: Any) -> None:
@@ -1024,15 +1028,15 @@ def test_a_failed_agent_persists_its_records_before_the_ledger(path: str) -> Non
             writes.append("ledger")
             dynamic(*args, **kwargs)
 
-        def save_ledger_snapshot(
-            workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+        def save_ledger(
+            workflow_id: str, ledger: LedgerChanges, control: Any = None
         ) -> None:
             writes.append("ledger")
-            save(workflow_id, snapshot)
+            save(workflow_id, ledger)
 
         registry.commit_transition = commit_transition  # type: ignore[method-assign]
         registry.commit_dynamic_tasks = commit_dynamic_tasks  # type: ignore[method-assign]
-        registry.save_ledger_snapshot = save_ledger_snapshot  # type: ignore[method-assign]
+        registry.save_ledger = save_ledger  # type: ignore[method-assign]
         if path == "reported":
             runtime.mark_failed(writer, "wkr-1", {}, _TS, error="boom")
         else:
@@ -1051,11 +1055,11 @@ async def test_a_restart_retires_a_region_template_whose_retire_a_crash_lost() -
     runtime, workflow_id, ids, child = await _entered_region(registry)
     record_dispatch(runtime, child, cast(Any, _worker()))
     runtime.mark_succeeded(child, "wkr-1", {}, _TS)
-    ledger = registry.ledger_blobs[workflow_id]
+    ledger = registry.ledgers[workflow_id]
     remaining = set(registry.remaining[workflow_id])
     _fail(runtime, ids["writer"])
     # The crash kept the task records and lost the retire and the ledger saves.
-    registry.ledger_blobs[workflow_id] = ledger
+    registry.ledgers[workflow_id] = ledger
     registry.remaining[workflow_id] = remaining - {ids["writer"], ids["after"]}
 
     restored = _live_runtime(registry, "restored", reader=runtime._results)
@@ -1100,13 +1104,15 @@ def test_a_fan_out_persists_what_it_failed_before_the_ledger(shape: str) -> None
             engine._ledger.root_grant = engine._ledger.root_grant.model_copy(
                 update={"invoke": ()}
             )
+            # A ledger's foundation is stored only with the whole ledger.
+            engine.owe_ledger_rewrite()
             items = ["h1", "h2"]
         after = ids["after"]
         writes: list[str] = []
         commit, dynamic, save = (
             registry.commit_transition,
             registry.commit_dynamic_tasks,
-            registry.save_ledger_snapshot,
+            registry.save_ledger,
         )
 
         def commit_transition(workflow_id: str, **kwargs: Any) -> None:
@@ -1121,17 +1127,17 @@ def test_a_fan_out_persists_what_it_failed_before_the_ledger(shape: str) -> None
             writes.append("ledger")
             dynamic(*args, **kwargs)
 
-        def save_ledger_snapshot(
-            workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+        def save_ledger(
+            workflow_id: str, ledger: LedgerChanges, control: Any = None
         ) -> None:
             writes.append("ledger")
-            save(workflow_id, snapshot)
+            save(workflow_id, ledger)
 
         planner = ids["planner"]
         record_dispatch(runtime, planner, cast(Any, _worker()))
         registry.commit_transition = commit_transition  # type: ignore[method-assign]
         registry.commit_dynamic_tasks = commit_dynamic_tasks  # type: ignore[method-assign]
-        registry.save_ledger_snapshot = save_ledger_snapshot  # type: ignore[method-assign]
+        registry.save_ledger = save_ledger  # type: ignore[method-assign]
         runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, items), _TS)
 
         assert writes[0] == "after failed" and "ledger" in writes
@@ -1160,9 +1166,41 @@ async def test_a_restart_fails_a_task_the_ledger_already_failed() -> None:
     record = restored.get_record(after)
     assert record is not None and record.status == TaskStatus.FAILED
     assert record.error == "join collect resolved no winner"
-    persisted = registry.load_task_states(after)[0]
+    persisted = registry.stored_task(after)
     assert persisted is not None and persisted.record.status == TaskStatus.FAILED
     assert restored.workflow_settlement(workflow_id).settled
+
+
+@pytest.mark.anyio
+async def test_a_declared_failure_refused_by_the_store_is_written_on_its_retry() -> (
+    None
+):
+    registry = _FaultyRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, _HEAD + _NO_WINNER)
+    planner, after = ids["planner"], ids["after"]
+    pending = registry.task_blobs[after]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
+    registry.task_blobs[after] = pending
+    registry.remaining.setdefault(workflow_id, set()).add(after)
+
+    restored = _durable_runtime(registry, runtime._results)
+    registry.fail_from = registry.writes + 1
+    assert await restored.rehydrate() == 1
+    record = restored.get_record(after)
+    assert record is not None and record.status == TaskStatus.FAILED
+    assert registry.record(after).status == TaskStatus.PENDING
+    assert restored._durability.pending(workflow_id)
+
+    # Later saves of the ledger do not drop the record write it still owes.
+    restored._durability.run_due()
+    assert registry.record(after).status == TaskStatus.PENDING
+    registry.heal()
+    while restored._durability.pending(workflow_id):
+        restored._durability.run_due()
+    assert registry.record(after).status == TaskStatus.FAILED
+    assert registry.record(after).error == "join collect resolved no winner"
 
 
 def test_a_restart_fails_a_stored_reader_of_a_spawned_agents_region(
@@ -1186,7 +1224,7 @@ def test_a_restart_fails_a_stored_reader_of_a_spawned_agents_region(
         assert record.error == (
             f"region of spawned-only agent {ids['worker']} delivers nothing"
         )
-        persisted = registry.load_task_states(ids["merge"])[0]
+        persisted = registry.stored_task(ids["merge"])
         assert persisted is not None and persisted.record.status == TaskStatus.FAILED
 
     asyncio.run(run())

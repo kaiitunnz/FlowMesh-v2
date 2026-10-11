@@ -9,7 +9,8 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
-from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.orchestration.ledger_layout import LedgerChanges
+from server.orchestration.state import InvocationState
 from server.resident import ClaimState, ClaimTerminalReason
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
@@ -121,7 +122,8 @@ def test_losing_the_origin_worker_releases_the_resident_credit_once_durable() ->
         assert record is not None and record.status == TaskStatus.FAILED
         assert releases == [(env.invocation_id, True)]
         registry = cast(FakeRegistry, runtime._workflow_registry)
-        stored = LedgerSnapshot.model_validate_json(registry.ledger_blobs[workflow_id])
+        stored = registry.ledger(workflow_id)
+        assert stored is not None
         durable = next(
             i.state for i in stored.invocations if i.invocation_id == env.invocation_id
         )
@@ -144,18 +146,16 @@ def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
         _capture_resident_boundary(runtime, ids["writer"])
         (env,) = originated
         registry = cast(FakeRegistry, runtime._workflow_registry)
-        save = registry.save_ledger_snapshot
+        save = registry.save_ledger
 
-        def down(
-            workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
-        ) -> None:
+        def down(workflow_id: str, ledger: LedgerChanges, control: Any = None) -> None:
             raise ConnectionError("control redis unavailable")
 
-        registry.save_ledger_snapshot = down  # type: ignore[method-assign]
+        registry.save_ledger = down  # type: ignore[method-assign]
         runtime.recover_tasks_for_worker("wkr-1", spend_attempt=True)
         assert releases == []
 
-        registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+        registry.save_ledger = save  # type: ignore[method-assign]
         runtime._retry_durability(workflow_id)
         assert releases == [env.invocation_id]
 
@@ -206,15 +206,15 @@ def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again(
         _capture_resident_boundary(runtime, writer, seal_in=tmp_path)
         (env,) = originated
         registry = cast(FakeRegistry, runtime._workflow_registry)
-        save = registry.save_ledger_snapshot
+        save = registry.save_ledger
 
         def crash(*_: Any, **__: Any) -> None:
             raise ConnectionError("crash before the ledger save")
 
-        registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+        registry.save_ledger = crash  # type: ignore[method-assign]
         assert runtime.settle_episode_invocation(writer, env.call_correlation, "done")
         runtime.shutdown()
-        registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+        registry.save_ledger = save  # type: ignore[method-assign]
 
         restored = TaskRuntime(
             cast(Any, registry),

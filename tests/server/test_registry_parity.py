@@ -9,10 +9,19 @@ import fakeredis
 import pytest
 from starlette.datastructures import QueryParams
 
-from server.clients.redis import AsyncRedisClient, SyncRedisClient
+from server.clients.redis import (
+    AsyncRedisClient,
+    SyncRedisClient,
+    workflow_sources_key,
+)
+from server.orchestration.ledger_layout import (
+    LedgerChanges,
+    encode_ledger,
+    scalar_field,
+)
 from server.registries.workflow import WorkflowRegistry, WorkflowSched
 from server.utils.query import QueryFilter
-from tests.server.redis_helpers import fake_redis_client
+from tests.server.redis_helpers import fake_redis_client, raw_control
 from tests.server.task.test_v2_orchestration import AUTORESEARCH, _bundle
 from tests.server.test_workflow_listing import _Fabric, _seed
 
@@ -102,7 +111,7 @@ def _seed_ids(count: int) -> list[str]:
 
 
 def _server(registry: WorkflowRegistry) -> fakeredis.FakeServer:
-    return registry._rds.sync._control.connection_pool.connection_kwargs["server"]
+    return raw_control(registry).connection_pool.connection_kwargs["server"]
 
 
 @pytest.fixture
@@ -164,12 +173,27 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
     sync, async_ = twins.sync, twins.asyncio
     workflow_id = twins.workflow_id
     task_ids = sorted(sync.get_workflow_record(workflow_id).task_ids)  # type: ignore[union-attr]
-    records = [state for state in sync.load_task_states(*task_ids) if state]
-    snapshot = sync.load_ledger_snapshot(workflow_id)
-    assert records and snapshot is not None
+    records = [
+        state for state in sync.load_task_states(workflow_id, *task_ids) if state
+    ]
+    stored = sync.load_ledger(workflow_id)
+    assert records and stored is not None
+    assert asyncio.run(async_.load_ledger_async(workflow_id)) == stored
+    assert records == [
+        state
+        for state in asyncio.run(async_.load_task_states_async(workflow_id, *task_ids))
+        if state
+    ]
+    rewrite = LedgerChanges(encode_ledger(stored), reset=True)
+    dropped = next(name for name in rewrite.fields if name.startswith("work_items:"))
+    delta = LedgerChanges({scalar_field("next_seq"): "7"}, deleted=(dropped,))
 
     sync.save_task_states(records)
     asyncio.run(async_.save_task_states_async(records))
+    for twin in (sync, async_):
+        raw_control(twin).delete(workflow_sources_key(workflow_id))
+    sync.keep_sources(workflow_id, records)
+    asyncio.run(async_.keep_sources_async(workflow_id, records))
     sync.commit_transition(
         workflow_id, records=records[:1], dispatched=task_ids[:1], failed=task_ids[1:2]
     )
@@ -187,19 +211,17 @@ def test_the_durable_writes_agree(twins: _Twins) -> None:
         "failed": task_ids[1:2],
         "sched": WorkflowSched(in_epoch_order=True, epoch_frontier=2),
     }
-    sync.commit_dynamic_tasks(workflow_id, records[:2], snapshot, **children)
+    sync.commit_dynamic_tasks(workflow_id, records[:2], rewrite, **children)
     asyncio.run(
-        async_.commit_dynamic_tasks_async(
-            workflow_id, records[:2], snapshot, **children
-        )
+        async_.commit_dynamic_tasks_async(workflow_id, records[:2], rewrite, **children)
     )
-    sync.save_ledger_snapshot(workflow_id, snapshot)
-    asyncio.run(async_.save_ledger_snapshot_async(workflow_id, snapshot))
+    sync.save_ledger(workflow_id, delta)
+    asyncio.run(async_.save_ledger_async(workflow_id, delta))
     sync.save_workflow_sched(workflow_id, True, 3)
     asyncio.run(async_.save_workflow_sched_async(workflow_id, True, 3))
     registration: dict[str, Any] = {
         "v2": _bundle(AUTORESEARCH, "wfl-new"),
-        "ledger": snapshot,
+        "ledger": rewrite,
         "submitted_at": "2026-10-08T00:00:00+00:00",
         "blueprints": records[:1],
     }

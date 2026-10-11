@@ -98,7 +98,7 @@ def _crash_before_ledger_save(registry: FakeRegistry) -> None:
     def crash(*_args: Any, **_kwargs: Any) -> None:
         raise ConnectionError("root crashed")
 
-    registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+    registry.save_ledger = crash  # type: ignore[method-assign]
 
 
 def test_a_restart_releases_a_credit_whose_cancel_only_its_records_hold() -> None:
@@ -109,7 +109,7 @@ def test_a_restart_releases_a_credit_whose_cancel_only_its_records_hold() -> Non
     with pytest.raises(TransitionNotDurable), runtime.acknowledging():
         runtime.cancel_workflow(workflow_id)
     runtime.shutdown()
-    del registry.save_ledger_snapshot
+    del registry.save_ledger
 
     stores = _restart(registry, snapshot)
     (claim,) = stores.claims.by_invocation(env.invocation_id)
@@ -123,7 +123,7 @@ def test_a_restart_releases_a_credit_whose_failure_only_its_records_hold() -> No
     snapshot = _admit(scenario.workflow_id, scenario.invocation_id)
     _crash_before_ledger_save(scenario.registry)
     assert scenario.report_success() is not None
-    del scenario.registry.save_ledger_snapshot
+    del scenario.registry.save_ledger
 
     stores = _restart(scenario.registry, snapshot)
     (claim,) = stores.claims.by_invocation(scenario.invocation_id)

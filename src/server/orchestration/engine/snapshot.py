@@ -1,48 +1,72 @@
 """Encodes and restores one workflow instance's ledger snapshot."""
 
-from collections import Counter
-from collections.abc import Iterable
+from collections import Counter, OrderedDict
+from collections.abc import Hashable, Iterable
+from typing import Any, ClassVar
+
+from pydantic import BaseModel
 
 from ..guardrails import ScopeBudget
+from ..journal import AppendOnlyList, JournaledModel, TrackedDict, TrackedSet
+from ..ledger_layout import (
+    KEYED,
+    KEYED_TEXTS,
+    SET_MEMBER,
+    LedgerChanges,
+    LedgerOrdinals,
+    StoredLedger,
+    applied_changes,
+    encode_fields,
+    encode_ledger,
+    field_name,
+    keyed_value,
+    scalar_field,
+    scalar_value,
+)
 from ..state import (
     AuthorityDecisionKind,
     ControlStatus,
     LedgerSnapshot,
     LoopInstanceStatus,
     PublicationOutcome,
-    ResultPublication,
-    ResultSlot,
 )
 from .attempts import AttemptLifecycle
 from .authority import AuthorityLedger
 from .boundaries import BoundaryLedger
 from .embodiments import EmbodimentLedger
-from .failures import DECLARED_FAILURE_REASON, FailureLedger
+from .failures import FailureLedger
 from .inputs import AcceptedInputLedger
 from .ledger import OrchestrationLedger
 from .publications import PublicationLedger
 from .topology import PlanTopology
 
 
-def _rekeyed_publications(
-    slots: Iterable[ResultSlot], publications: Iterable[ResultPublication]
-) -> dict[str, ResultPublication]:
-    """Index publications by slot identity, re-keying any stored under the unscoped
-    key format."""
-    current = {slot.legacy_slot_key: slot.slot_key for slot in slots}
-    identities = set(current.values())
-    indexed: dict[str, ResultPublication] = {}
-    for publication in publications:
-        key = publication.slot_key
-        if key not in identities and (rekeyed := current.get(key)) is not None:
-            publication = publication.model_copy(update={"slot_key": rekeyed})
-        indexed[publication.slot_key] = publication
-    return indexed
+def _detached(snapshot: LedgerSnapshot) -> LedgerSnapshot:
+    """Return the snapshot with a copy of each entity another ledger holds."""
+    updates: dict[str, list[BaseModel]] = {}
+    for name in KEYED:
+        entities: list[BaseModel] = getattr(snapshot, name)
+        if any(isinstance(e, JournaledModel) and e.held for e in entities):
+            updates[name] = [
+                e.model_copy() if isinstance(e, JournaledModel) and e.held else e
+                for e in entities
+            ]
+    return snapshot.model_copy(update=updates) if updates else snapshot
 
 
 class SnapshotCodec:
     """Captures the instance's durable state as a ledger snapshot, and restores a
-    stored one into the owners of that state in dependency order."""
+    stored one into the owners of that state in dependency order.
+
+    The persisted collections it restores record each change they take in the
+    ledger's journal, so a write carries only the fields that changed since the last
+    one that landed.
+    """
+
+    # Test-only: each write's changes are checked to carry every change the ledger
+    # took, against the image of the ledger the last landed write left stored.
+    verify_changes: ClassVar[bool] = False
+    verify_failures: ClassVar[list[str]] = []
 
     def __init__(
         self,
@@ -67,9 +91,54 @@ class SnapshotCodec:
         self._boundaries = boundaries
         self._attempt_lifecycle = attempt_lifecycle
         self._budget = budget
+        self._journal = ledger.journal
+        self._keyed: dict[str, TrackedDict[Any, Any]] = {}
+        self._histories: dict[str, AppendOnlyList[Any]] = {}
+        self._sets: dict[str, TrackedSet[str]] = {}
+        self._written_lengths: dict[str, int] = {}
+        self._written_scalars: dict[str, Any] = {}
+        # Rewrites of the whole ledger owed and made, by count.
+        self._rewrite = 0
+        self._rewritten = 0
+        self._acknowledged: dict[str, str] | None = None
+        self._stored: LedgerOrdinals | None = None
 
-    def restore(self, snapshot: LedgerSnapshot) -> None:
-        self._ledger.scopes = {}
+    def _keyed_dict[K: Hashable, V](
+        self, name: str, items: Iterable[tuple[K, V]] = ()
+    ) -> TrackedDict[K, V]:
+        stored = None if self._stored is None else self._stored.get(name, {})
+        tracked = TrackedDict[K, V](self._journal, name, items, stored)
+        self._keyed[name] = tracked
+        return tracked
+
+    def _history[T](self, name: str, entries: Iterable[T]) -> AppendOnlyList[T]:
+        history = AppendOnlyList(entries)
+        self._histories[name] = history
+        return history
+
+    def _set(self, name: str, members: Iterable[str]) -> TrackedSet[str]:
+        tracked = TrackedSet(self._journal, name, members)
+        self._sets[name] = tracked
+        return tracked
+
+    def restore(
+        self, snapshot: LedgerSnapshot, ordinals: LedgerOrdinals | None = None
+    ) -> None:
+        """Restore a ledger snapshot into the ledger's owners.
+
+        With ``ordinals``, the stored insertion ordinal of each keyed entry, the
+        snapshot is the stored ledger and the next write carries only what the restore
+        changed; without them the next write rewrites the whole ledger.
+        """
+        snapshot = _detached(snapshot)
+        self._stored = ordinals
+        for order in (ordinals or {}).values():
+            if order:
+                self._journal.seen_ordinal(max(order.values()))
+        self._keyed.clear()
+        self._histories.clear()
+        self._sets.clear()
+        self._ledger.scopes = self._keyed_dict("scopes")
         self._ledger.subscopes = {}
         self._ledger.open_subscopes = {}
         for scope in snapshot.scopes:
@@ -77,27 +146,36 @@ class SnapshotCodec:
         self._ledger.scopes.setdefault(
             self._ledger.root_scope.scope_id, self._ledger.root_scope
         )
-        self._ledger.activations = {}
+        self._ledger.activations = self._keyed_dict("activations")
         self._ledger.children_by_scope = {}
+        self._ledger.static_activations = {}
+        self._ledger.activations_by_scope = {}
         self._ledger.open_children = {}
         self._ledger.scope_population = Counter()
         self._ledger.scope_children = Counter()
         self._ledger.dynamic_activations = 0
         for activation in snapshot.activations:
             self._ledger.add_activation(activation)
-        self._ledger.work_items = {}
-        self._ledger.open_task_items = {}
+        self._ledger.work_items = self._keyed_dict("work_items")
+        self._ledger.open_task_items = OrderedDict()
         for wi in snapshot.work_items:
             self._ledger.add_work_item(wi)
-        self._ledger.continuations = {c.work_item_id: c for c in snapshot.continuations}
-        self._ledger.records = list(snapshot.records)
-        self._inputs.accepted_inputs = list(snapshot.accepted_inputs)
+        self._ledger.continuations = self._keyed_dict("continuations")
+        self._ledger.input_candidates = {}
+        for continuation in snapshot.continuations:
+            self._ledger.set_continuation(continuation)
+        self._ledger.records = self._history("records", snapshot.records)
+        self._inputs.accepted_inputs = self._history(
+            "accepted_inputs", snapshot.accepted_inputs
+        )
         self._inputs.accepted_by_activation = {}
         for accepted in self._inputs.accepted_inputs:
             self._inputs.accepted_by_activation.setdefault(
                 accepted.activation_id, []
             ).append(accepted)
-        self._ledger.region_aggregates = list(snapshot.region_aggregates)
+        self._ledger.region_aggregates = self._history(
+            "region_aggregates", snapshot.region_aggregates
+        )
         self._ledger.aggregate_by_join = {}
         # A stored ledger may hold a nested level's aggregate after its root level's;
         # the root level's is the one delivered downstream.
@@ -110,30 +188,54 @@ class SnapshotCodec:
                 for member in aggregate.members
             ):
                 self._ledger.aggregate_by_join[join_key] = aggregate
-        self._ledger.invocations = {i.invocation_id: i for i in snapshot.invocations}
-        self._ledger.attempts = {a.attempt_id: a for a in snapshot.attempts}
-        self._embodiments.embodiment_selections = {
-            sel.work_item_id: sel for sel in snapshot.embodiment_selections
-        }
-        self._embodiments.input_resolutions = {
-            res.work_item_id: res for res in snapshot.input_resolutions
-        }
-        self._embodiments.input_preparations = {
-            prep.work_item_id: prep for prep in snapshot.input_preparations
-        }
-        self._attempt_lifecycle.receipts = {
-            r.invocation_id: r for r in snapshot.effect_receipts
-        }
-        self._authority.decisions = list(snapshot.authority_decisions)
-        self._authority.grants = {g.grant_id: g for g in snapshot.delegated_grants}
-        self._ledger.capabilities = {
-            (c.scope_id, c.axis): c for c in snapshot.progress_capabilities
-        }
-        self._publication.slots = {s.slot_key: s for s in snapshot.result_slots}
-        self._publication.publications = _rekeyed_publications(
-            self._publication.slots.values(), snapshot.result_publications
+        self._ledger.invocations = self._keyed_dict(
+            "invocations", ((i.invocation_id, i) for i in snapshot.invocations)
         )
-        self._ledger.trace = list(snapshot.trace)
+        self._ledger.attempts = self._keyed_dict(
+            "attempts", ((a.attempt_id, a) for a in snapshot.attempts)
+        )
+        self._embodiments.embodiment_selections = self._keyed_dict(
+            "embodiment_selections",
+            ((sel.work_item_id, sel) for sel in snapshot.embodiment_selections),
+        )
+        self._embodiments.input_resolutions = self._keyed_dict(
+            "input_resolutions",
+            ((res.work_item_id, res) for res in snapshot.input_resolutions),
+        )
+        self._embodiments.input_preparations = self._keyed_dict(
+            "input_preparations",
+            ((prep.work_item_id, prep) for prep in snapshot.input_preparations),
+        )
+        self._attempt_lifecycle.receipts = self._keyed_dict(
+            "effect_receipts", ((r.invocation_id, r) for r in snapshot.effect_receipts)
+        )
+        self._authority.decisions = self._history(
+            "authority_decisions", snapshot.authority_decisions
+        )
+        self._authority.grants = self._keyed_dict(
+            "delegated_grants", ((g.grant_id, g) for g in snapshot.delegated_grants)
+        )
+        self._ledger.capabilities = self._keyed_dict(
+            "progress_capabilities",
+            (((c.scope_id, c.axis), c) for c in snapshot.progress_capabilities),
+        )
+        self._publication.slots = self._keyed_dict(
+            "result_slots", ((s.slot_key, s) for s in snapshot.result_slots)
+        )
+        self._publication.publications = self._keyed_dict(
+            "result_publications",
+            ((p.slot_key, p) for p in snapshot.result_publications),
+        )
+        self._ledger.trace = self._history("trace", snapshot.trace)
+        self._ledger.private_state.adopt(
+            self._keyed_dict(
+                "private_state",
+                (
+                    (lineage.binding.reference.activation_id, lineage)
+                    for lineage in snapshot.private_state
+                ),
+            )
+        )
 
         # Not persisted: each region activation names the parent and operator that
         # opened it.
@@ -142,11 +244,14 @@ class SnapshotCodec:
             for a in self._ledger.activations.values()
             if a.kind == "region" and a.parent_activation_id
         }
-        self._boundaries.boundary_events = {
-            (b.activation, b.call_correlation): b
-            for b in snapshot.boundary_events
-            if b.activation and b.call_correlation
-        }
+        self._boundaries.boundary_events = self._keyed_dict(
+            "boundary_events",
+            (
+                ((b.activation, b.call_correlation), b)
+                for b in snapshot.boundary_events
+                if b.activation and b.call_correlation
+            ),
+        )
         self._ledger.wi_by_task = {
             w.legacy_task_id: w.work_item_id
             for w in self._ledger.work_items.values()
@@ -154,7 +259,7 @@ class SnapshotCodec:
         }
         # An operator inside a region definition runs once per occurrence, so its work
         # is addressed by occurrence, task or activation, never by operator alone.
-        self._ledger.occurrences = {}
+        self._ledger.occurrences = self._keyed_dict("occurrences")
         self._ledger.occurrences_by_scope = {}
         self._ledger.open_occurrences = {}
         self._ledger.occurrence_by_activation = {}
@@ -171,26 +276,40 @@ class SnapshotCodec:
                 key := self._ledger.occurrence_by_activation.get(w.activation_id)
             ) is not None:
                 self._ledger.wi_by_occurrence[key] = w.work_item_id
-        self._ledger.control_states = {c.key: c for c in snapshot.control_states}
+        self._ledger.control_states = self._keyed_dict(
+            "control_states", ((c.key, c) for c in snapshot.control_states)
+        )
         self._ledger.selection_candidates = dict.fromkeys(
             key
             for key, state in self._ledger.control_states.items()
             if state.status is ControlStatus.PENDING and state.inputs
         )
-        self._ledger.branch_decisions = {
-            d.occurrence: d for d in snapshot.branch_decisions
-        }
-        self._ledger.loop_instances = {i.scope_id: i for i in snapshot.loop_instances}
+        self._ledger.branch_decisions = self._keyed_dict(
+            "branch_decisions", ((d.occurrence, d) for d in snapshot.branch_decisions)
+        )
+        self._ledger.loop_instances = self._keyed_dict(
+            "loop_instances", ((i.scope_id, i) for i in snapshot.loop_instances)
+        )
         self._ledger.loop_by_occurrence = {
             i.occurrence: i.scope_id for i in snapshot.loop_instances
         }
-        self._ledger.iterations = {
-            (r.loop, r.iteration): r for r in snapshot.iteration_resolutions
-        }
-        self._ledger.child_contexts = {c.context_id: c for c in snapshot.child_contexts}
+        self._ledger.iterations = self._keyed_dict(
+            "iteration_resolutions",
+            (((r.loop, r.iteration), r) for r in snapshot.iteration_resolutions),
+        )
+        self._ledger.child_contexts = self._keyed_dict(
+            "child_contexts", ((c.context_id, c) for c in snapshot.child_contexts)
+        )
         self._ledger.wi_by_activation = {
             w.activation_id: w.work_item_id for w in self._ledger.work_items.values()
         }
+        self._ledger.succeeded_children = Counter(
+            scope_id
+            for scope_id, children in self._ledger.children_by_scope.items()
+            for child in children.values()
+            if (wi_id := self._ledger.wi_by_activation.get(child)) is not None
+            and self._ledger.work_items[wi_id].outcome is PublicationOutcome.SUCCESS
+        )
         self._publication.slots_by_operator = {}
         self._publication.slots_by_output = {}
         for slot in self._publication.slots.values():
@@ -249,7 +368,9 @@ class SnapshotCodec:
         # Released scopes are authoritative scope-level state, restored directly rather
         # than re-derived from records: a recursive region's levels share one join/loop
         # operator, so a record could not attribute a release to the right level.
-        self._ledger.released_scopes = set(snapshot.released_scopes)
+        self._ledger.released_scopes = self._set(
+            "released_scopes", snapshot.released_scopes
+        )
         self._ledger.active_loops = {
             i.scope_id
             for i in snapshot.loop_instances
@@ -260,18 +381,19 @@ class SnapshotCodec:
             for c in snapshot.child_contexts
             if c.scope_id not in self._ledger.released_scopes
         }
-        self._failures.failed_regions = set(snapshot.failed_regions)
-        self._failures.failed_scopes = set(snapshot.failed_scopes)
-        # A ledger stored without failure reasons names each failed work item's own.
-        self._failures.failure_reasons = dict(snapshot.failure_reasons)
+        self._failures.failed_regions = self._set(
+            "failed_regions", snapshot.failed_regions
+        )
+        self._failures.failed_scopes = self._set(
+            "failed_scopes", snapshot.failed_scopes
+        )
+        self._failures.failure_reasons = self._keyed_dict(
+            "failure_reasons", snapshot.failure_reasons.items()
+        )
         self._failures.instance_failure = snapshot.instance_failure
         self._failures.control_failure = snapshot.control_failure
         self._failures.instance_cancelled = snapshot.instance_cancelled
-        for wi in self._ledger.work_items.values():
-            if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
-                self._failures.failure_reasons.setdefault(
-                    wi.legacy_task_id, wi.failure_reason or DECLARED_FAILURE_REASON
-                )
+        self._failures.unapplied = dict.fromkeys(self._failures.failure_reasons)
         # A spawn-site denial names no work item; an agent's denied boundary names one
         # and never refuses a later spawn.
         self._authority.denied_spawns = {
@@ -281,48 +403,156 @@ class SnapshotCodec:
             and d.operator_id
             and d.work_item_id is None
         }
+        self._settle(snapshot, ordinals)
+
+    def _settle(
+        self, snapshot: LedgerSnapshot, ordinals: LedgerOrdinals | None
+    ) -> None:
+        """Take the restored ledger as stored, owing what the restore changed, or a
+        rewrite when it is no stored ledger."""
+        self._stored = None
+        self._written_lengths = {name: len(h) for name, h in self._histories.items()}
+        self._written_scalars = self._scalars()
+        self._acknowledged = None
+        if ordinals is None:
+            self._journal.reset()
+            self.owe_rewrite()
+            return
+        for tracked in self._keyed.values():
+            tracked.restoring = None
+        for name, stored in ordinals.items():
+            for key in stored.keys() - self._keyed.get(name, {}).keys():
+                self._journal.mark((name, key))
+        if self.verify_changes:
+            self._acknowledged = encode_ledger(StoredLedger(snapshot, ordinals))
+
+    def _foundation(self) -> dict[str, Any]:
+        return {
+            "instance": self._ledger.workflow_instance,
+            "root_scope": self._ledger.root_scope,
+            "root_grant": self._ledger.root_grant,
+            "max_loop_iterations": self._budget.max_loop_iterations,
+        }
+
+    def _scalars(self) -> dict[str, Any]:
+        return {
+            "next_seq": self._ledger.next_seq,
+            "instance_failure": self._failures.instance_failure,
+            "control_failure": self._failures.control_failure,
+            "instance_cancelled": self._failures.instance_cancelled,
+        }
 
     def to_snapshot(self) -> LedgerSnapshot:
-        return LedgerSnapshot(
-            instance=self._ledger.workflow_instance,
-            root_scope=self._ledger.root_scope,
-            root_grant=self._ledger.root_grant,
-            scopes=list(self._ledger.scopes.values()),
-            activations=list(self._ledger.activations.values()),
-            work_items=list(self._ledger.work_items.values()),
-            continuations=list(self._ledger.continuations.values()),
-            records=list(self._ledger.records),
-            accepted_inputs=list(self._inputs.accepted_inputs),
-            region_aggregates=list(self._ledger.region_aggregates),
-            invocations=list(self._ledger.invocations.values()),
-            attempts=list(self._ledger.attempts.values()),
-            embodiment_selections=list(
-                self._embodiments.embodiment_selections.values()
-            ),
-            input_resolutions=list(self._embodiments.input_resolutions.values()),
-            input_preparations=list(self._embodiments.input_preparations.values()),
-            boundary_events=list(self._boundaries.boundary_events.values()),
-            effect_receipts=list(self._attempt_lifecycle.receipts.values()),
-            authority_decisions=list(self._authority.decisions),
-            delegated_grants=list(self._authority.grants.values()),
-            progress_capabilities=list(self._ledger.capabilities.values()),
-            result_slots=list(self._publication.slots.values()),
-            result_publications=list(self._publication.publications.values()),
-            trace=list(self._ledger.trace),
-            private_state=self._ledger.private_state.lineages(),
-            released_scopes=sorted(self._ledger.released_scopes),
-            failed_regions=sorted(self._failures.failed_regions),
-            failed_scopes=sorted(self._failures.failed_scopes),
-            failure_reasons=dict(self._failures.failure_reasons),
-            instance_failure=self._failures.instance_failure,
-            control_failure=self._failures.control_failure,
-            instance_cancelled=self._failures.instance_cancelled,
-            next_seq=self._ledger.next_seq,
-            occurrences=list(self._ledger.occurrences.values()),
-            control_states=list(self._ledger.control_states.values()),
-            branch_decisions=list(self._ledger.branch_decisions.values()),
-            loop_instances=list(self._ledger.loop_instances.values()),
-            iteration_resolutions=list(self._ledger.iterations.values()),
-            child_contexts=list(self._ledger.child_contexts.values()),
-            max_loop_iterations=self._budget.max_loop_iterations,
+        fields: dict[str, Any] = {**self._foundation(), **self._scalars()}
+        for name, tracked in self._keyed.items():
+            fields[name] = (
+                dict(tracked) if name in KEYED_TEXTS else list(tracked.values())
+            )
+        for name, history in self._histories.items():
+            fields[name] = list(history)
+        for name, members in self._sets.items():
+            fields[name] = sorted(members)
+        return LedgerSnapshot(**fields)
+
+    def image(self) -> dict[str, str]:
+        """Encode every field of the ledger as it stands."""
+        return encode_fields(
+            self._foundation(),
+            {
+                name: (tracked, tracked.ordinals)
+                for name, tracked in self._keyed.items()
+            },
+            self._histories,
+            self._sets,
+            self._scalars(),
         )
+
+    def changes(self) -> LedgerChanges:
+        """Capture the write that stores the ledger as it stands over what the landed
+        writes stored; ``written`` takes it as landed."""
+        captured = self._journal.captured()
+        lengths = {name: len(history) for name, history in self._histories.items()}
+        scalars = self._scalars()
+        if self._rewrite > self._rewritten:
+            changes = LedgerChanges(
+                self.image(),
+                reset=True,
+                captured=captured,
+                lengths=lengths,
+                scalars=scalars,
+                rewrite=self._rewrite,
+            )
+        else:
+            fields: dict[str, str] = {}
+            deleted: list[str] = []
+            for name, key in captured:
+                if (tracked := self._keyed.get(name)) is not None:
+                    if key in tracked:
+                        fields[field_name(name, key)] = keyed_value(
+                            tracked.ordinals[key], tracked[key]
+                        )
+                    else:
+                        deleted.append(field_name(name, key))
+                elif key in self._sets[name]:
+                    fields[field_name(name, key)] = SET_MEMBER
+                else:
+                    deleted.append(field_name(name, key))
+            for name, history in self._histories.items():
+                for position in range(self._written_lengths[name], len(history)):
+                    fields[field_name(name, position)] = history[
+                        position
+                    ].model_dump_json()
+            for name, value in scalars.items():
+                if value != self._written_scalars[name]:
+                    fields[scalar_field(name)] = scalar_value(value)
+            changes = LedgerChanges(
+                fields,
+                tuple(deleted),
+                captured=captured,
+                lengths=lengths,
+                scalars=scalars,
+            )
+        if self.verify_changes:
+            self._verify(changes)
+        return changes
+
+    def written(self, changes: LedgerChanges) -> None:
+        """Take a write of ``changes`` as landed, keeping each change made since they
+        were captured."""
+        self._journal.clear(changes.captured)
+        for name, length in changes.lengths.items():
+            self._written_lengths[name] = max(self._written_lengths[name], length)
+        self._written_scalars.update(changes.scalars)
+        self._rewritten = max(self._rewritten, changes.rewrite)
+        if self.verify_changes:
+            self._acknowledged = applied_changes(self._acknowledged or {}, changes)
+
+    def owe_rewrite(self) -> None:
+        """Owe a rewrite of the whole ledger with the next write."""
+        self._rewrite += 1
+
+    def _verify(self, changes: LedgerChanges) -> None:
+        failures = SnapshotCodec.verify_failures
+        for name, tracked in self._keyed.items():
+            if name in KEYED_TEXTS:
+                continue
+            key_of = KEYED[name][1]
+            failures.extend(
+                f"{name} holds {key_of(value)!r} under {key!r}"
+                for key, value in tracked.items()
+                if key_of(value) != key
+            )
+        if self._acknowledged is None and not changes.reset:
+            failures.append("a write of a ledger no write stored carries no rewrite")
+            return
+        expected = applied_changes(self._acknowledged or {}, changes)
+        image = self.image()
+        if expected != image:
+            differing = sorted(
+                name
+                for name in expected.keys() | image.keys()
+                if expected.get(name) != image.get(name)
+            )
+            failures.append(
+                f"a write leaves stored fields that differ: {differing[:10]}"
+            )

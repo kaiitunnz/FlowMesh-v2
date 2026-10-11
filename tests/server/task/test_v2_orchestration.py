@@ -18,6 +18,7 @@ from server.orchestration import (
     RecoveryDisposition,
     WorkItemStatus,
 )
+from server.orchestration.ledger_layout import LedgerChanges
 from server.orchestration.outcomes import (
     AdmissionError,
     check_admissible,
@@ -25,7 +26,6 @@ from server.orchestration.outcomes import (
     is_replayable,
     next_on_uncertain,
 )
-from server.orchestration.state import LedgerSnapshot
 from server.registries.workflow import PersistedTask, WorkflowControl, WorkflowSched
 from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
@@ -38,10 +38,10 @@ from server.task.v2.representations.operators import (
     EffectReplayContract,
 )
 from shared.content import ContentReference
-from shared.tasks import PERSISTED_LOAD_CONTEXT
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
+from tests.server.stored_state import StoredLedgers, StoredTaskStates
 from tests.support.waiting import pop_ready
 
 # --------------------------------------------------------------------------- #
@@ -49,16 +49,15 @@ from tests.support.waiting import pop_ready
 # --------------------------------------------------------------------------- #
 
 
-class FakeRegistry:
+class FakeRegistry(StoredTaskStates, StoredLedgers):
     """In-memory registry that round-trips durable state through model JSON."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.submitted_at: str = ""
-        self.task_blobs: dict[str, str] = {}
         self.sched: dict[str, str] = {}
         self.workflow_task_ids: dict[str, list[str]] = {}
         self.v2_blobs: dict[str, str] = {}
-        self.ledger_blobs: dict[str, str] = {}
         self.dynamic_task_ids: dict[str, set[str]] = {}
         self.remaining: dict[str, set[str]] = {}
         self.blueprints: dict[str, list[PersistedTask]] = {}
@@ -76,7 +75,7 @@ class FakeRegistry:
         tasks: Sequence[PersistedTask],
         sched: WorkflowSched,
         v2: Any = None,
-        ledger: LedgerSnapshot | None = None,
+        ledger: LedgerChanges | None = None,
         submitted_at: str | None = None,
         blueprints: Any = (),
     ) -> None:
@@ -86,20 +85,21 @@ class FakeRegistry:
             for t in tasks
             if t.record.status not in (TaskStatus.DONE, TaskStatus.FAILED)
         }
-        for item in tasks:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
+        self.put_sources([*tasks, *blueprints])
+        self.put_tasks(tasks)
         self.sched[workflow_id] = sched.model_dump_json()
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
         if ledger is not None:
-            self.ledger_blobs[workflow_id] = ledger.model_dump_json()
+            self.put_ledger(workflow_id, ledger)
         self.blueprints[workflow_id] = list(blueprints)
 
     async def unregister_workflows_async(self, *workflow_ids: str) -> None:
         for workflow_id in workflow_ids:
-            for task_id in self.workflow_task_ids.pop(workflow_id, []):
-                self.task_blobs.pop(task_id, None)
-            for store in (self.remaining, self.sched, self.v2_blobs, self.ledger_blobs):
+            self.forget_workflow_tasks(
+                workflow_id, self.workflow_task_ids.pop(workflow_id, [])
+            )
+            for store in (self.remaining, self.sched, self.v2_blobs, self.ledgers):
                 store.pop(workflow_id, None)
 
     async def get_workflow_ids_async(self) -> set[str]:
@@ -121,23 +121,8 @@ class FakeRegistry:
         return self.get_workflow_record(workflow_id)
 
     async def save_task_states_async(self, items: list[PersistedTask]) -> None:
-        for item in items:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
-
-    def load_task_states(self, *task_ids: str) -> list[PersistedTask | None]:
-        return [
-            (
-                PersistedTask.model_validate_json(blob, context=PERSISTED_LOAD_CONTEXT)
-                if (blob := self.task_blobs.get(t))
-                else None
-            )
-            for t in task_ids
-        ]
-
-    async def load_task_states_async(
-        self, *task_ids: str
-    ) -> list[PersistedTask | None]:
-        return self.load_task_states(*task_ids)
+        self.put_sources(items)
+        self.put_tasks(items)
 
     async def save_workflow_sched_async(
         self, workflow_id: str, in_epoch_order: bool, frontier: int
@@ -156,21 +141,15 @@ class FakeRegistry:
         blob = self.v2_blobs.get(workflow_id)
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+    def save_ledger(
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
-        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+        self.put_ledger(workflow_id, ledger)
         if control is not None:
             self.control[workflow_id] = control
 
     async def load_blueprints_async(self, workflow_id: str) -> list[PersistedTask]:
         return self.blueprints.get(workflow_id, [])
-
-    async def load_ledger_snapshot_async(
-        self, workflow_id: str
-    ) -> LedgerSnapshot | None:
-        blob = self.ledger_blobs.get(workflow_id)
-        return LedgerSnapshot.model_validate_json(blob) if blob else None
 
     def commit_transition(
         self,
@@ -185,8 +164,7 @@ class FakeRegistry:
         sched: WorkflowSched | None = None,
         control: WorkflowControl | None = None,
     ) -> None:
-        for item in records:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
+        self.put_tasks(records)
         self.remaining.setdefault(workflow_id, set()).difference_update(
             {*done, *failed, *cancelled}
         )
@@ -202,7 +180,7 @@ class FakeRegistry:
         self,
         workflow_id: str,
         records: Sequence[PersistedTask],
-        snapshot: LedgerSnapshot,
+        ledger: LedgerChanges,
         retire: Sequence[str] = (),
         *,
         dispatched: Sequence[str] = (),
@@ -214,8 +192,8 @@ class FakeRegistry:
     ) -> None:
         remaining = self.remaining.setdefault(workflow_id, set())
         settled = {*done, *failed, *cancelled}
+        self.put_tasks(records)
         for item in records:
-            self.task_blobs[item.record.task_id] = item.model_dump_json()
             self.dynamic_task_ids.setdefault(workflow_id, set()).add(
                 item.record.task_id
             )
@@ -224,7 +202,7 @@ class FakeRegistry:
             else:
                 remaining.add(item.record.task_id)
         remaining.difference_update(retire)
-        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+        self.put_ledger(workflow_id, ledger)
         if control is not None:
             self.control[workflow_id] = control
         if sched is not None:
@@ -689,7 +667,7 @@ async def test_boundary_event_carries_into_the_ledger_and_persists() -> None:
     assert changed is False
     wi = engine.work_item(a)
     assert wi is not None and wi.status is WorkItemStatus.BLOCKED
-    assert workflow_id in registry.ledger_blobs
+    assert workflow_id in registry.ledgers
 
 
 # --------------------------------------------------------------------------- #
@@ -1056,14 +1034,14 @@ async def test_rehydration_heals_when_ledger_snapshot_lags_terminal_records() ->
     workflow_id, ids = await _register(runtime, LINEAR)
     a, b, c = ids["a"], ids["b"], ids["c"]
     # Snapshot the ledger as it stood at submission, before any settlement.
-    stale_ledger = registry.ledger_blobs[workflow_id]
+    stale_ledger = registry.ledgers[workflow_id]
 
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom")
     # Simulate a crash after the terminal task records committed but before the ledger
     # snapshot: the ledger lags durable task state (never ahead, per the write order).
-    registry.ledger_blobs[workflow_id] = stale_ledger
+    registry.ledgers[workflow_id] = stale_ledger
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -1119,7 +1097,7 @@ async def test_rehydration_replays_a_cancel_left_mid_flight() -> None:
     workflow_id, ids = await _register(runtime, _CANCELLING_SINGLE)
     solo = ids["solo"]
     # Snapshot the ledger as it stood before the cancel.
-    stale_ledger = registry.ledger_blobs[workflow_id]
+    stale_ledger = registry.ledgers[workflow_id]
 
     pop_ready(runtime)
     record_dispatch(runtime, solo, cast(Any, _worker()))
@@ -1127,7 +1105,7 @@ async def test_rehydration_replays_a_cancel_left_mid_flight() -> None:
     assert runtime.get_record(solo).status == TaskStatus.CANCELLING  # type: ignore[union-attr]
     # Simulate a crash after the cancelling task records committed but before the
     # ledger snapshot: no task is CANCELLED yet, so only the records carry the cancel.
-    registry.ledger_blobs[workflow_id] = stale_ledger
+    registry.ledgers[workflow_id] = stale_ledger
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -1154,14 +1132,14 @@ async def test_rehydration_readmits_task_orphaned_by_a_mid_retry_crash() -> None
     pop_ready(runtime)
     record_dispatch(runtime, a, cast(Any, _worker()))
     # Snapshot the ledger while a's work item is in flight (DISPATCHED).
-    dispatched_ledger = registry.ledger_blobs[workflow_id]
+    dispatched_ledger = registry.ledgers[workflow_id]
     # A retry persists a's record PENDING and readies the ledger work item, but
     # simulate a crash before that ledger snapshot committed: the durable snapshot
     # still shows the work item DISPATCHED while the task record is PENDING.
     runtime.fail_dispatch(
         a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom", retryable=True
     )
-    registry.ledger_blobs[workflow_id] = dispatched_ledger
+    registry.ledgers[workflow_id] = dispatched_ledger
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -1399,8 +1377,8 @@ class _LockProbingRegistry(FakeRegistry):
         self.runtime: TaskRuntime | None = None
         self.saved_unlocked: list[bool] = []
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: LedgerSnapshot, control: Any = None
+    def save_ledger(
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         assert self.runtime is not None
         lock = self.runtime._lock
@@ -1417,7 +1395,7 @@ class _LockProbingRegistry(FakeRegistry):
         thread.start()
         thread.join()
         self.saved_unlocked.append(taken[0])
-        super().save_ledger_snapshot(workflow_id, snapshot)
+        super().save_ledger(workflow_id, ledger)
 
 
 @pytest.mark.anyio
@@ -1430,5 +1408,5 @@ async def test_the_submit_ledger_save_runs_under_the_runtime_lock() -> None:
     assert registry.saved_unlocked == [False]
     live = runtime.orchestration_engine(workflow_id)
     assert live is not None
-    stored = LedgerSnapshot.model_validate_json(registry.ledger_blobs[workflow_id])
+    stored = registry.ledger(workflow_id)
     assert stored == live.to_snapshot()

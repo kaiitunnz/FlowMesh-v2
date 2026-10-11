@@ -9,6 +9,7 @@ import pytest
 
 from server.dispatcher.base import Dispatcher
 from server.orchestration import WorkItemStatus
+from server.orchestration.ledger_layout import LedgerChanges
 from server.registries.worker import Worker
 from server.services.monitoring import EventMonitor
 from server.services.watchdog import WorkerWatchdog
@@ -748,7 +749,7 @@ async def test_a_v2_failure_handled_again_after_its_commit_failed_retries_once()
     assert engine is not None
     work_item = engine.work_item(task_id)
     assert work_item is not None and work_item.status is WorkItemStatus.READY
-    assert registry.ledger_blobs[workflow_id] == engine.to_snapshot().model_dump_json()
+    assert registry.ledger(workflow_id) == engine.to_snapshot()
     assert runtime._tasks[task_id].attempts == 1
 
 
@@ -815,7 +816,7 @@ async def test_a_v2_success_handled_again_after_its_commit_failed_settles_it() -
     assert engine is not None
     work_item = engine.work_item(task_id)
     assert work_item is not None and work_item.status is WorkItemStatus.SETTLED
-    assert registry.ledger_blobs[workflow_id] == engine.to_snapshot().model_dump_json()
+    assert registry.ledger(workflow_id) == engine.to_snapshot()
     assert runtime.workflow_settlement(workflow_id).settled
 
 
@@ -847,14 +848,14 @@ class _FlakyWrites(_Registry):
         self.ledger_saves_to_failure = 0
         self.children_down = False
 
-    def save_ledger_snapshot(
-        self, workflow_id: str, snapshot: Any, control: Any = None
+    def save_ledger(
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         if self.ledger_saves_to_failure:
             self.ledger_saves_to_failure -= 1
             if not self.ledger_saves_to_failure:
                 raise ConnectionError("ledger write failed")
-        super().save_ledger_snapshot(workflow_id, snapshot)
+        super().save_ledger(workflow_id, ledger)
 
     def commit_dynamic_tasks(self, workflow_id: str, *args: Any, **kwargs: Any) -> None:
         if self.children_down:
@@ -892,7 +893,7 @@ async def test_a_v2_success_whose_writes_fail_counts_once(
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
     assert registry.durable_status(task_id) == TaskStatus.DONE
-    assert registry.ledger_blobs[workflow_id] == engine.to_snapshot().model_dump_json()
+    assert registry.ledger(workflow_id) == engine.to_snapshot()
     assert monitor._metrics.record_task_event.call_count == 1
 
 

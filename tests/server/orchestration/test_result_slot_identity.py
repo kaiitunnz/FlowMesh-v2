@@ -1,12 +1,11 @@
 """A result slot's identity is unambiguous and carries its scope.
 
 A keyed collection publishes one slot per child of each scope that spawns, so two
-scopes publishing the same child index are two slots, and a publication stored under
-the unscoped key is found after a restart.
+scopes publishing the same child index are two slots.
 """
 
 from server.orchestration import OrchestrationEngine, PublicationOutcome
-from server.orchestration.state import Activation, ResultPublication, ValueRef
+from server.orchestration.state import Activation, ValueRef
 from server.task.outputs import published_members
 from server.task.v2 import PersistedV2Workflow
 from server.task.v2.representations.results import Visibility
@@ -87,24 +86,3 @@ def test_a_key_that_reads_like_a_sequence_is_its_own_slot() -> None:
         )
     }
     assert len(keys) == 4
-
-
-def test_a_publication_recorded_under_the_legacy_key_is_found_after_restart() -> None:
-    eng = _engine()
-    eng.on_succeeded("planner")
-    snapshot = eng.to_snapshot()
-    (summary,) = [s for s in snapshot.result_slots if s.output_id == "summary"]
-    legacy = ResultPublication(
-        slot_key=summary.legacy_slot_key,
-        output_id="summary",
-        outcome=PublicationOutcome.SUCCESS,
-        value_ref=_value("summary"),
-    )
-    restored = OrchestrationEngine(
-        snapshot.model_copy(update={"result_publications": [legacy]}),
-        _fanout_bundle(),
-    )
-
-    published = restored.output_publication("summary")
-    assert published is not None and published.value_ref == _value("summary")
-    assert published.slot_key == summary.slot_key

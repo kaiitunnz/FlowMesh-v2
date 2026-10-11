@@ -448,10 +448,10 @@ def _dispatched_unsaved(
     registry: FakeRegistry, runtime: TaskRuntime, task: str
 ) -> None:
     """Dispatch a task, then lose the ledger save that recorded the dispatch."""
-    saved = dict(registry.ledger_blobs)
+    saved = dict(registry.ledgers)
     record_dispatch(runtime, task, cast(Any, _worker()), "dsp-1")
-    registry.ledger_blobs.clear()
-    registry.ledger_blobs.update(saved)
+    registry.ledgers.clear()
+    registry.ledgers.update(saved)
 
 
 @pytest.mark.anyio

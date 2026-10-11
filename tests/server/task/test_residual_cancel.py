@@ -7,7 +7,6 @@ import pytest
 
 from server.orchestration.state import (
     InvocationState,
-    LedgerSnapshot,
     PublicationOutcome,
     WorkItemStatus,
 )
@@ -109,7 +108,7 @@ async def test_a_pending_residual_child_is_cancelled_and_never_dispatched() -> N
 
     assert _pop_ready(runtime) == [ids["after"]]
     assert _status(runtime, loser) == TaskStatus.CANCELLED
-    persisted = registry.load_task_states(loser)[0]
+    persisted = registry.stored_task(loser)
     assert persisted is not None and persisted.record.status == TaskStatus.CANCELLED
     _finish(runtime, ids["after"])
     assert runtime.workflow_settlement(workflow_id).settled
@@ -241,9 +240,8 @@ def test_an_agents_cancel_residual_releases_a_cancelled_childs_credit() -> None:
         )
 
         def durable(invocation_id: str) -> InvocationState:
-            stored = LedgerSnapshot.model_validate_json(
-                registry.ledger_blobs[workflow_id]
-            )
+            stored = registry.ledger(workflow_id)
+            assert stored is not None
             return next(
                 i.state for i in stored.invocations if i.invocation_id == invocation_id
             )

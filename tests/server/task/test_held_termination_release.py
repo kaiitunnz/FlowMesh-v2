@@ -15,7 +15,7 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
-from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.orchestration.state import InvocationState
 from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from server.task.runtime.after_commit import AfterCommit, CreditRelease
@@ -112,9 +112,8 @@ class _Scenario:
         self.releases.append((invocation_id, self.durable_state(invocation_id)))
 
     def durable_state(self, invocation_id: str) -> InvocationState:
-        snapshot = LedgerSnapshot.model_validate_json(
-            self.registry.ledger_blobs[self.workflow_id]
-        )
+        snapshot = self.registry.ledger(self.workflow_id)
+        assert snapshot is not None
         return next(
             i.state for i in snapshot.invocations if i.invocation_id == invocation_id
         )
