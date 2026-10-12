@@ -1,10 +1,12 @@
 """Immutable, content-addressed objects the fabric stores within one scope."""
 
 from .access import (
+    RENEWAL_LEAD_SEC,
     ContentOperationKind,
     ContentStoreAccess,
     ContentStoreAccessGrant,
     ScopedContentCredential,
+    renewal_lead_sec,
 )
 from .config import BACKEND_FILESYSTEM, BACKEND_S3, ObjectStoreConfig
 from .filesystem import FilesystemObjectBacking, SharedFilesystemObjectStore
@@ -38,6 +40,8 @@ from .store import (
 )
 
 __all__ = [
+    "RENEWAL_LEAD_SEC",
+    "renewal_lead_sec",
     "STREAM_CHUNK_BYTES",
     "BACKEND_FILESYSTEM",
     "BACKEND_S3",

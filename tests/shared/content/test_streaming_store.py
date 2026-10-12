@@ -126,29 +126,6 @@ def test_a_commit_racing_another_writer_is_retried() -> None:
     assert store.hydrate(reference) == b"payload"
 
 
-def test_a_part_whose_session_expired_is_sent_again_on_renewed_access(
-    tmp_path: Path,
-) -> None:
-    client = FakeS3()
-    store = S3ObjectStore(client, "bucket", part_bytes=_PART, upload_concurrency=1)
-    original = client.upload_part
-    expired: list[int] = []
-
-    def expiring(**kw: Any) -> Any:
-        if kw["PartNumber"] == 2 and not expired:
-            expired.append(1)
-            raise s3_error("ExpiredToken", 400, "UploadPart")
-        return original(**kw)
-
-    client.upload_part = expiring  # type: ignore[method-assign]
-    data = os.urandom(3 * _PART)
-
-    reference = store.write_file("org", _write_file(tmp_path, data))
-
-    assert expired == [1]
-    assert store.hydrate(reference) == data
-
-
 def test_an_existing_object_of_the_wrong_size_is_refused() -> None:
     client = FakeS3()
     store = S3ObjectStore(client, "bucket", part_bytes=_PART)

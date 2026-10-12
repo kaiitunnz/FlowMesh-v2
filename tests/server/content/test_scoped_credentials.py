@@ -127,6 +127,19 @@ def test_a_session_near_its_end_is_cut_again() -> None:
     assert len(sts.calls) == 2
 
 
+def test_a_renewal_inside_a_workers_lead_gets_a_later_expiry() -> None:
+    """A session a worker is already asking to replace is never handed back to it."""
+    sts = _FakeSts(expires_in_sec=100.0)
+    minter = StsScopedCredentialMinter(_CFG, sts)
+    first = minter.mint("tenant-a", _OPS, 900.0)
+
+    sts._expires_in_sec = 900.0
+    renewed = minter.mint("tenant-a", _OPS, 900.0)
+
+    assert len(sts.calls) == 2
+    assert renewed.expires_at_epoch > first.expires_at_epoch + 600.0
+
+
 def test_the_grant_never_outlives_the_session_it_opens() -> None:
     """A grant that claimed longer than its material would read live while refused."""
     sts = _FakeSts(expires_in_sec=120.0)

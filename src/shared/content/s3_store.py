@@ -53,8 +53,8 @@ _TAKEN_CODES = frozenset({"PreconditionFailed", "412"})
 # The answer to a conditional write racing another write of the same key; the store
 # asks the writer to try again, and the retry is refused or lands.
 _CONFLICT_CODES = frozenset({"ConditionalRequestConflict", "409"})
-# A session that ran out under a call; one made again on renewed access may land.
-_EXPIRED_CODES = frozenset(
+# A session the store no longer honours, or never did, for the call it refused.
+_CREDENTIAL_CODES = frozenset(
     {"ExpiredToken", "AccessDenied", "InvalidAccessKeyId", "TokenRefreshRequired"}
 )
 _CONFLICT_RETRIES = 5
@@ -286,16 +286,14 @@ class S3ObjectStore(FabricObjectStore):
             if cancelled is not None and cancelled():
                 raise WriteCancelled(f"write of {key} was cancelled")
             body = read_part(index)
-            response = _renewing(
-                lambda: self._client.upload_part(
-                    Bucket=self._bucket,
-                    Key=key,
-                    UploadId=upload_id,
-                    PartNumber=index + 1,
-                    Body=body,
-                    ChecksumAlgorithm="SHA256",
-                    ChecksumSHA256=checksums[index],
-                )
+            response = self._client.upload_part(
+                Bucket=self._bucket,
+                Key=key,
+                UploadId=upload_id,
+                PartNumber=index + 1,
+                Body=body,
+                ChecksumAlgorithm="SHA256",
+                ChecksumSHA256=checksums[index],
             )
             return {
                 "PartNumber": index + 1,
@@ -438,7 +436,7 @@ def _committing(call: Callable[[], Any]) -> Any:
     """Make a conditional commit, again while it races another writer of its key."""
     for attempt in range(_CONFLICT_RETRIES):
         try:
-            return _renewing(call)
+            return call()
         except ClientError as exc:
             code, status = _error_code(exc)
             if not (code in _CONFLICT_CODES or status == 409):
@@ -449,14 +447,10 @@ def _committing(call: Callable[[], Any]) -> Any:
     raise AssertionError("unreachable")
 
 
-def _renewing(call: Callable[[], Any]) -> Any:
-    """Make a call, and once more if its session ran out under it."""
-    try:
-        return call()
-    except ClientError as exc:
-        if _error_code(exc)[0] not in _EXPIRED_CODES:
-            raise
-        return call()
+def is_credential_refusal(exc: Exception) -> bool:
+    """Whether the store refused a call for the session it was made under: one that ran
+    out, was revoked, or does not cover the call."""
+    return _error_code(exc)[0] in _CREDENTIAL_CODES
 
 
 def _write_error(exc: Exception) -> ContentStoreError:
@@ -483,4 +477,5 @@ def _is_taken(exc: Exception) -> bool:
 __all__ = [
     "S3Client",
     "S3ObjectStore",
+    "is_credential_refusal",
 ]

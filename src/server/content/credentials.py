@@ -25,6 +25,7 @@ from shared.content import (
     ObjectStoreConfig,
     ScopedContentCredential,
     SharedFilesystemObjectStore,
+    renewal_lead_sec,
 )
 from shared.content.s3_store import S3ObjectStore
 
@@ -197,10 +198,6 @@ class StsScopedCredentialMinter:
     added isolation.
     """
 
-    # How long before a session's end it stops being handed out, so a task never starts
-    # with access that expires under it.
-    _RENEW_MARGIN_SEC = 60.0
-
     def __init__(self, cfg: ObjectStoreConfig, sts_client: Any) -> None:
         self._cfg = cfg
         self._sts = sts_client
@@ -216,9 +213,11 @@ class StsScopedCredentialMinter:
         key = (scope, operations)
         now = time.time()
         cached = self._sessions.get(key)
+        # A session is handed out only while more of it remains than a worker asks
+        # ahead of its end, so a renewal is always answered with a later expiry.
         if (
             cached is not None
-            and now + self._RENEW_MARGIN_SEC < cached.expires_at_epoch
+            and now + renewal_lead_sec(ttl_sec) < cached.expires_at_epoch
         ):
             return cached
         minted = self._cut(scope, operations, ttl_sec)
