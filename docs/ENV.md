@@ -85,11 +85,11 @@ directory `flowmesh stack` runs in.
 | `CONTENT_CACHE_MAX_BYTES` | `0` | Disk budget for a worker's cached copies (0 = unbounded) |
 | `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Longest a content transfer may go without progress (seconds) |
 | `CONTENT_TRANSFER_WINDOW_BYTES` | `1048576` | Bytes a content transfer keeps in flight |
-| `CONTENT_PEER_TRANSFER_MAX_BYTES` | `67108864` | Objects this size or larger skip peer copies for the store while it is reachable (0 = always try a peer) |
-| `CONTENT_STORE_PART_BYTES` | `16777216` | Part size of a large object's upload (bytes, at least 5 MiB) |
+| `CONTENT_PEER_TRANSFER_MAX_BYTES` | `67108864` | Objects this size or larger read from the store before a peer while it is reachable (0 = peer first) |
+| `CONTENT_STORE_PART_BYTES` | `16777216` | Part size of a large object's upload (bytes, 5 MiB to 5 GiB) |
 | `CONTENT_STORE_UPLOAD_CONCURRENCY` | `4` | Parts one upload sends at once |
 | `CONTENT_STORE_READ_STALL_TIMEOUT_SEC` | `10` | Longest a control-plane store read waits for bytes (seconds) |
-| `CONTENT_STORE_READ_ATTEMPTS` | `2` | Times a control-plane store read's request is made |
+| `CONTENT_STORE_READ_ATTEMPTS` | `2` | Request attempts per control-plane store read |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
 | `RESIDENT_ADMISSION_SLOTS` | `8` | Conservative safe admission slots per replica |

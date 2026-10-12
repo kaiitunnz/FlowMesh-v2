@@ -2,7 +2,7 @@
 
 import pytest
 
-from server.config import PortForwardConfig, ServerConfig
+from server.config import ContentStoreConfig, PortForwardConfig, ServerConfig
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 
 
@@ -86,3 +86,11 @@ def test_server_config_carries_telemetry_beside_its_store(
     config = ServerConfig.from_env()
 
     assert config.telemetry.level is TelemetryLevel.FINE
+
+
+def test_content_store_reads_make_at_least_one_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONTENT_STORE_READ_ATTEMPTS", "0")
+
+    assert ContentStoreConfig.from_env().read_attempts == 1

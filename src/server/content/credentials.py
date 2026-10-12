@@ -35,35 +35,21 @@ _SessionKey = tuple[str, tuple[ContentOperationKind, ...]]
 _MIN_SESSION_SEC = 900
 
 
-def _client_config() -> Config:
-    """Short timeouts and one retry for the calls control makes to the store.
+def _client_config(stall_timeout_sec: float = 10.0, attempts: int = 2) -> Config:
+    """Short timeouts and few attempts for the calls control makes to the store.
 
-    These run on the dispatch path, so an unreachable store has to cost a dispatch a
-    moment rather than botocore's minute-long default with retries behind it — the task
-    goes on to fail its first content read, which is the outcome either way.
-    """
-    return Config(
-        signature_version="s3v4",
-        connect_timeout=5,
-        read_timeout=10,
-        retries={"total_max_attempts": 2},
-    )
-
-
-def _read_client_config(stall_timeout_sec: float, attempts: int) -> Config:
-    """The timeouts control reads content under.
-
-    ``read_timeout`` bounds how long one socket read may wait for bytes, not how long
-    an object takes, so a read of any size runs while it keeps moving and fails only
-    once it stalls. Retries cover the request alone: once a body is flowing, a failure
-    surfaces to the reader rather than restarting a response part of which it has
-    already consumed.
+    Minting and provisioning run on the dispatch path, so an unreachable store costs a
+    dispatch a moment rather than botocore's minute-long default. ``read_timeout``
+    bounds how long one socket read may wait for bytes, not how long an object takes,
+    so a read of any size runs while it keeps moving and fails only once it stalls.
+    Attempts cover the request alone: once a body is flowing, a failure surfaces to the
+    reader rather than restarting a response part of which it has already consumed.
     """
     return Config(
         signature_version="s3v4",
         connect_timeout=5,
         read_timeout=stall_timeout_sec,
-        retries={"total_max_attempts": max(1, attempts)},
+        retries={"total_max_attempts": attempts},
     )
 
 
@@ -158,7 +144,7 @@ def open_deployment_store(
         aws_access_key_id=cfg.access_key or None,
         aws_secret_access_key=cfg.secret_key or None,
         region_name=cfg.region,
-        config=_read_client_config(read_stall_timeout_sec, read_attempts),
+        config=_client_config(read_stall_timeout_sec, read_attempts),
     )
     return S3ObjectStore(client, cfg.bucket, prefix=cfg.prefix)
 

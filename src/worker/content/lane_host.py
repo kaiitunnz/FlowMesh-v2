@@ -26,6 +26,7 @@ from shared.content import (
     ContentHydrationGrant,
     ContentReference,
 )
+from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.network.frame_stream import WireFrameSink
 from shared.network.relay_frame import CONTENT_FRAME_KIND, RelayDirection, RelayFrame
 from shared.utils.atomic import temp_path
@@ -50,7 +51,7 @@ class ContentLaneHost:
         worker_id: str,
         generation: int,
         transfer_timeout_sec: float = 60.0,
-        window_bytes: int = 1 << 20,
+        window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES,
         announce: AnnounceHolding | None = None,
         holder_report_ttl_sec: float = 300.0,
         logger: logging.Logger | None = None,

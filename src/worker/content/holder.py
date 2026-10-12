@@ -22,6 +22,7 @@ from shared.content import (
     GrantRejection,
     HolderGrantGate,
 )
+from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.content.wire import (
     CHUNK_BYTES,
     KIND_CHUNK,
@@ -60,7 +61,7 @@ class ContentHolder:
         sink: FrameSink,
         holder_id: str,
         generation: int,
-        window_bytes: int = 65536,
+        window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES,
         grant_arrival_wait_sec: float = _GRANT_ARRIVAL_WAIT_SEC,
         stall_timeout_sec: float = _STALL_TIMEOUT_SEC,
         logger: logging.Logger | None = None,

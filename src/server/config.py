@@ -568,6 +568,10 @@ class WebSearchConfig:
         )
 
 
+_DEFAULT_READ_STALL_TIMEOUT_SEC = 10.0
+_DEFAULT_READ_ATTEMPTS = 2
+
+
 @dataclass
 class ContentStoreConfig:
     """What the control plane does about fabric content.
@@ -584,8 +588,8 @@ class ContentStoreConfig:
     grant_ttl_sec: float = 60.0
     holder_record_ttl_sec: float = 300.0
     access_grant_ttl_sec: float = 900.0
-    read_stall_timeout_sec: float = 10.0
-    read_attempts: int = 2
+    read_stall_timeout_sec: float = _DEFAULT_READ_STALL_TIMEOUT_SEC
+    read_attempts: int = _DEFAULT_READ_ATTEMPTS
 
     @classmethod
     def from_env(cls) -> "ContentStoreConfig":
@@ -595,9 +599,11 @@ class ContentStoreConfig:
             holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
             access_grant_ttl_sec=parse_float_env("CONTENT_ACCESS_TTL_SEC", 900.0),
             read_stall_timeout_sec=parse_float_env(
-                "CONTENT_STORE_READ_STALL_TIMEOUT_SEC", 10.0
+                "CONTENT_STORE_READ_STALL_TIMEOUT_SEC", _DEFAULT_READ_STALL_TIMEOUT_SEC
             ),
-            read_attempts=parse_int_env("CONTENT_STORE_READ_ATTEMPTS", 2),
+            read_attempts=max(
+                1, parse_int_env("CONTENT_STORE_READ_ATTEMPTS", _DEFAULT_READ_ATTEMPTS)
+            ),
         )
 
 

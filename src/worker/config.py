@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from shared.content.config import ObjectStoreConfig
+from shared.content.config import (
+    DEFAULT_PEER_TRANSFER_MAX_BYTES,
+    DEFAULT_TRANSFER_WINDOW_BYTES,
+    ObjectStoreConfig,
+)
+from shared.content.wire import CHUNK_BYTES
 from shared.schemas.worker import SSHBackendName, SSHLimits
 from shared.telemetry.config import TelemetryConfig
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
@@ -303,11 +308,15 @@ class WorkerConfig:
             content_transfer_timeout_sec=parse_float_env(
                 "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
             ),
-            content_transfer_window_bytes=parse_int_env(
-                "CONTENT_TRANSFER_WINDOW_BYTES", 1 << 20
+            # A window smaller than one frame never admits a frame.
+            content_transfer_window_bytes=max(
+                CHUNK_BYTES,
+                parse_int_env(
+                    "CONTENT_TRANSFER_WINDOW_BYTES", DEFAULT_TRANSFER_WINDOW_BYTES
+                ),
             ),
             content_peer_transfer_max_bytes=parse_int_env(
-                "CONTENT_PEER_TRANSFER_MAX_BYTES", 64 << 20
+                "CONTENT_PEER_TRANSFER_MAX_BYTES", DEFAULT_PEER_TRANSFER_MAX_BYTES
             ),
             results_mount_source=results_mount_source,
             hb_interval_sec=hb_interval,

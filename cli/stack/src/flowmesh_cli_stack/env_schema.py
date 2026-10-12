@@ -952,8 +952,8 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "CONTENT_PEER_TRANSFER_MAX_BYTES",
                     "67108864",
                     description=(
-                        "Objects this size or larger skip peer copies for the store "
-                        "while it is reachable (0 = always try a peer)."
+                        "Objects this size or larger read from the store before a peer "
+                        "while it is reachable (0 = peer first)."
                     ),
                     var_type=EnvVarType.INT,
                     min_value=0,
@@ -961,9 +961,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_STORE_PART_BYTES",
                     "16777216",
-                    description="Part size of a large object's upload (bytes).",
+                    description=(
+                        "Part size of a large object's upload (bytes, 5 MiB to 5 GiB)."
+                    ),
                     var_type=EnvVarType.INT,
                     min_value=5242880,
+                    max_value=5368709120,
                 ),
                 EnvVar(
                     "CONTENT_STORE_UPLOAD_CONCURRENCY",
@@ -985,7 +988,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_STORE_READ_ATTEMPTS",
                     "2",
-                    description="Times a control-plane store read's request is made.",
+                    description="Request attempts per control-plane store read.",
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),

@@ -26,6 +26,7 @@ from shared.content import (
     ContentReference,
     ContentVerifier,
 )
+from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.content.wire import (
     KIND_CHUNK,
     KIND_DONE,
@@ -68,7 +69,7 @@ class ContentHydrationClient:
         sink: FrameSink,
         request_grant: RequestGrant,
         transfer_timeout_sec: float = 60.0,
-        window_bytes: int = 65536,
+        window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES,
         logger: logging.Logger | None = None,
     ) -> None:
         self._sink = sink
