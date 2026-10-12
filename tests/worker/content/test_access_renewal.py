@@ -176,8 +176,16 @@ def test_parts_asking_at_once_share_the_client_one_of_them_opens(
     clients = _Clients()
     registry = _registry(monkeypatch, clients, clock)
 
+    entered = 0
+    changed = threading.Condition()
+
     def slow_open(credential: ScopedContentCredential) -> Any:
-        time.sleep(0.05)
+        # Every caller that can get here at once does before any client opens.
+        nonlocal entered
+        with changed:
+            entered += 1
+            changed.notify_all()
+            changed.wait_for(lambda: entered >= 4, timeout=0.5)
         return clients.open(credential)
 
     monkeypatch.setattr(registry, "_open_s3", slow_open)
@@ -193,6 +201,7 @@ def test_parts_asking_at_once_share_the_client_one_of_them_opens(
         thread.join()
 
     assert clients.opened == ["csg-1"]
+    assert entered == 1
 
 
 def test_access_is_renewed_once_ahead_of_its_end(monkeypatch) -> None:

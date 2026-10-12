@@ -9,6 +9,7 @@ from server.content import StsScopedCredentialMinter
 from server.content.credentials import scope_policy
 from shared.content import ContentOperationKind, ObjectStoreConfig
 from shared.content.s3_store import S3ObjectStore
+from tests.shared.fake_s3 import UnusedWrites
 
 _OPS = (ContentOperationKind.READ, ContentOperationKind.WRITE)
 _CFG = ObjectStoreConfig(
@@ -39,25 +40,6 @@ class _FakeSts:
         return {"Credentials": session}
 
 
-class _UnusedWrites:
-    """The multipart calls an S3 client offers, which these reads never make."""
-
-    def head_object(self, **kwargs: Any) -> Any:
-        raise AssertionError("not called here")
-
-    def create_multipart_upload(self, **kwargs: Any) -> Any:
-        raise AssertionError("not called here")
-
-    def upload_part(self, **kwargs: Any) -> Any:
-        raise AssertionError("not called here")
-
-    def complete_multipart_upload(self, **kwargs: Any) -> Any:
-        raise AssertionError("not called here")
-
-    def abort_multipart_upload(self, **kwargs: Any) -> Any:
-        raise AssertionError("not called here")
-
-
 def test_the_policy_covers_exactly_the_scopes_own_keys() -> None:
     """The policy's resource has to match where objects are actually written.
 
@@ -66,7 +48,7 @@ def test_the_policy_covers_exactly_the_scopes_own_keys() -> None:
     """
     written: dict[str, Any] = {}
 
-    class _Recording(_UnusedWrites):
+    class _Recording(UnusedWrites):
         def put_object(self, **kwargs: Any) -> Any:
             written.update(kwargs)
 

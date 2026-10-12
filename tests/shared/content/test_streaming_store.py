@@ -79,14 +79,16 @@ def test_a_large_object_already_stored_is_not_sent_again() -> None:
     store = S3ObjectStore(client, "bucket", part_bytes=_PART)
     data = os.urandom(2 * _PART)
     store.write("org", data)
-    created = client._next
+    created = client.created
 
     store.write("org", data)
 
-    assert client._next == created
+    assert client.created == created
 
 
-def test_a_commit_refused_by_a_racing_writer_is_aborted() -> None:
+def test_a_commit_refused_by_a_racing_writer_is_aborted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = FakeS3()
     store = S3ObjectStore(client, "bucket", part_bytes=_PART)
     data = os.urandom(2 * _PART)
@@ -101,7 +103,7 @@ def test_a_commit_refused_by_a_racing_writer_is_aborted() -> None:
             raise s3_error("404", 404, "HeadObject")
         return head(**kw)
 
-    client.head_object = head_after_refusal  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "head_object", head_after_refusal)
 
     store.write("org", data)
 
@@ -109,7 +111,9 @@ def test_a_commit_refused_by_a_racing_writer_is_aborted() -> None:
     assert len(client.aborted) == 1
 
 
-def test_a_commit_racing_another_writer_is_retried() -> None:
+def test_a_commit_racing_another_writer_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = FakeS3()
     store = S3ObjectStore(client, "bucket", part_bytes=_PART)
     original = client.put_object
@@ -121,7 +125,7 @@ def test_a_commit_racing_another_writer_is_retried() -> None:
             raise s3_error("ConditionalRequestConflict", 409)
         return original(**kw)
 
-    client.put_object = conflicting  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "put_object", conflicting)
 
     reference = store.write("org", b"payload")
 
@@ -154,7 +158,9 @@ def test_a_failed_part_aborts_the_upload(tmp_path: Path) -> None:
     assert client.aborted
 
 
-def test_a_cancelled_upload_is_aborted(tmp_path: Path) -> None:
+def test_a_cancelled_upload_is_aborted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = FakeS3()
     store = S3ObjectStore(client, "bucket", part_bytes=_PART, upload_concurrency=1)
     sent: list[int] = []
@@ -164,7 +170,7 @@ def test_a_cancelled_upload_is_aborted(tmp_path: Path) -> None:
         sent.append(kw["PartNumber"])
         return original(**kw)
 
-    client.upload_part = counting  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "upload_part", counting)
 
     with pytest.raises(WriteCancelled):
         store.write_file(
@@ -338,7 +344,9 @@ def test_a_missing_object_is_a_permanent_miss(store: FabricObjectStore) -> None:
     assert not isinstance(raised.value, ContentUnavailable)
 
 
-def test_a_commit_whose_answer_was_lost_settles_on_the_object(tmp_path: Path) -> None:
+def test_a_commit_whose_answer_was_lost_settles_on_the_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = FakeS3()
     store = S3ObjectStore(client, "bucket", part_bytes=_PART)
     original = client.complete_multipart_upload
@@ -351,7 +359,7 @@ def test_a_commit_whose_answer_was_lost_settles_on_the_object(tmp_path: Path) ->
             raise s3_error("ConditionalRequestConflict", 409, "CompleteMultipartUpload")
         return original(**kw)
 
-    client.complete_multipart_upload = lost_answer  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "complete_multipart_upload", lost_answer)
     data = os.urandom(2 * _PART)
 
     reference = store.write_file("org", _write_file(tmp_path, data))
@@ -359,13 +367,15 @@ def test_a_commit_whose_answer_was_lost_settles_on_the_object(tmp_path: Path) ->
     assert store.hydrate(reference) == data
 
 
-def test_a_store_without_conditional_writes_is_named_as_such() -> None:
+def test_a_store_without_conditional_writes_is_named_as_such(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = FakeS3()
 
     def unsupported(**kw: Any) -> Any:
         raise s3_error("NotImplemented", 501)
 
-    client.put_object = unsupported  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "put_object", unsupported)
 
     with pytest.raises(ContentStoreError, match="conditional writes"):
         S3ObjectStore(client, "bucket").write("org", b"payload")
