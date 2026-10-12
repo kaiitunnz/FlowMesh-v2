@@ -31,8 +31,6 @@ from shared.content import (
     verify_content,
 )
 
-# A write still in flight keeps its file moving, so staging left idle this long belongs
-# to a process that stopped mid-write.
 _STALE_STAGING_SEC = 3600.0
 
 

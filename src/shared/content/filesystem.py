@@ -2,9 +2,10 @@
 
 The backing a worker's cache and a shared-filesystem content store both keep their
 objects in: one file per object, named by its digest, under the scope that isolates it.
-An object is written to a temp file and linked into place only where nothing is, so
-re-writing identical bytes is free and an object is never rewritten in place. It holds
-bytes only — what an object means, and which binding keeps it alive, live above it.
+An object is written to a temp file and linked into place only where nothing is, so an
+object is never rewritten in place and a repeated write settles on the one stored. It
+holds bytes only — what an object means, and which binding keeps it alive, live above
+it.
 """
 
 import contextlib
@@ -46,11 +47,9 @@ def safe_segment(value: str | None) -> str:
 class FilesystemObjectBacking:
     """Content-addressed object files under a local directory.
 
-    With ``durable`` every committed object and its directory entry reach the disk
-    before the write returns, as a store of record needs; a cache that can lose a copy
-    without losing the object skips that cost. With ``repair`` an object found the wrong
-    size under its digest is replaced, which only a copy of an object held elsewhere
-    can afford: a store of record keeps what it has and refuses the write.
+    With ``durable`` a write returns only once the object and its directory entry are on
+    disk. With ``repair`` a write that finds an object of the wrong size under its
+    digest replaces it; without it the write is refused.
     """
 
     def __init__(

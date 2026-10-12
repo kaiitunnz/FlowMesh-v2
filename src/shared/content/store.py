@@ -81,10 +81,8 @@ class WriteCancelled(ContentStoreError):
 class ContentVerifier:
     """Checks bytes against the reference naming them as they arrive, chunk by chunk.
 
-    Size is checked with the digest because a reader sized its buffers from it, and an
-    encoding or algorithm this build cannot verify is refused rather than trusted. Bytes
-    past the declared size are refused as they arrive, so a source sending more than
-    the reference names is never read to its end to find that out.
+    Size is checked with the digest, an encoding or algorithm this build cannot verify
+    is refused, and bytes past the declared size are refused as they arrive.
     """
 
     def __init__(self, reference: ContentReference) -> None:

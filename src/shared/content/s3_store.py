@@ -11,7 +11,7 @@ The key is the reference's own identity — scope first, so a scope is a prefix 
 policy can be written against, then the algorithm and digest naming the bytes. A writer
 hashes the bytes before it names them, so the key is known before anything is sent, and
 every write is conditional on the key being free: a second write of the same object is
-refused by the store and costs a size check instead of a rewrite.
+refused by the store and settles on the stored object once its size matches.
 
 A large object goes up in parts, a bounded number at a time, each carrying the SHA-256
 of its own bytes so the store refuses a part that arrives other than it was hashed. The

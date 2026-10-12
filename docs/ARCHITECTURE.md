@@ -477,56 +477,51 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `CONTENT_STORE_ENDPOINT_URL` moves the fabric onto real object storage and leaves the
   co-located store unstarted, which is the shape a production deployment takes. The root
   provisions the bucket it is pointed at where its credential allows, since the scoped
-  session a worker reaches content under covers one scope's prefix rather than the bucket.
-  Its credential also needs list access on the bucket for a missing object to read as
-  missing. It is a service beside the fabric, never the root process: the root and its
-  supervisors hold no payload. A worker writes an object there before it reports the
-  reference naming it, so a reference that reaches any binding names bytes that already
-  outlive their producer, and a worker's death loses nothing. Every write is
-  conditional on its digest key being free, so an object once stored is never replaced:
-  a second write of the same bytes is refused and settles on the object already there,
-  once its size matches. Reads verify size and digest before releasing their last
-  bytes. A file written to the store, a file hydrated from it, and a peer transfer move
-  the object through bounded buffers; a large object goes up in parts, each carrying its
-  own SHA-256 for the store to check. An S3-compatible
-  store therefore has to support conditional writes (`If-None-Match`) and SHA-256 part
-  checksums, and a filesystem backend hard links. The outcome-finalization
-  index lives on the control plane, binding an `idm-*` to a reference so a re-drive
-  re-reports the first materialization rather than re-running a sampled producer; the
-  store holds only bytes and never treats an idempotency key as a name. The scope that
-  binding lands in is the one control assigned the work when it authorized the key, so the
-  producer reporting a finalization is held to it rather than naming a scope of its own.
+  session a worker reaches content under covers one scope's prefix rather than the
+  bucket. Its credential also needs list access on the bucket for a missing object to
+  read as missing. It is a service beside the fabric, never the root process: the root
+  and its supervisors hold no payload. A worker writes an object there before it reports
+  the reference naming it, so a reference that reaches any binding names bytes that
+  already outlive their producer, and a worker's death loses nothing. Every write is
+  conditional on its digest key being free, so a stored object is never replaced and a
+  repeated write settles on it; every read verifies size and digest before releasing its
+  last bytes. Files and peer transfers move through bounded buffers. An S3-compatible
+  store must support conditional writes (`If-None-Match`) and SHA-256 part checksums,
+  and a filesystem backend hard links. The outcome-finalization index lives on the
+  control plane, binding an `idm-*` to a reference so a re-drive re-reports the first
+  materialization rather than re-running a sampled producer; the store holds only bytes
+  and never treats an idempotency key as a name. The scope that binding lands in is the
+  one control assigned the work when it authorized the key, so the producer reporting a
+  finalization is held to it rather than naming a scope of its own.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
   authorization scope, bound to the worker incarnation running it and expiring shortly
   after. The grant records what access was given and is not itself secret; the material
   that opens the backend travels beside it, relayed to that worker as a control message
   and delivered over its authenticated attachment, and is kept nowhere — no ledger,
-  control store, manifest, frame, or log. A scope is the widest a task can reach, cut as a
-  short-lived session over that scope's prefix. A grant may abort its own scope's
+  control store, manifest, frame, or log. A scope is the widest a task can reach, cut as
+  a short-lived session over that scope's prefix. A grant may abort its own scope's
   multipart uploads and carries no list, delete, or binding operation — which references
-  a task may use is still decided by the consumer bindings control checks. A fresh dispatch or recovery gets fresh access, and renewal
-  serves only the dispatch holding the task; expiry or a policy rotation fences what
-  came before.
-- **Worker content cache and granted hydration.** What a worker holds is a cache over that
-  store, so a copy may be dropped at any time: a deployment can bound the cache by how
-  long a copy goes unused and by disk, least recently used first, and leaves both
-  unbounded by default. A read tries the local copy, then another worker's copy, then the
-  store itself. For a peer's copy the control plane checks that the requesting worker is
-  running the task and that it is bound to exactly that reference as an input or delivered
-  outcome, resolves a live holder, and mints one short-lived `chg-` grant it hands to both
-  ends: the holder serves only a grant it was handed, once, for that exact object, and the
-  requester verifies the digest and size before anything reads the bytes. That transfer
-  runs over the network plane's relay under its own namespace, so the root bridges opaque
-  frames and never holds, assembles, or resolves the payload. A refused, expired, or
-  replayed grant, an evicted copy, or a holder that is gone costs a read from the shared
-  store, not a failure. The holder streams its copy as it reads it and the requester
-  writes it to disk as it arrives, so a transfer holds a window of the object, never
-  the whole; a copy that turns out not to be the object ends the transfer refused and is
-  dropped. An object of `CONTENT_PEER_TRANSFER_MAX_BYTES` or more is read from the store
-  first, since relaying it costs more per byte, and from a peer only while the store
-  cannot be reached. A worker keeps a copy of whatever it reads from a peer or the store,
-  so an unbounded cache keeps every object its tasks read. Enable the cache and its
+  a task may use is still decided by the consumer bindings control checks. A fresh
+  dispatch or recovery gets fresh access, and renewal serves only the dispatch holding
+  the task; expiry or a policy rotation fences what came before.
+- **Worker content cache and granted hydration.** What a worker holds is a cache over
+  that store, so a copy may be dropped at any time: a deployment can bound the cache by
+  how long a copy goes unused and by disk, least recently used first, and leaves both
+  unbounded by default. A read tries the local copy, then another worker's copy, then
+  the store itself; an object of `CONTENT_PEER_TRANSFER_MAX_BYTES` or more is read from
+  the store first, and from a peer only while the store cannot be reached. For a peer's
+  copy the control plane checks that the requesting worker is running the task and that
+  it is bound to exactly that reference as an input or delivered outcome, resolves a
+  live holder, and mints one short-lived `chg-` grant it hands to both ends: the holder
+  serves only a grant it was handed, once, for that exact object, and the requester
+  verifies the digest and size before anything reads the bytes. That transfer runs over
+  the network plane's relay under its own namespace, so the root bridges opaque frames
+  and never holds, assembles, or resolves the payload. A refused, expired, or replayed
+  grant, an evicted copy, or a holder that is gone costs a read from the shared store,
+  not a failure. A transfer holds a window of the object, never the whole, and a copy
+  that turns out not to be the object ends the transfer refused and is dropped. A worker
+  keeps a copy of whatever it reads from a peer or the store. Enable the cache and its
   transfers with `CONTENT_HYDRATION_ENABLED=true` (which requires the network plane).
 - **Task results.** A task's result lives in the shared content store: its worker writes
   the result envelope there under the task's store access before it reports success, and

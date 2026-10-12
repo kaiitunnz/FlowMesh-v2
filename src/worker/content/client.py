@@ -171,8 +171,6 @@ class ContentHydrationClient:
                 message, body = frame
                 kind = message.get("kind")
                 if kind == KIND_CHUNK:
-                    # The reference says how big the object is, so a holder sending
-                    # past it is refused here rather than read to its end.
                     verifier.update(body)
                     pending.append(body)
                     buffered += len(body)
