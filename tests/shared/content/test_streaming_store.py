@@ -12,10 +12,12 @@ from shared.content import (
     ContentStoreError,
     ContentUnavailable,
     FabricObjectStore,
+    ObjectStoreConfig,
     SharedFilesystemObjectStore,
     WriteCancelled,
     content_digest,
     reference_for,
+    s3_store,
 )
 from shared.content.s3_store import S3ObjectStore
 from tests.shared.fake_s3 import FakeS3, s3_error
@@ -176,24 +178,68 @@ def test_a_cancelled_upload_is_aborted(tmp_path: Path) -> None:
     assert len(sent) == 2
 
 
-def test_a_file_changed_between_hash_and_send_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("parts", [1, 3])
+def test_a_file_changed_between_hash_and_send_is_refused_by_its_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parts: int
+) -> None:
+    """The writer sends only the bytes it hashed, whether or not the store checks."""
     client = FakeS3()
+    client.check_checksums = False
     store = S3ObjectStore(client, "bucket", part_bytes=_PART, upload_concurrency=1)
-    path = _write_file(tmp_path, os.urandom(3 * _PART))
-    original = client.create_multipart_upload
+    path = _write_file(tmp_path, os.urandom(parts * _PART))
+    digest_file = store._digest_file
 
-    def mutate_then_create(**kw: Any) -> Any:
+    def hash_then_change(*args: Any) -> Any:
+        digest = digest_file(*args)
         with path.open("r+b") as fh:
-            fh.seek(_PART + 3)
-            fh.write(b"changed")
-        return original(**kw)
+            fh.seek(parts * _PART - 3)
+            fh.write(b"chg")
+        return digest
 
-    client.create_multipart_upload = mutate_then_create  # type: ignore[method-assign]
+    monkeypatch.setattr(store, "_digest_file", hash_then_change)
 
-    with pytest.raises(ContentStoreError):
+    with pytest.raises(ContentStoreError, match="changed while it was written"):
         store.write_file("org", path)
     assert client.objects == {}
     assert client.uploads == {}
+
+
+def test_a_large_write_over_an_object_of_another_size_fails_before_sending(
+    tmp_path: Path,
+) -> None:
+    client = FakeS3()
+    store = S3ObjectStore(client, "bucket", part_bytes=_PART)
+    data = os.urandom(3 * _PART)
+    reference = reference_for("org", data)
+    client.objects[store._key(reference)] = b"truncated"
+
+    with pytest.raises(ContentStoreError, match="already stored"):
+        store.write_file("org", _write_file(tmp_path, data))
+    assert client.uploads == {} and client.aborted == []
+
+
+def test_a_part_is_read_whole_however_short_each_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = FakeS3()
+    store = S3ObjectStore(client, "bucket", part_bytes=_PART)
+    data = os.urandom(2 * _PART + 7)
+    pread = os.pread
+    monkeypatch.setattr(
+        s3_store.os, "pread", lambda fd, n, offset: pread(fd, min(n, 1 << 20), offset)
+    )
+
+    reference = store.write_file("org", _write_file(tmp_path, data))
+
+    assert store.hydrate(reference) == data
+
+
+def test_a_part_size_past_the_s3_limit_is_held_to_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CONTENT_STORE_PART_BYTES", str(64 << 30))
+
+    assert ObjectStoreConfig.from_env(tmp_path).part_bytes == 5 << 30
 
 
 def test_a_read_withholds_its_last_chunk_from_bytes_that_do_not_verify(

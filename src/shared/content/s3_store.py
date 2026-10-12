@@ -32,7 +32,7 @@ from typing import Any, Protocol
 
 from botocore.exceptions import ClientError
 
-from .config import DEFAULT_PART_BYTES, DEFAULT_UPLOAD_CONCURRENCY, MIN_PART_BYTES
+from .config import DEFAULT_PART_BYTES, DEFAULT_UPLOAD_CONCURRENCY
 from .reference import OCTET_STREAM, ContentReference
 from .store import (
     STREAM_CHUNK_BYTES,
@@ -41,6 +41,7 @@ from .store import (
     ContentUnavailable,
     FabricObjectStore,
     WriteCancelled,
+    check_existing_size,
     new_hasher,
     reference_for,
     verified_chunks,
@@ -109,8 +110,8 @@ class S3ObjectStore(FabricObjectStore):
         self._client = client
         self._bucket = bucket
         self._prefix = prefix.strip("/")
-        self._part_bytes = max(part_bytes, MIN_PART_BYTES)
-        self._upload_concurrency = max(1, upload_concurrency)
+        self._part_bytes = part_bytes
+        self._upload_concurrency = upload_concurrency
 
     def _key(self, reference: ContentReference) -> str:
         scope, algorithm, digest = reference.identity
@@ -150,17 +151,27 @@ class S3ObjectStore(FabricObjectStore):
             size_bytes=digest.size,
             media_type=media_type,
         )
+        changed = ContentStoreError(f"{path.name} changed while it was written")
         if digest.size <= self._part_bytes:
             data = path.read_bytes()
-            if len(data) != digest.size:
-                raise ContentStoreError(f"{path.name} changed while it was written")
-            self._put(reference, data, checksum=digest.part_checksums[0])
+            if _checksum(data) != digest.part_checksums[0]:
+                raise changed
+            self._put(reference, data)
             return reference
         fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
         try:
 
             def read_part(index: int) -> bytes:
-                return os.pread(fd, digest.part_bytes, index * digest.part_bytes)
+                # The bytes sent are the bytes hashed: a store that did not check a
+                # part's checksum would otherwise keep a changed part under the digest.
+                part = _pread_exactly(
+                    fd,
+                    min(digest.part_bytes, digest.size - index * digest.part_bytes),
+                    index * digest.part_bytes,
+                )
+                if _checksum(part) != digest.part_checksums[index]:
+                    raise changed
+                return part
 
             self._upload(reference, digest.part_checksums, read_part, cancelled)
         finally:
@@ -206,9 +217,7 @@ class S3ObjectStore(FabricObjectStore):
             part_checksums=checksums,
         )
 
-    def _put(
-        self, reference: ContentReference, data: bytes, *, checksum: str | None = None
-    ) -> None:
+    def _put(self, reference: ContentReference, data: bytes) -> None:
         try:
             _committing(
                 lambda: self._client.put_object(
@@ -216,7 +225,7 @@ class S3ObjectStore(FabricObjectStore):
                     Key=self._key(reference),
                     Body=data,
                     ContentType=reference.media_type,
-                    ChecksumSHA256=checksum or _checksum(data),
+                    ChecksumSHA256=_checksum(data),
                     IfNoneMatch="*",
                 )
             )
@@ -338,8 +347,9 @@ class S3ObjectStore(FabricObjectStore):
     def _present(self, reference: ContentReference) -> bool:
         """Whether the object is already stored, so a large write can skip sending it.
 
-        Only a cost saving: a write that finds nothing still commits conditionally, so
-        a concurrent writer landing first is caught at the commit.
+        A write that finds nothing still commits conditionally, so a concurrent writer
+        landing first is caught at the commit. One that finds an object of another
+        size fails at once, as its commit would after sending every part.
         """
         try:
             head = self._client.head_object(
@@ -347,7 +357,8 @@ class S3ObjectStore(FabricObjectStore):
             )
         except Exception:
             return False
-        return int(head.get("ContentLength", -1)) == reference.size_bytes
+        check_existing_size(reference, int(head.get("ContentLength", -1)))
+        return True
 
     def _check_existing(self, reference: ContentReference) -> None:
         """Take an object already under the reference's key as the one written, once
@@ -361,11 +372,7 @@ class S3ObjectStore(FabricObjectStore):
                 f"content {reference.content_digest} is neither written nor readable: "
                 f"{exc}"
             ) from exc
-        if (size := int(head.get("ContentLength", -1))) != reference.size_bytes:
-            raise ContentStoreError(
-                f"content {reference.content_digest} already stored is {size} bytes "
-                f"for a reference naming {reference.size_bytes}"
-            )
+        check_existing_size(reference, int(head.get("ContentLength", -1)))
 
     def fetch(self, reference: ContentReference) -> bytes:
         body = self._get(reference)
@@ -412,6 +419,20 @@ class S3ObjectStore(FabricObjectStore):
             f"could not read {reference.content_digest} in scope "
             f"{reference.authorization_scope}: {exc}"
         )
+
+
+def _pread_exactly(fd: int, size: int, offset: int) -> bytes:
+    """``size`` bytes of a file from ``offset``; one ``pread`` returns at most about
+    2 GiB, so a larger part is read in pieces."""
+    pieces: list[bytes] = []
+    while size > 0:
+        piece = os.pread(fd, size, offset)
+        if not piece:
+            break
+        pieces.append(piece)
+        size -= len(piece)
+        offset += len(piece)
+    return b"".join(pieces)
 
 
 def _error_code(exc: Exception) -> tuple[str | None, int | None]:

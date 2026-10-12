@@ -16,8 +16,10 @@ BACKEND_FILESYSTEM = "filesystem"
 
 # The port the store a default deployment co-locates publishes on its own host.
 _DEFAULT_STORE_PORT = "9800"
-# S3 refuses a part of a multipart upload smaller than this, the last one aside.
+# S3 refuses a part of a multipart upload smaller than this, the last one aside, and
+# any part larger than the maximum.
 MIN_PART_BYTES = 5 << 20
+MAX_PART_BYTES = 5 << 30
 DEFAULT_PART_BYTES = 16 << 20
 DEFAULT_UPLOAD_CONCURRENCY = 4
 
@@ -81,9 +83,12 @@ class ObjectStoreConfig:
                 or (default_root / "shared-content")
             ).absolute(),
             scoped_credentials=parse_bool_env("CONTENT_STORE_SCOPED_CREDENTIALS", True),
-            part_bytes=max(
-                MIN_PART_BYTES,
-                parse_int_env("CONTENT_STORE_PART_BYTES", DEFAULT_PART_BYTES),
+            part_bytes=min(
+                MAX_PART_BYTES,
+                max(
+                    MIN_PART_BYTES,
+                    parse_int_env("CONTENT_STORE_PART_BYTES", DEFAULT_PART_BYTES),
+                ),
             ),
             upload_concurrency=max(
                 1,

@@ -25,6 +25,7 @@ from .store import (
     ContentUnavailable,
     FabricObjectStore,
     WriteCancelled,
+    check_existing_size,
     new_hasher,
     reference_for,
     verified_chunks,
@@ -167,11 +168,7 @@ class FilesystemObjectBacking:
                 f"content {reference.content_digest} is neither written nor readable: "
                 f"{exc}"
             ) from exc
-        if size != reference.size_bytes:
-            raise ContentStoreError(
-                f"content {reference.content_digest} already stored is {size} bytes "
-                f"for a reference naming {reference.size_bytes}"
-            )
+        check_existing_size(reference, size)
 
     def open_object(self, scope: str, digest: str) -> BinaryIO:
         """The object file opened for reading, which stays readable once open even if

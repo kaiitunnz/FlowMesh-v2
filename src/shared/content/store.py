@@ -128,6 +128,16 @@ class ContentVerifier:
             )
 
 
+def check_existing_size(reference: ContentReference, size: int) -> None:
+    """Take an object already stored under a reference's key as the one written, once
+    its size shows it is not a truncated copy."""
+    if size != reference.size_bytes:
+        raise ContentStoreError(
+            f"content {reference.content_digest} already stored is {size} bytes "
+            f"for a reference naming {reference.size_bytes}"
+        )
+
+
 def verify_content(reference: ContentReference, data: bytes) -> bytes:
     """Return the bytes once they are the ones the reference names, else raise."""
     verifier = ContentVerifier(reference)

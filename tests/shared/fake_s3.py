@@ -46,13 +46,18 @@ class FakeS3:
         self.aborted: list[str] = []
         self.puts = 0
         self.fail_part: int | None = None
+        # A store that ignores the checksums it is sent, as a writer must not rely on.
+        self.check_checksums = True
         self.body_fail_after: int | None = None
         self._lock = threading.Lock()
         self._next = 0
 
     def put_object(self, **kw: Any) -> Any:
         data = kw["Body"]
-        if kw.get("ChecksumSHA256") not in (None, sha256_b64(data)):
+        if self.check_checksums and kw.get("ChecksumSHA256") not in (
+            None,
+            sha256_b64(data),
+        ):
             raise s3_error("XAmzContentChecksumMismatch", 400)
         with self._lock:
             self.puts += 1
@@ -82,7 +87,7 @@ class FakeS3:
         data = kw["Body"]
         if self.fail_part is not None and kw["PartNumber"] == self.fail_part:
             raise s3_error("InternalError", 500, "UploadPart")
-        if kw["ChecksumSHA256"] != sha256_b64(data):
+        if self.check_checksums and kw["ChecksumSHA256"] != sha256_b64(data):
             raise s3_error("XAmzContentChecksumMismatch", 400, "UploadPart")
         with self._lock:
             self.uploads[kw["UploadId"]][kw["PartNumber"]] = bytes(data)
