@@ -486,8 +486,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   conditional on its digest key being free, so an object once stored is never replaced:
   a second write of the same bytes is refused and settles on the object already there,
   once its size matches. Reads verify size and digest before releasing their last
-  bytes. A large object streams through bounded parts, each carrying its own SHA-256
-  for the store to check, and is never held whole in any process. An S3-compatible
+  bytes. A file written to the store, a file hydrated from it, and a peer transfer move
+  the object through bounded buffers; a large object goes up in parts, each carrying its
+  own SHA-256 for the store to check. An S3-compatible
   store therefore has to support conditional writes (`If-None-Match`) and SHA-256 part
   checksums, and a filesystem backend hard links. The outcome-finalization
   index lives on the control plane, binding an `idm-*` to a reference so a re-drive
