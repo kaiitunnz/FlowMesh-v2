@@ -51,6 +51,9 @@ class _Lane:
         self.kept.append(reference)
         return reference
 
+    def held(self, reference: ContentReference) -> ContentReference:
+        return reference
+
     def keep_file(self, reference: ContentReference, path: Path) -> Any:
         assert reference_for(reference.authorization_scope, path.read_bytes()) == (
             reference.model_copy(update={"media_type": "application/octet-stream"})
@@ -91,8 +94,12 @@ def test_a_small_object_is_read_from_a_peer_before_the_store(tmp_path) -> None:
     reference = store.write("org", b"small")
     lane = _Lane({reference.content_digest: b"small"})
 
-    assert _plane(store, lane, []).hydrate("tsk-1", reference) == b"small"
+    announced: list[Sequence[Any]] = []
+
+    assert _plane(store, lane, announced).hydrate("tsk-1", reference) == b"small"
     assert lane.peer_reads == [reference]
+    # The copy the peer read leaves here is announced for the next reader.
+    assert announced == [[("org", reference.content_digest)]]
 
 
 def test_a_large_object_is_read_from_the_store_not_relayed(tmp_path) -> None:

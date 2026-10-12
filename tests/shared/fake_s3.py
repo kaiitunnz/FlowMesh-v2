@@ -44,7 +44,6 @@ class FakeS3:
         self.objects: dict[str, bytes] = {}
         self.uploads: dict[str, dict[int, bytes]] = {}
         self.aborted: list[str] = []
-        self.puts = 0
         self.fail_part: int | None = None
         # A store that ignores the checksums it is sent, as a writer must not rely on.
         self.check_checksums = True
@@ -60,7 +59,6 @@ class FakeS3:
         ):
             raise s3_error("XAmzContentChecksumMismatch", 400)
         with self._lock:
-            self.puts += 1
             if kw.get("IfNoneMatch") == "*" and kw["Key"] in self.objects:
                 raise s3_error("PreconditionFailed", 412)
             self.objects[kw["Key"]] = bytes(data)

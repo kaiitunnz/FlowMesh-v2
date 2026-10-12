@@ -8,12 +8,12 @@ from typing import Any, BinaryIO
 
 _SHARED_FILE_MODE = 0o0666
 _COPY_CHUNK_BYTES = 1 << 20
-TEMP_PREFIX = ".fm-tmp-"
+_TEMP_PREFIX = ".fm-tmp-"
 
 
 def is_atomic_temp(name: str) -> bool:
     """Return whether ``name`` is an in-flight atomic write's temp file."""
-    return name.startswith(TEMP_PREFIX)
+    return name.startswith(_TEMP_PREFIX)
 
 
 def atomic_write_text(
@@ -34,9 +34,33 @@ def atomic_write_text(
     _atomic_replace(target, lambda fh: fh.write(content.encode(encoding)), dir_fd)
 
 
+def _temp_name() -> str:
+    return f"{_TEMP_PREFIX}{os.urandom(6).hex()}"
+
+
 def temp_path(directory: Path) -> Path:
     """A fresh in-flight temp file name in ``directory``."""
-    return directory / f"{TEMP_PREFIX}{os.urandom(6).hex()}"
+    return directory / _temp_name()
+
+
+def write_replacing(dest: Path, write: Callable[[BinaryIO], Any]) -> None:
+    """Replace ``dest`` with what ``write`` puts in a temp file beside it.
+
+    ``dest`` only ever appears whole, with its bytes on disk; a write that fails leaves
+    nothing behind. The rename itself is not flushed, so ``dest`` may be absent after a
+    crash.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = temp_path(dest.parent)
+    try:
+        with tmp.open("xb") as fh:
+            write(fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def link_no_replace(tmp: Path, target: Path, *, durable: bool = False) -> bool:
@@ -65,7 +89,7 @@ def link_no_replace(tmp: Path, target: Path, *, durable: bool = False) -> bool:
             # A directory this commit created is only reachable once its own entry in
             # its parent is on disk too.
             for directory in (target.parent, *(d.parent for d in created)):
-                fsync_dir(directory)
+                _fsync_dir(directory)
         return landed
     finally:
         tmp.unlink(missing_ok=True)
@@ -84,14 +108,11 @@ def _make_parents(directory: Path) -> list[Path]:
         missing.append(current)
         current = current.parent
     for path in reversed(missing):
-        try:
-            path.mkdir()
-        except FileExistsError:
-            pass
+        path.mkdir(exist_ok=True)
     return missing
 
 
-def fsync_dir(directory: Path) -> None:
+def _fsync_dir(directory: Path) -> None:
     """Flush a directory's entries to disk."""
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
@@ -131,7 +152,7 @@ def _replace_at(dir_fd: int, name: str, write: Callable[[BinaryIO], Any]) -> Non
     ``name`` is replaced, never written through."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     while True:
-        tmp_name = f"{TEMP_PREFIX}{os.urandom(6).hex()}"
+        tmp_name = _temp_name()
         try:
             fd = os.open(tmp_name, flags, 0o600, dir_fd=dir_fd)
             break

@@ -119,7 +119,7 @@ class WorkerContentCache(FabricObjectStore):
         return fh
 
     def drop(self, reference: ContentReference) -> None:
-        """Remove a copy, as one found not to be the object it is named for."""
+        """Remove a copy."""
         self._objects.remove(reference.authorization_scope, reference.content_digest)
 
     def holds(self, reference: ContentReference) -> bool:

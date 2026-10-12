@@ -21,11 +21,12 @@ taken for the object's digest.
 
 import base64
 import concurrent.futures
+import contextlib
 import hashlib
 import math
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -88,11 +89,15 @@ class _FileDigest:
     size: int
     part_bytes: int
     # The base64 SHA-256 of each part, in order.
-    part_checksums: list[str]
+    part_checksums: tuple[str, ...]
 
 
 def _checksum(data: bytes | memoryview) -> str:
-    return base64.b64encode(hashlib.sha256(data).digest()).decode()
+    return _b64(hashlib.sha256(data).digest())
+
+
+def _b64(digest: bytes) -> str:
+    return base64.b64encode(digest).decode()
 
 
 class S3ObjectStore(FabricObjectStore):
@@ -204,7 +209,7 @@ class S3ObjectStore(FabricObjectStore):
                     taken += len(chunk)
                 if taken == 0 and checksums:
                     break
-                checksums.append(base64.b64encode(part.digest()).decode())
+                checksums.append(_b64(part.digest()))
                 read += taken
                 if taken < part_bytes:
                     break
@@ -214,7 +219,7 @@ class S3ObjectStore(FabricObjectStore):
             digest=whole.hexdigest(),
             size=size,
             part_bytes=part_bytes,
-            part_checksums=checksums,
+            part_checksums=tuple(checksums),
         )
 
     def _put(self, reference: ContentReference, data: bytes) -> None:
@@ -238,7 +243,7 @@ class S3ObjectStore(FabricObjectStore):
     def _upload(
         self,
         reference: ContentReference,
-        checksums: list[str],
+        checksums: Sequence[str],
         read_part: Callable[[int], bytes],
         cancelled: Callable[[], bool] | None,
     ) -> None:
@@ -287,7 +292,7 @@ class S3ObjectStore(FabricObjectStore):
         self,
         key: str,
         upload_id: str,
-        checksums: list[str],
+        checksums: Sequence[str],
         read_part: Callable[[int], bytes],
         cancelled: Callable[[], bool] | None,
     ) -> list[dict[str, Any]]:
@@ -335,14 +340,12 @@ class S3ObjectStore(FabricObjectStore):
         return sorted(parts, key=lambda part: part["PartNumber"])
 
     def _abort(self, key: str, upload_id: str) -> None:
-        """Abandon an upload. An abort the store refuses — a session that has ended
-        with it — leaves its parts to reclamation."""
-        try:
+        """Abandon an upload. One the store refuses to abort — a session that has
+        ended with it — stays in the store."""
+        with contextlib.suppress(Exception):
             self._client.abort_multipart_upload(
                 Bucket=self._bucket, Key=key, UploadId=upload_id
             )
-        except Exception:
-            pass
 
     def _present(self, reference: ContentReference) -> bool:
         """Whether the object is already stored, so a large write can skip sending it.
@@ -453,19 +456,20 @@ def _is_missing(exc: Exception) -> bool:
     return code in _MISSING_CODES or status == 404
 
 
-def _committing(call: Callable[[], Any]) -> Any:
+def _committing[T](call: Callable[[], T]) -> T:
     """Make a conditional commit, again while it races another writer of its key."""
-    for attempt in range(_CONFLICT_RETRIES):
+    attempt = 0
+    while True:
         try:
             return call()
         except ClientError as exc:
             code, status = _error_code(exc)
-            if not (code in _CONFLICT_CODES or status == 409):
+            attempt += 1
+            if not (code in _CONFLICT_CODES or status == 409) or (
+                attempt == _CONFLICT_RETRIES
+            ):
                 raise
-            if attempt == _CONFLICT_RETRIES - 1:
-                raise
-            time.sleep(_CONFLICT_BACKOFF_SEC * (attempt + 1))
-    raise AssertionError("unreachable")
+            time.sleep(_CONFLICT_BACKOFF_SEC * attempt)
 
 
 def is_credential_refusal(exc: Exception) -> bool:

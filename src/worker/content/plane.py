@@ -230,18 +230,27 @@ class WorkerContentPlane:
             if self._relayable(reference) and not isinstance(
                 got := self._attempt(reference, lambda: peer(lane)), _Missed
             ):
-                return got
+                return self._kept(reference, lane, got)
         try:
             value = stored()
         except ContentUnavailable as outage:
             if lane is None or self._relayable(reference):
                 raise
-            return self._relay_during(outage, lambda: peer(lane))
+            return self._kept(
+                reference, lane, self._relay_during(outage, lambda: peer(lane))
+            )
         self._logger.info(
             "content %s read from the shared store", reference.content_digest
         )
         if lane is not None:
             self._cache(reference, lambda: keep(lane, value))
+        return value
+
+    def _kept[T](
+        self, reference: ContentReference, lane: ContentLaneHost, value: T
+    ) -> T:
+        """Announce the copy a peer read left here."""
+        self._cache(reference, lambda: lane.held(reference))
         return value
 
     def _relayable(self, reference: ContentReference) -> bool:

@@ -16,13 +16,12 @@ next read of it fails verification as a hydration error rather than returning it
 """
 
 import hashlib
-import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Protocol
 
-from shared.utils.atomic import temp_path
+from shared.utils.atomic import write_replacing
 
 from .reference import (
     CONTENT_ENCODING_IDENTITY,
@@ -101,10 +100,6 @@ class ContentVerifier:
         self._hasher = factory()
         self._size = 0
 
-    @property
-    def size(self) -> int:
-        return self._size
-
     def update(self, chunk: bytes) -> None:
         self._size += len(chunk)
         if self._size > self._reference.size_bytes:
@@ -169,23 +164,9 @@ def verified_chunks(
 
 
 def write_verified(chunks: Iterable[bytes], dest: Path) -> None:
-    """Write a verified stream to ``dest`` through a temporary file beside it.
-
-    ``dest`` appears only complete and durable: a stream that fails verification
-    leaves nothing behind but the error.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = temp_path(dest.parent)
-    try:
-        with tmp.open("xb") as fh:
-            for chunk in chunks:
-                fh.write(chunk)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, dest)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    """Write a verified stream to ``dest``, which appears only whole: a stream that
+    fails verification leaves nothing behind but the error."""
+    write_replacing(dest, lambda fh: fh.writelines(chunks))
 
 
 def reference_for(

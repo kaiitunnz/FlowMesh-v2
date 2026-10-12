@@ -12,7 +12,6 @@ import asyncio
 import concurrent.futures
 import contextlib
 import logging
-import os
 import shutil
 import threading
 import time
@@ -29,7 +28,7 @@ from shared.content import (
 from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.network.frame_stream import WireFrameSink
 from shared.network.relay_frame import CONTENT_FRAME_KIND, RelayDirection, RelayFrame
-from shared.utils.atomic import temp_path
+from shared.utils.atomic import write_replacing
 
 from .client import AnnounceHolding, ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
@@ -118,7 +117,8 @@ class ContentLaneHost:
         )
 
     def read_peer(self, reference: ContentReference, task_id: str) -> bytes:
-        """An object's verified bytes from the peer control resolves, kept here too."""
+        """An object's verified bytes from the peer control resolves, kept here too;
+        the copy is announced by whoever asked for the read."""
         with self._from_peer(reference, task_id) as verified:
             return verified.read_bytes()
 
@@ -142,7 +142,7 @@ class ContentLaneHost:
                 "content %s read from a peer cache", reference.content_digest
             )
             try:
-                self.adopt(reference, verified)
+                self._store.adopt(reference, verified)
             except Exception:
                 self._logger.warning(
                     "could not cache %s locally",
@@ -184,7 +184,7 @@ class ContentLaneHost:
         None when the copy did not survive the bounds — an object larger than the whole
         disk budget — so nothing is announced for a copy that is not here.
         """
-        return self._held(self._store.write(scope, data, media_type=media_type))
+        return self.held(self._store.write(scope, data, media_type=media_type))
 
     def keep_file(
         self, reference: ContentReference, path: Path
@@ -200,15 +200,10 @@ class ContentLaneHost:
         if copied != reference:
             self._store.drop(copied)
             return None
-        return self._held(reference)
+        return self.held(reference)
 
-    def adopt(self, reference: ContentReference, verified: Path) -> None:
-        """Take a verified file in as a copy, and say so when it is kept."""
-        self._store.adopt(reference, verified)
-        if self._held(reference) is not None and self._announce is not None:
-            self._announce([(reference.authorization_scope, reference.content_digest)])
-
-    def _held(self, reference: ContentReference) -> ContentReference | None:
+    def held(self, reference: ContentReference) -> ContentReference | None:
+        """The reference while a copy of it is here, once the cache is in bounds."""
         self.evict()
         return reference if self._store.holds(reference) else None
 
@@ -343,14 +338,6 @@ class ContentLaneHost:
 
 
 def _copy_file(source: Path, dest: Path) -> None:
-    """Copy a file to ``dest``, replacing it whole once the copy is on disk."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = temp_path(dest.parent)
-    try:
-        shutil.copyfile(source, tmp)
-        with tmp.open("rb") as fh:
-            os.fsync(fh.fileno())
-        os.replace(tmp, dest)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    """Copy a file to ``dest``, which appears only whole."""
+    with source.open("rb") as src:
+        write_replacing(dest, lambda fh: shutil.copyfileobj(src, fh))

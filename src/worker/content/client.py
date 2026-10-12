@@ -18,7 +18,6 @@ import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import BinaryIO
 
 from shared.content import (
     ContentHydrationError,
@@ -178,10 +177,10 @@ class ContentHydrationClient:
                     pending.append(body)
                     buffered += len(body)
                     if buffered >= _WRITE_BUFFER_BYTES:
-                        await asyncio.to_thread(_write_all, fh, pending)
+                        await asyncio.to_thread(fh.writelines, pending)
                         pending, buffered = [], 0
                 elif kind == KIND_DONE:
-                    await asyncio.to_thread(_write_all, fh, pending)
+                    await asyncio.to_thread(fh.writelines, pending)
                     verifier.finish()
                     return
                 elif kind == KIND_REJECT:
@@ -233,8 +232,3 @@ class ContentHydrationClient:
         if session is not None:
             self._progressed()
             await session.on_frame(frame)
-
-
-def _write_all(fh: BinaryIO, chunks: list[bytes]) -> None:
-    for chunk in chunks:
-        fh.write(chunk)

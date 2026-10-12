@@ -29,7 +29,6 @@ from .store import (
     new_hasher,
     reference_for,
     verified_chunks,
-    write_verified,
 )
 
 _SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
@@ -214,10 +213,6 @@ class FilesystemObjectBacking:
 
         return verified_chunks(reference, chunks())
 
-    def copy_out(self, reference: ContentReference, dest: Path) -> None:
-        """Copy a held object to ``dest``, verified on the way."""
-        write_verified(self.stream(reference), dest)
-
     def holds(self, scope: str, digest: str) -> bool:
         return self.object_path(scope, digest).exists()
 
@@ -236,17 +231,16 @@ class FilesystemObjectBacking:
     def remove(self, scope: str, digest: str) -> None:
         self.object_path(scope, digest).unlink(missing_ok=True)
 
-    def clear_staging(self, idle_sec: float) -> int:
-        """Drop in-flight writes untouched for ``idle_sec``, and return how many.
+    def clear_staging(self, idle_sec: float) -> None:
+        """Drop in-flight writes untouched for ``idle_sec``.
 
         A live write keeps its file moving, so one idle that long belongs to a process
         that stopped mid-write; the directory may be shared with other live writers,
         whose files are left alone.
         """
         if not self._root.exists():
-            return 0
+            return
         cutoff = time.time() - idle_sec
-        removed = 0
         for scope_dir in self._root.iterdir():
             if not (staging := scope_dir / "staging").is_dir():
                 continue
@@ -254,8 +248,6 @@ class FilesystemObjectBacking:
                 with contextlib.suppress(FileNotFoundError):
                     if entry.stat().st_mtime < cutoff:
                         entry.unlink()
-                        removed += 1
-        return removed
 
     def iter_objects(self) -> Iterator[tuple[str, str]]:
         """Every ``(scope, digest)`` this backing holds."""
