@@ -43,28 +43,37 @@ def link_no_replace(tmp: Path, target: Path, *, durable: bool = False) -> bool:
     """Move a finished temp file to ``target`` only where nothing is, and return
     whether it landed.
 
-    The link is the commit: it fails rather than replacing a file already there,
-    including one a concurrent writer landed a moment earlier. The temp name is gone
-    either way. With ``durable`` the file and its directory entry are flushed to disk
-    before this returns.
+    The link is the commit: it returns False rather than replacing a file already
+    there, including one a concurrent writer landed a moment earlier. The temp name is
+    gone either way. With ``durable`` the file at ``target`` and its directory entry
+    are on disk before this returns, whichever writer's link it is.
     """
     try:
         if durable:
-            with open(tmp, "rb") as fh:
-                os.fsync(fh.fileno())
+            _fsync_file(tmp)
         created = _make_parents(target.parent)
         try:
             os.link(tmp, target)
+            landed = True
         except FileExistsError:
-            return False
+            landed = False
+            if durable:
+                # Another writer's link may not have reached the disk yet, and this
+                # writer is about to report the object as stored.
+                _fsync_file(target)
         if durable:
             # A directory this commit created is only reachable once its own entry in
             # its parent is on disk too.
             for directory in (target.parent, *(d.parent for d in created)):
                 fsync_dir(directory)
-        return True
+        return landed
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _fsync_file(path: Path) -> None:
+    with open(path, "rb") as fh:
+        os.fsync(fh.fileno())
 
 
 def _make_parents(directory: Path) -> list[Path]:
