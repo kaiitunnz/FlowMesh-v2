@@ -84,7 +84,10 @@ class ServiceLeafExecutor(Executor):
                 "service-episode dispatch context"
             )
         outcomes = hydrate_delivered_outcomes(
-            self._lifecycle, task.task_id, dispatch.delivered_outcomes
+            self._lifecycle,
+            task.task_id,
+            task.content_scope,
+            dispatch.delivered_outcomes,
         )
         correlation = _call_correlation(task.task_id)
         settled = next((o for o in outcomes if o.call_correlation == correlation), None)

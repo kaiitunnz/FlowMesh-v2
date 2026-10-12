@@ -32,7 +32,7 @@ class _Plane:
         self.store = store
         self.tasks: list[str] = []
 
-    def for_task(self, task_id: str) -> FabricObjectStore:
+    def for_task(self, task_id: str, scope: str) -> FabricObjectStore:
         self.tasks.append(task_id)
         return self.store
 

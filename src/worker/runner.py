@@ -614,11 +614,11 @@ class Runner:
             return
         self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
-    def _object_store(self, task_id: str) -> FabricObjectStore | None:
+    def _object_store(self, msg: WorkerTaskMessage) -> FabricObjectStore | None:
         """The content surface this task reads and writes through."""
         if (plane := self.lifecycle.content_plane) is None:
             return None
-        return plane.for_task(task_id)
+        return plane.for_task(msg.task_id, msg.content_scope)
 
     def _outcome_store(self, task_id: str) -> FabricContentStore | None:
         """Where this task's outcomes materialize and deduplicate."""
@@ -633,7 +633,7 @@ class Runner:
         anywhere here leaves an object no resolution claims rather than a resolution
         pointing at nothing.
         """
-        store = self._object_store(msg.task_id)
+        store = self._object_store(msg)
         if store is None:
             raise ExecutionError(
                 f"task {msg.task_id} prepares its inputs, and this worker reaches no "
@@ -858,7 +858,7 @@ class Runner:
         sync_manifest(out_dir, task_id, spec.get_artifacts())
         if not _publishes_result(payload):
             return None
-        store = self._object_store(msg.task_id)
+        store = self._object_store(msg)
         if store is None:
             raise ExecutionError(
                 f"task {task_id} produced a result and this worker reaches no fabric "

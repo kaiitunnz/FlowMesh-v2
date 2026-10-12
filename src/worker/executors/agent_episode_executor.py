@@ -229,7 +229,10 @@ class AgentEpisodeExecutor(Executor):
             else None
         )
         outcomes = hydrate_delivered_outcomes(
-            self._lifecycle, task.task_id, dispatch.delivered_outcomes
+            self._lifecycle,
+            task.task_id,
+            task.content_scope,
+            dispatch.delivered_outcomes,
         )
         for outcome in outcomes:
             _LOG.info(

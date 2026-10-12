@@ -31,6 +31,7 @@ from shared.content import (
     STREAM_CHUNK_BYTES,
     ContentReference,
     ContentStoreAccess,
+    ContentStoreError,
     ContentUnavailable,
     FabricObjectStore,
 )
@@ -41,7 +42,7 @@ from shared.outcome import (
     FinalizingContentStore,
 )
 
-from .access import ContentAccessRegistry
+from .access import ContentAccessDenied, ContentAccessRegistry
 from .client import AnnounceHolding
 from .lane_host import ContentLaneHost
 
@@ -73,9 +74,10 @@ class WorkerContentPlane:
         self._peer_max_bytes = peer_max_bytes
         self._logger = logger or logging.getLogger("content-plane")
 
-    def for_task(self, task_id: str) -> "TaskContentStore":
-        """The object surface one task reads and writes through."""
-        return TaskContentStore(self, task_id)
+    def for_task(self, task_id: str, scope: str) -> "TaskContentStore":
+        """The object surface one task reads and writes through, reading only in the
+        scope its dispatch carries."""
+        return TaskContentStore(self, task_id, scope)
 
     def outcome_store(self, task_id: str) -> FabricContentStore | None:
         """Where one task's outcomes materialize, when it can finalize at all."""
@@ -163,13 +165,17 @@ class WorkerContentPlane:
         return reference
 
     def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
-        """The object's verified bytes, from the nearest place that has them."""
-        store = self._store(task_id, reference.authorization_scope)
+        """The object's verified bytes, from the nearest place that has them.
+
+        The caller holds the task to the scope it was dispatched in; only a read from
+        the shared store needs the task's live access.
+        """
+        scope = reference.authorization_scope
         return self._read(
             reference,
             local=lambda lane: lane.read_local(reference),
             peer=lambda lane: lane.read_peer(reference, task_id),
-            stored=lambda: store.hydrate(reference),
+            stored=lambda: self._store(task_id, scope).hydrate(reference),
             keep=lambda lane, data: lane.keep(
                 reference.authorization_scope, data, media_type=reference.media_type
             ),
@@ -178,12 +184,12 @@ class WorkerContentPlane:
     def hydrate_to(self, task_id: str, reference: ContentReference, dest: Path) -> None:
         """Write the object's verified bytes to ``dest``, from the nearest place that
         has them, never holding the object whole."""
-        store = self._store(task_id, reference.authorization_scope)
+        scope = reference.authorization_scope
         self._read(
             reference,
             local=lambda lane: lane.copy_local(reference, dest),
             peer=lambda lane: lane.copy_peer(reference, task_id, dest),
-            stored=lambda: store.hydrate_to(reference, dest),
+            stored=lambda: self._store(task_id, scope).hydrate_to(reference, dest),
             keep=lambda lane, _: lane.keep_file(reference, dest),
         )
 
@@ -200,14 +206,15 @@ class WorkerContentPlane:
         A copy that fails verification part way through is dropped as it raises, so
         the next open reads the store.
         """
-        store = self._store(task_id, reference.authorization_scope)
         if (lane := self._lane) is not None:
             local = self._attempt(
                 reference, lambda: lane.store.open(reference, chunk_bytes=chunk_bytes)
             )
             if not isinstance(local, _Missed):
                 return local
-        return store.open(reference, chunk_bytes=chunk_bytes)
+        return self._store(task_id, reference.authorization_scope).open(
+            reference, chunk_bytes=chunk_bytes
+        )
 
     def _read[T](
         self,
@@ -233,7 +240,7 @@ class WorkerContentPlane:
                 return self._kept(reference, lane, got)
         try:
             value = stored()
-        except ContentUnavailable as outage:
+        except (ContentUnavailable, ContentAccessDenied) as outage:
             if lane is None or self._relayable(reference):
                 raise
             return self._kept(
@@ -262,8 +269,8 @@ class WorkerContentPlane:
         """
         return self._peer_max_bytes <= 0 or reference.size_bytes < self._peer_max_bytes
 
-    def _relay_during[T](self, outage: ContentUnavailable, read: Callable[[], T]) -> T:
-        """A peer's copy while the store is down.
+    def _relay_during[T](self, outage: ContentStoreError, read: Callable[[], T]) -> T:
+        """A peer's copy while the store is down or out of the task's reach.
 
         When no peer can serve it, the read fails as the outage it is, so the task
         waits for the store rather than failing on a peer's miss.
@@ -325,15 +332,29 @@ class _TaskScopedStores:
         self._task_id = task_id
 
     def for_scope(self, scope: str) -> FabricObjectStore:
-        return TaskContentStore(self._plane, self._task_id)
+        return TaskContentStore(self._plane, self._task_id, scope)
 
 
 class TaskContentStore(FabricObjectStore):
-    """One task's object surface over the worker's content plane."""
+    """One task's object surface over the worker's content plane.
 
-    def __init__(self, plane: WorkerContentPlane, task_id: str) -> None:
+    It reads only in the scope the task was dispatched in, whatever copy can serve the
+    read: a copy held here or by a peer is no more the task's to read than the store
+    itself is.
+    """
+
+    def __init__(self, plane: WorkerContentPlane, task_id: str, scope: str) -> None:
         self._plane = plane
         self._task_id = task_id
+        self._scope = scope
+
+    def _authorized(self, reference: ContentReference) -> ContentReference:
+        if reference.authorization_scope != self._scope:
+            raise ContentAccessDenied(
+                f"task {self._task_id} reads in scope {self._scope}, not "
+                f"{reference.authorization_scope}"
+            )
+        return reference
 
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
@@ -341,7 +362,7 @@ class TaskContentStore(FabricObjectStore):
         return self._plane.write(self._task_id, scope, data, media_type=media_type)
 
     def fetch(self, reference: ContentReference) -> bytes:
-        return self._plane.hydrate(self._task_id, reference)
+        return self._plane.hydrate(self._task_id, self._authorized(reference))
 
     def hydrate(self, reference: ContentReference) -> bytes:
         # Every path a read can take here verifies the bytes against this exact
@@ -363,7 +384,9 @@ class TaskContentStore(FabricObjectStore):
     def open(
         self, reference: ContentReference, *, chunk_bytes: int = STREAM_CHUNK_BYTES
     ) -> Iterator[bytes]:
-        return self._plane.open(self._task_id, reference, chunk_bytes=chunk_bytes)
+        return self._plane.open(
+            self._task_id, self._authorized(reference), chunk_bytes=chunk_bytes
+        )
 
     def hydrate_to(self, reference: ContentReference, dest: Path) -> None:
-        self._plane.hydrate_to(self._task_id, reference, dest)
+        self._plane.hydrate_to(self._task_id, self._authorized(reference), dest)

@@ -16,7 +16,7 @@ from shared.content import (
     SharedFilesystemObjectStore,
     reference_for,
 )
-from worker.content import WorkerContentCache, WorkerContentPlane
+from worker.content import TaskContentStore, WorkerContentCache, WorkerContentPlane
 from worker.content.access import ContentAccessDenied
 
 _LARGE = 64
@@ -197,24 +197,64 @@ class _CachedLane(_Lane):
         self.local_reads += 1
         return self.store.hydrate(reference)
 
+    def copy_local(self, reference: ContentReference, dest: Path) -> None:
+        self.local_reads += 1
+        self.store.hydrate_to(reference, dest)
 
-@pytest.mark.parametrize("read", ["hydrate", "hydrate_to", "open"])
-def test_a_copy_here_is_never_served_to_a_task_without_access_to_its_scope(
-    tmp_path, read: str
+
+def _read(store: TaskContentStore, reference: ContentReference, how: str, tmp_path):
+    match how:
+        case "hydrate":
+            return store.hydrate(reference)
+        case "hydrate_to":
+            store.hydrate_to(reference, tmp_path / "out.bin")
+            return (tmp_path / "out.bin").read_bytes()
+        case _:
+            return b"".join(store.open(reference))
+
+
+_READS = ["hydrate", "hydrate_to", "open"]
+
+
+@pytest.mark.parametrize("how", _READS)
+def test_a_copy_here_serves_its_dispatched_scope_without_live_access(
+    tmp_path, how: str
+) -> None:
+    lane = _CachedLane(tmp_path / "cache")
+    reference = lane.store.write("org", b"this task's object")
+    plane = WorkerContentPlane(cast(Any, lane), cast(Any, _NoAccess()))
+
+    assert _read(plane.for_task("tsk-1", "org"), reference, how, tmp_path) == (
+        b"this task's object"
+    )
+
+
+@pytest.mark.parametrize("how", _READS)
+def test_a_copy_here_is_never_served_outside_the_dispatched_scope(
+    tmp_path, how: str
 ) -> None:
     lane = _CachedLane(tmp_path / "cache")
     reference = lane.store.write("org", b"another task's object")
     plane = WorkerContentPlane(cast(Any, lane), cast(Any, _NoAccess()))
 
     with pytest.raises(ContentAccessDenied):
-        match read:
-            case "hydrate":
-                plane.hydrate("tsk-1", reference)
-            case "hydrate_to":
-                plane.hydrate_to("tsk-1", reference, tmp_path / "out.bin")
-            case _:
-                b"".join(plane.open("tsk-1", reference))
+        _read(plane.for_task("tsk-1", "other"), reference, how, tmp_path)
     assert lane.local_reads == 0
+
+
+@pytest.mark.parametrize("how", ["hydrate", "hydrate_to"])
+def test_a_large_object_is_relayed_to_a_task_with_no_live_access(
+    tmp_path, how: str
+) -> None:
+    data = b"x" * _LARGE
+    reference = reference_for("org", data)
+    lane = _Lane({reference.content_digest: data})
+    plane = WorkerContentPlane(
+        cast(Any, lane), cast(Any, _NoAccess()), peer_max_bytes=_LARGE
+    )
+
+    assert _read(plane.for_task("tsk-1", "org"), reference, how, tmp_path) == data
+    assert lane.peer_reads == [reference]
 
 
 def test_a_copy_that_fails_verification_mid_read_leaves_the_next_open_to_the_store(

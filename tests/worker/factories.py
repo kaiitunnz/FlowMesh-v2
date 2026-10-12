@@ -193,7 +193,7 @@ class FakeContentPlane:
         self.reads: list[ContentReference] = []
         self.on_read: Callable[[], None] | None = None
 
-    def for_task(self, task_id: str) -> FabricObjectStore:
+    def for_task(self, task_id: str, scope: str) -> FabricObjectStore:
         return self.store
 
     def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
