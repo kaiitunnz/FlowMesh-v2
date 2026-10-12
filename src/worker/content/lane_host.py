@@ -140,7 +140,14 @@ class ContentLaneHost:
             self._logger.info(
                 "content %s read from a peer cache", reference.content_digest
             )
-            self.adopt(reference, verified)
+            try:
+                self.adopt(reference, verified)
+            except Exception:
+                self._logger.warning(
+                    "could not cache %s locally",
+                    reference.content_digest,
+                    exc_info=True,
+                )
         finally:
             verified.unlink(missing_ok=True)
 

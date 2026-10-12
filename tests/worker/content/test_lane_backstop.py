@@ -1,4 +1,5 @@
-"""The lane host's backstop on a peer read: it bounds a stall, never a slow transfer."""
+"""The lane host's peer reads: the backstop bounds a stall, never a slow transfer, and
+what the cache does with a verified read never fails it."""
 
 import asyncio
 import time
@@ -64,5 +65,21 @@ def test_a_peer_read_that_stops_progressing_fails_typed(tmp_path) -> None:
         with pytest.raises(ContentHydrationError, match="stopped making progress"):
             lane.read_peer(reference_for("local", b"body"), "tsk-1")
         assert time.monotonic() - started < _STALL * 10
+    finally:
+        lane.stop()
+
+
+def test_a_verified_peer_read_survives_a_copy_the_cache_cannot_take(
+    tmp_path, monkeypatch
+) -> None:
+    lane = _lane(tmp_path, _Client(0.0, progressing=True))
+
+    def refuse(reference: ContentReference, verified: Path) -> None:
+        raise OSError("cache disk full")
+
+    monkeypatch.setattr(lane._store, "adopt", refuse)
+    try:
+        assert lane.read_peer(reference_for("local", b"body"), "tsk-1") == b"body"
+        assert list(lane._store.staging_dir("local").iterdir()) == []
     finally:
         lane.stop()
