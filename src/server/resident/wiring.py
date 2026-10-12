@@ -57,7 +57,8 @@ def build_resident_capacity(
     """Wire resident-capacity control for the enabled resident config, install its
     runtime hooks, and return it."""
     cfg = orchestration.resident
-    stores = ResidentStores()
+    stores = ResidentStores(registry)
+    stores.complete = False
     limits = ResidentPolicyLimits(
         allowed_models=frozenset(cfg.allowed_models),
         max_replicas_per_family=cfg.max_replicas_per_family,
@@ -65,9 +66,6 @@ def build_resident_capacity(
         cold_start_deadline_sec=cfg.cold_start_deadline_sec,
         selection_strategy=cfg.selection_strategy,
     )
-
-    def persist() -> None:
-        registry.save_snapshot(stores.to_snapshot())
 
     async def materialize(family: ServiceFamily, replica: ReplicaIncarnation) -> str:
         return await materialize_resident_replica(
@@ -87,7 +85,6 @@ def build_resident_capacity(
         admission_slots=cfg.admission_slots,
         adapter_slots=cfg.adapter_slots,
         idle_retain_sec=cfg.idle_retain_sec,
-        persist=persist,
         materialize_fn=materialize,
         stop_fn=stop,
     )
@@ -133,7 +130,7 @@ def build_resident_capacity(
     sweep_interval = cfg.idle_sweep_interval_sec if cfg.idle_retain_sec > 0 else 0.0
     resident_control = ResidentCapacityControl(
         stores=stores,
-        admission=AdmissionController(stores, persist),
+        admission=AdmissionController(stores),
         lifecycle=lifecycle,
         limits=limits,
         dependency_resolver=runtime.resolve_service_dependency,

@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from server.orchestration.state import InvocationState
+from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from server.task.workflow_retry import WorkflowRetryScheduler
 from tests.server.stored_state import StoredLedgers
@@ -15,6 +16,13 @@ def manual_durability_retry(
 ) -> WorkflowRetryScheduler:
     """A durability retry that runs only when a test drives it."""
     return WorkflowRetryScheduler(fire, logger, base_delay_sec=0.0, run_thread=False)
+
+
+def manual_redrive(
+    fire: Callable[[str], None], logger: logging.Logger
+) -> StoreRedriveScheduler:
+    """A store re-drive that runs only when a test drives it."""
+    return StoreRedriveScheduler(fire, logger, base_delay_sec=0.0, run_thread=False)
 
 
 def durable_invocation(

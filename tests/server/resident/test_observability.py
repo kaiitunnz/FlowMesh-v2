@@ -6,6 +6,7 @@ api_key, degrades to empty results when resident capacity is disabled, and denie
 non-admin principal.
 """
 
+import asyncio
 import logging
 from collections.abc import Iterator
 from typing import Any
@@ -19,8 +20,12 @@ from server.auth.security import authenticate_connection
 from server.hooks import PERMISSION_CHECKERS
 from server.resident import (
     AdmissionController,
+    AdmissionProfile,
     ClaimCredit,
     ClaimState,
+    InvocationRequest,
+    InvocationSubject,
+    InvocationSubjectKind,
     LifecycleScaleManager,
     ReplicaEndpoint,
     ReplicaIncarnation,
@@ -122,10 +127,12 @@ def restore_checkers() -> Iterator[None]:
 def test_accessors_project_authoritative_state() -> None:
     control = _control(_seeded_stores())
 
-    families = control.list_service_families()
+    families = asyncio.run(control.list_service_families_async())
     assert [f.family for f in families] == ["fam"]
 
-    replicas = {r.replica_id: r for r in control.list_replica_incarnations()}
+    replicas = {
+        r.replica_id: r for r in asyncio.run(control.list_replica_incarnations_async())
+    }
     assert set(replicas) == {"rpl-warm", "rpl-preempted"}  # preempted stays visible
 
     claims, held = control.list_credit_bearing_claims()
@@ -225,3 +232,84 @@ async def test_non_admin_principal_is_denied(restore_checkers: None) -> None:
         for path in ("families", "replicas", "claims"):
             resp = await client.get(f"{PREFIX}/resident/{path}")
             assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+
+_LISTINGS = {
+    "families": {},
+    "replicas": {},
+    "serve-fam replicas": {"family": "serve-fam"},
+}
+
+
+async def _listings(control: ResidentCapacityControl) -> dict[str, Any]:
+    async with _client(_app(control)) as client:
+        answers = {}
+        for name, params in _LISTINGS.items():
+            path = name.split()[-1]
+            resp = await client.get(f"{PREFIX}/resident/{path}", params=params)
+            assert resp.status_code == status.HTTP_200_OK
+            answers[name] = resp.json()
+        return answers
+
+
+@pytest.mark.anyio
+async def test_listings_answer_alike_before_and_after_retirement_and_a_restart() -> (
+    None
+):
+    stores = _seeded_stores()
+    stores.families.register(
+        ServiceFamily(
+            family="serve-fam",
+            engine_batch_key="serve-fam",
+            model_ref="m",
+            standing=True,
+            created_at="2026-01-01T00:00:00Z",
+        )
+    )
+    stores.directory.add(
+        ReplicaIncarnation(
+            replica_id="rpl-stopped",
+            family="serve-fam",
+            incarnation=1,
+            state=ReplicaState.STOPPED,
+            standing=True,
+            created_at="2026-01-01T00:00:00Z",
+        )
+    )
+    for replica_id, created_at in (
+        ("rpl-warm", "2026-01-02T00:00:00Z"),
+        ("rpl-preempted", "2026-01-03T00:00:00Z"),
+    ):
+        replica = stores.directory.get(replica_id)
+        assert replica is not None
+        replica.created_at = created_at
+    stores.invocations.put(
+        InvocationRequest(
+            invocation_id="inv-1",
+            subject=InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="wfl-1"),
+            family="fam",
+            profile=AdmissionProfile(engine_batch_key="fam"),
+        )
+    )
+    stores.flush()
+    control = _control(stores)
+    before = await _listings(control)
+    assert [r["replica_id"] for r in before["replicas"]] == [
+        "rpl-stopped",
+        "rpl-warm",
+        "rpl-preempted",
+    ]
+    assert [f["family"] for f in before["families"]] == ["serve-fam", "fam"]
+    assert [r["replica_id"] for r in before["serve-fam replicas"]] == ["rpl-stopped"]
+
+    control._lifecycle.retire_inert(["rpl-preempted", "rpl-stopped"])
+    assert {r.replica_id for r in stores.directory.all()} == {"rpl-warm"}
+    assert stores.families.get("serve-fam") is None
+    assert await _listings(control) == before
+
+    snapshot = await stores.durability.load_snapshot_async()
+    assert snapshot is not None
+    restarted = ResidentStores(stores.durability)
+    restarted.load_snapshot(snapshot)
+    assert {r.replica_id for r in restarted.directory.all()} == {"rpl-warm"}
+    assert await _listings(_control(restarted)) == before

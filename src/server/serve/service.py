@@ -177,6 +177,7 @@ class _ServeStream:
         self._closed = False
         self._flushed = False
         self._dropped = False
+        self._terminal_recorded = False
 
     @property
     def invocation_id(self) -> str:
@@ -264,8 +265,16 @@ class _ServeStream:
         except asyncio.QueueFull:
             self._dropped = True
 
-    def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
-        self._edge.record_terminal(self.invocation_id, reason, detail)
+    def record_terminal(
+        self, reason: ClaimTerminalReason, detail: str | None
+    ) -> ClaimTerminalReason:
+        recorded = self._edge.record_terminal(self.invocation_id, reason, detail)
+        self._terminal_recorded = True
+        return recorded
+
+    @property
+    def terminal_recorded(self) -> bool:
+        return self._terminal_recorded
 
     def complete(self) -> None:
         self._finish(ServeEvent(kind="done"))
@@ -339,8 +348,15 @@ class GatedServe:
         self.control = control
         self.relay = relay
         self._persist = persist or (lambda: None)
+        # Set while a write of the edge's state has not landed.
+        self._unsaved = False
         self._logger = logger or logging.getLogger("gated-serve")
         self._streams: dict[str, _ServeStream] = {}
+
+    def _save(self) -> None:
+        self._unsaved = True
+        self._persist()
+        self._unsaved = False
 
     def set_forward_listener(self, listener: RootForwardIngress) -> None:
         """Attach the root forward listener the edge binds and releases ports on."""
@@ -492,7 +508,7 @@ class GatedServe:
             )
             if exposure is None:
                 return
-            self._persist()
+            self._save()
             self._advertise_route(serve_task_id)
 
         self.control.call_on_loop(_commit)
@@ -581,7 +597,7 @@ class GatedServe:
                 # Reserve a public port on the public host and bind its listener; the
                 # exposure goes live only on the listener's bound evidence.
                 self._reserve_and_bind(binding, forward_port)
-            self._persist()
+            self._save()
 
         self.control.call_on_loop(_adopt)
 
@@ -605,7 +621,7 @@ class GatedServe:
             if exposure is not None and self._forward_listener is not None:
                 self._forward_listener.schedule_release(exposure.public_port)
             self._bindings.remove(serve_task_id)
-            self._persist()
+            self._save()
 
         self.control.call_on_loop(_drain)
 
@@ -615,15 +631,18 @@ class GatedServe:
 
     def record_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason, detail: str | None
-    ) -> None:
-        """Record the fenced external status fact before the credit releases."""
+    ) -> ClaimTerminalReason:
+        """Record the fenced external status fact before the credit releases, writing
+        it again after a failed write, and return the reason of the first fact
+        recorded."""
         status = _TERMINAL_STATUS.get(reason, ServeTerminalStatus.FAILED)
-        if self._terminals.record(
-            ServeStatusTerminal(
-                invocation_id=invocation_id, status=status, detail=detail
-            )
-        ):
-            self._persist()
+        terminal = ServeStatusTerminal(
+            invocation_id=invocation_id, status=status, detail=detail
+        )
+        if self._terminals.record(terminal) or self._unsaved:
+            self._save()
+        first = self._terminals.get(invocation_id) or terminal
+        return _STATUS_REASON[first.status]
 
     def reconcile_terminals(self) -> None:
         """Settle on startup every gated serve request the restart ended.
@@ -632,7 +651,8 @@ class GatedServe:
         so a ``FAILED`` terminal fact is first recorded for each one whose claim holds
         credit. Every recorded fact then replays through the FSM, releasing its claim
         and reaping the replica's request, so a crash between a fact and its release
-        also settles on the next start. Idempotent on a terminal claim.
+        also settles on the next start. Idempotent on a terminal claim. A fact whose
+        invocation then holds nothing live is dropped.
         """
         for invocation_id in self.control.serve_invocations_holding_credit():
             self.record_terminal(
@@ -644,3 +664,16 @@ class GatedServe:
             self.control.reconcile_serve_terminal(
                 terminal.invocation_id, _STATUS_REASON[terminal.status]
             )
+        retired = [
+            terminal.invocation_id
+            for terminal in self._terminals.all()
+            if not self.control.invocation_live(terminal.invocation_id)
+        ]
+        for invocation_id in retired:
+            self._terminals.drop(invocation_id)
+        if retired:
+            self._save()
+
+    def retire_terminal(self, invocation_id: str) -> None:
+        """Drop a retired invocation's status fact; the next write omits it."""
+        self._terminals.drop(invocation_id)

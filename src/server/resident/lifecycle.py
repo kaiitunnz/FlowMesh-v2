@@ -5,10 +5,14 @@ demand-driven scale-from-zero for approved plan-derived families, and drains bef
 idle teardown so accepted work reaches a terminal outcome. It never mints or releases an
 admission credit: the capacity decision (join a warm replica, materialize one, or return
 a typed denial) is a pure function of the directory, leases, and policy, and the actual
-start and stop cross the flat worker plane through injected substrate hooks.
+start and stop cross the flat worker plane through injected substrate hooks. An inert
+replica no live claim names moves to stored history with its lease, as does a standing
+family nothing live uses.
 """
 
-from collections.abc import Awaitable, Callable, Set
+import functools
+import logging
+from collections.abc import Awaitable, Callable, Iterable, Set
 from dataclasses import dataclass
 from typing import Literal
 
@@ -16,8 +20,10 @@ from shared.utils.ids import new_allocation_lease_id, new_replica_id
 
 from ..task.v2.representations.plan import ResidencyWarmth
 from ..utils.time import now_iso, parse_iso_ts
+from .durability import FAMILY, LEASE, REPLICA, live_field
 from .policy import ProvisioningDecision, ResidentPolicyLimits, decide_materialization
 from .state import (
+    INERT_REPLICA_STATES,
     SERVABLE_REPLICA_STATES,
     AdmissionProfile,
     AllocationLease,
@@ -28,8 +34,12 @@ from .state import (
     ReplicaState,
     SafeCapacityVector,
     ServiceFamily,
+    StoredReplica,
 )
+from .store_retry import Attempt
 from .stores import ResidentStores
+
+_logger = logging.getLogger("resident-capacity")
 
 # Submits the family's serve substrate and returns the backing serve task id.
 MaterializeFn = Callable[[ServiceFamily, ReplicaIncarnation], Awaitable[str]]
@@ -66,7 +76,6 @@ class LifecycleScaleManager:
         admission_slots: int,
         adapter_slots: int = 4,
         idle_retain_sec: float = 0.0,
-        persist: Callable[[], None] | None = None,
         materialize_fn: MaterializeFn | None = None,
         stop_fn: StopFn | None = None,
     ) -> None:
@@ -75,7 +84,7 @@ class LifecycleScaleManager:
         self._admission_slots = max(1, admission_slots)
         self._adapter_slots = max(1, adapter_slots)
         self._idle_retain_sec = max(0.0, idle_retain_sec)
-        self._persist = persist or (lambda: None)
+        self._retry: Callable[[str, str, Attempt], None] = lambda *_: None
         self._materialize_fn = materialize_fn
         self._stop_fn = stop_fn
 
@@ -167,7 +176,7 @@ class LifecycleScaleManager:
         replica.lease_id = lease.lease_id
         self._stores.leases.add(lease)
         self._stores.directory.add(replica)
-        self._persist()
+        self._stores.flush()
         try:
             serve_task_id = await self._materialize_fn(family, replica)
         except BaseException:
@@ -177,7 +186,7 @@ class LifecycleScaleManager:
             raise
         replica.serve_task_id = serve_task_id
         replica.updated_at = now_iso()
-        self._persist()
+        self._stores.flush()
         return replica
 
     def adopt_standing_replica(
@@ -220,7 +229,7 @@ class LifecycleScaleManager:
         self._stores.leases.add(lease)
         self._stores.directory.add(replica)
         self.refresh_report(replica.replica_id)
-        self._persist()
+        self._stores.flush()
         return replica
 
     def on_replica_ready(self, replica_id: str, endpoint: ReplicaEndpoint) -> None:
@@ -234,7 +243,7 @@ class LifecycleScaleManager:
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.WARM)
         self.refresh_report(replica_id)
-        self._persist()
+        self._stores.flush()
 
     def refresh_report(self, replica_id: str) -> None:
         """Ingest a conservative normalized capacity report for a replica's current
@@ -315,7 +324,7 @@ class LifecycleScaleManager:
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.DRAINING)
         self.refresh_report(replica_id)
-        self._persist()
+        self._stores.flush()
 
     def stop(self, replica_id: str) -> None:
         """Stop a drained replica once it holds no admitted work.
@@ -333,9 +342,10 @@ class LifecycleScaleManager:
         replica.healthy = False
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.STOPPED)
-        self._persist()
+        self._stores.flush()
         if not replica.standing:
             self._reap_serve_task(replica.serve_task_id)
+        self.retire_inert([replica_id])
 
     def stop_if_drained(self, replica_id: str | None) -> None:
         """Stop a drained replica once its last admitted work has released.
@@ -415,8 +425,11 @@ class LifecycleScaleManager:
         replica.incarnation += 1
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.PREEMPTED)
-        self._persist()
+        # A restart invalidates a replica whose serve task is gone, so the reap need
+        # not wait on this write.
+        self._stores.flush_or_defer()
         self._reap_serve_task(serve_task_id)
+        self.retire_inert([replica_id])
 
     def on_serve_task_end(self, serve_task_id: str, *, live: bool) -> None:
         """Retire the demand replica a serve task stopped serving.
@@ -495,3 +508,80 @@ class LifecycleScaleManager:
         if lease is not None:
             lease.state = state
             lease.updated_at = now_iso()
+
+    def set_store_retry(self, retry: Callable[[str, str, Attempt], None]) -> None:
+        """Register ``retry``, called with the kind, key and attempt of a retirement a
+        store failure interrupted."""
+        self._retry = retry
+
+    def retire_inert(
+        self, replica_ids: Iterable[str], families: Iterable[str] = ()
+    ) -> None:
+        """Move each inert replica no live claim names to stored history, then each of
+        ``families`` and of their families that is standing and unused, handing a store
+        failure to the retry."""
+        unused = set(families)
+        for replica_id in replica_ids:
+            try:
+                if (family := self.retire_replica(replica_id)) is not None:
+                    unused.add(family)
+            except Exception:
+                _logger.exception("retiring resident replica %s failed", replica_id)
+                self._retry(
+                    REPLICA,
+                    replica_id,
+                    functools.partial(self.retire_inert, [replica_id]),
+                )
+        for family in sorted(unused):
+            try:
+                self.retire_family(family)
+            except Exception:
+                _logger.exception("retiring resident family %s failed", family)
+                self._retry(
+                    FAMILY, family, functools.partial(self.retire_family, family)
+                )
+
+    def retire_replica(self, replica_id: str) -> str | None:
+        """Move an inert replica no live claim names, with its lease, to stored history,
+        returning its family. Raises on a store failure.
+
+        It leaves the directory, with its lease and report, once its history is stored.
+        """
+        replica = self._stores.directory.get(replica_id)
+        if (
+            replica is None
+            or replica.state not in INERT_REPLICA_STATES
+            or self._stores.claims.by_replica(replica_id)
+        ):
+            return None
+        lease = (
+            self._stores.leases.get(replica.lease_id)
+            if replica.lease_id is not None
+            else None
+        )
+        fields = [live_field(REPLICA, replica_id)]
+        if lease is not None:
+            fields.append(live_field(LEASE, lease.lease_id))
+        self._stores.flush()
+        self._stores.durability.archive_replica(
+            StoredReplica(replica=replica, lease=lease), fields
+        )
+        self._stores.forget_replica(replica)
+        return replica.family
+
+    def retire_family(self, family: str) -> None:
+        """Move a standing family with no live replica, request or claim to stored
+        history. Raises on a store failure."""
+        definition = self._stores.families.get(family)
+        if definition is None or not definition.standing or self._family_used(family):
+            return
+        self._stores.flush()
+        self._stores.durability.archive_family(definition, live_field(FAMILY, family))
+        self._stores.families.forget(family)
+
+    def _family_used(self, family: str) -> bool:
+        return bool(
+            self._stores.directory.by_family(family)
+            or self._stores.claims.pending_for_family(family)
+            or self._stores.invocations.any_for_family(family)
+        )

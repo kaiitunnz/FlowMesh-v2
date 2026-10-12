@@ -491,7 +491,7 @@ if IS_ROOT_NODE:
 
     RUNTIME.settled_history.set_on_freed(METRICS_RECORDER.forget_tasks)
     if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
-        RUNTIME.settled_history.set_claims_settled(
+        RUNTIME.settled_history.set_invocations_retired(
             partial(
                 RESIDENT_CONTROL.invocations_settled,
                 timeout_sec=5.0,

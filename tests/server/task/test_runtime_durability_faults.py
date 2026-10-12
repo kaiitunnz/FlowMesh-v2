@@ -36,7 +36,7 @@ from server.task.runtime.after_commit import (
     Settled,
 )
 from tests.server.dispatch_helpers import record_dispatch
-from tests.server.runtime_helpers import durable_invocation
+from tests.server.runtime_helpers import durable_invocation, manual_redrive
 from tests.server.task.test_resident_origin_loss import (
     _RESIDENT_WF,
     _capture_resident_boundary,
@@ -425,9 +425,10 @@ def test_a_crash_at_a_faulted_cut_restores_without_an_early_or_lost_release(
                 assert released_before == [], f"cut {cut}"
                 expected = [] if claim.holds_credit else [claim.replica_id]
                 assert resident.released == expected, f"cut {cut}"
-            assert [c.invocation_id for c in resident.stores.claims.all()] == [
-                claim.invocation_id
-            ], f"cut {cut}"
+            # No successor was raised, and a consumed terminal retired the invocation.
+            assert all(c is claim for c in resident.stores.claims.all()), f"cut {cut}"
+            if durable:
+                assert not resident.stores.live(claim.invocation_id), f"cut {cut}"
             resident.assert_durable_matches_memory()
 
 
@@ -444,11 +445,12 @@ def test_the_observer_catches_an_action_delivered_before_its_cause_is_durable(
             ),
         )
         resident.registry.fail_from = resident.registry.writes + 1
+        claim = resident.claim()
 
         _run(resident, _TRANSITIONS[0])
 
         assert resident.observer.violations
-        assert not resident.claim().holds_credit
+        assert not claim.holds_credit
 
 
 def test_a_failed_interrupt_is_retried_without_repeating_its_credit_release(
@@ -511,8 +513,9 @@ class _Spawning:
 
 
 def _restarted(runtime: TaskRuntime, registry: FakeRegistry) -> TaskRuntime:
-    """A new runtime over the same durable state and shared content store."""
-    return _runtime(registry, runtime._results)
+    """A new runtime over the same durable state and shared content store, whose
+    re-drives run only when the test drives them."""
+    return _runtime(registry, runtime._results, redrive=manual_redrive)
 
 
 def _spawn_writes() -> int:
@@ -548,6 +551,7 @@ def test_a_faulted_fan_out_keeps_its_children_whole(applied: bool, crash: bool) 
             # The success was never acknowledged, so its stream redelivers it.
             spawning.succeed()
         for _ in range(5):
+            spawning.runtime._redrive.run_due()
             spawning.runtime._durability.run_due()
         assert not spawning.runtime._durability.pending(spawning.workflow_id)
         spawning.assert_consistent()

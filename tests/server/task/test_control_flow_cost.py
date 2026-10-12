@@ -11,10 +11,10 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration.engine.snapshot import SnapshotCodec
-from server.orchestration.journal import TrackedDict
 from server.orchestration.state import WorkItem
 from server.task.models import TaskStatus
 from server.task.runtime.commits import TransitionCommitter
+from server.utils.journal import TrackedDict
 from tests.server.orchestration.helpers import chain_bundle, engine
 from tests.server.task.test_runtime_control_flow import (
     _ECHO,

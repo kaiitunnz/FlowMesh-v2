@@ -57,8 +57,8 @@ from ...task.v2.representations.operators import (
 from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 from ...task.v2.representations.results import CardinalityKind, ResultDeclaration
 from ...task.v2.representations.template import LogicalWorkflowTemplate
+from ...utils.journal import ChangeJournal
 from ..guardrails import ScopeBudget
-from ..journal import LedgerJournal
 from ..ledger_layout import LedgerChanges, LedgerOrdinals
 from ..outcomes import check_admissible
 from ..state import (
@@ -189,7 +189,7 @@ class OrchestrationEngine:
         """``ordinals`` restores ``snapshot`` as the stored ledger they order; without
         them the engine's first ledger write stores the whole ledger."""
         self._topology = PlanTopology(bundle)
-        journal = LedgerJournal()
+        journal = ChangeJournal()
         self._failures = FailureLedger(journal)
         self._ledger = OrchestrationLedger(
             snapshot,

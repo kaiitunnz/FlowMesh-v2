@@ -117,3 +117,44 @@ def test_superseded_incarnation_drops_from_selection():
     # Directory advances the replica to a new incarnation; the report fences the old.
     stores.directory.get("rpl-1").incarnation = 2
     assert stores.pools.feasible_candidates("fam", _PROFILE) == []
+
+
+def test_the_claim_indexes_follow_every_transition_and_drop_empty_buckets():
+    stores = _stores()
+    claim = new_claim(invocation_id="inv-1", family="fam")
+    stores.claims.add(claim)
+    assert stores.claims.pending_for_family("fam") == [claim]
+    assert stores.claims.credit_bearing_for_replica("rpl-1") == []
+
+    reserve(claim, replica_id="rpl-1", incarnation=1, credit=_CREDIT)
+    assert stores.claims.pending_for_family("fam") == []
+    assert stores.claims.credit_bearing_for_replica("rpl-1") == [claim]
+    assert stores.claims.credit_bearing() == [claim]
+    assert stores.claims.by_replica("rpl-1") == [claim]
+
+    settle_terminal(claim, ClaimTerminalReason.ENQUEUE_FAILED)
+    assert stores.claims.credit_bearing_for_replica("rpl-1") == []
+    assert stores.claims.by_replica("rpl-1") == [claim]  # still names its replica
+
+    stores.flush()
+    stores.claims.forget(claim.claim_id)
+    assert stores.claims.by_invocation("inv-1") == []
+    assert stores.claims.by_replica("rpl-1") == []
+    index = stores.claims
+    assert not (
+        index._by_invocation
+        or index._by_replica
+        or index._credit_by_replica
+        or index._pending_by_family
+    )
+
+
+def test_a_lookup_hands_back_a_list_the_store_never_changes():
+    stores = _stores()
+    claim = new_claim(invocation_id="inv-1", family="fam")
+    stores.claims.add(claim)
+    pending = stores.claims.pending_for_family("fam")
+
+    reserve(claim, replica_id="rpl-1", incarnation=1, credit=_CREDIT)
+
+    assert pending == [claim]

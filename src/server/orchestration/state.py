@@ -34,8 +34,8 @@ from ..task.v2.representations.operators import (
     RecoveryClass,
     SelectorStep,
 )
+from ..utils.journal import EMPTY_MAP, JournaledModel, freeze_mapping
 from ..utils.time import now_iso
-from .journal import EMPTY_MAP, JournaledModel, freeze_mapping
 
 
 class WorkItemStatus(StrEnum):

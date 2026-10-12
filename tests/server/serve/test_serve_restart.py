@@ -3,7 +3,8 @@
 The request's origin is the root's serve edge, so the restart takes its client and its
 data path with it, and nothing durable can re-drive it. Startup records a failed
 terminal for it, reaps the replica's engine request through the serve task's worker,
-and releases the credit, while a workflow's claim waits for its own ledger terminal.
+and releases the credit, while a workflow's claim waits for its own ledger terminal. A
+request whose invocation retires leaves no status fact behind.
 """
 
 import asyncio
@@ -24,6 +25,7 @@ from server.serve.ingress import ServeIngressRegistry
 from server.serve.service import GatedServe
 from server.startup import rehydrate_root_state
 from shared.resident.reports import ResidentBootstrapOutcome
+from tests.server.resident._helpers import durability_holding, stored_snapshot
 from tests.server.resident.test_serve_origination import (
     _FAMILY,
     _SERVE_TASK,
@@ -39,6 +41,18 @@ from tests.server.runtime_helpers import never_closed
 from tests.server.task.test_v2_orchestration import FakeRegistry, _runtime
 
 _LOST = "serve request lost in a root restart"
+
+
+class _RecordingTerminals(ServeTerminalStore):
+    """Keeps every fact it was handed, after the store drops it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.recorded: dict[str, ServeStatusTerminal] = {}
+
+    def record(self, terminal: ServeStatusTerminal) -> bool:
+        self.recorded.setdefault(terminal.invocation_id, terminal)
+        return super().record(terminal)
 
 
 class _Runtime:
@@ -59,14 +73,6 @@ class _Runtime:
         return None
 
 
-class _SnapshotRegistry:
-    def __init__(self, snapshot: ResidentSnapshot) -> None:
-        self._snapshot = snapshot
-
-    async def load_snapshot_async(self) -> ResidentSnapshot:
-        return self._snapshot
-
-
 def _in_flight(*, drain: bool = False, uncertain: bool = False) -> ResidentSnapshot:
     """A root holding both of a standing replica's slots for gated serve requests: one
     accepted and streaming, one reserved."""
@@ -85,7 +91,7 @@ def _in_flight(*, drain: bool = False, uncertain: bool = False) -> ResidentSnaps
         svc.drain_serve_replica(_SERVE_TASK)
     (replica,) = stores.directory.by_family(_FAMILY)
     assert stores.credit_ledger.held(replica.replica_id) == 2
-    return stores.to_snapshot()
+    return stored_snapshot(stores)
 
 
 def _edge(control: Any, terminals: ServeTerminalStore) -> GatedServe:
@@ -105,7 +111,7 @@ def _start(runtime: Any, control: Any, snapshot: ResidentSnapshot, edge: GatedSe
             await rehydrate_root_state(
                 runtime,
                 control,
-                cast(Any, _SnapshotRegistry(snapshot)),
+                durability_holding(snapshot),
                 edge,
                 never_closed,
             )
@@ -128,14 +134,17 @@ def _restart(
 def test_a_restart_fails_each_serve_request_it_ended_and_frees_its_slot(
     uncertain: bool,
 ) -> None:
-    svc, stores, deps, terminals = _restart(_in_flight(uncertain=uncertain))
+    recorded = _RecordingTerminals()
+    svc, stores, deps, terminals = _restart(_in_flight(uncertain=uncertain), recorded)
 
+    # Each request retires, so its status fact leaves with its claims.
+    assert terminals.all() == []
     for invocation_id in ("inv-1", "inv-2"):
-        (claim,) = stores.claims.by_invocation(invocation_id)
-        assert claim.state is ClaimState.TERMINAL
-        assert claim.terminal_reason is ClaimTerminalReason.FAILED
-        terminal = terminals.get(invocation_id)
-        assert terminal is not None
+        assert not stores.live(invocation_id)
+        [record] = stores.durability.retired_invocations([invocation_id])
+        assert record is not None
+        assert record.terminal_reason is ClaimTerminalReason.FAILED
+        terminal = recorded.recorded[invocation_id]
         assert (terminal.status, terminal.detail) == (ServeTerminalStatus.FAILED, _LOST)
         # The replica's engine request is reaped once, through the serve task's worker.
         assert (
@@ -171,8 +180,9 @@ def test_a_restart_fails_each_serve_request_it_ended_and_frees_its_slot(
 def test_a_restart_stops_a_drained_serve_replica_its_lost_requests_held() -> None:
     _svc, stores, _deps, _terminals = _restart(_in_flight(drain=True))
 
-    (replica,) = stores.directory.by_family(_FAMILY)
-    assert replica.state is ReplicaState.STOPPED
+    assert stores.directory.by_family(_FAMILY) == []
+    (stored,) = asyncio.run(stores.durability.stored_replicas_async())
+    assert stored.replica.state is ReplicaState.STOPPED
 
 
 def test_a_crash_between_the_failed_terminal_and_its_release_heals_on_next_start(
@@ -234,6 +244,43 @@ def test_a_restart_reaps_nothing_for_requests_that_already_settled() -> None:
         )
         svc.reconcile_serve_terminal(invocation_id, ClaimTerminalReason.COMPLETED)
 
-    _svc, _stores, deps, _terminals = _restart(stores.to_snapshot(), terminals)
+    _svc, _stores, deps, _terminals = _restart(stored_snapshot(stores), terminals)
 
     assert [r for r in deps.relays if r[1] == "resident_sidecar_reap"] == []
+
+
+def test_a_restart_drops_each_status_fact_whose_invocation_holds_nothing_live() -> None:
+    terminals = ServeTerminalStore()
+    terminals.record(
+        ServeStatusTerminal(invocation_id="inv-9", status=ServeTerminalStatus.COMPLETED)
+    )
+    persisted: list[int] = []
+    svc, _stores, _settled, _deps = _build()
+    edge = _edge(svc, terminals)
+    edge._persist = lambda: persisted.append(len(terminals.all()))
+
+    _start(_Runtime(), svc, _in_flight(), edge)
+
+    assert terminals.all() == []
+    assert persisted[-1] == 0
+
+
+def test_a_status_fact_whose_write_failed_is_written_on_the_next_record() -> None:
+    terminals = ServeTerminalStore()
+    svc, _stores, _settled, _deps = _build()
+    edge = _edge(svc, terminals)
+    writes: list[int] = []
+
+    def persist() -> None:
+        writes.append(len(terminals.all()))
+        if len(writes) == 1:
+            raise ConnectionError("store unavailable")
+
+    edge._persist = persist
+    with pytest.raises(ConnectionError):
+        edge.record_terminal("inv-1", ClaimTerminalReason.COMPLETED, None)
+
+    edge.record_terminal("inv-1", ClaimTerminalReason.COMPLETED, None)
+    edge.record_terminal("inv-1", ClaimTerminalReason.COMPLETED, None)
+
+    assert writes == [1, 1]

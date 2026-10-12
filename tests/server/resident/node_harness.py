@@ -11,8 +11,9 @@ from lumid_hooks import PrincipalContext
 
 from server.config import OrchestrationConfig, ResidentCapacityConfig
 from server.resident import ReplicaState, ServiceFamily
+from server.resident.durability import MemoryResidentDurability
 from server.resident.service import ResidentCapacityControl
-from server.resident.state import ReplicaIncarnation, ResidentSnapshot
+from server.resident.state import ReplicaIncarnation, StoredReplica
 from server.resident.wiring import build_resident_capacity
 from server.startup import rehydrate_root_state
 from server.task.runtime import TaskRuntime
@@ -40,19 +41,6 @@ SYSTEM = PrincipalContext(
 )
 FAMILY = ServiceFamily(family="m|chat", engine_batch_key="m|chat", model_ref="m")
 ENGINE_KEY = "engine-key"
-
-
-class _SnapshotRegistry:
-    """Round-trips the resident snapshot through JSON, as the Redis registry does."""
-
-    def __init__(self) -> None:
-        self.blob: str | None = None
-
-    def save_snapshot(self, snapshot: ResidentSnapshot) -> None:
-        self.blob = snapshot.model_dump_json()
-
-    async def load_snapshot_async(self) -> ResidentSnapshot | None:
-        return ResidentSnapshot.model_validate_json(self.blob) if self.blob else None
 
 
 class _YieldingRegistry(FakeRegistry):
@@ -95,7 +83,7 @@ class Node:
         self.substrate = substrate
         self.forward_api_key = forward_api_key
         self.tasks = _YieldingRegistry()
-        self.resident = _SnapshotRegistry()
+        self.resident = MemoryResidentDurability()
         self.runtime, self.control = self._boot()
 
     def _boot(self) -> tuple[TaskRuntime, ResidentCapacityControl]:
@@ -228,12 +216,15 @@ class Node:
         return replica
 
     def persist(self) -> None:
-        self.resident.save_snapshot(self.control.stores.to_snapshot())
+        self.control.stores.flush()
 
     def replica(self, replica_id: str) -> ReplicaIncarnation:
-        replica = self.control.stores.directory.get(replica_id)
-        assert replica is not None
-        return replica
+        """The replica, live or moved to stored history."""
+        if (replica := self.control.stores.directory.get(replica_id)) is not None:
+            return replica
+        return StoredReplica.model_validate_json(
+            self.resident.replicas[replica_id]
+        ).replica
 
     def status(self, task_id: str) -> str:
         record = self.runtime.get_record(task_id)

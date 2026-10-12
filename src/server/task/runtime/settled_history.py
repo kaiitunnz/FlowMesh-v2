@@ -28,7 +28,7 @@ _POLL_SEC = 1.0
 @dataclass(frozen=True)
 class ReclaimCheck:
     """What a reclaimable workflow's eligibility rests on outside the runtime: the
-    invocations whose resident claims must all be terminal."""
+    resident invocations that must all have retired."""
 
     invocation_ids: frozenset[str]
 
@@ -96,7 +96,7 @@ class SettledHistory:
         self._done = 0
         self._requires_closure = True
         self._requires_archive = True
-        self._claims_settled: Callable[[Collection[str]], bool] | None = None
+        self._invocations_retired: Callable[[Collection[str]], bool] | None = None
         self._on_freed: Callable[[list[str]], None] | None = None
 
     # ------------------------------------------------------------------ #
@@ -122,10 +122,12 @@ class SettledHistory:
             self._requires_closure = closure
             self._requires_archive = archive
 
-    def set_claims_settled(self, settled: Callable[[Collection[str]], bool]) -> None:
-        """Install the check that every resident claim the given invocations raised
-        is terminal."""
-        self._claims_settled = settled
+    def set_invocations_retired(
+        self, retired: Callable[[Collection[str]], bool]
+    ) -> None:
+        """Install the check that every given resident invocation retired or never
+        raised a claim."""
+        self._invocations_retired = retired
 
     def set_on_freed(self, on_freed: Callable[[list[str]], None]) -> None:
         """Install the callback handed each freed workflow's task ids, off the lock."""
@@ -260,8 +262,8 @@ class SettledHistory:
             return seal.ambiguous and self._resolve_ambiguous(workflow_id)
         if check is None:
             return False
-        if check.invocation_ids and self._claims_settled is not None:
-            if not self._claims_settled(check.invocation_ids):
+        if check.invocation_ids and self._invocations_retired is not None:
+            if not self._invocations_retired(check.invocation_ids):
                 return False
         revision = self._registry.workflow_revision(workflow_id)
         with self._lock:

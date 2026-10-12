@@ -12,6 +12,7 @@ denies with no allocation; and a restart reconciles an in-flight claim to uncert
 import asyncio
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from server.network.state import (
@@ -37,6 +38,7 @@ from server.resident import (
     ResidentPolicyLimits,
     ResidentStores,
 )
+from server.resident.durability import ResidentDurability
 from server.resident.service import ResidentWorkerDelivery
 from server.resident.state import ReplicaIncarnation
 from server.task.v2.representations.admission import ResidentAdmissionBinding
@@ -59,6 +61,7 @@ from shared.resident.reports import (
     ResidentRouteObservation,
     ResidentStreamStatus,
 )
+from tests.server.resident._helpers import stored_snapshot
 
 
 def _dependency(model_ref: str = "m") -> ServiceDependency:
@@ -191,8 +194,10 @@ def _build(
     dependency: ServiceDependency | None = None,
     warmth: ResidencyWarmth | None = None,
     content_scope: str = "",
+    durability: ResidentDurability | None = None,
+    boundary_settleable: Callable[[str, str], bool] = lambda _task, _call: True,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Delivery]:
-    stores = ResidentStores()
+    stores = ResidentStores(durability)
     limits = limits or ResidentPolicyLimits()
     settled: list[Any] = []
     redispatched: list[tuple[str, str]] = []
@@ -230,6 +235,7 @@ def _build(
         limits=limits,
         dependency_resolver=lambda task_id: _admission(dependency, warmth),
         content_scope_resolver=lambda _task_id: content_scope,
+        boundary_settleable=boundary_settleable,
         content_scope_authority=lambda idem, scope: assigned_scopes.append(
             (idem, scope)
         ),
@@ -611,7 +617,7 @@ def test_originate_leaves_a_boundary_to_its_caller_while_control_is_stopped():
 def test_rehydrate_reconciles_in_flight_claim():
     svc, stores, _settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))
-    snapshot = stores.to_snapshot()
+    snapshot = stored_snapshot(stores)
 
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc.rehydrate(snapshot)
@@ -623,7 +629,7 @@ def test_rehydrate_reconciles_in_flight_claim():
 def test_reattach_reports_a_warm_replica_so_it_is_admittable_again():
     svc, stores, _settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))
-    snapshot = stores.to_snapshot()
+    snapshot = stored_snapshot(stores)
 
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc.rehydrate(snapshot)
@@ -637,7 +643,7 @@ def test_reattach_reports_a_warm_replica_so_it_is_admittable_again():
 def test_reattach_preempts_a_warm_replica_whose_serve_task_is_gone():
     svc, stores, _settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))
-    snapshot = stores.to_snapshot()
+    snapshot = stored_snapshot(stores)
 
     fresh_svc, fresh_stores, _s, _d = _build()
     fresh_svc._probe_endpoint = lambda serve_task_id: None  # serve task is gone
@@ -772,9 +778,9 @@ def test_a_request_that_exhausts_its_redrives_settles_before_it_releases() -> No
     delivery.relays.clear()
     at_settle: list[tuple[ClaimState, list[str]]] = []
     settle = svc._settle
+    claim = stores.claims.by_invocation("inv-1")[-1]
 
     def recording_settle(*args: Any, **kwargs: Any) -> bool:
-        claim = stores.claims.by_invocation("inv-1")[-1]
         at_settle.append((claim.state, [kind for _, kind, _ in delivery.relays]))
         return settle(*args, **kwargs)
 
@@ -786,5 +792,5 @@ def test_a_request_that_exhausts_its_redrives_settles_before_it_releases() -> No
 
     ((state, relays),) = at_settle
     assert state is not ClaimState.TERMINAL and "resident_reap" not in relays
-    assert stores.claims.by_invocation("inv-1")[-1].state is ClaimState.TERMINAL
+    assert claim.state is ClaimState.TERMINAL
     assert [kind for _, kind, _ in delivery.relays].count("resident_reap") == 1

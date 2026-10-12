@@ -10,10 +10,10 @@ shared machine measures the machine.
 from typing import Any
 
 from server.orchestration import OrchestrationEngine
-from server.orchestration.journal import AppendOnlyList, TrackedDict
 from server.orchestration.state import BoundaryEvent
 from server.orchestration.telemetry import TelemetrySpanEmitter
 from server.task.v2.representations.operators import BoundaryEventKind
+from server.utils.journal import AppendOnlyList, TrackedDict
 from shared.telemetry.config import TelemetryLevel
 from tests.server.orchestration.helpers import (
     emitter,

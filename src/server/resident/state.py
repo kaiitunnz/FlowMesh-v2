@@ -17,6 +17,7 @@ from shared.resident.contracts import ReplicaEndpoint
 from ..network.state import ReplicaListenerAdvertisement
 from ..task.v2.representations.plan import Warmth
 from ..task.v2.representations.serving_size import DEFAULT_SERVING_SIZE, ServingSize
+from ..utils.journal import JournaledModel
 from ..utils.time import now_iso
 
 
@@ -75,6 +76,9 @@ class ReplicaState(StrEnum):
 
 SERVABLE_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
     {ReplicaState.WARM, ReplicaState.BUSY}
+)
+INERT_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
+    {ReplicaState.STOPPED, ReplicaState.PREEMPTED, ReplicaState.FAILED}
 )
 
 
@@ -192,7 +196,7 @@ class ServiceFamily(BaseModel):
     created_at: str = Field(default_factory=now_iso)
 
 
-class ReplicaIncarnation(BaseModel):
+class ReplicaIncarnation(JournaledModel):
     """A live replica incarnation in the Replica directory.
 
     ``incarnation`` is the monotonic fence: a lost or recreated replica invalidates
@@ -221,7 +225,7 @@ class ReplicaIncarnation(BaseModel):
     last_active_at: str = Field(default_factory=now_iso)
 
 
-class AllocationLease(BaseModel):
+class AllocationLease(JournaledModel):
     """Lease record and lifecycle ownership for one resident replica."""
 
     lease_id: str
@@ -231,6 +235,15 @@ class AllocationLease(BaseModel):
     cold_start_deadline_at: str | None = None
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)
+
+
+class StoredReplica(BaseModel):
+    """A retired replica incarnation and its allocation lease, kept as history."""
+
+    model_config = ConfigDict(frozen=True)
+
+    replica: ReplicaIncarnation
+    lease: AllocationLease | None = None
 
 
 class DemandEntry(BaseModel):
@@ -288,10 +301,26 @@ class InvocationRequest(BaseModel):
     family: str
     profile: AdmissionProfile
     replayable: bool = True
+    # The first fenced terminal consumed, recorded with the claims it settles.
+    consumed: ClaimTerminalReason | None = None
     created_at: str = Field(default_factory=now_iso)
 
 
-class ServiceClaim(BaseModel):
+class RetiredInvocation(BaseModel):
+    """The durable record of a retired invocation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    invocation_id: str
+    subject: InvocationSubject
+    family: str
+    # The highest admission epoch its claims reached; a successor takes the next one.
+    epoch_high: int = Field(ge=0)
+    terminal_reason: ClaimTerminalReason
+    retired_at: str = Field(default_factory=now_iso)
+
+
+class ServiceClaim(JournaledModel):
     """The authoritative per-admission fact and causal FSM for one credit.
 
     Linked to its invocation by ``invocation_id`` and carrying a fresh ``claim_id`` and
@@ -318,11 +347,12 @@ class ServiceClaim(BaseModel):
 
 
 class ResidentSnapshot(BaseModel):
-    """The durable aggregate of the authoritative resident-capacity control facts.
+    """The live authoritative resident-capacity control facts, as one value.
 
-    It persists exactly the authoritative ``CS`` stores; derived views and telemetry are
-    rebuilt on load. The DemandLedger is reconstructed from the pending claims and their
-    invocation requests, so no separate demand persistence is needed.
+    It holds exactly the authoritative ``CS`` entities a restart loads; derived views
+    and telemetry are rebuilt on load. The DemandLedger is reconstructed from the
+    pending claims and their invocation requests, so no separate demand persistence is
+    needed.
     """
 
     families: list[ServiceFamily] = Field(default_factory=list)

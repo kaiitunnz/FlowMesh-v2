@@ -1,10 +1,12 @@
-"""Durable persistence of the authoritative resident-capacity control facts.
+"""The live resident facts round-trip through their stored layout.
 
-The snapshot round-trips the authoritative stores through JSON, the DemandLedger is
-rebuilt from pending claims on load while an admitted claim is not re-enqueued, and the
-derived credit ledger recomputes the outstanding credit from the rehydrated claims.
+What the stores flush loads back through the decoder a restart uses: the DemandLedger is
+rebuilt from pending claims while an admitted claim is not re-enqueued, the credit
+ledger recomputes the outstanding credit from the loaded claims, and an endpoint
+credential is never stored.
 """
 
+import asyncio
 import json
 
 from server.resident import (
@@ -12,16 +14,19 @@ from server.resident import (
     ClaimState,
     InvocationSubject,
     InvocationSubjectKind,
-    ResidentSnapshot,
+    ReplicaEndpoint,
+    ReplicaIncarnation,
+    ReplicaState,
     ResidentStores,
 )
-from tests.server.resident._helpers import PROFILE, warm_stores
+from server.resident.durability import FAMILY, MemoryResidentDurability, live_field
+from tests.server.resident._helpers import PROFILE, stored_snapshot, warm_stores
 
 _SUBJECT = InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="wfl-1")
 
 
-def _seed():
-    stores = warm_stores(slots=2)
+def _seed() -> tuple[ResidentStores, str, str]:
+    stores = warm_stores(slots=2, durability=MemoryResidentDurability())
     ctl = AdmissionController(stores)
     reserved = ctl.raise_claim(
         invocation_id="inv-1", subject=_SUBJECT, family="fam", profile=PROFILE
@@ -32,30 +37,25 @@ def _seed():
     pending = ctl.raise_claim(
         invocation_id="inv-2", subject=_SUBJECT, family="fam", profile=PROFILE
     )
-    return stores, reserved, pending
+    return stores, reserved.claim_id, pending.claim_id
 
 
-def test_snapshot_round_trips_authoritative_facts():
+def test_the_live_facts_round_trip() -> None:
     stores, reserved, pending = _seed()
 
-    blob = stores.to_snapshot().model_dump_json()
     restored = ResidentStores()
-    restored.load_snapshot(ResidentSnapshot.model_validate_json(blob))
+    restored.load_snapshot(stored_snapshot(stores))
 
     assert restored.families.get("fam") is not None
-    assert restored.directory.get("rpl-1").state.value == "warm"
+    replica = restored.directory.get("rpl-1")
+    assert replica is not None and replica.state is ReplicaState.WARM
     assert restored.leases.all() == stores.leases.all()
-    assert {c.claim_id for c in restored.claims.all()} == {
-        reserved.claim_id,
-        pending.claim_id,
-    }
+    assert {c.claim_id for c in restored.claims.all()} == {reserved, pending}
     assert restored.invocations.get("inv-1") is not None
 
 
-def test_replica_endpoint_credential_is_not_persisted():
-    from server.resident import ReplicaEndpoint, ReplicaIncarnation, ReplicaState
-
-    stores = warm_stores()
+def test_a_replica_endpoint_credential_is_never_stored() -> None:
+    stores = warm_stores(durability=MemoryResidentDurability())
     stores.directory.add(
         ReplicaIncarnation(
             replica_id="rpl-keyed",
@@ -67,41 +67,41 @@ def test_replica_endpoint_credential_is_not_persisted():
             ),
         )
     )
-    blob = stores.to_snapshot().model_dump_json()
-    assert "super-secret" not in blob
     restored = ResidentStores()
-    restored.load_snapshot(ResidentSnapshot.model_validate_json(blob))
-    assert restored.directory.get("rpl-keyed").endpoint.api_key is None
+    restored.load_snapshot(stored_snapshot(stores))
+
+    assert isinstance(stores.durability, MemoryResidentDurability)
+    assert not any("super-secret" in v for v in stores.durability.live.values())
+    replica = restored.directory.get("rpl-keyed")
+    assert replica is not None and replica.endpoint is not None
+    assert replica.endpoint.api_key is None
 
 
-def test_derived_credit_and_demand_rebuild_on_load():
+def test_derived_credit_and_demand_rebuild_on_load() -> None:
     stores, reserved, pending = _seed()
     restored = ResidentStores()
-    restored.load_snapshot(stores.to_snapshot())
+    restored.load_snapshot(stored_snapshot(stores))
 
-    # The still-streaming claim's credit is recomputed from the rehydrated facts.
     assert restored.credit_ledger.held("rpl-1") == 1
-    # The pending claim returns to the demand queue; the admitted one does not.
-    assert restored.demand.get(pending.claim_id) is not None
-    assert restored.demand.get(reserved.claim_id) is None
-    assert restored.claims.get(reserved.claim_id).state is ClaimState.STREAMING
+    assert restored.demand.get(pending) is not None
+    assert restored.demand.get(reserved) is None
+    claim = restored.claims.get(reserved)
+    assert claim is not None and claim.state is ClaimState.STREAMING
 
 
-def test_an_unreadable_family_is_dropped_without_stranding_the_claims():
-    """A stale snapshot must not fail the root's rehydrate.
-
-    A family definition an older build wrote may no longer validate. Dropping it costs a
-    cold start, since the next eligible demand re-derives the same family id; refusing
-    the whole snapshot would strand every credit-bearing claim it carries.
-    """
+def test_an_unreadable_family_is_dropped_without_stranding_the_claims() -> None:
+    """A family definition that fails validation costs a cold start, since the next
+    eligible demand re-derives the same family; the claims it served still load."""
     stores, reserved, _pending = _seed()
-    blob = json.loads(stores.to_snapshot().model_dump_json())
-    blob["families"] = [
-        {"family": "legacy", "engine_batch_key": "k"},
-        *blob["families"],
-    ]
+    stores.flush()
+    durability = stores.durability
+    assert isinstance(durability, MemoryResidentDurability)
+    durability.live[live_field(FAMILY, "legacy")] = json.dumps(
+        {"family": "legacy", "engine_batch_key": "k"}
+    )
 
-    restored = ResidentSnapshot.model_validate(blob)
+    loaded = asyncio.run(durability.load_snapshot_async())
 
-    assert "legacy" not in {family.family for family in restored.families}
-    assert reserved.claim_id in {claim.claim_id for claim in restored.claims}
+    assert loaded is not None
+    assert "legacy" not in {family.family for family in loaded.families}
+    assert reserved in {claim.claim_id for claim in loaded.claims}

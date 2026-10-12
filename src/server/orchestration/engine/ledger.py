@@ -11,7 +11,7 @@ from ...task.v2.representations.operators import (
     operator_service_dependency,
 )
 from ...task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
-from ..journal import AppendOnlyList, LedgerJournal, TrackedDict, TrackedSet
+from ...utils.journal import AppendOnlyList, ChangeJournal, TrackedDict, TrackedSet
 from ..outcomes import classify_recovery
 from ..private_state import PrivateStateLedger
 from ..state import (
@@ -80,7 +80,7 @@ class OrchestrationLedger:
         topology: PlanTopology,
         failures: FailureLedger,
         emitter: TelemetrySpanEmitter,
-        journal: LedgerJournal,
+        journal: ChangeJournal,
     ) -> None:
         self._topology = topology
         self._failures = failures

@@ -1,6 +1,6 @@
 """Declared-failure facts of one workflow instance."""
 
-from ..journal import LedgerJournal, TrackedDict, TrackedSet
+from ...utils.journal import ChangeJournal, TrackedDict, TrackedSet
 
 DECLARED_FAILURE_REASON = "declared-failure obligation"
 
@@ -9,7 +9,7 @@ class FailureLedger:
     """Holds which control regions and child-init scopes settled as a declared failure,
     and why each task failed."""
 
-    def __init__(self, journal: LedgerJournal) -> None:
+    def __init__(self, journal: ChangeJournal) -> None:
         # Control operators settled as a declared failure; a late record from another
         # input never fires one.
         self.failed_regions: TrackedSet[str] = TrackedSet(journal, "failed_regions")

@@ -271,7 +271,7 @@ def test_a_workflow_whose_resident_claims_are_open_stays_resident() -> None:
         asked.append(frozenset(invocation_ids))
         return settled
 
-    runtime.settled_history.set_claims_settled(claims_settled)
+    runtime.settled_history.set_invocations_retired(claims_settled)
     runtime.settled_history.sweep()
     runtime.settled_history.drain()
     assert _resident(runtime, workflow_id)

@@ -410,7 +410,12 @@ def test_a_cold_start_whose_registrar_raises_leaves_no_serve_task(
         with pytest.raises(type(error)):
             await node.materialize_async()
 
-        (replica,) = node.control.stores.directory.all()
+        # The invalidated cold start moves to stored history.
+        assert node.control.stores.directory.all() == []
+        (replica,) = [
+            entry.replica
+            for entry in await node.control.stores.durability.stored_replicas_async()
+        ]
         assert replica.state is ReplicaState.PREEMPTED
         assert node.runtime.live_resident_task_ids() == set()
         assert not node.control._has_materializing(FAMILY.family)

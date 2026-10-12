@@ -946,7 +946,7 @@ class TaskRuntime:
     async def restart(
         self,
         close: Callable[["TaskRuntime", str], bool],
-        claims_terminal: Callable[[Collection[str]], bool] | None = None,
+        invocations_retired: Callable[[Collection[str]], bool] | None = None,
         archived: Callable[[str], bool | None] | None = None,
     ) -> int:
         """Restore every workflow not freed, then begin freeing settled ones.
@@ -959,7 +959,7 @@ class TaskRuntime:
             self._workflow_registry,
             self._scratch_runtime,
             close,
-            claims_terminal,
+            invocations_retired,
             archived,
             self._logger,
         ).run()

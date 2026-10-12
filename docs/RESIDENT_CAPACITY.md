@@ -52,6 +52,29 @@ neither side infers or overwrites the other's facts. The durable `DS` invocation
 identity and terminal state; the admission profile and the mid-claim credit state live only
 in `CS`, so both persist to survive a restart.
 
+### Persistence and retention
+
+The stores hold the live working set, persisted in one Redis hash, `resident:cs`, with a
+field per family, replica incarnation, allocation lease, invocation request and claim. Each
+step writes only the entities it changed, in one transaction, before anything acts on them:
+a reservation before its handoff, a replica's listener fence before a handoff names it, an
+acceptance before its route authorization, and a terminal before its release.
+
+An invocation retires once its fenced terminal has been consumed, its release has finished
+and its requests have been reaped: a record of its subject, family, terminal reason and
+highest admission epoch lands in `resident:cs:retired`, then its live fields are deleted. A
+successor raised under the same `invocation_id` takes the next epoch. An inert replica that
+no live claim names moves with its lease to `resident:cs:replicas`, and a serve task's
+family with nothing live left moves to `resident:cs:families`; the listings read both. A
+retirement, move or gated serve settlement that a store failure interrupts is retried until
+it lands, and a write nothing waits on, such as a hold, is carried by the next one; a
+credit stays held until its release is durable, and a serve client is answered at once. A
+settled workflow is freed only once every resident invocation it raised has retired.
+
+A restart loads only `resident:cs`, and refuses a resident key of the wrong type (delete it
+and restart), a field it cannot read, or a claim without its request. The retired records
+and history grow by one entry per retired invocation, replica or family, and are kept.
+
 ## Claim admission FSM
 
 A claim carries a fresh `claim_id` and admission epoch under its invocation's stable id.
@@ -241,7 +264,9 @@ its serve task ends, and its family never starts another.
 On a root restart, in-flight claims go `UNCERTAIN`, and each restored replica whose serve
 task holds the dispatch that reported its endpoint re-attaches and is reused; any other
 is invalidated. Admission waits until the replicas have re-attached, and a resident serve
-task that no active replica backs is reaped at startup.
+task that no active replica backs is reaped at startup. An invocation whose terminal was
+consumed before the restart then has its request reaped, best effort, on each replica its
+claims name, and retires.
 
 ## Selection strategy
 
@@ -270,8 +295,8 @@ is disabled.
 
 | Method | Path | Returns |
 | --- | --- | --- |
-| GET | `/api/v1/resident/families` | Registered service families (family, engine/batch key, model ref, isolation, selection strategy, warmth, serving size). |
-| GET | `/api/v1/resident/replicas` | Replica incarnations, live and inert. Filterable by `family`. |
+| GET | `/api/v1/resident/families` | Registered service families, oldest first (family, engine/batch key, model ref, isolation, selection strategy, warmth, serving size). |
+| GET | `/api/v1/resident/replicas` | Replica incarnations, live and inert, oldest first. Filterable by `family`. |
 | GET | `/api/v1/resident/claims` | Credit-bearing admission claims and per-replica held credit, recomputed on read from the authoritative claims. |
 
 To read a replica's serving logs, list replicas, take a replica's `serve_task_id`, and read

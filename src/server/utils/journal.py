@@ -1,7 +1,7 @@
-"""Change tracking over the persisted collections of one orchestration ledger.
+"""Change tracking over persisted keyed collections.
 
-The ledger's collections record each change they take in a ``LedgerJournal``, so a
-durable write carries only what changed since the last one. A mutable entity reports
+Tracked collections record each change they take in a ``ChangeJournal``, so a durable
+write carries only what changed since the last one. A mutable entity reports
 each assignment that changes its value to the one collection slot that holds it, and
 keeps its container fields immutable so it can only change by assignment. An
 append-only history refuses any other change.
@@ -15,9 +15,9 @@ from pydantic import BaseModel
 type JournalKey = tuple[str, Hashable]
 
 
-class LedgerJournal:
-    """Records each entry of a keyed collection or set changed since the ledger's
-    last durable write, by collection and key, at the version it last changed at.
+class ChangeJournal:
+    """Records each entry of a keyed collection or set changed since the last durable
+    write, by collection and key, at the version it last changed at.
 
     Versions let a write clear only the changes it captured, so a change made while
     the write is in flight stays pending.
@@ -42,7 +42,7 @@ class LedgerJournal:
         self._next_ordinal = max(self._next_ordinal, ordinal + 1)
 
     def reset(self) -> None:
-        """Drop every pending change, for a ledger written whole next."""
+        """Drop every pending change, for a state just loaded or written whole next."""
         self.pending.clear()
 
     def captured(self) -> dict[JournalKey, int]:
@@ -59,7 +59,7 @@ _UNSET = object()
 
 
 class JournaledModel(BaseModel):
-    """A mutable ledger entity: each assignment that changes a value marks the
+    """A mutable tracked entity: each assignment that changes a value marks the
     collection slot holding it, and a container assigned to it is stored frozen."""
 
     # The holding slot is a plain instance slot, not a pydantic private attribute: a
@@ -158,30 +158,50 @@ def freeze_mapping[K, V](value: Mapping[K, V]) -> FrozenMap[K, V]:
 
 
 class TrackedDict[K: Hashable, V](dict[K, V]):
-    """A keyed ledger collection that journals each entry it sets or removes, keeps
+    """A keyed collection that journals each entry it sets or removes, keeps
     each key's insertion ordinal, and holds each mutable entity it stores.
 
     While it is ``restoring`` a stored collection, an entry set under a key the store
-    holds takes the key's stored ordinal and is no change.
+    holds takes the key's stored ordinal and is no change. ``on_change`` is called with
+    a key after each change to its entry, including an assignment to the entity it
+    holds, once the change is in place.
     """
 
     def __init__(
         self,
-        journal: LedgerJournal,
+        journal: ChangeJournal,
         name: str,
         items: Iterable[tuple[K, V]] = (),
         restoring: Mapping[Hashable, int] | None = None,
+        on_change: Callable[[Any], None] | None = None,
     ) -> None:
         super().__init__()
         self.journal = journal
         self.name = name
         self.ordinals: dict[K, int] = {}
         self.restoring = restoring
+        self.on_change = on_change
         for key, value in items:
             self[key] = value
 
     def touch(self, key: Hashable) -> None:
         self.journal.mark((self.name, key))
+        if self.on_change is not None:
+            self.on_change(key)
+
+    def forget(self, key: K) -> None:
+        """Remove an entry the durable state has dropped, journaling nothing.
+
+        The entry must have no change pending, so nothing unwritten is dropped.
+        """
+        if (self.name, key) in self.journal.pending:
+            raise ValueError(f"{self.name} {key!r} has a change pending")
+        if isinstance(old := self[key], JournaledModel):
+            old.release(self)
+        super().__delitem__(key)
+        del self.ordinals[key]
+        if self.on_change is not None:
+            self.on_change(key)
 
     def __setitem__(self, key: K, value: V) -> None:
         if isinstance(value, JournaledModel):
@@ -195,6 +215,8 @@ class TrackedDict[K: Hashable, V](dict[K, V]):
                 and (ordinal := self.restoring.get(key)) is not None
             ):
                 self.ordinals[key] = ordinal
+                if self.on_change is not None:
+                    self.on_change(key)
                 return
             self.ordinals[key] = self.journal.ordinal()
         self.touch(key)
@@ -243,10 +265,10 @@ class TrackedDict[K: Hashable, V](dict[K, V]):
 
 
 class TrackedSet[T: Hashable](set[T]):
-    """A ledger set that journals each member it adds or removes."""
+    """A set that journals each member it adds or removes."""
 
     def __init__(
-        self, journal: LedgerJournal, name: str, members: Iterable[T] = ()
+        self, journal: ChangeJournal, name: str, members: Iterable[T] = ()
     ) -> None:
         super().__init__(members)
         self.journal = journal
@@ -322,10 +344,10 @@ class TrackedSet[T: Hashable](set[T]):
 
 
 class AppendOnlyList[T](list[T]):
-    """A ledger history: entries are only ever appended, so what a durable write took
-    is the prefix up to the length it saw."""
+    """An append-only history: entries are only ever appended, so what a durable write
+    took is the prefix up to the length it saw."""
 
-    _refuse = _refusal("a ledger history only appends")
+    _refuse = _refusal("an append-only history only appends")
     __setitem__ = _refuse
     __delitem__ = _refuse
     __imul__ = _refuse

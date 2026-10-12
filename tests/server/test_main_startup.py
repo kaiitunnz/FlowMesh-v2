@@ -46,11 +46,14 @@ class _Control(_Recorder):
     def rehydrate(self, snapshot: Any) -> None:
         self.calls.append("control.rehydrate")
 
-    def claims_terminal(self, invocation_ids: Any) -> bool:
+    def invocations_retired(self, invocation_ids: Any) -> bool:
         return True
 
     def reattach_replicas(self, live_serve_tasks: Any) -> None:
         self.calls.append("control.reattach")
+
+    def recover_retirements(self) -> None:
+        self.calls.append("control.recover")
 
     def reconcile_workflow_terminals(self, completed: Any) -> None:
         self.calls.append("control.reconcile")
@@ -75,14 +78,17 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
     # The claim store is bound and loaded before the runtime
     # re-drives suspended boundaries (a resident boundary would otherwise terminalize
     # against an empty store), restored replicas re-attach once the runtime has restored
-    # their serve tasks, the claims the restored ledger settled release before the idle
-    # sweep starts, and it starts only after the store rebuilds.
+    # their serve tasks, invocations consumed before the restart finish their cleanup
+    # once the replicas they name are re-attached, the claims the restored ledger
+    # settled release before the idle sweep starts, and it starts only after the store
+    # rebuilds.
     assert calls == [
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
         "runtime.restart",
         "control.reattach",
+        "control.recover",
         "runtime.release",
         "control.reconcile",
         "start",
@@ -108,6 +114,7 @@ def test_root_startup_settles_serve_requests_before_admission_opens() -> None:
         "runtime.restart",
         "serve.reconcile",
         "control.reattach",
+        "control.recover",
         "runtime.release",
         "control.reconcile",
         "start",

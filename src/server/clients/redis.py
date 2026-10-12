@@ -160,6 +160,18 @@ def resident_cs_key() -> str:
     return "resident:cs"
 
 
+def resident_retired_key() -> str:
+    return "resident:cs:retired"
+
+
+def resident_replica_history_key() -> str:
+    return "resident:cs:replicas"
+
+
+def resident_family_history_key() -> str:
+    return "resident:cs:families"
+
+
 def serve_cs_key() -> str:
     return "serve:cs"
 

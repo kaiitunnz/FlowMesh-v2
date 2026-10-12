@@ -19,7 +19,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel, TypeAdapter
 
-from .journal import JournalKey
+from ..utils.journal import JournalKey
 from .state import (
     AcceptedInput,
     Activation,
