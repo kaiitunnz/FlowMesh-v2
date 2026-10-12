@@ -828,6 +828,9 @@ class ResidentCapacityControl:
         definition = self._stores.families.get(family)
         if definition is None:
             return
+        # The family lands with its replica, even where an archive whose reply was
+        # lost deleted its live field.
+        self._stores.families.rewrite(family)
         self._lifecycle.adopt_standing_replica(
             definition,
             serve_task_id=serve_task_id,

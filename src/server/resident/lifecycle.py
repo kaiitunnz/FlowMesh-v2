@@ -538,7 +538,7 @@ class LifecycleScaleManager:
             except Exception:
                 _logger.exception("retiring resident family %s failed", family)
                 self._retry(
-                    FAMILY, family, functools.partial(self._retry_family, family)
+                    FAMILY, family, functools.partial(self.retire_family, family)
                 )
 
     def retire_replica(self, replica_id: str) -> str | None:
@@ -578,15 +578,6 @@ class LifecycleScaleManager:
         self._stores.flush()
         self._stores.durability.archive_family(definition, live_field(FAMILY, family))
         self._stores.families.forget(family)
-
-    def _retry_family(self, family: str) -> None:
-        """Retry a family's archive. A family in use again is written live once more,
-        since an archive whose reply was lost has deleted its live field."""
-        if family in self._stores.families and self._family_used(family):
-            self._stores.families.rewrite(family)
-            self._stores.flush()
-            return
-        self.retire_family(family)
 
     def _family_used(self, family: str) -> bool:
         return bool(

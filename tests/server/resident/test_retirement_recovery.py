@@ -657,3 +657,22 @@ def test_an_acceptance_whose_stream_start_write_fails_is_still_authorized() -> N
     assert delivery.frame("resident_authorization")
     [claim] = stores.claims.by_invocation("inv-1")
     assert claim.state is ClaimState.STREAMING
+
+
+def test_a_family_re_adopted_after_a_lost_archive_reply_survives_a_crash() -> None:
+    svc, stores, _settled, _deps = _build_serve()
+    stores.durability = durability = _FamilyReplyLost()
+    _adopt(svc)
+    svc.drain_serve_replica(_SERVE_TASK)
+    _adopt(svc)
+
+    fresh, fresh_stores, _s, _d = _build_serve()
+    fresh_stores.durability = durability
+    fresh.rehydrate(asyncio.run(durability.load_snapshot_async()))
+    fresh.reattach_replicas(frozenset({_SERVE_TASK}))
+    fresh.recover_retirements()
+
+    assert fresh_stores.families.get(_FAMILY) is not None
+    delivery = _ServeDelivery()
+    asyncio.run(fresh._originate_serve(_origination(delivery)))
+    assert delivery.opened and delivery.failed is None
