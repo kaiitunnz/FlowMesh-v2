@@ -77,7 +77,7 @@ directory `flowmesh stack` runs in.
 | `CONTENT_STORE_BIND_HOST` | `0.0.0.0` | Co-located content store bind address |
 | `CONTENT_STORE_CONSOLE_PORT` | `9801` | Co-located content store console port |
 | `CONTENT_STORE_CONSOLE_BIND_HOST` | `127.0.0.1` | Co-located content store console bind address |
-| `CONTENT_ACCESS_TTL_SEC` | `900` | Store-access grant lifetime (seconds) |
+| `CONTENT_ACCESS_TTL_SEC` | `900` | Store-access grant lifetime (seconds, at least 60) |
 | `CONTENT_HYDRATION_ENABLED` | `false` | Cache content on workers and hydrate it between them (requires `NETWORK_PLANE_ENABLED`) |
 | `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Hydration grant lifetime (seconds) |
 | `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime (seconds) |

@@ -308,7 +308,7 @@ class WorkerConfig:
             content_transfer_timeout_sec=parse_float_env(
                 "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
             ),
-            # A window smaller than one frame never admits a frame.
+            # A window under one frame carries one frame at a time.
             content_transfer_window_bytes=max(
                 CHUNK_BYTES,
                 parse_int_env(

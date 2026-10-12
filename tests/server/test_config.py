@@ -94,3 +94,11 @@ def test_content_store_reads_make_at_least_one_attempt(
     monkeypatch.setenv("CONTENT_STORE_READ_ATTEMPTS", "0")
 
     assert ContentStoreConfig.from_env().read_attempts == 1
+
+
+def test_store_access_lives_long_enough_to_renew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONTENT_ACCESS_TTL_SEC", "5")
+
+    assert ContentStoreConfig.from_env().access_grant_ttl_sec == 60.0

@@ -18,7 +18,7 @@ def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def test_a_transfer_window_below_one_frame_is_held_to_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A window smaller than a frame would admit no frame and stall every transfer."""
+    """A window under one frame would carry one frame at a time."""
     monkeypatch.setenv("CONTENT_TRANSFER_WINDOW_BYTES", "1024")
 
     assert WorkerConfig.from_env().content_transfer_window_bytes == CHUNK_BYTES

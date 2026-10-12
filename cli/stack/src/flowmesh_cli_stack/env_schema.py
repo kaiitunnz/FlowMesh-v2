@@ -885,10 +885,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_ACCESS_TTL_SEC",
                     "900",
-                    description="Store-access grant lifetime (seconds).",
+                    description="Store-access grant lifetime (seconds, at least 60).",
                     var_type=EnvVarType.FLOAT,
-                    min_value=0,
-                    min_inclusive=False,
+                    min_value=60,
                 ),
                 EnvVar(
                     "CONTENT_HYDRATION_ENABLED",

@@ -159,9 +159,9 @@ class S3ObjectStore(FabricObjectStore):
         changed = ContentStoreError(f"{path.name} changed while it was written")
         if digest.size <= self._part_bytes:
             data = path.read_bytes()
-            if _checksum(data) != digest.part_checksums[0]:
+            if (checksum := _checksum(data)) != digest.part_checksums[0]:
                 raise changed
-            self._put(reference, data)
+            self._put(reference, data, checksum)
             return reference
         fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
         try:
@@ -222,7 +222,9 @@ class S3ObjectStore(FabricObjectStore):
             part_checksums=tuple(checksums),
         )
 
-    def _put(self, reference: ContentReference, data: bytes) -> None:
+    def _put(
+        self, reference: ContentReference, data: bytes, checksum: str | None = None
+    ) -> None:
         try:
             _committing(
                 lambda: self._client.put_object(
@@ -230,7 +232,7 @@ class S3ObjectStore(FabricObjectStore):
                     Key=self._key(reference),
                     Body=data,
                     ContentType=reference.media_type,
-                    ChecksumSHA256=_checksum(data),
+                    ChecksumSHA256=checksum or _checksum(data),
                     IfNoneMatch="*",
                 )
             )

@@ -570,6 +570,9 @@ class WebSearchConfig:
 
 _DEFAULT_READ_STALL_TIMEOUT_SEC = 10.0
 _DEFAULT_READ_ATTEMPTS = 2
+# A worker renews its access within half its lifetime and asks again only after a pause,
+# so a shorter access would lapse before a failed renewal could be asked for again.
+_MIN_ACCESS_GRANT_TTL_SEC = 60.0
 
 
 @dataclass
@@ -597,7 +600,10 @@ class ContentStoreConfig:
             hydration_enabled=parse_bool_env("CONTENT_HYDRATION_ENABLED", False),
             grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
             holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
-            access_grant_ttl_sec=parse_float_env("CONTENT_ACCESS_TTL_SEC", 900.0),
+            access_grant_ttl_sec=max(
+                _MIN_ACCESS_GRANT_TTL_SEC,
+                parse_float_env("CONTENT_ACCESS_TTL_SEC", 900.0),
+            ),
             read_stall_timeout_sec=parse_float_env(
                 "CONTENT_STORE_READ_STALL_TIMEOUT_SEC", _DEFAULT_READ_STALL_TIMEOUT_SEC
             ),
