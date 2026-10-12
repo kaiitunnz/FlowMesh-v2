@@ -36,7 +36,12 @@ class _Clock:
 
 
 def _access(
-    grant_id: str, clock: _Clock, *, ttl: float = 900.0, session: str | None = None
+    grant_id: str,
+    clock: _Clock,
+    *,
+    ttl: float = 900.0,
+    session: str | None = None,
+    secret: str = "sk",
 ) -> ContentStoreAccess:
     return ContentStoreAccess(
         grant=ContentStoreAccessGrant(
@@ -50,7 +55,7 @@ def _access(
             expires_at_epoch=clock.now + ttl,
         ),
         credential=ScopedContentCredential(
-            material={"access_key": session or grant_id}
+            material={"access_key": session or grant_id, "secret_key": secret}
         ),
     )
 
@@ -370,3 +375,17 @@ def test_a_call_refused_with_no_renewed_session_is_not_repeated(monkeypatch) -> 
         store.write("tenant-a", b"refused")
 
     assert [op for _, op in clients.calls] == ["put_object"]
+
+
+def test_a_secret_rotated_under_the_same_key_opens_a_new_client(monkeypatch) -> None:
+    clock = _Clock()
+    clients = _Clients()
+    registry = _registry(monkeypatch, clients, clock)
+    registry.accept(_access("csg-1", clock, session="ak-1", secret="old"))
+    store = registry.store_for("tsk-1", "tenant-a")
+    store.write("tenant-a", b"before the rotation")
+
+    registry.accept(_access("csg-2", clock, session="ak-1", secret="new"))
+    store.write("tenant-a", b"after the rotation")
+
+    assert clients.opened == ["ak-1", "ak-1"]

@@ -41,6 +41,7 @@ from shared.content import (
 from shared.content.s3_store import S3Client, S3ObjectStore, is_credential_refusal
 
 _AccessKey = tuple[str, str]
+_Session = tuple[str, str, str, str]
 
 # How long after one renew-ahead ask this worker asks again, while no later access has
 # arrived for it.
@@ -81,7 +82,7 @@ class ContentAccessRegistry:
         # Each renew-ahead ask still unanswered: the expiry it asked past, and when.
         self._asked: dict[_AccessKey, tuple[float, float]] = {}
         self._stores: dict[_AccessKey, FabricObjectStore] = {}
-        self._clients: dict[_AccessKey, tuple[str, S3Client]] = {}
+        self._clients: dict[_AccessKey, tuple[_Session, S3Client]] = {}
         self._opening = threading.Lock()
         self._session: boto3.Session | None = None
 
@@ -283,9 +284,19 @@ class ContentAccessRegistry:
                 self._forget(key)
 
 
-def _session_of(access: ContentStoreAccess) -> str:
-    """Which backend session an access opens, so a regrant on one session shares it."""
-    return access.credential.material.get("access_key") or access.grant.grant_id
+def _session_of(access: ContentStoreAccess) -> _Session:
+    """Which backend session an access opens, so a regrant on one session shares it.
+
+    The whole credential names it: a secret rotated under the same key is another
+    session. It is compared here and never written anywhere.
+    """
+    material = access.credential.material
+    return (
+        access.grant.grant_id if not material else "",
+        material.get("access_key", ""),
+        material.get("secret_key", ""),
+        material.get("session_token", ""),
+    )
 
 
 class _RenewingClient:
