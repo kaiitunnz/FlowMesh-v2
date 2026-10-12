@@ -178,17 +178,20 @@ def test_a_renewal_request_that_failed_is_asked_again(monkeypatch) -> None:
 def test_an_upload_whose_access_ran_out_is_aborted_on_its_last_client(
     tmp_path, monkeypatch
 ) -> None:
+    access = _access("csg-1", ttl=1.0)
+
     def expire_then_fail() -> None:
-        time.sleep(0.4)
+        time.sleep(max(0.0, access.grant.expires_at_epoch - time.time()) + 0.1)
         raise s3_error("InternalError", 500, "UploadPart")
 
     clients = _Clients({("csg-1", "upload_part"): expire_then_fail})
     registry = _registry(monkeypatch, clients)
-    registry.accept(_access("csg-1", ttl=0.3))
+    source = _source(tmp_path)
+    registry.accept(access)
     store = registry.store_for("tsk-1", "tenant-a")
 
     with pytest.raises(ContentStoreError):
-        store.write_file("tenant-a", _source(tmp_path))
+        store.write_file("tenant-a", source)
 
     assert clients.calls[-1] == ("csg-1", "abort_multipart_upload")
     assert clients.s3.aborted == ["up-1"]

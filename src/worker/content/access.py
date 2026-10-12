@@ -75,6 +75,7 @@ class ContentAccessRegistry:
         self._stores: dict[_AccessKey, FabricObjectStore] = {}
         self._clients: dict[_AccessKey, tuple[str, S3Client]] = {}
         self._opening = threading.Lock()
+        self._session: boto3.Session | None = None
         self._renewing: set[str] = set()
 
     def accept(self, access: ContentStoreAccess) -> None:
@@ -193,10 +194,12 @@ class ContentAccessRegistry:
         them opens the client and the rest take it.
         """
         access = self._access(key)
-        grant_id = access.grant.grant_id
         with self._opening:
             with self._arrived:
+                # Access renewed while this call waited to open is the one to open.
+                access = self._live(key) or access
                 cached = self._clients.get(key)
+            grant_id = access.grant.grant_id
             if cached is not None and cached[0] == grant_id:
                 return cached[1]
             client = self._open_s3(access.credential)
@@ -206,9 +209,12 @@ class ContentAccessRegistry:
 
     def _open_s3(self, credential: ScopedContentCredential) -> S3Client:
         material = credential.material
-        # A session of its own: boto3's default session is not safe to open clients
-        # from on several threads at once.
-        client: S3Client = boto3.Session().client(
+        # Clients open one at a time from this registry's own session: boto3's default
+        # session is shared with the rest of the process, and no session is safe to
+        # open clients from on several threads at once.
+        if self._session is None:
+            self._session = boto3.Session()
+        client: S3Client = self._session.client(
             "s3",
             endpoint_url=self._cfg.endpoint_url or None,
             aws_access_key_id=material.get("access_key") or None,
