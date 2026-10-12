@@ -425,7 +425,9 @@ class LifecycleScaleManager:
         replica.incarnation += 1
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.PREEMPTED)
-        self._stores.flush()
+        # A restart invalidates a replica whose serve task is gone, so the reap need
+        # not wait on this write.
+        self._stores.flush_or_defer()
         self._reap_serve_task(serve_task_id)
         self.retire_inert([replica_id])
 

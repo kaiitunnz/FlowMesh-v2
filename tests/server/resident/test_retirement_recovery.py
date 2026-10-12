@@ -24,6 +24,7 @@ from server.resident import (
     StoredReplica,
 )
 from server.resident.durability import (
+    CLAIM,
     FAMILY,
     REPLICA,
     REQUEST,
@@ -544,3 +545,115 @@ def test_a_batch_claim_releases_its_whole_credit_at_once() -> None:
     assert stores.credit_ledger.held("rpl-1") == 0
     assert admission.retire("inv-1")
     assert stores.credit_ledger.held("rpl-1") == 0
+
+
+def _serve_accepted(outage: _Outage):
+    svc, stores, _settled, _deps = _build_serve()
+    stores.durability = outage
+    outage.trip = False
+    _adopt(svc)
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+    [replica] = stores.directory.by_family(_FAMILY)
+    return svc, stores, delivery, replica
+
+
+def test_a_serve_hold_during_an_outage_re_drives_and_settles_once_it_ends() -> None:
+    outage = _Outage()
+    svc, stores, delivery, replica = _serve_accepted(outage)
+    asyncio.run(svc._on_ack(_serve_ack(svc, ResidentBootstrapOutcome.ACKED)))
+    outage.down = True
+
+    asyncio.run(
+        svc._on_outcome(
+            _serve_outcome(svc, ResidentStreamStatus.UNCERTAIN, error="lost")
+        )
+    )
+    assert delivery.redrives == 1
+    [claim] = stores.claims.by_invocation("inv-1")
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+
+    assert delivery.failed is not None and not delivery.completed
+    stored = json.loads(outage.live[live_field(CLAIM, claim.claim_id)])
+    assert stored["state"] != ClaimState.TERMINAL
+    assert svc._store_retry.pending == [(SETTLEMENT, "inv-1")]
+    outage.down = False
+    svc.retry_store_failures()
+
+    assert stores.credit_ledger.held(replica.replica_id) == 0
+    assert not stores.live("inv-1")
+    assert svc._store_retry.pending == []
+
+
+def test_a_serve_rejection_during_an_outage_releases_its_replica_once_it_ends() -> None:
+    outage = _Outage()
+    svc, stores, delivery, replica = _serve_accepted(outage)
+    released: list[str] = []
+    release = svc._admission._on_release
+
+    def heard(replica_id: str) -> None:
+        released.append(replica_id)
+        release(replica_id)
+
+    svc._admission.set_release_hook(heard)
+    svc._lifecycle.drain(replica.replica_id)
+    outage.down = True
+
+    asyncio.run(
+        svc._on_ack(
+            _serve_ack(svc, ResidentBootstrapOutcome.REJECTED, rejection="fence")
+        )
+    )
+
+    assert delivery.failed is not None and not delivery.completed
+    assert released == []
+    outage.down = False
+    svc.retry_store_failures()
+
+    assert released == [replica.replica_id]
+    assert stores.directory.get(replica.replica_id) is None
+    assert stored_replica(stores, replica.replica_id).state is ReplicaState.STOPPED
+    assert not stores.live("inv-1")
+
+
+def test_a_workflow_hold_during_an_outage_re_drives_its_boundary() -> None:
+    outage = _Outage()
+    outage.trip = False
+    svc, _stores, _settled, _delivery = _accepted(outage)
+    outage.down = True
+
+    asyncio.run(svc._on_outcome(_outcome(svc, ResidentStreamStatus.UNCERTAIN)))
+
+    assert svc._redispatched  # type: ignore[attr-defined]
+
+
+def test_a_workflow_hold_that_preempts_during_an_outage_re_drives_its_boundary() -> (
+    None
+):
+    outage = _Outage()
+    outage.trip = False
+    svc, stores, _settled, _delivery = _accepted(outage)
+    svc._max_transient_redrives = 1
+    [claim] = stores.claims.by_invocation("inv-1")
+    outage.down = True
+
+    asyncio.run(svc._on_outcome(_outcome(svc, ResidentStreamStatus.UNCERTAIN)))
+
+    replica = stores.directory.get(claim.replica_id or "")
+    assert replica is not None and replica.state is ReplicaState.PREEMPTED
+    assert svc._redispatched  # type: ignore[attr-defined]
+
+
+class _StreamStartFails(MemoryResidentDurability):
+    def write(self, changes: Mapping[str, str | None]) -> None:
+        if any(v is not None and '"state":"streaming"' in v for v in changes.values()):
+            raise ConnectionError("store unavailable")
+        super().write(changes)
+
+
+def test_an_acceptance_whose_stream_start_write_fails_is_still_authorized() -> None:
+    svc, stores, _settled, delivery = _accepted(_StreamStartFails())
+
+    assert delivery.frame("resident_authorization")
+    [claim] = stores.claims.by_invocation("inv-1")
+    assert claim.state is ClaimState.STREAMING

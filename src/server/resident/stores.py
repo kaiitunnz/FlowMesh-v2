@@ -429,6 +429,14 @@ class ResidentStores:
         self.durability.write(changes)
         self.journal.clear(captured)
 
+    def flush_or_defer(self) -> None:
+        """Flush changes nothing acts on, leaving them for the next flush when the store
+        fails."""
+        try:
+            self.flush()
+        except Exception:
+            _logger.warning("resident state write deferred", exc_info=True)
+
     @property
     def durable(self) -> bool:
         """Report whether every change has been made durable."""

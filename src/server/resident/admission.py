@@ -9,6 +9,7 @@ to the stores' durability before the step returns, so the credit survives a rest
 Once a consumed invocation's cleanup is done it retires into its durable record.
 """
 
+import logging
 from collections.abc import Callable
 
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
@@ -42,6 +43,8 @@ from .state import (
     ServiceClaim,
 )
 from .stores import ResidentStores
+
+_logger = logging.getLogger("resident-capacity")
 
 
 class AdmissionController:
@@ -342,15 +345,22 @@ class AdmissionController:
     def on_stream_started(self, claim: ServiceClaim) -> None:
         """Record the start of the authorized response stream for an accepted claim."""
         begin_stream(claim)
-        self._stores.flush()
+        self._stores.flush_or_defer()
 
     def on_enqueue_failed(self, claim: ServiceClaim) -> None:
-        """Release a reserved credit on a known pre-acceptance enqueue failure."""
+        """Release a reserved credit on a known pre-acceptance enqueue failure.
+
+        A release whose write fails is left for the invocation's consumption to finish.
+        """
         settle_terminal(claim, ClaimTerminalReason.ENQUEUE_FAILED)
         self._touch_replica(claim)
-        self._stores.flush()
-        if claim.replica_id is not None:
-            self._on_release(claim.replica_id)
+        self._unfinished.setdefault(claim.invocation_id, []).append(claim.replica_id)
+        try:
+            self._finish_release(claim.invocation_id)
+        except Exception:
+            _logger.warning(
+                "releasing resident claim %s deferred", claim.claim_id, exc_info=True
+            )
 
     def _touch_replica(self, claim: ServiceClaim) -> None:
         """Stamp the claim's replica idle-clock so a retain window starts at release."""
@@ -379,7 +389,7 @@ class AdmissionController:
         """
         if claim.holds_credit and claim.state is not ClaimState.UNCERTAIN:
             mark_uncertain(claim)
-            self._stores.flush()
+            self._stores.flush_or_defer()
 
     def settle_invocation_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason
@@ -414,15 +424,19 @@ class AdmissionController:
             return False
         # A terminal handed over again finishes a release an earlier one began, so the
         # claim is persisted and each replica hears of its release once.
-        pending = self._unfinished.setdefault(invocation_id, [])
-        pending += released
+        self._unfinished.setdefault(invocation_id, []).extend(released)
+        self._finish_release(invocation_id)
+        return True
+
+    def _finish_release(self, invocation_id: str) -> None:
+        """Make the released claims durable, then tell each of their replicas once."""
+        pending = self._unfinished[invocation_id]
         self._stores.flush()
         while pending:
             if (replica_id := pending[0]) is not None:
                 self._on_release(replica_id)
             pending.pop(0)
         del self._unfinished[invocation_id]
-        return True
 
     def retired_record(self, invocation_id: str) -> RetiredInvocation | None:
         """Read the invocation's stored retirement record, raising on a store failure
