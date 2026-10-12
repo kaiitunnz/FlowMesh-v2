@@ -116,6 +116,7 @@ class ContentHydrationAuthority:
             target_node=holder.node_id,
             origin_worker=worker_id,
             target_worker=holder.id,
+            size_bytes=reference.size_bytes,
         )
         payload = {"grant": grant.model_dump(mode="json")}
         self._relay(holder, "content_serve_grant", payload)

@@ -21,17 +21,24 @@ from .reference import (
     DigestAlgorithm,
 )
 from .store import (
+    STREAM_CHUNK_BYTES,
     ContentHydrationError,
     ContentStoreError,
     ContentUnavailable,
+    ContentVerifier,
     FabricObjectStore,
     ScopedObjectStore,
+    WriteCancelled,
     content_digest,
+    new_hasher,
     reference_for,
+    verified_chunks,
     verify_content,
+    write_verified,
 )
 
 __all__ = [
+    "STREAM_CHUNK_BYTES",
     "BACKEND_FILESYSTEM",
     "BACKEND_S3",
     "ObjectStoreConfig",
@@ -46,6 +53,7 @@ __all__ = [
     "ContentStoreAccessGrant",
     "ContentStoreError",
     "ContentUnavailable",
+    "ContentVerifier",
     "DigestAlgorithm",
     "FabricObjectStore",
     "FilesystemObjectBacking",
@@ -54,7 +62,11 @@ __all__ = [
     "ScopedObjectStore",
     "GrantRejection",
     "HolderGrantGate",
+    "WriteCancelled",
     "content_digest",
+    "new_hasher",
     "reference_for",
+    "verified_chunks",
     "verify_content",
+    "write_verified",
 ]

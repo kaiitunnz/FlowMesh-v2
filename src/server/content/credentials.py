@@ -35,7 +35,7 @@ _MIN_SESSION_SEC = 900
 
 
 def _client_config() -> Config:
-    """Short, single-attempt timeouts for the calls control makes to the store.
+    """Short timeouts and one retry for the calls control makes to the store.
 
     These run on the dispatch path, so an unreachable store has to cost a dispatch a
     moment rather than botocore's minute-long default with retries behind it — the task
@@ -45,7 +45,24 @@ def _client_config() -> Config:
         signature_version="s3v4",
         connect_timeout=5,
         read_timeout=10,
-        retries={"max_attempts": 1},
+        retries={"total_max_attempts": 2},
+    )
+
+
+def _read_client_config(stall_timeout_sec: float, attempts: int) -> Config:
+    """The timeouts control reads content under.
+
+    ``read_timeout`` bounds how long one socket read may wait for bytes, not how long
+    an object takes, so a read of any size runs while it keeps moving and fails only
+    once it stalls. Retries cover the request alone: once a body is flowing, a failure
+    surfaces to the reader rather than restarting a response part of which it has
+    already consumed.
+    """
+    return Config(
+        signature_version="s3v4",
+        connect_timeout=5,
+        read_timeout=stall_timeout_sec,
+        retries={"total_max_attempts": max(1, attempts)},
     )
 
 
@@ -62,7 +79,14 @@ class MintedCredential:
 
 
 _READ_ACTIONS = ("s3:GetObject",)
-_WRITE_ACTIONS = ("s3:PutObject",)
+# A large object goes up in parts, and an upload the store refuses or the writer gives
+# up on has to be abandoned by the writer that started it, so writing carries the
+# multipart housekeeping for the scope's own uploads.
+_WRITE_ACTIONS = (
+    "s3:PutObject",
+    "s3:AbortMultipartUpload",
+    "s3:ListMultipartUploadParts",
+)
 
 
 def scope_policy(
@@ -127,7 +151,9 @@ def ensure_bucket(cfg: ObjectStoreConfig, logger: logging.Logger) -> None:
         )
 
 
-def open_deployment_store(cfg: ObjectStoreConfig) -> FabricObjectStore:
+def open_deployment_store(
+    cfg: ObjectStoreConfig, *, read_stall_timeout_sec: float, read_attempts: int
+) -> FabricObjectStore:
     """The shared store opened under the control plane's own deployment credential."""
     if cfg.backend == BACKEND_FILESYSTEM:
         return SharedFilesystemObjectStore(cfg.filesystem_root)
@@ -137,7 +163,7 @@ def open_deployment_store(cfg: ObjectStoreConfig) -> FabricObjectStore:
         aws_access_key_id=cfg.access_key or None,
         aws_secret_access_key=cfg.secret_key or None,
         region_name=cfg.region,
-        config=_client_config(),
+        config=_read_client_config(read_stall_timeout_sec, read_attempts),
     )
     return S3ObjectStore(client, cfg.bucket, prefix=cfg.prefix)
 
@@ -182,7 +208,7 @@ class StsScopedCredentialMinter:
 
     @property
     def policy_version(self) -> str:
-        return "sts-scope-prefix-1"
+        return "sts-scope-prefix-2"
 
     def mint(
         self, scope: str, operations: tuple[ContentOperationKind, ...], ttl_sec: float

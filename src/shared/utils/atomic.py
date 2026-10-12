@@ -8,12 +8,12 @@ from typing import Any, BinaryIO
 
 _SHARED_FILE_MODE = 0o0666
 _COPY_CHUNK_BYTES = 1 << 20
-_TEMP_PREFIX = ".fm-tmp-"
+TEMP_PREFIX = ".fm-tmp-"
 
 
 def is_atomic_temp(name: str) -> bool:
     """Return whether ``name`` is an in-flight atomic write's temp file."""
-    return name.startswith(_TEMP_PREFIX)
+    return name.startswith(TEMP_PREFIX)
 
 
 def atomic_write_text(
@@ -34,17 +34,61 @@ def atomic_write_text(
     _atomic_replace(target, lambda fh: fh.write(content.encode(encoding)), dir_fd)
 
 
-def atomic_write_bytes(target: Path, data: bytes, *, if_absent: bool = False) -> None:
-    """Replace ``target`` with ``data`` atomically via tempfile + os.replace.
+def temp_path(directory: Path) -> Path:
+    """A fresh in-flight temp file name in ``directory``."""
+    return directory / f"{TEMP_PREFIX}{os.urandom(6).hex()}"
 
-    Creates the parent directory when missing. With ``if_absent`` an existing file
-    is left untouched, so a concurrent or re-driven write of immutable content is a
-    no-op rather than a rewrite.
+
+def link_no_replace(tmp: Path, target: Path, *, durable: bool = False) -> bool:
+    """Move a finished temp file to ``target`` only where nothing is, and return
+    whether it landed.
+
+    The link is the commit: it fails rather than replacing a file already there,
+    including one a concurrent writer landed a moment earlier. The temp name is gone
+    either way. With ``durable`` the file and its directory entry are flushed to disk
+    before this returns.
     """
-    if if_absent and target.exists():
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_replace(target, lambda fh: fh.write(data), None)
+    try:
+        if durable:
+            with open(tmp, "rb") as fh:
+                os.fsync(fh.fileno())
+        created = _make_parents(target.parent)
+        try:
+            os.link(tmp, target)
+        except FileExistsError:
+            return False
+        if durable:
+            # A directory this commit created is only reachable once its own entry in
+            # its parent is on disk too.
+            for directory in (target.parent, *(d.parent for d in created)):
+                fsync_dir(directory)
+        return True
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _make_parents(directory: Path) -> list[Path]:
+    """Create ``directory`` and any missing ancestors, returning those it created."""
+    missing: list[Path] = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for path in reversed(missing):
+        try:
+            path.mkdir()
+        except FileExistsError:
+            pass
+    return missing
+
+
+def fsync_dir(directory: Path) -> None:
+    """Flush a directory's entries to disk."""
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def atomic_write_stream(
@@ -78,7 +122,7 @@ def _replace_at(dir_fd: int, name: str, write: Callable[[BinaryIO], Any]) -> Non
     ``name`` is replaced, never written through."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     while True:
-        tmp_name = f"{_TEMP_PREFIX}{os.urandom(6).hex()}"
+        tmp_name = f"{TEMP_PREFIX}{os.urandom(6).hex()}"
         try:
             fd = os.open(tmp_name, flags, 0o600, dir_fd=dir_fd)
             break

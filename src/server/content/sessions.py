@@ -4,12 +4,17 @@ One record per transfer: the nodes and workers the frames travel between. The ro
 bridge and each node's attachment read it to route an opaque frame onward, so it lives
 in the relay's Redis beside the streams it routes. It names no object and authorizes
 nothing, so losing it costs a transfer rather than an object. The record expires on its
-own, well after the grant that created it.
+own, well after the grant that created it and after the slowest transfer of its object
+the relay still counts as moving.
 """
 
 import redis
 
 from ..clients.redis import content_relay_session_key
+
+# The slowest a relayed transfer is expected to move. Nothing refreshes a routing record
+# while frames flow, so its lifetime has to cover the whole of its object at this rate.
+_SLOWEST_TRANSFER_BYTES_PER_SEC = 1 << 20
 
 
 class ContentTransferSessions:
@@ -27,6 +32,7 @@ class ContentTransferSessions:
         target_node: str,
         origin_worker: str,
         target_worker: str,
+        size_bytes: int,
     ) -> None:
         key = content_relay_session_key(session_id)
         pipeline = self._rds.pipeline()
@@ -39,5 +45,6 @@ class ContentTransferSessions:
                 "target_worker": target_worker,
             },
         )
-        pipeline.expire(key, int(self._ttl) + 1)
+        ttl = self._ttl + size_bytes / _SLOWEST_TRANSFER_BYTES_PER_SEC
+        pipeline.expire(key, int(ttl) + 1)
         pipeline.execute()

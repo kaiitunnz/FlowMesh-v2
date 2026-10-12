@@ -8,10 +8,14 @@ sampled producer. Neither half holds the other's: the server never sees the byte
 the store never learns what an outcome is.
 """
 
+from collections.abc import Callable, Iterator
+from pathlib import Path
+
 import requests
 
 from shared.content import (
     OCTET_STREAM,
+    STREAM_CHUNK_BYTES,
     ContentReference,
     ContentStoreError,
     ScopedObjectStore,
@@ -86,6 +90,30 @@ class FinalizingContentStore(FabricContentStore):
 
     def fetch(self, reference: ContentReference) -> bytes:
         return self._objects.for_scope(reference.authorization_scope).fetch(reference)
+
+    def write_file(
+        self,
+        scope: str,
+        path: Path,
+        *,
+        media_type: str = OCTET_STREAM,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> ContentReference:
+        return self._objects.for_scope(scope).write_file(
+            scope, path, media_type=media_type, cancelled=cancelled
+        )
+
+    def open(
+        self, reference: ContentReference, *, chunk_bytes: int = STREAM_CHUNK_BYTES
+    ) -> Iterator[bytes]:
+        return self._objects.for_scope(reference.authorization_scope).open(
+            reference, chunk_bytes=chunk_bytes
+        )
+
+    def hydrate_to(self, reference: ContentReference, dest: Path) -> None:
+        self._objects.for_scope(reference.authorization_scope).hydrate_to(
+            reference, dest
+        )
 
     def find(self, scope: str, idempotency_key: str) -> OutcomeManifest | None:
         return self._index.find(scope, idempotency_key)

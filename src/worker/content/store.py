@@ -10,19 +10,30 @@ Copies are kept on disk rather than in memory so they survive the worker process
 the worker tells control what it holds so a peer's read can be pointed at it. Two bounds
 keep the cache in check, each off unless configured: a copy unused for longer than the
 retention window ages out, and past the disk budget the least recently used copies go
-first. Reading a copy — for a task here or to serve a peer — counts as using it.
+first. Reading a copy — for a task here or to serve a peer — counts as using it. A copy
+found not to be the object it is named for is dropped, since the store still has the
+object.
 """
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import BinaryIO
 
 from shared.content import (
     OCTET_STREAM,
+    STREAM_CHUNK_BYTES,
+    ContentHydrationError,
     ContentReference,
+    ContentUnavailable,
     FabricObjectStore,
     FilesystemObjectBacking,
+    verify_content,
 )
+
+# A write still in flight keeps its file moving, so staging left idle this long belongs
+# to a process that stopped mid-write.
+_STALE_STAGING_SEC = 3600.0
 
 
 class WorkerContentCache(FabricObjectStore):
@@ -31,7 +42,8 @@ class WorkerContentCache(FabricObjectStore):
     def __init__(
         self, root: Path, *, retain_sec: float = 0.0, max_bytes: int = 0
     ) -> None:
-        self._objects = FilesystemObjectBacking(root)
+        self._objects = FilesystemObjectBacking(root, repair=True)
+        self._objects.clear_staging(_STALE_STAGING_SEC)
         self._retain_sec = retain_sec
         self._max_bytes = max_bytes
 
@@ -42,12 +54,73 @@ class WorkerContentCache(FabricObjectStore):
         self._objects.touch(scope, reference.content_digest)
         return reference
 
+    def write_file(
+        self,
+        scope: str,
+        path: Path,
+        *,
+        media_type: str = OCTET_STREAM,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> ContentReference:
+        reference = self._objects.write_file(
+            scope, path, media_type=media_type, cancelled=cancelled
+        )
+        self._objects.touch(scope, reference.content_digest)
+        return reference
+
+    def staging_dir(self, scope: str) -> Path:
+        """Where a copy on its way in is written before it is adopted."""
+        return self._objects.staging_dir(scope)
+
+    def adopt(self, reference: ContentReference, verified: Path) -> None:
+        """Take a file already verified as the reference's bytes in as its copy."""
+        self._objects.adopt(reference, verified)
+        self._objects.touch(reference.authorization_scope, reference.content_digest)
+
     def fetch(self, reference: ContentReference) -> bytes:
         data = self._objects.read(
             reference.authorization_scope, reference.content_digest
         )
         self._objects.touch(reference.authorization_scope, reference.content_digest)
         return data
+
+    def hydrate(self, reference: ContentReference) -> bytes:
+        data = self.fetch(reference)
+        try:
+            return verify_content(reference, data)
+        except ContentHydrationError:
+            self.drop(reference)
+            raise
+
+    def open(
+        self, reference: ContentReference, *, chunk_bytes: int = STREAM_CHUNK_BYTES
+    ) -> Iterator[bytes]:
+        stream = self._objects.stream(reference, chunk_bytes)
+        self._objects.touch(reference.authorization_scope, reference.content_digest)
+        return self._dropping_corrupt(reference, stream)
+
+    def _dropping_corrupt(
+        self, reference: ContentReference, stream: Iterator[bytes]
+    ) -> Iterator[bytes]:
+        try:
+            yield from stream
+        except ContentUnavailable:
+            raise
+        except ContentHydrationError:
+            self.drop(reference)
+            raise
+
+    def open_pinned(self, reference: ContentReference) -> BinaryIO:
+        """The copy opened for reading, readable to its end even if it is evicted."""
+        fh = self._objects.open_object(
+            reference.authorization_scope, reference.content_digest
+        )
+        self._objects.touch(reference.authorization_scope, reference.content_digest)
+        return fh
+
+    def drop(self, reference: ContentReference) -> None:
+        """Remove a copy, as one found not to be the object it is named for."""
+        self._objects.remove(reference.authorization_scope, reference.content_digest)
 
     def holds(self, reference: ContentReference) -> bool:
         return self._objects.holds(

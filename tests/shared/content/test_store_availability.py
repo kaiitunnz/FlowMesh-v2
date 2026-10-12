@@ -15,12 +15,32 @@ from shared.content import (
 )
 from shared.content.s3_store import S3ObjectStore
 
+
+class _UnusedWrites:
+    """The multipart calls an S3 client offers, which these reads never make."""
+
+    def head_object(self, **kwargs: Any) -> Any:
+        raise AssertionError("not called here")
+
+    def create_multipart_upload(self, **kwargs: Any) -> Any:
+        raise AssertionError("not called here")
+
+    def upload_part(self, **kwargs: Any) -> Any:
+        raise AssertionError("not called here")
+
+    def complete_multipart_upload(self, **kwargs: Any) -> Any:
+        raise AssertionError("not called here")
+
+    def abort_multipart_upload(self, **kwargs: Any) -> Any:
+        raise AssertionError("not called here")
+
+
 _REF = ContentReference(
     authorization_scope="org", content_digest="a" * 64, size_bytes=1
 )
 
 
-class _Client:
+class _Client(_UnusedWrites):
     def __init__(self, error: Exception) -> None:
         self._error = error
 

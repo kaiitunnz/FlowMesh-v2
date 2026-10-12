@@ -576,12 +576,16 @@ class ContentStoreConfig:
     every deployment runs. ``hydration_enabled`` turns on the
     worker content cache, where a worker keeps what it wrote and another reads it over a
     control-granted transfer instead of going to the shared store.
+    ``read_stall_timeout_sec`` bounds how long a control-plane read waits on a store
+    that has stopped sending, and ``read_attempts`` how many times its request is made.
     """
 
     hydration_enabled: bool = False
     grant_ttl_sec: float = 60.0
     holder_record_ttl_sec: float = 300.0
     access_grant_ttl_sec: float = 900.0
+    read_stall_timeout_sec: float = 10.0
+    read_attempts: int = 2
 
     @classmethod
     def from_env(cls) -> "ContentStoreConfig":
@@ -590,6 +594,10 @@ class ContentStoreConfig:
             grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
             holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
             access_grant_ttl_sec=parse_float_env("CONTENT_ACCESS_TTL_SEC", 900.0),
+            read_stall_timeout_sec=parse_float_env(
+                "CONTENT_STORE_READ_STALL_TIMEOUT_SEC", 10.0
+            ),
+            read_attempts=parse_int_env("CONTENT_STORE_READ_ATTEMPTS", 2),
         )
 
 

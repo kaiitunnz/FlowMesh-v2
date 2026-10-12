@@ -7,10 +7,13 @@ so the next read of it is local.
 
 Reading walks three levels, and each is only ever an optimization over the last. What
 this worker already has, it reads locally. What another worker has, it hydrates over an
-authorized transfer, which saves a trip to the shared store on the path that matters.
-What no copy can supply — nothing holds it, the holder died, the grant expired — it
-reads from the shared store, which always has it. So a cache miss costs a read rather
-than a failure, and a worker dying costs nothing at all.
+authorized transfer, which saves a trip to the shared store for an object small enough
+that the relay is the cheaper path. What no copy can supply — nothing holds it, the
+holder died, the grant expired — it reads from the shared store, which always has it.
+An object too large to be worth relaying goes straight to the store, and to a peer only
+while the store cannot be reached. So a cache miss costs a read rather than a failure,
+and a worker dying costs nothing at all. Whatever this worker reads from a peer or the
+store it keeps a copy of, so the next reader here, or on a peer, finds one.
 
 The cache is the optional half. A deployment that runs none has no lane here, and every
 read and write goes straight to the shared store, which is where the content is either
@@ -22,11 +25,15 @@ mints for a peer's copy rests on that task's own binding.
 """
 
 import logging
+from collections.abc import Callable, Iterator
+from pathlib import Path
 
 from shared.content import (
     OCTET_STREAM,
+    STREAM_CHUNK_BYTES,
     ContentReference,
     ContentStoreAccess,
+    ContentUnavailable,
     FabricObjectStore,
 )
 from shared.outcome import (
@@ -50,12 +57,14 @@ class WorkerContentPlane:
         *,
         announce: AnnounceHolding | None = None,
         finalizations: FinalizationIndexClient | None = None,
+        peer_max_bytes: int = 0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._lane = lane
         self._access = access
         self._announce = announce
         self._finalizations = finalizations
+        self._peer_max_bytes = peer_max_bytes
         self._logger = logger or logging.getLogger("content-plane")
 
     def for_task(self, task_id: str) -> "TaskContentStore":
@@ -117,43 +126,169 @@ class WorkerContentPlane:
         telling control about the copy are what make the next read cheap, so a failure
         there costs a local read rather than the object.
         """
-        reference = self._access.store_for(task_id, scope).write(
+        reference = self._store(task_id, scope).write(
             scope, data, media_type=media_type
         )
-        if self._lane is None or self._announce is None:
-            return reference
-        try:
-            if self._lane.keep(scope, data, media_type=media_type) is not None:
-                self._announce([(scope, reference.content_digest)])
-        except Exception:
-            self._logger.warning(
-                "could not cache %s locally", reference.content_digest, exc_info=True
+        if (lane := self._lane) is not None:
+            self._cache(
+                reference, lambda: lane.keep(scope, data, media_type=media_type)
             )
+        return reference
+
+    def write_file(
+        self,
+        task_id: str,
+        scope: str,
+        path: Path,
+        *,
+        media_type: str = OCTET_STREAM,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> ContentReference:
+        """Put a file's bytes in the shared store, then keep a copy as ``write`` does.
+
+        The file is streamed and never held whole; the cache takes a copy of it rather
+        than the file itself, which stays its producer's to change or remove.
+        """
+        reference = self._store(task_id, scope).write_file(
+            scope, path, media_type=media_type, cancelled=cancelled
+        )
+        if (lane := self._lane) is not None:
+            self._cache(reference, lambda: lane.keep_file(reference, path))
         return reference
 
     def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
         """The object's verified bytes, from the nearest place that has them."""
-        if self._lane is not None:
-            try:
-                return self._lane.hydrate(reference, task_id)
-            except Exception as miss:
-                # Every cache path is optional, and that includes a cache that cannot
-                # represent the object, a content directory that has gone unreadable,
-                # and a lane that is not running. The object is in the shared store
-                # whatever happened to a copy of it, so anything the cache raises costs
-                # this read and nothing else.
-                self._logger.debug(
-                    "reading %s from the shared store: %s",
-                    reference.content_digest,
-                    miss,
-                )
-        data = self._access.store_for(task_id, reference.authorization_scope).hydrate(
-            reference
-        )
+        lane = self._lane
+        if lane is not None:
+            local = self._attempt(reference, lambda: lane.read_local(reference))
+            if not isinstance(local, _Missed):
+                return local
+        if lane is not None and self._relayable(reference):
+            peer = self._attempt(reference, lambda: lane.read_peer(reference, task_id))
+            if not isinstance(peer, _Missed):
+                return peer
+        try:
+            data = self._store(task_id, reference.authorization_scope).hydrate(
+                reference
+            )
+        except ContentUnavailable:
+            if lane is None or self._relayable(reference):
+                raise
+            return lane.read_peer(reference, task_id)
         self._logger.info(
             "content %s read from the shared store", reference.content_digest
         )
+        if lane is not None:
+            self._cache(
+                reference,
+                lambda: lane.keep(
+                    reference.authorization_scope,
+                    data,
+                    media_type=reference.media_type,
+                ),
+            )
         return data
+
+    def hydrate_to(self, task_id: str, reference: ContentReference, dest: Path) -> None:
+        """Write the object's verified bytes to ``dest``, from the nearest place that
+        has them, never holding the object whole."""
+        lane = self._lane
+        if lane is not None:
+            local = self._attempt(reference, lambda: lane.copy_local(reference, dest))
+            if not isinstance(local, _Missed):
+                return
+        if lane is not None and self._relayable(reference):
+            peer = self._attempt(
+                reference, lambda: lane.copy_peer(reference, task_id, dest)
+            )
+            if not isinstance(peer, _Missed):
+                return
+        store = self._store(task_id, reference.authorization_scope)
+        try:
+            store.hydrate_to(reference, dest)
+        except ContentUnavailable:
+            if lane is None or self._relayable(reference):
+                raise
+            lane.copy_peer(reference, task_id, dest)
+            return
+        self._logger.info(
+            "content %s read from the shared store", reference.content_digest
+        )
+        if lane is not None:
+            self._cache(reference, lambda: lane.keep_file(reference, dest))
+
+    def open(
+        self,
+        task_id: str,
+        reference: ContentReference,
+        *,
+        chunk_bytes: int = STREAM_CHUNK_BYTES,
+    ) -> Iterator[bytes]:
+        """The object's bytes in chunks, from this worker's copy or the shared store,
+        raising before the last chunk unless they verify."""
+        if (lane := self._lane) is not None:
+            local = self._attempt(
+                reference, lambda: lane.store.open(reference, chunk_bytes=chunk_bytes)
+            )
+            if not isinstance(local, _Missed):
+                return local
+        return self._store(task_id, reference.authorization_scope).open(
+            reference, chunk_bytes=chunk_bytes
+        )
+
+    def _relayable(self, reference: ContentReference) -> bool:
+        """Whether a peer is worth trying before the store for this object.
+
+        A relayed transfer costs more per byte than a store read, so past a configured
+        size the store is read first. This weighs cost only: an object of any size is
+        relayed while the store cannot be reached.
+        """
+        return self._peer_max_bytes <= 0 or reference.size_bytes < self._peer_max_bytes
+
+    def _store(self, task_id: str, scope: str) -> FabricObjectStore:
+        return self._access.store_for(task_id, scope)
+
+    def _attempt[T](
+        self, reference: ContentReference, read: Callable[[], T]
+    ) -> T | "_Missed":
+        """A read from a copy, or a miss.
+
+        Every cache path is optional, and that includes a cache that cannot represent
+        the object, a content directory that has gone unreadable, and a lane that is
+        not running. The object is in the shared store whatever happened to a copy of
+        it, so anything the cache raises costs this read and nothing else.
+        """
+        try:
+            result = read()
+        except Exception as miss:
+            self._logger.debug(
+                "content %s not read from a copy: %s", reference.content_digest, miss
+            )
+            return _MISSED
+        return result
+
+    def _cache(
+        self,
+        reference: ContentReference,
+        keep: Callable[[], ContentReference | None],
+    ) -> None:
+        """Keep a copy and announce it; a failure costs only the next read."""
+        try:
+            if keep() is not None and self._announce is not None:
+                self._announce(
+                    [(reference.authorization_scope, reference.content_digest)]
+                )
+        except Exception:
+            self._logger.warning(
+                "could not cache %s locally", reference.content_digest, exc_info=True
+            )
+
+
+class _Missed:
+    """A read from a copy that found none."""
+
+
+_MISSED = _Missed()
 
 
 class _TaskScopedStores:
@@ -191,3 +326,23 @@ class TaskContentStore(FabricObjectStore):
         # Every path a read can take here verifies the bytes against this exact
         # reference before returning them, so there is nothing left to check.
         return self.fetch(reference)
+
+    def write_file(
+        self,
+        scope: str,
+        path: Path,
+        *,
+        media_type: str = OCTET_STREAM,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> ContentReference:
+        return self._plane.write_file(
+            self._task_id, scope, path, media_type=media_type, cancelled=cancelled
+        )
+
+    def open(
+        self, reference: ContentReference, *, chunk_bytes: int = STREAM_CHUNK_BYTES
+    ) -> Iterator[bytes]:
+        return self._plane.open(self._task_id, reference, chunk_bytes=chunk_bytes)
+
+    def hydrate_to(self, reference: ContentReference, dest: Path) -> None:
+        self._plane.hydrate_to(self._task_id, reference, dest)

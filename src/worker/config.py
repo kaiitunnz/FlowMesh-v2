@@ -60,6 +60,8 @@ class WorkerConfig:
     content_holder_ttl_sec: float
     object_store: ObjectStoreConfig
     content_transfer_timeout_sec: float
+    content_transfer_window_bytes: int
+    content_peer_transfer_max_bytes: int
     results_mount_source: str | None
     hb_interval_sec: int
     hb_ttl_sec: int
@@ -300,6 +302,12 @@ class WorkerConfig:
             object_store=ObjectStoreConfig.from_env(results_dir),
             content_transfer_timeout_sec=parse_float_env(
                 "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
+            ),
+            content_transfer_window_bytes=parse_int_env(
+                "CONTENT_TRANSFER_WINDOW_BYTES", 1 << 20
+            ),
+            content_peer_transfer_max_bytes=parse_int_env(
+                "CONTENT_PEER_TRANSFER_MAX_BYTES", 64 << 20
             ),
             results_mount_source=results_mount_source,
             hb_interval_sec=hb_interval,

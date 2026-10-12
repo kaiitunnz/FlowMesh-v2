@@ -9,13 +9,17 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from shared.utils.parsing import parse_bool_env
+from shared.utils.parsing import parse_bool_env, parse_int_env
 
 BACKEND_S3 = "s3"
 BACKEND_FILESYSTEM = "filesystem"
 
 # The port the store a default deployment co-locates publishes on its own host.
 _DEFAULT_STORE_PORT = "9800"
+# S3 refuses a part of a multipart upload smaller than this, the last one aside.
+MIN_PART_BYTES = 5 << 20
+DEFAULT_PART_BYTES = 16 << 20
+DEFAULT_UPLOAD_CONCURRENCY = 4
 
 
 def _colocated_endpoint() -> str:
@@ -38,6 +42,10 @@ class ObjectStoreConfig:
     deployment whose store is elsewhere — cloud object storage, an external
     S3-compatible store, a node not the root's — names it, and every node other than the
     store's own host has to, since the co-located address is only local to that host.
+
+    ``part_bytes`` is the size of one part of a large object's upload and
+    ``upload_concurrency`` how many parts one upload sends at once, so one write holds
+    at most their product in memory.
     """
 
     backend: str = BACKEND_S3
@@ -49,6 +57,8 @@ class ObjectStoreConfig:
     secret_key: str = ""
     filesystem_root: Path = Path("./shared-content")
     scoped_credentials: bool = True
+    part_bytes: int = DEFAULT_PART_BYTES
+    upload_concurrency: int = DEFAULT_UPLOAD_CONCURRENCY
 
     @staticmethod
     def from_env(default_root: Path) -> "ObjectStoreConfig":
@@ -71,6 +81,16 @@ class ObjectStoreConfig:
                 or (default_root / "shared-content")
             ).absolute(),
             scoped_credentials=parse_bool_env("CONTENT_STORE_SCOPED_CREDENTIALS", True),
+            part_bytes=max(
+                MIN_PART_BYTES,
+                parse_int_env("CONTENT_STORE_PART_BYTES", DEFAULT_PART_BYTES),
+            ),
+            upload_concurrency=max(
+                1,
+                parse_int_env(
+                    "CONTENT_STORE_UPLOAD_CONCURRENCY", DEFAULT_UPLOAD_CONCURRENCY
+                ),
+            ),
         )
 
 

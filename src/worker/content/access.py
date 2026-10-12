@@ -21,6 +21,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 import boto3
 from botocore.client import Config
@@ -35,9 +36,13 @@ from shared.content import (
     ScopedContentCredential,
     SharedFilesystemObjectStore,
 )
-from shared.content.s3_store import S3ObjectStore
+from shared.content.s3_store import S3Client, S3ObjectStore
 
 _AccessKey = tuple[str, str]
+
+# How long before an access ends this worker asks to renew it, so a long upload moves
+# onto renewed access without a call ever starting on a session about to lapse.
+_RENEW_AHEAD_SEC = 120.0
 
 
 class ContentAccessDenied(ContentStoreError):
@@ -68,23 +73,39 @@ class ContentAccessRegistry:
         self._arrived = threading.Condition()
         self._granted: dict[_AccessKey, ContentStoreAccess] = {}
         self._stores: dict[_AccessKey, FabricObjectStore] = {}
+        self._clients: dict[_AccessKey, tuple[str, S3Client]] = {}
+        self._renewing: set[str] = set()
 
     def accept(self, access: ContentStoreAccess) -> None:
         """Take one access control minted for a task of this worker."""
         key = (access.grant.task_id, access.grant.authorization_scope)
         with self._arrived:
             self._granted[key] = access
-            self._stores.pop(key, None)
             self._expire()
             self._arrived.notify_all()
 
     def store_for(self, task_id: str, scope: str) -> FabricObjectStore:
         """The store this task opens for a scope, or a refusal if it holds none.
 
-        Access that has run out is renewed on request, and a renewal control refuses or
-        never relays ends in the same refusal as having none, after a bounded wait.
+        The store resolves the task's access afresh for every call it makes, so a write
+        that outlives one access continues on the access renewed under it.
         """
         key = (task_id, scope)
+        self._access(key)
+        with self._arrived:
+            if (store := self._stores.get(key)) is None:
+                store = self._open(key)
+                self._stores[key] = store
+            return store
+
+    def _access(self, key: _AccessKey) -> ContentStoreAccess:
+        """This task's live access, or a refusal if it holds none.
+
+        Access that has run out is renewed on request, and a renewal control refuses or
+        never relays ends in the same refusal as having none, after a bounded wait.
+        Access close to its end is renewed ahead of time, without waiting for it.
+        """
+        task_id, scope = key
         with self._arrived:
             # An access that has expired is not one still in flight, so only a task
             # that never had one waits out the relay.
@@ -109,11 +130,27 @@ class ContentAccessRegistry:
             raise ContentAccessDenied(
                 f"task {task_id} holds no live content store access in scope {scope}"
             )
+        self._renew_ahead(access)
+        return access
+
+    def _renew_ahead(self, access: ContentStoreAccess) -> None:
+        grant = access.grant
+        if self._request_access is None or not grant.expired(
+            time.time() + _RENEW_AHEAD_SEC
+        ):
+            return
         with self._arrived:
-            if (store := self._stores.get(key)) is None:
-                store = self._open(access.credential)
-                self._stores[key] = store
-            return store
+            if grant.grant_id in self._renewing:
+                return
+            self._renewing.add(grant.grant_id)
+        try:
+            self._request_access(grant.task_id)
+        except Exception:
+            self._logger.warning(
+                "could not ask to renew content store access for %s",
+                grant.task_id,
+                exc_info=True,
+            )
 
     def _await_live(self, key: _AccessKey, timeout: float) -> ContentStoreAccess | None:
         """This task's unexpired access, waiting up to ``timeout`` for one to land."""
@@ -127,10 +164,16 @@ class ContentAccessRegistry:
         self._forget(key)
         return None
 
-    def _open(self, credential: ScopedContentCredential) -> FabricObjectStore:
+    def _open(self, key: _AccessKey) -> FabricObjectStore:
         match self._cfg.backend:
             case x if x == BACKEND_S3:
-                return self._open_s3(credential)
+                return S3ObjectStore(
+                    _RenewingClient(lambda: self._client(key)),
+                    self._cfg.bucket,
+                    prefix=self._cfg.prefix,
+                    part_bytes=self._cfg.part_bytes,
+                    upload_concurrency=self._cfg.upload_concurrency,
+                )
             case x if x == BACKEND_FILESYSTEM:
                 return SharedFilesystemObjectStore(self._cfg.filesystem_root)
             case _:
@@ -138,9 +181,21 @@ class ContentAccessRegistry:
                     f"unknown content store backend {self._cfg.backend}"
                 )
 
-    def _open_s3(self, credential: ScopedContentCredential) -> FabricObjectStore:
+    def _client(self, key: _AccessKey) -> S3Client:
+        """The backend client this task's live access opens, opened once per access."""
+        access = self._access(key)
+        with self._arrived:
+            cached = self._clients.get(key)
+            if cached is not None and cached[0] == access.grant.grant_id:
+                return cached[1]
+        client = self._open_s3(access.credential)
+        with self._arrived:
+            self._clients[key] = (access.grant.grant_id, client)
+        return client
+
+    def _open_s3(self, credential: ScopedContentCredential) -> S3Client:
         material = credential.material
-        client = boto3.client(
+        client: S3Client = boto3.client(
             "s3",
             endpoint_url=self._cfg.endpoint_url or None,
             aws_access_key_id=material.get("access_key") or None,
@@ -149,20 +204,67 @@ class ContentAccessRegistry:
             region_name=self._cfg.region,
             config=Config(signature_version="s3v4"),
         )
-        return S3ObjectStore(client, self._cfg.bucket, prefix=self._cfg.prefix)
+        return client
 
     def clear(self) -> None:
         """Drop every access, as the incarnation it was granted to has ended."""
         with self._arrived:
             self._granted.clear()
             self._stores.clear()
+            self._clients.clear()
+            self._renewing.clear()
 
     def _forget(self, key: _AccessKey) -> None:
         self._granted.pop(key, None)
         self._stores.pop(key, None)
+        if (cached := self._clients.pop(key, None)) is not None:
+            self._renewing.discard(cached[0])
 
     def _expire(self) -> None:
         now = time.time()
         for key, access in list(self._granted.items()):
             if access.grant.expired(now):
                 self._forget(key)
+
+
+class _RenewingClient:
+    """An S3 client that is whatever the task's live access opens at each call.
+
+    An abort is housekeeping for an upload this worker started, so it goes out on the
+    last client that worked when the task holds no live access any more.
+    """
+
+    def __init__(self, resolve: Callable[[], S3Client]) -> None:
+        self._resolve = resolve
+        self._last: S3Client | None = None
+
+    def _current(self) -> S3Client:
+        self._last = self._resolve()
+        return self._last
+
+    def put_object(self, **kwargs: Any) -> Any:
+        return self._current().put_object(**kwargs)
+
+    def get_object(self, **kwargs: Any) -> Any:
+        return self._current().get_object(**kwargs)
+
+    def head_object(self, **kwargs: Any) -> Any:
+        return self._current().head_object(**kwargs)
+
+    def create_multipart_upload(self, **kwargs: Any) -> Any:
+        return self._current().create_multipart_upload(**kwargs)
+
+    def upload_part(self, **kwargs: Any) -> Any:
+        return self._current().upload_part(**kwargs)
+
+    def complete_multipart_upload(self, **kwargs: Any) -> Any:
+        return self._current().complete_multipart_upload(**kwargs)
+
+    def abort_multipart_upload(self, **kwargs: Any) -> Any:
+        try:
+            client = self._current()
+        except ContentAccessDenied:
+            if self._last is None:
+                raise
+            client = self._last
+        return client.abort_multipart_upload(**kwargs)

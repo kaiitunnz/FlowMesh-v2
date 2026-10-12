@@ -941,6 +941,54 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=0,
                     min_inclusive=False,
                 ),
+                EnvVar(
+                    "CONTENT_TRANSFER_WINDOW_BYTES",
+                    "1048576",
+                    description="Bytes a content transfer keeps in flight.",
+                    var_type=EnvVarType.INT,
+                    min_value=65536,
+                ),
+                EnvVar(
+                    "CONTENT_PEER_TRANSFER_MAX_BYTES",
+                    "67108864",
+                    description=(
+                        "Objects this size or larger skip peer copies for the store "
+                        "while it is reachable (0 = always try a peer)."
+                    ),
+                    var_type=EnvVarType.INT,
+                    min_value=0,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_PART_BYTES",
+                    "16777216",
+                    description="Part size of a large object's upload (bytes).",
+                    var_type=EnvVarType.INT,
+                    min_value=5242880,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_UPLOAD_CONCURRENCY",
+                    "4",
+                    description="Parts one upload sends at once.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_READ_STALL_TIMEOUT_SEC",
+                    "10",
+                    description=(
+                        "Longest a control-plane store read waits for bytes (seconds)."
+                    ),
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_READ_ATTEMPTS",
+                    "2",
+                    description="Times a control-plane store read's request is made.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
             ],
         ),
         EnvSection(
