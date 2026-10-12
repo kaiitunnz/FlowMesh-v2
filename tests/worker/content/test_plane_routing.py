@@ -1,5 +1,6 @@
 """Where the worker's content plane reads an object from, and what it keeps of it."""
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -7,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 from shared.content import (
+    STREAM_CHUNK_BYTES,
     ContentHydrationError,
     ContentReference,
     ContentUnavailable,
@@ -14,7 +16,8 @@ from shared.content import (
     SharedFilesystemObjectStore,
     reference_for,
 )
-from worker.content import WorkerContentPlane
+from worker.content import WorkerContentCache, WorkerContentPlane
+from worker.content.access import ContentAccessDenied
 
 _LARGE = 64
 
@@ -168,3 +171,58 @@ def test_a_written_file_lands_in_the_store_and_a_copy_is_kept(tmp_path) -> None:
     assert store.hydrate(reference) == b"produced bytes"
     assert lane.kept == [reference]
     assert announced == [[("org", reference.content_digest)]]
+
+
+class _NoAccess:
+    def store_for(self, task_id: str, scope: str) -> FabricObjectStore:
+        raise ContentAccessDenied(f"task {task_id} holds no access in scope {scope}")
+
+
+class _CachedLane(_Lane):
+    """A lane whose local copies are a real cache."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.store = WorkerContentCache(root)
+        self.local_reads = 0
+
+    def read_local(self, reference: ContentReference) -> bytes:
+        self.local_reads += 1
+        return self.store.hydrate(reference)
+
+
+@pytest.mark.parametrize("read", ["hydrate", "hydrate_to", "open"])
+def test_a_copy_here_is_never_served_to_a_task_without_access_to_its_scope(
+    tmp_path, read: str
+) -> None:
+    lane = _CachedLane(tmp_path / "cache")
+    reference = lane.store.write("org", b"another task's object")
+    plane = WorkerContentPlane(cast(Any, lane), cast(Any, _NoAccess()))
+
+    with pytest.raises(ContentAccessDenied):
+        match read:
+            case "hydrate":
+                plane.hydrate("tsk-1", reference)
+            case "hydrate_to":
+                plane.hydrate_to("tsk-1", reference, tmp_path / "out.bin")
+            case _:
+                b"".join(plane.open("tsk-1", reference))
+    assert lane.local_reads == 0
+
+
+def test_a_copy_that_fails_verification_mid_read_leaves_the_next_open_to_the_store(
+    tmp_path,
+) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    data = os.urandom(4 * STREAM_CHUNK_BYTES)
+    reference = store.write("org", data)
+    lane = _CachedLane(tmp_path / "cache")
+    lane.store.write("org", data)
+    (copy,) = [p for p in (tmp_path / "cache").rglob("*") if p.is_file()]
+    copy.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+    plane = _plane(store, lane, [])
+
+    with pytest.raises(ContentHydrationError):
+        b"".join(plane.open("tsk-1", reference))
+    assert not lane.store.holds(reference)
+    assert b"".join(plane.open("tsk-1", reference)) == data

@@ -5,15 +5,13 @@ reports the reference naming it, so every reference that reaches a binding names
 that already outlive the worker that produced them, and it keeps a copy of what it wrote
 so the next read of it is local.
 
-Reading walks three levels, and each is only ever an optimization over the last. What
-this worker already has, it reads locally. What another worker has, it hydrates over an
-authorized transfer, which saves a trip to the shared store for an object small enough
-that the relay is the cheaper path. What no copy can supply — nothing holds it, the
-holder died, the grant expired — it reads from the shared store, which always has it.
-An object too large to be worth relaying goes straight to the store, and to a peer only
-while the store cannot be reached. So a cache miss costs a read rather than a failure,
-and a worker dying costs nothing at all. Whatever this worker reads from a peer or the
-store it keeps a copy of, so the next reader here, or on a peer, finds one.
+A read tries this worker's own copy, then another worker's over an authorized transfer,
+then the shared store, which always has the object; each level only ever saves a trip
+to the next. An object of the configured relay size or larger is read from the store
+before a peer, and from a peer only while the store cannot be reached. So a cache miss
+costs a read rather than a failure, and a worker dying costs nothing at all. Whatever
+this worker reads from a peer or the store it keeps a copy of, so the next reader here,
+or on a peer, finds one.
 
 The cache is the optional half. A deployment that runs none has no lane here, and every
 read and write goes straight to the shared store, which is where the content is either
@@ -36,6 +34,7 @@ from shared.content import (
     ContentUnavailable,
     FabricObjectStore,
 )
+from shared.content.config import DEFAULT_PEER_TRANSFER_MAX_BYTES
 from shared.outcome import (
     FabricContentStore,
     FinalizationIndexClient,
@@ -45,6 +44,13 @@ from shared.outcome import (
 from .access import ContentAccessRegistry
 from .client import AnnounceHolding
 from .lane_host import ContentLaneHost
+
+
+class _Missed:
+    """A read from a copy that found none."""
+
+
+_MISSED = _Missed()
 
 
 class WorkerContentPlane:
@@ -57,7 +63,7 @@ class WorkerContentPlane:
         *,
         announce: AnnounceHolding | None = None,
         finalizations: FinalizationIndexClient | None = None,
-        peer_max_bytes: int = 0,
+        peer_max_bytes: int = DEFAULT_PEER_TRANSFER_MAX_BYTES,
         logger: logging.Logger | None = None,
     ) -> None:
         self._lane = lane
@@ -158,66 +164,28 @@ class WorkerContentPlane:
 
     def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
         """The object's verified bytes, from the nearest place that has them."""
-        lane = self._lane
-        if lane is not None:
-            local = self._attempt(reference, lambda: lane.read_local(reference))
-            if not isinstance(local, _Missed):
-                return local
-        if lane is not None and self._relayable(reference):
-            peer = self._attempt(reference, lambda: lane.read_peer(reference, task_id))
-            if not isinstance(peer, _Missed):
-                return peer
-        try:
-            data = self._store(task_id, reference.authorization_scope).hydrate(
-                reference
-            )
-        except ContentUnavailable as outage:
-            if lane is None or self._relayable(reference):
-                raise
-            return self._relay_during(
-                outage, lambda: lane.read_peer(reference, task_id)
-            )
-        self._logger.info(
-            "content %s read from the shared store", reference.content_digest
+        store = self._store(task_id, reference.authorization_scope)
+        return self._read(
+            reference,
+            local=lambda lane: lane.read_local(reference),
+            peer=lambda lane: lane.read_peer(reference, task_id),
+            stored=lambda: store.hydrate(reference),
+            keep=lambda lane, data: lane.keep(
+                reference.authorization_scope, data, media_type=reference.media_type
+            ),
         )
-        if lane is not None:
-            self._cache(
-                reference,
-                lambda: lane.keep(
-                    reference.authorization_scope,
-                    data,
-                    media_type=reference.media_type,
-                ),
-            )
-        return data
 
     def hydrate_to(self, task_id: str, reference: ContentReference, dest: Path) -> None:
         """Write the object's verified bytes to ``dest``, from the nearest place that
         has them, never holding the object whole."""
-        lane = self._lane
-        if lane is not None:
-            local = self._attempt(reference, lambda: lane.copy_local(reference, dest))
-            if not isinstance(local, _Missed):
-                return
-        if lane is not None and self._relayable(reference):
-            peer = self._attempt(
-                reference, lambda: lane.copy_peer(reference, task_id, dest)
-            )
-            if not isinstance(peer, _Missed):
-                return
         store = self._store(task_id, reference.authorization_scope)
-        try:
-            store.hydrate_to(reference, dest)
-        except ContentUnavailable as outage:
-            if lane is None or self._relayable(reference):
-                raise
-            self._relay_during(outage, lambda: lane.copy_peer(reference, task_id, dest))
-            return
-        self._logger.info(
-            "content %s read from the shared store", reference.content_digest
+        self._read(
+            reference,
+            local=lambda lane: lane.copy_local(reference, dest),
+            peer=lambda lane: lane.copy_peer(reference, task_id, dest),
+            stored=lambda: store.hydrate_to(reference, dest),
+            keep=lambda lane, _: lane.keep_file(reference, dest),
         )
-        if lane is not None:
-            self._cache(reference, lambda: lane.keep_file(reference, dest))
 
     def open(
         self,
@@ -226,17 +194,55 @@ class WorkerContentPlane:
         *,
         chunk_bytes: int = STREAM_CHUNK_BYTES,
     ) -> Iterator[bytes]:
-        """The object's bytes in chunks, from this worker's copy or the shared store,
-        raising before the last chunk unless they verify."""
+        """The object's bytes in chunks, from this worker's copy or else the shared
+        store, raising before the last chunk unless they verify.
+
+        A copy that fails verification part way through is dropped as it raises, so
+        the next open reads the store.
+        """
+        store = self._store(task_id, reference.authorization_scope)
         if (lane := self._lane) is not None:
             local = self._attempt(
                 reference, lambda: lane.store.open(reference, chunk_bytes=chunk_bytes)
             )
             if not isinstance(local, _Missed):
                 return local
-        return self._store(task_id, reference.authorization_scope).open(
-            reference, chunk_bytes=chunk_bytes
+        return store.open(reference, chunk_bytes=chunk_bytes)
+
+    def _read[T](
+        self,
+        reference: ContentReference,
+        *,
+        local: Callable[[ContentLaneHost], T],
+        peer: Callable[[ContentLaneHost], T],
+        stored: Callable[[], T],
+        keep: Callable[[ContentLaneHost, T], ContentReference | None],
+    ) -> T:
+        """Read from this worker's copy, a peer's, or the shared store, in that order
+        for an object worth relaying and with the store before a peer otherwise; keep
+        a copy of what the store supplied."""
+        lane = self._lane
+        if lane is not None:
+            if not isinstance(
+                got := self._attempt(reference, lambda: local(lane)), _Missed
+            ):
+                return got
+            if self._relayable(reference) and not isinstance(
+                got := self._attempt(reference, lambda: peer(lane)), _Missed
+            ):
+                return got
+        try:
+            value = stored()
+        except ContentUnavailable as outage:
+            if lane is None or self._relayable(reference):
+                raise
+            return self._relay_during(outage, lambda: peer(lane))
+        self._logger.info(
+            "content %s read from the shared store", reference.content_digest
         )
+        if lane is not None:
+            self._cache(reference, lambda: keep(lane, value))
+        return value
 
     def _relayable(self, reference: ContentReference) -> bool:
         """Whether a peer is worth trying before the store for this object.
@@ -263,7 +269,7 @@ class WorkerContentPlane:
 
     def _attempt[T](
         self, reference: ContentReference, read: Callable[[], T]
-    ) -> T | "_Missed":
+    ) -> T | _Missed:
         """A read from a copy, or a miss.
 
         Every cache path is optional, and that includes a cache that cannot represent
@@ -295,13 +301,6 @@ class WorkerContentPlane:
             self._logger.warning(
                 "could not cache %s locally", reference.content_digest, exc_info=True
             )
-
-
-class _Missed:
-    """A read from a copy that found none."""
-
-
-_MISSED = _Missed()
 
 
 class _TaskScopedStores:
