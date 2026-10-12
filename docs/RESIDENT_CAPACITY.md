@@ -67,8 +67,9 @@ successor raised under the same `invocation_id` takes the next epoch. An inert r
 no live claim names moves with its lease to `resident:cs:replicas`, and a serve task's
 family with nothing live left moves to `resident:cs:families`; the listings read both. A
 retirement, move or gated serve settlement that a store failure interrupts is retried until
-it lands, its credit held meanwhile; the serve client is answered at once. A settled
-workflow is freed only once every resident invocation it raised has retired.
+it lands, and a write nothing waits on, such as a hold, is carried by the next one; a
+credit stays held until its release is durable, and a serve client is answered at once. A
+settled workflow is freed only once every resident invocation it raised has retired.
 
 A restart loads only `resident:cs`, and refuses a resident key of the wrong type (delete it
 and restart), a field it cannot read, or a claim without its request. The retired records
