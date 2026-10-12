@@ -171,10 +171,12 @@ class WorkerContentPlane:
             data = self._store(task_id, reference.authorization_scope).hydrate(
                 reference
             )
-        except ContentUnavailable:
+        except ContentUnavailable as outage:
             if lane is None or self._relayable(reference):
                 raise
-            return lane.read_peer(reference, task_id)
+            return self._relay_during(
+                outage, lambda: lane.read_peer(reference, task_id)
+            )
         self._logger.info(
             "content %s read from the shared store", reference.content_digest
         )
@@ -206,10 +208,10 @@ class WorkerContentPlane:
         store = self._store(task_id, reference.authorization_scope)
         try:
             store.hydrate_to(reference, dest)
-        except ContentUnavailable:
+        except ContentUnavailable as outage:
             if lane is None or self._relayable(reference):
                 raise
-            lane.copy_peer(reference, task_id, dest)
+            self._relay_during(outage, lambda: lane.copy_peer(reference, task_id, dest))
             return
         self._logger.info(
             "content %s read from the shared store", reference.content_digest
@@ -244,6 +246,17 @@ class WorkerContentPlane:
         relayed while the store cannot be reached.
         """
         return self._peer_max_bytes <= 0 or reference.size_bytes < self._peer_max_bytes
+
+    def _relay_during[T](self, outage: ContentUnavailable, read: Callable[[], T]) -> T:
+        """A peer's copy while the store is down.
+
+        When no peer can serve it, the read fails as the outage it is, so the task
+        waits for the store rather than failing on a peer's miss.
+        """
+        try:
+            return read()
+        except Exception as miss:
+            raise outage from miss
 
     def _store(self, task_id: str, scope: str) -> FabricObjectStore:
         return self._access.store_for(task_id, scope)

@@ -118,8 +118,17 @@ def test_a_large_object_is_relayed_while_the_store_is_down() -> None:
 def test_a_large_object_no_peer_holds_fails_as_the_outage_it_is() -> None:
     reference = reference_for("org", b"x" * _LARGE)
 
-    with pytest.raises(ContentHydrationError):
+    with pytest.raises(ContentUnavailable, match="store down"):
         _plane(_DownStore(), _Lane(), []).hydrate("tsk-1", reference)
+
+
+def test_a_large_file_no_peer_holds_fails_as_the_outage_it_is(tmp_path) -> None:
+    reference = reference_for("org", b"x" * _LARGE)
+    dest = tmp_path / "object.bin"
+
+    with pytest.raises(ContentUnavailable, match="store down"):
+        _plane(_DownStore(), _Lane(), []).hydrate_to("tsk-1", reference, dest)
+    assert not dest.exists()
 
 
 def test_a_file_hydration_routes_as_a_read_does(tmp_path) -> None:
