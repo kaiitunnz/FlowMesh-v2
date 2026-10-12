@@ -1,15 +1,11 @@
 """Streaming writes and reads through the shared store, conditional on the key."""
 
-import base64
-import hashlib
 import os
 import threading
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError
 
 from shared.content import (
     ContentHydrationError,
@@ -22,109 +18,9 @@ from shared.content import (
     reference_for,
 )
 from shared.content.s3_store import S3ObjectStore
+from tests.shared.fake_s3 import FakeS3, s3_error
 
 _PART = 5 << 20
-
-
-def _error(code: str, status: int, op: str = "PutObject") -> ClientError:
-    response: Any = {
-        "Error": {"Code": code},
-        "ResponseMetadata": {"HTTPStatusCode": status},
-    }
-    return ClientError(response, op)
-
-
-def _b64(data: bytes) -> str:
-    return base64.b64encode(hashlib.sha256(data).digest()).decode()
-
-
-class _Body:
-    def __init__(self, data: bytes, *, fail_after: int | None = None) -> None:
-        self._data = data
-        self._fail_after = fail_after
-
-    def read(self) -> bytes:
-        return self._data
-
-    def iter_chunks(self, chunk_size: int) -> Iterator[bytes]:
-        for start in range(0, len(self._data), chunk_size):
-            if self._fail_after is not None and start >= self._fail_after:
-                raise ConnectionResetError("reset mid-body")
-            yield self._data[start : start + chunk_size]
-
-    def close(self) -> None:
-        pass
-
-
-class FakeS3:
-    """An in-memory S3 that enforces conditional writes and per-part checksums."""
-
-    def __init__(self) -> None:
-        self.objects: dict[str, bytes] = {}
-        self.uploads: dict[str, dict[int, bytes]] = {}
-        self.aborted: list[str] = []
-        self.puts = 0
-        self.fail_part: int | None = None
-        self.body_fail_after: int | None = None
-        self._lock = threading.Lock()
-        self._next = 0
-
-    def put_object(self, **kw: Any) -> Any:
-        data = kw["Body"]
-        if kw.get("ChecksumSHA256") not in (None, _b64(data)):
-            raise _error("XAmzContentChecksumMismatch", 400)
-        with self._lock:
-            self.puts += 1
-            if kw.get("IfNoneMatch") == "*" and kw["Key"] in self.objects:
-                raise _error("PreconditionFailed", 412)
-            self.objects[kw["Key"]] = bytes(data)
-        return {}
-
-    def get_object(self, **kw: Any) -> Any:
-        if kw["Key"] not in self.objects:
-            raise _error("NoSuchKey", 404, "GetObject")
-        return {"Body": _Body(self.objects[kw["Key"]], fail_after=self.body_fail_after)}
-
-    def head_object(self, **kw: Any) -> Any:
-        if kw["Key"] not in self.objects:
-            raise _error("404", 404, "HeadObject")
-        return {"ContentLength": len(self.objects[kw["Key"]])}
-
-    def create_multipart_upload(self, **kw: Any) -> Any:
-        with self._lock:
-            self._next += 1
-            upload_id = f"up-{self._next}"
-            self.uploads[upload_id] = {}
-        return {"UploadId": upload_id}
-
-    def upload_part(self, **kw: Any) -> Any:
-        data = kw["Body"]
-        if self.fail_part is not None and kw["PartNumber"] == self.fail_part:
-            raise _error("InternalError", 500, "UploadPart")
-        if kw["ChecksumSHA256"] != _b64(data):
-            raise _error("XAmzContentChecksumMismatch", 400, "UploadPart")
-        with self._lock:
-            self.uploads[kw["UploadId"]][kw["PartNumber"]] = bytes(data)
-        return {"ETag": f"etag-{kw['PartNumber']}"}
-
-    def complete_multipart_upload(self, **kw: Any) -> Any:
-        with self._lock:
-            if kw["UploadId"] not in self.uploads:
-                raise _error("NoSuchUpload", 404, "CompleteMultipartUpload")
-            parts = self.uploads[kw["UploadId"]]
-            if kw.get("IfNoneMatch") == "*" and kw["Key"] in self.objects:
-                raise _error("PreconditionFailed", 412, "CompleteMultipartUpload")
-            numbers = [part["PartNumber"] for part in kw["MultipartUpload"]["Parts"]]
-            assert numbers == sorted(numbers)
-            self.objects[kw["Key"]] = b"".join(parts[n] for n in numbers)
-            del self.uploads[kw["UploadId"]]
-        return {}
-
-    def abort_multipart_upload(self, **kw: Any) -> Any:
-        with self._lock:
-            self.uploads.pop(kw["UploadId"], None)
-            self.aborted.append(kw["UploadId"])
-        return {}
 
 
 def _write_file(tmp_path: Path, data: bytes, name: str = "src.bin") -> Path:
@@ -200,7 +96,7 @@ def test_a_commit_refused_by_a_racing_writer_is_aborted() -> None:
     def head_after_refusal(**kw: Any) -> Any:
         calls.append(1)
         if len(calls) == 1:
-            raise _error("404", 404, "HeadObject")
+            raise s3_error("404", 404, "HeadObject")
         return head(**kw)
 
     client.head_object = head_after_refusal  # type: ignore[method-assign]
@@ -220,7 +116,7 @@ def test_a_commit_racing_another_writer_is_retried() -> None:
     def conflicting(**kw: Any) -> Any:
         if not conflicts:
             conflicts.append(1)
-            raise _error("ConditionalRequestConflict", 409)
+            raise s3_error("ConditionalRequestConflict", 409)
         return original(**kw)
 
     client.put_object = conflicting  # type: ignore[method-assign]
@@ -241,7 +137,7 @@ def test_a_part_whose_session_expired_is_sent_again_on_renewed_access(
     def expiring(**kw: Any) -> Any:
         if kw["PartNumber"] == 2 and not expired:
             expired.append(1)
-            raise _error("ExpiredToken", 400, "UploadPart")
+            raise s3_error("ExpiredToken", 400, "UploadPart")
         return original(**kw)
 
     client.upload_part = expiring  # type: ignore[method-assign]
@@ -429,7 +325,7 @@ def test_a_commit_whose_answer_was_lost_settles_on_the_object(tmp_path: Path) ->
         if not answered:
             answered.append(1)
             original(**kw)
-            raise _error("ConditionalRequestConflict", 409, "CompleteMultipartUpload")
+            raise s3_error("ConditionalRequestConflict", 409, "CompleteMultipartUpload")
         return original(**kw)
 
     client.complete_multipart_upload = lost_answer  # type: ignore[method-assign]
@@ -444,7 +340,7 @@ def test_a_store_without_conditional_writes_is_named_as_such() -> None:
     client = FakeS3()
 
     def unsupported(**kw: Any) -> Any:
-        raise _error("NotImplemented", 501)
+        raise s3_error("NotImplemented", 501)
 
     client.put_object = unsupported  # type: ignore[method-assign]
 

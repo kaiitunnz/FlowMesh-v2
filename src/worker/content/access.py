@@ -74,12 +74,15 @@ class ContentAccessRegistry:
         self._granted: dict[_AccessKey, ContentStoreAccess] = {}
         self._stores: dict[_AccessKey, FabricObjectStore] = {}
         self._clients: dict[_AccessKey, tuple[str, S3Client]] = {}
+        self._opening = threading.Lock()
         self._renewing: set[str] = set()
 
     def accept(self, access: ContentStoreAccess) -> None:
         """Take one access control minted for a task of this worker."""
         key = (access.grant.task_id, access.grant.authorization_scope)
         with self._arrived:
+            if (superseded := self._granted.get(key)) is not None:
+                self._renewing.discard(superseded.grant.grant_id)
             self._granted[key] = access
             self._expire()
             self._arrived.notify_all()
@@ -146,6 +149,8 @@ class ContentAccessRegistry:
         try:
             self._request_access(grant.task_id)
         except Exception:
+            with self._arrived:
+                self._renewing.discard(grant.grant_id)
             self._logger.warning(
                 "could not ask to renew content store access for %s",
                 grant.task_id,
@@ -182,20 +187,28 @@ class ContentAccessRegistry:
                 )
 
     def _client(self, key: _AccessKey) -> S3Client:
-        """The backend client this task's live access opens, opened once per access."""
+        """The backend client this task's live access opens, opened once per access.
+
+        An upload's part threads all ask at once when its access is renewed, so one of
+        them opens the client and the rest take it.
+        """
         access = self._access(key)
-        with self._arrived:
-            cached = self._clients.get(key)
-            if cached is not None and cached[0] == access.grant.grant_id:
+        grant_id = access.grant.grant_id
+        with self._opening:
+            with self._arrived:
+                cached = self._clients.get(key)
+            if cached is not None and cached[0] == grant_id:
                 return cached[1]
-        client = self._open_s3(access.credential)
-        with self._arrived:
-            self._clients[key] = (access.grant.grant_id, client)
-        return client
+            client = self._open_s3(access.credential)
+            with self._arrived:
+                self._clients[key] = (grant_id, client)
+            return client
 
     def _open_s3(self, credential: ScopedContentCredential) -> S3Client:
         material = credential.material
-        client: S3Client = boto3.client(
+        # A session of its own: boto3's default session is not safe to open clients
+        # from on several threads at once.
+        client: S3Client = boto3.Session().client(
             "s3",
             endpoint_url=self._cfg.endpoint_url or None,
             aws_access_key_id=material.get("access_key") or None,
@@ -215,10 +228,10 @@ class ContentAccessRegistry:
             self._renewing.clear()
 
     def _forget(self, key: _AccessKey) -> None:
-        self._granted.pop(key, None)
+        if (access := self._granted.pop(key, None)) is not None:
+            self._renewing.discard(access.grant.grant_id)
         self._stores.pop(key, None)
-        if (cached := self._clients.pop(key, None)) is not None:
-            self._renewing.discard(cached[0])
+        self._clients.pop(key, None)
 
     def _expire(self) -> None:
         now = time.time()
