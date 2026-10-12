@@ -296,7 +296,7 @@ async def test_an_object_larger_than_one_chunk_reassembles(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
-    tmp_path,
+    tmp_path, monkeypatch
 ) -> None:
     """A copy being served survives a sweep that would otherwise drop it.
 
@@ -308,21 +308,24 @@ async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
     reference = pair.store.write("local", _BODY, media_type="application/json")
     reading = threading.Event()
     release = threading.Event()
+    # Whether the test let the open go, rather than the open giving up waiting: the
+    # holder opens off its loop, so the test runs while the open is held.
+    released: list[bool] = []
     served = pair.store.open_pinned
 
     def _blocking_open(ref: ContentReference) -> BinaryIO:
         reading.set()
-        release.wait(5)
+        released.append(release.wait(5))
         return served(ref)
 
-    pair.store.open_pinned = _blocking_open  # type: ignore[assignment]
+    monkeypatch.setattr(pair.store, "open_pinned", _blocking_open)
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
-    await asyncio.to_thread(reading.wait, 5)
+    assert await asyncio.to_thread(reading.wait, 5)
 
     # Mid-serve: the object is named as in transfer, and a sweep with no room for
     # anything leaves it alone while every other copy goes.
@@ -334,6 +337,7 @@ async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
 
     release.set()
     assert await hydration == _BODY
+    assert released == [True]
 
 
 @pytest.mark.asyncio
@@ -385,7 +389,7 @@ async def test_a_grant_naming_another_session_serves_nothing(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_abandoned_transfer_releases_the_holder(tmp_path) -> None:
+async def test_an_abandoned_transfer_releases_the_holder(tmp_path, monkeypatch) -> None:
     """A requester that gives up tells the holder, which stops serving and lets go.
 
     A transfer only advances as the requester drains, so one abandoned in silence
@@ -396,21 +400,24 @@ async def test_an_abandoned_transfer_releases_the_holder(tmp_path) -> None:
     reference = pair.store.write("local", _BODY, media_type="application/json")
     reading = threading.Event()
     release = threading.Event()
+    # Whether the test let the open go, rather than the open giving up waiting: the
+    # holder opens off its loop, so the test runs while the open is held.
+    released: list[bool] = []
     served = pair.store.open_pinned
 
     def _blocking_open(ref: ContentReference) -> BinaryIO:
         reading.set()
-        release.wait(5)
+        released.append(release.wait(5))
         return served(ref)
 
-    pair.store.open_pinned = _blocking_open  # type: ignore[assignment]
+    monkeypatch.setattr(pair.store, "open_pinned", _blocking_open)
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
-    await asyncio.to_thread(reading.wait, 5)
+    assert await asyncio.to_thread(reading.wait, 5)
     assert reference.content_digest in pair.holder.in_transfer
 
     hydration.cancel()
@@ -418,6 +425,7 @@ async def test_an_abandoned_transfer_releases_the_holder(tmp_path) -> None:
         await hydration
     release.set()
     await asyncio.sleep(0.05)
+    assert released == [True]
 
     assert any(
         frame.kind is RelayFrameKind.CANCEL for frame in pair.to_holder.frames

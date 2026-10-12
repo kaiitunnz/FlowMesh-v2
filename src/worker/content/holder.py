@@ -169,7 +169,7 @@ class ContentHolder:
         try:
             # The open file outlives an eviction that unlinks it mid-transfer, so the
             # copy this transfer serves cannot be taken out from under it.
-            fh = self._store.open_pinned(reference)
+            fh = await asyncio.to_thread(self._store.open_pinned, reference)
         except (ContentStoreError, OSError) as exc:
             self._logger.warning("holder cannot serve %s: %s", session_id, exc)
             await session.send_wire(KIND_REJECT, reason="unavailable")
