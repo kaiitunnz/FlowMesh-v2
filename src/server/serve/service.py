@@ -265,9 +265,12 @@ class _ServeStream:
         except asyncio.QueueFull:
             self._dropped = True
 
-    def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
-        self._edge.record_terminal(self.invocation_id, reason, detail)
+    def record_terminal(
+        self, reason: ClaimTerminalReason, detail: str | None
+    ) -> ClaimTerminalReason:
+        recorded = self._edge.record_terminal(self.invocation_id, reason, detail)
         self._terminal_recorded = True
+        return recorded
 
     @property
     def terminal_recorded(self) -> bool:
@@ -628,17 +631,18 @@ class GatedServe:
 
     def record_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason, detail: str | None
-    ) -> None:
+    ) -> ClaimTerminalReason:
         """Record the fenced external status fact before the credit releases, writing
-        it again after a failed write."""
+        it again after a failed write, and return the reason of the first fact
+        recorded."""
         status = _TERMINAL_STATUS.get(reason, ServeTerminalStatus.FAILED)
-        recorded = self._terminals.record(
-            ServeStatusTerminal(
-                invocation_id=invocation_id, status=status, detail=detail
-            )
+        terminal = ServeStatusTerminal(
+            invocation_id=invocation_id, status=status, detail=detail
         )
-        if recorded or self._unsaved:
+        if self._terminals.record(terminal) or self._unsaved:
             self._save()
+        first = self._terminals.get(invocation_id) or terminal
+        return _STATUS_REASON[first.status]
 
     def reconcile_terminals(self) -> None:
         """Settle on startup every gated serve request the restart ended.

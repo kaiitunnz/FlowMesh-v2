@@ -9,6 +9,7 @@ the stored layout as the store does.
 import asyncio
 import json
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any, cast
 
 import pytest
 
@@ -32,6 +33,10 @@ from server.resident.durability import (
     live_field,
 )
 from server.resident.store_retry import SETTLEMENT
+from server.serve import ServeBindingStore, ServeTerminalStore
+from server.serve.forward_exposure import ForwardIngressDirectory
+from server.serve.ingress import ServeIngressRegistry
+from server.serve.service import GatedServe
 from shared.content import reference_for
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import ResidentBootstrapOutcome, ResidentStreamStatus
@@ -320,10 +325,12 @@ class _StoredTerminalDelivery(_ServeDelivery):
         super().__init__()
         self.store = store
 
-    def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
+    def record_terminal(
+        self, reason: ClaimTerminalReason, detail: str | None
+    ) -> ClaimTerminalReason:
         if self.store.down:
             raise ConnectionError("serve snapshot write failed")
-        super().record_terminal(reason, detail)
+        return super().record_terminal(reason, detail)
 
 
 def test_a_serve_settlement_through_an_outage_lands_once_the_store_returns() -> None:
@@ -676,3 +683,57 @@ def test_a_family_re_adopted_after_a_lost_archive_reply_survives_a_crash() -> No
     delivery = _ServeDelivery()
     asyncio.run(fresh._originate_serve(_origination(delivery)))
     assert delivery.opened and delivery.failed is None
+
+
+class _EdgeDelivery(_ServeDelivery):
+    """Records its terminal through the gated edge, as a serve stream does."""
+
+    def __init__(self, edge: GatedServe) -> None:
+        super().__init__()
+        self.edge = edge
+
+    def record_terminal(
+        self, reason: ClaimTerminalReason, detail: str | None
+    ) -> ClaimTerminalReason:
+        super().record_terminal(reason, detail)
+        return self.edge.record_terminal("inv-1", reason, detail)
+
+
+@pytest.mark.parametrize("late_lands", [True, False], ids=["late-lands", "both-held"])
+def test_a_serve_settled_twice_keeps_its_first_recorded_outcome(
+    late_lands: bool,
+) -> None:
+    svc, stores, _settled, _deps = _build_serve()
+    _adopt(svc)
+    terminals = ServeTerminalStore()
+    down = [True]
+
+    def persist() -> None:
+        if down[0]:
+            raise ConnectionError("serve snapshot write failed")
+
+    edge = GatedServe(
+        bindings=ServeBindingStore(),
+        terminals=terminals,
+        control=svc,
+        relay=cast(Any, None),
+        ingresses=ServeIngressRegistry("serve-edge"),
+        exposures=ForwardIngressDirectory("serve.example", 34000, 34009),
+        persist=persist,
+    )
+    delivery = _EdgeDelivery(edge)
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+    asyncio.run(svc._on_ack(_serve_ack(svc, ResidentBootstrapOutcome.ACKED)))
+    asyncio.run(svc._on_outcome(_serve_outcome(svc, ResidentStreamStatus.SUCCESS)))
+
+    down[0] = not late_lands
+    svc.fail_serve("inv-1", delivery, "late give-up")
+    down[0] = False
+    svc.retry_store_failures()
+
+    assert delivery.completed
+    durability = stores.durability
+    assert isinstance(durability, MemoryResidentDurability)
+    [record] = durability.retired_invocations(["inv-1"])
+    assert record is not None
+    assert record.terminal_reason is ClaimTerminalReason.COMPLETED

@@ -225,8 +225,11 @@ class _ServeDelivery:
     def tee(self, payload: bytes) -> None:
         self.chunks.append(payload)
 
-    def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
+    def record_terminal(
+        self, reason: ClaimTerminalReason, detail: str | None
+    ) -> ClaimTerminalReason:
         self.terminals.append((reason, detail))
+        return self.terminals[0][0]
 
     @property
     def terminal_recorded(self) -> bool:

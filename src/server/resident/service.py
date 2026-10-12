@@ -283,8 +283,11 @@ class ServeDelivery(Protocol):
         """Relay one authorized response frame to the client, unparsed."""
         ...
 
-    def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
-        """Record the fenced external status fact before the credit releases."""
+    def record_terminal(
+        self, reason: ClaimTerminalReason, detail: str | None
+    ) -> ClaimTerminalReason:
+        """Record the fenced external status fact before the credit releases, returning
+        the reason of the first one recorded."""
         ...
 
     @property
@@ -1382,8 +1385,7 @@ class ResidentCapacityControl:
         The fact is durable before the credit releases, so a restart reconciles the
         claim against it.
         """
-        delivery.record_terminal(reason, detail)
-        self._consume(invocation_id, reason)
+        self._consume(invocation_id, delivery.record_terminal(reason, detail))
 
     def _settle_serve_and_retire(
         self,
