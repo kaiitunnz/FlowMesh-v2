@@ -482,7 +482,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   missing. It is a service beside the fabric, never the root process: the root and its
   supervisors hold no payload. A worker writes an object there before it reports the
   reference naming it, so a reference that reaches any binding names bytes that already
-  outlive their producer, and a worker's death loses nothing. The outcome-finalization
+  outlive their producer, and a worker's death loses nothing. Every write is
+  conditional on its digest key being free, so an object once stored is never replaced:
+  a second write of the same bytes is refused and settles on the object already there,
+  once its size matches. Reads verify size and digest before releasing their last
+  bytes. A large object streams through bounded parts, each carrying its own SHA-256
+  for the store to check, and is never held whole in any process. An S3-compatible
+  store therefore has to support conditional writes (`If-None-Match`) and SHA-256 part
+  checksums, and a filesystem backend hard links. The outcome-finalization
   index lives on the control plane, binding an `idm-*` to a reference so a re-drive
   re-reports the first materialization rather than re-running a sampled producer; the
   store holds only bytes and never treats an idempotency key as a name. The scope that
@@ -512,8 +519,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   runs over the network plane's relay under its own namespace, so the root bridges opaque
   frames and never holds, assembles, or resolves the payload. A refused, expired, or
   replayed grant, an evicted copy, or a holder that is gone costs a read from the shared
-  store, not a failure. Enable the cache and its transfers with
-  `CONTENT_HYDRATION_ENABLED=true` (which requires the network plane).
+  store, not a failure. The holder streams its copy as it reads it and the requester
+  writes it to disk as it arrives, so a transfer holds a window of the object, never
+  the whole; a copy that turns out not to be the object ends the transfer refused and is
+  dropped. An object of `CONTENT_PEER_TRANSFER_MAX_BYTES` or more is read from the store
+  first, since relaying it costs more per byte, and from a peer only while the store
+  cannot be reached. A worker keeps a copy of whatever it reads from a peer or the store,
+  so an unbounded cache keeps every object its tasks read. Enable the cache and its
+  transfers with `CONTENT_HYDRATION_ENABLED=true` (which requires the network plane).
 - **Task results.** A task's result lives in the shared content store: its worker writes
   the result envelope there under the task's store access before it reports success, and
   the success binds that reference once, at the commit that settles the task, so a retry,
