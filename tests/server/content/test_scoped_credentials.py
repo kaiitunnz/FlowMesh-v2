@@ -1,5 +1,6 @@
 """What a scope's minted session is cut to, and when a new one is cut."""
 
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -91,6 +92,17 @@ def test_a_read_only_grant_asks_for_no_write_action() -> None:
     policy = scope_policy("bucket", "", "tenant-a", (ContentOperationKind.READ,))
 
     assert "s3:GetObject" in policy and "s3:PutObject" not in policy
+
+
+def test_a_write_grant_may_abort_its_uploads_and_nothing_more() -> None:
+    policy = json.loads(scope_policy("bucket", "", "tenant-a", _OPS))
+    actions = {a for s in policy["Statement"] for a in _as_list(s["Action"])}
+
+    assert actions == {"s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"}
+
+
+def _as_list(value: str | list[str]) -> list[str]:
+    return [value] if isinstance(value, str) else value
 
 
 def test_one_session_serves_a_scopes_tasks_until_it_nears_its_end() -> None:

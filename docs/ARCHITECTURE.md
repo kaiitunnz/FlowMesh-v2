@@ -503,9 +503,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   that opens the backend travels beside it, relayed to that worker as a control message
   and delivered over its authenticated attachment, and is kept nowhere — no ledger,
   control store, manifest, frame, or log. A scope is the widest a task can reach, cut as a
-  short-lived session over that scope's prefix, and the grant carries no list, delete, or
-  binding operation — which references a task may use is still decided by the consumer
-  bindings control checks. A fresh dispatch or recovery gets fresh access, and renewal
+  short-lived session over that scope's prefix. A grant may abort its own scope's
+  multipart uploads and carries no list, delete, or binding operation — which references
+  a task may use is still decided by the consumer bindings control checks. A fresh dispatch or recovery gets fresh access, and renewal
   serves only the dispatch holding the task; expiry or a policy rotation fences what
   came before.
 - **Worker content cache and granted hydration.** What a worker holds is a cache over that

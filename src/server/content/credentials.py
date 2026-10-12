@@ -80,14 +80,8 @@ class MintedCredential:
 
 
 _READ_ACTIONS = ("s3:GetObject",)
-# A large object goes up in parts, and an upload the store refuses or the writer gives
-# up on has to be abandoned by the writer that started it, so writing carries the
-# multipart housekeeping for the scope's own uploads.
-_WRITE_ACTIONS = (
-    "s3:PutObject",
-    "s3:AbortMultipartUpload",
-    "s3:ListMultipartUploadParts",
-)
+# A writer aborts the multipart uploads it gives up on.
+_WRITE_ACTIONS = ("s3:PutObject", "s3:AbortMultipartUpload")
 
 
 def scope_policy(

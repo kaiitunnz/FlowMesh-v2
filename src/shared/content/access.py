@@ -14,9 +14,9 @@ grant it came with does.
 
 The grant covers a scope rather than a reference, so one issuance serves everything a
 task reads and writes, and the scope is therefore the widest the store itself will let
-that task reach. It carries no list, delete, or binding operation. Which references a
-task may actually use is still decided above, by the consumer bindings control checks
-before it hands one over.
+that task reach. It may abort its own scope's multipart uploads and carries no list,
+delete, or binding operation. Which references a task may actually use is still decided
+above, by the consumer bindings control checks before it hands one over.
 """
 
 import time
