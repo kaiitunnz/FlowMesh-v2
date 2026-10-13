@@ -21,6 +21,10 @@ from dataclasses import dataclass
 from ..clients.redis import RedisClient, content_holders_key
 
 # Deletes a holder's field only while it still records the given incarnation.
+# Objects per pipelined round trip of a holding report: the loop serving every content
+# request runs other work between chunks, so a large cache never holds it for long.
+_RECORD_CHUNK = 256
+
 _FORGET_GENERATION = """
 local value = redis.call('HGET', KEYS[1], ARGV[1])
 if not value then
@@ -71,24 +75,23 @@ class ContentHolderDirectory:
         node_id: str,
         generation: int,
     ) -> None:
-        """Record a holder's whole report in one round trip.
+        """Record a holder's whole report in a few pipelined round trips.
 
         A holder re-reports everything it has on each cadence, so this is proportional
-        to that worker's cache and runs on the loop serving every content request. One
-        pipelined round trip keeps a large cache from costing two commands per object
-        there.
+        to that worker's cache and runs on the loop serving every content request.
         """
         if not held:
             return
         expires_at = time.time() + self._ttl
         field = self._field(expires_at, node_id, generation)
         ttl = int(self._ttl * 2) + 1
-        pipeline = self._rds.asyncio.control_pipeline()
-        for scope, digest in held:
-            key = content_holders_key(scope, digest)
-            pipeline.hset(key, mapping={worker_id: field})
-            pipeline.expire(key, ttl)
-        await pipeline.execute()
+        for start in range(0, len(held), _RECORD_CHUNK):
+            pipeline = self._rds.asyncio.control_pipeline()
+            for scope, digest in held[start : start + _RECORD_CHUNK]:
+                key = content_holders_key(scope, digest)
+                pipeline.hset(key, mapping={worker_id: field})
+                pipeline.expire(key, ttl)
+            await pipeline.execute()
 
     async def holders(self, scope: str, digest: str) -> list[ContentHolderRecord]:
         """Every live holder reported for this object, freshest report first."""

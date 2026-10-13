@@ -9,6 +9,7 @@ import asyncio
 import fakeredis
 
 from server.content import ContentHolderDirectory
+from server.content import directory as directory_module
 from tests.server.redis_helpers import fake_redis_client
 
 
@@ -35,3 +36,19 @@ def test_a_stale_report_is_forgotten_but_a_fresher_one_in_its_place_stays() -> N
         ]
 
     assert asyncio.run(run()) == [("wkr-1", 4)]
+
+
+def test_a_report_larger_than_one_round_trip_records_every_object() -> None:
+    async def run() -> list[int]:
+        directory = ContentHolderDirectory(
+            fake_redis_client(fakeredis.FakeServer()), record_ttl_sec=300.0
+        )
+        held = [
+            ("org", f"{i:064x}") for i in range(directory_module._RECORD_CHUNK * 2 + 1)
+        ]
+        await directory.record_many(
+            held, worker_id="wkr-1", node_id="nde-1", generation=1
+        )
+        return [len(await directory.holders(scope, digest)) for scope, digest in held]
+
+    assert set(asyncio.run(run())) == {1}
