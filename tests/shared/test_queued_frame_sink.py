@@ -88,8 +88,9 @@ def test_sending_to_a_peer_that_stops_reading_never_waits() -> None:
 def test_a_peer_that_lets_more_than_its_bound_queue_is_dropped() -> None:
     async def run() -> bool:
         sink, reader, writer, server = await _pair(4 * _CHUNK, 60.0)
-        for seq in range(1, 65):
-            await sink.send(_frame(seq))
+        async with asyncio.timeout(5.0):
+            for seq in range(1, 65):
+                await sink.send(_frame(seq))
         try:
             return await _ended(reader, 5.0)
         finally:
@@ -105,8 +106,9 @@ def test_a_peer_whose_connection_takes_nothing_is_dropped_at_the_stall_deadline(
 ):
     async def run() -> bool:
         sink, reader, writer, server = await _pair(64 << 20, 0.3)
-        for seq in range(1, 129):
-            await sink.send(_frame(seq))
+        async with asyncio.timeout(5.0):
+            for seq in range(1, 129):
+                await sink.send(_frame(seq))
         # The peer reads nothing until the deadline has passed.
         await asyncio.sleep(1.0)
         try:
@@ -130,11 +132,12 @@ def test_a_peer_that_keeps_reading_receives_every_frame_in_order() -> None:
                     seqs.append((await read_relay_frame(reader)).seq)
 
         reading = asyncio.ensure_future(drain())
-        for seq in range(1, 33):
-            await sink.send(_frame(seq))
-            # Keep within the bound as a reader that keeps up does.
-            while len(seqs) < seq - 2:
-                await asyncio.sleep(0.001)
+        async with asyncio.timeout(5.0):
+            for seq in range(1, 33):
+                await sink.send(_frame(seq))
+                # Keep within the bound as a reader that keeps up does.
+                while len(seqs) < seq - 2:
+                    await asyncio.sleep(0.001)
         await asyncio.wait_for(reading, 5.0)
         sink.close()
         writer.close()
