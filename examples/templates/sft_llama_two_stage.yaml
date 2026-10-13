@@ -1,9 +1,7 @@
 # sft_llama_two_stage.yaml
 #
 # Two-stage supervised fine-tuning pipeline that first adapts on GSM8K and then
-# resumes training on OpenAI Humaneval using the checkpoint path produced by the
-# first stage. Results are sent to the orchestrator via HTTP while remaining
-# available under the worker's RESULTS_DIR.
+# resumes training on OpenAI Humaneval from the model the first stage published.
 
 apiVersion: flowmesh/v1
 kind: SFTTask
