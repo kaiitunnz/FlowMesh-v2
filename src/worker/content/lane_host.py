@@ -164,6 +164,7 @@ class ContentLaneHost:
                 material=self._peer_material,
                 handler=lambda sink, peer: _HolderConnection(holder, sink, peer),
                 purposes=frozenset({PeerPurpose.CONTENT}),
+                idle_timeout_sec={PeerPurpose.CONTENT: self._transfer_timeout_sec},
                 logger=self._logger,
             )
             await self._listener.start_on_socket(self._listener_sock)

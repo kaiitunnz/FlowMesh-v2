@@ -2,10 +2,12 @@
 
 A requester reaches a holder's content listener directly, or the holder node's listener
 that forwards to it, only at the address control resolved beside the transfer's grant.
-The connection carries that one transfer in both directions and closes with it. Path
-evidence goes back to control as it does for a resident origin: a dial or a mid-transfer
-loss is a network failure, a busy or purpose-less target is no evidence at all, and what
-the holder answers — a refusal, a copy that does not verify — says nothing of the path.
+The connection carries that one transfer in both directions and closes with it, from
+either end. Path evidence goes back to control as it does for a resident origin, each
+failure classified: a failed dial or a connection that breaks mid-transfer is a network
+failure, while a busy or purpose-less target, a holder that closes the connection, and
+what the holder answers — a refusal, a copy that does not verify — say nothing of the
+path.
 """
 
 import asyncio
@@ -27,7 +29,7 @@ from shared.network.peer_dial import (
     classify_peer_error,
     open_accepted_connection,
 )
-from shared.network.relay_frame import RelayFrame
+from shared.network.relay_frame import RelayFrame, RelayFrameKind
 from shared.network.session import FramedRelaySession
 from shared.schemas.network import RouteObservationOutcome
 
@@ -49,7 +51,7 @@ class PeerConnection:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         route: ContentPeerRoute,
-        on_loss: Callable[[], None],
+        on_loss: Callable[[RouteObservationOutcome], None],
         on_frame: Callable[[], None],
     ) -> None:
         self.route = route
@@ -66,8 +68,13 @@ class PeerConnection:
         try:
             async with self._lock:
                 await write_relay_frame(self._writer, frame)
-        except (OSError, FrameStreamError):
-            self._lose()
+        except (OSError, FrameStreamError) as exc:
+            if frame.kind is RelayFrameKind.WINDOW:
+                # The holder closes the connection once it has sent its last frame, so
+                # the grant for that frame can find it gone; the read side alone
+                # decides whether the transfer was lost.
+                return
+            self._lose(exc)
             raise
 
     def attach(self, session: FramedRelaySession) -> None:
@@ -81,17 +88,26 @@ class PeerConnection:
                 if frame.session_id == session.session_id:
                     self._on_frame()
                     await session.on_frame(frame)
-        except (asyncio.IncompleteReadError, OSError, FrameStreamError):
+        except asyncio.IncompleteReadError as exc:
+            # The holder's end closed the connection: the transfer is over or the holder
+            # gave up on it, neither of which is the path's doing.
+            if exc.partial:
+                self._lose(exc)
+            session.abort()
+        except (OSError, FrameStreamError) as exc:
             # The transfer is waiting on frames this connection will never carry, so it
             # ends now rather than at its stall deadline.
-            if not self._closing:
-                self._lose()
+            self._lose(exc)
             session.abort()
 
-    def _lose(self) -> None:
+    def _lose(self, exc: BaseException) -> None:
         if not self._lost and not self._closing:
             self._lost = True
-            self._on_loss()
+            self._on_loss(
+                RouteObservationOutcome.ROUTE_FAILURE
+                if isinstance(exc, (FrameStreamError, asyncio.IncompleteReadError))
+                else classify_peer_error(exc)
+            )
 
     async def aclose(self) -> None:
         self._closing = True
@@ -145,9 +161,7 @@ class ContentPeerDialer:
             reader,
             writer,
             route,
-            on_loss=lambda: self._observe(
-                carriage, route, RouteObservationOutcome.ROUTE_FAILURE
-            ),
+            on_loss=lambda outcome: self._observe(carriage, route, outcome),
             on_frame=on_frame,
         )
 

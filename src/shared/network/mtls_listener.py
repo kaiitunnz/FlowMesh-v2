@@ -22,8 +22,10 @@ handshake, origin check and framing a session uses without reaching a handler.
 A dialer that opens a socket but never finishes the handshake holds one slot, so the
 handshake is deadlined, and so is the opening of a session: its first frame, and after
 an accept the first relay frame, which every dialer sends at once. The connection cap
-bounds the sessions accepted past that. A legitimate connection then idles between
-frames for as long as its invocation runs, so later reads carry no deadline.
+bounds the sessions accepted past that, overall and per purpose, so one purpose's load
+never takes another's slots. A resident connection then idles between frames for as
+long as its invocation runs, so its later reads carry no deadline; a purpose given an
+idle deadline is closed once its dialer sends nothing for that long.
 
 An operator may run a deployment on a trusted network without mutual TLS. That posture
 is explicit, warns on every listener it starts, and carries no peer identity, so the
@@ -35,8 +37,8 @@ import contextlib
 import logging
 import socket
 import ssl
-from collections import deque
-from collections.abc import Callable
+from collections import Counter, deque
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -109,6 +111,11 @@ class ConnectionFrameSink(FrameSink):
     def abort(self) -> None:
         """Drop the connection at once, so its dialer sees it end."""
         self._writer.transport.abort()
+
+    def close(self) -> None:
+        """Close the connection once what was written to it has gone."""
+        with contextlib.suppress(OSError, ssl.SSLError):
+            self._writer.close()
 
 
 # Builds the handler for one accepted connection, given the sink that answers over it
@@ -221,6 +228,8 @@ class MutualTlsFrameListener:
         admits: PeerAdmission = is_registered_origin,
         purposes: frozenset[PeerPurpose] = frozenset({PeerPurpose.RESIDENT}),
         max_connections: int = MAX_CONNECTIONS,
+        purpose_limits: Mapping[PeerPurpose, int] | None = None,
+        idle_timeout_sec: Mapping[PeerPurpose, float] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._material = material
@@ -228,7 +237,10 @@ class MutualTlsFrameListener:
         self._admits = admits
         self._purposes = purposes
         self._max_connections = max_connections
+        self._purpose_limits = dict(purpose_limits or {})
+        self._idle_timeout_sec = dict(idle_timeout_sec or {})
         self._open = 0
+        self._open_by_purpose: Counter[PeerPurpose] = Counter()
         self._logger = logger or logging.getLogger("peer-frame-listener")
         self._server: asyncio.Server | None = None
         self._connections: set[asyncio.StreamWriter] = set()
@@ -309,6 +321,7 @@ class MutualTlsFrameListener:
         self._open += 1
         self._connections.add(writer)
         handler: ConnectionHandler | None = None
+        counted: PeerPurpose | None = None
         try:
             first = await asyncio.wait_for(
                 read_stream_frame(reader), HANDSHAKE_TIMEOUT_SEC
@@ -329,6 +342,16 @@ class MutualTlsFrameListener:
                 )
                 await write_accept(writer, AcceptStatus.UNSERVED, first.purpose)
                 return
+            if self._open_by_purpose[purpose] >= self._purpose_limits.get(
+                purpose, self._max_connections
+            ):
+                self._logger.warning(
+                    "refusing a %s peer connection over its cap", purpose
+                )
+                await write_accept(writer, AcceptStatus.BUSY, purpose)
+                return
+            counted = purpose
+            self._open_by_purpose[purpose] += 1
             await write_accept(writer, AcceptStatus.ACCEPTED, purpose)
             first = await asyncio.wait_for(
                 read_relay_frame(reader), HANDSHAKE_TIMEOUT_SEC
@@ -338,14 +361,21 @@ class MutualTlsFrameListener:
                 PeerContext(purpose, identities, PeerNames.of(peer_cert)),
             )
             await handler.on_frame(first)
+            idle = self._idle_timeout_sec.get(purpose)
             while True:
-                await handler.on_frame(await read_relay_frame(reader))
+                await handler.on_frame(
+                    await asyncio.wait_for(read_relay_frame(reader), idle)
+                )
+        except TimeoutError:
+            self._logger.info("closing a peer connection that went idle")
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
         except FrameStreamError as exc:
             self._logger.warning("closing a peer connection: %s", exc)
         finally:
             self._open -= 1
+            if counted is not None:
+                self._open_by_purpose[counted] -= 1
             self._connections.discard(writer)
             if handler is not None:
                 handler.close()

@@ -538,6 +538,7 @@ def _run_supervisor(
             send_limit_bytes=2
             * max(content_cfg.transfer_window_bytes, DEFAULT_WINDOW_BYTES),
             send_stall_sec=content_cfg.transfer_timeout_sec,
+            content_idle_sec=content_cfg.transfer_timeout_sec,
             logger=logger,
         )
 

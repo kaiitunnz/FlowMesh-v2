@@ -30,6 +30,7 @@ from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.network.frame_stream import FrameStreamError, PeerPurpose
 from shared.network.mtls import MutualTlsMaterial
 from shared.network.mtls_listener import (
+    MAX_CONNECTIONS,
     ConnectionFrameSink,
     ConnectionHandler,
     MutualTlsFrameListener,
@@ -116,6 +117,7 @@ class NodePeerListener:
         bridges: dict[PeerPurpose, RelayWorkerBridge],
         send_limit_bytes: int = 2 * DEFAULT_TRANSFER_WINDOW_BYTES,
         send_stall_sec: float = 60.0,
+        content_idle_sec: float = 60.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._endpoint = endpoint
@@ -131,6 +133,11 @@ class NodePeerListener:
             material=material,
             handler=lambda sink, peer: self._open(bridges[peer.purpose], sink, peer),
             purposes=frozenset(bridges),
+            # Each purpose has its own slots, so content load never turns a resident
+            # dial away, and an idle content connection has no transfer left to carry.
+            max_connections=MAX_CONNECTIONS * len(bridges),
+            purpose_limits={purpose: MAX_CONNECTIONS for purpose in bridges},
+            idle_timeout_sec={PeerPurpose.CONTENT: content_idle_sec},
             logger=self._logger,
         )
 

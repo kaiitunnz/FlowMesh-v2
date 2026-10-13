@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import socket
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -255,3 +256,67 @@ def test_every_request_names_its_purpose_on_the_wire() -> None:
         return requests[0]
 
     assert asyncio.run(run()) == AcceptFrame(AcceptStatus.REQUEST, PeerPurpose.RESIDENT)
+
+
+@contextlib.asynccontextmanager
+async def _shared_listener(**kwargs: Any) -> AsyncIterator[str]:
+    listener = MutualTlsFrameListener(
+        material=None,
+        handler=lambda sink, ctx: _Recording([], ctx),
+        admits=bool,
+        purposes=frozenset(PeerPurpose),
+        **kwargs,
+    )
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    await listener.start_on_socket(sock)
+    try:
+        yield f"127.0.0.1:{listener.port}"
+    finally:
+        await listener.stop()
+
+
+def test_one_purposes_load_never_takes_another_purposes_slots() -> None:
+    async def run() -> None:
+        limits = {PeerPurpose.CONTENT: 1, PeerPurpose.RESIDENT: 1}
+        async with _shared_listener(purpose_limits=limits) as ep:
+            _, content = await open_accepted_connection(
+                ep, None, _BUDGET, PeerPurpose.CONTENT
+            )
+            with pytest.raises(PeerAcceptError) as busy:
+                await open_accepted_connection(ep, None, _BUDGET, PeerPurpose.CONTENT)
+            assert busy.value.outcome is None
+            _, resident = await open_accepted_connection(
+                ep, None, _BUDGET, PeerPurpose.RESIDENT
+            )
+            content.close()
+            resident.close()
+
+    asyncio.run(run())
+
+
+def test_a_purpose_with_an_idle_deadline_closes_its_idle_connections() -> None:
+    async def run() -> tuple[bytes, bool]:
+        idle = {PeerPurpose.CONTENT: 0.2}
+        async with _shared_listener(idle_timeout_sec=idle) as ep:
+            content_reader, content = await open_accepted_connection(
+                ep, None, _BUDGET, PeerPurpose.CONTENT
+            )
+            resident_reader, resident = await open_accepted_connection(
+                ep, None, _BUDGET, PeerPurpose.RESIDENT
+            )
+            await write_relay_frame(content, _frame())
+            await write_relay_frame(resident, _frame())
+            ended = await asyncio.wait_for(content_reader.read(), 5.0)
+            try:
+                await asyncio.wait_for(resident_reader.read(), 0.5)
+                resident_open = False
+            except TimeoutError:
+                resident_open = True
+            content.close()
+            resident.close()
+            return ended, resident_open
+
+    ended, resident_open = asyncio.run(run())
+    assert ended == b""
+    assert resident_open
