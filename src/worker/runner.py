@@ -30,6 +30,7 @@ from shared.network.mtls import MutualTlsMaterial
 from shared.network.relay_frame import SSH_FRAME_KIND
 from shared.outcome import FabricContentStore
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
+from shared.tasks.artifact_binding import ArtifactKind
 from shared.tasks.credentials import dispatched_credentials
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
@@ -57,18 +58,23 @@ from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.hardware import available_devices, gpus_fit_dispatch
-from shared.utils.manifest import prepare_output_dir, sync_manifest
+from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir, sync_manifest
 from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
 from shared.utils.time import now_iso
 
+from .content.artifacts import ArtifactChanged, ArtifactPublisher, declared_archives
 from .content.inputs import TaskInputHydrator, input_unreadable, read_input
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.episode_support import EpisodeStepResult, discard_step_captures
 from .executors.inference.projection import generated_outputs
 from .executors.inference.resolution import resolve_task_contract
-from .executors.utils.checkpoints import write_executor_result
+from .executors.utils.checkpoints import (
+    clear_directory,
+    is_cleanup_enabled,
+    write_executor_result,
+)
 from .gpu_binding import FreeGpus, pick_devices
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
@@ -817,6 +823,11 @@ class Runner:
             return {}
         own = result.model_copy(update={"children": {}})
         declared = _declared_result(own, msg.resolved_contract) or own
+        artifacts = (
+            self._publish_artifacts(msg, msg.task_id, out_dir, own)
+            if _publishes_result(own)
+            else []
+        )
         reference = self._write_single_result(
             msg, msg.task_id, msg.spec, out_dir, declared
         )
@@ -825,24 +836,72 @@ class Runner:
         references: dict[str, Any] = {
             "result_reference": reference.model_dump(mode="json")
         }
+        if artifacts:
+            references["artifacts"] = artifacts
         child_lookup = {entry.task_id: entry for entry in msg.merged_children or []}
         children: dict[str, Any] = {}
+        child_artifacts: dict[str, Any] = {}
         for child_id, child_result in result.children.items():
             child_info = child_lookup.get(child_id)
             if child_info is None:
                 continue
+            child_dir = self._resolve_output_dir(child_id)
+            published = self._publish_artifacts(msg, child_id, child_dir, child_result)
             child_reference = self._write_single_result(
-                msg,
-                child_id,
-                child_info.spec,
-                self._resolve_output_dir(child_id),
-                child_result,
+                msg, child_id, child_info.spec, child_dir, child_result
             )
             if child_reference is not None:
                 children[child_id] = child_reference.model_dump(mode="json")
+                if published:
+                    child_artifacts[child_id] = published
         if children:
             references["child_result_references"] = children
+        if child_artifacts:
+            references["child_artifacts"] = child_artifacts
         return references
+
+    def _publish_artifacts(
+        self,
+        msg: WorkerTaskMessage,
+        task_id: str,
+        out_dir: Path,
+        result: BaseExecutorResult,
+    ) -> list[dict[str, Any]]:
+        """Publish what a task left under its artifacts directory, returning the
+        bindings its success reports.
+
+        Every file is in the shared store before this returns, so the success that
+        reports these bindings names bytes that outlive this worker.
+        """
+        artifacts_dir = out_dir / ARTIFACTS_DIR
+        if not artifacts_dir.is_dir() or not any(artifacts_dir.iterdir()):
+            return []
+        store = self._object_store(msg)
+        if store is None:
+            raise ExecutionError(
+                f"task {task_id} produced artifacts and this worker reaches no fabric "
+                "content store to publish them in",
+                retryable=True,
+            )
+        publisher = ArtifactPublisher(store, msg.content_scope)
+        started = time.monotonic()
+        try:
+            bindings = publisher.publish_final(artifacts_dir, declared_archives(result))
+        except (ContentStoreError, ArtifactChanged, OSError) as exc:
+            raise ExecutionError(
+                f"task {task_id} could not publish its artifacts: {exc}",
+                retryable=True,
+            ) from exc
+        self.logger.info(
+            "Published %d artifact(s) of task %s (%d bytes) in %.1f s",
+            len(bindings),
+            task_id,
+            sum(b.size_bytes for b in bindings if b.kind is not ArtifactKind.ARCHIVE),
+            time.monotonic() - started,
+        )
+        if is_cleanup_enabled():
+            clear_directory(artifacts_dir)
+        return [binding.model_dump(mode="json") for binding in bindings]
 
     def _write_single_result(
         self,

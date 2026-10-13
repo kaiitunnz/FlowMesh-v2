@@ -31,9 +31,8 @@ from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
 from .utils.checkpoints import (
-    archive_model_dir,
+    archive_path_for,
     determine_resume_path,
-    get_http_destination,
     maybe_upload_artifacts,
     write_executor_result,
 )
@@ -345,16 +344,7 @@ class SFTExecutor(TrainingMixin, Executor):
                 tokenizer.save_pretrained(model_path)
                 final_model_path = model_path
                 logger.info("Saved fine-tuned model to %s", model_path)
-                if get_http_destination(spec):
-                    final_archive_path = archive_model_dir(model_path)
-                    logger.info(
-                        "Archived fine-tuned model to %s for HTTP delivery",
-                        final_archive_path,
-                    )
-                else:
-                    logger.info(
-                        "No HTTP destination detected; skipping archive generation"
-                    )
+                final_archive_path = archive_path_for(model_path)
             else:
                 logger.info(
                     "save_model flag is false; skipping model serialization and "
@@ -393,13 +383,6 @@ class SFTExecutor(TrainingMixin, Executor):
             )
 
             maybe_upload_artifacts(task, out_dir, logger=logger)
-
-            self._cleanup_local_artifacts(
-                task,
-                checkpoint_dir,
-                final_model_path,
-                final_archive_path,
-            )
 
             # Drop heavy references before runner-level cleanup
             del trainer, model, tokenizer, train_dataset

@@ -43,8 +43,7 @@ from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
 from .utils.checkpoints import (
-    archive_model_dir,
-    get_http_destination,
+    archive_path_for,
     maybe_upload_artifacts,
     write_executor_result,
 )
@@ -720,18 +719,7 @@ class PPOExecutor(TrainingMixin, Executor):
                     ppo_trainer.save_model(model_save_path.as_posix())
                     logger.info("Model saved to: %s", model_save_path)
                     final_model_path = model_save_path
-                    destination = get_http_destination(task.spec)
-                    if destination:
-                        try:
-                            final_archive_path = archive_model_dir(model_save_path)
-                            logger.info(
-                                "Archived PPO model to %s for HTTP delivery",
-                                final_archive_path,
-                            )
-                        except Exception as arch_exc:
-                            logger.warning(
-                                "Failed to archive PPO model for upload: %s", arch_exc
-                            )
+                    final_archive_path = archive_path_for(model_save_path)
                 except Exception as exc:
                     logger.warning("Failed to save model: %s", exc)
 
@@ -780,13 +768,6 @@ class PPOExecutor(TrainingMixin, Executor):
         )
 
         maybe_upload_artifacts(task, out_dir, logger=logger)
-
-        self._cleanup_local_artifacts(
-            task,
-            checkpoint_dir,
-            final_model_path,
-            final_archive_path,
-        )
 
         logger.info("PPO training task completed in %.2f seconds", training_time)
         self._task_out_dir = None

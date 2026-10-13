@@ -1,7 +1,6 @@
 import logging
 import os
 import shutil
-import subprocess
 import tarfile
 import zipfile
 from dataclasses import dataclass, field
@@ -253,90 +252,9 @@ def select_extracted_subdir(extracted_dir: Path, subdir: str | None) -> Path:
     return extracted_dir
 
 
-def archive_model_dir(model_dir: Path, compression_level: int | None = None) -> Path:
-    archive_path = model_dir.parent / f"{model_dir.name}.tar.gz"
-    if archive_path.exists():
-        archive_path.unlink()
-
-    level = _resolve_compression_level(compression_level)
-    pigz_enabled = _should_use_pigz()
-    pigz_binary = (
-        shutil.which(os.getenv("MODEL_ARCHIVE_PIGZ_BIN", "").strip() or "pigz")
-        if pigz_enabled
-        else None
-    )
-    tar_binary = (
-        shutil.which(os.getenv("MODEL_ARCHIVE_TAR_BIN", "").strip() or "tar")
-        if pigz_binary
-        else None
-    )
-
-    if pigz_binary and tar_binary:
-        temp_tar = archive_path.with_suffix(".tar")
-        if temp_tar.exists():
-            temp_tar.unlink()
-        try:
-            subprocess.run(  # nosec B603 — argv list, no shell=True, absolute path via shutil.which()
-                [
-                    tar_binary,
-                    "-C",
-                    model_dir.parent.as_posix(),
-                    "-cf",
-                    temp_tar.as_posix(),
-                    model_dir.name,
-                ],
-                check=True,
-            )
-
-            pigz_cmd = [pigz_binary, "-f"]
-            pigz_threads = os.getenv("MODEL_ARCHIVE_PIGZ_THREADS")
-            if pigz_threads:
-                pigz_cmd.extend(["-p", pigz_threads])
-            if level is not None:
-                pigz_cmd.append(f"-{level}")
-            pigz_cmd.append(temp_tar.as_posix())
-            subprocess.run(
-                pigz_cmd, check=True
-            )  # nosec B603 — argv list, no shell=True, absolute path via shutil.which()
-
-            compressed_path = temp_tar.with_suffix(".tar.gz")
-            compressed_path.rename(archive_path)
-            return archive_path
-        except Exception:
-            # Fall back to python tarfile implementation below
-            if temp_tar.exists():
-                temp_tar.unlink(missing_ok=True)
-
-    tarfile_kwargs: dict[str, Any] = {"mode": "w:gz"}
-    if level is not None:
-        tarfile_kwargs["compresslevel"] = level
-    with tarfile.open(archive_path, **tarfile_kwargs) as tf:
-        tf.add(model_dir, arcname=model_dir.name)
-    return archive_path
-
-
-def _resolve_compression_level(level: int | None) -> int | None:
-    if level is not None:
-        return _clamp_compression(level)
-    env_value = os.getenv("MODEL_ARCHIVE_COMPRESSION_LEVEL")
-    if env_value is None:
-        return None
-    try:
-        return _clamp_compression(int(env_value))
-    except ValueError:
-        return None
-
-
-def _clamp_compression(level: int) -> int:
-    return max(0, min(level, 9))
-
-
-def _should_use_pigz() -> bool:
-    setting = os.getenv("MODEL_ARCHIVE_USE_PIGZ")
-    if setting is None:
-        return True
-    normalized = setting.strip().lower()
-    return normalized not in {"0", "false", "no", "off"}
+def archive_path_for(model_dir: Path) -> Path:
+    """Where a published model directory's archive view is named, beside it."""
+    return model_dir.with_name(f"{model_dir.name}.tar.gz")
 
 
 def get_http_destination(spec: TaskSpecStrictBase) -> HTTPDestination | None:
@@ -398,6 +316,15 @@ def cleanup_artifact_path(
     except Exception as exc:
         if logger:
             logger.warning("Failed to remove artifact at %s: %s", target, exc)
+
+
+def clear_directory(directory: Path) -> None:
+    """Remove everything under ``directory``, leaving it empty."""
+    for entry in directory.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
 
 
 def is_cleanup_enabled() -> bool:

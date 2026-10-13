@@ -29,7 +29,7 @@ from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
 from .sft_executor import SFT_LAUNCHER_FLAG, SFTExecutor
 from .utils.checkpoints import (
-    archive_model_dir,
+    archive_path_for,
     determine_resume_path,
     maybe_upload_artifacts,
     write_executor_result,
@@ -270,7 +270,6 @@ class LoRASFTExecutor(TrainingMixin, Executor):
             logger.info("LoRA SFT training completed")
 
             final_adapter_path: Path | None = None
-            archive_path: Path | None = None
             if bool(training_cfg.get("save_model", True)):
                 model_path = artifacts_dir / "final_lora"
                 trainer.save_model(model_path.as_posix())
@@ -285,11 +284,11 @@ class LoRASFTExecutor(TrainingMixin, Executor):
                 final_lora = ArtifactRef(
                     path=final_adapter_path.relative_to(artifacts_dir).as_posix()
                 )
-                archive_path = archive_model_dir(final_adapter_path)
                 final_lora_archive = ArtifactRef(
-                    path=archive_path.relative_to(artifacts_dir).as_posix()
+                    path=archive_path_for(final_adapter_path)
+                    .relative_to(artifacts_dir)
+                    .as_posix()
                 )
-                logger.info("Prepared LoRA archive at %s", archive_path)
             result = LoRAResult(
                 ok=ok,
                 training_time_seconds=training_time,
@@ -305,12 +304,6 @@ class LoRASFTExecutor(TrainingMixin, Executor):
 
             maybe_upload_artifacts(task, out_dir, logger=logger)
 
-            self._cleanup_local_artifacts(
-                task,
-                checkpoint_dir,
-                final_adapter_path,
-                archive_path,
-            )
             return result
 
         except Exception as exc:  # pylint: disable=broad-except

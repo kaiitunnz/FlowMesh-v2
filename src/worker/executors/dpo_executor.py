@@ -34,8 +34,7 @@ from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
 from .utils.checkpoints import (
-    archive_model_dir,
-    get_http_destination,
+    archive_path_for,
     maybe_upload_artifacts,
     write_executor_result,
 )
@@ -414,18 +413,7 @@ class DPOExecutor(TrainingMixin, Executor):
                     dpo_trainer.save_model(str(model_save_path))
                     logger.info("Model saved to: %s", model_save_path)
                     final_model_path = model_save_path
-                    destination = get_http_destination(task.spec)
-                    if destination:
-                        try:
-                            final_archive_path = archive_model_dir(model_save_path)
-                            logger.info(
-                                "Archived DPO model to %s for HTTP delivery",
-                                final_archive_path,
-                            )
-                        except Exception as arch_exc:
-                            logger.warning(
-                                "Failed to archive DPO model for upload: %s", arch_exc
-                            )
+                    final_archive_path = archive_path_for(model_save_path)
                 except Exception as exc:
                     logger.warning("Failed to save model: %s", exc)
 
@@ -455,12 +443,6 @@ class DPOExecutor(TrainingMixin, Executor):
 
             maybe_upload_artifacts(task, out_dir, logger=logger)
 
-            self._cleanup_local_artifacts(
-                task,
-                checkpoint_dir,
-                final_model_path,
-                final_archive_path,
-            )
             return result
         except Exception as exc:
             training_time = time.time() - start_time

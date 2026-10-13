@@ -187,3 +187,70 @@ def test_a_merged_parent_stores_only_its_own_result(tmp_path: Path) -> None:
 
     assert merged["tsk-1"]["result"] == alone["tsk-1"]["result"]
     assert merged["tsk-c"]["result"]["value"] == "child"
+
+
+class _Producing(_Returning):
+    """Leaves artifacts in the task's output, as a trainer does."""
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        model = out_dir / "artifacts" / "final_model"
+        model.mkdir(parents=True, exist_ok=True)
+        (model / "weights.bin").write_bytes(b"weights")
+        return self.result
+
+
+def _run_producing(
+    tmp_path: Path, store: FabricObjectStore, cleanup: bool = False
+) -> MagicMock:
+    lifecycle = MagicMock()
+    lifecycle.worker_id = "wrk-test"
+    lifecycle.cost_per_hour = 1.0
+    lifecycle.client.create_task_log_emitter.return_value = None
+    lifecycle.client.iter_interrupts.return_value = []
+    lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
+    lifecycle.content_plane = _Plane(store)
+    msg = make_worker_task_message(
+        {"taskType": "echo"},
+        task_type=TaskType.ECHO,
+        task_id="tsk-1",
+        content_scope="org-a",
+    )
+    executor = _Producing(BaseExecutorResult())
+    Runner(
+        lifecycle=lifecycle,
+        task_stream=[msg],
+        results_dir=tmp_path / "out",
+        hardware=make_worker_hardware(),
+        executors={"echo": executor, "default": executor},
+        default_executor=executor,
+        logger=MagicMock(),
+    ).start()
+    return lifecycle
+
+
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_success_reports_the_artifacts_it_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup: bool
+) -> None:
+    monkeypatch.setenv("MODEL_CLEANUP_AFTER_UPLOAD", "1" if cleanup else "0")
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+
+    metadata = _metadata(_run_producing(tmp_path, store))
+
+    (binding,) = metadata["artifacts"]
+    assert binding["name"] == "final_model" and binding["kind"] == "tree"
+    assert store.hydrate(ContentReference.model_validate(binding["reference"]))
+    local = tmp_path / "out" / "tsk-1" / "artifacts" / "final_model"
+    assert local.exists() is not cleanup
+
+
+def test_artifacts_the_store_refuses_fail_the_task_retryably(tmp_path: Path) -> None:
+    class _NoFiles(SharedFilesystemObjectStore):
+        def write_file(self, scope: str, path: Path, **kwargs: Any) -> Any:
+            raise ContentStoreError("store unreachable")
+
+    lifecycle = _run_producing(tmp_path, _NoFiles(tmp_path / "cas"))
+
+    lifecycle.set_succeeded.assert_not_called()
+    assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
