@@ -182,6 +182,9 @@ class QueuedFrameSink(FrameSink):
                 except (OSError, ssl.SSLError, FrameStreamError):
                     self._drop("its connection failed")
                     return
+                if self._dropped:
+                    # Dropped while this frame was being written; the queue is gone.
+                    return
                 self._queue.popleft()
                 self._queued_bytes -= len(frame.payload) + _FRAME_OVERHEAD_BYTES
 

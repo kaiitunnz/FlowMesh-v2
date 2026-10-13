@@ -9,6 +9,8 @@ import contextlib
 import socket
 import time
 
+import pytest
+
 from shared.network.frame_stream import read_relay_frame
 from shared.network.mtls_listener import ConnectionFrameSink, QueuedFrameSink
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
@@ -145,3 +147,29 @@ def test_a_peer_that_keeps_reading_receives_every_frame_in_order() -> None:
         return seqs
 
     assert asyncio.run(run()) == list(range(1, 33))
+
+
+@pytest.mark.parametrize("ending", ["overflow", "abort"])
+def test_a_dropped_sink_ends_its_writer_cleanly(ending: str) -> None:
+    async def run() -> BaseException | None:
+        sink, reader, writer, server = await _pair(4 * _CHUNK, 60.0)
+        for seq in range(1, 4):
+            await sink.send(_frame(seq))
+        # Let the writer block on the connection the peer is not reading.
+        await asyncio.sleep(0.3)
+        if ending == "overflow":
+            for seq in range(10, 20):
+                await sink.send(_frame(seq))
+        else:
+            sink.abort()
+        try:
+            async with asyncio.timeout(5.0):
+                while not sink._task.done():
+                    await asyncio.sleep(0.01)
+            return sink._task.exception()
+        finally:
+            sink.close()
+            writer.close()
+            server.close()
+
+    assert asyncio.run(run()) is None
