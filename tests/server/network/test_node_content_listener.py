@@ -342,3 +342,34 @@ def test_a_closed_content_connection_drops_its_sessions_and_a_resident_one_relea
     asyncio.run(run())
     assert content.dropped == ["rly-here"] and content.released == []
     assert resident.released == ["rly-resident"] and resident.dropped == []
+
+
+def test_a_worker_id_registered_again_is_admitted_again(ca: _TestCa) -> None:
+    records = {
+        "rly-to-h": {
+            "target_node": "nde-b",
+            "target_worker": "wkr-h",
+            "origin_host": _REQUESTER_HOST,
+        },
+    }
+    content = _Uplink("nde-b", records)
+
+    async def run() -> None:
+        listener = NodePeerListener(
+            endpoint="127.0.0.1:0",
+            material=ca.material("node-b", "127.0.0.1"),
+            bridges=cast(Any, {PeerPurpose.CONTENT: content}),
+        )
+        await listener.start()
+        endpoint = f"127.0.0.1:{listener.port}"
+        requester = ca.material("node-a", _REQUESTER_HOST)
+        try:
+            listener.release_worker("wkr-h")
+            listener.admit_worker("wkr-h")
+            await asyncio.sleep(0.05)
+            await _send(endpoint, requester, PeerPurpose.CONTENT, "rly-to-h")
+        finally:
+            await listener.stop()
+
+    asyncio.run(run())
+    assert [frame.session_id for frame in content.frames] == ["rly-to-h"]

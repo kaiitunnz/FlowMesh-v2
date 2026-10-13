@@ -186,6 +186,12 @@ class NodePeerListener:
         if (loop := self._loop) is not None:
             loop.call_soon_threadsafe(self._release, worker_id)
 
+    def admit_worker(self, worker_id: str) -> None:
+        """Forget that a worker id ended once a worker registers under it again, as
+        after the control store lost its id counter. Safe from any thread."""
+        if (loop := self._loop) is not None:
+            loop.call_soon_threadsafe(self._ended.pop, worker_id, None)
+
     def _release(self, worker_id: str) -> None:
         self._ended[worker_id] = None
         while len(self._ended) > _ENDED_MEMORY:

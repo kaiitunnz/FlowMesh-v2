@@ -157,19 +157,29 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # admitted again by the next supervisor, leaving a ghost id behind.
         self._stopping = False
         self._worker_ended: Callable[[str], None] | None = None
+        self._worker_registered: Callable[[str], None] | None = None
 
-    def on_worker_ended(self, listener: Callable[[str], None]) -> None:
+    def set_worker_ended_listener(self, listener: Callable[[str], None]) -> None:
         """Call ``listener`` with each worker id that ends here, from any thread."""
         self._worker_ended = listener
 
+    def set_worker_registered_listener(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener`` with each worker id whose stream registers here."""
+        self._worker_registered = listener
+
     def _ended(self, worker_id: str) -> None:
-        if (listener := self._worker_ended) is None:
+        self._notify(self._worker_ended, worker_id, "ended")
+
+    def _notify(
+        self, listener: Callable[[str], None] | None, worker_id: str, what: str
+    ) -> None:
+        if listener is None:
             return
         try:
             listener(worker_id)
         except Exception:
             self._logger.warning(
-                "worker-ended listener failed for %s", worker_id, exc_info=True
+                "worker-%s listener failed for %s", what, worker_id, exc_info=True
             )
 
     def begin_shutdown(self) -> None:
@@ -492,6 +502,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                 case "REGISTER":
                     # Every event stream opens with one; the root hears it once.
                     registered = True
+                    self._notify(self._worker_registered, worker_id, "registered")
                     worker.set_worker_id(worker_id)
                     worker.set_status(WorkerStatus.RUNNING)
                     if worker_id in self._registered:
@@ -602,9 +613,13 @@ class GrpcServer:
         )
         self._listen_addr = f"{host}:{port}"
 
-    def on_worker_ended(self, listener: Callable[[str], None]) -> None:
+    def set_worker_ended_listener(self, listener: Callable[[str], None]) -> None:
         """Call ``listener`` with each worker id that ends on this node."""
-        self._servicer.on_worker_ended(listener)
+        self._servicer.set_worker_ended_listener(listener)
+
+    def set_worker_registered_listener(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener`` with each worker id that registers on this node."""
+        self._servicer.set_worker_registered_listener(listener)
 
     async def start(self) -> None:
         if self._server is not None:

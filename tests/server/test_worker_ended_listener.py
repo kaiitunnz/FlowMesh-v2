@@ -1,18 +1,20 @@
-"""A supervisor tells its listener each worker id that ends on its node."""
+"""A supervisor tells its listeners each worker id that registers or ends here."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
 
 from server.supervisor.services import grpc_server
-from tests.server.servicer_helpers import ServicerHarness
+from shared.grpc.supervisor.v1 import supervisor_pb2
+from tests.server.servicer_helpers import ServicerHarness, WorkerContext
 
 
 def test_a_released_worker_id_is_announced_as_ended() -> None:
     harness = ServicerHarness()
     ended: list[str] = []
-    harness.servicer.on_worker_ended(ended.append)
+    harness.servicer.set_worker_ended_listener(ended.append)
 
     harness.servicer.worker_id_released("wkr-gone")
 
@@ -25,7 +27,7 @@ def test_a_worker_whose_stream_closed_for_good_is_announced_as_ended(
     monkeypatch.setattr(grpc_server, "_REATTACH_GRACE_SEC", 0.0)
     harness = ServicerHarness()
     ended: list[str] = []
-    harness.servicer.on_worker_ended(ended.append)
+    harness.servicer.set_worker_ended_listener(ended.append)
 
     async def run() -> None:
         worker_id = await harness.register()
@@ -43,6 +45,24 @@ def test_a_failing_listener_never_fails_the_release() -> None:
     def broken(worker_id: str) -> None:
         raise RuntimeError("listener down")
 
-    harness.servicer.on_worker_ended(broken)
+    harness.servicer.set_worker_ended_listener(broken)
     harness.servicer.worker_id_released("wkr-gone")
     assert harness.relay.unregisters() == ["wkr-gone"]
+
+
+def test_a_worker_whose_stream_registers_is_announced() -> None:
+    harness = ServicerHarness()
+    registered: list[str] = []
+    harness.servicer.set_worker_registered_listener(registered.append)
+
+    async def events() -> AsyncIterator[supervisor_pb2.EventMessage]:
+        message = supervisor_pb2.EventMessage()
+        message.payload.update({"type": "REGISTER"})
+        yield message
+
+    async def run() -> str:
+        worker_id = await harness.register()
+        await harness.servicer.PushEvents(events(), cast(Any, WorkerContext()))
+        return worker_id
+
+    assert registered == [asyncio.run(run())]

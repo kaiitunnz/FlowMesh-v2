@@ -595,7 +595,8 @@ def _run_supervisor(
             node_relays.start(loop)
         if peer_listener is not None:
             await peer_listener.start()
-            grpc_server.on_worker_ended(peer_listener.release_worker)
+            grpc_server.set_worker_ended_listener(peer_listener.release_worker)
+            grpc_server.set_worker_registered_listener(peer_listener.admit_worker)
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
 
