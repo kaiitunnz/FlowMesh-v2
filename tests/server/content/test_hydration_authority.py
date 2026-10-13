@@ -1,6 +1,8 @@
 """The control plane's decision to authorize one hydration, and what it refuses."""
 
 import asyncio
+import threading
+from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -20,7 +22,12 @@ from server.network.state import (
     RouteHop,
     TrustedPeerPolicy,
 )
-from shared.content import ContentHydrationGrant, ContentRouteObservation, reference_for
+from shared.content import (
+    ContentHydrationGrant,
+    ContentReference,
+    ContentRouteObservation,
+    reference_for,
+)
 from shared.schemas.network import (
     CONTENT_PEER_PROTOCOL,
     RouteObservationOutcome,
@@ -132,7 +139,7 @@ class _Workers:
 def _authority(
     workers: _Workers,
     *,
-    authorizes: bool = True,
+    authorizes: bool | Callable[[str, str, ContentReference], bool] = True,
     redis: Any = None,
     relay: _FakeRelayRedis | None = None,
     network: Any = None,
@@ -142,7 +149,11 @@ def _authority(
     return ContentHydrationAuthority(
         ContentHolderDirectory(client, record_ttl_sec=300.0),
         cast(Any, workers),
-        authorizes=lambda task_id, worker_id, reference: authorizes,
+        authorizes=(
+            authorizes
+            if callable(authorizes)
+            else lambda task_id, worker_id, reference: authorizes
+        ),
         grant_ttl_sec=60.0,
         sessions=ContentTransferSessions(
             cast(Any, relay or _FakeRelayRedis()), ttl_sec=600.0
@@ -161,12 +172,22 @@ def _denial(workers: _Workers) -> str:
     return str(denied["reason"])
 
 
+def _authorize(
+    authority: ContentHydrationAuthority,
+    worker_id: str,
+    reference: ContentReference,
+    peer_only: bool = False,
+) -> Coroutine[Any, Any, None]:
+    bound = authority.binds("tsk-1", worker_id, reference)
+    return authority.authorize(worker_id, reference, peer_only, bound=bound)
+
+
 def test_a_bound_request_grants_both_ends_the_same_grant() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     assert workers.kinds() == ["content_serve_grant", "content_grant"]
     holder_frame, requester_frame = (payload for _, _, payload in workers.frames)
@@ -186,7 +207,7 @@ def test_the_transfer_record_routes_between_the_two_ends() -> None:
     authority = _authority(workers, redis=control, relay=relay)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     grant = _granted(workers)
     # The record lands where the relay's bridges look a frame's session up.
@@ -206,7 +227,7 @@ def test_a_request_no_binding_authorizes_is_refused() -> None:
     authority = _authority(workers, authorizes=False)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     assert workers.kinds() == ["content_grant_denied"]
     assert _denial(workers) == HydrationDenial.NO_BINDING
@@ -216,7 +237,7 @@ def test_an_object_no_holder_reported_is_refused_as_untracked() -> None:
     workers = _Workers(**{"wkr-2": 5})
     authority = _authority(workers)
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     assert _denial(workers) == HydrationDenial.NOT_TRACKED
 
@@ -227,7 +248,7 @@ def test_a_holder_that_is_gone_is_refused_rather_than_granted() -> None:
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
     workers.retire("wkr-1")
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     assert _denial(workers) == HydrationDenial.HOLDER_UNAVAILABLE
 
@@ -238,7 +259,7 @@ def test_a_holder_that_came_back_as_another_incarnation_is_refused() -> None:
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
     workers.restart("wkr-1")
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     assert _denial(workers) == HydrationDenial.HOLDER_UNAVAILABLE
 
@@ -248,7 +269,7 @@ def test_a_worker_is_never_sent_to_itself_for_an_object() -> None:
     authority = _authority(workers)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-1", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-1", _REFERENCE))
 
     assert _denial(workers) == HydrationDenial.HOLDER_UNAVAILABLE
 
@@ -259,7 +280,7 @@ def test_a_scope_is_part_of_what_a_holder_reported() -> None:
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
     elsewhere = _REFERENCE.model_copy(update={"authorization_scope": "other"})
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", elsewhere))
+    asyncio.run(_authorize(authority, "wkr-2", elsewhere))
 
     assert _denial(workers) == HydrationDenial.NOT_TRACKED
 
@@ -269,7 +290,7 @@ def test_an_unknown_requester_is_answered_with_nothing() -> None:
     authority = _authority(workers)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-9", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-9", _REFERENCE))
 
     assert workers.frames == []
 
@@ -280,10 +301,10 @@ def test_every_grant_is_freshly_minted(field: str) -> None:
     authority = _authority(workers)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
     first = _granted(workers)
     workers.frames.clear()
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
     second = _granted(workers)
 
     assert getattr(first, field) != getattr(second, field)
@@ -294,7 +315,7 @@ def test_a_grant_carries_no_service_admission_identity() -> None:
     authority = _authority(workers)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     fields = set(ContentHydrationGrant.model_fields)
     assert not fields & {"idempotency_key", "invocation_id", "claim_id"}
@@ -389,7 +410,7 @@ def test_a_holder_reached_over_a_peer_transport_is_preferred() -> None:
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
     asyncio.run(authority.record_holding("wkr-3", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     assert _granted(workers).holder_id == "wkr-3"
     carriage = _frame(workers, "content_grant")["carriage"]
@@ -410,7 +431,7 @@ def test_the_route_rides_beside_the_grant_and_the_holder_learns_the_requester() 
     authority = _authority(workers, network=network, relay=relay)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     serve = _frame(workers, "content_serve_grant")
     grant = _frame(workers, "content_grant")
@@ -433,7 +454,7 @@ def test_a_peer_only_read_the_relay_alone_reaches_is_refused_unminted() -> None:
     authority = _authority(workers, network=_Network({}), relay=relay)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE, True))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE, True))
 
     assert workers.kinds() == ["content_grant_denied"]
     assert _denial(workers) == HydrationDenial.NO_PEER_ROUTE
@@ -447,7 +468,7 @@ def test_a_requester_that_dials_no_peer_is_routed_over_the_relay() -> None:
     authority = _authority(workers, network=network)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     assert _frame(workers, "content_grant")["carriage"]["routes"] == []
     assert _frame(workers, "content_serve_grant")["requester_host"] == ""
@@ -459,7 +480,7 @@ def test_a_probe_route_never_carries_a_transfer() -> None:
     authority = _authority(workers, network=network)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
 
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE, True))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE, True))
 
     assert _denial(workers) == HydrationDenial.NO_PEER_ROUTE
 
@@ -469,7 +490,7 @@ def test_only_the_routed_requester_reports_on_a_transfers_path() -> None:
     network = _Network({"wkr-1": [Transport.WORKER_DIRECT, Transport.CONTROL_RELAY]})
     authority = _authority(workers, network=network)
     asyncio.run(authority.record_holding("wkr-1", [_HELD]))
-    asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
     session = _granted(workers).transfer_session_id
 
     def report(worker_id: str, outcome: str, session_id: str = session) -> None:
@@ -506,3 +527,31 @@ def test_requests_from_the_events_thread_run_on_the_bound_loop() -> None:
 
     asyncio.run(run())
     assert workers.kinds()[:2] == ["content_serve_grant", "content_grant"]
+
+
+def test_the_binding_check_runs_on_the_thread_that_hands_the_request_over() -> None:
+    """The check takes the runtime lock store writes hold, so never on the loop."""
+    workers = _peers(**{"wkr-1": 3, "wkr-2": 5})
+    checked_on: list[int] = []
+
+    def check(task_id: str, worker_id: str, reference: ContentReference) -> bool:
+        checked_on.append(threading.get_ident())
+        return True
+
+    authority = _authority(workers, authorizes=check)
+
+    async def run() -> int:
+        loop = asyncio.get_running_loop()
+        authority.bind_loop(loop)
+        await loop.run_in_executor(None, lambda: authority.on_holding("wkr-1", [_HELD]))
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if workers.frames:
+                break
+            await loop.run_in_executor(
+                None, lambda: authority.on_request("wkr-2", "tsk-1", _REFERENCE)
+            )
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(run())
+    assert checked_on and loop_thread not in checked_on

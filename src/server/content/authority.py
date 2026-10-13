@@ -142,8 +142,17 @@ class ContentHydrationAuthority:
         reference: ContentReference,
         peer_only: bool = False,
     ) -> None:
-        """Take a worker's hydration request off the calling thread."""
-        self._submit(self.authorize(worker_id, task_id, reference, peer_only))
+        """Take a worker's hydration request off the calling thread.
+
+        The binding check reads the task runtime under its own lock, which other
+        threads hold across store writes, so it runs here rather than on the loop.
+        """
+        bound = self.binds(task_id, worker_id, reference)
+        self._submit(self.authorize(worker_id, reference, peer_only, bound=bound))
+
+    def binds(self, task_id: str, worker_id: str, reference: ContentReference) -> bool:
+        """Whether the task the worker runs is bound to exactly this reference."""
+        return self._authorizes(task_id, worker_id, reference)
 
     def on_route_observation(
         self, worker_id: str, observation: ContentRouteObservation
@@ -189,11 +198,14 @@ class ContentHydrationAuthority:
     async def authorize(
         self,
         worker_id: str,
-        task_id: str,
         reference: ContentReference,
         peer_only: bool = False,
+        *,
+        bound: bool,
     ) -> None:
         """Grant one hydration, or relay the reason it is refused.
+
+        ``bound`` is the binding check's answer for the requesting task.
 
         With ``peer_only`` the requester reads the object over a peer transport or not
         at all, so a holder the relay alone reaches is refused rather than granted.
@@ -203,7 +215,7 @@ class ContentHydrationAuthority:
             # Nothing to answer: a request from a worker the registry no longer knows
             # has no attachment to relay a grant or a refusal over.
             return
-        if not self._authorizes(task_id, worker_id, reference):
+        if not bound:
             await self._deny(requester, reference, HydrationDenial.NO_BINDING)
             return
         reported = await self._directory.holders(
