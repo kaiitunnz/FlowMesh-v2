@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from shared.content import SharedFilesystemObjectStore, TreeManifest
+from shared.tasks.artifact_binding import ArtifactKind
 from shared.tasks.components.exports import EXPORT_MISSING, EXPORT_UNSAFE, AgentExport
+from worker.content.artifacts import ArtifactPublisher
 from worker.content.exports import ExportFailed, spool_exports
 
 
@@ -66,6 +69,22 @@ def test_a_later_completion_replaces_an_earlier_copy(
     spool_exports(workspace, [AgentExport(path="out")], artifacts)
 
     assert _files(artifacts) == {"out/report.md": b"# report\n"}
+
+
+def test_a_re_driven_completion_publishes_exactly_what_it_exported(
+    tmp_path: Path, workspace: Path, artifacts: Path
+) -> None:
+    spool_exports(workspace, [AgentExport(path="out")], artifacts)
+    (workspace / "out" / "nested" / "table.csv").unlink()
+    (artifacts / "earlier.txt").write_text("left by an earlier attempt")
+
+    spool_exports(workspace, [AgentExport(path="out")], artifacts)
+    store = SharedFilesystemObjectStore(tmp_path / "store")
+    bindings = ArtifactPublisher(store, "org").publish_final(artifacts, {})
+
+    assert [(b.name, b.kind) for b in bindings] == [("out", ArtifactKind.TREE)]
+    manifest = TreeManifest.decode(store.fetch(bindings[0].reference))
+    assert [member.path for member in manifest.members] == ["report.md"]
 
 
 def test_a_missing_path_is_missing(workspace: Path, artifacts: Path) -> None:

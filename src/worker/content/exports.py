@@ -5,7 +5,8 @@ writer the step started is proved stopped, and lands under the task's artifacts,
 the task publishes it like any other artifact. Anything an agent could plant to reach
 past its workspace or to alias other bytes ends the copy refused: a link, a special
 file, a file with a second hard link, an in-flight write, or a path the fabric never
-exports. A declared path that does not exist ends it as missing.
+exports. A declared path that does not exist ends it as missing. An agent's artifacts
+are its exports alone, so each copy owns the task's artifacts directory.
 """
 
 import os
@@ -52,7 +53,8 @@ def spool_exports(
     """Copy each export from ``workspace`` to ``artifacts_dir`` under its name.
 
     The copies land whole or not at all: they are staged beside the artifacts and
-    replace any earlier copy under the same names only once every export copied.
+    replace everything an earlier completion left there only once every export
+    copied, so what the task publishes is exactly what this completion exported.
     """
     staging = artifacts_dir.parent / ".export-staging"
     shutil.rmtree(staging, ignore_errors=True)
@@ -64,15 +66,16 @@ def spool_exports(
                     _copy_export(workspace_fd, export, staging)
         except (FileNotFoundError, PathRefused) as exc:
             raise ExportFailed(EXPORT_MISSING, f"the workspace is unreadable: {exc}")
-        for export in exports:
-            name = export.published_name
-            dest = artifacts_dir / name
-            if dest.is_dir() and not dest.is_symlink():
-                shutil.rmtree(dest)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        for entry in artifacts_dir.iterdir():
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
             else:
-                dest.unlink(missing_ok=True)
+                entry.unlink()
+        for export in exports:
+            dest = artifacts_dir / export.published_name
             dest.parent.mkdir(parents=True, exist_ok=True)
-            (staging / name).rename(dest)
+            (staging / export.published_name).rename(dest)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
