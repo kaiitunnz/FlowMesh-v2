@@ -3,9 +3,8 @@
 FlowMesh workers communicate with a per-node **supervisor** that relays tasks
 and telemetry to the central server. Each worker opens a gRPC connection to its
 supervisor, receives assignments, executes them via the appropriate executor
-(Transformers, TRL, vLLM, RAG, agents, etc.), stores each result in the shared
-content store, and keeps optional artifacts in shared storage or uploads them to
-the server over HTTP.
+(Transformers, TRL, vLLM, RAG, agents, etc.), and publishes each result and the
+task's artifacts in the shared content store.
 
 ## Quick Start (local)
 ### 1. Install dependencies with uv
@@ -29,7 +28,7 @@ uv sync --group runtime-worker-core --group runtime-inference
 ```bash
 export SUPERVISOR_GRPC_TARGET="localhost:50051" # supervisor gRPC host:port
 export RESULTS_DIR=./results
-export FLOWMESH_BASE_URL="http://localhost:8000"  # required for HTTP artifact uploads
+export FLOWMESH_BASE_URL="http://localhost:8000"  # trace uploads and SSH input bundles
 uv run python worker/main.py
 ```
 At startup the worker:
@@ -38,8 +37,8 @@ At startup the worker:
 2. Streams heartbeats (load/power metrics) through the supervisor.
 3. Listens for tasks delivered over the supervisor gRPC stream, selects the
    right executor, and writes outputs under `RESULTS_DIR/<task_id>/`.
-4. Archives `final_model/` or `final_lora/` and uploads the bundle when the task
-   requests HTTP artifact delivery.
+4. Publishes what the task leaves under `RESULTS_DIR/<task_id>/artifacts/` in the
+   shared content store before reporting it done.
 
 ## Environment variables
 | Variable | Default | Description |
@@ -56,7 +55,7 @@ At startup the worker:
 | `WORKER_TAGS` | empty | Comma-separated tags used by the scheduler. |
 | `LOG_LEVEL` | `INFO` | Worker log level. |
 | `WORKER_COST_PER_HOUR` | `1.0` | Hourly cost in USD; reported with heartbeats. |
-| `FLOWMESH_BASE_URL` | `http://localhost:8000` | Server URL used to build artifact download links and to hydrate cross-node SSH input bundles. |
+| `FLOWMESH_BASE_URL` | `http://localhost:8000` | Server URL the worker uploads a task's trace files to and hydrates cross-node SSH input bundles from; unset, traces stay local. |
 | `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` | empty | Network bandwidth the worker advertises. |
 | `WORKER_HB_FILE` | – | Full path to the worker heartbeat file. |
 | `MODEL_CLEANUP_AFTER_UPLOAD` | `false` | Delete a task's local artifacts once they are published. |
@@ -68,36 +67,28 @@ At startup the worker:
 
 > The heartbeat TTL is computed automatically as `max(HEARTBEAT_INTERVAL_SEC * 4, 120)`.
 
-> When a task sets `spec.output.destination.type: http`, configure
-> `FLOWMESH_BASE_URL` so the worker can upload artifacts to
-> `POST /api/v1/results/{task_id}/files` and expose the generated download link.
+> A task's trace files upload to the server when it ends, whenever `FLOWMESH_BASE_URL`
+> is set and the task wrote one; a failed upload is logged and does not fail the task.
 
 ## Output directories
 - Every task receives a dedicated subdirectory under `RESULTS_DIR`.
 - Executors write their JSON summary to `<task_id>/results.json`; the worker also
   stores it in the shared content store before reporting the task done, and that
   stored copy is what the server serves.
-- Training executors produce checkpoints and, when HTTP uploads are enabled,
-  create `final_model.tar.gz` or `final_lora.tar.gz`.
-
-## HTTP artifact workflow
-1. Stage 1 declares `spec.output.destination.type: http`.
-2. The worker keeps a local copy and uploads the archive to the orchestrator.
-3. The orchestrator serves the bundle at
-   `GET /api/v1/results/{task_id}/files/<archive>`.
-4. Downstream stages reference the URL via `${stage.final_model_archive}`
-   (or the LoRA equivalent).
-
-Prefer shared storage? Point both the orchestrator and workers at the same
-mount and disable HTTP uploads—the executors still emit artifacts locally and
-templates can reference absolute paths.
+- Executors write their artifacts under `<task_id>/artifacts/`. The worker
+  publishes them in the shared content store: a file as one object, a directory as a
+  tree, and a model archive the result names (`final_model.tar.gz`,
+  `final_lora.tar.gz`) as an archive view over its tree, built from the tree when it
+  is read. A training run publishes each checkpoint it saves as revision `step-<n>`.
+- A downstream stage names an upstream artifact with a placeholder such as
+  `${train.final_model_archive}`; its worker hydrates the artifact through its
+  content cache, a peer's copy, or the store, and the spec reads its local path.
 
 ## Debugging tips
-- Inspect `worker.log` for executor output and upload diagnostics.
+- Inspect `worker.log` for executor output and publication diagnostics.
 - Tail the server logs to confirm worker registration, gRPC connections, and forwarded telemetry.
-- If a pipeline stalls, confirm the Stage 1 task produced the expected
-  `final_*_archive` URL and that the orchestrator results directory contains the
-  uploaded `.tar.gz`.
+- If a pipeline stalls, list what the upstream task published with
+  `flowmesh result artifacts <task_id>`.
 
 ## SSH Tasks
 

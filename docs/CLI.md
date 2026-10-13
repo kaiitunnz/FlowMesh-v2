@@ -16,7 +16,7 @@ flowmesh task     {list, info, watch, stop, logs}
 flowmesh worker   {list, info, cordon, uncordon, cordons}
 flowmesh node     {list, info, worker {list, start, stop}}
 flowmesh ssh      {connect, run, proxy, connections}
-flowmesh result   {fetch, download}
+flowmesh result   {fetch, download, artifacts}
 flowmesh trace    {fetch, analyze, tree, aggregate}
 flowmesh system   {metrics}
 flowmesh stack    {build, push, pull, pullall, up, down, restart, ps, logs}
@@ -48,7 +48,10 @@ Pull results / artifacts:
 
 ```bash
 flowmesh result fetch <tsk-id>                                  # JSON result
-flowmesh result download <tsk-id> --include all -o bundle.tgz   # tar.gz bundle
+flowmesh result fetch <tsk-id> -o out/                          # result and its artifacts
+flowmesh result artifacts <tsk-id>                              # what the task published
+flowmesh result download <tsk-id> model/config.json -o out/     # chosen artifacts
+flowmesh result download <tsk-id> ckpt -o out/ --revision step-200  # a checkpoint
 flowmesh workflow outputs <wfl-id> --output <name>              # published members
 flowmesh workflow output <wfl-id> <name> --scope <scope> --key 0  # one member's value
 ```

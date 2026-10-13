@@ -59,6 +59,18 @@ An inference producer reports every item with its `index`, `prompt` and `output`
 task fails before the result is stored; stored results read through the tolerant
 `InferenceItem`.
 
+## Artifact publication
+
+An executor writes its artifacts under `out_dir/artifacts/`, and the worker publishes
+them in the shared content store when the executor returns, before it reports the task
+done: each top-level file as one object and each top-level directory as a tree whose
+manifest names its files. A result field ending in `_archive` whose ref names a
+directory with `.tar.gz` appended (`final_model_archive`, `final_lora_archive`) declares
+an archive view of that tree: a deterministic stored-block `.tar.gz` framing of the
+tree's verified members, which the server builds as it streams a download. A training executor's checkpoints publish while it runs: each one the trainer
+saves becomes the `checkpoints` artifact at revision `step-<n>`, which a client
+downloads with `revision=step-<n>`.
+
 ## Agent-episode harness backends
 
 Every agent runs through the dependency-light `AgentEpisodeExecutor`: one dispatch is one

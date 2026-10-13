@@ -24,7 +24,7 @@ for ev in client.workflows.stream_logs(wf.workflow_id):
 
 # Inspect tasks and pull a result.
 tasks = client.tasks.list(workflow_id=wf.workflow_id)
-result = client.results.get(tasks[0].task_id)
+result = client.results.retrieve(tasks[0].task_id)
 ```
 
 ## Async client
@@ -54,9 +54,12 @@ async with AsyncFlowMesh(base_url="...", api_key="...") as client:
   pages a workflow's published members by cursor, and
   `client.workflows.get_output(wf_id, name, scope=..., key=...)` returns one; a
   spawn whose input failed has one failed member, fetched by name alone.
-- **Pull artifacts** — `client.results.get(task_id)` for the result
-  payload, `client.results.download_bundle(task_id, include="all")`
-  for the tar.gz.
+- **Pull results and artifacts** — `client.results.retrieve(task_id)` for the
+  result payload, `client.results.list_artifacts(task_id)` for what the task
+  published, `client.results.download_file(task_id, path, output_path)` for one
+  artifact, and `client.results.get_bundle(task_id, output_path, include=["all"])`
+  for the tar.gz. Each artifact read takes `revision=` (`final` by default, or a
+  checkpoint's `step-<n>`).
 - **Fetch and analyze traces** — `client.traces.fetch(wf_id, "spans")`
   yields JSONL rows; `client.traces.analyze(wf_id)` returns a profile
   summary.
