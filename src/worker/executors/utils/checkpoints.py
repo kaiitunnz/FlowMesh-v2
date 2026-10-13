@@ -115,22 +115,10 @@ def resolve_checkpoint_load(
                 log.info("Using hydrated checkpoint: %s", local)
             return local
         if not url:
-            task_id = load_cfg.get("task_id")
-            filename = load_cfg.get("filename")
-            base_url = load_cfg.get("base_url") or os.getenv("FLOWMESH_BASE_URL")
-
-            if base_url and task_id and filename:
-                from urllib.parse import urljoin
-
-                base = base_url.rstrip("/") + "/"
-                artifact_path = f"api/v1/results/{task_id}/files/{filename}"
-                load_cfg = dict(load_cfg)
-                load_cfg["url"] = urljoin(base, artifact_path)
-            else:
-                raise ExecutionError(
-                    "checkpoint.load.url is required for HTTP checkpoints (set "
-                    "base_url or FLOWMESH_BASE_URL)"
-                )
+            raise ExecutionError(
+                "checkpoint.load needs a url, or the task_id and filename of a "
+                "published artifact"
+            )
         log = logger or load_cfg.get("_logger")
         if log:
             log.info(

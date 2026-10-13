@@ -702,6 +702,9 @@ class Dispatcher:
             rendered_task, upstream_results = self._resolve_stage_references(
                 task_id, task, context, scoped, artifact_inputs
             )
+            rendered_task = self._render_checkpoint_load(
+                record, rendered_task, artifact_inputs
+            )
         except StageReferenceNotReady as exc:
             self._logger.debug(
                 "Task %s waiting on stage artifacts: %s", task_id, scrub(str(exc))
@@ -1480,6 +1483,42 @@ class Dispatcher:
                 f"task {context.task_id} published no artifact named {path!r}"
             )
         return artifact_inputs.token(*found)
+
+    def _render_checkpoint_load(
+        self,
+        record: TaskRecord,
+        task: TaskEnvelopeStrict,
+        artifact_inputs: ArtifactInputs,
+    ) -> TaskEnvelopeStrict:
+        """The task with a checkpoint it loads by ``task_id`` and ``filename`` named
+        by the token of that task's published artifact, which its worker hydrates."""
+        checkpoint = getattr(task.spec, "checkpoint", None)
+        if not isinstance(checkpoint, dict):
+            return task
+        load = checkpoint.get("load")
+        if (
+            not isinstance(load, dict)
+            or load.get("url")
+            or not (producer := load.get("task_id"))
+            or not (filename := load.get("filename"))
+        ):
+            return task
+        bindings = self._runtime.artifact_bindings(str(producer)) or {}
+        found = resolve_artifact_input(bindings, str(filename))
+        if found is None or found[0].reference.authorization_scope != record.org_id:
+            raise ValueError(
+                f"task {producer} published no artifact named {filename!r}"
+            )
+        rendered = {
+            key: value
+            for key, value in load.items()
+            if key not in ("task_id", "filename", "base_url")
+        }
+        rendered["url"] = artifact_inputs.token(*found)
+        spec = task.spec.model_copy(
+            update={"checkpoint": {**checkpoint, "load": rendered}}
+        )
+        return task.model_copy(update={"spec": spec})
 
     def _upstream_artifacts(
         self, bindings: Iterable[ResultBinding]
