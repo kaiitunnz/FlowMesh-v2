@@ -146,6 +146,7 @@ class Runner:
         model_api_key: str | None = None,
         model_egress_timeout_sec: float = 120.0,
         peer_enabled: bool = False,
+        peer_connect_budget_sec: float = 5.0,
         peer_material: MutualTlsMaterial | None = None,
         peer_listener_sock: socket.socket | None = None,
         telemetry: TelemetryConfig | None = None,
@@ -161,6 +162,7 @@ class Runner:
         self.default_executor = default_executor
         self._input_hydrator = TaskInputHydrator(lifecycle.content_plane)
         self._peer_enabled = peer_enabled
+        self._peer_connect_budget_sec = peer_connect_budget_sec
         self._peer_material = peer_material
         self._peer_listener_sock = peer_listener_sock
         # How long to keep an executor alive (seconds) after its last use before calling
@@ -545,6 +547,7 @@ class Runner:
             delete_request=self.lifecycle.resident_requests.delete,
             peer_enabled=self._peer_enabled,
             peer_material=self._peer_material,
+            connect_budget_sec=self._peer_connect_budget_sec,
             peer_listener_sock=self._peer_listener_sock,
             lookup_local_engine=self.lifecycle.local_engines.lookup,
             local_engine_live=self.lifecycle.local_engines.serves,

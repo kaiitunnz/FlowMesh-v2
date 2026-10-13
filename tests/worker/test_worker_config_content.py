@@ -22,3 +22,11 @@ def test_a_transfer_window_below_one_frame_is_held_to_one(
     monkeypatch.setenv("CONTENT_TRANSFER_WINDOW_BYTES", "1024")
 
     assert WorkerConfig.from_env().content_transfer_window_bytes == CHUNK_BYTES
+
+
+def test_a_worker_reads_the_peer_connect_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NETWORK_PLANE_CONNECT_BUDGET_SEC", "2.5")
+
+    assert WorkerConfig.from_env().peer_connect_budget_sec == 2.5

@@ -97,6 +97,7 @@ class WorkerConfig:
     container_name: str | None = None
     ssh_network_name: str | None = None
     peer_enabled: bool = False
+    peer_connect_budget_sec: float = 5.0
     peer_disable_mtls: bool = False
     peer_tls_ca_b64: str | None = None
     peer_tls_cert_b64: str | None = None
@@ -291,6 +292,9 @@ class WorkerConfig:
             supervisor_grpc_target=supervisor_grpc_target,
             supervisor_grpc_tls_ca_b64=supervisor_grpc_tls_ca_b64,
             peer_enabled=peer_enabled,
+            peer_connect_budget_sec=parse_float_env(
+                "NETWORK_PLANE_CONNECT_BUDGET_SEC", 5.0
+            ),
             peer_disable_mtls=peer_disable_mtls,
             peer_tls_ca_b64=peer_tls_ca_b64,
             peer_tls_cert_b64=peer_tls_cert_b64,

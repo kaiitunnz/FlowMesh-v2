@@ -350,6 +350,9 @@ class WorkerAdapter(ABC):
             "SUPERVISOR_GRPC_TARGET": config.supervisor_grpc_target,
             "SUPERVISOR_GRPC_TLS_CA_B64": env.SERVER_GRPC_TLS_CA_B64,
             "NETWORK_PLANE_PEER_ENABLED": to_env_str(env.NETWORK_PLANE_PEER_ENABLED),
+            "NETWORK_PLANE_CONNECT_BUDGET_SEC": to_env_str(
+                env.NETWORK_PLANE_CONNECT_BUDGET_SEC
+            ),
             "NETWORK_PLANE_PEER_DISABLE_MTLS": to_env_str(
                 env.NETWORK_PLANE_PEER_DISABLE_MTLS
             ),
