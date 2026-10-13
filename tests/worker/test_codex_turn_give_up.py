@@ -361,7 +361,7 @@ def test_a_give_up_during_the_seal_keeps_the_searches_the_turn_asked_for(
             lambda self, dispatch: (MagicMock(), _Holder()),
         ),
         patch.object(aee, "_attachment", lambda dispatch: MagicMock()),
-        patch.object(Runner, "_write_results", lambda self, msg, out_dir, out: {}),
+        patch.object(Runner, "_write_results", lambda self, msg, out_dir, out, *_: {}),
         patch.object(runner_module, "_STOP_BUDGET_SEC", _STOP_BUDGET_SEC),
         patch.object(runner_module, "_BOUNDARY_DRAIN_SEC", _BOUNDARY_DRAIN_SEC),
     ):
