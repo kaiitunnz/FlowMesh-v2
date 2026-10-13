@@ -11,11 +11,17 @@ transfers runs one bridge per keyspace.
 """
 
 import logging
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from shared.network.frame_stream import FrameSink
-from shared.network.relay_frame import RESIDENT_FRAME_KIND, RelayDirection, RelayFrame
+from shared.network.relay_frame import (
+    RESIDENT_FRAME_KIND,
+    RelayDirection,
+    RelayFrame,
+    RelayFrameKind,
+)
 
 from .reverse_relay import (
     BinaryRedis,
@@ -26,6 +32,10 @@ from .reverse_relay import (
 
 # Enqueues a dispatch payload straight to a co-located worker; True if it is local.
 LocalEnqueue = Callable[[str, dict[str, Any]], Awaitable[bool]]
+
+# Far more sessions than a node's dialed connections end while their worker could still
+# be producing frames for one.
+_DROPPED_MEMORY = 4096
 
 
 class RelayWorkerBridge:
@@ -47,6 +57,7 @@ class RelayWorkerBridge:
         self._enqueue_local = enqueue_local
         self._frame_kind = frame_kind
         self._peers: dict[str, FrameSink] = {}
+        self._dropped: OrderedDict[str, None] = OrderedDict()
         self._logger = logger or logging.getLogger("relay-worker-bridge")
 
     async def on_frame(self, frame: RelayFrame) -> None:
@@ -97,6 +108,28 @@ class RelayWorkerBridge:
         if self._peers.get(session_id) is sink:
             del self._peers[session_id]
 
+    async def drop_peer(self, session_id: str, sink: FrameSink) -> None:
+        """End a session whose dialed connection is gone, at the worker serving it.
+
+        The worker is cancelled, and anything it still produces for the session is
+        discarded here: its origin read it only over that connection.
+        """
+        if self._peers.get(session_id) is not sink:
+            return
+        del self._peers[session_id]
+        self._dropped[session_id] = None
+        while len(self._dropped) > _DROPPED_MEMORY:
+            self._dropped.popitem(last=False)
+        await self.on_frame(
+            RelayFrame(
+                kind=RelayFrameKind.CANCEL,
+                session_id=session_id,
+                correlation_id="",
+                operation_id="",
+                direction=RelayDirection.ORIGIN_TO_TARGET,
+            )
+        )
+
     async def publish_up(self, frame: RelayFrame) -> None:
         """Return a worker's produced frame to the origin that is waiting for it.
 
@@ -106,5 +139,7 @@ class RelayWorkerBridge:
         """
         if (sink := self._peers.get(frame.session_id)) is not None:
             await sink.send(frame)
+            return
+        if frame.session_id in self._dropped:
             return
         await self._streams.publish_up(self._node_id, frame)

@@ -23,7 +23,8 @@ rather than waiting out its stall deadline for frames a gone worker will never s
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.network.frame_stream import FrameStreamError, PeerPurpose
@@ -53,12 +54,14 @@ class _UplinkConnection(ConnectionHandler):
         peer: PeerContext,
         on_close: Callable[["_UplinkConnection"], None],
         ended: Callable[[str], bool],
+        defer: Callable[[Coroutine[Any, Any, None]], None],
     ) -> None:
         self._bridge = bridge
         self._sink = sink
         self._peer = peer
         self._on_close = on_close
         self._ended = ended
+        self._defer = defer
         self._sessions: set[str] = set()
         # The workers this connection's content sessions are served by.
         self.targets: set[str] = set()
@@ -90,8 +93,14 @@ class _UplinkConnection(ConnectionHandler):
         self._sink.abort()
 
     def close(self) -> None:
-        for session_id in self._sessions:
-            self._bridge.release_peer(session_id, self._sink)
+        if self._peer.purpose is PeerPurpose.CONTENT:
+            # The holder is still streaming to a requester that can no longer read it:
+            # cancel it there, and keep its frames off the root relay.
+            for session_id in self._sessions:
+                self._defer(self._bridge.drop_peer(session_id, self._sink))
+        else:
+            for session_id in self._sessions:
+                self._bridge.release_peer(session_id, self._sink)
         self._sink.close()
         self._on_close(self)
 
@@ -116,6 +125,7 @@ class NodePeerListener:
         self._connections: set[_UplinkConnection] = set()
         # Workers that ended here, newest last; an ended id is never registered again.
         self._ended: OrderedDict[str, None] = OrderedDict()
+        self._deferred: set[asyncio.Task[None]] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._listener = MutualTlsFrameListener(
             material=material,
@@ -145,10 +155,21 @@ class NodePeerListener:
             peer,
             on_close=self._connections.discard,
             ended=self._ended.__contains__,
+            defer=self._defer,
         )
         if peer.purpose is PeerPurpose.CONTENT:
             self._connections.add(connection)
         return connection
+
+    def _defer(self, step: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.get_running_loop().create_task(step)
+        self._deferred.add(task)
+        task.add_done_callback(self._settled)
+
+    def _settled(self, task: asyncio.Task[None]) -> None:
+        self._deferred.discard(task)
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            self._logger.warning("could not end a dropped peer session: %s", exc)
 
     def release_worker(self, worker_id: str) -> None:
         """End every content connection carrying a session to a worker that ended.

@@ -32,6 +32,8 @@ class _Uplink:
         self.frames: list[RelayFrame] = []
         self.bound: list[str] = []
         self.sinks: dict[str, Any] = {}
+        self.released: list[str] = []
+        self.dropped: list[str] = []
 
     async def session(self, session_id: str) -> dict[str, str]:
         return self._records.get(session_id, {})
@@ -41,7 +43,10 @@ class _Uplink:
         self.sinks[session_id] = sink
 
     def release_peer(self, session_id: str, sink: Any) -> None:
-        return None
+        self.released.append(session_id)
+
+    async def drop_peer(self, session_id: str, sink: Any) -> None:
+        self.dropped.append(session_id)
 
     async def on_frame(self, frame: RelayFrame) -> None:
         self.frames.append(frame)
@@ -313,3 +318,27 @@ def test_a_dialer_that_stops_reading_never_holds_the_worker_answering_it(
     # dropped past its bound rather than holding the sender.
     assert elapsed < 1.0
     assert tail == b""
+
+
+def test_a_closed_content_connection_drops_its_sessions_and_a_resident_one_releases(
+    ca: _TestCa,
+) -> None:
+    records = {
+        "rly-here": {"target_node": "nde-b", "origin_host": _REQUESTER_HOST},
+    }
+    content = _Uplink("nde-b", records)
+    resident = _Uplink("nde-b", {})
+
+    async def run() -> None:
+        bridges = {PeerPurpose.CONTENT: content, PeerPurpose.RESIDENT: resident}
+        async with _listener(ca, bridges) as endpoint:
+            requester = ca.material("node-a", _REQUESTER_HOST)
+            await _send(endpoint, requester, PeerPurpose.CONTENT, "rly-here")
+            await _send(endpoint, requester, PeerPurpose.RESIDENT, "rly-resident")
+            async with asyncio.timeout(5.0):
+                while not (content.dropped and resident.released):
+                    await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    assert content.dropped == ["rly-here"] and content.released == []
+    assert resident.released == ["rly-resident"] and resident.dropped == []
