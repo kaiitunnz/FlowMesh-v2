@@ -137,7 +137,13 @@ class _Fabric:
         await self.listener.start_on_socket(sock)
         self.endpoint = f"127.0.0.1:{self.listener.port}"
 
-    def _grant(self, reference: ContentReference, task_id: str, peer_only: bool):
+    def _grant(
+        self,
+        reference: ContentReference,
+        task_id: str,
+        peer_only: bool,
+        request_id: int,
+    ) -> None:
         grant = ContentHydrationGrant(
             grant_id=new_hydration_grant_id(),
             reference=reference,
@@ -164,7 +170,9 @@ class _Fabric:
             fresh_for_sec=30.0,
         )
         self.holder.accept_grant(grant, _REQUESTER_HOST)
-        asyncio.get_running_loop().call_soon(self.client.deliver_grant, grant, carriage)
+        asyncio.get_running_loop().call_soon(
+            self.client.deliver_grant, request_id, grant, carriage
+        )
 
     async def read(self, reference: ContentReference, peer_only: bool = False) -> bytes:
         staging = self.tmp_path / "staging"
@@ -381,7 +389,7 @@ async def test_one_grant_fetched_twice_at_once_is_served_once(
                 client.hydrate_to_file(reference, "tsk-1", staging, True)
             )
             await asyncio.sleep(0)
-            client.deliver_grant(grant, carriage)
+            client.deliver_grant(1, grant, carriage)
             return (await reading).read_bytes()
 
         outcomes = await asyncio.gather(fetch(), fetch(), return_exceptions=True)

@@ -348,9 +348,12 @@ def _build_content_plane(
             ),
             push_frame=client.push_content_frame,
             request_grant=(
-                lambda reference, task_id, peer_only: (
+                lambda reference, task_id, peer_only, request_id: (
                     client.push_content_hydration_request(
-                        reference.model_dump(mode="json"), task_id, peer_only
+                        reference.model_dump(mode="json"),
+                        task_id,
+                        peer_only,
+                        request_id,
                     )
                 )
             ),

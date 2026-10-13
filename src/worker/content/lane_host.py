@@ -396,6 +396,7 @@ class ContentLaneHost:
         if self._client is not None:
             carriage = frame.get("carriage")
             self._client.deliver_grant(
+                int(frame["request_id"]),
                 ContentHydrationGrant.model_validate(frame["grant"]),
                 (
                     ContentCarriagePlan.model_validate(carriage)
@@ -407,8 +408,7 @@ class ContentLaneHost:
     def _on_denial(self, frame: dict[str, Any]) -> None:
         if self._client is not None:
             self._client.deliver_denial(
-                ContentReference.model_validate(frame["reference"]),
-                str(frame.get("reason") or "denied"),
+                int(frame["request_id"]), str(frame.get("reason") or "denied")
             )
 
     def _on_serve_grant(self, frame: dict[str, Any]) -> None:

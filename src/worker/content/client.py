@@ -21,9 +21,9 @@ hydration failure and the consumer's own recovery decides what follows.
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import time
-from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -51,8 +51,8 @@ from shared.utils.atomic import temp_path
 from .peer import ContentPeerDialer, PeerConnection, PeerUnreachable
 
 # Asks the control plane to authorize hydrating one reference for one task, over a peer
-# transport only when the flag is set.
-RequestGrant = Callable[[ContentReference, str, bool], None]
+# transport only when the flag is set; control answers with the request's number.
+RequestGrant = Callable[[ContentReference, str, bool, int], None]
 
 # Reports the objects this worker holds, each by its scope and digest, to the holder
 # directory. One call carries a whole report so a periodic re-report is one message.
@@ -62,11 +62,8 @@ AnnounceHolding = Callable[[Sequence[tuple[str, str]]], None]
 # written in large blocks off the loop rather than frame by frame on it.
 _WRITE_BUFFER_BYTES = 1 << 20
 
-# Keyed by the object a request waits on: control answers a grant or a typed denial
-# naming that same reference, so an answer finds its request by what it is about.
-_WaitKey = tuple[str, str]
 _Granted = tuple[ContentHydrationGrant, ContentCarriagePlan | None]
-_Answer = asyncio.Future["_Granted | str"]
+_Answer = asyncio.Future[_Granted | str]
 
 # A transfer that broke after its fetch is tried again under one fresh grant at most.
 _TRANSFER_ATTEMPTS = 2
@@ -103,7 +100,10 @@ class ContentHydrationClient:
         self._last_progress = time.monotonic()
         self._window_bytes = window_bytes
         self._logger = logger or logging.getLogger("content-hydration")
-        self._waiters: dict[_WaitKey, deque[_Answer]] = {}
+        # Each request waits under its own number, which control echoes beside its
+        # answer, so two requests for one object never take each other's.
+        self._waiters: dict[int, _Answer] = {}
+        self._requests = itertools.count(1)
         self._sessions: dict[str, FramedRelaySession] = {}
 
     @property
@@ -230,13 +230,12 @@ class ContentHydrationClient:
         two tasks reading the same object each ask, and each takes the grant minted for
         it rather than sharing one that the second would find already consumed.
         """
-        key = (reference.authorization_scope, reference.content_digest)
+        request_id = next(self._requests)
         pending: _Answer = asyncio.get_running_loop().create_future()
-        waiting = self._waiters.setdefault(key, deque())
-        waiting.append(pending)
         # Armed before the request goes up, so an answer that comes straight back finds
         # a waiter rather than arriving at nobody.
-        self._request_grant(reference, task_id, peer_only)
+        self._waiters[request_id] = pending
+        self._request_grant(reference, task_id, peer_only, request_id)
         try:
             answer = await asyncio.wait_for(pending, self._timeout)
         except TimeoutError as exc:
@@ -244,7 +243,7 @@ class ContentHydrationClient:
                 f"no hydration grant for {reference.content_digest} in time"
             ) from exc
         finally:
-            self._forget(key, pending)
+            self._waiters.pop(request_id, None)
         if isinstance(answer, str):
             raise GrantDenied(
                 f"hydration of {reference.content_digest} denied: {answer}"
@@ -292,44 +291,22 @@ class ContentHydrationClient:
 
     def deliver_grant(
         self,
+        request_id: int,
         grant: ContentHydrationGrant,
         carriage: ContentCarriagePlan | None = None,
     ) -> None:
-        """Hand a control-minted grant, and how control routed it, to the request
-        waiting for its object."""
+        """Hand a control-minted grant, and how control routed it, to its request."""
         self._progressed()
-        self._settle(
-            (
-                grant.reference.authorization_scope,
-                grant.reference.content_digest,
-            ),
-            (grant, carriage),
-        )
+        self._settle(request_id, (grant, carriage))
 
-    def deliver_denial(self, reference: ContentReference, reason: str) -> None:
-        """Fail the request waiting on this object with control's typed reason."""
+    def deliver_denial(self, request_id: int, reason: str) -> None:
+        """Fail a request with control's typed reason."""
         self._progressed()
-        self._settle((reference.authorization_scope, reference.content_digest), reason)
+        self._settle(request_id, reason)
 
-    def _settle(self, key: _WaitKey, answer: _Granted | str) -> None:
-        """Hand one answer to the longest-waiting request for that object."""
-        waiting = self._waiters.get(key)
-        while waiting:
-            waiter = waiting.popleft()
-            if not waiter.done():
-                waiter.set_result(answer)
-                break
-        if not waiting:
-            self._waiters.pop(key, None)
-
-    def _forget(self, key: _WaitKey, waiter: "_Answer") -> None:
-        waiting = self._waiters.get(key)
-        if waiting is None:
-            return
-        if waiter in waiting:
-            waiting.remove(waiter)
-        if not waiting:
-            self._waiters.pop(key, None)
+    def _settle(self, request_id: int, answer: _Granted | str) -> None:
+        if (waiter := self._waiters.get(request_id)) is not None and not waiter.done():
+            waiter.set_result(answer)
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one relayed frame into the transfer waiting for it.

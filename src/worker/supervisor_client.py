@@ -971,13 +971,22 @@ class SupervisorClient:
         )
 
     def push_content_hydration_request(
-        self, reference: dict[str, Any], task_id: str, peer_only: bool = False
+        self,
+        reference: dict[str, Any],
+        task_id: str,
+        peer_only: bool,
+        request_id: int,
     ) -> None:
         """Ask control to authorize hydrating one object for one task, carried over a
-        peer transport only when ``peer_only``."""
+        peer transport only when ``peer_only``; control echoes ``request_id``."""
         self._push_event(
             "CONTENT_HYDRATION_REQUEST",
-            {"reference": reference, "task_id": task_id, "peer_only": peer_only},
+            {
+                "reference": reference,
+                "task_id": task_id,
+                "peer_only": peer_only,
+                "request_id": request_id,
+            },
         )
 
     def push_content_route_observation(

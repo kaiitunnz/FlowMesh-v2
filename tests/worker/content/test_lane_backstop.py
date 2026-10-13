@@ -45,7 +45,7 @@ def _lane(tmp_path, client: _Client) -> ContentLaneHost:
     lane = ContentLaneHost(
         store=WorkerContentCache(tmp_path / "content"),
         push_frame=lambda frame: None,
-        request_grant=lambda reference, task_id, peer_only: None,
+        request_grant=lambda reference, task_id, peer_only, request_id: None,
         worker_id="wkr-1",
         generation=1,
         transfer_timeout_sec=_STALL,
@@ -97,7 +97,9 @@ def test_a_worker_without_peer_transports_never_asks_for_a_peer_only_read(
     lane = ContentLaneHost(
         store=WorkerContentCache(tmp_path / "content"),
         push_frame=lambda frame: None,
-        request_grant=lambda reference, task_id, peer_only: asked.append(peer_only),
+        request_grant=lambda reference, task_id, peer_only, request_id: asked.append(
+            peer_only
+        ),
         worker_id="wkr-1",
         generation=1,
         transfer_timeout_sec=_STALL,

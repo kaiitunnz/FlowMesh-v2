@@ -88,9 +88,7 @@ class _Pair:
         )
         self.client = ContentHydrationClient(
             sink=self.to_holder,
-            request_grant=lambda reference, task_id, peer_only: self.granted.append(
-                reference
-            ),
+            request_grant=lambda reference, *_: self.granted.append(reference),
             transfer_timeout_sec=5.0,
         )
         self.to_requester.peer = self.client.on_frame
@@ -106,7 +104,7 @@ async def test_a_granted_transfer_delivers_the_verified_object(tmp_path) -> None
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
 
     assert await hydration == _BODY
     assert pair.granted == [reference]
@@ -121,7 +119,7 @@ async def test_a_transfer_carries_no_object_identity_in_its_frames(tmp_path) -> 
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
     await hydration
 
     for frame in pair.to_holder.frames + pair.to_requester.frames:
@@ -144,7 +142,7 @@ async def test_a_fetch_waits_for_a_grant_still_in_flight(tmp_path) -> None:
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
     await asyncio.sleep(0)
     pair.holder.accept_grant(grant)
 
@@ -159,7 +157,7 @@ async def test_a_grant_the_holder_never_received_serves_nothing(tmp_path) -> Non
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(forged)
+    pair.client.deliver_grant(1, forged)
 
     with pytest.raises(ContentHydrationError, match="unknown_grant"):
         await hydration
@@ -174,7 +172,7 @@ async def test_an_expired_grant_serves_nothing(tmp_path) -> None:
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
 
     with pytest.raises(ContentHydrationError, match="expired"):
         await hydration
@@ -191,7 +189,7 @@ async def test_a_grant_for_a_superseded_holder_incarnation_serves_nothing(
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
 
     with pytest.raises(ContentHydrationError, match="stale_generation"):
         await hydration
@@ -209,7 +207,7 @@ async def test_a_rebound_holder_serves_its_new_registration_s_grants(
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
 
     assert await hydration == _BODY
 
@@ -226,7 +224,7 @@ async def test_a_rebound_holder_refuses_its_previous_registration_s_grants(
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
 
     with pytest.raises(ContentHydrationError):
         await hydration
@@ -241,7 +239,7 @@ async def test_an_object_the_holder_lost_is_a_typed_failure(tmp_path) -> None:
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
 
     with pytest.raises(ContentHydrationError, match="unavailable"):
         await hydration
@@ -254,7 +252,7 @@ async def test_a_denied_request_fails_with_controls_reason(tmp_path) -> None:
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_denial(reference, "no binding authorizes this reference")
+    pair.client.deliver_denial(1, "no binding authorizes this reference")
 
     with pytest.raises(ContentHydrationError, match="no binding"):
         await hydration
@@ -269,12 +267,12 @@ async def test_a_grant_is_good_for_one_transfer(tmp_path) -> None:
 
     first = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
     assert await first == _BODY
 
     replay = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(2, grant)
     with pytest.raises(ContentHydrationError, match="consumed"):
         await replay
 
@@ -289,7 +287,7 @@ async def test_an_object_larger_than_one_chunk_reassembles(tmp_path) -> None:
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
 
     assert await hydration == body
     chunks = [f for f in pair.to_requester.frames if f.payload]
@@ -326,7 +324,7 @@ async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
     assert await asyncio.to_thread(reading.wait, 5)
 
     # Mid-serve: the object is named as in transfer, and a sweep with no room for
@@ -355,8 +353,8 @@ async def test_two_reads_of_one_object_each_take_their_own_grant(tmp_path) -> No
         asyncio.ensure_future(_read(pair.client, reference, "tsk-2", tmp_path)),
     ]
     await asyncio.sleep(0)
-    pair.client.deliver_grant(first)
-    pair.client.deliver_grant(second)
+    pair.client.deliver_grant(1, first)
+    pair.client.deliver_grant(2, second)
 
     assert await asyncio.gather(*reads) == [_BODY, _BODY]
     assert len(pair.granted) == 2  # each read asked for its own authorization
@@ -418,7 +416,7 @@ async def test_an_abandoned_transfer_releases_the_holder(tmp_path, monkeypatch) 
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
     assert await asyncio.to_thread(reading.wait, 5)
     assert reference.content_digest in pair.holder.in_transfer
 
@@ -483,7 +481,7 @@ async def test_a_slow_transfer_runs_as_long_as_it_keeps_progressing(tmp_path) ->
     )
     client = ContentHydrationClient(
         sink=to_holder,
-        request_grant=lambda reference, task_id, peer_only: None,
+        request_grant=lambda reference, task_id, peer_only, request_id: None,
         transfer_timeout_sec=stall,
         window_bytes=CHUNK_BYTES + 1024,
     )
@@ -495,7 +493,7 @@ async def test_a_slow_transfer_runs_as_long_as_it_keeps_progressing(tmp_path) ->
     started = time.monotonic()
     hydration = asyncio.ensure_future(_read(client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    client.deliver_grant(grant)
+    client.deliver_grant(1, grant)
 
     assert await hydration == body
     assert time.monotonic() - started > stall * 2
@@ -519,7 +517,7 @@ async def test_a_holder_gives_up_a_requester_that_stops_reading(tmp_path) -> Non
     )
     client = ContentHydrationClient(
         sink=to_holder,
-        request_grant=lambda reference, task_id, peer_only: None,
+        request_grant=lambda reference, task_id, peer_only, request_id: None,
         transfer_timeout_sec=30.0,
         window_bytes=CHUNK_BYTES + 1024,
     )
@@ -530,7 +528,7 @@ async def test_a_holder_gives_up_a_requester_that_stops_reading(tmp_path) -> Non
 
     hydration = asyncio.ensure_future(_read(client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    client.deliver_grant(grant)
+    client.deliver_grant(1, grant)
     for _ in range(50):
         await asyncio.sleep(0.02)
         if reference.content_digest in holder.in_transfer:
@@ -562,7 +560,7 @@ async def test_a_holder_copy_that_is_not_the_object_is_refused_and_dropped(
 
     hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
-    pair.client.deliver_grant(grant)
+    pair.client.deliver_grant(1, grant)
 
     with pytest.raises(ContentHydrationError):
         await hydration
@@ -589,7 +587,7 @@ async def test_a_transfer_streams_without_holding_the_object(tmp_path) -> None:
             pair.client.hydrate_to_file(reference, "tsk-1", staging)
         )
         await asyncio.sleep(0)
-        pair.client.deliver_grant(grant)
+        pair.client.deliver_grant(1, grant)
         landed = await hydration
         _, peak = tracemalloc.get_traced_memory()
     finally:
@@ -599,3 +597,23 @@ async def test_a_transfer_streams_without_holding_the_object(tmp_path) -> None:
     # Both ends run in this process, so the peak covers the holder's reads, the frames
     # in flight and the requester's write buffer: a few MiB, not the object.
     assert peak < 6 << 20
+
+
+@pytest.mark.asyncio
+async def test_answers_for_one_object_reach_their_own_requests_in_any_order(
+    tmp_path,
+) -> None:
+    pair = _Pair(tmp_path)
+    reference = pair.store.write("local", _BODY, media_type="application/json")
+    grant = _grant(reference)
+    pair.holder.accept_grant(grant)
+
+    denied = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
+    granted = asyncio.ensure_future(_read(pair.client, reference, "tsk-2", tmp_path))
+    await asyncio.sleep(0)
+    pair.client.deliver_grant(2, grant)
+    pair.client.deliver_denial(1, "no_peer_route")
+
+    assert await granted == _BODY
+    with pytest.raises(ContentHydrationError, match="no_peer_route"):
+        await denied

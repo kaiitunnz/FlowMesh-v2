@@ -198,7 +198,9 @@ def _authorize(
     peer_only: bool = False,
 ) -> Coroutine[Any, Any, None]:
     bound = authority.binds("tsk-1", worker_id, reference)
-    return authority.authorize(worker_id, reference, peer_only, bound=bound)
+    return authority.authorize(
+        worker_id, reference, 7, peer_only=peer_only, bound=bound
+    )
 
 
 def test_a_bound_request_grants_both_ends_the_same_grant() -> None:
@@ -551,7 +553,10 @@ def test_requests_from_the_events_thread_run_on_the_bound_loop() -> None:
             if workers.frames:
                 break
             await loop.run_in_executor(
-                None, lambda: authority.on_request("wkr-2", "tsk-1", _REFERENCE)
+                None,
+                lambda: authority.on_request(
+                    "wkr-2", "tsk-1", _REFERENCE, request_id=7
+                ),
             )
 
     asyncio.run(run())
@@ -578,7 +583,10 @@ def test_the_binding_check_runs_on_the_thread_that_hands_the_request_over() -> N
             if workers.frames:
                 break
             await loop.run_in_executor(
-                None, lambda: authority.on_request("wkr-2", "tsk-1", _REFERENCE)
+                None,
+                lambda: authority.on_request(
+                    "wkr-2", "tsk-1", _REFERENCE, request_id=7
+                ),
             )
         return threading.get_ident()
 
@@ -659,3 +667,16 @@ def test_a_holders_content_listener_is_its_nodes_host_and_its_bound_port(
     assert target.routes == (address,)
     assert target.protocols == ((CONTENT_PEER_PROTOCOL,) if listening else ())
     assert target.directly_routable is direct
+
+
+def test_an_answer_carries_the_number_of_the_request_it_answers() -> None:
+    workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
+    authority = _authority(workers)
+    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
+    denying = _authority(workers, authorizes=False)
+    asyncio.run(_authorize(denying, "wkr-2", _REFERENCE))
+
+    assert _frame(workers, "content_grant")["request_id"] == 7
+    assert _frame(workers, "content_grant_denied")["request_id"] == 7
+    assert "request_id" not in _frame(workers, "content_grant")["grant"]

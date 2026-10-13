@@ -142,6 +142,8 @@ class ContentHydrationAuthority:
         worker_id: str,
         task_id: str,
         reference: ContentReference,
+        *,
+        request_id: int,
         peer_only: bool = False,
     ) -> None:
         """Take a worker's hydration request off the calling thread.
@@ -150,7 +152,11 @@ class ContentHydrationAuthority:
         threads hold across store writes, so it runs here rather than on the loop.
         """
         bound = self.binds(task_id, worker_id, reference)
-        self._submit(self.authorize(worker_id, reference, peer_only, bound=bound))
+        self._submit(
+            self.authorize(
+                worker_id, reference, request_id, peer_only=peer_only, bound=bound
+            )
+        )
 
     def binds(self, task_id: str, worker_id: str, reference: ContentReference) -> bool:
         """Whether the task the worker runs is bound to exactly this reference."""
@@ -201,11 +207,13 @@ class ContentHydrationAuthority:
         self,
         worker_id: str,
         reference: ContentReference,
-        peer_only: bool = False,
+        request_id: int,
         *,
+        peer_only: bool = False,
         bound: bool,
     ) -> None:
-        """Grant one hydration, or relay the reason it is refused.
+        """Grant one hydration, or relay the reason it is refused, under the
+        requester's ``request_id``.
 
         ``bound`` is the binding check's answer for the requesting task.
 
@@ -218,7 +226,7 @@ class ContentHydrationAuthority:
             # has no attachment to relay a grant or a refusal over.
             return
         if not bound:
-            await self._deny(requester, reference, HydrationDenial.NO_BINDING)
+            await self._deny(requester, request_id, HydrationDenial.NO_BINDING)
             return
         reported = await self._directory.holders(
             reference.authorization_scope, reference.content_digest
@@ -226,7 +234,7 @@ class ContentHydrationAuthority:
         if not reported:
             # Nothing ever reported holding it — no copy was ever announced, or every
             # holder's report has lapsed. Its consumer reads the shared store instead.
-            await self._deny(requester, reference, HydrationDenial.NOT_TRACKED)
+            await self._deny(requester, request_id, HydrationDenial.NOT_TRACKED)
             return
         endpoints: dict[str, NetworkEndpointAdvertisement | None] = {}
         requester_host = await self._dial_host(requester, endpoints)
@@ -234,11 +242,11 @@ class ContentHydrationAuthority:
             reference, reported, requester, requester_host, endpoints
         )
         if chosen is None:
-            await self._deny(requester, reference, HydrationDenial.HOLDER_UNAVAILABLE)
+            await self._deny(requester, request_id, HydrationDenial.HOLDER_UNAVAILABLE)
             return
         holder, route = chosen
         if peer_only and (route is None or not route.peer):
-            await self._deny(requester, reference, HydrationDenial.NO_PEER_ROUTE)
+            await self._deny(requester, request_id, HydrationDenial.NO_PEER_ROUTE)
             return
         grant = ContentHydrationGrant(
             grant_id=new_hydration_grant_id(),
@@ -273,7 +281,11 @@ class ContentHydrationAuthority:
         await self._relay(
             requester,
             "content_grant",
-            {"grant": grant_json, "carriage": carriage.model_dump(mode="json")},
+            {
+                "request_id": request_id,
+                "grant": grant_json,
+                "carriage": carriage.model_dump(mode="json"),
+            },
         )
 
     async def observe_route(
@@ -453,7 +465,7 @@ class ContentHydrationAuthority:
         )
 
     async def _deny(
-        self, requester: Worker, reference: ContentReference, denial: HydrationDenial
+        self, requester: Worker, request_id: int, denial: HydrationDenial
     ) -> None:
         self._logger.info(
             "content hydration refused for %s: %s", requester.id, denial.value
@@ -461,7 +473,7 @@ class ContentHydrationAuthority:
         await self._relay(
             requester,
             "content_grant_denied",
-            {"reference": reference.model_dump(mode="json"), "reason": denial.value},
+            {"request_id": request_id, "reason": denial.value},
         )
 
     async def _relay(

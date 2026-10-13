@@ -968,7 +968,8 @@ class EventMonitor:
                     worker_id,
                     str(event.payload["task_id"]),
                     ContentReference.model_validate(event.payload["reference"]),
-                    bool(event.payload.get("peer_only")),
+                    request_id=int(event.payload["request_id"]),
+                    peer_only=bool(event.payload.get("peer_only")),
                 )
             case "CONTENT_ROUTE_OBSERVATION" if self._content_authority is not None:
                 self._content_authority.on_route_observation(

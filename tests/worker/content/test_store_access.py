@@ -288,7 +288,7 @@ def test_a_copy_the_cache_cannot_keep_is_never_announced(tmp_path) -> None:
     lane = ContentLaneHost(
         store=WorkerContentCache(tmp_path / "cache", max_bytes=4),
         push_frame=lambda frame: None,
-        request_grant=lambda reference, task_id, peer_only: None,
+        request_grant=lambda reference, task_id, peer_only, request_id: None,
         worker_id="wkr-1",
         generation=1,
     )
