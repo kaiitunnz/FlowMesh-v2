@@ -1,8 +1,9 @@
 """The published artifacts a task's spec names, put on this worker's disk.
 
-A dispatch names each artifact its task loads by a token in the spec; the worker
-hydrates every such artifact under the task's output and puts the local path in the
-token's place before anything reads the spec. A tree lands as a directory of its
+A dispatch names each artifact its task loads by a token in the spec, or carries the
+publications of the producers whose artifact refs the spec's data reads; the worker
+hydrates every such artifact under the task's output and puts its local path in the
+spec before anything reads it. A tree lands as a directory of its
 files, each verified against the digest its manifest names, under a name keyed by the
 tree's own digest, so two tokens naming one tree share it. The directory appears only
 once whole, and it goes when the task ends: where the worker keeps a cache, each file is
@@ -11,7 +12,6 @@ a link to the cached copy, so what stays on disk is the cache's, under its bound
 
 import os
 import shutil
-from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
 from shared.content import ContentReference, TreeManifest, TreeManifestError
@@ -38,12 +38,6 @@ class ArtifactMaterializer:
         self._plane = plane
         self._task_id = task_id
         self._root = root
-
-    def materialize_all(self, inputs: Mapping[str, ArtifactBinding]) -> dict[str, str]:
-        """Each input's local path, by token key."""
-        return {
-            key: self.materialize(binding).as_posix() for key, binding in inputs.items()
-        }
 
     def materialize(self, binding: ArtifactBinding) -> Path:
         digest = binding.reference.content_digest

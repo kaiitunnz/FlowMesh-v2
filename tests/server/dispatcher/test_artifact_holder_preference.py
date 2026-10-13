@@ -159,8 +159,7 @@ def _worker(worker_id: str) -> Worker:
     )
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-def test_a_dispatch_goes_to_the_holder_only_with_stickiness_on(enabled: bool) -> None:
+def _dispatch_use(enabled: bool, holders: Any) -> tuple[Any, mock.Mock, dict, Any]:
     runtime = _real_runtime(FakeRegistry())
     _, ids = asyncio.run(_register(runtime, _CHAIN))
     train = ids["train"]
@@ -173,7 +172,6 @@ def test_a_dispatch_goes_to_the_holder_only_with_stickiness_on(enabled: bool) ->
     runtime.mark_succeeded(train, "wkr-1", payload, _TS, "dsp-1")
     use = ids["use"]
     assert pop_ready(runtime) == use
-    holders = _Holders({_WEIGHTS.content_digest: [_holder("wkr-2")]})
     registry = mock.Mock()
     registry.idle_satisfying_pool.return_value = [_worker("wkr-1"), _worker("wkr-2")]
     registry.satisfying_workers.return_value = [_worker("wkr-1"), _worker("wkr-2")]
@@ -186,8 +184,31 @@ def test_a_dispatch_goes_to_the_holder_only_with_stickiness_on(enabled: bool) ->
         content_holders=holders,
         worker_selection_strategy="first_fit",
     )
-
     dispatcher.dispatch_once(use)
+    return runtime, registry, ids, model
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_a_dispatch_goes_to_the_holder_only_with_stickiness_on(enabled: bool) -> None:
+    holders = _Holders({_WEIGHTS.content_digest: [_holder("wkr-2")]})
+
+    _, registry, _, _ = _dispatch_use(enabled, holders)
 
     assert registry.publish_task.call_args[0][0].id == ("wkr-2" if enabled else "wkr-1")
     assert holders.reads == ([_WEIGHTS.content_digest] if enabled else [])
+
+
+def test_a_dispatch_carries_its_upstream_artifacts_and_its_worker_may_read_them() -> (
+    None
+):
+    runtime, registry, ids, model = _dispatch_use(False, None)
+
+    worker, message = registry.publish_task.call_args[0]
+    assert message.upstream_artifacts is not None
+    assert [b.reference for b in message.upstream_artifacts[ids["train"]]] == [
+        model.reference
+    ]
+    assert runtime.content_binding_authorizes(ids["use"], worker.id, model.reference)
+    assert not runtime.content_binding_authorizes(
+        ids["use"], worker.id, _ref(b"elsewhere", 3)
+    )

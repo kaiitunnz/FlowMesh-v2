@@ -2,7 +2,14 @@ import json
 from enum import StrEnum
 from typing import Annotated, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    model_validator,
+)
 
 from ...schemas.result import BaseExecutorResult
 from ...schemas.result.routed import RoutedValue
@@ -186,6 +193,16 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
     upstreamResults: dict[str, UpstreamValue] | None = Field(
         default=None, alias="_upstreamResults"
     )
+    # The local path of each upstream artifact the worker hydrated for the spec's
+    # artifact refs, by producer task id and path; never sent.
+    _hydrated_artifacts: dict[tuple[str, str], str] = PrivateAttr(default_factory=dict)
+
+    def hydrated_artifact(self, task_id: str, path: str) -> str | None:
+        """The local path of task ``task_id``'s artifact ``path``, once hydrated."""
+        return self._hydrated_artifacts.get((task_id, path))
+
+    def record_hydrated_artifacts(self, paths: dict[tuple[str, str], str]) -> None:
+        self._hydrated_artifacts = dict(paths)
 
     @model_validator(mode="after")
     def _check_condition_depends_on(self) -> "TaskSpecStrictBase":

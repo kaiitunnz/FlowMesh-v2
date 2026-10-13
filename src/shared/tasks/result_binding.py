@@ -66,6 +66,14 @@ class ResultBinding(BaseModel):
             self.kind is BindingKind.RESULT and self.element is None and not self.path
         )
 
+    def producers(self) -> set[str]:
+        """Every task whose stored result the value reads, its members' included."""
+        found = {self.task_id} if self.task_id is not None else set()
+        for member in self.members:
+            if member.binding is not None:
+                found |= member.binding.producers()
+        return found
+
 
 class ResultElementRef(BaseModel):
     """One element of a producer's stored result: a member of its collection, a value

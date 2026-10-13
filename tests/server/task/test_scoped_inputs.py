@@ -25,7 +25,7 @@ from tests.server.task.test_runtime_control_flow import _TS, _Run, _workflow
 from tests.worker.factories import FakeContentPlane
 from worker.content.inputs import TaskInputHydrator
 from worker.executors.mixins.data import DataMixin
-from worker.executors.utils.artifacts import maybe_resolve_artifact_ref
+from worker.executors.utils.artifacts import artifact_ref_source
 from worker.executors.utils.expressions import project_expression
 
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
@@ -61,6 +61,8 @@ def _dispatch(run: _Run, name: str) -> tuple[dict[str, Any], WorkerTaskMessage]:
         dispatched_at=_TS,
         upstream_results=upstream,
         artifact_inputs=inputs.bindings or None,
+        upstream_artifacts=dispatcher._upstream_artifacts((upstream or {}).values())
+        or None,
     )
     wire = message.model_dump(mode="json", exclude_none=True, by_alias=True)
     delivered = WorkerTaskMessage.model_validate(normalize_numbers(wire))
@@ -606,10 +608,9 @@ async def test_the_refine_loop_example_reads_its_exit_value_at_the_root() -> Non
 
 
 @pytest.mark.anyio
-async def test_an_artifact_ref_in_a_part_of_a_result_names_one_published_artifact(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("FLOWMESH_BASE_URL", "http://fm.example")
+async def test_an_artifact_ref_in_a_part_of_a_result_names_one_published_artifact() -> (
+    None
+):
     run = await _Run().start(_workflow(f"""
       - name: gen
         spec: {_ECHO}
@@ -636,13 +637,17 @@ async def test_an_artifact_ref_in_a_part_of_a_result_names_one_published_artifac
     spec, message = _dispatch(run, "use")
     context = message.task.spec.upstreamResults or {}
 
-    worker = maybe_resolve_artifact_ref(
+    worker = artifact_ref_source(
         project_expression("img.image", context), context, "img"
     )
     assert spec["data"]["items"] == ["flowmesh-artifact:0"]
     assert message.artifact_inputs is not None
     assert message.artifact_inputs["0"].reference == image.reference
-    assert worker == f"http://fm.example/api/v1/results/{producer}/files/img.png"
+    assert worker == (producer, "img.png")
+    assert message.upstream_artifacts is not None
+    assert [b.reference for b in message.upstream_artifacts[producer]] == [
+        image.reference
+    ]
     assert DataMixin()._extract_source_data_ids(message.task.spec) == [producer]
 
 

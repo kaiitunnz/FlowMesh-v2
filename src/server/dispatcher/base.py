@@ -1,7 +1,7 @@
 import datetime
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -30,9 +30,9 @@ from shared.tasks import (
 )
 from shared.tasks.artifact_binding import (
     FINAL_REVISION,
+    ArtifactBinding,
     ArtifactInputs,
-    ArtifactKind,
-    resolve_artifact_path,
+    resolve_artifact_input,
 )
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
 from shared.tasks.result_binding import ResultBinding
@@ -772,6 +772,16 @@ class Dispatcher:
         rendered_children = self._render_merged_children(
             task_id, record, rendered_task.spec, artifact_inputs
         )
+        upstream_artifacts = self._upstream_artifacts(
+            [
+                *(upstream_results or {}).values(),
+                *(
+                    binding
+                    for child in rendered_children or ()
+                    for binding in (child.upstream_results or {}).values()
+                ),
+            ]
+        )
 
         # 7. Build WorkerTaskMessage
         agent_episode = self._runtime.agent_episode_dispatch(
@@ -794,6 +804,7 @@ class Dispatcher:
             merged_children=rendered_children,
             upstream_results=upstream_results,
             artifact_inputs=artifact_inputs.bindings or None,
+            upstream_artifacts=upstream_artifacts or None,
             input_element=self._runtime.input_element(task_id),
             credential_pointers=self._runtime.credential_pointers(
                 [task_id, *(child.task_id for child in rendered_children or ())]
@@ -812,7 +823,15 @@ class Dispatcher:
 
         # 8. Give the task what it reads and writes its content under, then publish it
         self._runtime.note_artifact_inputs(
-            task_id, list(artifact_inputs.bindings.values())
+            task_id,
+            [
+                *artifact_inputs.bindings.values(),
+                *(
+                    binding
+                    for published in upstream_artifacts.values()
+                    for binding in published
+                ),
+            ],
         )
         match self._runtime.begin_publish(
             task_id, worker, dispatch_id, input_preparation=preparing
@@ -1456,14 +1475,30 @@ class Dispatcher:
         ):
             return None
         bindings = self._runtime.artifact_bindings(context.task_id) or {}
-        if (found := resolve_artifact_path(bindings, FINAL_REVISION, path)) is None:
+        if (found := resolve_artifact_input(bindings, path)) is None:
             raise ValueError(
                 f"task {context.task_id} published no artifact named {path!r}"
             )
-        binding, inner = found
-        if binding.kind is ArtifactKind.ARCHIVE and binding.of is not None:
-            binding = bindings[(binding.revision, binding.of)]
-        return artifact_inputs.token(binding, inner)
+        return artifact_inputs.token(*found)
+
+    def _upstream_artifacts(
+        self, bindings: Iterable[ResultBinding]
+    ) -> dict[str, list[ArtifactBinding]]:
+        """The final artifacts each task whose result ``bindings`` read published, for
+        the artifact refs in those values a worker loads itself."""
+        producers: set[str] = set()
+        for binding in bindings:
+            producers |= binding.producers()
+        found: dict[str, list[ArtifactBinding]] = {}
+        for producer in sorted(producers):
+            published = self._runtime.artifact_bindings(producer) or {}
+            if finals := [
+                binding
+                for binding in published.values()
+                if binding.revision == FINAL_REVISION
+            ]:
+                found[producer] = finals
+        return found
 
     def _upstream_bindings(
         self, context: dict[str, TaskRecord], current_task_id: str

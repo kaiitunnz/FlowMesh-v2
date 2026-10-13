@@ -11,6 +11,7 @@ import pytest
 from PIL import Image
 
 from shared.schemas.result import BaseExecutorResult
+from shared.tasks.specs import InferenceSpecStrict
 from worker.executors.mixins import data as data_mixin_module
 from worker.executors.mixins.data import DataMixin
 from worker.executors.utils import artifacts
@@ -161,37 +162,12 @@ def test_extract_source_data_ids_from_upstream_artifacts() -> None:
 
 
 def test_collect_prompts_resolves_grouped_image_artifact_refs_after_flatten(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("FLOWMESH_BASE_URL", "https://root.internal")
-    served = {
-        f"https://root.internal/api/v1/results/tsk-up/files/images/{name}": color
-        for name, color in (("a.png", "red"), ("b.png", "green"), ("c.png", "blue"))
-    }
-    fetched: list[str] = []
+    def _no_http(*_: Any, **__: Any) -> None:
+        raise AssertionError("a hydrated artifact ref is read from disk")
 
-    class _Response:
-        def __init__(self, body: bytes) -> None:
-            self._body = body
-
-        def __enter__(self) -> "_Response":
-            return self
-
-        def __exit__(self, *exc_info: object) -> None:
-            return None
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def iter_content(self, chunk_size: int = 8192) -> Iterator[bytes]:
-            yield self._body
-
-    def _get(url: str, **_: Any) -> _Response:
-        fetched.append(url)
-        return _Response(_png_bytes(served[url]))
-
-    monkeypatch.setattr(artifacts.requests, "get", _get)
-    mixin = _Mixin()
+    monkeypatch.setattr(artifacts.requests, "get", _no_http)
     result = BaseExecutorResult.model_validate(
         {
             "images": [
@@ -201,26 +177,31 @@ def test_collect_prompts_resolves_grouped_image_artifact_refs_after_flatten(
             "_artifacts": {"task_id": "tsk-up"},
         }
     )
-    spec = cast(
-        Any,
-        SimpleNamespace(
-            data={"type": "list", "expr": "vision.images"},
-            inference={},
-            upstreamResults={"vision": result},
-        ),
+    spec = InferenceSpecStrict.model_validate(
+        {
+            "taskType": "inference",
+            "model": {
+                "source": {"identifier": "vlm"},
+                "transformers": {"mode": "visual-embedding"},
+            },
+            "data": {"type": "list", "expr": "vision.images"},
+            "_upstreamResults": {"vision": result},
+        }
     )
+    colors = {"a.png": "red", "b.png": "green", "c.png": "blue"}
+    hydrated: dict[tuple[str, str], str] = {}
+    for name, color in colors.items():
+        (local := tmp_path / name).write_bytes(_png_bytes(color))
+        hydrated[("tsk-up", f"images/{name}")] = local.as_posix()
 
-    entry = mixin._collect_prompts_for_spec(spec, "tsk-vision", fetch_images=True)
+    assert artifacts.data_artifact_refs(spec) == list(hydrated)
+    spec.record_hydrated_artifacts(hydrated)
+    entry = _Mixin()._collect_prompts_for_spec(spec, "tsk-vision", fetch_images=True)
 
     assert entry.image_group_sizes == [2, 1]
-    assert len(entry.images) == 3
-    assert all(image is not None for image in entry.images)
-    assert [image.size for image in entry.images if image is not None] == [
-        (2, 2),
-        (2, 2),
-        (2, 2),
+    assert [image.getpixel((0, 0)) for image in entry.images if image] == [
+        Image.new("RGB", (1, 1), color).getpixel((0, 0)) for color in colors.values()
     ]
-    assert fetched == list(served)
 
 
 def _png_bytes(color: str) -> bytes:

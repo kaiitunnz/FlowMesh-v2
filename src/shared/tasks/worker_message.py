@@ -69,6 +69,13 @@ class WorkerTaskMessage(BaseModel):
         default=None,
         description="Upstream stage results by stage name.",
     )
+    upstream_artifacts: dict[str, list[ArtifactBinding]] | None = Field(
+        default=None,
+        description=(
+            "Final artifacts each task whose result an upstream value reads "
+            "published, by producer task id."
+        ),
+    )
     input_element: ResultElementRef | None = Field(
         default=None,
         description="Collection element a fan-out child runs on.",

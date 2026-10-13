@@ -32,7 +32,9 @@ from shared.schemas.result.binding import (
 )
 from shared.tasks import MergedChildTaskStrict, TaskEnvelopeStrict
 from shared.tasks.artifact_binding import (
+    ArtifactBinding,
     names_artifact_token,
+    resolve_artifact_input,
     substitute_artifact_tokens,
 )
 from shared.tasks.result_binding import BindingKind, ResultBinding
@@ -41,6 +43,7 @@ from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
 
 from ..executors.base_executor import ExecutionError
+from ..executors.utils.artifacts import data_artifact_refs
 from .access import ContentAccessDenied, ContentBackendUnsupported
 from .artifact_inputs import ArtifactInputUnreadable, ArtifactMaterializer
 from .plane import WorkerContentPlane
@@ -61,6 +64,30 @@ def input_unavailable(message: str, reference: ContentReference) -> ExecutionErr
 
 def input_unreadable(message: str) -> ExecutionError:
     return ExecutionError(f"input_unreadable: {message}", retryable=False)
+
+
+def _check_scope(msg: WorkerTaskMessage, binding: ArtifactBinding) -> None:
+    if binding.reference.authorization_scope != msg.content_scope:
+        raise input_unreadable(
+            f"task {msg.task_id} runs in scope {msg.content_scope} and an "
+            f"artifact it loads is in {binding.reference.authorization_scope}"
+        )
+
+
+def _materialize(
+    materializer: ArtifactMaterializer, task_id: str, binding: ArtifactBinding
+) -> Path:
+    try:
+        return materializer.materialize(binding)
+    except (ContentUnavailable, ContentAccessDenied) as exc:
+        raise ExecutionError(
+            f"task {task_id} cannot reach an artifact it loads: {exc}",
+            retryable=True,
+        ) from exc
+    except (ContentStoreError, ArtifactInputUnreadable) as exc:
+        raise input_unreadable(
+            f"task {task_id} artifact input unreadable: {exc}"
+        ) from exc
 
 
 def read_input(
@@ -162,37 +189,64 @@ class TaskInputHydrator:
         the spec, in place."""
         if not msg.artifact_inputs:
             return
-        task_id = msg.task_id
-        if self._plane is None:
-            raise ExecutionError(
-                f"task {task_id} loads published artifacts and this worker reaches "
-                "no fabric content store",
-                retryable=True,
-            )
+        materializer = self._materializer(msg, root)
         inputs = msg.artifact_inputs or {}
         for binding in inputs.values():
-            if binding.reference.authorization_scope != msg.content_scope:
-                raise input_unreadable(
-                    f"task {task_id} runs in scope {msg.content_scope} and an "
-                    f"artifact it loads is in {binding.reference.authorization_scope}"
-                )
-        materializer = ArtifactMaterializer(self._plane, task_id, root)
-        try:
-            paths = materializer.materialize_all(inputs)
-        except (ContentUnavailable, ContentAccessDenied) as exc:
-            raise ExecutionError(
-                f"task {task_id} cannot reach an artifact it loads: {exc}",
-                retryable=True,
-            ) from exc
-        except (ContentStoreError, ArtifactInputUnreadable) as exc:
-            raise input_unreadable(
-                f"task {task_id} artifact input unreadable: {exc}"
-            ) from exc
+            _check_scope(msg, binding)
+        paths = {
+            key: _materialize(materializer, msg.task_id, binding).as_posix()
+            for key, binding in inputs.items()
+        }
         msg.task = _as_dispatched(msg.task, paths)
         if msg.merged_children:
             msg.merged_children = [
                 _as_dispatched(child, paths) for child in msg.merged_children
             ]
+
+    def install_upstream_artifacts(self, msg: WorkerTaskMessage, root: Path) -> None:
+        """Put each upstream artifact a spec's data loads under ``root``, and record
+        its local path on the spec.
+
+        Only the artifacts the data's refs name are read, each from the producer's
+        publications the dispatch carries; a ref to a path no producer published fails
+        the task.
+        """
+        if not msg.upstream_artifacts:
+            return
+        specs = [msg.task.spec, *(child.spec for child in msg.merged_children or ())]
+        wanted = [(spec, refs) for spec in specs if (refs := data_artifact_refs(spec))]
+        if not wanted:
+            return
+        materializer = self._materializer(msg, root)
+        published = {
+            producer: {binding.key: binding for binding in bindings}
+            for producer, bindings in msg.upstream_artifacts.items()
+        }
+        for spec, refs in wanted:
+            paths: dict[tuple[str, str], str] = {}
+            for producer, path in refs:
+                missing = input_unreadable(
+                    f"task {producer} published no artifact named {path!r}"
+                )
+                found = resolve_artifact_input(published.get(producer, {}), path)
+                if found is None:
+                    raise missing
+                binding, inner = found
+                _check_scope(msg, binding)
+                local = _materialize(materializer, msg.task_id, binding)
+                if inner and not (local := local / inner).is_file():
+                    raise missing
+                paths[(producer, path)] = local.as_posix()
+            spec.record_hydrated_artifacts(paths)
+
+    def _materializer(self, msg: WorkerTaskMessage, root: Path) -> ArtifactMaterializer:
+        if self._plane is None:
+            raise ExecutionError(
+                f"task {msg.task_id} loads published artifacts and this worker reaches "
+                "no fabric content store",
+                retryable=True,
+            )
+        return ArtifactMaterializer(self._plane, msg.task_id, root)
 
     def _hydrate_child(
         self, reader: "_TaskReader", child: MergedChildTaskStrict

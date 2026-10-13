@@ -46,9 +46,14 @@ end-to-end (worker envelope → server ingest and `GET /results/{id}` → SDK).
 Results without a `task_type` (legacy files, condition-skips) fall back to
 the permissive base.
 
-Artifact-bearing fields use `ArtifactRef` (`{"path": rel_path}`);
-relative paths resolve against the producer's `_artifacts` context via
-`artifact_to_source` / `_render_artifact_ref`.
+Artifact-bearing fields use `ArtifactRef` (`{"path": rel_path}`), a path relative
+to the producer's published artifacts, which the `_artifacts` context names. A ref a
+placeholder renders becomes a token the worker replaces with the artifact's local path.
+A ref the data a spec projects reads — a visual-embedding model's image items or an
+`image_embedding` — is hydrated on the worker before the task runs from the producer's
+final publications the dispatch carries, through the worker's content cache, a peer's
+copy or the shared store, never the root. A ref to a path the producer did not publish
+fails the task as `input_unreadable`.
 
 An inference producer reports every item with its `index`, `prompt` and `output`, or its
 task fails before the result is stored; stored results read through the tolerant

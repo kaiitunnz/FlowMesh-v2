@@ -135,6 +135,20 @@ def resolve_artifact_path(
     return None
 
 
+def resolve_artifact_input(
+    bindings: dict[tuple[str, str], ArtifactBinding], path: str
+) -> tuple[ArtifactBinding, str] | None:
+    """The final artifact a consumer loads for a ref to ``path``, with the path inside
+    it. A model archive loads as the tree it archives, which every loader takes as a
+    directory."""
+    if (found := resolve_artifact_path(bindings, FINAL_REVISION, path)) is None:
+        return None
+    binding, inner = found
+    if binding.kind is ArtifactKind.ARCHIVE and binding.of is not None:
+        binding = bindings[(binding.revision, binding.of)]
+    return binding, inner
+
+
 ARTIFACT_TOKEN = "flowmesh-artifact:"
 _TOKEN = re.compile(r"flowmesh-artifact:([0-9]+)")
 
@@ -177,6 +191,7 @@ __all__ = [
     "ArtifactName",
     "Revision",
     "is_revision",
+    "resolve_artifact_input",
     "resolve_artifact_path",
     "step_revision",
 ]

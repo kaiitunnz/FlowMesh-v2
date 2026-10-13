@@ -1,6 +1,6 @@
 import os
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import ParseResult, urlparse
@@ -10,25 +10,28 @@ import requests
 from shared.schemas.artifact import artifact_download_path
 from shared.schemas.result import BaseExecutorResult
 from shared.schemas.result.binding import artifact_context
+from shared.tasks.specs import TaskSpecStrictBase
+from shared.tasks.specs.common import ModelInferSpecStrict
 from shared.utils.http import auth_headers
 
 from ...utils.redaction import redact_urls
 from ..base_executor import ExecutionError
+from .expressions import element_paths, item_path, project_expression_paths
 
 
-def artifact_to_source(
-    ref: dict[str, Any],
-    context: dict[str, BaseExecutorResult] | None,
+def artifact_ref_source(
+    value: Any,
+    context: Mapping[str, BaseExecutorResult] | None,
     node: str | None,
     path: Sequence[str | int] = (),
-) -> str:
-    """Translate a `{path: ...}` artifact ref into the server URL its producer's
-    published artifact downloads from, for the value at ``path`` inside upstream
-    ``node``."""
-    rel_path = ref.get("path")
+) -> tuple[str, str] | None:
+    """The producer task and artifact path a `{path: ...}` ref names, for the value at
+    ``path`` inside upstream ``node``; None for any other value."""
+    if not isinstance(value, dict) or "path" not in value:
+        return None
+    rel_path = value.get("path")
     if not isinstance(rel_path, str) or not rel_path:
         raise ExecutionError("Artifact ref must include a non-empty 'path' field")
-
     task_id = (
         ctx.task_id
         if context
@@ -41,12 +44,115 @@ def artifact_to_source(
         raise ExecutionError(
             "Cannot resolve artifact ref: upstream _artifacts context is missing"
         )
-    base_url = os.getenv("FLOWMESH_BASE_URL", "").rstrip("/")
-    if not base_url:
+    return task_id, rel_path
+
+
+def hydrated_artifact_ref(
+    value: Any,
+    spec: TaskSpecStrictBase,
+    context: Mapping[str, BaseExecutorResult] | None,
+    node: str | None,
+    path: Sequence[str | int] = (),
+) -> Any:
+    """A `{path: ...}` ref as the local path its artifact was hydrated to before the
+    task ran; any other value as it is."""
+    if (named := artifact_ref_source(value, context, node, path)) is None:
+        return value
+    if (local := spec.hydrated_artifact(*named)) is None:
         raise ExecutionError(
-            "Cannot resolve artifact ref: FLOWMESH_BASE_URL is not set"
+            f"input_unreadable: task {named[0]} published no artifact named "
+            f"{named[1]!r}"
         )
-    return base_url + artifact_download_path(task_id, rel_path)
+    return local
+
+
+def artifact_ref_text(
+    value: Any,
+    context: Mapping[str, BaseExecutorResult] | None,
+    node: str | None,
+    path: Sequence[str | int] = (),
+) -> Any:
+    """A `{path: ...}` ref as the text naming its published artifact; any other value
+    as it is."""
+    if (named := artifact_ref_source(value, context, node, path)) is None:
+        return value
+    return artifact_download_path(*named)
+
+
+def list_items_expression(data: Mapping[str, Any]) -> str | None:
+    """The expression list data projects its items from, when it names no items."""
+    if data.get("items") is not None:
+        return None
+    expr = data.get("expr")
+    if not expr:
+        node, path = data.get("node"), data.get("path")
+        if node and path:
+            expr = f"{node}.{path}"
+    return expr.strip() if isinstance(expr, str) and expr.strip() else None
+
+
+def image_embedding_expression(
+    raw: Mapping[str, Any],
+) -> tuple[str, str | None] | None:
+    """The expression an image embedding projects, with the upstream node it reads."""
+    expr = raw.get("expr")
+    node: str | None = raw.get("node")
+    if not expr and node and (path_hint := raw.get("path")):
+        expr = f"{node}.{path_hint}"
+    if not expr or not isinstance(expr, str):
+        return None
+    return expr.strip(), node or expr.split(".", 1)[0].strip() or None
+
+
+def data_artifact_refs(spec: TaskSpecStrictBase) -> list[tuple[str, str]]:
+    """The producer task and path of each artifact a spec's data loads the bytes of:
+    the images a visual-embedding model reads from its projected list items, and an
+    image embedding.
+
+    A projection that fails names nothing here; the executor reports it when it runs.
+    """
+    if not isinstance(spec, ModelInferSpecStrict) or not spec.data:
+        return []
+    data, context = spec.data, spec.upstreamResults or {}
+    named: list[tuple[str, str]] = []
+
+    def collect(value: Any, node: str | None, path: Sequence[str | int]) -> None:
+        try:
+            found = artifact_ref_source(value, context, node, path)
+        except ExecutionError:
+            return
+        if found is not None and found not in named:
+            named.append(found)
+
+    reads_images = spec.model is not None and spec.model.visual_embedding
+    if (
+        reads_images
+        and data.get("type") == "list"
+        and (expr := list_items_expression(data))
+    ):
+        try:
+            items, paths = project_expression_paths(expr, context)
+        except Exception:
+            items, paths = None, ()
+        node = expr.split(".", 1)[0] or None
+        for index, item in enumerate(items if isinstance(items, list) else ()):
+            if isinstance(item, list):
+                for position, member in enumerate(item):
+                    collect(
+                        member, node, item_path(element_paths(paths, index), position)
+                    )
+            else:
+                collect(item, node, item_path(paths, index))
+    if (raw := data.get("image_embedding")) and (
+        embedding := image_embedding_expression(raw)
+    ):
+        expr, node = embedding
+        try:
+            value, value_paths = project_expression_paths(expr, context)
+        except Exception:
+            return named
+        collect(value, node, value_paths if isinstance(value_paths, tuple) else ())
+    return named
 
 
 _DEFAULT_PORT_BY_SCHEME = {"http": 80, "https": 443}
@@ -82,24 +188,11 @@ def is_flowmesh_origin_url(url: str) -> bool:
     )
 
 
-def maybe_resolve_artifact_ref(
-    value: Any,
-    context: dict[str, BaseExecutorResult] | None,
-    node: str | None,
-    path: Sequence[str | int] = (),
-) -> Any:
-    """Convert `{path: ...}` ref dicts to URL/path strings; pass others through."""
-    if isinstance(value, dict) and "path" in value:
-        return artifact_to_source(value, context, node, path)
-    return value
-
-
 def resolve_artifact(source: str, timeout: float = 1800) -> Path:
     """Download an artifact URL (or symlink a local path) into a tempfile.
 
     `source` is either an absolute HTTP/HTTPS URL or an absolute filesystem
-    path. Callers normally get it by running `artifact_to_source` on a
-    `{path: ...}` ref dict resolved via the task's upstream results.
+    path, such as the one a `{path: ...}` ref was hydrated to.
     """
     if not isinstance(source, str) or not source:
         raise ExecutionError("Artifact source is missing for embedding resolution")

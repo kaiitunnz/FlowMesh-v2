@@ -1,9 +1,10 @@
 """A file a task published reaches its consumer as that published artifact on every
 path its reference travels: a rendered spec names it by a token its worker hydrates, a
-worker resolving the ref itself reads it from the root, and an agent reads its root
-download path."""
+worker resolving the ref itself hydrates it from its producer's publications, and an
+agent reads its root download path."""
 
-from types import SimpleNamespace
+import io
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -16,14 +17,22 @@ from shared.tasks.artifact_binding import (
     ArtifactBinding,
     ArtifactKind,
 )
+from shared.tasks.specs import InferenceSpecStrict
+from shared.tasks.worker_message import WorkerTaskMessage
 from tests.server.task.test_agent_region_inputs import _AGENT, _member_values, _ready
 from tests.server.task.test_runtime_control_flow import _Run, _workflow
 from tests.server.task.test_scoped_inputs import _dispatch
+from tests.worker.content.test_artifact_inputs import _CacheLane
+from tests.worker.content.test_plane_routing import _Access
+from worker.content import WorkerContentPlane
+from worker.content.inputs import TaskInputHydrator
+from worker.executors.base_executor import ExecutionError
+from worker.executors.mixins import data as data_module
 from worker.executors.mixins.data import DataMixin
-from worker.executors.utils.artifacts import maybe_resolve_artifact_ref
+from worker.executors.utils import artifacts as artifacts_module
+from worker.executors.utils.artifacts import artifact_ref_source
 from worker.executors.utils.expressions import item_path, project_expression_paths
 
-_URL = "http://fm.example"
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
 
 
@@ -61,10 +70,6 @@ def _train(run: _Run, name: str, **extra: Any) -> str:
         [tree, archive],
     )
     return producer
-
-
-def _file(task: str) -> str:
-    return f"{_URL}/api/v1/results/{task}/files/final_lora.tar.gz"
 
 
 def _tokens(message: Any) -> list[ArtifactBinding]:
@@ -179,10 +184,7 @@ _CONCAT = f"""
 
 
 @pytest.mark.anyio
-async def test_each_aggregate_members_file_names_its_own_producers_tree(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("FLOWMESH_BASE_URL", _URL)
+async def test_each_aggregate_members_file_names_its_own_producers_tree() -> None:
     run = await _Run().start(_workflow(_CONCAT))
     left = _train(run, "left")
     right = _train(run, "right")
@@ -197,9 +199,9 @@ async def test_each_aggregate_members_file_names_its_own_producers_tree(
     upstream = message.task.spec.upstreamResults or {}
     items, paths = project_expression_paths("all.value.final_lora_archive", upstream)
     assert [
-        maybe_resolve_artifact_ref(item, upstream, "all", item_path(paths, i))
+        artifact_ref_source(item, upstream, "all", item_path(paths, i))
         for i, item in enumerate(items)
-    ] == [_file(left), _file(right)]
+    ] == [(left, "final_lora.tar.gz"), (right, "final_lora.tar.gz")]
     assert DataMixin()._extract_source_data_ids(message.task.spec) == [left, right]
 
 
@@ -260,25 +262,45 @@ async def test_an_agent_reading_a_projected_file_reads_its_download_path() -> No
     }
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("expr", "expected"),
-    [
-        ("all.value[0].images", ["left/files/a.png", "left/files/b.png"]),
-        (
-            "all.value.images",
-            [
-                "left/files/a.png",
-                "left/files/b.png",
-                "right/files/c.png",
-                "right/files/d.png",
-            ],
-        ),
-    ],
-)
-async def test_images_over_an_aggregate_read_from_their_own_producer(
-    expr: str, expected: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _png(color: str) -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (1, 1), color).save(out, format="PNG")
+    return out.getvalue()
+
+
+_IMAGES = {
+    "left": {"a.png": "red", "b.png": "green"},
+    "right": {"c.png": "blue", "d.png": "white"},
+}
+
+
+def _publish_images(run: _Run, name: str, extra: tuple[str, ...] = ()) -> str:
+    """Settle the ready ``name`` as a task whose result names its images, each one it
+    published into the shared store, returning its task id."""
+    producer = next(t for t in run.ready if run.name(t) == name)
+    record = run.runtime.get_record(producer)
+    assert record is not None
+    published = [
+        ArtifactBinding(
+            name=image,
+            kind=ArtifactKind.FILE,
+            reference=(reference := run.reader.store.write(record.org_id, _png(color))),
+            size_bytes=reference.size_bytes,
+        )
+        for image, color in _IMAGES[name].items()
+    ]
+    named = [*_IMAGES[name], *extra]
+    run.run(
+        name,
+        {"images": [{"path": p} for p in named], "_artifacts": {"task_id": producer}},
+        published,
+    )
+    return producer
+
+
+async def _image_consumer(
+    expr: str, extra: tuple[str, ...] = ()
+) -> tuple[WorkerTaskMessage, dict[str, str], Any]:
     run = await _Run().start(_workflow(f"""
       - name: left
         spec: {_ECHO}
@@ -292,27 +314,86 @@ async def test_images_over_an_aggregate_read_from_their_own_producer(
         spec: {_ECHO}
 """))
     ids = {
-        "left": _train(run, "left", images=[{"path": "a.png"}, {"path": "b.png"}]),
-        "right": _train(run, "right", images=[{"path": "c.png"}, {"path": "d.png"}]),
+        "left": _publish_images(run, "left", extra),
+        "right": _publish_images(run, "right"),
     }
     _, message = _dispatch(run, "use")
-    spec = SimpleNamespace(
-        data={"type": "list", "expr": expr},
-        inference={},
-        upstreamResults=message.task.spec.upstreamResults,
+    spec = InferenceSpecStrict.model_validate(
+        {
+            "taskType": "inference",
+            "model": {
+                "source": {"identifier": "vlm"},
+                "transformers": {"mode": "visual-embedding"},
+            },
+            "data": {"type": "list", "expr": expr},
+            "_upstreamResults": message.task.spec.upstreamResults,
+        }
     )
-    loaded: list[str] = []
+    message.task = message.task.model_copy(update={"spec": spec})
+    return message, ids, run.reader.store
 
-    def load(_: Any, source: str) -> Any:
-        loaded.append(source)
-        return Image.new("RGB", (1, 1))
 
-    monkeypatch.setattr(DataMixin, "_load_image_from_artifact", load)
-    monkeypatch.setenv("FLOWMESH_BASE_URL", _URL)
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        ("all.value[0].images", ["left/a.png", "left/b.png"]),
+        (
+            "all.value.images",
+            ["left/a.png", "left/b.png", "right/c.png", "right/d.png"],
+        ),
+    ],
+)
+async def test_images_over_an_aggregate_hydrate_from_their_own_producer_not_the_root(
+    expr: str,
+    expected: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message, ids, store = await _image_consumer(expr)
 
-    DataMixin()._collect_prompts_for_spec(cast(Any, spec), "tsk-use", True)
+    def no_root(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a worker reads no artifact over HTTP")
 
-    assert loaded == [
-        f"{_URL}/api/v1/results/{ids[producer]}/{tail}"
-        for producer, tail in (item.split("/", 1) for item in expected)
+    monkeypatch.setattr(artifacts_module.requests, "get", no_root)
+    monkeypatch.setattr(data_module.requests, "get", no_root)
+    lane = _CacheLane(tmp_path / "cache")
+    plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
+
+    TaskInputHydrator(cast(Any, plane)).install_upstream_artifacts(
+        message, tmp_path / "in"
+    )
+    entry = DataMixin()._collect_prompts_for_spec(
+        cast(InferenceSpecStrict, message.task.spec), message.task_id, True
+    )
+
+    assert message.upstream_artifacts is not None
+    assert set(message.upstream_artifacts) == set(ids.values())
+    assert [image.getpixel((0, 0)) for image in entry.images if image] == [
+        Image.new("RGB", (1, 1), _IMAGES[name][image]).getpixel((0, 0))
+        for name, image in (item.split("/") for item in expected)
     ]
+    assert len(lane.peer_reads) == len(expected)
+    assert sorted(ref.content_digest for ref in lane.kept) == sorted(
+        reference_for(message.content_scope, _png(_IMAGES[name][image])).content_digest
+        for name, image in (item.split("/") for item in expected)
+    )
+
+
+@pytest.mark.anyio
+async def test_an_image_its_producer_never_published_fails_the_task_unreadable(
+    tmp_path: Path,
+) -> None:
+    message, ids, store = await _image_consumer(
+        "all.value[0].images", extra=("missing.png",)
+    )
+
+    with pytest.raises(ExecutionError, match="input_unreadable") as raised:
+        TaskInputHydrator(
+            cast(Any, WorkerContentPlane(None, cast(Any, _Access(store))))
+        ).install_upstream_artifacts(message, tmp_path / "in")
+
+    assert raised.value.retryable is False
+    assert f"task {ids['left']} published no artifact named 'missing.png'" in str(
+        raised.value
+    )
