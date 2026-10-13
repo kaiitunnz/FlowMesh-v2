@@ -146,7 +146,12 @@ class ContentHydrationAuthority:
         The binding check reads the task runtime under its own lock, which other
         threads hold across store writes, so it runs here rather than on the loop.
         """
-        bound = self.binds(task_id, worker_id, reference)
+        try:
+            bound = self.binds(task_id, worker_id, reference)
+        except Exception:
+            # The events thread must keep reading; an unanswerable check denies.
+            self._logger.exception("content binding check failed for %s", task_id)
+            bound = False
         self._submit(
             self.authorize(
                 worker_id, reference, request_id, peer_only=peer_only, bound=bound

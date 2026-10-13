@@ -605,6 +605,33 @@ def test_the_binding_check_runs_on_the_thread_that_hands_the_request_over() -> N
     assert checked_on and loop_thread not in checked_on
 
 
+def test_a_binding_check_that_raises_denies_without_breaking_the_events_thread() -> (
+    None
+):
+    workers = _peers(**{"wkr-1": 3, "wkr-2": 5})
+
+    def check(task_id: str, worker_id: str, reference: ContentReference) -> bool:
+        raise RuntimeError("runtime unavailable")
+
+    authority = _authority(workers, authorizes=check)
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        authority.bind_loop(loop)
+        await authority.record_holding("wkr-1", [_HELD])
+        await loop.run_in_executor(
+            None,
+            lambda: authority.on_request("wkr-2", "tsk-1", _REFERENCE, request_id=7),
+        )
+        for _ in range(100):
+            if workers.frames:
+                return
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    assert _denial(workers) == HydrationDenial.NO_BINDING
+
+
 def _many_holders(count: int) -> tuple[_Workers, list[str]]:
     holders = [f"wkr-{index}" for index in range(3, 3 + count)]
     workers = _peers(**{"wkr-2": 5, **{holder: 1 for holder in holders}})
