@@ -789,12 +789,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=0,
                     min_inclusive=False,
                 ),
-                EnvVar(
-                    "RESIDENT_SIDECAR_DIRECTLY_ROUTABLE",
-                    "false",
-                    description="Advertise the resident sidecar as directly routable.",
-                    var_type=EnvVarType.BOOL,
-                ),
             ],
         ),
         EnvSection(
@@ -1065,6 +1059,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                     min_inclusive=False,
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE",
+                    "false",
+                    description="Workers' peer listeners are reachable off-host.",
+                    var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
                     "NETWORK_PLANE_PEER_ENABLED",

@@ -106,7 +106,6 @@ directory `flowmesh stack` runs in.
 | `RESIDENT_SELECTION_STRATEGY` | `batch-aware-best-fit` | Per-family replica-selection strategy |
 | `RESIDENT_IDLE_RETAIN_SEC` | `0` | Base idle retain window before teardown; 0 disables |
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
-| `RESIDENT_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Advertise the resident sidecar as directly routable |
 | `NETWORK_PLANE_ENABLED` | `true` | Enable the route-discovery and relay substrate |
 | `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node inbound address (`host:port`) |
 | `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
@@ -117,6 +116,7 @@ directory `flowmesh stack` runs in.
 | `NETWORK_PLANE_BACKOFF_MAX_SEC` | `30` | Demotion retry backoff cap (seconds) |
 | `NETWORK_PLANE_CONNECT_BUDGET_SEC` | `5` | Per-candidate optimistic connect budget (seconds) |
 | `NETWORK_PLANE_ROUTE_TTL_SEC` | `30` | Resolved-route snapshot TTL (seconds) |
+| `NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE` | `false` | Workers' peer listeners are reachable off-host |
 | `NETWORK_PLANE_PEER_ENABLED` | `false` | Enable trusted origin-to-target peer transports |
 | `NETWORK_PLANE_PEER_TRUST_DOMAIN` | – | Trust domain both ends must share |
 | `NETWORK_PLANE_PEER_CLASSES` | `same_node,same_cluster` | Target reachability classes a peer transport admits |

@@ -68,7 +68,9 @@ and a demoted one drops out until its backoff cools.
 
 - **`worker_direct`** — caller to the listener. A forward-dial peer transport legal only
   for an explicitly directly routable listener whose endpoint class the origin's network
-  class can reach, under a bounded optimistic connect budget. Shared-node placement alone
+  class can reach, under a bounded optimistic connect budget. A deployment declares its
+  workers' listeners reachable from off their host with
+  `NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE`; shared-node placement or a bound port alone
   does not make it legal.
 - **`node_relay`** — caller to the target node's peer listener, which hands each session
   to the node's local sidecar uplink. A forward-dial peer transport for same-node and

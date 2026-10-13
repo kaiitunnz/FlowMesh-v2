@@ -341,6 +341,9 @@ if IS_ROOT_NODE:
             runtime=RUNTIME,
             sessions=RelaySessionStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
             resident_cfg=config.orchestration.resident,
+            worker_directly_routable=(
+                config.orchestration.network.worker_directly_routable
+            ),
             root_node_id=lambda: ROOT_NODE_ID,
             edge_id=SERVE_EDGE_STREAM_ID,
         )

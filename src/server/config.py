@@ -492,7 +492,6 @@ class ResidentCapacityConfig:
     selection_strategy: str = field(default_factory=_default_selection_strategy)
     idle_retain_sec: float = 0.0
     idle_sweep_interval_sec: float = 30.0
-    sidecar_directly_routable: bool = False
 
     @classmethod
     def from_env(cls) -> "ResidentCapacityConfig":
@@ -535,9 +534,6 @@ class ResidentCapacityConfig:
             idle_retain_sec=parse_float_env(f"{prefix}IDLE_RETAIN_SEC", 0.0),
             idle_sweep_interval_sec=parse_float_env(
                 f"{prefix}IDLE_SWEEP_INTERVAL_SEC", 30.0
-            ),
-            sidecar_directly_routable=parse_bool_env(
-                f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
             ),
         )
 
@@ -687,6 +683,9 @@ class NetworkPlaneConfig:
     backoff_max_sec: float = 30.0
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
+    # Whether a worker's peer listeners are reachable from off its host; a bound port
+    # alone never makes a worker a direct route target.
+    worker_directly_routable: bool = False
     peer: TrustedPeerConfig = field(default_factory=TrustedPeerConfig)
 
     @classmethod
@@ -704,6 +703,9 @@ class NetworkPlaneConfig:
             backoff_max_sec=parse_float_env(f"{prefix}BACKOFF_MAX_SEC", 30.0),
             connect_budget_sec=parse_float_env(f"{prefix}CONNECT_BUDGET_SEC") or 5.0,
             route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC", 30.0),
+            worker_directly_routable=parse_bool_env(
+                f"{prefix}WORKER_DIRECTLY_ROUTABLE", False
+            ),
             peer=TrustedPeerConfig.from_env(
                 default_trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh"
             ),
