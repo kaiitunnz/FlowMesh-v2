@@ -9,7 +9,7 @@ reachability for diagnostics.
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from shared.network.frame_stream import split_host_port
 from shared.schemas.network import RESIDENT_PEER_PROTOCOL
@@ -148,6 +148,21 @@ class NetworkPlane:
             return None
         return stamp_endpoint(node.network_endpoint, node.id)
 
+    async def endpoints_for(
+        self, node_ids: Iterable[str]
+    ) -> dict[str, NetworkEndpointAdvertisement | None]:
+        """Each node's current advertisement, read in one round trip."""
+        ordered = sorted(set(node_ids))
+        nodes = await self._nodes.get_nodes_async(ordered)
+        return {
+            node_id: (
+                stamp_endpoint(node.network_endpoint, node.id)
+                if node is not None and node.network_endpoint is not None
+                else None
+            )
+            for node_id, node in zip(ordered, nodes, strict=True)
+        }
+
     @staticmethod
     def node_host(endpoint: NetworkEndpointAdvertisement | None) -> str:
         """Return the host a node is reached at; empty when it advertises none."""
@@ -204,15 +219,8 @@ class NetworkPlane:
         origin = self._route_origin(origin_endpoint, origin_node_id, policy_class)
         now = time.monotonic()
         self._route_epoch += 1
-        route = resolve_route(
-            origin,
-            listener,
-            target_endpoint,
-            self._reachability,
-            trust=self._trust if trust is None else trust,
-            now=now,
-            route_epoch=self._route_epoch,
-            expires_at=now + self._config.route_ttl_sec,
+        route = self._ladder(
+            origin, listener, target_endpoint, trust, now, self._route_epoch
         )
         for candidate in route.candidates:
             self._reachability.mark_optimistic(
@@ -225,6 +233,51 @@ class NetworkPlane:
                 now=now,
             )
         return origin, route
+
+    def preview(
+        self,
+        origin_node_id: str,
+        listener: RouteTarget,
+        *,
+        trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
+        endpoints: Mapping[str, NetworkEndpointAdvertisement | None],
+    ) -> ResolvedRoute | None:
+        """Return the ladder ``resolve`` would give, from advertisements already read,
+        leaving no trace: no epoch is spent and no candidate is marked attempted, so a
+        caller can rank several targets and resolve only the one it picks."""
+        origin_endpoint = endpoints.get(origin_node_id)
+        if origin_endpoint is None:
+            return None
+        origin = self._route_origin(origin_endpoint, origin_node_id, policy_class)
+        return self._ladder(
+            origin,
+            listener,
+            endpoints.get(listener.node_id),
+            trust,
+            time.monotonic(),
+            self._route_epoch,
+        )
+
+    def _ladder(
+        self,
+        origin: RouteOrigin,
+        listener: RouteTarget,
+        target_endpoint: NetworkEndpointAdvertisement | None,
+        trust: TrustedPeerPolicy | None,
+        now: float,
+        route_epoch: int,
+    ) -> ResolvedRoute:
+        return resolve_route(
+            origin,
+            listener,
+            target_endpoint,
+            self._reachability,
+            trust=self._trust if trust is None else trust,
+            now=now,
+            route_epoch=route_epoch,
+            expires_at=now + self._config.route_ttl_sec,
+        )
 
     def record_observations(
         self,

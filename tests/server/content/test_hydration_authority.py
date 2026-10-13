@@ -375,9 +375,12 @@ class _Network:
         self.endpoint_reads = 0
         self.peer_enabled = True
 
-    async def endpoint_for(self, node_id: str) -> Any:
+    async def endpoints_for(self, node_ids) -> dict[str, Any]:
         self.endpoint_reads += 1
-        return SimpleNamespace(url=f"10.0.0.{node_id[-1]}:9101")
+        return {
+            node_id: SimpleNamespace(url=f"10.0.0.{node_id[-1]}:9101")
+            for node_id in node_ids
+        }
 
     def peer_trust(self, protocol: str) -> TrustedPeerPolicy:
         return TrustedPeerPolicy(
@@ -390,10 +393,19 @@ class _Network:
         assert origin_node_id in endpoints and target.node_id in endpoints
         self.resolved.append((target.worker_id, policy_class, trust.protocol))
         self.targets.append(target)
+        return SimpleNamespace(
+            origin_id="rog-1", origin_node=origin_node_id
+        ), self._ladder(target, trust)
+
+    def preview(self, origin_node_id, target, *, trust, policy_class, endpoints) -> Any:
+        assert origin_node_id in endpoints and target.node_id in endpoints
+        return self._ladder(target, trust)
+
+    def _ladder(self, target, trust) -> ResolvedRoute:
         ladder = self._ladders.get(target.worker_id, [Transport.CONTROL_RELAY])
         if not trust.enabled:
             ladder = [Transport.CONTROL_RELAY]
-        route = ResolvedRoute(
+        return ResolvedRoute(
             origin_id="rog-1",
             target_node_id=target.node_id,
             listener_generation=target.listener_generation,
@@ -417,7 +429,6 @@ class _Network:
             ),
             probe=self._probe,
         )
-        return SimpleNamespace(origin_id="rog-1", origin_node=origin_node_id), route
 
     def record_observations(self, origin, target, observations) -> None:
         for transport, outcome in observations:
@@ -621,25 +632,25 @@ def test_without_a_peer_transport_a_grant_reads_each_holder_once_and_resolves_no
     assert network.resolved == []
 
 
-@pytest.mark.parametrize("count", [1, 12])
-def test_with_peer_transports_a_grant_resolves_a_bounded_few_holders(
-    count: int,
+@pytest.mark.parametrize(("count", "reachable"), [(1, 0), (12, 0), (12, 11)])
+def test_with_peer_transports_the_peer_reached_holder_is_found_at_any_position(
+    count: int, reachable: int
 ) -> None:
     workers, holders = _many_holders(count)
-    network = _Network({})
+    network = _Network({holders[reachable]: [Transport.NODE_RELAY]})
     authority = _authority(workers, network=network)
-    for holder in holders:
+    for holder in reversed(holders):
         asyncio.run(authority.record_holding(holder, [_HELD]))
     workers.reads = network.endpoint_reads = 0
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
-    resolved = min(count, 4)
+    assert _granted(workers).holder_id == holders[reachable]
+    # The requester, then every reported holder in one batch.
     assert workers.reads == 2
-    assert len(network.resolved) == resolved
-    # Each node's endpoint is read once: the requester's, then each holder resolved.
-    nodes = {"nde-2"} | {target.node_id for target in network.targets}
-    assert network.endpoint_reads == len(nodes)
+    # Every node's advertisement in one batch, and only the chosen holder resolved.
+    assert network.endpoint_reads == 1
+    assert [worker for worker, *_ in network.resolved] == [holders[reachable]]
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import threading
+from typing import Any
 
 import pytest
 
@@ -24,6 +25,7 @@ from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 class _FakeNodeRegistry:
     def __init__(self) -> None:
         self._nodes: dict[str, Node] = {}
+        self.batches = 0
 
     def set(self, node: Node) -> None:
         self._nodes[node.id] = node
@@ -33,6 +35,10 @@ class _FakeNodeRegistry:
 
     async def list_nodes_async(self) -> list[Node]:
         return list(self._nodes.values())
+
+    async def get_nodes_async(self, node_ids) -> list[Node | None]:
+        self.batches += 1
+        return [self._nodes.get(node_id) for node_id in node_ids]
 
 
 def _node(
@@ -260,6 +266,39 @@ def test_a_departure_reported_off_the_loop_is_applied_on_it() -> None:
         return held, gone
 
     assert asyncio.run(scenario()) == (True, True)
+
+
+def test_a_preview_ranks_without_a_trace_and_resolve_commits() -> None:
+    registry = _FakeNodeRegistry()
+    registry.set(_node("nde-1", generation=1))
+    registry.set(_node("nde-2", generation=1))
+    plane = _plane(registry, trusted=True)
+
+    async def scenario() -> tuple[Any, ...]:
+        endpoints = await plane.endpoints_for(["nde-1", "nde-2", "nde-2"])
+        previewed = plane.preview("nde-1", _listener(), endpoints=endpoints)
+        traced = plane.reachability_snapshot()
+        resolved = await plane.resolve("nde-1", _listener(), endpoints=endpoints)
+        assert previewed is not None and resolved is not None
+        return (
+            registry.batches,
+            sorted(endpoints),
+            traced,
+            [c.transport for c in previewed.candidates],
+            [c.transport for c in resolved[1].candidates],
+            resolved[1].route_epoch,
+            len(plane.reachability_snapshot()),
+        )
+
+    batches, nodes, traced, previewed, resolved, epoch, entries = asyncio.run(
+        scenario()
+    )
+    assert batches == 1 and nodes == ["nde-1", "nde-2"]
+    assert traced == []
+    assert previewed == resolved
+    # The preview spent no epoch; the resolve took the first.
+    assert epoch == 1
+    assert entries == len(resolved)
 
 
 def test_endpoints_are_stamped_with_node_id() -> None:
