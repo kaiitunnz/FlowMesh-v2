@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from server.dispatcher.base import Dispatcher
+from server.registries.artifacts import final_set
 from shared.content import ContentReference
 from shared.schemas.artifact import ArtifactContext, ArtifactRef
 from shared.schemas.result import LoRAResult
@@ -55,10 +56,10 @@ class _Runtime:
     def __init__(self, bindings: dict[str, list[ArtifactBinding]]) -> None:
         self._bindings = bindings
 
-    def artifact_bindings(self, task_id: str) -> dict[tuple[str, str], Any] | None:
-        if task_id not in self._bindings:
-            return None
-        return {binding.key: binding for binding in self._bindings[task_id]}
+    def final_artifacts(self, task_id: str) -> dict[tuple[str, str], Any]:
+        return final_set(
+            {binding.key: binding for binding in self._bindings.get(task_id, [])}
+        )
 
 
 def _dispatcher() -> Dispatcher:

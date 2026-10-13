@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from redis.asyncio.client import Pipeline as AsyncPipeline
 from redis.client import Pipeline
 
-from shared.tasks.artifact_binding import ArtifactBinding
+from shared.tasks.artifact_binding import FINAL_REVISION, ArtifactBinding
 
 from ..clients.redis import RedisClient, task_artifacts_key
 
@@ -23,6 +23,15 @@ type ArtifactBindings = dict[ArtifactKey, ArtifactBinding]
 
 _SEPARATOR = "\0"
 _logger = logging.getLogger(__name__)
+
+
+def _text(value: Any) -> str:
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
+def final_set(bindings: ArtifactBindings) -> ArtifactBindings:
+    """The ``final`` revision of a catalog."""
+    return {key: b for key, b in bindings.items() if key[0] == FINAL_REVISION}
 
 
 def artifact_field(binding: ArtifactBinding) -> str:
@@ -43,10 +52,16 @@ def queue_artifact_bindings(
         )
 
 
-def decode_artifact_bindings(task_id: str, raw: Mapping[Any, Any]) -> ArtifactBindings:
-    """A task's catalog from its stored hash, skipping a field that does not parse."""
+def decode_artifact_bindings(
+    task_id: str, raw: Mapping[Any, Any], revision: str | None = None
+) -> ArtifactBindings:
+    """A task's catalog from its stored hash, or only ``revision`` of it, skipping a
+    field that does not parse."""
     bindings: ArtifactBindings = {}
+    prefix = None if revision is None else f"{revision}{_SEPARATOR}"
     for field, value in raw.items():
+        if prefix is not None and not _text(field).startswith(prefix):
+            continue
         try:
             binding = ArtifactBinding.model_validate_json(value)
         except ValidationError:
@@ -74,9 +89,9 @@ class ArtifactCatalogStore:
         )
 
     def artifact_bindings_many(
-        self, task_ids: Sequence[str]
+        self, task_ids: Sequence[str], revision: str | None = None
     ) -> dict[str, ArtifactBindings]:
-        """Each task's catalog, read in one round trip."""
+        """Each task's catalog, or only ``revision`` of it, read in one round trip."""
         if not task_ids:
             return {}
         with self._rds.sync.control_pipeline(transaction=False) as pipe:
@@ -84,12 +99,12 @@ class ArtifactCatalogStore:
                 pipe.hgetall(task_artifacts_key(task_id))
             replies = pipe.execute()
         return {
-            task_id: decode_artifact_bindings(task_id, raw)
+            task_id: decode_artifact_bindings(task_id, raw, revision)
             for task_id, raw in zip(task_ids, replies, strict=True)
         }
 
     async def artifact_bindings_many_async(
-        self, task_ids: Sequence[str]
+        self, task_ids: Sequence[str], revision: str | None = None
     ) -> dict[str, ArtifactBindings]:
         if not task_ids:
             return {}
@@ -98,7 +113,7 @@ class ArtifactCatalogStore:
                 pipe.hgetall(task_artifacts_key(task_id))
             replies = await pipe.execute()
         return {
-            task_id: decode_artifact_bindings(task_id, raw)
+            task_id: decode_artifact_bindings(task_id, raw, revision)
             for task_id, raw in zip(task_ids, replies, strict=True)
         }
 

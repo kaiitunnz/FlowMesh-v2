@@ -11,6 +11,7 @@ from unittest import mock
 import pytest
 
 from server.content.directory import ContentHolderRecord
+from server.registries.artifacts import final_set
 from server.registries.worker import Worker
 from shared.content import ContentReference
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
@@ -70,8 +71,8 @@ class _Runtime:
     def describe_task(self, task_id: str) -> Any:
         return SimpleNamespace(depends_on=self._depends_on)
 
-    def artifact_bindings(self, task_id: str) -> Any:
-        return self.artifacts.get(task_id)
+    def final_artifacts(self, task_id: str) -> Any:
+        return final_set(self.artifacts.get(task_id) or {})
 
 
 class _Holders:

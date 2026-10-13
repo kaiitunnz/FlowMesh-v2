@@ -49,7 +49,7 @@ from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.schemas.result.binding import upstream_value
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from shared.tasks.artifact_binding import FINAL_REVISION, ArtifactBinding, ArtifactKind
 from shared.tasks.credentials import set_spec_values
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
 from shared.tasks.specs import ModelBindingMode, TaskSpecBase
@@ -87,7 +87,7 @@ from ...orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from ...registries.artifacts import ArtifactBindings
+from ...registries.artifacts import ArtifactBindings, final_set
 from ...registries.history import HistoryPublication, StoredTask
 from ...registries.worker import Worker, WorkerRegistry
 from ...registries.workflow import (
@@ -1102,17 +1102,24 @@ class TaskRuntime:
         return restored
 
     async def _restore_artifacts(self, workflow_ids: Sequence[str]) -> None:
-        """Load the artifact catalog of each restored task that published one."""
+        """Load the artifact catalog of each restored task that published one: all of
+        it for a task that can still bind, and the final set of a settled one."""
         with self._lock:
-            task_ids = [
-                record.task_id
+            records = [
+                record
                 for workflow_id in workflow_ids
                 for record in self._tasks.of_workflow(workflow_id)
                 if record.has_artifacts
             ]
-        if not task_ids:
+        if not records:
             return
-        catalogs = await self._workflow_registry.artifact_bindings_many_async(task_ids)
+        settled = [r.task_id for r in records if r.status in TERMINAL_TASK_STATUSES]
+        live = [r.task_id for r in records if r.status not in TERMINAL_TASK_STATUSES]
+        registry = self._workflow_registry
+        catalogs = {
+            **await registry.artifact_bindings_many_async(live),
+            **await registry.artifact_bindings_many_async(settled, FINAL_REVISION),
+        }
         with self._lock:
             for task_id, bindings in catalogs.items():
                 if (record := self._tasks.get(task_id)) is not None:
@@ -3485,15 +3492,31 @@ class TaskRuntime:
 
     def artifact_bindings(self, task_id: str) -> ArtifactBindings | None:
         """A task's published artifacts by revision and name, or None for a task this
-        runtime neither holds nor has stored."""
+        runtime neither holds nor has stored. A settled task holds only its final set,
+        so the rest is read from its stored catalog."""
+        held: ArtifactBindings | None = None
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
-                return dict(record.artifacts)
+                held = dict(record.artifacts)
+                if (
+                    record.status not in TERMINAL_TASK_STATUSES
+                    or not record.has_artifacts
+                ):
+                    return held
+        if held is not None:
+            return {**self._workflow_registry.artifact_bindings(task_id), **held}
         if (stored := self._stored_task(task_id)) is None:
             return None
         if not stored.persisted.record.has_artifacts:
             return {}
         return self._workflow_registry.artifact_bindings(task_id)
+
+    def final_artifacts(self, task_id: str) -> ArtifactBindings:
+        """A task's final set by revision and name, empty for a task that has none."""
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is not None:
+                return final_set(record.artifacts)
+        return final_set(self.artifact_bindings(task_id) or {})
 
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
         """The binding a task's recorded resolution carries, if one was recorded."""

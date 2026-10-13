@@ -37,9 +37,9 @@ _ARCHIVE = ArtifactBinding(
 
 
 class _Runtime:
-    def artifact_bindings(self, task_id: str) -> Any:
+    def final_artifacts(self, task_id: str) -> Any:
         if task_id != "tsk-train":
-            return None
+            return {}
         return {b.key: b for b in (_TREE, _ARCHIVE)}
 
 

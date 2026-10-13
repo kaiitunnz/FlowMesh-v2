@@ -355,3 +355,81 @@ def test_success_binds_a_checkpoint_whose_report_was_lost() -> None:
         ("step-10", "checkpoints"),
         ("step-20", "checkpoints"),
     }
+
+
+def test_a_settled_task_keeps_only_its_final_set_in_memory() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    _publish(runtime, train, _step(10), "dsp-1")
+    assert set(runtime._tasks[train].artifacts) == {("step-10", "checkpoints")}
+
+    _succeed(runtime, train, [_tree()], "dsp-1")
+
+    assert set(runtime._tasks[train].artifacts) == {("final", "final_model")}
+    assert set(runtime.artifact_bindings(train) or {}) == {
+        ("step-10", "checkpoints"),
+        ("final", "final_model"),
+    }
+    assert set(runtime.final_artifacts(train)) == {("final", "final_model")}
+
+
+def test_a_held_success_still_lists_every_revision() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    _publish(runtime, train, _step(10), "dsp-1")
+    registry.refuse = 1
+
+    _succeed(runtime, train, [_tree()], "dsp-1")
+
+    assert set(_stored(registry, train)) == {("step-10", "checkpoints")}
+    assert set(runtime.artifact_bindings(train) or {}) == {
+        ("step-10", "checkpoints"),
+        ("final", "final_model"),
+    }
+
+
+def test_a_restart_restores_every_revision_only_for_a_running_task() -> None:
+    registry = _registry()
+    reader = make_result_reader()
+    runtime = _runtime(registry, reader)
+    _, (train, use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    _publish(runtime, train, _step(10), "dsp-1")
+    _succeed(runtime, train, [_tree()], "dsp-1")
+    record_dispatch(runtime, use, dispatch_id="dsp-2")
+    _publish(runtime, use, _step(5), "dsp-2")
+
+    restored = _runtime(registry, make_result_reader(reader.store))
+    assert asyncio.run(restored.rehydrate()) == 1
+
+    assert set(restored._tasks[train].artifacts) == {("final", "final_model")}
+    assert set(restored.artifact_bindings(train) or {}) == {
+        ("step-10", "checkpoints"),
+        ("final", "final_model"),
+    }
+    assert set(restored._tasks[use].artifacts) == {("step-5", "checkpoints")}
+
+
+def test_a_revision_read_decodes_only_that_revision() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    _publish(runtime, train, _step(10), "dsp-1")
+    _succeed(runtime, train, [_tree()], "dsp-1")
+
+    sync = registry.artifact_bindings_many([train, use], "final")
+    via_loop = asyncio.run(registry.artifact_bindings_many_async([train, use], "final"))
+
+    assert (
+        sync
+        == via_loop
+        == {
+            train: {("final", "final_model"): sync[train][("final", "final_model")]},
+            use: {},
+        }
+    )

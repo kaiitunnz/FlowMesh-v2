@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 from server.dispatcher.base import Dispatcher, StageReferenceNotReady
+from server.registries.artifacts import final_set
 from server.registries.worker import WorkerRegistry
 from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
@@ -38,10 +39,8 @@ class _DummyRuntime:
         self._results = results or {}
         self.artifacts: dict[str, dict[tuple[str, str], ArtifactBinding]] = {}
 
-    def artifact_bindings(
-        self, task_id: str
-    ) -> dict[tuple[str, str], ArtifactBinding] | None:
-        return self.artifacts.get(task_id)
+    def final_artifacts(self, task_id: str) -> dict[tuple[str, str], ArtifactBinding]:
+        return final_set(self.artifacts.get(task_id) or {})
 
     def read_result(self, task_id: str) -> ResultEnvelope | None:
         envelope = self._results.get(task_id)

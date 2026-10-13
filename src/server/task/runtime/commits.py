@@ -20,6 +20,7 @@ from server.telemetry.tracing import ControlPlaneTracer
 
 from ...clients.redis import REDIS_CONN_ERRORS
 from ...orchestration import OrchestrationEngine
+from ...registries.artifacts import final_set
 from ...registries.workflow import (
     PersistedTask,
     WorkflowControl,
@@ -502,10 +503,17 @@ class TransitionCommitter:
         by_status: dict[str, list[str]],
     ) -> None:
         """Report each committed resident task that ended, file the completion notice
-        of a terminal, and release the worker of each dispatch the commit ended."""
+        of a terminal, and release the worker of each dispatch the commit ended.
+
+        A settled task binds nothing more, so only its final set stays in memory; its
+        checkpoints are read from its stored catalog.
+        """
         self._observe_resident_locked(records)
         for persisted in records:
-            persisted.record.unwritten_artifacts.clear()
+            record = persisted.record
+            record.unwritten_artifacts.clear()
+            if record.status in TERMINAL_TASK_STATUSES and record.artifacts:
+                record.artifacts = final_set(record.artifacts)
         if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
             self._actions.file_locked(workflow_id, Settled(workflow_id))
         self._reservations.release_ended_dispatches_locked(

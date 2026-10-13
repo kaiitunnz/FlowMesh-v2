@@ -29,7 +29,6 @@ from shared.tasks import (
     TaskSpecStrict,
 )
 from shared.tasks.artifact_binding import (
-    FINAL_REVISION,
     ArtifactBinding,
     ArtifactInputs,
     resolve_artifact_input,
@@ -1290,8 +1289,8 @@ class Dispatcher:
             producers = set(info.depends_on) if info is not None else set()
         objects: dict[tuple[str, str, str], ContentReference] = {}
         for producer in producers:
-            for binding in (self._runtime.artifact_bindings(producer) or {}).values():
-                if binding.revision != FINAL_REVISION or binding.largest is None:
+            for binding in self._runtime.final_artifacts(producer).values():
+                if binding.largest is None:
                     continue
                 objects.setdefault(binding.largest.identity, binding.largest)
         return sorted(objects.values(), key=lambda ref: ref.size_bytes, reverse=True)
@@ -1477,7 +1476,7 @@ class Dispatcher:
             or (path := artifact_ref_path(value)) is None
         ):
             return None
-        bindings = self._runtime.artifact_bindings(context.task_id) or {}
+        bindings = self._runtime.final_artifacts(context.task_id)
         if (found := resolve_artifact_input(bindings, path)) is None:
             raise ValueError(
                 f"task {context.task_id} published no artifact named {path!r}"
@@ -1503,7 +1502,7 @@ class Dispatcher:
             or not (filename := load.get("filename"))
         ):
             return task
-        bindings = self._runtime.artifact_bindings(str(producer)) or {}
+        bindings = self._runtime.final_artifacts(str(producer))
         found = resolve_artifact_input(bindings, str(filename))
         if found is None or found[0].reference.authorization_scope != record.org_id:
             raise ValueError(
@@ -1530,12 +1529,7 @@ class Dispatcher:
             producers |= binding.producers()
         found: dict[str, list[ArtifactBinding]] = {}
         for producer in sorted(producers):
-            published = self._runtime.artifact_bindings(producer) or {}
-            if finals := [
-                binding
-                for binding in published.values()
-                if binding.revision == FINAL_REVISION
-            ]:
+            if finals := list(self._runtime.final_artifacts(producer).values()):
                 found[producer] = finals
         return found
 
