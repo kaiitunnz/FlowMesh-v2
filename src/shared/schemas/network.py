@@ -26,6 +26,9 @@ class ReachabilityClass(StrEnum):
 PEER_PROTOCOL = "resident-peer"
 """The transport capability a direct origin-to-target peer transport is carried over."""
 
+CONTENT_PEER_PROTOCOL = "content-peer"
+"""The capability to carry a content transfer over a peer transport, at either end."""
+
 
 class NetworkEndpointAdvertisement(BaseModel):
     """A node's (or registered ingress edge's) purpose-scoped network-plane endpoint.

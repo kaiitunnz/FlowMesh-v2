@@ -254,7 +254,7 @@ def test_a_peer_node_without_a_listener_dials_a_trusted_worker_directly() -> Non
             network_endpoint=origin_ad,
         )
     )
-    registry.set(_node("nde-2", generation=1))
+    registry.set(_node("nde-2", generation=1, protocols=(PEER_PROTOCOL,)))
     plane = NetworkPlane(
         NetworkPlaneConfig(enabled=True, trust_domain="fm", peer=peer),
         registry,  # type: ignore[arg-type]

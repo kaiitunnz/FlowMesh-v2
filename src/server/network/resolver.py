@@ -80,7 +80,8 @@ def _peer_admitted(
     address proves nothing. Both ends must sit in the configured trust domain, the
     target must be exposed at an admitted class, the origin must be able to dial the
     peer protocol, and the target must serve it: a ``worker_direct`` listener by
-    advertising the protocol, a ``node_relay`` node by serving a peer listener.
+    advertising the protocol, a ``node_relay`` node by serving a peer listener that
+    carries it.
     """
     if not trust.enabled:
         return False
@@ -97,7 +98,9 @@ def _peer_admitted(
     if trust.protocol not in origin.protocols:
         return False
     if transport is Transport.NODE_RELAY:
-        return bool(node_endpoint.peer_url)
+        return (
+            bool(node_endpoint.peer_url) and trust.protocol in node_endpoint.protocols
+        )
     return trust.protocol in listener.protocols
 
 

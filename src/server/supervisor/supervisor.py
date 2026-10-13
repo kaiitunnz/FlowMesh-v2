@@ -19,6 +19,7 @@ from shared.network.mtls import (
 )
 from shared.schemas.command import CommandMessage, CommandResponse
 from shared.schemas.network import (
+    CONTENT_PEER_PROTOCOL,
     PEER_PROTOCOL,
     NetworkEndpointAdvertisement,
     ReachabilityClass,
@@ -271,7 +272,7 @@ def _enqueue_latest_node_id(
 
 
 def _endpoint_advertisement_provider(
-    network_cfg: NetworkPlaneConfig,
+    network_cfg: NetworkPlaneConfig, content_peer: bool = False
 ) -> Callable[[], NetworkEndpointAdvertisement | None]:
     """Return a provider that mints a fresh-generation endpoint advertisement.
 
@@ -291,9 +292,14 @@ def _endpoint_advertisement_provider(
     peer = network_cfg.peer
     # The peer protocol says the node's peer plane is on; whether an origin dials is its
     # worker's own. Only a node serving a peer listener advertises it and is offered as
-    # a node_relay hop.
+    # a node_relay hop. A node carrying content transfers also says so, so a content
+    # transfer is routed over its peer plane only once it can carry one.
     peer_url = peer.node_listener_url if peer.enabled else ""
-    protocols = (PEER_PROTOCOL,) if peer.enabled else ()
+    protocols: tuple[str, ...] = ()
+    if peer.enabled:
+        protocols = (
+            (PEER_PROTOCOL, CONTENT_PEER_PROTOCOL) if content_peer else (PEER_PROTOCOL,)
+        )
     try:
         reachability_class = ReachabilityClass(network_cfg.reachability_class)
     except ValueError:
@@ -423,7 +429,9 @@ def _run_supervisor(
         logger=logger,
         system_principal=system_principal,
         current_gpu_count_getter=current_gpu_count_getter,
-        endpoint_advertisement_provider=_endpoint_advertisement_provider(network_cfg),
+        endpoint_advertisement_provider=_endpoint_advertisement_provider(
+            network_cfg, content_peer=content_cfg.hydration_enabled
+        ),
     )
 
     # Register now — must happen before other components that need node_id

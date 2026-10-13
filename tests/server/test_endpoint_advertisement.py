@@ -4,7 +4,7 @@ which the server derives the relay attachment identity from the node."""
 
 from server.config import NetworkPlaneConfig, TrustedPeerConfig
 from server.supervisor.supervisor import _endpoint_advertisement_provider
-from shared.schemas.network import PEER_PROTOCOL
+from shared.schemas.network import CONTENT_PEER_PROTOCOL, PEER_PROTOCOL
 
 
 def test_carries_the_inbound_url_when_configured() -> None:
@@ -68,3 +68,16 @@ def test_a_node_without_the_peer_plane_neither_dials_nor_is_dialed() -> None:
     assert ad is not None
     assert ad.protocols == ()
     assert ad.peer_url == ""
+
+
+def test_a_peer_node_carrying_content_transfers_says_so() -> None:
+    peer = TrustedPeerConfig(enabled=True, node_listener_url="10.0.0.2:9102")
+    with_content = _endpoint_advertisement_provider(
+        NetworkPlaneConfig(enabled=True, peer=peer), content_peer=True
+    )()
+    without_peer = _endpoint_advertisement_provider(
+        NetworkPlaneConfig(enabled=True), content_peer=True
+    )()
+    assert with_content is not None and without_peer is not None
+    assert with_content.protocols == (PEER_PROTOCOL, CONTENT_PEER_PROTOCOL)
+    assert without_peer.protocols == ()

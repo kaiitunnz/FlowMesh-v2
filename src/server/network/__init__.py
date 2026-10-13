@@ -1,6 +1,7 @@
 from .reachability import NetworkReachabilityView, ReachabilityBounds
 from .resolver import resolve_route
 from .state import (
+    ContentListenerTarget,
     NetworkEndpointAdvertisement,
     NonresidentSidecarTarget,
     PolicyClass,
@@ -22,6 +23,7 @@ from .state import (
 __all__ = [
     "NetworkEndpointAdvertisement",
     "NetworkReachabilityView",
+    "ContentListenerTarget",
     "NonresidentSidecarTarget",
     "PolicyClass",
     "ReachabilityBounds",

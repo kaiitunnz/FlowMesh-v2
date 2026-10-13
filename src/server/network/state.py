@@ -26,6 +26,7 @@ from ..utils.time import now_iso
 
 __all__ = [
     "NetworkEndpointAdvertisement",
+    "ContentListenerTarget",
     "NonresidentSidecarTarget",
     "PolicyClass",
     "ReachabilityClass",
@@ -52,6 +53,9 @@ class PolicyClass(StrEnum):
     # The root's gated serve ingress, with reachability evidence separate from its
     # node's workers.
     SERVE_INGRESS = "serve_ingress"
+    # A worker's content transfers, whose target is a holder's content listener rather
+    # than a resident one, so their evidence never grades a resident path.
+    CONTENT = "content"
 
 
 class ReachabilityState(StrEnum):
@@ -129,12 +133,34 @@ class NonresidentSidecarTarget(BaseModel):
     directly_routable: bool = False
 
 
+class ContentListenerTarget(BaseModel):
+    """A holder worker's content listener, the target of one content transfer.
+
+    It carries no replica, claim or tool fact. ``incarnation`` and
+    ``listener_generation`` mirror the holder's incarnation, the generation its copies
+    and its listener were reported under. ``routes`` names the listener's dialable
+    address, or an opaque per-worker name when it has none, which only the node and
+    control relays can reach.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    worker_id: str
+    node_id: str
+    incarnation: int
+    listener_generation: int
+    routes: tuple[str, ...] = ()
+    protocols: tuple[str, ...] = ()
+    directly_routable: bool = False
+
+
 class TrustedPeerPolicy(BaseModel):
     """The deployment's eligibility rule for the direct origin-to-target transports.
 
     Disabled by default: a deployment that has not declared a trusted class carries
     every resident invocation over ``control_relay``. ``protocol`` is the transport an
-    origin must be able to dial and a ``worker_direct`` listener must serve.
+    origin must be able to dial and a ``worker_direct`` listener or ``node_relay`` node
+    must serve.
 
     ``probe`` marks the rule a reachability diagnostic resolves under. A probe is
     answered by the peer listener it dials and carries no invocation payload, so it is

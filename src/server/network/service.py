@@ -20,11 +20,11 @@ from .state import (
     NetworkEndpointAdvertisement,
     PolicyClass,
     ReachabilityClass,
-    ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteObservation,
     RouteObservationOutcome,
     RouteOrigin,
+    RouteTarget,
     Transport,
     TrustedPeerPolicy,
 )
@@ -122,7 +122,7 @@ class NetworkPlane:
     async def resolve(
         self,
         origin_node_id: str,
-        listener: ReplicaListenerAdvertisement,
+        listener: RouteTarget,
         *,
         trust: TrustedPeerPolicy | None = None,
         policy_class: PolicyClass = PolicyClass.DEFAULT,
@@ -171,7 +171,7 @@ class NetworkPlane:
     def record_observations(
         self,
         origin: RouteOrigin,
-        listener: ReplicaListenerAdvertisement,
+        listener: RouteTarget,
         observations: list[tuple[Transport, RouteObservationOutcome]],
     ) -> None:
         """Fold the deputy's classified observations into the reachability view."""
@@ -191,7 +191,7 @@ class NetworkPlane:
             )
 
     def reachability_states(
-        self, origin: RouteOrigin, listener: ReplicaListenerAdvertisement
+        self, origin: RouteOrigin, listener: RouteTarget
     ) -> dict[str, str]:
         """The current directional state per transport, for the echo response."""
         now = time.monotonic()
