@@ -5,9 +5,6 @@ import textwrap
 import pytest
 
 from server.task.parser import ParsedTask, ParsedWorkflow, parse_workflow
-from shared.tasks.components.output import (
-    OutputDestinationHTTPTemplate,
-)
 from shared.tasks.specs import InferenceSpecTemplate
 
 
@@ -308,10 +305,6 @@ def test_parse_task_allows_placeholders_in_typed_template_fields() -> None:
           taskType: inference
           sloSeconds: ${inputs.slo}
           enforce_cpu: ${inputs.enforce_cpu}
-          output:
-            destination:
-              type: http
-              timeoutSec: ${inputs.timeout}
           model:
             source:
               trust_remote_code: ${inputs.trust}
@@ -326,10 +319,6 @@ def test_parse_task_allows_placeholders_in_typed_template_fields() -> None:
     assert isinstance(spec, InferenceSpecTemplate)
     assert spec.sloSeconds == "${inputs.slo}"
     assert spec.enforce_cpu == "${inputs.enforce_cpu}"
-    assert spec.output is not None
-    assert spec.output.destination is not None
-    assert isinstance(spec.output.destination, OutputDestinationHTTPTemplate)
-    assert spec.output.destination.timeoutSec == "${inputs.timeout}"
     assert spec.model is not None
     assert spec.model.source is not None
     assert spec.model.source.trust_remote_code == "${inputs.trust}"

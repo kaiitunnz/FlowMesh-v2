@@ -85,16 +85,23 @@ def spec_value(spec: BaseModel, pointer: str) -> Any:
     return container
 
 
+def holds_pointer(spec: BaseModel, pointer: str) -> bool:
+    """Whether ``spec`` has a value at ``pointer``."""
+    try:
+        spec_value(spec, pointer)
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+        return False
+    return True
+
+
 def dispatched_credentials(spec: BaseModel, pointers: Iterable[str]) -> list[Any]:
     """The credential values at ``pointers`` in a dispatched spec; a pointer the spec
     does not hold is skipped."""
-    values: list[Any] = []
-    for pointer in pointers:
-        try:
-            values.append(spec_value(spec, pointer))
-        except (AttributeError, KeyError, IndexError, TypeError, ValueError):
-            continue
-    return values
+    return [
+        spec_value(spec, pointer)
+        for pointer in pointers
+        if holds_pointer(spec, pointer)
+    ]
 
 
 def set_spec_values(spec: BaseModel, values: Mapping[str, Any]) -> None:
@@ -146,6 +153,7 @@ def _assign(container: Any, segment: str, value: Any) -> None:
 __all__ = [
     "credential_pointer",
     "dispatched_credentials",
+    "holds_pointer",
     "find_spec_credentials",
     "find_spec_strings",
     "mask_spec_values",

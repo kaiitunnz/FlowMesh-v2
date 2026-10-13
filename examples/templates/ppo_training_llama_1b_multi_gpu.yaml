@@ -65,8 +65,6 @@ spec:
     temperature: 0.7
 
   output:
-    destination:
-      type: local
     artifacts:
       - results.json
       - logs

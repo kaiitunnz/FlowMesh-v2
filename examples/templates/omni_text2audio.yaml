@@ -33,8 +33,6 @@ spec:
     negative_prompt: Low quality.
 
   output:
-    destination:
-      type: http
     artifacts:
       - results.json
       - artifacts/

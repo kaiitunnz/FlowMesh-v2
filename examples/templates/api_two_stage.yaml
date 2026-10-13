@@ -51,7 +51,5 @@ spec:
             raise_for_status: true
 
   output:
-    destination:
-      type: http
     artifacts:
       - results.json

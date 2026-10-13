@@ -3,11 +3,12 @@ import time
 from enum import StrEnum
 from typing import Any, NamedTuple, Self
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 from shared.content import ContentReference
 from shared.tasks import TaskEnvelopeTemplate, TaskType
 from shared.tasks.artifact_binding import ArtifactBinding
+from shared.tasks.credentials import holds_pointer
 from shared.tasks.worker_message import HardwareUsage
 
 from ..orchestration.tool_dispatch import FacadeTurnGroup
@@ -352,6 +353,17 @@ class TaskRecord(BaseModel):
         "episode, durable so a restart-replayed completion still routes its whole "
         "ordered membership.",
     )
+
+    @model_validator(mode="after")
+    def _drop_unheld_credential_refs(self) -> Self:
+        # A ref into a field a spec retired has nowhere to go back to at dispatch.
+        if self.credential_refs:
+            self.credential_refs = {
+                pointer: ref
+                for pointer, ref in self.credential_refs.items()
+                if holds_pointer(self.task.spec, pointer)
+            }
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property

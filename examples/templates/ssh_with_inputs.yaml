@@ -16,8 +16,6 @@ spec:
             - ssh result mounting smoke test
             - inspect /mnt/flowmesh/inputs/preprocess/results.json from the SSH session
         output:
-          destination:
-            type: http
           artifacts:
             - results.json
             - logs
@@ -43,8 +41,6 @@ spec:
         env:
           FLOWMESH_TEST_HINT: Write a file to /mnt/flowmesh/output and verify the upstream mount is read-only
         output:
-          destination:
-            type: http
           artifacts:
             - results.json
             - logs

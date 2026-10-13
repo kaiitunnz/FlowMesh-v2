@@ -59,7 +59,6 @@ At startup the worker:
 | `FLOWMESH_BASE_URL` | `http://localhost:8000` | Server URL used to build artifact download links and to hydrate cross-node SSH input bundles. |
 | `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` | empty | Network bandwidth the worker advertises. |
 | `WORKER_HB_FILE` | – | Full path to the worker heartbeat file. |
-| `WORKER_UPLOAD_RESULTS` | `false` | Whether the worker should always upload artifacts to the server if spec.output.destination is unspecified. |
 | `MODEL_CLEANUP_AFTER_UPLOAD` | `false` | Delete a task's local artifacts once they are published. |
 | `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` | `60` | Seconds a worker waits before unloading an idle executor to release the resources it holds; higher values avoid reload thrash between tasks but keep those resources reserved while idle. |
 | `WORKER_FOREIGN_GPU_GATE` | `true` | Report a GPU as unavailable while a process outside FlowMesh uses it. |

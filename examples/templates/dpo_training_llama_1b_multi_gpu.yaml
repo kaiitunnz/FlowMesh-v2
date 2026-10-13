@@ -55,8 +55,6 @@ spec:
     bf16: true
 
   output:
-    destination:
-      type: http
     artifacts:
       - results.json
       - logs

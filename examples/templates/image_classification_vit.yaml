@@ -47,8 +47,6 @@ spec:
     bf16: true
 
   output:
-    destination:
-      type: local
     artifacts:
       - results.json
       - logs

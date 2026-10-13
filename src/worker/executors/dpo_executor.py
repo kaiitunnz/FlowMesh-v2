@@ -37,7 +37,6 @@ from .mixins.training import TrainingMixin
 from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
-    maybe_upload_artifacts,
     write_executor_result,
 )
 from .utils.data_utils import resolve_jsonl_path
@@ -443,8 +442,6 @@ class DPOExecutor(TrainingMixin, Executor):
                     else None
                 ),
             )
-
-            maybe_upload_artifacts(task, out_dir, logger=logger)
 
             return result
         except Exception as exc:

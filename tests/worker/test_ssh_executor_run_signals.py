@@ -112,7 +112,6 @@ def _run(
         patch.object(DockerSession, "save_logs"),
         patch.object(DockerSessionBackend, "_cleanup_mount_plan"),
         patch.object(ex, "emit_update"),
-        patch.object(ssh_module, "maybe_upload_artifacts"),
     ):
         return ex.run(_task(interactive), tmp_path / "out")
 

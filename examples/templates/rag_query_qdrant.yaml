@@ -47,8 +47,6 @@ spec:
       - How does server-side embedding work in Qdrant?
 
   output:
-    destination:
-      type: local
     artifacts:
       - results.json
       - logs

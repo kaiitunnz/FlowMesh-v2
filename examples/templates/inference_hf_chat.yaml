@@ -66,8 +66,6 @@ spec:
         - answer
 
   output:
-    destination:
-      type: local
     artifacts:
       - results.json
       - artifacts

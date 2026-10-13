@@ -1,52 +1,13 @@
-from typing import Annotated, Any, Literal
+from typing import ClassVar
 
-from pydantic import Field
-
-from .._base import StrictBaseModel, TemplateBaseModel
-from ..placeholders import TemplateFloat
+from .._base import RetiredFieldsModel, StrictBaseModel, TemplateBaseModel
 
 
-class OutputDestinationLocal(StrictBaseModel):
-    type: Literal["local"] = "local"
-
-
-class OutputDestinationHTTP(StrictBaseModel):
-    type: Literal["http"] = "http"
-    url: str | None = None
-    method: str | None = None
-    headers: dict[str, Any] | None = None
-    timeoutSec: float | None = None
-
-
-OutputDestination = Annotated[
-    OutputDestinationLocal | OutputDestinationHTTP,
-    Field(discriminator="type"),
-]
-
-
-class OutputSpec(StrictBaseModel):
-    destination: OutputDestination | None = None
+class OutputSpec(StrictBaseModel, RetiredFieldsModel):
+    retired_fields: ClassVar[tuple[str, ...]] = ("destination",)
     artifacts: list[str] | None = None
 
 
-class OutputDestinationLocalTemplate(TemplateBaseModel):
-    type: Literal["local"] = "local"
-
-
-class OutputDestinationHTTPTemplate(TemplateBaseModel):
-    type: Literal["http"] = "http"
-    url: str | None = None
-    method: str | None = None
-    headers: dict[str, Any] | None = None
-    timeoutSec: TemplateFloat | None = None
-
-
-OutputDestinationTemplate = Annotated[
-    OutputDestinationLocalTemplate | OutputDestinationHTTPTemplate,
-    Field(discriminator="type"),
-]
-
-
-class OutputSpecTemplate(TemplateBaseModel):
-    destination: OutputDestinationTemplate | None = None
+class OutputSpecTemplate(TemplateBaseModel, RetiredFieldsModel):
+    retired_fields: ClassVar[tuple[str, ...]] = ("destination",)
     artifacts: list[str] | None = None

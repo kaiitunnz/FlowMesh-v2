@@ -35,7 +35,6 @@ from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
     determine_resume_path,
-    maybe_upload_artifacts,
     write_executor_result,
 )
 from .utils.data_utils import resolve_jsonl_path
@@ -384,8 +383,6 @@ class SFTExecutor(TrainingMixin, Executor):
                 final_model=final_model,
                 final_model_archive=final_model_archive,
             )
-
-            maybe_upload_artifacts(task, out_dir, logger=logger)
 
             # Drop heavy references before runner-level cleanup
             del trainer, model, tokenizer, train_dataset

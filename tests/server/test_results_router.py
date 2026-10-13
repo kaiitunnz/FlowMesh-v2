@@ -1,18 +1,13 @@
 import gc
-import io
 import logging
 import os
-import stat
-import threading
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
 
 import anyio
 import pytest
-from fastapi import HTTPException, UploadFile, status
+from fastapi import HTTPException, status
 from fastapi.responses import FileResponse, Response
 from fastapi.routing import APIRoute
 from lumid_hooks import PrincipalContext, ResourceRef
@@ -27,7 +22,6 @@ from shared.content import (
 )
 from shared.schemas.result import RESULT_MEDIA_TYPE, ResultEnvelope
 from shared.tasks.result_binding import ResultBinding
-from shared.utils import atomic
 from tests.server.asgi_responses import ClientGone, serve
 
 
@@ -135,70 +129,11 @@ async def _body(response: Response) -> bytes:
     return (await serve(response)).body
 
 
-def test_resolve_artifact_relative_path_scopes_nested_paths_to_artifacts() -> None:
-    assert results_router._resolve_artifact_path("result.json") == Path(
-        "artifacts/result.json"
-    )
-    assert results_router._resolve_artifact_path("nested/result.json") == Path(
-        "artifacts/nested/result.json"
-    )
-    assert results_router._resolve_artifact_path("artifacts/result.json") == Path(
-        "artifacts/artifacts/result.json"
-    )
-    assert results_router._resolve_artifact_path(
-        "artifacts/nested/result.json"
-    ) == Path("artifacts/artifacts/nested/result.json")
-
-
-def test_resolve_artifact_relative_path_rejects_invalid_paths() -> None:
-    with pytest.raises(Exception):
-        results_router._resolve_artifact_path("../result.json")
-
-
 @pytest.mark.parametrize("filename", [".fm-tmp-result.json", ".fm-tmp-dir/out.bin"])
 def test_an_artifact_named_as_an_in_flight_write_is_refused(filename: str) -> None:
     with pytest.raises(HTTPException) as exc:
-        results_router._resolve_artifact_path(filename)
+        results_router._check_artifact_path(filename)
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
-
-
-@pytest.mark.anyio
-async def test_upload_result_file_denied_without_permission(
-    deny_all_permissions: None, logger: logging.Logger
-) -> None:
-    with pytest.raises(HTTPException) as exc:
-        await results_router.upload_result_file(
-            task_id="t-1", principal=_principal(), logger=logger
-        )
-    assert exc.value.status_code == status.HTTP_403_FORBIDDEN
-
-
-@pytest.mark.anyio
-async def test_upload_result_file_shares_the_task_directories_before_writing(
-    tmp_path: Path, logger: logging.Logger
-) -> None:
-    task_dir = tmp_path / "task-1"
-    write = results_router.atomic_write_stream
-    modes_at_write: dict[str, int] = {}
-
-    def _write(target: Path, source: Any, dir_fd: int) -> None:
-        for directory in (task_dir, task_dir / "artifacts", task_dir / "logs"):
-            if directory.is_dir():
-                modes_at_write[directory.name] = stat.S_IMODE(directory.stat().st_mode)
-        write(target, source, dir_fd=dir_fd)
-
-    with patch.object(results_router, "atomic_write_stream", _write):
-        await results_router.upload_result_file(
-            task_id="task-1",
-            file=UploadFile(file=io.BytesIO(b"x"), filename="out.txt"),
-            runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
-            principal=_principal(),
-            results_dir=tmp_path,
-            logger=logger,
-        )
-
-    assert modes_at_write == {"task-1": 0o777, "artifacts": 0o777, "logs": 0o777}
-    assert (task_dir / "artifacts" / "out.txt").read_bytes() == b"x"
 
 
 @pytest.mark.anyio
@@ -273,38 +208,6 @@ async def test_download_results_json_reads_the_stored_envelope(
     assert response.media_type == RESULT_MEDIA_TYPE
 
 
-@pytest.mark.anyio
-async def test_upload_result_file_copies_in_chunks_off_the_event_loop(
-    tmp_path: Path, logger: logging.Logger, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    copies: list[tuple[int, int]] = []
-    copy = atomic.shutil.copyfileobj
-
-    def _recording(source: Any, target: Any, length: int = 0) -> None:
-        copies.append((threading.get_ident(), length))
-        copy(source, target, length)
-
-    async def _whole_read(*args: Any) -> bytes:
-        raise AssertionError("the upload was read whole")
-
-    monkeypatch.setattr(atomic.shutil, "copyfileobj", _recording)
-    upload = UploadFile(file=io.BytesIO(b"x" * 10), filename="out.bin")
-    monkeypatch.setattr(upload, "read", _whole_read)
-
-    await results_router.upload_result_file(
-        task_id="task-1",
-        file=upload,
-        runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
-        principal=_principal(),
-        results_dir=tmp_path,
-        logger=logger,
-    )
-
-    assert copies == [(copies[0][0], 1 << 20)]
-    assert copies[0][0] != threading.get_ident()
-    assert (tmp_path / "task-1" / "artifacts" / "out.bin").read_bytes() == b"x" * 10
-
-
 def _conditional(etag: str, last_modified: str) -> list[dict[str, str]]:
     return [
         {},
@@ -362,28 +265,7 @@ async def test_an_aborted_download_closes_its_files_without_a_collection(
 )
 def test_an_artifact_name_with_a_non_plain_segment_is_refused(filename: str) -> None:
     with pytest.raises(HTTPException) as exc:
-        results_router._resolve_artifact_path(filename)
-    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
-
-
-@pytest.mark.anyio
-async def test_an_upload_through_a_link_loop_is_refused(
-    tmp_path: Path, logger: logging.Logger
-) -> None:
-    artifacts = tmp_path / "task-1" / "artifacts"
-    artifacts.mkdir(parents=True)
-    (artifacts / "loop").symlink_to("loop")
-
-    with pytest.raises(HTTPException) as exc:
-        await results_router.upload_result_file(
-            task_id="task-1",
-            file=UploadFile(file=io.BytesIO(b"x"), filename="loop/out.txt"),
-            runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
-            principal=_principal(),
-            results_dir=tmp_path,
-            logger=logger,
-        )
-
+        results_router._check_artifact_path(filename)
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
 
 

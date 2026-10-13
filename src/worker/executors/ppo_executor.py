@@ -46,7 +46,6 @@ from .mixins.training import TrainingMixin
 from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
-    maybe_upload_artifacts,
     write_executor_result,
 )
 from .utils.data_utils import resolve_jsonl_path
@@ -769,8 +768,6 @@ class PPOExecutor(TrainingMixin, Executor):
                 else None
             ),
         )
-
-        maybe_upload_artifacts(task, out_dir, logger=logger)
 
         logger.info("PPO training task completed in %.2f seconds", training_time)
         self._task_out_dir = None

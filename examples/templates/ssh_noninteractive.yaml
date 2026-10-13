@@ -17,8 +17,6 @@ spec:
   env:
     MY_CUSTOM_VAR: hello
   output:
-    destination:
-      type: http
     artifacts:
       - results.json
       - logs

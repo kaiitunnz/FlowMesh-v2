@@ -13,10 +13,8 @@ from anyio import to_thread
 from fastapi import (
     APIRouter,
     Depends,
-    File,
     HTTPException,
     Query,
-    UploadFile,
     status,
 )
 from fastapi.responses import (
@@ -35,13 +33,11 @@ from shared.tasks.artifact_binding import (
     ArtifactKind,
     is_revision,
 )
-from shared.utils.atomic import atomic_write_stream, is_atomic_temp
+from shared.utils.atomic import is_atomic_temp
 from shared.utils.manifest import (
     ARTIFACTS_DIR,
     LOGS_DIR,
     RESULTS_NAME,
-    prepare_output_dir,
-    sync_manifest,
 )
 from shared.utils.nofollow import (
     PathRefused,
@@ -66,7 +62,6 @@ from ...auth.security import (
 from ...hooks import ResourceAction, ResourceKind
 from ...registries.artifacts import ArtifactBindings
 from ...schemas.artifacts import PublishedArtifact, PublishedArtifactList
-from ...schemas.common import PathResponse
 from ...task.artifact_reads import (
     ArtifactDownload,
     ArtifactNotFound,
@@ -89,17 +84,6 @@ _STREAM_SLOTS = 4
 _RETRY_AFTER_SEC = 5
 
 router = APIRouter(prefix="/results", tags=["Results"])
-
-
-def _resolve_artifact_path(filename: str) -> Path:
-    segments = filename.split("/")
-    if not all(
-        is_plain_segment(part) and not is_atomic_temp(part) for part in segments
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
-        )
-    return Path(ARTIFACTS_DIR, *segments)
 
 
 @router.get(
@@ -134,50 +118,6 @@ async def get_result(
             status_code=status.HTTP_404_NOT_FOUND, detail="result not found"
         )
     return envelope.result
-
-
-@router.post(
-    "/{task_id}/files",
-    summary="Upload a result artifact",
-    description="Upload an artifact file for a task result.",
-    response_description="Upload status",
-)
-async def upload_result_file(
-    task_id: str,
-    file: UploadFile = File(...),
-    runtime: TaskRuntime = Depends(get_runtime),
-    principal: PrincipalContext = Depends(authenticate_connection),
-    results_dir: Path = Depends(get_results_dir),
-    logger: logging.Logger = Depends(get_logger),
-) -> PathResponse:
-    await require_permission(
-        principal, ResourceKind.RESULT, None, ResourceAction.WRITE, logger
-    )
-    base_dir = result_file_path(results_dir, task_id).parent
-    relative_path = _resolve_artifact_path(file.filename or "")
-    target_path = base_dir / relative_path
-
-    record = await asyncio.to_thread(runtime.task_record, task_id)
-    expected_artifacts = record.task.spec.get_artifacts() if record else []
-    try:
-        await asyncio.to_thread(_store_artifact, file, base_dir, relative_path)
-    except PathRefused as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to store artifact: {exc}",
-        ) from exc
-    await asyncio.to_thread(sync_manifest, base_dir, task_id, expected_artifacts)
-    return PathResponse(ok=True, path=str(target_path))
-
-
-def _store_artifact(file: UploadFile, base_dir: Path, relative_path: Path) -> None:
-    prepare_output_dir(base_dir)
-    with open_dir(base_dir, *relative_path.parent.parts, create=True) as dir_fd:
-        atomic_write_stream(Path(relative_path.name), file.file, dir_fd=dir_fd)
 
 
 @router.get(

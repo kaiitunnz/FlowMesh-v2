@@ -1,172 +1,85 @@
 """Tests for the worker artifact helpers in checkpoints."""
 
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
-from worker.executors.base_executor import ExecutionError, TaskReference
+from worker.executors.base_executor import TaskReference
 from worker.executors.utils import checkpoints
 
 
-def _task(
-    dest_type: str = "http", dest_url: str = "http://host:8010/api/v1/results"
-) -> TaskReference:
-    if dest_type == "http":
-        destination = SimpleNamespace(
-            type="http",
-            method="POST",
-            url=dest_url,
-            headers={},
-            timeoutSec=30,
-        )
-    elif dest_type == "local":
-        destination = SimpleNamespace(type="local")
-    else:
-        destination = None
-    spec = SimpleNamespace(output=SimpleNamespace(destination=destination))
-    return cast(TaskReference, SimpleNamespace(task_id="task-1", spec=spec))
+def _task() -> TaskReference:
+    return cast(TaskReference, SimpleNamespace(task_id="task-1", spec=None))
 
 
-class TestMaybeUploadArtifacts:
-    def test_uploads_with_filename_relative_to_artifacts_dir(
-        self, tmp_path: Path, monkeypatch
+def _traces(out_dir: Path) -> None:
+    (out_dir / "logs").mkdir(parents=True)
+    (out_dir / "logs" / "spans.jsonl").write_text("{}\n", encoding="utf-8")
+    (out_dir / "logs" / "lineage.jsonl").write_text("{}\n", encoding="utf-8")
+
+
+class TestMaybeUploadTraces:
+    def test_posts_each_trace_to_the_server_with_its_auth(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        out_dir = tmp_path / "task-1"
-        artifacts_dir = out_dir / "artifacts"
-        (artifacts_dir / "images" / "nested").mkdir(parents=True)
-        first = artifacts_dir / "images" / "nested" / "a.png"
-        second = artifacts_dir / "final_model.tar.gz"
-        first.write_text("first", encoding="utf-8")
-        second.write_text("second", encoding="utf-8")
-
-        uploaded: list[tuple[str, str]] = []
+        monkeypatch.setenv("FLOWMESH_BASE_URL", "http://root:8000/")
+        monkeypatch.setenv("FLOWMESH_API_KEY", "flm-test")
+        _traces(tmp_path)
+        posted: list[tuple[str, str | None]] = []
 
         class _Response:
             def raise_for_status(self) -> None:
                 return None
 
-        def fake_request(method, url, files, headers, timeout):
-            assert method == "POST"
-            assert url == "http://host:8010/api/v1/results/task-1/files"
-            remote_name, _fh, _content_type = files["file"]
-            uploaded.append((remote_name, url))
+        def post(url: str, files: Any, headers: dict[str, str], timeout: float) -> Any:
+            posted.append((url, headers.get("Authorization")))
             return _Response()
 
-        monkeypatch.setattr(checkpoints.requests, "request", fake_request)
+        monkeypatch.setattr(checkpoints.requests, "post", post)
 
-        rel_paths = checkpoints.maybe_upload_artifacts(_task(), out_dir)
-        assert set(rel_paths) == {"images/nested/a.png", "final_model.tar.gz"}
-        assert {name for name, _url in uploaded} == {
-            "images/nested/a.png",
-            "final_model.tar.gz",
-        }
+        assert checkpoints.maybe_upload_traces(_task(), tmp_path) == [
+            "spans",
+            "lineage",
+        ]
+        assert posted == [
+            ("http://root:8000/api/v1/traces/tasks/task-1/spans", "Bearer flm-test"),
+            ("http://root:8000/api/v1/traces/tasks/task-1/lineage", "Bearer flm-test"),
+        ]
 
-    def test_links_are_never_followed(self, tmp_path: Path, monkeypatch) -> None:
-        """A session writing into artifacts/ cannot make the worker upload its own
-        files, through a file link or a directory link."""
-        secret = tmp_path / "worker-secret"
-        secret.write_text("worker environment", encoding="utf-8")
-        (tmp_path / "worker-dir").mkdir()
-        (tmp_path / "worker-dir" / "token").write_text("t", encoding="utf-8")
-        out_dir = tmp_path / "task-1"
-        artifacts_dir = out_dir / "artifacts"
-        artifacts_dir.mkdir(parents=True)
-        (artifacts_dir / "report.txt").write_text("ok", encoding="utf-8")
-        (artifacts_dir / "environ").symlink_to(secret)
-        (artifacts_dir / "linked").symlink_to(tmp_path / "worker-dir")
-        os.mkfifo(artifacts_dir / "pipe")
-
-        bodies: dict[str, bytes] = {}
-
-        class _Response:
-            def raise_for_status(self) -> None:
-                return None
-
-        def fake_request(method, url, files, headers, timeout):
-            name, fh, _ = files["file"]
-            bodies[name] = fh.read()
-            return _Response()
-
-        monkeypatch.setattr(checkpoints.requests, "request", fake_request)
-
-        assert checkpoints.maybe_upload_artifacts(_task(), out_dir) == ["report.txt"]
-        assert bodies == {"report.txt": b"ok"}
-
-    def test_in_flight_atomic_writes_are_not_uploaded(
-        self, tmp_path: Path, monkeypatch
+    def test_no_server_url_uploads_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        artifacts_dir = tmp_path / "task-1" / "artifacts"
-        (artifacts_dir / ".fm-tmp-dir").mkdir(parents=True)
-        (artifacts_dir / ".fm-tmp-dir" / "inner.bin").write_bytes(b"x")
-        (artifacts_dir / ".fm-tmp-abc123").write_bytes(b"partial")
-        (artifacts_dir / "report.txt").write_text("ok", encoding="utf-8")
+        monkeypatch.delenv("FLOWMESH_BASE_URL", raising=False)
+        _traces(tmp_path)
+
+        def post(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("nothing uploads without a server URL")
+
+        monkeypatch.setattr(checkpoints.requests, "post", post)
+
+        assert checkpoints.maybe_upload_traces(_task(), tmp_path) == []
+
+    def test_a_failed_upload_is_left_out_and_the_rest_go(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FLOWMESH_BASE_URL", "http://root:8000")
+        _traces(tmp_path)
 
         class _Response:
+            def __init__(self, url: str) -> None:
+                self.url = url
+
             def raise_for_status(self) -> None:
-                return None
+                if self.url.endswith("/spans"):
+                    raise checkpoints.requests.HTTPError("503")
 
         monkeypatch.setattr(
-            checkpoints.requests, "request", lambda *args, **kwargs: _Response()
+            checkpoints.requests, "post", lambda url, **kwargs: _Response(url)
         )
 
-        uploaded = checkpoints.maybe_upload_artifacts(_task(), tmp_path / "task-1")
-        assert uploaded == ["report.txt"]
-
-    @pytest.mark.skipif(os.getuid() == 0, reason="root reads any file")
-    @pytest.mark.parametrize("skip_errors", [False, True])
-    def test_a_file_that_cannot_be_read_follows_the_error_policy(
-        self, tmp_path: Path, monkeypatch, skip_errors: bool
-    ) -> None:
-        out_dir = tmp_path / "task-1"
-        artifacts_dir = out_dir / "artifacts"
-        artifacts_dir.mkdir(parents=True)
-        (artifacts_dir / "report.txt").write_text("ok", encoding="utf-8")
-        (artifacts_dir / "unreadable.bin").write_text("x", encoding="utf-8")
-        (artifacts_dir / "unreadable.bin").chmod(0)
-
-        class _Response:
-            def raise_for_status(self) -> None:
-                return None
-
-        monkeypatch.setattr(
-            checkpoints.requests, "request", lambda *args, **kwargs: _Response()
-        )
-
-        if skip_errors:
-            uploaded = checkpoints.maybe_upload_artifacts(
-                _task(), out_dir, skip_errors=True
-            )
-            assert uploaded == ["report.txt"]
-        else:
-            with pytest.raises(ExecutionError, match="unreadable.bin") as raised:
-                checkpoints.maybe_upload_artifacts(_task(), out_dir)
-            assert raised.value.retryable
-
-    def test_local_destination_is_noop(self, tmp_path: Path, monkeypatch) -> None:
-        out_dir = tmp_path / "task-1"
-        (out_dir / "artifacts").mkdir(parents=True)
-        (out_dir / "artifacts" / "a.png").write_text("x", encoding="utf-8")
-
-        def fake_request(*args, **kwargs):
-            raise AssertionError("should not be called for local destination")
-
-        monkeypatch.setattr(checkpoints.requests, "request", fake_request)
-        assert checkpoints.maybe_upload_artifacts(_task("local"), out_dir) == []
-
-    def test_empty_artifacts_dir_returns_empty_list(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        out_dir = tmp_path / "task-1"
-        out_dir.mkdir()  # no artifacts/ subdir
-
-        def fake_request(*args, **kwargs):
-            raise AssertionError("should not be called")
-
-        monkeypatch.setattr(checkpoints.requests, "request", fake_request)
-        assert checkpoints.maybe_upload_artifacts(_task(), out_dir) == []
+        assert checkpoints.maybe_upload_traces(_task(), tmp_path) == ["lineage"]
 
 
 @pytest.mark.parametrize(

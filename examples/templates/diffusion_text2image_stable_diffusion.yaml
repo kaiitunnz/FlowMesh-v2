@@ -39,8 +39,6 @@ spec:
       - A serene mountain lake reflecting the sunset
 
   output:
-    destination:
-      type: http
     artifacts:
       - results.json
       - images/

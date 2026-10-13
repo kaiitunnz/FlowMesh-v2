@@ -47,8 +47,6 @@ spec:
 
   # Output configuration (current worker writes locally to RESULTS_DIR/<task_id>/results.json)
   output:
-    destination:
-      type: local
     artifacts:
       - results.json
       - logs

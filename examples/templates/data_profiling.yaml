@@ -32,7 +32,5 @@ spec:
               max: 10
             num_test_queries: 3
   output:
-    destination:
-      type: http
     artifacts:
       - results.json

@@ -32,9 +32,6 @@ spec:
             items:
               - https://images.unsplash.com/photo-1617298452285-ceb241df5c67?w=1920
           output:
-            destination:
-              type: http
-              timeoutSec: 1800
             artifacts:
               - results.json
               - visual_embeddings.pt
@@ -71,7 +68,5 @@ spec:
             temperature: 0.1
 
           output:
-            destination:
-              type: http
             artifacts:
               - results.json

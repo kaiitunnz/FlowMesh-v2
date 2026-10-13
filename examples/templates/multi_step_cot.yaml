@@ -67,8 +67,6 @@ spec:
           top_p: 0.9
 
         output:
-          destination:
-            type: local
           artifacts:
             - results.json
             - logs
@@ -102,8 +100,6 @@ spec:
           top_p: 0.95
 
         output:
-          destination:
-            type: local
           artifacts:
             - results.json
             - logs
@@ -142,8 +138,6 @@ spec:
           top_p: 0.9
 
         output:
-          destination:
-            type: local
           artifacts:
             - results.json
             - logs

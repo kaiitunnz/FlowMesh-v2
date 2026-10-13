@@ -29,8 +29,6 @@ spec:
     language: Auto
 
   output:
-    destination:
-      type: http
     artifacts:
       - results.json
       - artifacts/

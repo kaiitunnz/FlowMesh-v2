@@ -138,8 +138,6 @@ def build_ssh_task_yaml(
         if env_dict:
             spec["env"] = env_dict
 
-    spec["output"] = {"destination": {"type": "http"}}
-
     metadata: dict[str, Any] = {"name": name}
     if worker:
         metadata["annotations"] = {"schedule_hint": {"selected_worker": worker}}

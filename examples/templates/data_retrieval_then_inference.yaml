@@ -181,7 +181,5 @@ spec:
                     content: "Given the following news summaries, generate an aggregated summary that captures the key points from all articles. {df}"
 
   output:
-    destination:
-      type: http
     artifacts:
       - results.json

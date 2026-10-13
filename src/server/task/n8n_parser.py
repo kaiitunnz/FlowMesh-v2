@@ -567,21 +567,11 @@ def _node_dependencies(
 
 
 def _default_api_output_spec() -> dict[str, Any]:
-    return {
-        "destination": {"type": "http"},
-        "artifacts": ["results.json"],
-    }
+    return {"artifacts": ["results.json"]}
 
 
 def _default_output_spec(task_type: str) -> dict[str, Any]:
-    artifacts = _default_artifacts(task_type)
-    return {
-        "destination": {
-            "type": "http",
-            "timeoutSec": 30,
-        },
-        "artifacts": artifacts,
-    }
+    return {"artifacts": _default_artifacts(task_type)}
 
 
 def _default_artifacts(task_type: str) -> list[str]:

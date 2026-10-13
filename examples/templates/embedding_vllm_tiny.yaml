@@ -34,8 +34,6 @@ spec:
       - "The quick brown fox jumps over the lazy dog."
 
   output:
-    destination:
-      type: local
     artifacts:
       - results.json
       - embeddings.safetensors

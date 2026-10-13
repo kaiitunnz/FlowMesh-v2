@@ -27,7 +27,7 @@ from worker.config import WorkerConfig
 
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.inference import InferenceMixin
-from .utils.checkpoints import maybe_upload_artifacts, maybe_upload_traces
+from .utils.checkpoints import maybe_upload_traces
 from .utils.collective import loopback_collective_env
 
 try:
@@ -108,7 +108,6 @@ class OmniExecutorBase(InferenceMixin, Executor):
             raise
         if self._omni_closed_by_generation:
             self._close_omni()
-        maybe_upload_artifacts(task, out_dir, logger=logger)
         maybe_upload_traces(task, out_dir, logger=logger)
         return result
 

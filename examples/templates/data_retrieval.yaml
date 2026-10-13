@@ -68,7 +68,5 @@ spec:
             verify: false
 
   output:
-    destination:
-      type: local
     artifacts:
       - results.json

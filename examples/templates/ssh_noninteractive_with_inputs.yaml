@@ -16,8 +16,6 @@ spec:
             - upstream data for non-interactive processing
             - inspect /mnt/flowmesh/inputs/preprocess/results.json inside the container
         output:
-          destination:
-            type: http
           artifacts:
             - results.json
             - logs
@@ -48,8 +46,6 @@ spec:
           mountPath: /mnt/flowmesh/output
           maxBytes: 1073741824
         output:
-          destination:
-            type: http
           artifacts:
             - results.json
             - logs

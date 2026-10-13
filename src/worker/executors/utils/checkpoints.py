@@ -3,7 +3,6 @@ import os
 import shutil
 import tarfile
 import zipfile
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -16,24 +15,11 @@ from shared.tasks.specs import TaskSpecStrictBase
 from shared.telemetry.propagation import inject_ambient_traceparent
 from shared.utils.atomic import atomic_write_text
 from shared.utils.http import add_auth_headers
-from shared.utils.nofollow import regular_files
-from shared.utils.parsing import parse_bool_env
 from shared.utils.redact import redact_url
 
 from ...utils.redaction import redact_urls
 from ..base_executor import ExecutionError, TaskReference
 from .artifacts import is_flowmesh_origin_url
-
-
-@dataclass(slots=True)
-class HTTPDestination:
-    """Resolved HTTP destination for posting task results / uploading artifacts."""
-
-    method: str
-    url: str
-    headers: dict[str, str] = field(default_factory=dict)
-    timeout: float = 30
-    ignore_error: bool = False
 
 
 def determine_resume_path(
@@ -271,43 +257,6 @@ def archive_path_for(model_dir: Path) -> Path:
     return model_dir.with_name(f"{model_dir.name}.tar.gz")
 
 
-def get_http_destination(spec: TaskSpecStrictBase) -> HTTPDestination | None:
-    dest = spec.output and spec.output.destination
-    ignore_error = False
-    method = "POST"
-    url: str | None = None
-    headers: dict[str, str] = {}
-    timeout: float = 30.0
-
-    if dest and dest.type == "http":
-        if dest.method:
-            method = dest.method.upper()
-        url = dest.url
-        if dest.headers:
-            headers = dest.headers.copy()
-        if dest.timeoutSec is not None:
-            timeout = dest.timeoutSec
-    elif parse_bool_env("WORKER_UPLOAD_RESULTS", False):
-        ignore_error = True
-    else:
-        return None
-    if not url:
-        if base_url := os.getenv("FLOWMESH_BASE_URL"):
-            url = base_url.rstrip("/") + "/api/v1/results"
-        else:
-            return None
-    if is_flowmesh_origin_url(url):
-        add_auth_headers(headers)
-        inject_ambient_traceparent(headers)
-    return HTTPDestination(
-        method=method,
-        url=url,
-        headers=headers,
-        timeout=timeout,
-        ignore_error=ignore_error,
-    )
-
-
 def cleanup_artifact_path(
     path: Path | None, logger: logging.Logger | None = None
 ) -> None:
@@ -363,107 +312,46 @@ def write_executor_result(
     return envelope
 
 
-def maybe_upload_artifacts(
-    task: TaskReference,
-    out_dir: Path,
-    logger: logging.Logger | None = None,
-    skip_errors: bool = False,
-) -> list[str]:
-    """Upload files under `out_dir/artifacts/` when the task has an HTTP
-    destination; no-op otherwise. Each file's multipart filename is its
-    path relative to `out_dir/artifacts/`. Returns uploaded rel-paths."""
-    if not task.task_id:
-        raise ExecutionError("Task id missing; cannot upload artifacts")
-    out_dir = Path(out_dir).resolve()
-    artifacts_dir = out_dir / "artifacts"
-    destination = get_http_destination(task.spec)
-    if destination is None or not artifacts_dir.is_dir():
-        return []
-
-    base_url = destination.url.rstrip("/")
-    upload_url = f"{base_url}/{task.task_id}/files"
-    uploaded: list[str] = []
-
-    for rel_name, opened in regular_files(artifacts_dir):
-        try:
-            if isinstance(opened, OSError):
-                raise opened
-            with opened as fh:
-                response = requests.request(
-                    destination.method,
-                    upload_url,
-                    files={"file": (rel_name, fh, "application/octet-stream")},
-                    headers=destination.headers,
-                    timeout=destination.timeout,
-                )
-                response.raise_for_status()
-                size = os.fstat(fh.fileno()).st_size
-        except Exception as exc:
-            if not skip_errors:
-                raise ExecutionError(
-                    redact_urls(
-                        f"Artifact upload failed for {rel_name}: {exc}", upload_url
-                    ),
-                    retryable=True,
-                ) from exc
-            if logger:
-                logger.warning(
-                    "Failed to upload artifact %s: %s",
-                    rel_name,
-                    redact_urls(str(exc), upload_url),
-                )
-            continue
-        if logger:
-            logger.info("Uploaded artifact %s (%d bytes)", rel_name, size)
-        uploaded.append(rel_name)
-
-    return uploaded
+_TRACE_UPLOAD_TIMEOUT_SEC = 30.0
 
 
 def maybe_upload_traces(
     task: TaskReference,
     out_dir: Path,
     logger: logging.Logger | None = None,
-    skip_errors: bool = False,
 ) -> list[str]:
-    """Upload trace JSONL files under `out_dir/logs/` to
-    `<api-base>/traces/tasks/{task_id}/{trace_type}` when the task has an HTTP
-    destination; no-op otherwise. The destination's `/results` artifact base
-    is swapped for `/traces`. Returns uploaded trace types."""
+    """Upload the trace JSONL files under `out_dir/logs/` to the server's
+    `/api/v1/traces/tasks/{task_id}/{trace_type}` when `FLOWMESH_BASE_URL` names it.
+
+    A trace that fails to upload is logged and left out; the task's own work does not
+    depend on it. Returns the uploaded trace types.
+    """
     if not task.task_id:
         raise ExecutionError("Task id missing; cannot upload traces")
-    out_dir = Path(out_dir).resolve()
-    logs_dir = out_dir / "logs"
-    destination = get_http_destination(task.spec)
-    if destination is None or not logs_dir.is_dir():
+    logs_dir = Path(out_dir).resolve() / "logs"
+    base_url = os.getenv("FLOWMESH_BASE_URL", "").rstrip("/")
+    if not base_url or not logs_dir.is_dir():
         return []
 
-    upload_base = destination.url.rstrip("/").removesuffix("/results") + "/traces"
+    headers: dict[str, str] = {}
+    add_auth_headers(headers)
+    inject_ambient_traceparent(headers)
     uploaded: list[str] = []
-
     for trace_type in ("spans", "assets", "lineage"):
         file_path = logs_dir / f"{trace_type}.jsonl"
         if not file_path.is_file():
             continue
-        upload_url = f"{upload_base}/tasks/{task.task_id}/{trace_type}"
+        upload_url = f"{base_url}/api/v1/traces/tasks/{task.task_id}/{trace_type}"
         try:
             with file_path.open("rb") as fh:
-                response = requests.request(
-                    destination.method,
+                response = requests.post(
                     upload_url,
                     files={"file": (file_path.name, fh, "application/octet-stream")},
-                    headers=destination.headers,
-                    timeout=destination.timeout,
+                    headers=headers,
+                    timeout=_TRACE_UPLOAD_TIMEOUT_SEC,
                 )
                 response.raise_for_status()
         except Exception as exc:
-            if not skip_errors:
-                raise ExecutionError(
-                    redact_urls(
-                        f"Trace upload failed for {file_path}: {exc}", upload_url
-                    ),
-                    retryable=True,
-                ) from exc
             if logger:
                 logger.warning(
                     "Failed to upload trace %s: %s",

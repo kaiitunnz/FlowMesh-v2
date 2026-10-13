@@ -83,8 +83,5 @@ spec:
       - Explain quantum entanglement in exactly three sentences.
       - Write a haiku about machine learning.
   output:
-    destination:
-      type: http
-      timeoutSec: 120
     artifacts:
       - results.json

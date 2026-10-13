@@ -175,7 +175,7 @@ def _merge_key_in(key: str | None, context: dict[str, Any]) -> str | None:
 class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
-    credential_fields: ClassVar[tuple[str, ...]] = ("output",)
+    credential_fields: ClassVar[tuple[str, ...]] = ()
     resources: ResourcesSpec | None = None
     output: OutputSpec | None = None
     dependsOn: list[str] | None = None
@@ -241,7 +241,7 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
 class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
-    credential_fields: ClassVar[tuple[str, ...]] = ("output",)
+    credential_fields: ClassVar[tuple[str, ...]] = ()
     resources: ResourcesSpec | None = None
     output: OutputSpecTemplate | None = None
     dependsOn: list[str] | None = None

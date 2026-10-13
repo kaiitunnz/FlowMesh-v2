@@ -33,7 +33,6 @@ from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
     determine_resume_path,
-    maybe_upload_artifacts,
     write_executor_result,
 )
 from .utils.distributed import launch_ranks
@@ -304,8 +303,6 @@ class LoRASFTExecutor(TrainingMixin, Executor):
                 final_lora=final_lora,
                 final_lora_archive=final_lora_archive,
             )
-
-            maybe_upload_artifacts(task, out_dir, logger=logger)
 
             return result
 

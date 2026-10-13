@@ -1637,12 +1637,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "CUDA_VISIBLE_DEVICES", "all", var_type=EnvVarType.CSV_INTS_OR_ALL
                 ),
                 EnvVar(
-                    "WORKER_UPLOAD_RESULTS",
-                    "false",
-                    description="Upload artifacts when no destination set.",
-                    var_type=EnvVarType.BOOL,
-                ),
-                EnvVar(
                     "WORKER_EXECUTOR_IDLE_CLEANUP_SEC",
                     "60",
                     var_type=EnvVarType.FLOAT,

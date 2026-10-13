@@ -85,7 +85,5 @@ spec:
                 path: "items[0].output"
 
   output:
-    destination:
-      type: http
     artifacts:
       - results.json

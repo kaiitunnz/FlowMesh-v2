@@ -30,7 +30,7 @@ from ..connectors import LumidDataConnector, PostgreSQLConnector, S3Connector
 from ..utils.serialization import serialize_dataframe
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import DataMixin
-from .utils.checkpoints import maybe_upload_artifacts, maybe_upload_traces
+from .utils.checkpoints import maybe_upload_traces
 from .utils.graph_templates import _render_template, _resolve_columns
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,6 @@ class DataRetrievalExecutor(DataMixin, Executor):
                 dependencies_by_task=dependencies_by_task,
             )
 
-        maybe_upload_artifacts(task, out_dir, logger=logger)
         maybe_upload_traces(task, out_dir, logger=logger)
         return result
 

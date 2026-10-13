@@ -19,9 +19,9 @@ Contract:
   The runner writes the returned model to `out_dir/results.json` and
   injects the top-level `_artifacts` context — executors should not write
   that file themselves on the success path.
-- Drop generated files under `out_dir/artifacts/` (uploaded to the server
-  when the task has an HTTP destination) or `scratch_dir(out_dir)` for
-  local-only scratch data.
+- Drop generated files under `out_dir/artifacts/` (published to the content
+  store when the task succeeds) or `scratch_dir(out_dir)` for local-only
+  scratch data.
 - Optionally override `prepare()` and `teardown()` for lifecycle hooks.
 - Raise `ExecutionError` for user-visible failures.
 """

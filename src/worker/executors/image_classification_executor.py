@@ -38,7 +38,6 @@ from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
     determine_resume_path,
-    maybe_upload_artifacts,
     write_executor_result,
 )
 from .utils.huggingface import pick_torch_dtype
@@ -276,8 +275,6 @@ class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
                 final_model=final_model,
                 final_model_archive=final_model_archive,
             )
-
-            maybe_upload_artifacts(task, out_dir, logger=logger)
 
             self._current_trainer = None
             self._current_model = None

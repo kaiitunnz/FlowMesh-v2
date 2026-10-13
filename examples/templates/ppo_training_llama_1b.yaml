@@ -76,8 +76,6 @@ spec:
 
   # Output configuration
   output:
-    destination:
-      type: local
     artifacts:
       - results.json
       - logs

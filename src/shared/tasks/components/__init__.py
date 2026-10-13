@@ -13,8 +13,6 @@ from .model import (
     ModelSourceTemplate,
 )
 from .output import (
-    OutputDestination,
-    OutputDestinationTemplate,
     OutputSpec,
     OutputSpecTemplate,
 )
@@ -42,8 +40,6 @@ __all__ = [
     "ModelConfigTemplate",
     "ModelSource",
     "ModelSourceTemplate",
-    "OutputDestination",
-    "OutputDestinationTemplate",
     "OutputSpec",
     "OutputSpecTemplate",
     "PostprocessSpec",

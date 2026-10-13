@@ -23,7 +23,7 @@ from shared.tasks.task_type import TaskType
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import DataMixin
-from .utils.checkpoints import maybe_upload_artifacts, maybe_upload_traces
+from .utils.checkpoints import maybe_upload_traces
 
 try:
     import torch
@@ -259,7 +259,6 @@ class DiffusersExecutor(DataMixin, Executor):
             task_id, task.workflow_id, out_dir, owner_id=task.owner_id
         ):
             result = self._run_inner(spec, task_id, out_dir)
-        maybe_upload_artifacts(task, out_dir, logger=logger)
         maybe_upload_traces(task, out_dir, logger=logger)
         return result
 

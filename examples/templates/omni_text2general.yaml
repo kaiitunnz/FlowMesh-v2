@@ -46,8 +46,6 @@ spec:
         gpu_memory_utilization: 0.1
 
   output:
-    destination:
-      type: http
     artifacts:
       - results.json
       - artifacts/

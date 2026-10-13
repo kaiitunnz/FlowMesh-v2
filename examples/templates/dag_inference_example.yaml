@@ -54,7 +54,5 @@ spec:
                   path: "items[0].output"
 
   output:
-    destination:
-      type: local
     artifacts:
       - results.json

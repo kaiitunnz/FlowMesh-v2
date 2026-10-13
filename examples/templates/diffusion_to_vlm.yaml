@@ -42,8 +42,6 @@ spec:
               - "A futuristic city with flying cars at night, cyberpunk style, high detail"
 
           output:
-            destination:
-              type: http
             artifacts:
               - results.json
               - images/
@@ -66,9 +64,6 @@ spec:
             path: images
 
           output:
-            destination:
-              type: http
-              timeoutSec: 1800
             artifacts:
               - results.json
               - visual_embeddings.pt
@@ -105,7 +100,5 @@ spec:
             temperature: 0.7
 
           output:
-            destination:
-              type: http
             artifacts:
               - results.json

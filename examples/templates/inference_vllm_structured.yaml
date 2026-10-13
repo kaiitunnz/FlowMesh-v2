@@ -92,8 +92,6 @@ spec:
       required: [start_date, rationale, alternative_dates]
 
   output:
-    destination:
-      type: http
     artifacts:
       - results.json
       - logs

@@ -16,7 +16,6 @@ from server.task.runtime import TaskRuntime
 from server.task.v2 import PersistedV2Workflow
 from server.task.v2.compiler.diagnostics import CompileError
 from server.task.v2.representations.operators import LeafOperator
-from shared.tasks.components.output import OutputDestinationHTTP
 from shared.tasks.specs import ApiSpecStrict, ApiSpecTemplate
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.redact import REDACTED
@@ -27,9 +26,8 @@ from tests.server.task.test_v2_orchestration import FakeRegistry
 
 _AUTH = "Bearer sk-user-inline-SECRET"
 _QUERY_KEY = "q-user-inline-SECRET"
-_OUTPUT_KEY = "out-user-inline-SECRET"
 _HF = "hf-user-inline-SECRET"
-_SECRETS = (_AUTH, _QUERY_KEY, _OUTPUT_KEY, _HF)
+_SECRETS = (_AUTH, _QUERY_KEY, _HF)
 
 
 def _api_workflow(api_version: str, auth: str = _AUTH) -> str:
@@ -47,11 +45,6 @@ spec:
             url: "https://api.example/v1/chat?api_key={_QUERY_KEY}"
             headers: {{Authorization: "{auth}", Accept: application/json}}
             json: {{model: m}}
-          output:
-            destination:
-              type: http
-              url: "https://sink.example/"
-              headers: {{X-Api-Key: "{_OUTPUT_KEY}"}}
       - name: shell
         spec:
           taskType: ssh
@@ -159,10 +152,6 @@ def test_a_dispatch_carries_the_task_its_own_credentials(api_version):
     api = _api(message.task)
     assert api["headers"]["Authorization"] == _AUTH
     assert api["url"] == f"https://api.example/v1/chat?api_key={_QUERY_KEY}"
-    output = message.task.spec.output
-    assert output is not None
-    assert isinstance(output.destination, OutputDestinationHTTP)
-    assert output.destination.headers == {"X-Api-Key": _OUTPUT_KEY}
     # The record the dispatch rendered from keeps only the refs.
     record = runtime.get_record(ids["call"])
     assert record is not None and _no_secret(record.model_dump_json())
