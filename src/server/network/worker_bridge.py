@@ -89,7 +89,7 @@ class RelayWorkerBridge:
         return self._node_id
 
     async def session(self, session_id: str) -> dict[str, str]:
-        """The control-written routing record of one session, empty when it has none."""
+        """Load one session's control-written routing record; empty when it has none."""
         return await self._sessions.load(session_id)
 
     def bind_peer(self, session_id: str, sink: FrameSink) -> None:

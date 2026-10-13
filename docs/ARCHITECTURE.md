@@ -511,27 +511,23 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   unbounded by default. A read tries the local copy, then another worker's copy, then
   the store itself. For a peer's copy the control plane checks that the requesting
   worker is running the task and that it is bound to exactly that reference as an input
-  or delivered outcome, resolves a live holder and the route the requester reaches it
-  by, and mints one short-lived `chg-` grant it hands to both ends with that route beside
-  it: the holder serves only a grant it was handed, once, for that exact object, and the
-  requester verifies the digest and size before anything reads the bytes. Where the
-  deployment runs trusted peer transports, the requester dials the holder's own content
-  listener (`worker_direct`) or its node's peer listener (`node_relay`), and the whole
-  transfer bypasses the root; a holder reached that way is preferred, at any object
-  size. Otherwise the transfer runs over the network plane's relay under its own
-  namespace, so the root bridges opaque frames and never holds, assembles, or resolves
-  the payload; an object of `CONTENT_RELAY_TRANSFER_MAX_BYTES` or more is relayed only
-  while the store cannot be reached, and read from the store first otherwise. A dialed
-  transfer is served only to a connection whose certificate covers the requester node's
-  advertised host. A refused, expired, or replayed grant, an evicted copy, a holder that
-  is gone, or a transfer that breaks costs a read from the shared store, not a failure: a
-  read of an immutable object can be repeated, so a dial that sends nothing passes its
-  grant to the next peer transport, then the relay, and a retry after a fetch takes a
-  fresh grant. A transfer holds a
-  window of the object, never the whole, and a copy that turns out not to be the object
-  ends the transfer refused and is dropped. A worker keeps a copy of whatever it reads
-  from a peer or the store. Enable the cache and its transfers with
-  `CONTENT_HYDRATION_ENABLED=true` (which requires the network plane).
+  or delivered outcome, resolves a live holder and a route to it, and mints one
+  short-lived `chg-` grant it hands to both ends: the holder serves only a grant it was
+  handed, once, for that exact object, and the requester verifies the digest and size
+  before anything reads the bytes. With trusted peer transports enabled
+  (`NETWORK_PLANE_PEER_ENABLED`, off by default), the requester dials the holder's node
+  (`node_relay`), or the holder itself where workers are declared routable
+  (`worker_direct`), bypassing the root, and reads such a holder before the store at any
+  size. Otherwise the transfer runs over the network plane's relay, where the root
+  bridges opaque frames and never holds, assembles, or resolves the payload, and an
+  object of `CONTENT_RELAY_TRANSFER_MAX_BYTES` or more is read from the store first
+  unless the store cannot be reached. A refused, expired, or replayed grant, an evicted
+  copy, a holder that is gone, or a transfer that breaks costs a read from the shared
+  store, not a failure. A transfer holds a window of the object, never the whole, and a
+  copy that turns out not to be the object ends the transfer refused and is dropped. A
+  worker keeps a copy of whatever it reads from a peer or the store. Enable the cache
+  and its transfers with `CONTENT_HYDRATION_ENABLED=true` (which requires the network
+  plane). See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Task results.** A task's result lives in the shared content store: its worker writes
   the result envelope there under the task's store access before it reports success, and
   the success binds that reference once, at the commit that settles the task, so a retry,

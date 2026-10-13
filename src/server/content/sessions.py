@@ -7,9 +7,8 @@ nothing, so losing it costs a transfer rather than an object. The record expires
 own, well after the grant that created it and after the slowest transfer of its object
 the relay still counts as moving.
 
-A transfer a requester dials to the holder's node is bridged by the same record, which
-also names the host the requester's node is expected to dial from, so that node hands a
-dialed session on only for the connection control routed it for.
+A transfer dialed to the holder's node is bridged by the same record, which also names
+the requester node's host, so that node admits only the connection control routed.
 """
 
 import redis.asyncio as async_redis

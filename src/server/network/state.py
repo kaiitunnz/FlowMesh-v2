@@ -53,8 +53,8 @@ class PolicyClass(StrEnum):
     # The root's gated serve ingress, with reachability evidence separate from its
     # node's workers.
     SERVE_INGRESS = "serve_ingress"
-    # A worker's content transfers, whose target is a holder's content listener rather
-    # than a resident one, so their evidence never grades a resident path.
+    # A worker's content transfers to a holder's content listener, graded apart from
+    # resident paths.
     CONTENT = "content"
 
 
@@ -135,21 +135,17 @@ class NonresidentSidecarTarget(BaseModel):
 
 
 class ContentListenerTarget(BaseModel):
-    """A holder worker's content listener, the target of one content transfer.
-
-    It carries no replica, claim or tool fact. ``incarnation`` and
-    ``listener_generation`` mirror the holder's incarnation, the generation its copies
-    and its listener were reported under. ``routes`` names the listener's dialable
-    address, or an opaque per-worker name when it has none, which only the node and
-    control relays can reach.
-    """
+    """A holder worker's content listener, the target of one content transfer."""
 
     model_config = ConfigDict(frozen=True)
 
     worker_id: str
     node_id: str
+    # The holder's incarnation, under which its copies and listener were reported.
     incarnation: int
     listener_generation: int
+    # Its dialable address, or an opaque per-worker name only the node and control
+    # relays reach.
     routes: tuple[str, ...] = ()
     protocols: tuple[str, ...] = ()
     directly_routable: bool = False

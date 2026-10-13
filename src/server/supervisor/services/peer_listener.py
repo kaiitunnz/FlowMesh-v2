@@ -15,9 +15,9 @@ is handed on only when control routed it to this node, and, under mutual TLS, on
 a dialer whose certificate covers the host control named for the transfer's requester:
 the holder's reply goes back over this connection, so it must be the requester's.
 
-A content connection ends when the holder worker it carries a session to ends on this
-node, so its requester learns at once that the transfer is lost and reads elsewhere,
-rather than waiting out its stall deadline for frames a gone worker will never send.
+A content connection ends when the holder worker it serves ends on this node, so its
+requester falls back at once. A connection that stops reading what it is sent is
+dropped, so a stalled dialer never holds up its worker's other traffic.
 """
 
 import asyncio
@@ -41,7 +41,8 @@ from shared.network.relay_frame import RelayFrame
 
 from ...network.worker_bridge import RelayWorkerBridge
 
-# Far more workers than end on one node while a transfer to one could still be asked.
+# Remember far more ended workers than end on one node while a transfer to one can
+# still arrive.
 _ENDED_MEMORY = 4096
 
 

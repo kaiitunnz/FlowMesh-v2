@@ -294,8 +294,8 @@ def _endpoint_advertisement_provider(
     peer = network_cfg.peer
     # The peer protocol says the node's peer plane is on; whether an origin dials is its
     # worker's own. Only a node serving a peer listener advertises it and is offered as
-    # a node_relay hop. A node carrying content transfers also says so, so a content
-    # transfer is routed over its peer plane only once it can carry one.
+    # a node_relay hop. A node with content hydration on also advertises the content
+    # protocol, so only such a node is offered for a content transfer.
     peer_url = peer.node_listener_url if peer.enabled else ""
     protocols: tuple[str, ...] = ()
     if peer.enabled:

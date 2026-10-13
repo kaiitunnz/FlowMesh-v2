@@ -696,8 +696,6 @@ class NetworkPlaneConfig:
     backoff_max_sec: float = 30.0
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
-    # Whether a worker's peer listeners are reachable from off its host; a bound port
-    # alone never makes a worker a direct route target.
     worker_directly_routable: bool = False
     peer: TrustedPeerConfig = field(default_factory=TrustedPeerConfig)
 

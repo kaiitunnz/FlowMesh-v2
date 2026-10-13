@@ -125,7 +125,7 @@ class NetworkPlane:
         return self._config.worker_directly_routable
 
     def peer_trust(self, protocol: str) -> TrustedPeerPolicy:
-        """The deployment's peer rule for a route carrying ``protocol``."""
+        """Return the deployment's peer rule for a route carrying ``protocol``."""
         return self._trust.model_copy(update={"protocol": protocol})
 
     @property

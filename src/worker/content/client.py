@@ -6,13 +6,11 @@ typed denial. With a grant in hand the worker opens the transfer and streams the
 from that holder into a file, hashing as it goes, and hands the file back only once its
 bytes verify against the reference; a transfer that fails leaves no file behind.
 
-Control resolves how the transfer is carried and sends that beside the grant: over the
-root relay, or over a connection this worker dials to the holder or the holder's node.
-A dial that fails sends nothing, so the same grant still goes over the relay where the
-read may use it. Once a fetch may have reached the holder its grant may be spent, so a
-transfer that breaks after that is retried only under a fresh grant, a bounded number of
-times. A caller that will read the store rather than the relay asks for a peer
-transport only, and control then refuses a transfer the relay alone could carry.
+Control routes the transfer beside its grant: over the root relay, or over a connection
+this worker dials to the holder or its node. A failed dial sends nothing, so its grant
+carries over to the next route; a dialed transfer that breaks after its fetch may have
+spent its grant, so it is retried once under a fresh one. A caller that prefers the
+store to the relay asks for a peer transport only.
 Nothing here decides that the worker may read the object — control does, against the
 consumer binding that entitles it — and nothing here recreates an outcome, re-resolves
 an input, or releases a credit when a transfer fails: an unavailable holder is a typed
@@ -50,8 +48,8 @@ from shared.utils.atomic import temp_path
 
 from .peer import ContentPeerDialer, PeerConnection, PeerUnreachable
 
-# Asks the control plane to authorize hydrating one reference for one task, over a peer
-# transport only when the flag is set; control answers with the request's number.
+# Asks the control plane to authorize hydrating one reference for one task; with the
+# flag, over a peer transport alone. Control answers with the request's number.
 RequestGrant = Callable[[ContentReference, str, bool, int], None]
 
 # Reports the objects this worker holds, each by its scope and digest, to the holder
@@ -124,8 +122,7 @@ class ContentHydrationClient:
         """Fetch one object from whichever holder control resolves into a new file in
         ``staging``, and return the file once its bytes verify.
 
-        With ``peer_only`` the transfer is carried only over a peer transport, and a
-        grant control could route only over the root relay fails the read instead.
+        With ``peer_only``, a read no peer transport carries fails.
         """
         self._progressed()
         attempts_left = _TRANSFER_ATTEMPTS
@@ -152,7 +149,8 @@ class ContentHydrationClient:
     async def _dial(
         self, carriage: ContentCarriagePlan | None
     ) -> PeerConnection | None:
-        """The first of a plan's routes that connects, or None for the root relay.
+        """Return a connection over the first of the plan's routes that connects, or
+        None for the root relay.
 
         Nothing of the transfer is sent before a route connects, so every route a plan
         names is tried under the one grant.

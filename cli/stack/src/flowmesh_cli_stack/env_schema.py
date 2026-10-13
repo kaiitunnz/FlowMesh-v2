@@ -1063,7 +1063,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE",
                     "false",
-                    description="Workers' peer listeners are reachable off-host.",
+                    description="Declare workers' peer listeners reachable off-host.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(

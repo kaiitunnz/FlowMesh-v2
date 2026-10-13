@@ -7,11 +7,9 @@ asking worker reaches it, mints one grant, and hands it to both ends over their
 authenticated attachments. Then it steps out: the bytes move worker to worker, over a
 connection the requester dials or over the relay, and no payload passes through here.
 
-How a transfer is carried rides beside its grant as a carriage plan, routing evidence
-the network plane resolves for the requester-to-holder pair, never authority: the grant
-alone decides what may be read. A holder reached over a peer transport is preferred to
-one the relay alone reaches. A dialed transfer reports what its path did, which the
-network plane folds into its reachability evidence for later transfers.
+A carriage plan rides beside each grant, naming how the requester reaches the holder; a
+holder reached over a peer transport is preferred. A dialed transfer reports what its
+path did, which feeds the network plane's reachability evidence.
 
 It reads consumer bindings as evidence and never writes one. A denial creates nothing —
 no invocation, no claim, no credit — and settles nothing: the asking worker surfaces a
@@ -217,8 +215,7 @@ class ContentHydrationAuthority:
 
         ``bound`` is the binding check's answer for the requesting task.
 
-        With ``peer_only`` the requester reads the object over a peer transport or not
-        at all, so a holder the relay alone reaches is refused rather than granted.
+        With ``peer_only``, a holder the relay alone reaches is refused.
         """
         requester = await self._workers.get_worker_async(worker_id)
         if requester is None:
@@ -291,11 +288,8 @@ class ContentHydrationAuthority:
     async def observe_route(
         self, worker_id: str, observation: ContentRouteObservation
     ) -> None:
-        """Fold a dialed transfer's path report into the reachability evidence.
-
-        Only the requester the transfer was routed for reports on it, and only a path
-        outcome counts: what the holder answered never reaches here.
-        """
+        """Fold a dialed transfer's path report into the reachability evidence, heard
+        only from the requester the transfer was routed for."""
         transfer = self._transfers.get(observation.transfer_session_id)
         if transfer is None or transfer.requester_id != worker_id:
             return

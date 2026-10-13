@@ -6,8 +6,9 @@ The connection carries that one transfer in both directions and closes with it. 
 evidence goes back to control as it does for a resident origin, each failure classified:
 a failed dial or a connection that ends before its transfer does is a network failure,
 and a holder refusing this node as not the transfer's requester is a TLS failure, since
-the pair's identities do not fit. A busy or purpose-less target is no evidence at all,
-and nor is anything else the holder answers, such as a copy that does not verify.
+the pair's identities do not fit. A busy target, or one that does not serve content, is
+no evidence, and nor is anything else the holder answers, such as a copy that does not
+verify.
 """
 
 import asyncio
@@ -89,8 +90,7 @@ class PeerConnection:
                     self._on_frame()
                     await session.on_frame(frame)
         except (asyncio.IncompleteReadError, OSError, FrameStreamError) as exc:
-            # The transfer is waiting on frames this connection will never carry, so it
-            # ends now rather than at its stall deadline.
+            # This connection carries no more frames, so wake the waiting transfer now.
             self._lose(exc)
             session.abort()
 

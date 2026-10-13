@@ -8,7 +8,8 @@ so the next read of it is local.
 A read tries this worker's own copy, then another worker's over an authorized transfer,
 then the shared store, which always has the object; each level only ever saves a trip
 to the next. An object of the configured relay size or larger is read from the store
-before a peer, and from a peer only while the store cannot be reached. So a cache miss
+before the root relay, and over the relay only while the store cannot be reached; a
+holder a peer transport reaches is read first at any size. So a cache miss
 costs a read rather than a failure, and a worker dying costs nothing at all. Whatever
 this worker reads from a peer or the store it keeps a copy of, so the next reader here,
 or on a peer, finds one.
@@ -230,9 +231,9 @@ class WorkerContentPlane:
         """Read from this worker's copy, a peer's, or the shared store, in that order;
         keep a copy of what the store supplied.
 
-        A peer reached over a peer transport is read before the store at any size. The
-        root relay is a peer route too, and it is taken before the store only for an
-        object worth relaying, and at any size while the store cannot be reached.
+        A holder reached over a peer transport is read before the store at any size;
+        the root relay comes before the store only for an object worth relaying, and at
+        any size while the store cannot be reached.
         """
         lane = self._lane
         if lane is not None:

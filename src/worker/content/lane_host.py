@@ -7,10 +7,9 @@ a grant for a transfer this worker requested, a grant against content it holds, 
 frame — onto the same loop. Produced frames leave as ``CONTENT_FRAME`` events over the
 authenticated attachment, which the supervisor bridges onward opaquely.
 
-Where the deployment carries content over peer transports, the lane also serves its own
-content listener on this loop, so a transfer a requester dials here is read, answered
-and closed without crossing to another thread, and it dials the holders control routes
-its own transfers to.
+With peer transports on, the lane also serves the worker's content listener and dials
+the holders control routes its own transfers to, both on this loop, so a dialed
+transfer never crosses threads.
 """
 
 import asyncio
@@ -212,8 +211,7 @@ class ContentLaneHost:
         """An object's verified bytes from the peer control resolves, kept here too;
         the copy is announced by whoever asked for the read.
 
-        With ``peer_only`` the read is carried only over a peer transport, never the
-        root relay.
+        With ``peer_only`` the read skips the root relay.
         """
         with self._from_peer(reference, task_id, peer_only) as verified:
             return verified.read_bytes()

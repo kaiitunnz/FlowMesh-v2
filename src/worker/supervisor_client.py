@@ -977,8 +977,8 @@ class SupervisorClient:
         peer_only: bool,
         request_id: int,
     ) -> None:
-        """Ask control to authorize hydrating one object for one task, carried over a
-        peer transport only when ``peer_only``; control echoes ``request_id``."""
+        """Ask control to authorize hydrating one object for one task; with
+        ``peer_only``, over a peer transport alone. Control echoes ``request_id``."""
         self._push_event(
             "CONTENT_HYDRATION_REQUEST",
             {
