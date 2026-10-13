@@ -196,7 +196,7 @@ class ContentHydrationAuthority:
         worker = await self._workers.get_worker_async(worker_id)
         if worker is None:
             return
-        await self._directory.record_many(
+        await self._directory.record_many_async(
             held,
             worker_id=worker_id,
             node_id=worker.node_id,
@@ -227,7 +227,7 @@ class ContentHydrationAuthority:
         if not bound:
             await self._deny(requester, request_id, HydrationDenial.NO_BINDING)
             return
-        reported = await self._directory.holders(
+        reported = await self._directory.holders_async(
             reference.authorization_scope, reference.content_digest
         )
         if not reported:
@@ -352,7 +352,7 @@ class ContentHydrationAuthority:
                 # The reporting worker is gone or came back as another incarnation, so
                 # its report describes content no one can serve. A restarted worker
                 # re-reports what it still holds, which lands under its new incarnation.
-                await self._directory.forget(
+                await self._directory.forget_async(
                     reference.authorization_scope,
                     reference.content_digest,
                     record.worker_id,
