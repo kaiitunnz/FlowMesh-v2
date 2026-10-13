@@ -219,6 +219,41 @@ def test_a_holder_that_ends_ends_the_content_connections_to_it_at_once(
     assert kept_open and resident_open
 
 
+def test_a_content_session_to_a_worker_that_ended_reaches_nothing(
+    ca: _TestCa,
+) -> None:
+    records = {
+        "rly-late": {
+            "target_node": "nde-b",
+            "target_worker": "wkr-h",
+            "origin_host": _REQUESTER_HOST,
+        }
+    }
+    content = _Uplink("nde-b", records)
+
+    async def run() -> None:
+        listener = NodePeerListener(
+            endpoint="127.0.0.1:0",
+            material=ca.material("node-b", "127.0.0.1"),
+            bridges=cast(Any, {PeerPurpose.CONTENT: content}),
+        )
+        await listener.start()
+        try:
+            await asyncio.to_thread(listener.release_worker, "wkr-h")
+            await asyncio.sleep(0.05)
+            await _send(
+                f"127.0.0.1:{listener.port}",
+                ca.material("node-a", _REQUESTER_HOST),
+                PeerPurpose.CONTENT,
+                "rly-late",
+            )
+        finally:
+            await listener.stop()
+
+    asyncio.run(run())
+    assert content.frames == [] and content.bound == []
+
+
 async def _closes(reader: asyncio.StreamReader) -> bool:
     try:
         return await asyncio.wait_for(reader.read(), 0.3) == b""

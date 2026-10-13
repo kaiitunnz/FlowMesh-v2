@@ -22,6 +22,7 @@ rather than waiting out its stall deadline for frames a gone worker will never s
 
 import asyncio
 import logging
+from collections import OrderedDict
 from collections.abc import Callable
 
 from shared.network.frame_stream import FrameSink, FrameStreamError, PeerPurpose
@@ -36,6 +37,9 @@ from shared.network.relay_frame import RelayFrame
 
 from ...network.worker_bridge import RelayWorkerBridge
 
+# Far more workers than end on one node while a transfer to one could still be asked.
+_ENDED_MEMORY = 4096
+
 
 class _UplinkConnection(ConnectionHandler):
     """Binds each session this connection carries to the node's local uplink."""
@@ -46,11 +50,13 @@ class _UplinkConnection(ConnectionHandler):
         sink: FrameSink,
         peer: PeerContext,
         on_close: Callable[["_UplinkConnection"], None],
+        ended: Callable[[str], bool],
     ) -> None:
         self._bridge = bridge
         self._sink = sink
         self._peer = peer
         self._on_close = on_close
+        self._ended = ended
         self._sessions: set[str] = set()
         # The workers this connection's content sessions are served by.
         self.targets: set[str] = set()
@@ -73,6 +79,8 @@ class _UplinkConnection(ConnectionHandler):
         ):
             raise FrameStreamError("a content session from a dialer not its requester")
         if target := record.get("target_worker"):
+            if self._ended(target):
+                raise FrameStreamError("a content session to a worker that has ended")
             self.targets.add(target)
 
     def end(self) -> None:
@@ -104,6 +112,8 @@ class NodePeerListener:
     ) -> None:
         self._endpoint = endpoint
         self._connections: set[_UplinkConnection] = set()
+        # Workers that ended here, newest last; an ended id is never registered again.
+        self._ended: OrderedDict[str, None] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._listener = MutualTlsFrameListener(
             material=material,
@@ -121,7 +131,11 @@ class NodePeerListener:
         self, bridge: RelayWorkerBridge, sink: FrameSink, peer: PeerContext
     ) -> _UplinkConnection:
         connection = _UplinkConnection(
-            bridge, sink, peer, on_close=self._connections.discard
+            bridge,
+            sink,
+            peer,
+            on_close=self._connections.discard,
+            ended=self._ended.__contains__,
         )
         if peer.purpose is PeerPurpose.CONTENT:
             self._connections.add(connection)
@@ -136,6 +150,9 @@ class NodePeerListener:
             loop.call_soon_threadsafe(self._release, worker_id)
 
     def _release(self, worker_id: str) -> None:
+        self._ended[worker_id] = None
+        while len(self._ended) > _ENDED_MEMORY:
+            self._ended.popitem(last=False)
         for connection in list(self._connections):
             if worker_id in connection.targets:
                 connection.end()
