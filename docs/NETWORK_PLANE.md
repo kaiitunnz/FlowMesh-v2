@@ -151,8 +151,9 @@ node; a subject common name never counts. Under an attested trusted network with
 mutual TLS this check is skipped, and the grant alone gates the read.
 
 A content read repeats safely, so the resident rule against switching transport does
-not apply to it. A dial that fails sends nothing and its grant goes over the relay where
-the read allows it; a transfer that breaks after its fetch is dropped, its unverified
+not apply to it. The route names its peer transports in ladder order, and a dial that
+fails sends nothing, so its grant goes to the next one, then over the relay where the
+read allows it; a transfer that breaks after its fetch is dropped, its unverified
 bytes with it, and a retry takes a fresh grant. Only a dial failure or a connection lost
 mid-transfer demotes a path — a refusal or a copy that does not verify does not.
 

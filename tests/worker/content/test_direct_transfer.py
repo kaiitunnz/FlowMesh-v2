@@ -20,7 +20,12 @@ from shared.content import (
     ContentHydrationGrant,
     ContentReference,
 )
-from shared.content.carriage import CONTROL_RELAY, WORKER_DIRECT
+from shared.content.carriage import (
+    CONTROL_RELAY,
+    NODE_RELAY,
+    WORKER_DIRECT,
+    ContentPeerRoute,
+)
 from shared.content.wire import CHUNK_BYTES
 from shared.network.frame_stream import PeerPurpose
 from shared.network.mtls import MutualTlsMaterial, client_context
@@ -110,6 +115,8 @@ class _Fabric:
         self.grants: list[ContentHydrationGrant] = []
         self.transport = transport
         self.endpoint = ""
+        # Routes dialed before the listener's own, as an unreachable first candidate.
+        self.leading: list[tuple[str, str]] = []
         self.client = ContentHydrationClient(
             sink=self.to_holder,
             request_grant=self._grant,
@@ -117,11 +124,16 @@ class _Fabric:
             dialer=ContentPeerDialer(
                 ssl_context=client_context(requester),
                 connect_budget_sec=2.0,
-                observe=lambda _, outcome: self.observed.append(outcome.value),
+                observe=lambda _, route, outcome: self.observed.append(outcome.value),
             ),
         )
         self.to_requester.peer = self.client.on_frame
         self.to_holder.peer = self.holder.on_frame
+
+    def routes(self) -> list[tuple[str, str]]:
+        if self.transport == CONTROL_RELAY:
+            return []
+        return [*self.leading, (self.transport, self.endpoint)]
 
     async def start(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -147,8 +159,12 @@ class _Fabric:
             holder_worker_id="wkr-1",
             holder_generation=1,
             listener_generation=1,
-            transport=self.transport,
-            endpoint=self.endpoint if self.transport != CONTROL_RELAY else "",
+            routes=(
+                tuple(
+                    ContentPeerRoute(transport=transport, endpoint=endpoint)
+                    for transport, endpoint in self.routes()
+                )
+            ),
             fresh_for_sec=30.0,
         )
         self.holder.accept_grant(grant, _REQUESTER_HOST)
@@ -342,8 +358,9 @@ async def test_one_grant_fetched_twice_at_once_is_served_once(
             holder_worker_id="wkr-1",
             holder_generation=1,
             listener_generation=1,
-            transport=WORKER_DIRECT,
-            endpoint=fabric.endpoint,
+            routes=(
+                ContentPeerRoute(transport=WORKER_DIRECT, endpoint=fabric.endpoint),
+            ),
             fresh_for_sec=30.0,
         )
         dialer = ContentPeerDialer(
@@ -402,3 +419,22 @@ async def test_a_dialed_session_ignores_frames_from_any_other_carriage(
     holder.drop_connection(dialed)
     assert holder._sessions == {}
     await holder.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_route_that_does_not_connect_gives_way_to_the_next_under_one_grant(
+    tmp_path, ca: _TestCa
+) -> None:
+    closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    closed.bind(("127.0.0.1", 0))
+    dead = f"127.0.0.1:{closed.getsockname()[1]}"
+    closed.close()
+    async with _fabric(tmp_path, ca, transport=NODE_RELAY) as fabric:
+        fabric.leading = [(WORKER_DIRECT, dead)]
+        reference = fabric.cache.write("org", b"payload")
+
+        assert await fabric.read(reference, peer_only=True) == b"payload"
+
+    assert len(fabric.grants) == 1
+    assert fabric.observed == ["connect_failure", "verified"]
+    assert fabric.to_holder.frames == []

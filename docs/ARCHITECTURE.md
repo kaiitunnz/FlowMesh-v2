@@ -526,7 +526,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   advertised host. A refused, expired, or replayed grant, an evicted copy, a holder that
   is gone, or a transfer that breaks costs a read from the shared store, not a failure: a
   read of an immutable object can be repeated, so a dial that sends nothing passes its
-  grant to the relay, and a retry after a fetch takes a fresh grant. A transfer holds a
+  grant to the next peer transport, then the relay, and a retry after a fetch takes a
+  fresh grant. A transfer holds a
   window of the object, never the whole, and a copy that turns out not to be the object
   ends the transfer refused and is dropped. A worker keeps a copy of whatever it reads
   from a peer or the store. Enable the cache and its transfers with

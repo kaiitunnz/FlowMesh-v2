@@ -32,7 +32,7 @@ from shared.content import (
     ContentHydrationGrant,
     ContentReference,
 )
-from shared.content.carriage import ContentRouteObservation
+from shared.content.carriage import ContentPeerRoute, ContentRouteObservation
 from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.network.frame_stream import FrameSink, PeerPurpose, WireFrameSink
 from shared.network.mtls import MutualTlsMaterial, client_context
@@ -175,7 +175,10 @@ class ContentLaneHost:
         self._sweep = asyncio.ensure_future(self._keep_held_reachable())
 
     def _observe_path(
-        self, carriage: ContentCarriagePlan, outcome: RouteObservationOutcome
+        self,
+        carriage: ContentCarriagePlan,
+        route: ContentPeerRoute,
+        outcome: RouteObservationOutcome,
     ) -> None:
         if self._report_path is None:
             return
@@ -183,7 +186,7 @@ class ContentLaneHost:
             self._report_path(
                 ContentRouteObservation(
                     transfer_session_id=carriage.transfer_session_id,
-                    transport=carriage.transport,
+                    transport=route.transport,
                     outcome=outcome.value,
                 )
             )

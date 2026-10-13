@@ -173,7 +173,7 @@ def test_a_bound_request_grants_both_ends_the_same_grant() -> None:
     holder_frame, requester_frame = (payload for _, _, payload in workers.frames)
     assert holder_frame["grant"] == requester_frame["grant"]
     # Without a network plane the transfer is carried over the relay.
-    assert requester_frame["carriage"]["transport"] == "control_relay"
+    assert requester_frame["carriage"]["routes"] == []
     grant = _granted(workers)
     assert grant.reference == _REFERENCE
     assert (grant.holder_id, grant.holder_generation) == ("wkr-1", 3)
@@ -394,8 +394,9 @@ def test_a_holder_reached_over_a_peer_transport_is_preferred() -> None:
 
     assert _granted(workers).holder_id == "wkr-3"
     carriage = _frame(workers, "content_grant")["carriage"]
-    assert carriage["transport"] == "worker_direct"
-    assert carriage["endpoint"] == "10.0.0.3:41000"
+    assert carriage["routes"] == [
+        {"transport": "worker_direct", "endpoint": "10.0.0.3:41000"}
+    ]
     assert carriage["holder_worker_id"] == "wkr-3"
     assert 0 < carriage["fresh_for_sec"] <= 30.0
     assert "received_at" not in carriage
@@ -417,7 +418,7 @@ def test_the_route_rides_beside_the_grant_and_the_holder_learns_the_requester() 
     assert serve["grant"] == grant["grant"]
     assert "carriage" not in serve
     assert serve["requester_host"] == "10.0.0.2"
-    assert grant["carriage"]["transport"] == "node_relay"
+    assert [r["transport"] for r in grant["carriage"]["routes"]] == ["node_relay"]
     record = asyncio.run(
         RelaySessionStore(cast(Any, relay), CONTENT_RELAY_KEYSPACE).load(
             _granted(workers).transfer_session_id
@@ -449,9 +450,7 @@ def test_a_requester_that_dials_no_peer_is_routed_over_the_relay() -> None:
 
     asyncio.run(authority.authorize("wkr-2", "tsk-1", _REFERENCE))
 
-    assert _frame(workers, "content_grant")["carriage"]["transport"] == (
-        "control_relay"
-    )
+    assert _frame(workers, "content_grant")["carriage"]["routes"] == []
     assert _frame(workers, "content_serve_grant")["requester_host"] == ""
 
 

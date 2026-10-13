@@ -139,25 +139,26 @@ class ContentHydrationClient:
                 self._logger.info(
                     "content transfer %s over %s failed; asking for a fresh grant",
                     grant.transfer_session_id,
-                    carriage.transport if carriage is not None else "relay",
+                    connection.route.transport,
                 )
         raise AssertionError("unreachable")
 
     async def _dial(
         self, carriage: ContentCarriagePlan | None
     ) -> PeerConnection | None:
-        """The connection a plan routes over, or None for the root relay."""
-        if (
-            carriage is None
-            or not carriage.dialed
-            or not carriage.fresh()
-            or self._dialer is None
-        ):
+        """The first of a plan's routes that connects, or None for the root relay.
+
+        Nothing of the transfer is sent before a route connects, so every route a plan
+        names is tried under the one grant.
+        """
+        if carriage is None or not carriage.fresh() or self._dialer is None:
             return None
-        try:
-            return await self._dialer.open(carriage, self._progressed)
-        except PeerUnreachable:
-            return None
+        for route in carriage.routes:
+            try:
+                return await self._dialer.open(carriage, route, self._progressed)
+            except PeerUnreachable:
+                continue
+        return None
 
     async def _transfer_into(
         self,
@@ -184,7 +185,7 @@ class ContentHydrationClient:
             self._logger.info(
                 "content %s carried over %s",
                 grant.reference.content_digest,
-                "a dialed peer connection" if connection else "the root relay",
+                connection.route.transport if connection else "the root relay",
             )
             return target
         except OSError as exc:

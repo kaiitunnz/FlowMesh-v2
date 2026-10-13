@@ -14,7 +14,7 @@ import logging
 import ssl
 from collections.abc import Callable
 
-from shared.content.carriage import ContentCarriagePlan
+from shared.content.carriage import ContentCarriagePlan, ContentPeerRoute
 from shared.network.frame_stream import (
     FrameStreamError,
     PeerPurpose,
@@ -31,8 +31,10 @@ from shared.network.relay_frame import RelayFrame
 from shared.network.session import FramedRelaySession
 from shared.schemas.network import RouteObservationOutcome
 
-# Reports one classified observation of the path a transfer was carried over.
-ObservePath = Callable[[ContentCarriagePlan, RouteObservationOutcome], None]
+# Reports one classified observation of one route a transfer was carried over.
+ObservePath = Callable[
+    [ContentCarriagePlan, ContentPeerRoute, RouteObservationOutcome], None
+]
 
 
 class PeerUnreachable(Exception):
@@ -46,9 +48,11 @@ class PeerConnection:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        route: ContentPeerRoute,
         on_loss: Callable[[], None],
         on_frame: Callable[[], None],
     ) -> None:
+        self.route = route
         self._reader = reader
         self._writer = writer
         self._on_loss = on_loss
@@ -115,30 +119,34 @@ class ContentPeerDialer:
         self._logger = logger or logging.getLogger("content-peer-dialer")
 
     async def open(
-        self, carriage: ContentCarriagePlan, on_frame: Callable[[], None]
+        self,
+        carriage: ContentCarriagePlan,
+        route: ContentPeerRoute,
+        on_frame: Callable[[], None],
     ) -> PeerConnection:
-        """Dial the plan's endpoint and wait for the target to accept a content
+        """Dial one of the plan's routes and wait for the target to accept a content
         connection, raising ``PeerUnreachable`` before anything of the transfer goes."""
         try:
             reader, writer = await open_accepted_connection(
-                carriage.endpoint, self._ssl_context, self._budget, PeerPurpose.CONTENT
+                route.endpoint, self._ssl_context, self._budget, PeerPurpose.CONTENT
             )
         except PEER_DIAL_ERRORS as exc:
             if not (isinstance(exc, PeerAcceptError) and exc.outcome is None):
-                self._observe(carriage, classify_peer_error(exc))
+                self._observe(carriage, route, classify_peer_error(exc))
             self._logger.info(
                 "content peer %s over %s unreachable: %s",
-                carriage.endpoint,
-                carriage.transport,
+                route.endpoint,
+                route.transport,
                 exc,
             )
             raise PeerUnreachable(str(exc)) from exc
-        self._observe(carriage, RouteObservationOutcome.VERIFIED)
+        self._observe(carriage, route, RouteObservationOutcome.VERIFIED)
         return PeerConnection(
             reader,
             writer,
+            route,
             on_loss=lambda: self._observe(
-                carriage, RouteObservationOutcome.ROUTE_FAILURE
+                carriage, route, RouteObservationOutcome.ROUTE_FAILURE
             ),
             on_frame=on_frame,
         )

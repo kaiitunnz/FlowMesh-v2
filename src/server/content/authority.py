@@ -32,7 +32,7 @@ from enum import StrEnum
 from typing import Any
 
 from shared.content import ContentCarriagePlan, ContentHydrationGrant, ContentReference
-from shared.content.carriage import ContentRouteObservation
+from shared.content.carriage import ContentPeerRoute, ContentRouteObservation
 from shared.network.frame_stream import split_host_port
 from shared.schemas.command import MediatedOpMessage
 from shared.schemas.network import (
@@ -370,11 +370,16 @@ class ContentHydrationAuthority:
         )
         if route is None or not route.peer or self._network is None:
             return plan
-        hop = route.resolved.candidates[0].hops[0]
         return plan.model_copy(
             update={
-                "transport": hop.transport.value,
-                "endpoint": hop.endpoint,
+                "routes": tuple(
+                    ContentPeerRoute(
+                        transport=candidate.transport.value,
+                        endpoint=candidate.hops[0].endpoint,
+                    )
+                    for candidate in route.resolved.candidates
+                    if candidate.transport in _PEER_TRANSPORTS and candidate.hops
+                ),
                 "route_epoch": route.resolved.route_epoch,
                 "fresh_for_sec": min(self._network.route_ttl_sec, self._grant_ttl_sec),
             }
