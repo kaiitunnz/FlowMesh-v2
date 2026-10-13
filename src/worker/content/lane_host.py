@@ -260,6 +260,10 @@ class ContentLaneHost:
     ) -> Path:
         if self._client is None:
             raise RuntimeError("content lane is not started")
+        if peer_only and not self._peer_enabled:
+            # Nothing here dials a peer, so asking control for one costs a round trip
+            # for a refusal.
+            raise ContentHydrationError("this worker carries no peer transport")
         client = self._client
         staging = self._store.staging_dir(reference.authorization_scope)
         transfer = self._call(

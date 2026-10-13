@@ -1,5 +1,6 @@
 """The lane host's peer reads: the backstop bounds a stall, never a slow transfer, and
-what the cache does with a verified read never fails it."""
+what the cache does with a verified read never fails it; a worker that dials no peer
+never asks for a read only a peer transport may carry."""
 
 import asyncio
 import time
@@ -87,3 +88,24 @@ def test_a_verified_peer_read_survives_a_copy_the_cache_cannot_take(
         assert list(lane._store.staging_dir("local").iterdir()) == []
     finally:
         lane.stop()
+
+
+def test_a_worker_without_peer_transports_never_asks_for_a_peer_only_read(
+    tmp_path,
+) -> None:
+    asked: list[bool] = []
+    lane = ContentLaneHost(
+        store=WorkerContentCache(tmp_path / "content"),
+        push_frame=lambda frame: None,
+        request_grant=lambda reference, task_id, peer_only: asked.append(peer_only),
+        worker_id="wkr-1",
+        generation=1,
+        transfer_timeout_sec=_STALL,
+    )
+    lane.start()
+    try:
+        with pytest.raises(ContentHydrationError, match="no peer transport"):
+            lane.read_peer(reference_for("local", b"body"), "tsk-1", peer_only=True)
+    finally:
+        lane.stop()
+    assert asked == []
