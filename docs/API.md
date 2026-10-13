@@ -71,7 +71,8 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 
 A task publishes its artifacts when it succeeds, as the `final` revision, and a
 training run publishes each checkpoint it saves as `step-<n>`. A publication never
-changes once made. A download streams from the shared content store and carries the
+changes once made: after a retry, a checkpoint an earlier attempt published keeps that attempt's bytes,
+and each later one comes from the attempt that saved it. A download streams from the shared content store and carries the
 object's `ETag`, a SHA-256 `Repr-Digest` of its whole bytes, and its publication time
 as `Last-Modified`. A single `Range`, optionally conditioned by `If-Range`, is answered
 `206`; a request naming several ranges is answered whole, an unsatisfiable range `416`.

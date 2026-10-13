@@ -546,17 +546,20 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   success binds the task's `final` set, and a training run publishes each checkpoint it
   saves as `step-<n>` while it runs. An `ArtifactBinding` names each artifact by its
   path and revision; a name is published once at a revision and never replaced, so the
-  same bytes again change nothing and different bytes are refused. The catalog lives
-  with the task's record, so a freed workflow still lists and serves its artifacts. The
-  root streams a download from the store, verified, and builds an archive view as it
-  streams it from the tree's verified members. A consumer reads an upstream artifact
-  only through its worker's content plane: a ref a placeholder renders becomes a token
-  its worker replaces with the local path it hydrates the artifact to, a ref the data a
-  spec projects reads is hydrated from the producer's final publications its dispatch
-  carries, and a model archive loads as the tree it archives. Those publications are the
-  task's inputs, so its worker may read them from a peer. An agent's input names an
-  artifact by its download path, `/api/v1/results/{task}/files/{path}`, which identifies
-  it by task and path; the agent's sandbox has no route to fetch it.
+  same bytes again change nothing and different bytes are refused. After a retry, a
+  revision an earlier attempt published keeps those bytes, and each later revision comes
+  from the attempt that published it, which its binding's `dispatch_id` records. The
+  catalog lives with the task's record, so a freed workflow still lists and serves its
+  artifacts. The root streams a download from the store, verified, and builds an archive
+  view as it streams it from the tree's verified members. A consumer reads an upstream
+  artifact only through its worker's content plane: a ref a placeholder renders becomes
+  a token its worker replaces with the local path it hydrates the artifact to, a ref the
+  data a spec projects reads is hydrated from the producer's final publications its
+  dispatch carries, and a model archive loads as the tree it archives. Those
+  publications are the task's inputs, so its worker may read them from a peer. An
+  agent's input names an artifact by its download path,
+  `/api/v1/results/{task}/files/{path}`, which identifies it by task and path; the
+  agent's sandbox has no route to fetch it.
 - **Agent exports.** An agent declares workspace paths to publish as `exports`. On the
   completion that ends it, its worker copies them out of the quiesced workspace into the
   task's artifacts, replacing whatever an earlier completion copied, and publishes them
