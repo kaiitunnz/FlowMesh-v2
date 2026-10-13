@@ -367,7 +367,7 @@ def _build_content_plane(
             peer_material=peer_material,
             connect_budget_sec=cfg.peer_connect_budget_sec,
             listener_sock=listener_sock,
-            report_path=client.push_content_route_observation,
+            report_observation=client.push_content_route_observation,
             logger=logger,
         )
     return WorkerContentPlane(

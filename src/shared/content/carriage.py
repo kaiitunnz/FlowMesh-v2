@@ -30,7 +30,8 @@ class ContentCarriagePlan(BaseModel):
 
     ``routes`` are the peer transports to dial, best first; with none, or once every
     one has failed to connect, the transfer goes over the root relay where the read
-    allows it.
+    allows it. The grant, holder, listener generation and route epoch are carried for
+    diagnostics.
     """
 
     model_config = ConfigDict(frozen=True)

@@ -54,14 +54,16 @@ from .store import WorkerContentCache
 # A lane busy sending waits on the event stream; a re-registration waits this long.
 _REBIND_WAIT_SEC = 30.0
 
-# Reports one dialed transfer's path evidence to control.
-ReportPath = Callable[[ContentRouteObservation], None]
+# Reports one dialed transfer's route evidence to control.
+ObservationReport = Callable[[ContentRouteObservation], None]
 
 
 class _HolderConnection(ConnectionHandler):
     """Hands one dialed connection's frames to the holder, answering over it."""
 
-    def __init__(self, holder: ContentHolder, sink: FrameSink, peer: PeerContext):
+    def __init__(
+        self, holder: ContentHolder, sink: FrameSink, peer: PeerContext
+    ) -> None:
         self._holder = holder
         self._sink = sink
         self._peer = peer
@@ -92,7 +94,7 @@ class ContentLaneHost:
         peer_material: MutualTlsMaterial | None = None,
         listener_sock: socket.socket | None = None,
         connect_budget_sec: float = 5.0,
-        report_path: ReportPath | None = None,
+        report_observation: ObservationReport | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._store = store
@@ -108,7 +110,7 @@ class ContentLaneHost:
         self._peer_material = peer_material
         self._listener_sock = listener_sock
         self._connect_budget_sec = connect_budget_sec
-        self._report_path = report_path
+        self._report_observation = report_observation
         self._listener: MutualTlsFrameListener | None = None
         self._logger = logger or logging.getLogger("content-lane-host")
         self._loop = asyncio.new_event_loop()
@@ -147,7 +149,7 @@ class ContentLaneHost:
                     else None
                 ),
                 connect_budget_sec=self._connect_budget_sec,
-                observe=self._observe_path,
+                observe=self._observe_route,
                 logger=self._logger,
             )
         self._client = ContentHydrationClient(
@@ -170,16 +172,16 @@ class ContentLaneHost:
             await self._listener.start_on_socket(self._listener_sock)
         self._sweep = asyncio.ensure_future(self._keep_held_reachable())
 
-    def _observe_path(
+    def _observe_route(
         self,
         carriage: ContentCarriagePlan,
         route: ContentPeerRoute,
         outcome: RouteObservationOutcome,
     ) -> None:
-        if self._report_path is None:
+        if self._report_observation is None:
             return
         try:
-            self._report_path(
+            self._report_observation(
                 ContentRouteObservation(
                     transfer_session_id=carriage.transfer_session_id,
                     transport=route.transport.value,

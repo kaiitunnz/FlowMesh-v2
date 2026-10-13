@@ -128,7 +128,9 @@ class ContentHydrationClient:
         grant control could route only over the root relay fails the read instead.
         """
         self._progressed()
-        for attempt in range(_TRANSFER_ATTEMPTS):
+        attempts_left = _TRANSFER_ATTEMPTS
+        while True:
+            attempts_left -= 1
             grant, carriage = await self._grant_for(reference, task_id, peer_only)
             connection = await self._dial(carriage)
             if connection is None and peer_only:
@@ -139,14 +141,13 @@ class ContentHydrationClient:
             try:
                 return await self._transfer_into(grant, staging, connection)
             except ContentHydrationError:
-                if connection is None or attempt + 1 == _TRANSFER_ATTEMPTS:
+                if connection is None or not attempts_left:
                     raise
                 self._logger.info(
                     "content transfer %s over %s failed; asking for a fresh grant",
                     grant.transfer_session_id,
                     connection.route.transport,
                 )
-        raise AssertionError("unreachable")
 
     async def _dial(
         self, carriage: ContentCarriagePlan | None

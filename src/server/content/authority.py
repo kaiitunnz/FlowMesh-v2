@@ -177,7 +177,7 @@ class ContentHydrationAuthority:
             self._report_failure
         )
 
-    def _report_failure(self, done: "Future[None]") -> None:
+    def _report_failure(self, done: Future[None]) -> None:
         if not done.cancelled() and (exc := done.exception()) is not None:
             self._logger.error(
                 "content authority request failed",
