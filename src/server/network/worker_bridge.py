@@ -62,7 +62,7 @@ class RelayWorkerBridge:
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Forward one down frame to the local worker its session and direction name."""
-        await self.forward(frame, await self._sessions.load(frame.session_id))
+        await self.forward(frame, await self.session(frame.session_id))
 
     async def forward(self, frame: RelayFrame, record: Mapping[str, str]) -> None:
         """Forward one frame by its session's routing record, already loaded.
