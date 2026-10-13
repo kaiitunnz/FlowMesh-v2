@@ -195,8 +195,9 @@ workspace path and an optional artifact `name` (the path by default):
       authority: { invoke: ["sandbox.execute"], delegate: [] }
 ```
 
-When the agent completes, its worker copies each path out of the workspace and the
-task publishes it as an artifact, a directory as a tree. A path that does not exist, a
+When the agent completes, its worker copies each path out of the workspace under its
+name among the task's artifacts, which publish by their top-level entries: `dist` as a
+tree, and `out/report.md` inside the `out` tree, read at `out/report.md`. A path that does not exist, a
 link, a special file, a file with a second hard link, or a credential path such as
 `.ssh/` fails the agent; two exports may not publish under overlapping names,
 and a credential path is refused at submission.
