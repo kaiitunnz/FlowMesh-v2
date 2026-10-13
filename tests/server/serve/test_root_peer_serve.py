@@ -370,9 +370,12 @@ class _DialedUplink:
     def release_peer(self, session_id: str, sink: Any) -> None:
         self._bridge.release_peer(session_id, sink)
 
-    async def on_frame(self, frame: RelayFrame) -> None:
+    async def session(self, session_id: str) -> dict[str, str]:
+        return await self._bridge.session(session_id)
+
+    async def forward(self, frame: RelayFrame, record: dict[str, str]) -> None:
         self._dialed.append(frame)
-        await self._bridge.on_frame(frame)
+        await self._bridge.forward(frame, record)
 
 
 class _RelayLeg:
