@@ -1332,6 +1332,9 @@ class Runner:
                     self._input_hydrator.install_upstream_artifacts(
                         msg, artifact_inputs_dir(out_dir)
                     )
+                    self._input_hydrator.stage_ssh_inputs(
+                        msg, artifact_inputs_dir(out_dir) / "ssh", self.results_dir
+                    )
                     if msg.input_preparation:
                         self._raise_if_cancel_pending(task_id)
                         self.lifecycle.notify_task_started(

@@ -451,49 +451,22 @@ def test_a_failed_staging_pull_is_retryable(executor: SSHExecutor) -> None:
     client.containers.create.assert_not_called()
 
 
-def test_a_bundle_download_is_abandoned_once_a_signal_lands(
-    executor: SSHExecutor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("FLOWMESH_BASE_URL", "http://flowmesh.example")
-    chunks: list[int] = []
-
-    def iter_content(**_: Any) -> Iterator[bytes]:
-        for index in range(1000):
-            chunks.append(index)
-            if index == 2:
-                executor.cancel(_TASK_ID)
-            yield b"x"
-
-    response = MagicMock()
-    response.__enter__.return_value = response
-    response.iter_content.side_effect = iter_content
-
-    with (
-        executor._signals.running(_TASK_ID),
-        patch.object(inputs_module.requests, "get", return_value=response),
-        pytest.raises(SessionInterrupted),
-    ):
-        inputs_module.download_result_bundle(
-            "tsk-up", tmp_path / "bundle", True, executor._signals
-        )
-
-    assert chunks == [0, 1, 2]
-
-
 def test_a_signal_during_local_staging_leaves_no_staging_dir(
     executor: SSHExecutor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(inputs_module.tempfile, "tempdir", str(tmp_path))
+    staged = tmp_path / "staged" / "tsk-up"
+    (staged / "artifacts").mkdir(parents=True)
     upstream = ResolvedSSHInput(
-        stage="up", task_id="tsk-up", source_path=tmp_path / "absent", mount_path="/in"
+        stage="up",
+        task_id="tsk-up",
+        source_path=tmp_path / "absent",
+        mount_path="/in",
+        staged_path=staged,
     )
 
-    with (
-        patch.object(
-            inputs_module, "download_result_bundle", side_effect=SessionInterrupted
-        ),
-        pytest.raises(SessionInterrupted),
-    ):
+    with executor._signals.running(_TASK_ID), pytest.raises(SessionInterrupted):
+        executor.cancel(_TASK_ID)
         inputs_module.stage_inputs_locally(
             [upstream], "ssn-12345678", executor._signals
         )

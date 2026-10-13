@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+import requests
 
 from shared.content import (
     TREE_MEDIA_TYPE,
@@ -17,14 +18,21 @@ from shared.content import (
     TreeMember,
 )
 from shared.tasks import TaskType
-from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
-from shared.tasks.specs import EchoSpecStrict
+from shared.tasks.artifact_binding import ArchiveFacts, ArtifactBinding, ArtifactKind
+from shared.tasks.result_binding import ResultBinding
+from shared.tasks.specs import EchoSpecStrict, SSHSpecStrict
 from tests.worker.content.test_plane_routing import _Access, _Lane
-from tests.worker.factories import FakeContentPlane, make_worker_task_message
+from tests.worker.factories import (
+    DEFAULT_WORKER_CONFIG,
+    FakeContentPlane,
+    make_worker_task_message,
+)
 from worker.content import WorkerContentCache, WorkerContentPlane
 from worker.content.artifact_inputs import ArtifactMaterializer
 from worker.content.inputs import TaskInputHydrator
-from worker.executors.base_executor import ExecutionError
+from worker.executors.base_executor import ExecutionError, RunSignals
+from worker.executors.ssh_session import SSHConfig
+from worker.executors.ssh_session.inputs import resolve_inputs, stage_inputs_locally
 
 _SCOPE = "local"
 _FILES = {"config.json": b"{}", "weights/model.safetensors": b"w" * 100}
@@ -231,3 +239,83 @@ def test_without_a_cache_the_task_holds_its_own_copy(tmp_path: Path) -> None:
     plane.materialize_to("tsk-1", reference, tmp_path / "copy.bin")
 
     assert (tmp_path / "copy.bin").read_bytes() == b"no cache here"
+
+
+def _ssh_message(
+    store: SharedFilesystemObjectStore, published: list[ArtifactBinding]
+) -> Any:
+    msg = make_worker_task_message(
+        SSHSpecStrict.model_validate(
+            {
+                "taskType": "ssh",
+                "accessMode": "direct",
+                "inputs": [{"stage": "train"}],
+            }
+        ),
+        task_type=TaskType.SSH,
+        content_scope=_SCOPE,
+    )
+    msg.upstream_results = {"train": ResultBinding(task_id="tsk-train")}
+    msg.upstream_artifacts = {"tsk-train": published}
+    return msg
+
+
+def test_an_ssh_input_stages_its_upstreams_artifacts_from_the_store_not_the_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    tree, notes = _publish_tree(store), _publish_file(store)
+    archive = tree.model_copy(
+        update={
+            "name": "final_model.tar.gz",
+            "kind": ArtifactKind.ARCHIVE,
+            "of": tree.name,
+            "archive": ArchiveFacts(sha256="ab" * 32, crc32=1, size_bytes=9, top="m"),
+        }
+    )
+    msg = _ssh_message(store, [tree, notes, archive])
+
+    def no_root(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a worker reads no artifact over HTTP")
+
+    monkeypatch.setattr(requests, "get", no_root)
+    lane = _CacheLane(tmp_path / "cache")
+    plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
+
+    TaskInputHydrator(cast(Any, plane)).stage_ssh_inputs(
+        msg, tmp_path / "in", tmp_path / "results"
+    )
+
+    staged = msg.staged_input("tsk-train")
+    assert staged == (tmp_path / "in" / "tsk-train").as_posix()
+    resolved = resolve_inputs(
+        msg,
+        SSHConfig.from_spec(msg.task.spec, DEFAULT_WORKER_CONFIG),
+        tmp_path / "results",
+    )
+    staging = stage_inputs_locally(resolved, "ssn-12345678", RunSignals())
+    root = staging / "tsk-train" / "artifacts"
+    assert {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    } == {
+        **{f"final_model/{path}": data for path, data in _FILES.items()},
+        "reports/notes.txt": b"notes",
+    }
+    assert len(lane.peer_reads) == len(_FILES) + 2
+
+
+def test_an_ssh_input_whose_upstream_ran_here_is_not_staged_again(
+    tmp_path: Path,
+) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    msg = _ssh_message(store, [_publish_file(store)])
+    (tmp_path / "results" / "tsk-train").mkdir(parents=True)
+    plane = FakeContentPlane(store)
+
+    TaskInputHydrator(cast(Any, plane)).stage_ssh_inputs(
+        msg, tmp_path / "in", tmp_path / "results"
+    )
+
+    assert msg.staged_input("tsk-train") is None and plane.reads == []

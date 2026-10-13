@@ -13,6 +13,8 @@ or not a result envelope fails the task.
 """
 
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -33,14 +35,16 @@ from shared.schemas.result.binding import (
 from shared.tasks import MergedChildTaskStrict, TaskEnvelopeStrict
 from shared.tasks.artifact_binding import (
     ArtifactBinding,
+    ArtifactKind,
     names_artifact_token,
     resolve_artifact_input,
     substitute_artifact_tokens,
 )
 from shared.tasks.result_binding import BindingKind, ResultBinding
-from shared.tasks.specs import TaskSpecStrictBase
+from shared.tasks.specs import SSHSpecStrict, TaskSpecStrictBase
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
+from shared.utils.manifest import ARTIFACTS_DIR
 
 from ..executors.base_executor import ExecutionError
 from ..executors.utils.artifacts import data_artifact_refs
@@ -74,11 +78,11 @@ def _check_scope(msg: WorkerTaskMessage, binding: ArtifactBinding) -> None:
         )
 
 
-def _materialize(
-    materializer: ArtifactMaterializer, task_id: str, binding: ArtifactBinding
-) -> Path:
+@contextmanager
+def _reading_artifacts(task_id: str) -> Iterator[None]:
+    """Classify a failure to put an artifact input on disk."""
     try:
-        return materializer.materialize(binding)
+        yield
     except (ContentUnavailable, ContentAccessDenied) as exc:
         raise ExecutionError(
             f"task {task_id} cannot reach an artifact it loads: {exc}",
@@ -88,6 +92,19 @@ def _materialize(
         raise input_unreadable(
             f"task {task_id} artifact input unreadable: {exc}"
         ) from exc
+
+
+def _materialized(
+    materializer: ArtifactMaterializer, task_id: str, binding: ArtifactBinding
+) -> Path:
+    with _reading_artifacts(task_id):
+        return materializer.materialize(binding)
+
+
+def _input_producer(msg: WorkerTaskMessage, stage: str) -> str | None:
+    if (binding := (msg.upstream_results or {}).get(stage)) is not None:
+        return binding.task_id
+    return (msg.upstream_task_ids or {}).get(stage)
 
 
 def read_input(
@@ -194,7 +211,7 @@ class TaskInputHydrator:
         for binding in inputs.values():
             _check_scope(msg, binding)
         paths = {
-            key: _materialize(materializer, msg.task_id, binding).as_posix()
+            key: _materialized(materializer, msg.task_id, binding).as_posix()
             for key, binding in inputs.items()
         }
         msg.task = _as_dispatched(msg.task, paths)
@@ -233,11 +250,49 @@ class TaskInputHydrator:
                     raise missing
                 binding, inner = found
                 _check_scope(msg, binding)
-                local = _materialize(materializer, msg.task_id, binding)
+                local = _materialized(materializer, msg.task_id, binding)
                 if inner and not (local := local / inner).is_file():
                     raise missing
                 paths[(producer, path)] = local.as_posix()
             spec.record_hydrated_artifacts(paths)
+
+    def stage_ssh_inputs(
+        self, msg: WorkerTaskMessage, root: Path, results_root: Path
+    ) -> None:
+        """Stage the published artifacts of each upstream task an SSH task's inputs
+        name and this worker does not hold the outputs of, as its result bundle lays
+        them out (``<root>/<task_id>/artifacts/<name>``), and record where."""
+        spec = msg.task.spec
+        if not isinstance(spec, SSHSpecStrict) or not spec.inputs:
+            return
+        producers = {
+            producer
+            for entry in spec.inputs
+            if (producer := _input_producer(msg, entry.stage.strip())) is not None
+            and not (results_root / producer).exists()
+        }
+        published = {
+            producer: [
+                binding
+                for binding in (msg.upstream_artifacts or {}).get(producer, ())
+                if binding.kind is not ArtifactKind.ARCHIVE
+            ]
+            for producer in producers
+        }
+        if not any(published.values()):
+            return
+        materializer = self._materializer(msg, root)
+        staged: dict[str, str] = {}
+        for producer, bindings in published.items():
+            dest = root / producer
+            for binding in bindings:
+                _check_scope(msg, binding)
+                with _reading_artifacts(msg.task_id):
+                    materializer.materialize_at(
+                        binding, dest / ARTIFACTS_DIR / binding.name
+                    )
+            staged[producer] = dest.as_posix()
+        msg.record_staged_inputs(staged)
 
     def _materializer(self, msg: WorkerTaskMessage, root: Path) -> ArtifactMaterializer:
         if self._plane is None:

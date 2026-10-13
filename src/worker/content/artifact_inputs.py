@@ -66,6 +66,25 @@ class ArtifactMaterializer:
         staging.rename(dest)
         return dest
 
+    def materialize_at(self, binding: ArtifactBinding, dest: Path) -> None:
+        """Put the artifact at ``dest`` under its own layout: a file as ``dest``, a
+        tree as a directory of its files."""
+        if binding.kind is not ArtifactKind.TREE:
+            self._fetch(binding.reference, dest)
+            return
+        try:
+            manifest = TreeManifest.decode(
+                self._plane.hydrate(self._task_id, binding.reference)
+            )
+        except TreeManifestError as exc:
+            raise ArtifactInputUnreadable(
+                f"artifact {binding.name} names no tree: {exc}"
+            ) from exc
+        scope = binding.reference.authorization_scope
+        dest.mkdir(parents=True, exist_ok=True)
+        for member in manifest.members:
+            self._fetch(member.reference(scope), dest / member.path)
+
     def _fetch(self, reference: ContentReference, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         self._plane.materialize_to(self._task_id, reference, dest)

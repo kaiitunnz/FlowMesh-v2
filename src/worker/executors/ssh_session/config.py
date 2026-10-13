@@ -55,11 +55,12 @@ class ResolvedSSHInput:
     source_path: Path
     mount_path: str
     # The upstream's stored result envelope, hydrated from its reference; None when the
-    # dispatch named the upstream by task id only and its bundle carries the result.
+    # dispatch named the upstream by task id only.
     results: bytes | None = None
-    # Whether the upstream ran (a skipped one never did), so the root may hold
-    # artifacts for it.
-    has_artifacts: bool = True
+    # Where the worker staged the upstream's published artifacts, laid out as its
+    # output directory (``artifacts/<name>``); None when it holds the upstream's own
+    # output or the upstream published none.
+    staged_path: Path | None = None
 
 
 @dataclass(slots=True)
