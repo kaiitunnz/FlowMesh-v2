@@ -281,10 +281,12 @@ class ContentLaneHost:
                 idle = time.monotonic() - client.last_progress
                 if idle < self._transfer_timeout_sec * 2:
                     continue
-                transfer.cancel()
-                raise ContentHydrationError(
-                    f"hydrating {reference.content_digest} stopped making progress"
-                ) from exc
+                if transfer.cancel():
+                    raise ContentHydrationError(
+                        f"hydrating {reference.content_digest} stopped making progress"
+                    ) from exc
+                # The transfer finished as the backstop gave up on it.
+                return transfer.result()
 
     def keep(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM

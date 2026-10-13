@@ -3,6 +3,7 @@ what the cache does with a verified read never fails it; a worker that dials no 
 never asks for a read only a peer transport may carry."""
 
 import asyncio
+import concurrent.futures
 import time
 from pathlib import Path
 from typing import cast
@@ -71,6 +72,41 @@ def test_a_peer_read_that_stops_progressing_fails_typed(tmp_path) -> None:
             lane.read_peer(reference_for("local", b"body"), "tsk-1")
         assert time.monotonic() - started < _STALL * 10
     finally:
+        lane.stop()
+
+
+class _FinishedAsCancelled(concurrent.futures.Future[Path]):
+    """A transfer that lands just as the backstop gives up on it."""
+
+    def __init__(self, landed: Path) -> None:
+        super().__init__()
+        self._landed = landed
+
+    def result(self, timeout: float | None = None) -> Path:
+        if not self.done():
+            raise concurrent.futures.TimeoutError
+        return super().result(timeout)
+
+    def cancel(self) -> bool:
+        self.set_result(self._landed)
+        return False
+
+
+def test_a_transfer_that_lands_as_the_backstop_gives_up_is_read(
+    tmp_path, monkeypatch
+) -> None:
+    client = _Client(0.0, progressing=False)
+    client.last_progress = time.monotonic() - 60.0
+    lane = _lane(tmp_path, client)
+    staging = lane._store.staging_dir("local")
+    landed = staging / "transfer"
+    landed.write_bytes(b"body")
+    monkeypatch.setattr(lane, "_call", lambda make: _FinishedAsCancelled(landed))
+    try:
+        assert lane.read_peer(reference_for("local", b"body"), "tsk-1") == b"body"
+        assert list(staging.iterdir()) == []
+    finally:
+        monkeypatch.undo()
         lane.stop()
 
 
