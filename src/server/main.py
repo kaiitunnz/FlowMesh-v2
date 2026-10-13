@@ -715,6 +715,8 @@ async def _lifespan(_: FastAPI):
                 app.state.resident_bridge_task = start_relay_bridge_pump(
                     RESIDENT_BRIDGE, NODE_REGISTRY, logger, edge_ids
                 )
+            if NETWORK_PLANE is not None:
+                NETWORK_PLANE.bind_loop(asyncio.get_running_loop())
             if CONTENT_AUTHORITY is not None:
                 CONTENT_AUTHORITY.bind_loop(asyncio.get_running_loop())
             if CONTENT_BRIDGE is not None and NODE_REGISTRY is not None:

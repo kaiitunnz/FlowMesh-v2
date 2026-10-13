@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import threading
 
 import pytest
 
@@ -228,6 +229,37 @@ def test_rotation_invalidates_reachability() -> None:
     states = asyncio.run(scenario())
     # The prior VERIFIED entry was invalidated; the fresh attempt is only optimistic.
     assert states["worker_direct"] != "verified"
+
+
+def test_a_departure_reported_off_the_loop_is_applied_on_it() -> None:
+    registry = _FakeNodeRegistry()
+    registry.set(_node("nde-1", generation=1))
+    registry.set(_node("nde-2", generation=1))
+    plane = _plane(registry)
+
+    async def scenario() -> tuple[bool, bool]:
+        plane.bind_loop(asyncio.get_running_loop())
+        resolved = await plane.resolve("nde-1", _listener())
+        assert resolved is not None
+        plane.record_observations(
+            resolved[0],
+            _listener(),
+            [(Transport.WORKER_DIRECT, RouteObservationOutcome.VERIFIED)],
+        )
+        reported = threading.Thread(target=plane.forget_node, args=("nde-2",))
+        reported.start()
+        reported.join()
+        # The view is untouched until the loop runs the departure.
+        held = any(
+            e["target_node_id"] == "nde-2" for e in plane.reachability_snapshot()
+        )
+        await asyncio.sleep(0)
+        gone = all(
+            e["target_node_id"] != "nde-2" for e in plane.reachability_snapshot()
+        )
+        return held, gone
+
+    assert asyncio.run(scenario()) == (True, True)
 
 
 def test_endpoints_are_stamped_with_node_id() -> None:

@@ -6,6 +6,7 @@ origin, records the deputy's classified observations, and exposes endpoints and
 reachability for diagnostics.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import Mapping
@@ -57,6 +58,13 @@ def stamp_endpoint(
 _REACHABILITY_CLASSES = frozenset(ReachabilityClass)
 
 
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
 def _peer_policy(config: NetworkPlaneConfig) -> TrustedPeerPolicy:
     """The pure resolver's trust rule, derived from the deployment's peer posture."""
     peer = config.peer
@@ -96,6 +104,12 @@ class NetworkPlane:
         self._origin_ids: dict[tuple[str, PolicyClass, int], str] = {}
         self._seen_generation: dict[str, int] = {}
         self._trust = _peer_policy(config)
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Keep the view on ``loop``, the server's own, whatever thread reports a
+        node's departure."""
+        self._loop = loop
 
     @property
     def connect_budget_sec(self) -> float:
@@ -284,6 +298,13 @@ class NetworkPlane:
 
         Wired to node deregistration so the derived view stays bounded under node churn.
         """
+        loop = self._loop
+        if loop is None or _running_loop() is loop:
+            self._forget_node(node_id)
+        else:
+            loop.call_soon_threadsafe(self._forget_node, node_id)
+
+    def _forget_node(self, node_id: str) -> None:
         self._reachability.invalidate_node(node_id)
         self._seen_generation.pop(node_id, None)
 
