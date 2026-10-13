@@ -73,8 +73,9 @@ and a demoted one drops out until its backoff cools.
   `NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE`; shared-node placement or a bound port alone
   does not make it legal.
 - **`node_relay`** — caller to the target node's peer listener, which hands each session
-  to the node's local sidecar uplink. A forward-dial peer transport for same-node and
-  cross-node pairs.
+  to the node's local uplink of the connection's purpose: a replica's sidecar or a
+  worker's content lane. A forward-dial peer transport for same-node and cross-node
+  pairs, offered only through a node advertising that it carries the route's protocol.
 - **`control_relay`** — the universal reverse-rendezvous base. Its descriptor names the
   origin and target reverse attachments by node (the delivery routes by node id) and the
   target's node-local sidecar delivery, not a chain of dialable addresses. It is feasible
@@ -123,6 +124,37 @@ outcome is ambiguous, so it settles as uncertain with its credit held and the de
 steers the next drive. Only transport failures demote — a fence, tenant, descriptor,
 application, or engine rejection arrives as a frame and settles the boundary without
 touching the path.
+
+A connection's purpose — `resident` or `content` — is fixed once by its accept exchange,
+and a listener answers a purpose it does not serve as unserved before reading any
+session, so a session of one purpose never reaches another's handler. A request naming
+no purpose is resident. A dialer asking for any other purpose uses the connection only
+once the target echoes it, so a listener that predates purposes is never handed a
+session it would misroute.
+
+## Content transfers
+
+A content transfer between two workers' caches rides the same transports under its own
+route target, a holder worker's content listener, and its own `content` policy class,
+so its evidence never grades a resident path. A worker serves a content listener of its
+own, on a port beside its resident listener, when peer transports and content hydration
+are both on; a node carrying content transfers advertises the `content-peer` protocol.
+The control plane resolves the requester-to-holder route when it grants the transfer and
+sends it beside the grant as routing evidence, never authority: a route names how to
+reach the holder, the grant alone what may be read. The route carries a freshness
+budget, not a root clock reading, and the requester honors it no longer than the grant.
+
+The holder's reply goes back over the connection the requester dialed, so the holder,
+or for `node_relay` the holder's node, admits a dialed transfer only from a certificate
+whose subject alternative names cover the host control recorded for the requester's
+node; a subject common name never counts. Under an attested trusted network without
+mutual TLS this check is skipped, and the grant alone gates the read.
+
+A content read repeats safely, so the resident rule against switching transport does
+not apply to it. A dial that fails sends nothing and its grant goes over the relay where
+the read allows it; a transfer that breaks after its fetch is dropped, its unverified
+bytes with it, and a retry takes a fresh grant. Only a dial failure or a connection lost
+mid-transfer demotes a path — a refusal or a copy that does not verify does not.
 
 ## Reverse-rendezvous relay
 
