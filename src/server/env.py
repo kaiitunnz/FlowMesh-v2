@@ -11,6 +11,7 @@ from shared.content.config import (
     DEFAULT_TRANSFER_WINDOW_BYTES,
     DEFAULT_UPLOAD_CONCURRENCY,
 )
+from shared.network.peer_dial import connect_budget
 from shared.schemas.worker import SSHBackendName
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils import (
@@ -261,8 +262,8 @@ SERVER_METRICS_RESOURCE_SAMPLE_SEC: int = parse_int_env(
 
 
 NETWORK_PLANE_PEER_ENABLED: bool = parse_bool_env("NETWORK_PLANE_PEER_ENABLED", False)
-NETWORK_PLANE_CONNECT_BUDGET_SEC: float = parse_float_env(
-    "NETWORK_PLANE_CONNECT_BUDGET_SEC", 5.0
+NETWORK_PLANE_CONNECT_BUDGET_SEC: float = connect_budget(
+    parse_float_env("NETWORK_PLANE_CONNECT_BUDGET_SEC")
 )
 NETWORK_PLANE_PEER_DISABLE_MTLS: bool = parse_bool_env(
     "NETWORK_PLANE_PEER_DISABLE_MTLS", False

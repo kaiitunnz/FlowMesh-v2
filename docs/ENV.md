@@ -217,8 +217,9 @@ An `external` worker runs outside its supervisor, so set on it the settings a
 supervisor passes the workers it launches: a `WORKER_TOKEN` of the form
 `<alias>.<hex HMAC-SHA256 of the alias keyed by EXTERNAL_WORKER_TOKEN>`,
 `SUPERVISOR_GRPC_TARGET` with `SUPERVISOR_GRPC_TLS_CA_B64`, and the deployment's
-network-plane peer (`NETWORK_PLANE_PEER_*`), content cache and store
-(`WORKER_CONTENT_DIR`, `CONTENT_*`), `WORKER_PRIVATE_STATE_DIR`, and telemetry
+network-plane peer (`NETWORK_PLANE_PEER_*`, `NETWORK_PLANE_CONNECT_BUDGET_SEC`),
+content cache and store (`WORKER_CONTENT_DIR`, `CONTENT_*`),
+`WORKER_PRIVATE_STATE_DIR`, and telemetry
 (`SERVER_METRICS_*`, with the OTLP token and `SERVER_METRICS_OTLP_CA_B64`) settings.
 An external worker on a host other than its node's carries resident traffic over
 `control_relay`.

@@ -19,6 +19,7 @@ from shared.content.config import (
     ObjectStoreConfig,
 )
 from shared.content.wire import CHUNK_BYTES
+from shared.network.peer_dial import connect_budget
 from shared.schemas.worker import SSHBackendName, SSHLimits
 from shared.telemetry.config import TelemetryConfig
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
@@ -292,8 +293,8 @@ class WorkerConfig:
             supervisor_grpc_target=supervisor_grpc_target,
             supervisor_grpc_tls_ca_b64=supervisor_grpc_tls_ca_b64,
             peer_enabled=peer_enabled,
-            peer_connect_budget_sec=parse_float_env(
-                "NETWORK_PLANE_CONNECT_BUDGET_SEC", 5.0
+            peer_connect_budget_sec=connect_budget(
+                parse_float_env("NETWORK_PLANE_CONNECT_BUDGET_SEC")
             ),
             peer_disable_mtls=peer_disable_mtls,
             peer_tls_ca_b64=peer_tls_ca_b64,

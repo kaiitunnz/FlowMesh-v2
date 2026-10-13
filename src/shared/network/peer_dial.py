@@ -31,10 +31,20 @@ PEER_DIAL_ERRORS = (OSError, ValueError)
 
 # A peer that vanishes without a close (a partition, a host that died) is found by
 # keepalive probes, and unacknowledged writes give up after the user timeout.
+DEFAULT_CONNECT_BUDGET_SEC = 5.0
+
 _KEEPALIVE_IDLE_SEC = 30
 _KEEPALIVE_INTERVAL_SEC = 10
 _KEEPALIVE_PROBES = 3
 _USER_TIMEOUT_MS = 60_000
+
+
+def connect_budget(configured: float | None) -> float:
+    """Return the configured peer connect budget, or the default for one unset or not
+    positive."""
+    if configured is None or configured <= 0:
+        return DEFAULT_CONNECT_BUDGET_SEC
+    return configured
 
 
 def keep_alive(sock: Any) -> None:

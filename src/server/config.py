@@ -8,6 +8,7 @@ from pydantic import SecretStr
 from shared.content import ObjectStoreConfig
 from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.content.wire import CHUNK_BYTES
+from shared.network.peer_dial import connect_budget
 from shared.tasks.specs import ModelBindingMode
 from shared.telemetry.config import TelemetryConfig
 from shared.utils.parsing import (
@@ -712,7 +713,9 @@ class NetworkPlaneConfig:
             negative_ttl_sec=parse_float_env(f"{prefix}NEGATIVE_TTL_SEC", 15.0),
             backoff_base_sec=parse_float_env(f"{prefix}BACKOFF_BASE_SEC", 1.0),
             backoff_max_sec=parse_float_env(f"{prefix}BACKOFF_MAX_SEC", 30.0),
-            connect_budget_sec=parse_float_env(f"{prefix}CONNECT_BUDGET_SEC") or 5.0,
+            connect_budget_sec=connect_budget(
+                parse_float_env(f"{prefix}CONNECT_BUDGET_SEC")
+            ),
             route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC", 30.0),
             worker_directly_routable=parse_bool_env(
                 f"{prefix}WORKER_DIRECTLY_ROUTABLE", False
