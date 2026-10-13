@@ -937,7 +937,10 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_TRANSFER_WINDOW_BYTES",
                     "1048576",
-                    description="Bytes a content transfer keeps in flight.",
+                    description=(
+                        "Bytes a content transfer keeps in flight; set it alike on "
+                        "every node."
+                    ),
                     var_type=EnvVarType.INT,
                     min_value=65536,
                 ),

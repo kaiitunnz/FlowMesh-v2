@@ -148,7 +148,8 @@ whose subject alternative names cover the host control recorded for the requeste
 node; the subject common name never counts. With `NETWORK_PLANE_PEER_DISABLE_MTLS` set,
 the grant alone gates the read. A node drops a dialed connection that stops reading
 what it is sent, so a stalled requester never holds up the holder worker's other
-traffic.
+traffic. The node bounds that connection's queue by its own content window, so
+`CONTENT_TRANSFER_WINDOW_BYTES` is one deployment-wide value.
 
 A content read is repeatable, so it moves between transports freely. A failed dial
 sends nothing, so the requester tries the route's peer transports in order under one
