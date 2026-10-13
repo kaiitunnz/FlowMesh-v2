@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from shared.network.frame_stream import (
     FrameSink,
     FrameStreamError,
+    PeerPurpose,
     read_relay_frame,
     split_host_port,
     write_relay_frame,
@@ -119,6 +120,7 @@ class _PeerSink(FrameSink):
                 self._endpoint,
                 self._carriage.ssl_context,
                 self._carriage.connect_budget_sec,
+                PeerPurpose.RESIDENT,
             )
         except PEER_DIAL_ERRORS as exc:
             if not (isinstance(exc, PeerAcceptError) and exc.outcome is None):

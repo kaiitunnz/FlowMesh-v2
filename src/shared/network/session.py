@@ -25,6 +25,9 @@ from .relay_frame import (
     WindowStalled,
 )
 
+# The window a session keeps in flight unless its protocol sets its own.
+DEFAULT_WINDOW_BYTES = 64 * 1024
+
 
 class RelaySessionRole(Enum):
     """Which end of the exchange this session drives."""
@@ -58,7 +61,7 @@ class FramedRelaySession:
         sink: FrameSink,
         correlation_id: str = "",
         operation_id: str = "",
-        window_bytes: int = 65536,
+        window_bytes: int = DEFAULT_WINDOW_BYTES,
         strict_sequence: bool = False,
         send_deadline_sec: float | None = None,
     ) -> None:
@@ -184,6 +187,11 @@ class FramedRelaySession:
             return
         self._recv_seq = frame.seq
         self._recv.put_nowait(frame.payload)
+
+    def abort(self) -> None:
+        """End the session locally when its carriage is gone, without signalling the
+        peer; a blocked receiver wakes at once, as on a cancel."""
+        self._cancelled.set()
 
     async def cancel(self) -> None:
         """Signal the peer to reap this session and wake a blocked receiver here."""

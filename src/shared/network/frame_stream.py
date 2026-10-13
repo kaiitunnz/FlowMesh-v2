@@ -11,7 +11,9 @@ and the caller closes the connection: a stream whose framing is lost cannot resy
 The same framing carries two exchanges a stream listener answers itself, neither a relay
 frame kind, so no relay codec decodes either. A reachability probe exercises a
 listener's TLS and framing without entering any relay session. A connection accept lets
-a dialer learn that the target took its connection before it sends a session on it.
+a dialer learn that the target took its connection before it sends a session on it, and
+fixes the connection's purpose once, so a listener never hands one purpose's sessions to
+another's handler.
 """
 
 import asyncio
@@ -30,7 +32,6 @@ MAX_PROBE_BYTES = 1024
 _PROBE_KIND = "probe"
 _PROBE_META = json.dumps({"kind": _PROBE_KIND}, separators=(",", ":")).encode()
 _ACCEPT_KIND = "accept"
-_ACCEPT_META = json.dumps({"kind": _ACCEPT_KIND}, separators=(",", ":")).encode()
 _MAX_ACCEPT_BYTES = 16
 
 
@@ -52,13 +53,28 @@ class AcceptStatus(StrEnum):
     ACCEPTED = "accepted"
     BUSY = "busy"
     REFUSED = "refused"
+    # The listener serves no session of the requested purpose.
+    UNSERVED = "unserved"
+
+
+class PeerPurpose(StrEnum):
+    """What a peer connection carries, fixed once by its accept exchange."""
+
+    RESIDENT = "resident"
+    CONTENT = "content"
 
 
 @dataclass(frozen=True)
 class AcceptFrame:
-    """A connection accept step; a stream listener answers the request it reads."""
+    """A connection accept step; a stream listener answers the request it reads.
+
+    A request names the purpose it asks for and an acceptance echoes it, so a dialer
+    uses only a connection the listener took for that purpose. An unrecognized purpose
+    is kept as its raw text.
+    """
 
     status: AcceptStatus
+    purpose: str | None = None
 
 
 class FrameWriter(Protocol):
@@ -135,9 +151,16 @@ async def write_probe(writer: FrameWriter, payload: bytes) -> None:
     await _write_framed(writer, _PROBE_META, payload)
 
 
-async def write_accept(writer: FrameWriter, status: AcceptStatus) -> None:
-    """Write one connection accept step, then flush."""
-    await _write_framed(writer, _ACCEPT_META, status.value.encode())
+async def write_accept(
+    writer: FrameWriter, status: AcceptStatus, purpose: str | None = None
+) -> None:
+    """Write one connection accept step, naming its purpose when given, then flush."""
+    meta: dict[str, str] = {"kind": _ACCEPT_KIND}
+    if purpose is not None:
+        meta["purpose"] = purpose
+    await _write_framed(
+        writer, json.dumps(meta, separators=(",", ":")).encode(), status.value.encode()
+    )
 
 
 async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
@@ -169,9 +192,14 @@ async def read_stream_frame(
     if kind == _ACCEPT_KIND:
         if payload_len > _MAX_ACCEPT_BYTES:
             raise FrameStreamError(f"accept step too large: {payload_len}")
+        purpose = meta.get("purpose")
+        if purpose is not None and (
+            not isinstance(purpose, str) or len(purpose) > _MAX_ACCEPT_BYTES
+        ):
+            raise FrameStreamError("undecodable accept purpose")
         try:
             return AcceptFrame(
-                AcceptStatus((await reader.readexactly(payload_len)).decode())
+                AcceptStatus((await reader.readexactly(payload_len)).decode()), purpose
             )
         except ValueError as exc:
             raise FrameStreamError("undecodable accept step") from exc
@@ -201,6 +229,7 @@ __all__ = [
     "MAX_PAYLOAD_BYTES",
     "MAX_PROBE_BYTES",
     "FrameSink",
+    "PeerPurpose",
     "FrameStreamError",
     "FrameWriter",
     "ProbeFrame",

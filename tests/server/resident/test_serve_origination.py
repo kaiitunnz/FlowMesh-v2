@@ -56,7 +56,7 @@ from shared.resident.reports import (
     ResidentStreamHead,
     ResidentStreamStatus,
 )
-from shared.schemas.network import PEER_PROTOCOL
+from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.ids import SpanIdKind, derived_span_id
 from tests.server.resident._helpers import stored_replica, stored_snapshot
@@ -120,7 +120,7 @@ class _TrustedPeerNetwork(_FakeNetwork):
         enabled=True,
         trust_domain="td",
         classes=frozenset(ReachabilityClass),
-        protocol=PEER_PROTOCOL,
+        protocol=RESIDENT_PEER_PROTOCOL,
     )
 
     async def resolve(
@@ -138,13 +138,13 @@ class _TrustedPeerNetwork(_FakeNetwork):
             node_id=origin_node_id,
             reachability_class=ReachabilityClass.ROUTABLE,
             trust_domain="td",
-            protocols=(PEER_PROTOCOL,),
+            protocols=(RESIDENT_PEER_PROTOCOL,),
             relay_attachment_id="att-root",
         )
         target = listener.model_copy(
             update={
                 "routes": ("10.0.0.2:9500",),
-                "protocols": (PEER_PROTOCOL,),
+                "protocols": (RESIDENT_PEER_PROTOCOL,),
                 "directly_routable": True,
             }
         )
@@ -156,7 +156,7 @@ class _TrustedPeerNetwork(_FakeNetwork):
             generation=1,
             trust_domain="td",
             reachability_class=ReachabilityClass.ROUTABLE,
-            protocols=(PEER_PROTOCOL,),
+            protocols=(RESIDENT_PEER_PROTOCOL,),
             relay_attachment_id="att-1",
         )
         route = resolve_route(

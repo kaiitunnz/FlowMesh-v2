@@ -8,6 +8,7 @@ from .access import (
     ScopedContentCredential,
     renewal_lead_sec,
 )
+from .carriage import ContentCarriagePlan, ContentPeerRoute, ContentRouteObservation
 from .config import BACKEND_FILESYSTEM, BACKEND_S3, ObjectStoreConfig
 from .filesystem import FilesystemObjectBacking, SharedFilesystemObjectStore
 from .grant import (
@@ -45,6 +46,9 @@ __all__ = [
     "STREAM_CHUNK_BYTES",
     "BACKEND_FILESYSTEM",
     "BACKEND_S3",
+    "ContentCarriagePlan",
+    "ContentPeerRoute",
+    "ContentRouteObservation",
     "ObjectStoreConfig",
     "CONTENT_ENCODING_IDENTITY",
     "OCTET_STREAM",

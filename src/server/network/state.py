@@ -26,6 +26,7 @@ from ..utils.time import now_iso
 
 __all__ = [
     "NetworkEndpointAdvertisement",
+    "ContentListenerTarget",
     "NonresidentSidecarTarget",
     "PolicyClass",
     "ReachabilityClass",
@@ -52,6 +53,9 @@ class PolicyClass(StrEnum):
     # The root's gated serve ingress, with reachability evidence separate from its
     # node's workers.
     SERVE_INGRESS = "serve_ingress"
+    # A worker's content transfers to a holder's content listener, graded apart from
+    # resident paths.
+    CONTENT = "content"
 
 
 class ReachabilityState(StrEnum):
@@ -66,11 +70,12 @@ class ReachabilityState(StrEnum):
 class RouteTarget(Protocol):
     """The route-target facts the pure resolver reads.
 
-    Both the resident ``ReplicaListenerAdvertisement`` and the nonresident external-tool
-    ``NonresidentSidecarTarget`` satisfy it, so one resolver serves both without either
-    carrying the other's contract. ``incarnation`` and ``listener_generation`` are
-    distinct reachability-view keys (a resident target moves them independently); a
-    nonresident target mirrors both to its target generation.
+    The resident ``ReplicaListenerAdvertisement``, the nonresident external-tool
+    ``NonresidentSidecarTarget`` and a holder's ``ContentListenerTarget`` satisfy it, so
+    one resolver serves them all without any carrying another's contract.
+    ``incarnation`` and ``listener_generation`` are distinct reachability-view keys (a
+    resident target moves them independently); every other target mirrors both to its
+    target generation.
     """
 
     node_id: str
@@ -129,12 +134,30 @@ class NonresidentSidecarTarget(BaseModel):
     directly_routable: bool = False
 
 
+class ContentListenerTarget(BaseModel):
+    """A holder worker's content listener, the target of one content transfer."""
+
+    model_config = ConfigDict(frozen=True)
+
+    worker_id: str
+    node_id: str
+    # The holder's incarnation, under which its copies and listener were reported.
+    incarnation: int
+    listener_generation: int
+    # Its dialable address, or an opaque per-worker name only the node and control
+    # relays reach.
+    routes: tuple[str, ...] = ()
+    protocols: tuple[str, ...] = ()
+    directly_routable: bool = False
+
+
 class TrustedPeerPolicy(BaseModel):
     """The deployment's eligibility rule for the direct origin-to-target transports.
 
     Disabled by default: a deployment that has not declared a trusted class carries
     every resident invocation over ``control_relay``. ``protocol`` is the transport an
-    origin must be able to dial and a ``worker_direct`` listener must serve.
+    origin must be able to dial and a ``worker_direct`` listener or ``node_relay`` node
+    must serve.
 
     ``probe`` marks the rule a reachability diagnostic resolves under. A probe is
     answered by the peer listener it dials and carries no invocation payload, so it is

@@ -34,7 +34,7 @@ class _RefusingLane:
     def read_local(self, reference: Any) -> bytes:
         raise ContentStoreError("this cache cannot hold that scope")
 
-    def read_peer(self, reference: Any, task_id: str) -> bytes:
+    def read_peer(self, reference: Any, task_id: str, peer_only: bool = False) -> bytes:
         raise ContentStoreError("this cache cannot hold that scope")
 
     def keep(self, scope: str, data: bytes, *, media_type: str = "") -> Any:
@@ -203,7 +203,7 @@ class _BrokenLane:
     def read_local(self, reference: Any) -> bytes:
         raise OSError("input/output error")
 
-    def read_peer(self, reference: Any, task_id: str) -> bytes:
+    def read_peer(self, reference: Any, task_id: str, peer_only: bool = False) -> bytes:
         raise OSError("input/output error")
 
     def keep(self, scope: str, data: bytes, *, media_type: str = "") -> Any:
@@ -288,7 +288,7 @@ def test_a_copy_the_cache_cannot_keep_is_never_announced(tmp_path) -> None:
     lane = ContentLaneHost(
         store=WorkerContentCache(tmp_path / "cache", max_bytes=4),
         push_frame=lambda frame: None,
-        request_grant=lambda reference, task_id: None,
+        request_grant=lambda reference, task_id, peer_only, request_id: None,
         worker_id="wkr-1",
         generation=1,
     )

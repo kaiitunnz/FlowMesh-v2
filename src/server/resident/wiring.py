@@ -235,7 +235,7 @@ def wire_worker_delivery(
             node_of_worker=_node_of_worker,
             network=network,
             sessions=sessions,
-            directly_routable=resident_cfg.sidecar_directly_routable,
+            directly_routable=network.worker_directly_routable,
             resident_listener_port_of=_resident_listener_port_of,
             root_node_id=root_node_id,
             edge_id=edge_id,

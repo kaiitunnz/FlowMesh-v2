@@ -6,10 +6,14 @@ origin, records the deputy's classified observations, and exposes endpoints and
 reachability for diagnostics.
 """
 
+import asyncio
+import contextlib
 import logging
 import time
+from collections.abc import Iterable, Mapping
 
-from shared.schemas.network import PEER_PROTOCOL
+from shared.network.frame_stream import split_host_port
+from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 from shared.utils.ids import new_route_origin_id
 
 from ..config import NetworkPlaneConfig
@@ -20,11 +24,11 @@ from .state import (
     NetworkEndpointAdvertisement,
     PolicyClass,
     ReachabilityClass,
-    ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteObservation,
     RouteObservationOutcome,
     RouteOrigin,
+    RouteTarget,
     Transport,
     TrustedPeerPolicy,
 )
@@ -55,6 +59,13 @@ def stamp_endpoint(
 _REACHABILITY_CLASSES = frozenset(ReachabilityClass)
 
 
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
 def _peer_policy(config: NetworkPlaneConfig) -> TrustedPeerPolicy:
     """The pure resolver's trust rule, derived from the deployment's peer posture."""
     peer = config.peer
@@ -66,7 +77,7 @@ def _peer_policy(config: NetworkPlaneConfig) -> TrustedPeerPolicy:
             for value in peer.classes
             if value in _REACHABILITY_CLASSES
         ),
-        protocol=PEER_PROTOCOL,
+        protocol=RESIDENT_PEER_PROTOCOL,
     )
 
 
@@ -94,10 +105,29 @@ class NetworkPlane:
         self._origin_ids: dict[tuple[str, PolicyClass, int], str] = {}
         self._seen_generation: dict[str, int] = {}
         self._trust = _peer_policy(config)
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Keep the view on ``loop``, the server's own, whatever thread reports a
+        node's departure."""
+        self._loop = loop
 
     @property
     def connect_budget_sec(self) -> float:
         return self._config.connect_budget_sec
+
+    @property
+    def route_ttl_sec(self) -> float:
+        return self._config.route_ttl_sec
+
+    @property
+    def worker_directly_routable(self) -> bool:
+        """Whether the deployment declares its workers' listeners reachable off-host."""
+        return self._config.worker_directly_routable
+
+    def peer_trust(self, protocol: str) -> TrustedPeerPolicy:
+        """Return the deployment's peer rule for a route carrying ``protocol``."""
+        return self._trust.model_copy(update={"protocol": protocol})
 
     @property
     def probe_trust(self) -> TrustedPeerPolicy:
@@ -119,13 +149,54 @@ class NetworkPlane:
             return None
         return stamp_endpoint(node.network_endpoint, node.id)
 
+    async def endpoints_for(
+        self, node_ids: Iterable[str]
+    ) -> dict[str, NetworkEndpointAdvertisement | None]:
+        """Each node's current advertisement, read in one round trip."""
+        ordered = sorted(set(node_ids))
+        nodes = await self._nodes.get_nodes_async(ordered)
+        return {
+            node_id: (
+                stamp_endpoint(node.network_endpoint, node.id)
+                if node is not None and node.network_endpoint is not None
+                else None
+            )
+            for node_id, node in zip(ordered, nodes, strict=True)
+        }
+
+    @staticmethod
+    def node_host(endpoint: NetworkEndpointAdvertisement | None) -> str:
+        """Return the host a node is reached at; empty when it advertises none."""
+        if endpoint is None or not endpoint.url:
+            return ""
+        return split_host_port(endpoint.url)[0]
+
+    @classmethod
+    def listener_address(
+        cls, endpoint: NetworkEndpointAdvertisement | None, port: int
+    ) -> str:
+        """Return the ``host:port`` a listener a worker bound on ``port`` is dialed at,
+        on its node's host; empty when it binds none or the node advertises no host."""
+        host = cls.node_host(endpoint)
+        return f"{host}:{port}" if host and port > 0 else ""
+
+    async def _endpoint(
+        self,
+        node_id: str,
+        known: Mapping[str, NetworkEndpointAdvertisement | None],
+    ) -> NetworkEndpointAdvertisement | None:
+        if node_id in known:
+            return known[node_id]
+        return await self.endpoint_for(node_id)
+
     async def resolve(
         self,
         origin_node_id: str,
-        listener: ReplicaListenerAdvertisement,
+        listener: RouteTarget,
         *,
         trust: TrustedPeerPolicy | None = None,
         policy_class: PolicyClass = PolicyClass.DEFAULT,
+        endpoints: Mapping[str, NetworkEndpointAdvertisement | None] | None = None,
     ) -> tuple[RouteOrigin, ResolvedRoute] | None:
         """Resolve an ordered candidate ladder from origin to the target listener.
 
@@ -133,28 +204,24 @@ class NetworkPlane:
         every candidate — the peer transports included — is graded against. ``trust``
         overrides the deployment policy for a caller that probes reachability, or for
         an origin restricted to ``control_relay``. ``policy_class`` scopes the origin
-        and its evidence among the dialers sharing that node's endpoint.
+        and its evidence among the dialers sharing that node's endpoint. ``endpoints``
+        are advertisements the caller already read, by node id, so neither end is read
+        again.
 
         Returns ``None`` when the origin advertises no network endpoint.
         """
-        origin_endpoint = await self.endpoint_for(origin_node_id)
+        known = endpoints or {}
+        origin_endpoint = await self._endpoint(origin_node_id, known)
         if origin_endpoint is None:
             return None
-        target_endpoint = await self.endpoint_for(listener.node_id)
+        target_endpoint = await self._endpoint(listener.node_id, known)
         self._invalidate_on_rotation(target_endpoint)
 
         origin = self._route_origin(origin_endpoint, origin_node_id, policy_class)
         now = time.monotonic()
         self._route_epoch += 1
-        route = resolve_route(
-            origin,
-            listener,
-            target_endpoint,
-            self._reachability,
-            trust=self._trust if trust is None else trust,
-            now=now,
-            route_epoch=self._route_epoch,
-            expires_at=now + self._config.route_ttl_sec,
+        route = self._ladder(
+            origin, listener, target_endpoint, trust, now, self._route_epoch
         )
         for candidate in route.candidates:
             self._reachability.mark_optimistic(
@@ -168,10 +235,55 @@ class NetworkPlane:
             )
         return origin, route
 
+    def preview(
+        self,
+        origin_node_id: str,
+        listener: RouteTarget,
+        *,
+        trust: TrustedPeerPolicy | None = None,
+        policy_class: PolicyClass = PolicyClass.DEFAULT,
+        endpoints: Mapping[str, NetworkEndpointAdvertisement | None],
+    ) -> ResolvedRoute | None:
+        """Return the ladder ``resolve`` would give, from advertisements already read,
+        leaving no trace: no epoch is spent and no candidate is marked attempted, so a
+        caller can rank several targets and resolve only the one it picks."""
+        origin_endpoint = endpoints.get(origin_node_id)
+        if origin_endpoint is None:
+            return None
+        origin = self._route_origin(origin_endpoint, origin_node_id, policy_class)
+        return self._ladder(
+            origin,
+            listener,
+            endpoints.get(listener.node_id),
+            trust,
+            time.monotonic(),
+            self._route_epoch,
+        )
+
+    def _ladder(
+        self,
+        origin: RouteOrigin,
+        listener: RouteTarget,
+        target_endpoint: NetworkEndpointAdvertisement | None,
+        trust: TrustedPeerPolicy | None,
+        now: float,
+        route_epoch: int,
+    ) -> ResolvedRoute:
+        return resolve_route(
+            origin,
+            listener,
+            target_endpoint,
+            self._reachability,
+            trust=self._trust if trust is None else trust,
+            now=now,
+            route_epoch=route_epoch,
+            expires_at=now + self._config.route_ttl_sec,
+        )
+
     def record_observations(
         self,
         origin: RouteOrigin,
-        listener: ReplicaListenerAdvertisement,
+        listener: RouteTarget,
         observations: list[tuple[Transport, RouteObservationOutcome]],
     ) -> None:
         """Fold the deputy's classified observations into the reachability view."""
@@ -191,7 +303,7 @@ class NetworkPlane:
             )
 
     def reachability_states(
-        self, origin: RouteOrigin, listener: ReplicaListenerAdvertisement
+        self, origin: RouteOrigin, listener: RouteTarget
     ) -> dict[str, str]:
         """The current directional state per transport, for the echo response."""
         now = time.monotonic()
@@ -240,6 +352,15 @@ class NetworkPlane:
 
         Wired to node deregistration so the derived view stays bounded under node churn.
         """
+        loop = self._loop
+        if loop is None or _running_loop() is loop:
+            self._forget_node(node_id)
+        else:
+            # A departure reported once the server's loop has closed has no view left.
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._forget_node, node_id)
+
+    def _forget_node(self, node_id: str) -> None:
         self._reachability.invalidate_node(node_id)
         self._seen_generation.pop(node_id, None)
 

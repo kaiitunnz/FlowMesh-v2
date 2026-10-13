@@ -9,6 +9,7 @@ import asyncio
 from typing import Any
 
 from server.network.reverse_relay import (
+    CONTENT_RELAY_KEYSPACE,
     RESIDENT_RELAY_KEYSPACE,
     RelaySessionStore,
     RelayStreamStore,
@@ -131,3 +132,48 @@ def test_a_later_connection_naming_a_bound_session_does_not_take_its_frames() ->
     dialer, intruder = asyncio.run(run())
 
     assert len(dialer.frames) == 1 and intruder.frames == []
+
+
+def test_a_dropped_dialed_session_is_cancelled_and_kept_off_the_root_relay() -> None:
+    async def run() -> tuple[list[tuple[str, RelayFrame]], list[str]]:
+        redis = FakeBinaryRedis()
+        sessions = RelaySessionStore(redis, CONTENT_RELAY_KEYSPACE)
+        await sessions.update(
+            "s1",
+            origin_worker="wrk-requester",
+            target_worker="wrk-holder",
+            target_node="nde-h",
+        )
+        sent: list[tuple[str, RelayFrame]] = []
+
+        async def enqueue(worker_id: str, payload: dict[str, Any]) -> bool:
+            sent.append((worker_id, RelayFrame.from_wire(payload["payload"])))
+            return True
+
+        bridge = RelayWorkerBridge(
+            redis, "nde-h", enqueue, keyspace=CONTENT_RELAY_KEYSPACE
+        )
+        dialer = _Sink()
+        bridge.bind_peer("s1", dialer)
+        await bridge.drop_peer("s1", dialer, await sessions.load("s1"))
+        dropped = _frame(RelayDirection.TARGET_TO_ORIGIN)
+        await bridge.publish_up(dropped)
+        other = RelayFrame(
+            kind=RelayFrameKind.DATA,
+            session_id="s2",
+            direction=RelayDirection.TARGET_TO_ORIGIN,
+            seq=1,
+            payload=b"relayed",
+        )
+        await bridge.publish_up(other)
+        entries, _ = await RelayStreamStore(redis, CONTENT_RELAY_KEYSPACE).read_up(
+            "nde-h", "0", 10, None
+        )
+        assert dialer.frames == []
+        return sent, [entry.frame.session_id for entry in entries]
+
+    sent, up = asyncio.run(run())
+    ((worker, cancel),) = sent
+    assert worker == "wrk-holder"
+    assert cancel.kind is RelayFrameKind.CANCEL and cancel.session_id == "s1"
+    assert up == ["s2"]

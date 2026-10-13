@@ -84,8 +84,8 @@ directory `flowmesh stack` runs in.
 | `CONTENT_CACHE_TTL_SEC` | `0` | How long a worker keeps an unused cached copy (seconds, 0 = indefinitely) |
 | `CONTENT_CACHE_MAX_BYTES` | `0` | Disk budget for a worker's cached copies (0 = unbounded) |
 | `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Longest a content transfer may go without progress (seconds) |
-| `CONTENT_TRANSFER_WINDOW_BYTES` | `1048576` | Bytes a content transfer keeps in flight |
-| `CONTENT_PEER_TRANSFER_MAX_BYTES` | `67108864` | Objects this size or larger read from the store before a peer while it is reachable (0 = peer first) |
+| `CONTENT_TRANSFER_WINDOW_BYTES` | `1048576` | Bytes a content transfer keeps in flight; set it alike on every node |
+| `CONTENT_RELAY_TRANSFER_MAX_BYTES` | `67108864` | Size from which reads prefer the store to the root relay (0 = relay first) |
 | `CONTENT_STORE_PART_BYTES` | `16777216` | Part size of a large object's upload (bytes, 5 MiB to 5 GiB) |
 | `CONTENT_STORE_UPLOAD_CONCURRENCY` | `4` | Parts one upload sends at once |
 | `CONTENT_STORE_READ_STALL_TIMEOUT_SEC` | `10` | Longest a control-plane store read waits for bytes (seconds) |
@@ -106,7 +106,6 @@ directory `flowmesh stack` runs in.
 | `RESIDENT_SELECTION_STRATEGY` | `batch-aware-best-fit` | Per-family replica-selection strategy |
 | `RESIDENT_IDLE_RETAIN_SEC` | `0` | Base idle retain window before teardown; 0 disables |
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
-| `RESIDENT_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Advertise the resident sidecar as directly routable |
 | `NETWORK_PLANE_ENABLED` | `true` | Enable the route-discovery and relay substrate |
 | `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node inbound address (`host:port`) |
 | `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
@@ -117,6 +116,7 @@ directory `flowmesh stack` runs in.
 | `NETWORK_PLANE_BACKOFF_MAX_SEC` | `30` | Demotion retry backoff cap (seconds) |
 | `NETWORK_PLANE_CONNECT_BUDGET_SEC` | `5` | Per-candidate optimistic connect budget (seconds) |
 | `NETWORK_PLANE_ROUTE_TTL_SEC` | `30` | Resolved-route snapshot TTL (seconds) |
+| `NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE` | `false` | Declare workers' peer listeners reachable off-host |
 | `NETWORK_PLANE_PEER_ENABLED` | `false` | Enable trusted origin-to-target peer transports |
 | `NETWORK_PLANE_PEER_TRUST_DOMAIN` | – | Trust domain both ends must share |
 | `NETWORK_PLANE_PEER_CLASSES` | `same_node,same_cluster` | Target reachability classes a peer transport admits |
@@ -217,8 +217,9 @@ An `external` worker runs outside its supervisor, so set on it the settings a
 supervisor passes the workers it launches: a `WORKER_TOKEN` of the form
 `<alias>.<hex HMAC-SHA256 of the alias keyed by EXTERNAL_WORKER_TOKEN>`,
 `SUPERVISOR_GRPC_TARGET` with `SUPERVISOR_GRPC_TLS_CA_B64`, and the deployment's
-network-plane peer (`NETWORK_PLANE_PEER_*`), content cache and store
-(`WORKER_CONTENT_DIR`, `CONTENT_*`), `WORKER_PRIVATE_STATE_DIR`, and telemetry
+network-plane peer (`NETWORK_PLANE_PEER_*`, `NETWORK_PLANE_CONNECT_BUDGET_SEC`),
+content cache and store (`WORKER_CONTENT_DIR`, `CONTENT_*`),
+`WORKER_PRIVATE_STATE_DIR`, and telemetry
 (`SERVER_METRICS_*`, with the OTLP token and `SERVER_METRICS_OTLP_CA_B64`) settings.
 An external worker on a host other than its node's carries resident traffic over
 `control_relay`.

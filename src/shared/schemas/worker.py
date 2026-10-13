@@ -68,6 +68,13 @@ class WorkerCapabilities(BaseModel):
             "serves none, which leaves its replicas reachable over the relay alone."
         ),
     )
+    content_listener_port: int = Field(
+        default=0,
+        description=(
+            "Port of the worker's content listener; 0 when it serves none, which "
+            "leaves its held content reachable through its node or the relay alone."
+        ),
+    )
 
 
 __all__ = ["SSHBackendName", "SSHLimits", "WorkerCapabilities", "WorkerStatus"]

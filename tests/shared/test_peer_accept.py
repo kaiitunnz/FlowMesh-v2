@@ -10,6 +10,7 @@ import contextlib
 import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 import pytest
 
@@ -17,6 +18,7 @@ from shared.network.frame_stream import (
     AcceptFrame,
     AcceptStatus,
     FrameStreamError,
+    PeerPurpose,
     read_relay_frame,
     read_stream_frame,
     write_accept,
@@ -73,7 +75,7 @@ async def _listener(
 ) -> AsyncIterator[str]:
     listener = MutualTlsFrameListener(
         material=material,
-        handler=lambda sink: _Recording(received),
+        handler=lambda sink, _: _Recording(received),
         admits=admits,
         max_connections=max_connections,
     )
@@ -97,7 +99,10 @@ def _foreign_leaf(ca: _TestCa) -> MutualTlsMaterial:
 async def _dial(endpoint: str, origin: MutualTlsMaterial | None) -> BaseException:
     with pytest.raises((OSError, ValueError)) as raised:
         _, writer = await open_accepted_connection(
-            endpoint, client_context(origin) if origin else None, _BUDGET
+            endpoint,
+            client_context(origin) if origin else None,
+            _BUDGET,
+            PeerPurpose.RESIDENT,
         )
         writer.transport.abort()
     return raised.value
@@ -134,29 +139,10 @@ def test_an_accepted_connection_carries_the_session(ca: _TestCa) -> None:
     async def run() -> None:
         async with _listener(ca.material("node-target", "127.0.0.1"), received) as ep:
             _, writer = await open_accepted_connection(
-                ep, client_context(ca.material("node-origin")), _BUDGET
-            )
-            await write_relay_frame(writer, _frame())
-            for _ in range(100):
-                if received:
-                    break
-                await asyncio.sleep(0.02)
-            writer.close()
-
-    asyncio.run(run())
-
-    assert [f.payload for f in received] == [b"request"]
-
-
-def test_a_dialer_that_sends_no_accept_request_is_served_as_before(
-    ca: _TestCa,
-) -> None:
-    received: list[RelayFrame] = []
-
-    async def run() -> None:
-        async with _listener(ca.material("node-target", "127.0.0.1"), received) as ep:
-            _, writer = await open_peer_connection(
-                ep, client_context(ca.material("node-origin")), _BUDGET
+                ep,
+                client_context(ca.material("node-origin")),
+                _BUDGET,
+                PeerPurpose.RESIDENT,
             )
             await write_relay_frame(writer, _frame())
             for _ in range(100):
@@ -260,7 +246,9 @@ def test_a_target_that_never_answers_times_out_within_the_connect_budget() -> No
         port = server.sockets[0].getsockname()[1]
         async with server:
             with pytest.raises(TimeoutError) as raised:
-                await open_accepted_connection(f"127.0.0.1:{port}", None, 0.3)
+                await open_accepted_connection(
+                    f"127.0.0.1:{port}", None, 0.3, PeerPurpose.RESIDENT
+                )
             return raised.value
 
     exc = asyncio.run(run())
@@ -279,7 +267,7 @@ def test_a_dialer_that_opens_no_session_frees_its_slot(
         async with _listener(None, received, max_connections=1) as ep:
             _, silent = await open_peer_connection(ep, None, _BUDGET)
             if sends == "only an accept request":
-                await write_accept(silent, AcceptStatus.REQUEST)
+                await write_accept(silent, AcceptStatus.REQUEST, PeerPurpose.RESIDENT)
             # The silent dialer holds the only slot until the listener gives up on it.
             await asyncio.sleep(0.05)
             exc = await _dial(ep, None)
@@ -287,7 +275,9 @@ def test_a_dialer_that_opens_no_session_frees_its_slot(
             async with asyncio.timeout(_BUDGET):
                 while True:
                     try:
-                        _, writer = await open_accepted_connection(ep, None, _BUDGET)
+                        _, writer = await open_accepted_connection(
+                            ep, None, _BUDGET, PeerPurpose.RESIDENT
+                        )
                     except PeerAcceptError:
                         await asyncio.sleep(0.05)
                         continue
@@ -296,3 +286,39 @@ def test_a_dialer_that_opens_no_session_frees_its_slot(
             silent.close()
 
     asyncio.run(run())
+
+
+def test_both_ends_of_a_peer_connection_keep_it_alive() -> None:
+    """A peer gone without a close is noticed by keepalive, at either end."""
+
+    async def run() -> tuple[int, int, int]:
+        def _keepalive(sock: Any) -> int:
+            return sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+
+        listener = MutualTlsFrameListener(
+            material=None,
+            handler=lambda sink, _: _Recording([]),
+            admits=lambda _: True,
+        )
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        await listener.start_on_socket(sock)
+        try:
+            _, writer = await open_accepted_connection(
+                f"127.0.0.1:{listener.port}", None, _BUDGET, PeerPurpose.RESIDENT
+            )
+            dialed = writer.get_extra_info("socket")
+            user_timeout = dialed.getsockopt(
+                socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT
+            )
+            served = [
+                _keepalive(w.get_extra_info("socket")) for w in listener._connections
+            ]
+            writer.close()
+            return _keepalive(dialed), user_timeout, served[0]
+        finally:
+            await listener.stop()
+
+    dialed, user_timeout, served = asyncio.run(run())
+    assert dialed == 1 and user_timeout > 0
+    assert served == 1

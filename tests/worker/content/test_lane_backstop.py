@@ -1,7 +1,9 @@
 """The lane host's peer reads: the backstop bounds a stall, never a slow transfer, and
-what the cache does with a verified read never fails it."""
+what the cache does with a verified read never fails it; a worker that dials no peer
+never asks for a read only a peer transport may carry."""
 
 import asyncio
+import concurrent.futures
 import time
 from pathlib import Path
 from typing import cast
@@ -24,7 +26,11 @@ class _Client:
         self.last_progress = time.monotonic()
 
     async def hydrate_to_file(
-        self, reference: ContentReference, task_id: str, staging: Path
+        self,
+        reference: ContentReference,
+        task_id: str,
+        staging: Path,
+        peer_only: bool = False,
     ) -> Path:
         deadline = time.monotonic() + self._duration_sec
         while time.monotonic() < deadline:
@@ -40,7 +46,7 @@ def _lane(tmp_path, client: _Client) -> ContentLaneHost:
     lane = ContentLaneHost(
         store=WorkerContentCache(tmp_path / "content"),
         push_frame=lambda frame: None,
-        request_grant=lambda reference, task_id: None,
+        request_grant=lambda reference, task_id, peer_only, request_id: None,
         worker_id="wkr-1",
         generation=1,
         transfer_timeout_sec=_STALL,
@@ -69,6 +75,41 @@ def test_a_peer_read_that_stops_progressing_fails_typed(tmp_path) -> None:
         lane.stop()
 
 
+class _FinishedAsCancelled(concurrent.futures.Future[Path]):
+    """A transfer that lands just as the backstop gives up on it."""
+
+    def __init__(self, landed: Path) -> None:
+        super().__init__()
+        self._landed = landed
+
+    def result(self, timeout: float | None = None) -> Path:
+        if not self.done():
+            raise concurrent.futures.TimeoutError
+        return super().result(timeout)
+
+    def cancel(self) -> bool:
+        self.set_result(self._landed)
+        return False
+
+
+def test_a_transfer_that_lands_as_the_backstop_gives_up_is_read(
+    tmp_path, monkeypatch
+) -> None:
+    client = _Client(0.0, progressing=False)
+    client.last_progress = time.monotonic() - 60.0
+    lane = _lane(tmp_path, client)
+    staging = lane._store.staging_dir("local")
+    landed = staging / "transfer"
+    landed.write_bytes(b"body")
+    monkeypatch.setattr(lane, "_call", lambda make: _FinishedAsCancelled(landed))
+    try:
+        assert lane.read_peer(reference_for("local", b"body"), "tsk-1") == b"body"
+        assert list(staging.iterdir()) == []
+    finally:
+        monkeypatch.undo()
+        lane.stop()
+
+
 def test_a_verified_peer_read_survives_a_copy_the_cache_cannot_take(
     tmp_path, monkeypatch
 ) -> None:
@@ -83,3 +124,26 @@ def test_a_verified_peer_read_survives_a_copy_the_cache_cannot_take(
         assert list(lane._store.staging_dir("local").iterdir()) == []
     finally:
         lane.stop()
+
+
+def test_a_worker_without_peer_transports_never_asks_for_a_peer_only_read(
+    tmp_path,
+) -> None:
+    asked: list[bool] = []
+    lane = ContentLaneHost(
+        store=WorkerContentCache(tmp_path / "content"),
+        push_frame=lambda frame: None,
+        request_grant=lambda reference, task_id, peer_only, request_id: asked.append(
+            peer_only
+        ),
+        worker_id="wkr-1",
+        generation=1,
+        transfer_timeout_sec=_STALL,
+    )
+    lane.start()
+    try:
+        with pytest.raises(ContentHydrationError, match="no peer transport"):
+            lane.read_peer(reference_for("local", b"body"), "tsk-1", peer_only=True)
+    finally:
+        lane.stop()
+    assert asked == []

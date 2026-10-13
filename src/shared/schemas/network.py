@@ -23,8 +23,11 @@ class ReachabilityClass(StrEnum):
     ROUTABLE = "routable"
 
 
-PEER_PROTOCOL = "resident-peer"
-"""The transport capability a direct origin-to-target peer transport is carried over."""
+RESIDENT_PEER_PROTOCOL = "resident-peer"
+"""The capability to carry a resident session over a peer transport, at either end."""
+
+CONTENT_PEER_PROTOCOL = "content-peer"
+"""The capability to carry a content transfer over a peer transport, at either end."""
 
 
 class NetworkEndpointAdvertisement(BaseModel):
@@ -111,7 +114,7 @@ def is_demoting(outcome: RouteObservationOutcome) -> bool:
 
 
 __all__ = [
-    "PEER_PROTOCOL",
+    "RESIDENT_PEER_PROTOCOL",
     "NetworkEndpointAdvertisement",
     "ReachabilityClass",
     "RouteObservationOutcome",

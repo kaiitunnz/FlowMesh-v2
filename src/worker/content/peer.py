@@ -1,0 +1,170 @@
+"""Dialing a holder for a transfer control routed over a peer transport.
+
+A requester reaches a holder's content listener directly, or the holder node's listener
+that forwards to it, only at the address control resolved beside the transfer's grant.
+The connection carries that one transfer in both directions and closes with it. Path
+evidence goes back to control as it does for a resident origin, each failure classified:
+a failed dial or a connection that ends before its transfer does is a network failure,
+and a holder refusing this node as not the transfer's requester is a TLS failure, since
+the pair's identities do not fit. A busy target, or one that does not serve content, is
+no evidence, and nor is anything else the holder answers, such as a copy that does not
+verify.
+"""
+
+import asyncio
+import contextlib
+import logging
+import ssl
+from collections.abc import Callable
+
+from shared.content import ContentCarriagePlan, ContentPeerRoute
+from shared.network.frame_stream import (
+    FrameStreamError,
+    PeerPurpose,
+    read_relay_frame,
+    write_relay_frame,
+)
+from shared.network.peer_dial import (
+    PEER_DIAL_ERRORS,
+    PeerAcceptError,
+    classify_peer_error,
+    open_accepted_connection,
+)
+from shared.network.relay_frame import RelayFrame, RelayFrameKind
+from shared.network.session import FramedRelaySession
+from shared.schemas.network import RouteObservationOutcome
+
+# Reports one classified observation of one route a transfer was carried over.
+ObservePath = Callable[
+    [ContentCarriagePlan, ContentPeerRoute, RouteObservationOutcome], None
+]
+
+
+class PeerUnreachable(Exception):
+    """The holder's side could not be reached; nothing of the transfer was sent."""
+
+
+class PeerConnection:
+    """One dialed connection carrying one transfer."""
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        route: ContentPeerRoute,
+        on_loss: Callable[[RouteObservationOutcome], None],
+        on_frame: Callable[[], None],
+    ) -> None:
+        self.route = route
+        self._reader = reader
+        self._writer = writer
+        self._on_loss = on_loss
+        self._on_frame = on_frame
+        self._lock = asyncio.Lock()
+        self._pump: asyncio.Task[None] | None = None
+        self._closing = False
+        self._lost = False
+
+    async def send(self, frame: RelayFrame) -> None:
+        try:
+            async with self._lock:
+                await write_relay_frame(self._writer, frame)
+        except (OSError, FrameStreamError) as exc:
+            if frame.kind is RelayFrameKind.WINDOW:
+                # The far end may close the connection after its last frame, so the
+                # grant for that frame can find it gone; the read side alone decides
+                # whether the transfer was lost.
+                return
+            self._lose(exc)
+            raise
+
+    def attach(self, session: FramedRelaySession) -> None:
+        """Feed the session every frame the connection reads for it."""
+        self._pump = asyncio.ensure_future(self._read_into(session))
+
+    async def _read_into(self, session: FramedRelaySession) -> None:
+        try:
+            while True:
+                frame = await read_relay_frame(self._reader)
+                if frame.session_id == session.session_id:
+                    self._on_frame()
+                    await session.on_frame(frame)
+        except (asyncio.IncompleteReadError, OSError, FrameStreamError) as exc:
+            # This connection carries no more frames, so wake the waiting transfer now.
+            self._lose(exc)
+            session.abort()
+
+    def _lose(self, exc: BaseException) -> None:
+        self._report(
+            RouteObservationOutcome.ROUTE_FAILURE
+            if isinstance(exc, (FrameStreamError, asyncio.IncompleteReadError))
+            else classify_peer_error(exc)
+        )
+
+    def refused_requester(self) -> None:
+        """Record that the holder refused this node as not the transfer's requester."""
+        self._report(RouteObservationOutcome.TLS_FAILURE)
+
+    def _report(self, outcome: RouteObservationOutcome) -> None:
+        if not self._lost and not self._closing:
+            self._lost = True
+            self._on_loss(outcome)
+
+    async def aclose(self) -> None:
+        self._closing = True
+        if self._pump is not None:
+            self._pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._pump
+        self._writer.transport.abort()
+
+
+class ContentPeerDialer:
+    """Opens the connection a carriage plan names, reporting what the path did."""
+
+    def __init__(
+        self,
+        *,
+        ssl_context: ssl.SSLContext | None,
+        connect_budget_sec: float,
+        observe: ObservePath,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._ssl_context = ssl_context
+        self._budget = connect_budget_sec
+        self._observe = observe
+        self._logger = logger or logging.getLogger("content-peer-dialer")
+
+    async def open(
+        self,
+        carriage: ContentCarriagePlan,
+        route: ContentPeerRoute,
+        on_frame: Callable[[], None],
+    ) -> PeerConnection:
+        """Dial one of the plan's routes and wait for the target to accept a content
+        connection, raising ``PeerUnreachable`` before anything of the transfer goes."""
+        try:
+            reader, writer = await open_accepted_connection(
+                route.endpoint, self._ssl_context, self._budget, PeerPurpose.CONTENT
+            )
+        except PEER_DIAL_ERRORS as exc:
+            if not (isinstance(exc, PeerAcceptError) and exc.outcome is None):
+                self._observe(carriage, route, classify_peer_error(exc))
+            self._logger.info(
+                "content peer %s over %s unreachable: %s",
+                route.endpoint,
+                route.transport,
+                exc,
+            )
+            raise PeerUnreachable(str(exc)) from exc
+        self._observe(carriage, route, RouteObservationOutcome.VERIFIED)
+        return PeerConnection(
+            reader,
+            writer,
+            route,
+            on_loss=lambda outcome: self._observe(carriage, route, outcome),
+            on_frame=on_frame,
+        )
+
+
+__all__ = ["ContentPeerDialer", "ObservePath", "PeerConnection", "PeerUnreachable"]

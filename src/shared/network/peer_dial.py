@@ -9,8 +9,10 @@ dialer's certificate or its own capacity.
 """
 
 import asyncio
+import contextlib
 import socket
 import ssl
+from typing import Any
 
 from shared.schemas.network import RouteObservationOutcome
 
@@ -18,6 +20,7 @@ from .frame_stream import (
     AcceptFrame,
     AcceptStatus,
     FrameStreamError,
+    PeerPurpose,
     read_stream_frame,
     split_host_port,
     write_accept,
@@ -25,6 +28,39 @@ from .frame_stream import (
 
 # A failed dial raises a socket or TLS failure, or a parse failure of the endpoint.
 PEER_DIAL_ERRORS = (OSError, ValueError)
+
+# A peer that vanishes without a close (a partition, a host that died) is found by
+# keepalive probes, and unacknowledged writes give up after the user timeout.
+DEFAULT_CONNECT_BUDGET_SEC = 5.0
+
+_KEEPALIVE_IDLE_SEC = 30
+_KEEPALIVE_INTERVAL_SEC = 10
+_KEEPALIVE_PROBES = 3
+_USER_TIMEOUT_MS = 60_000
+
+
+def connect_budget(configured: float | None) -> float:
+    """Return the configured peer connect budget, or the default for one unset or not
+    positive."""
+    if configured is None or configured <= 0:
+        return DEFAULT_CONNECT_BUDGET_SEC
+    return configured
+
+
+def keep_alive(sock: Any) -> None:
+    """Make a peer connection's socket notice a peer that is gone without a close."""
+    if sock is None:
+        return
+    with contextlib.suppress(OSError):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for name, value in (
+            ("TCP_KEEPIDLE", _KEEPALIVE_IDLE_SEC),
+            ("TCP_KEEPINTVL", _KEEPALIVE_INTERVAL_SEC),
+            ("TCP_KEEPCNT", _KEEPALIVE_PROBES),
+            ("TCP_USER_TIMEOUT", _USER_TIMEOUT_MS),
+        ):
+            if (option := getattr(socket, name, None)) is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
 
 
 class PeerAcceptError(OSError):
@@ -44,7 +80,7 @@ async def open_peer_connection(
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Open a stream to the peer listener at ``endpoint`` (``host:port``)."""
     host, port = split_host_port(endpoint)
-    return await asyncio.wait_for(
+    reader, writer = await asyncio.wait_for(
         asyncio.open_connection(
             host,
             port,
@@ -53,10 +89,15 @@ async def open_peer_connection(
         ),
         timeout=timeout,
     )
+    keep_alive(writer.get_extra_info("socket"))
+    return reader, writer
 
 
 async def open_accepted_connection(
-    endpoint: str, ssl_context: ssl.SSLContext | None, timeout: float
+    endpoint: str,
+    ssl_context: ssl.SSLContext | None,
+    timeout: float,
+    purpose: PeerPurpose,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Open a stream to the peer listener at ``endpoint`` once the target accepts it.
 
@@ -64,12 +105,15 @@ async def open_accepted_connection(
     ``PeerAcceptError``. Under mutual TLS, a target that closes without answering has
     rejected the dialer's certificate after the dialer's side of the handshake
     completed, so that close records as a TLS failure.
+
+    The connection is used only when the acceptance echoes ``purpose``; any other
+    answer drops it as unserved.
     """
     writer: asyncio.StreamWriter | None = None
     try:
         async with asyncio.timeout(timeout):
             reader, writer = await open_peer_connection(endpoint, ssl_context)
-            await write_accept(writer, AcceptStatus.REQUEST)
+            await write_accept(writer, AcceptStatus.REQUEST, purpose)
             try:
                 answer = await read_stream_frame(reader)
             except asyncio.IncompleteReadError as exc:
@@ -91,11 +135,17 @@ async def open_accepted_connection(
             writer.transport.abort()
         raise
     status = answer.status if isinstance(answer, AcceptFrame) else None
-    if status is AcceptStatus.ACCEPTED:
+    if (
+        isinstance(answer, AcceptFrame)
+        and status is AcceptStatus.ACCEPTED
+        and answer.purpose == purpose
+    ):
         return reader, writer
     writer.transport.abort()
     if status is AcceptStatus.BUSY:
         raise PeerAcceptError(None, "the target is at its connection cap")
+    if status in (AcceptStatus.ACCEPTED, AcceptStatus.UNSERVED):
+        raise PeerAcceptError(None, f"the target does not serve {purpose} sessions")
     if status is AcceptStatus.REFUSED:
         raise PeerAcceptError(
             RouteObservationOutcome.TLS_FAILURE, "the target refused this origin"
@@ -124,6 +174,7 @@ __all__ = [
     "PEER_DIAL_ERRORS",
     "PeerAcceptError",
     "classify_peer_error",
+    "keep_alive",
     "open_accepted_connection",
     "open_peer_connection",
 ]

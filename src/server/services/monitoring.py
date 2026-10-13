@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
-from shared.content import ContentReference
+from shared.content import ContentReference, ContentRouteObservation
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,
@@ -939,7 +939,7 @@ class EventMonitor:
                     ResidentOpOutcome.model_validate(event.payload["outcome"])
                 )
             case "CONTENT_HOLDING" if self._content_authority is not None:
-                self._content_authority.record_holding(
+                self._content_authority.on_holding(
                     worker_id,
                     [
                         (str(scope), str(digest))
@@ -964,10 +964,19 @@ class EventMonitor:
                 else:
                     self._content_access.issue(worker_id, task_id, scope)
             case "CONTENT_HYDRATION_REQUEST" if self._content_authority is not None:
-                self._content_authority.authorize(
+                self._content_authority.on_request(
                     worker_id,
                     str(event.payload["task_id"]),
                     ContentReference.model_validate(event.payload["reference"]),
+                    request_id=int(event.payload["request_id"]),
+                    peer_only=bool(event.payload.get("peer_only")),
+                )
+            case "CONTENT_ROUTE_OBSERVATION" if self._content_authority is not None:
+                self._content_authority.on_route_observation(
+                    worker_id,
+                    ContentRouteObservation.model_validate(
+                        event.payload["observation"]
+                    ),
                 )
             case "RESIDENT_ROUTE_OBSERVATION":
                 self._runtime.on_resident_route_observation(

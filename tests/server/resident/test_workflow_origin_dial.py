@@ -21,7 +21,7 @@ from server.network.state import (
     ResolvedRoute,
     RouteOrigin,
 )
-from shared.schemas.network import PEER_PROTOCOL
+from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 
 from .test_service import _build, _env
 
@@ -29,7 +29,7 @@ _TRUSTED = TrustedPeerPolicy(
     enabled=True,
     trust_domain="td",
     classes=frozenset(ReachabilityClass),
-    protocol=PEER_PROTOCOL,
+    protocol=RESIDENT_PEER_PROTOCOL,
 )
 
 
@@ -53,13 +53,13 @@ class _TrustedPairNetwork:
             node_id=origin_node_id,
             reachability_class=ReachabilityClass.ROUTABLE,
             trust_domain="td",
-            protocols=(PEER_PROTOCOL,),
+            protocols=(RESIDENT_PEER_PROTOCOL,),
             relay_attachment_id="att-origin",
         )
         target = listener.model_copy(
             update={
                 "routes": ("10.0.0.2:9500",),
-                "protocols": (PEER_PROTOCOL,),
+                "protocols": (RESIDENT_PEER_PROTOCOL,),
                 "directly_routable": True,
             }
         )
@@ -70,7 +70,7 @@ class _TrustedPairNetwork:
             generation=1,
             trust_domain="td",
             reachability_class=ReachabilityClass.ROUTABLE,
-            protocols=(PEER_PROTOCOL,),
+            protocols=(RESIDENT_PEER_PROTOCOL,),
             relay_attachment_id="att-target",
         )
         route = resolve_route(

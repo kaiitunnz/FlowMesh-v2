@@ -8,7 +8,8 @@ so the next read of it is local.
 A read tries this worker's own copy, then another worker's over an authorized transfer,
 then the shared store, which always has the object; each level only ever saves a trip
 to the next. An object of the configured relay size or larger is read from the store
-before a peer, and from a peer only while the store cannot be reached. So a cache miss
+before the root relay, and over the relay only while the store cannot be reached; a
+holder a peer transport reaches is read first at any size. So a cache miss
 costs a read rather than a failure, and a worker dying costs nothing at all. Whatever
 this worker reads from a peer or the store it keeps a copy of, so the next reader here,
 or on a peer, finds one.
@@ -35,7 +36,7 @@ from shared.content import (
     ContentUnavailable,
     FabricObjectStore,
 )
-from shared.content.config import DEFAULT_PEER_TRANSFER_MAX_BYTES
+from shared.content.config import DEFAULT_RELAY_TRANSFER_MAX_BYTES
 from shared.outcome import (
     FabricContentStore,
     FinalizationIndexClient,
@@ -64,14 +65,14 @@ class WorkerContentPlane:
         *,
         announce: AnnounceHolding | None = None,
         finalizations: FinalizationIndexClient | None = None,
-        peer_max_bytes: int = DEFAULT_PEER_TRANSFER_MAX_BYTES,
+        relay_max_bytes: int = DEFAULT_RELAY_TRANSFER_MAX_BYTES,
         logger: logging.Logger | None = None,
     ) -> None:
         self._lane = lane
         self._access = access
         self._announce = announce
         self._finalizations = finalizations
-        self._peer_max_bytes = peer_max_bytes
+        self._relay_max_bytes = relay_max_bytes
         self._logger = logger or logging.getLogger("content-plane")
 
     def for_task(self, task_id: str, scope: str) -> "TaskContentStore":
@@ -174,7 +175,7 @@ class WorkerContentPlane:
         return self._read(
             reference,
             local=lambda lane: lane.read_local(reference),
-            peer=lambda lane: lane.read_peer(reference, task_id),
+            peer=lambda lane, peer_only: lane.read_peer(reference, task_id, peer_only),
             stored=lambda: self._store(task_id, scope).hydrate(reference),
             keep=lambda lane, data: lane.keep(
                 reference.authorization_scope, data, media_type=reference.media_type
@@ -188,7 +189,9 @@ class WorkerContentPlane:
         self._read(
             reference,
             local=lambda lane: lane.copy_local(reference, dest),
-            peer=lambda lane: lane.copy_peer(reference, task_id, dest),
+            peer=lambda lane, peer_only: lane.copy_peer(
+                reference, task_id, dest, peer_only
+            ),
             stored=lambda: self._store(task_id, scope).hydrate_to(reference, dest),
             keep=lambda lane, _: lane.keep_file(reference, dest),
         )
@@ -221,21 +224,27 @@ class WorkerContentPlane:
         reference: ContentReference,
         *,
         local: Callable[[ContentLaneHost], T],
-        peer: Callable[[ContentLaneHost], T],
+        peer: Callable[[ContentLaneHost, bool], T],
         stored: Callable[[], T],
         keep: Callable[[ContentLaneHost, T], ContentReference | None],
     ) -> T:
-        """Read from this worker's copy, a peer's, or the shared store, in that order
-        for an object worth relaying and with the store before a peer otherwise; keep
-        a copy of what the store supplied."""
+        """Read from this worker's copy, a peer's, or the shared store, in that order;
+        keep a copy of what the store supplied.
+
+        A holder reached over a peer transport is read before the store at any size;
+        the root relay comes before the store only for an object worth relaying, and at
+        any size while the store cannot be reached.
+        """
         lane = self._lane
         if lane is not None:
             if not isinstance(
                 got := self._attempt(reference, lambda: local(lane)), _Missed
             ):
                 return got
-            if self._relayable(reference) and not isinstance(
-                got := self._attempt(reference, lambda: peer(lane)), _Missed
+            relayable = self._relayable(reference)
+            if not isinstance(
+                got := self._attempt(reference, lambda: peer(lane, not relayable)),
+                _Missed,
             ):
                 return self._kept(reference, lane, got)
         try:
@@ -244,7 +253,7 @@ class WorkerContentPlane:
             if lane is None or self._relayable(reference):
                 raise
             return self._kept(
-                reference, lane, self._relay_during(outage, lambda: peer(lane))
+                reference, lane, self._relay_during(outage, lambda: peer(lane, False))
             )
         self._logger.info(
             "content %s read from the shared store", reference.content_digest
@@ -261,13 +270,15 @@ class WorkerContentPlane:
         return value
 
     def _relayable(self, reference: ContentReference) -> bool:
-        """Whether a peer is worth trying before the store for this object.
+        """Whether the root relay is worth trying before the store for this object.
 
         A relayed transfer costs more per byte than a store read, so past a configured
         size the store is read first. This weighs cost only: an object of any size is
         relayed while the store cannot be reached.
         """
-        return self._peer_max_bytes <= 0 or reference.size_bytes < self._peer_max_bytes
+        return (
+            self._relay_max_bytes <= 0 or reference.size_bytes < self._relay_max_bytes
+        )
 
     def _relay_during[T](self, outage: ContentStoreError, read: Callable[[], T]) -> T:
         """A peer's copy while the store is down or out of the task's reach.

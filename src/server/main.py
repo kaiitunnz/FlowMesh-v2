@@ -290,14 +290,14 @@ if IS_ROOT_NODE:
     _relay_redis: BinaryRedis | None = None
     CONTENT_BRIDGE: RootRendezvousBridge | None = None
     SSH_BRIDGE: RootRendezvousBridge | None = None
+    # One connection pool on the relay's Redis, for the bridges and the routing records
+    # control writes for them.
+    _relay_client = resident_relay_client(config.redis)
     if config.orchestration.network.enabled:
         NETWORK_PLANE = NetworkPlane(
             config.orchestration.network, NODE_REGISTRY, logger
         )
-        _relay_redis = cast(
-            BinaryRedis,
-            resident_relay_client(config.redis),
-        )
+        _relay_redis = cast(BinaryRedis, _relay_client)
         RESIDENT_BRIDGE = RootRendezvousBridge.for_keyspace(
             _relay_redis, RESIDENT_RELAY_KEYSPACE, logger
         )
@@ -443,8 +443,10 @@ if IS_ROOT_NODE:
             grant_ttl_sec=config.content_store.grant_ttl_sec,
             sessions=ContentTransferSessions(
                 resident_relay_sync_client(config.redis),
+                _relay_client,
                 ttl_sec=config.content_store.grant_ttl_sec * 10,
             ),
+            network=NETWORK_PLANE,
             logger=logger,
         )
 
@@ -715,6 +717,10 @@ async def _lifespan(_: FastAPI):
                 app.state.resident_bridge_task = start_relay_bridge_pump(
                     RESIDENT_BRIDGE, NODE_REGISTRY, logger, edge_ids
                 )
+            if NETWORK_PLANE is not None:
+                NETWORK_PLANE.bind_loop(asyncio.get_running_loop())
+            if CONTENT_AUTHORITY is not None:
+                CONTENT_AUTHORITY.bind_loop(asyncio.get_running_loop())
             if CONTENT_BRIDGE is not None and NODE_REGISTRY is not None:
                 app.state.content_bridge_task = start_relay_bridge_pump(
                     CONTENT_BRIDGE, NODE_REGISTRY, logger

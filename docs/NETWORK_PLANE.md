@@ -68,11 +68,13 @@ and a demoted one drops out until its backoff cools.
 
 - **`worker_direct`** — caller to the listener. A forward-dial peer transport legal only
   for an explicitly directly routable listener whose endpoint class the origin's network
-  class can reach, under a bounded optimistic connect budget. Shared-node placement alone
-  does not make it legal.
+  class can reach, under a bounded optimistic connect budget. A deployment declares its
+  workers' listeners reachable off-host with `NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE`,
+  off by default; shared-node placement or a bound port alone does not make it legal.
 - **`node_relay`** — caller to the target node's peer listener, which hands each session
-  to the node's local sidecar uplink. A forward-dial peer transport for same-node and
-  cross-node pairs.
+  to the node's local uplink of the connection's purpose: a replica's sidecar or a
+  worker's content lane. A forward-dial peer transport for same-node and cross-node
+  pairs, offered only through a node advertising that it carries the route's protocol.
 - **`control_relay`** — the universal reverse-rendezvous base. Its descriptor names the
   origin and target reverse attachments by node (the delivery routes by node id) and the
   target's node-local sidecar delivery, not a chain of dialable addresses. It is feasible
@@ -121,6 +123,45 @@ outcome is ambiguous, so it settles as uncertain with its credit held and the de
 steers the next drive. Only transport failures demote — a fence, tenant, descriptor,
 application, or engine rejection arrives as a frame and settles the boundary without
 touching the path.
+
+A connection's purpose, `resident` or `content`, is fixed by its accept exchange, so a
+session never reaches another purpose's handler: every dialer names its purpose, a
+listener answers a purpose it does not serve, or a request naming none, as `unserved`
+before reading a session, and a dialer uses the connection only once the target echoes
+its purpose. A connection that opens with a session frame instead is closed.
+
+## Content transfers
+
+A content transfer between two workers' caches rides the same transports, targeting the
+holder worker's content listener under its own `content` policy class, so its evidence
+never grades a resident path. A worker serves a content listener, and its node
+advertises the `content-peer` protocol, when peer transports and content hydration are
+both on. With workers not declared directly routable, the default, a dialed transfer
+goes over `node_relay`. The control plane resolves the requester-to-holder route when
+it grants the transfer and sends it beside the grant: the route names how to reach the
+holder, the grant alone what may be read. The requester honors a route for a freshness
+budget on its own clock, never past the grant.
+
+The holder's reply goes back over the connection the requester dialed, so the holder,
+or for `node_relay` the holder's node, admits a dialed transfer only from a certificate
+whose subject alternative names cover the host control recorded for the requester's
+node; the subject common name never counts. With `NETWORK_PLANE_PEER_DISABLE_MTLS` set,
+the grant alone gates the read. A node drops a dialed connection that stops reading
+what it is sent, so a stalled requester never holds up the holder worker's other
+traffic. The node bounds that connection's queue by its own content window, so
+`CONTENT_TRANSFER_WINDOW_BYTES` is one deployment-wide value.
+
+A content read is repeatable, so it moves between transports freely. A failed dial
+sends nothing, so the requester tries the route's peer transports in order under one
+grant, then the relay where the read allows it; a dialed transfer that breaks after its
+fetch is retried once under a fresh grant. A dialed transfer ends as soon as its
+connection drops, and a node drops its content connections to a holder worker that
+ends there, so the requester falls back promptly; over `control_relay` a lost holder
+costs the stall deadline (`CONTENT_TRANSFER_TIMEOUT_SEC`). A dial failure, a lost
+connection, or a refusal of the requester's certificate demotes a path; a busy holder or
+a copy that does not verify does not. A requester whose certificate does not cover its
+node's host is refused on both peer transports, so while the store cannot be reached
+the read that demotes them can fail, and the next read takes `control_relay`.
 
 ## Reverse-rendezvous relay
 

@@ -210,6 +210,7 @@ def build_capabilities(
     registry: Mapping[str, type[Executor] | None] | None = None,
     resident_listener_port: int = 0,
     binds_gpus: bool = True,
+    content_listener_port: int = 0,
 ) -> WorkerCapabilities:
     """Build the worker's capabilities; with ``binds_gpus`` false, as where its GPUs
     cannot be split, no task type binds."""
@@ -236,6 +237,7 @@ def build_capabilities(
             else True
         ),
         resident_listener_port=resident_listener_port,
+        content_listener_port=content_listener_port,
     )
 
 
@@ -295,6 +297,17 @@ def _bind_peer_listener(cfg: WorkerConfig) -> socket.socket | None:
     """
     if not cfg.peer_enabled:
         return None
+    return _bind_any_port()
+
+
+def _bind_content_listener(cfg: WorkerConfig) -> socket.socket | None:
+    """Bind the content listener, served by the content lane, before registration."""
+    if not (cfg.peer_enabled and cfg.content_hydration_enabled):
+        return None
+    return _bind_any_port()
+
+
+def _bind_any_port() -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", 0))  # nosec B104 - an origin dials it from off-host
@@ -308,6 +321,8 @@ def _build_content_plane(
     client: SupervisorClient,
     dispatch_for: Callable[[str], str | None],
     logger: logging.Logger,
+    listener_sock: socket.socket | None = None,
+    peer_material: MutualTlsMaterial | None = None,
 ) -> WorkerContentPlane | None:
     """The worker's content plane: the shared store, and a cache over it if one runs.
 
@@ -333,8 +348,13 @@ def _build_content_plane(
             ),
             push_frame=client.push_content_frame,
             request_grant=(
-                lambda reference, task_id: client.push_content_hydration_request(
-                    reference.model_dump(mode="json"), task_id
+                lambda reference, task_id, peer_only, request_id: (
+                    client.push_content_hydration_request(
+                        reference.model_dump(mode="json"),
+                        task_id,
+                        peer_only,
+                        request_id,
+                    )
                 )
             ),
             worker_id=client.worker_id,
@@ -343,6 +363,11 @@ def _build_content_plane(
             window_bytes=cfg.content_transfer_window_bytes,
             announce=client.push_content_holding,
             holder_report_ttl_sec=cfg.content_holder_ttl_sec,
+            peer_enabled=cfg.peer_enabled,
+            peer_material=peer_material,
+            connect_budget_sec=cfg.peer_connect_budget_sec,
+            listener_sock=listener_sock,
+            report_observation=client.push_content_route_observation,
             logger=logger,
         )
     return WorkerContentPlane(
@@ -354,7 +379,7 @@ def _build_content_plane(
             if cfg.server_base_url
             else None
         ),
-        peer_max_bytes=cfg.content_peer_transfer_max_bytes,
+        relay_max_bytes=cfg.content_relay_transfer_max_bytes,
         logger=logger,
     )
 
@@ -450,12 +475,17 @@ def main() -> None:
     )
 
     peer_sock = _bind_peer_listener(cfg)
+    content_sock = _bind_content_listener(cfg)
+    peer_material = _peer_material(cfg, logger)
     capabilities = build_capabilities(
         executors,
         resident_listener_port=(
             peer_sock.getsockname()[1] if peer_sock is not None else 0
         ),
         binds_gpus=_gpus_split_safely(),
+        content_listener_port=(
+            content_sock.getsockname()[1] if content_sock is not None else 0
+        ),
     )
     ssh_limits = cfg.ssh_limits
     if TaskType.SSH in capabilities.supported_task_types:
@@ -476,7 +506,14 @@ def main() -> None:
     gpu_sampler.start()
 
     lifecycle.start_content_plane(
-        _build_content_plane(cfg, supervisor_client, lifecycle.dispatch_for, logger)
+        _build_content_plane(
+            cfg,
+            supervisor_client,
+            lifecycle.dispatch_for,
+            logger,
+            listener_sock=content_sock,
+            peer_material=peer_material,
+        )
     )
     lifecycle.start_ssh_relay(
         SshRelayLane(
@@ -501,7 +538,8 @@ def main() -> None:
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
         peer_enabled=cfg.peer_enabled,
-        peer_material=_peer_material(cfg, logger),
+        peer_material=peer_material,
+        peer_connect_budget_sec=cfg.peer_connect_budget_sec,
         peer_listener_sock=peer_sock,
         telemetry=cfg.telemetry,
         gpu_binding_task_types=capabilities.gpu_binding_task_types,

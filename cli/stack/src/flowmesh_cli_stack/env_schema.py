@@ -789,12 +789,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=0,
                     min_inclusive=False,
                 ),
-                EnvVar(
-                    "RESIDENT_SIDECAR_DIRECTLY_ROUTABLE",
-                    "false",
-                    description="Advertise the resident sidecar as directly routable.",
-                    var_type=EnvVarType.BOOL,
-                ),
             ],
         ),
         EnvSection(
@@ -943,16 +937,19 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_TRANSFER_WINDOW_BYTES",
                     "1048576",
-                    description="Bytes a content transfer keeps in flight.",
+                    description=(
+                        "Bytes a content transfer keeps in flight; set it alike on "
+                        "every node."
+                    ),
                     var_type=EnvVarType.INT,
                     min_value=65536,
                 ),
                 EnvVar(
-                    "CONTENT_PEER_TRANSFER_MAX_BYTES",
+                    "CONTENT_RELAY_TRANSFER_MAX_BYTES",
                     "67108864",
                     description=(
-                        "Objects this size or larger read from the store before a peer "
-                        "while it is reachable (0 = peer first)."
+                        "Size from which reads prefer the store to the root relay "
+                        "(0 = relay first)."
                     ),
                     var_type=EnvVarType.INT,
                     min_value=0,
@@ -1065,6 +1062,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                     min_inclusive=False,
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE",
+                    "false",
+                    description="Declare workers' peer listeners reachable off-host.",
+                    var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
                     "NETWORK_PLANE_PEER_ENABLED",

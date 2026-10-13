@@ -6,6 +6,9 @@ from pathlib import Path
 from pydantic import SecretStr
 
 from shared.content import ObjectStoreConfig
+from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
+from shared.content.wire import CHUNK_BYTES
+from shared.network.peer_dial import connect_budget
 from shared.tasks.specs import ModelBindingMode
 from shared.telemetry.config import TelemetryConfig
 from shared.utils.parsing import (
@@ -492,7 +495,6 @@ class ResidentCapacityConfig:
     selection_strategy: str = field(default_factory=_default_selection_strategy)
     idle_retain_sec: float = 0.0
     idle_sweep_interval_sec: float = 30.0
-    sidecar_directly_routable: bool = False
 
     @classmethod
     def from_env(cls) -> "ResidentCapacityConfig":
@@ -535,9 +537,6 @@ class ResidentCapacityConfig:
             idle_retain_sec=parse_float_env(f"{prefix}IDLE_RETAIN_SEC", 0.0),
             idle_sweep_interval_sec=parse_float_env(
                 f"{prefix}IDLE_SWEEP_INTERVAL_SEC", 30.0
-            ),
-            sidecar_directly_routable=parse_bool_env(
-                f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
             ),
         )
 
@@ -585,6 +584,8 @@ class ContentStoreConfig:
     control-granted transfer instead of going to the shared store.
     ``read_stall_timeout_sec`` bounds how long a control-plane read waits on a store
     that has stopped sending, and ``read_attempts`` how many times its request is made.
+    ``transfer_window_bytes`` and ``transfer_timeout_sec`` are the window and stall
+    deadline the workers' transfers run under, which a node relaying one sizes by.
     """
 
     hydration_enabled: bool = False
@@ -593,6 +594,8 @@ class ContentStoreConfig:
     access_grant_ttl_sec: float = 900.0
     read_stall_timeout_sec: float = _DEFAULT_READ_STALL_TIMEOUT_SEC
     read_attempts: int = _DEFAULT_READ_ATTEMPTS
+    transfer_window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES
+    transfer_timeout_sec: float = 60.0
 
     @classmethod
     def from_env(cls) -> "ContentStoreConfig":
@@ -607,6 +610,13 @@ class ContentStoreConfig:
             read_stall_timeout_sec=parse_float_env(
                 "CONTENT_STORE_READ_STALL_TIMEOUT_SEC", _DEFAULT_READ_STALL_TIMEOUT_SEC
             ),
+            transfer_window_bytes=max(
+                CHUNK_BYTES,
+                parse_int_env(
+                    "CONTENT_TRANSFER_WINDOW_BYTES", DEFAULT_TRANSFER_WINDOW_BYTES
+                ),
+            ),
+            transfer_timeout_sec=parse_float_env("CONTENT_TRANSFER_TIMEOUT_SEC", 60.0),
             read_attempts=max(
                 1, parse_int_env("CONTENT_STORE_READ_ATTEMPTS", _DEFAULT_READ_ATTEMPTS)
             ),
@@ -687,6 +697,7 @@ class NetworkPlaneConfig:
     backoff_max_sec: float = 30.0
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
+    worker_directly_routable: bool = False
     peer: TrustedPeerConfig = field(default_factory=TrustedPeerConfig)
 
     @classmethod
@@ -702,8 +713,13 @@ class NetworkPlaneConfig:
             negative_ttl_sec=parse_float_env(f"{prefix}NEGATIVE_TTL_SEC", 15.0),
             backoff_base_sec=parse_float_env(f"{prefix}BACKOFF_BASE_SEC", 1.0),
             backoff_max_sec=parse_float_env(f"{prefix}BACKOFF_MAX_SEC", 30.0),
-            connect_budget_sec=parse_float_env(f"{prefix}CONNECT_BUDGET_SEC") or 5.0,
+            connect_budget_sec=connect_budget(
+                parse_float_env(f"{prefix}CONNECT_BUDGET_SEC")
+            ),
             route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC", 30.0),
+            worker_directly_routable=parse_bool_env(
+                f"{prefix}WORKER_DIRECTLY_ROUTABLE", False
+            ),
             peer=TrustedPeerConfig.from_env(
                 default_trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh"
             ),

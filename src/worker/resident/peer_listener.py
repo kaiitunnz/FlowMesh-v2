@@ -30,11 +30,6 @@ from shared.network.relay_frame import RelayFrame
 FrameDelivery = Callable[[RelayFrame, FrameSink], Awaitable[None]]
 
 
-def _is_registered_origin(identities: frozenset[str]) -> bool:
-    """Whether the dialer holds an identity the deployment CA issued."""
-    return bool(identities)
-
-
 class _SidecarConnection(ConnectionHandler):
     """Hands one connection's frames to the replica sidecar."""
 
@@ -64,8 +59,7 @@ class ResidentPeerListener:
         self._sock = sock
         self._listener = MutualTlsFrameListener(
             material=material,
-            handler=lambda sink: _SidecarConnection(deliver, sink),
-            admits=_is_registered_origin,
+            handler=lambda sink, _: _SidecarConnection(deliver, sink),
             max_connections=max_connections,
             logger=logger or logging.getLogger("resident-direct-listener"),
         )

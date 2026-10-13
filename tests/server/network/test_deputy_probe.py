@@ -18,10 +18,13 @@ from server.network.state import (
 from server.supervisor.services.peer_listener import NodePeerListener
 from shared.network.frame_stream import (
     MAX_PROBE_BYTES,
+    AcceptStatus,
     FrameStreamError,
+    PeerPurpose,
     ProbeFrame,
     read_relay_frame,
     read_stream_frame,
+    write_accept,
     write_probe,
     write_relay_frame,
 )
@@ -44,7 +47,10 @@ class _Bridge:
     def release_peer(self, session_id: str, sink: Any) -> None:
         pass
 
-    async def on_frame(self, frame: RelayFrame) -> None:
+    async def session(self, session_id: str) -> dict[str, str]:
+        return {"target_worker": "wkr-1"}
+
+    async def forward(self, frame: RelayFrame, record: Any) -> None:
         self.frames.append(frame)
 
 
@@ -76,7 +82,7 @@ async def _node_listener(
     listener = NodePeerListener(
         endpoint="127.0.0.1:0",
         material=material,
-        bridge=cast(Any, bridge),
+        bridges={PeerPurpose.RESIDENT: cast(Any, bridge)},
     )
     await listener.start()
     return listener
@@ -397,6 +403,8 @@ def test_a_probe_after_a_session_frame_closes_the_connection() -> None:
         listener = await _node_listener(None, bridge)
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+            await write_accept(writer, AcceptStatus.REQUEST, PeerPurpose.RESIDENT)
+            await read_stream_frame(reader)
             await write_relay_frame(writer, _data(1))
             await write_probe(writer, b"late")
             rest = await asyncio.wait_for(reader.read(), timeout=2.0)

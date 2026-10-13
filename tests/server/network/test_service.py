@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import threading
+from typing import Any
 
 import pytest
 
@@ -17,12 +19,13 @@ from server.network.state import (
 )
 from server.registries.node import Node
 from server.supervisor.supervisor import _endpoint_advertisement_provider
-from shared.schemas.network import PEER_PROTOCOL
+from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 
 
 class _FakeNodeRegistry:
     def __init__(self) -> None:
         self._nodes: dict[str, Node] = {}
+        self.batches = 0
 
     def set(self, node: Node) -> None:
         self._nodes[node.id] = node
@@ -32,6 +35,10 @@ class _FakeNodeRegistry:
 
     async def list_nodes_async(self) -> list[Node]:
         return list(self._nodes.values())
+
+    async def get_nodes_async(self, node_ids) -> list[Node | None]:
+        self.batches += 1
+        return [self._nodes.get(node_id) for node_id in node_ids]
 
 
 def _node(
@@ -230,6 +237,70 @@ def test_rotation_invalidates_reachability() -> None:
     assert states["worker_direct"] != "verified"
 
 
+def test_a_departure_reported_off_the_loop_is_applied_on_it() -> None:
+    registry = _FakeNodeRegistry()
+    registry.set(_node("nde-1", generation=1))
+    registry.set(_node("nde-2", generation=1))
+    plane = _plane(registry)
+
+    async def scenario() -> tuple[bool, bool]:
+        plane.bind_loop(asyncio.get_running_loop())
+        resolved = await plane.resolve("nde-1", _listener())
+        assert resolved is not None
+        plane.record_observations(
+            resolved[0],
+            _listener(),
+            [(Transport.WORKER_DIRECT, RouteObservationOutcome.VERIFIED)],
+        )
+        reported = threading.Thread(target=plane.forget_node, args=("nde-2",))
+        reported.start()
+        reported.join()
+        # The view is untouched until the loop runs the departure.
+        held = any(
+            e["target_node_id"] == "nde-2" for e in plane.reachability_snapshot()
+        )
+        await asyncio.sleep(0)
+        gone = all(
+            e["target_node_id"] != "nde-2" for e in plane.reachability_snapshot()
+        )
+        return held, gone
+
+    assert asyncio.run(scenario()) == (True, True)
+
+
+def test_a_preview_ranks_without_a_trace_and_resolve_commits() -> None:
+    registry = _FakeNodeRegistry()
+    registry.set(_node("nde-1", generation=1))
+    registry.set(_node("nde-2", generation=1))
+    plane = _plane(registry, trusted=True)
+
+    async def scenario() -> tuple[Any, ...]:
+        endpoints = await plane.endpoints_for(["nde-1", "nde-2", "nde-2"])
+        previewed = plane.preview("nde-1", _listener(), endpoints=endpoints)
+        traced = plane.reachability_snapshot()
+        resolved = await plane.resolve("nde-1", _listener(), endpoints=endpoints)
+        assert previewed is not None and resolved is not None
+        return (
+            registry.batches,
+            sorted(endpoints),
+            traced,
+            [c.transport for c in previewed.candidates],
+            [c.transport for c in resolved[1].candidates],
+            resolved[1].route_epoch,
+            len(plane.reachability_snapshot()),
+        )
+
+    batches, nodes, traced, previewed, resolved, epoch, entries = asyncio.run(
+        scenario()
+    )
+    assert batches == 1 and nodes == ["nde-1", "nde-2"]
+    assert traced == []
+    assert previewed == resolved
+    # The preview spent no epoch; the resolve took the first.
+    assert epoch == 1
+    assert entries == len(resolved)
+
+
 def test_endpoints_are_stamped_with_node_id() -> None:
     registry = _FakeNodeRegistry()
     registry.set(_node("nde-1", generation=1))
@@ -254,13 +325,13 @@ def test_a_peer_node_without_a_listener_dials_a_trusted_worker_directly() -> Non
             network_endpoint=origin_ad,
         )
     )
-    registry.set(_node("nde-2", generation=1))
+    registry.set(_node("nde-2", generation=1, protocols=(RESIDENT_PEER_PROTOCOL,)))
     plane = NetworkPlane(
         NetworkPlaneConfig(enabled=True, trust_domain="fm", peer=peer),
         registry,  # type: ignore[arg-type]
         logging.getLogger("test-network"),
     )
-    listener = _listener().model_copy(update={"protocols": (PEER_PROTOCOL,)})
+    listener = _listener().model_copy(update={"protocols": (RESIDENT_PEER_PROTOCOL,)})
 
     result = asyncio.run(plane.resolve("nde-1", listener))
 
@@ -287,9 +358,9 @@ def test_the_root_serve_ingress_and_the_nodes_workers_keep_separate_evidence(
     # but a failure one of them observes never steers the other's route.
     registry = _FakeNodeRegistry()
     for node_id in ("nde-1", "nde-2"):
-        registry.set(_node(node_id, generation=1, protocols=(PEER_PROTOCOL,)))
+        registry.set(_node(node_id, generation=1, protocols=(RESIDENT_PEER_PROTOCOL,)))
     plane = _plane(registry, trusted=True)
-    listener = _listener().model_copy(update={"protocols": (PEER_PROTOCOL,)})
+    listener = _listener().model_copy(update={"protocols": (RESIDENT_PEER_PROTOCOL,)})
 
     def head(policy_class: PolicyClass) -> tuple[str, str]:
         result = asyncio.run(
@@ -323,3 +394,13 @@ def test_the_root_serve_ingress_and_the_nodes_workers_keep_separate_evidence(
     }
     assert states[(demoted.value, "worker_direct")] == "demoted"
     assert states[(untouched.value, "worker_direct")] != "demoted"
+
+
+def test_a_departure_reported_after_the_loop_closed_is_dropped() -> None:
+    registry = _FakeNodeRegistry()
+    plane = _plane(registry)
+    loop = asyncio.new_event_loop()
+    plane.bind_loop(loop)
+    loop.close()
+
+    plane.forget_node("nde-2")

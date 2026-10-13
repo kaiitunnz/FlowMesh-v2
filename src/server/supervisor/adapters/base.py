@@ -350,6 +350,9 @@ class WorkerAdapter(ABC):
             "SUPERVISOR_GRPC_TARGET": config.supervisor_grpc_target,
             "SUPERVISOR_GRPC_TLS_CA_B64": env.SERVER_GRPC_TLS_CA_B64,
             "NETWORK_PLANE_PEER_ENABLED": to_env_str(env.NETWORK_PLANE_PEER_ENABLED),
+            "NETWORK_PLANE_CONNECT_BUDGET_SEC": to_env_str(
+                env.NETWORK_PLANE_CONNECT_BUDGET_SEC
+            ),
             "NETWORK_PLANE_PEER_DISABLE_MTLS": to_env_str(
                 env.NETWORK_PLANE_PEER_DISABLE_MTLS
             ),
@@ -380,8 +383,8 @@ class WorkerAdapter(ABC):
             "CONTENT_TRANSFER_WINDOW_BYTES": to_env_str(
                 env.CONTENT_TRANSFER_WINDOW_BYTES
             ),
-            "CONTENT_PEER_TRANSFER_MAX_BYTES": to_env_str(
-                env.CONTENT_PEER_TRANSFER_MAX_BYTES
+            "CONTENT_RELAY_TRANSFER_MAX_BYTES": to_env_str(
+                env.CONTENT_RELAY_TRANSFER_MAX_BYTES
             ),
             "CONTENT_STORE_PART_BYTES": to_env_str(env.CONTENT_STORE_PART_BYTES),
             "CONTENT_STORE_UPLOAD_CONCURRENCY": to_env_str(

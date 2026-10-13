@@ -316,7 +316,7 @@ async def test_a_worker_holding_content_moves_to_its_new_registration(
     lane = ContentLaneHost(
         store=cache,
         push_frame=client.push_content_frame,
-        request_grant=lambda reference, task_id: None,
+        request_grant=lambda reference, task_id, peer_only, request_id: None,
         worker_id=old_id,
         generation=client.incarnation,
         announce=client.push_content_holding,

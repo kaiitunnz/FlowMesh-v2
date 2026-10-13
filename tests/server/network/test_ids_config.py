@@ -22,18 +22,25 @@ def test_relay_session_id_is_prefixed_and_unique() -> None:
 
 
 def test_config_defaults_to_enabled(monkeypatch) -> None:
-    for name in ("NETWORK_PLANE_ENABLED", "NETWORK_PLANE_ENDPOINT_URL"):
+    for name in (
+        "NETWORK_PLANE_ENABLED",
+        "NETWORK_PLANE_ENDPOINT_URL",
+        "NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE",
+    ):
         monkeypatch.delenv(name, raising=False)
     cfg = NetworkPlaneConfig.from_env()
     assert cfg.enabled is True
     assert cfg.endpoint_url is None
+    assert cfg.worker_directly_routable is False
 
 
 def test_config_parses_env(monkeypatch) -> None:
     monkeypatch.setenv("NETWORK_PLANE_ENABLED", "true")
     monkeypatch.setenv("NETWORK_PLANE_ENDPOINT_URL", "127.0.0.1:41000")
     monkeypatch.setenv("NETWORK_PLANE_POSITIVE_TTL_SEC", "12")
+    monkeypatch.setenv("NETWORK_PLANE_WORKER_DIRECTLY_ROUTABLE", "true")
     cfg = NetworkPlaneConfig.from_env()
     assert cfg.enabled is True
     assert cfg.endpoint_url == "127.0.0.1:41000"
     assert cfg.positive_ttl_sec == 12.0
+    assert cfg.worker_directly_routable is True

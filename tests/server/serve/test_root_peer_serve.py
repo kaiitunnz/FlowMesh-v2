@@ -36,6 +36,7 @@ from server.supervisor.services.reverse_relay_attachment import (
     ReverseRelayAttachment,
 )
 from server.telemetry.tracing import format_traceparent
+from shared.network.frame_stream import PeerPurpose
 from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.relay_frame import RelayFrame
 from shared.resident.carriage import ResidentCarriagePlan
@@ -263,7 +264,11 @@ class _Harness:
         self.node_listener = NodePeerListener(
             endpoint="127.0.0.1:0",
             material=target,
-            bridge=cast(Any, _DialedUplink(self._relay.bridge, self.dialed)),
+            bridges={
+                PeerPurpose.RESIDENT: cast(
+                    Any, _DialedUplink(self._relay.bridge, self.dialed)
+                )
+            },
         )
 
     async def _dialed_frame(self, frame: RelayFrame, sink: Any) -> None:
@@ -365,9 +370,12 @@ class _DialedUplink:
     def release_peer(self, session_id: str, sink: Any) -> None:
         self._bridge.release_peer(session_id, sink)
 
-    async def on_frame(self, frame: RelayFrame) -> None:
+    async def session(self, session_id: str) -> dict[str, str]:
+        return await self._bridge.session(session_id)
+
+    async def forward(self, frame: RelayFrame, record: dict[str, str]) -> None:
         self._dialed.append(frame)
-        await self._bridge.on_frame(frame)
+        await self._bridge.forward(frame, record)
 
 
 class _RelayLeg:

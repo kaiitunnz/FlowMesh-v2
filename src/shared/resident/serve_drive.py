@@ -23,7 +23,11 @@ from opentelemetry.trace import Span, Tracer
 
 from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame
-from shared.network.session import FramedRelaySession, RelaySessionRole
+from shared.network.session import (
+    DEFAULT_WINDOW_BYTES,
+    FramedRelaySession,
+    RelaySessionRole,
+)
 from shared.telemetry.semconv import PHYSICAL_INVOCATION_ID
 
 from .carriage import (
@@ -105,7 +109,7 @@ class ServeOriginDrive:
         *,
         carriage: ClaimGatedServiceCarriage,
         control: ServeControl,
-        window_bytes: int = 65536,
+        window_bytes: int = DEFAULT_WINDOW_BYTES,
         stream_deadline_sec: float = 300.0,
         auth_deadline_sec: float = 60.0,
         tracer: Tracer | None = None,

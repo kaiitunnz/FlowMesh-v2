@@ -31,7 +31,6 @@ from server.telemetry.tracing import (
     serve_trace_id_int,
 )
 from shared.inference import InputResolutionBinding
-from shared.network.frame_stream import split_host_port
 from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
@@ -48,7 +47,7 @@ from shared.resident.reports import (
     ResidentStreamHead,
     ResidentStreamStatus,
 )
-from shared.schemas.network import PEER_PROTOCOL
+from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from shared.telemetry.semconv import (
     PHYSICAL_TASK_ID,
@@ -57,6 +56,7 @@ from shared.telemetry.semconv import (
 )
 from shared.utils.ids import new_relay_session_id
 
+from ..network.service import NetworkPlane
 from ..network.state import (
     NetworkEndpointAdvertisement,
     PolicyClass,
@@ -1984,7 +1984,9 @@ class ResidentCapacityControl:
             node_id=node_id,
             worker_id=worker_id,
             routes=(peer_listener or f"resident://{worker_id}",),
-            protocols=(("resident", PEER_PROTOCOL) if peer_listener else ("resident",)),
+            protocols=(
+                ("resident", RESIDENT_PEER_PROTOCOL) if peer_listener else ("resident",)
+            ),
             directly_routable=deps.directly_routable and peer_listener is not None,
         )
         # The listener fence is durable before any handoff names it.
@@ -2018,10 +2020,10 @@ class ResidentCapacityControl:
         port = deps.resident_listener_port_of(worker_id)
         if port <= 0:
             return None
-        endpoint = await deps.network.endpoint_for(node_id)
-        if endpoint is None or not endpoint.url:
-            return None
-        return f"{split_host_port(endpoint.url)[0]}:{port}"
+        address = NetworkPlane.listener_address(
+            await deps.network.endpoint_for(node_id), port
+        )
+        return address or None
 
     def _family_definition(
         self,

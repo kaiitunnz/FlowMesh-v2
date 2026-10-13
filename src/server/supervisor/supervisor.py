@@ -12,14 +12,17 @@ from queue import Empty as QueueEmpty
 from queue import Full as QueueFull
 from threading import Lock, Thread
 
+from shared.network.frame_stream import PeerPurpose
 from shared.network.mtls import (
     MutualTlsMaterial,
     MutualTlsMaterialError,
     client_context,
 )
+from shared.network.session import DEFAULT_WINDOW_BYTES
 from shared.schemas.command import CommandMessage, CommandResponse
 from shared.schemas.network import (
-    PEER_PROTOCOL,
+    CONTENT_PEER_PROTOCOL,
+    RESIDENT_PEER_PROTOCOL,
     NetworkEndpointAdvertisement,
     ReachabilityClass,
 )
@@ -271,7 +274,7 @@ def _enqueue_latest_node_id(
 
 
 def _endpoint_advertisement_provider(
-    network_cfg: NetworkPlaneConfig,
+    network_cfg: NetworkPlaneConfig, content_peer: bool = False
 ) -> Callable[[], NetworkEndpointAdvertisement | None]:
     """Return a provider that mints a fresh-generation endpoint advertisement.
 
@@ -291,9 +294,16 @@ def _endpoint_advertisement_provider(
     peer = network_cfg.peer
     # The peer protocol says the node's peer plane is on; whether an origin dials is its
     # worker's own. Only a node serving a peer listener advertises it and is offered as
-    # a node_relay hop.
+    # a node_relay hop. A node with content hydration on also advertises the content
+    # protocol, so only such a node is offered for a content transfer.
     peer_url = peer.node_listener_url if peer.enabled else ""
-    protocols = (PEER_PROTOCOL,) if peer.enabled else ()
+    protocols: tuple[str, ...] = ()
+    if peer.enabled:
+        protocols = (
+            (RESIDENT_PEER_PROTOCOL, CONTENT_PEER_PROTOCOL)
+            if content_peer
+            else (RESIDENT_PEER_PROTOCOL,)
+        )
     try:
         reachability_class = ReachabilityClass(network_cfg.reachability_class)
     except ValueError:
@@ -342,6 +352,7 @@ def _run_supervisor(
     from ..clients import RedisClient
     from ..clients.redis import resident_relay_client, supervisor_state_sync_client
     from ..network.reverse_relay import BinaryRedis
+    from ..network.worker_bridge import RelayWorkerBridge
     from ..registries.node import NodeRegistry
     from ..registries.worker import WorkerRegistry as WorkerRecords
     from ..utils.logging import get_logger as _get_logger
@@ -423,7 +434,9 @@ def _run_supervisor(
         logger=logger,
         system_principal=system_principal,
         current_gpu_count_getter=current_gpu_count_getter,
-        endpoint_advertisement_provider=_endpoint_advertisement_provider(network_cfg),
+        endpoint_advertisement_provider=_endpoint_advertisement_provider(
+            network_cfg, content_peer=content_cfg.hydration_enabled
+        ),
     )
 
     # Register now — must happen before other components that need node_id
@@ -507,16 +520,25 @@ def _run_supervisor(
         ),
     )
 
-    peer_listener: NodePeerListener | None = None
-    if (
-        resident_bridge is not None
-        and network_cfg.peer.enabled
-        and network_cfg.peer.node_listener_url
+    peer_bridges: dict[PeerPurpose, RelayWorkerBridge] = {}
+    if resident_bridge is not None:
+        peer_bridges[PeerPurpose.RESIDENT] = resident_bridge
+    if node_relays is not None and (
+        content_bridge := node_relays.bridge(CONTENT_NAMESPACE)
     ):
+        peer_bridges[PeerPurpose.CONTENT] = content_bridge
+    peer_listener: NodePeerListener | None = None
+    if peer_bridges and network_cfg.peer.enabled and network_cfg.peer.node_listener_url:
         peer_listener = NodePeerListener(
             endpoint=network_cfg.peer.node_listener_url,
             material=peer_material,
-            bridge=resident_bridge,
+            bridges=peer_bridges,
+            # Two windows of whichever session relays the most: a reader keeping up
+            # never has more than one outstanding.
+            send_limit_bytes=2
+            * max(content_cfg.transfer_window_bytes, DEFAULT_WINDOW_BYTES),
+            send_stall_sec=content_cfg.transfer_timeout_sec,
+            content_idle_sec=content_cfg.transfer_timeout_sec,
             logger=logger,
         )
 
@@ -573,6 +595,8 @@ def _run_supervisor(
             node_relays.start(loop)
         if peer_listener is not None:
             await peer_listener.start()
+            grpc_server.set_worker_ended_listener(peer_listener.release_worker)
+            grpc_server.set_worker_registered_listener(peer_listener.admit_worker)
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
 

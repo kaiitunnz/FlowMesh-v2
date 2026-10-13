@@ -12,7 +12,7 @@ from server.network.state import (
     Transport,
     TrustedPeerPolicy,
 )
-from shared.schemas.network import PEER_PROTOCOL
+from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 
 # The ladder tests below exercise transport legality and ordering, so they resolve under
 # a policy that admits the pair; the trust gate itself is covered separately.
@@ -20,7 +20,7 @@ TRUSTED = TrustedPeerPolicy(
     enabled=True,
     trust_domain="fm",
     classes=frozenset(ReachabilityClass),
-    protocol=PEER_PROTOCOL,
+    protocol=RESIDENT_PEER_PROTOCOL,
 )
 
 
@@ -34,7 +34,7 @@ def _origin(
         reachability_class=reachability_class,
         policy_class=PolicyClass.DEFAULT,
         trust_domain="fm",
-        protocols=(PEER_PROTOCOL,),
+        protocols=(RESIDENT_PEER_PROTOCOL,),
         relay_attachment_id="att-origin" if attached else None,
     )
 
@@ -49,7 +49,7 @@ def _listener(
         listener_generation=0,
         node_id=node_id,
         routes=("127.0.0.1:9001",),
-        protocols=(PEER_PROTOCOL,),
+        protocols=(RESIDENT_PEER_PROTOCOL,),
         directly_routable=directly_routable,
     )
 
@@ -65,7 +65,7 @@ def _endpoint(
         generation=1,
         trust_domain="fm",
         reachability_class=reachability_class,
-        protocols=(PEER_PROTOCOL,),
+        protocols=(RESIDENT_PEER_PROTOCOL,),
         relay_attachment_id="att-target" if attached else None,
     )
 
