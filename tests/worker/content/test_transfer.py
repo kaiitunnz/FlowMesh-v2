@@ -88,7 +88,9 @@ class _Pair:
         )
         self.client = ContentHydrationClient(
             sink=self.to_holder,
-            request_grant=lambda reference, task_id: self.granted.append(reference),
+            request_grant=lambda reference, task_id, peer_only: self.granted.append(
+                reference
+            ),
             transfer_timeout_sec=5.0,
         )
         self.to_requester.peer = self.client.on_frame
@@ -481,7 +483,7 @@ async def test_a_slow_transfer_runs_as_long_as_it_keeps_progressing(tmp_path) ->
     )
     client = ContentHydrationClient(
         sink=to_holder,
-        request_grant=lambda reference, task_id: None,
+        request_grant=lambda reference, task_id, peer_only: None,
         transfer_timeout_sec=stall,
         window_bytes=CHUNK_BYTES + 1024,
     )
@@ -517,7 +519,7 @@ async def test_a_holder_gives_up_a_requester_that_stops_reading(tmp_path) -> Non
     )
     client = ContentHydrationClient(
         sink=to_holder,
-        request_grant=lambda reference, task_id: None,
+        request_grant=lambda reference, task_id, peer_only: None,
         transfer_timeout_sec=30.0,
         window_bytes=CHUNK_BYTES + 1024,
     )

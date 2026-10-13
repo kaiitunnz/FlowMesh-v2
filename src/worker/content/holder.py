@@ -7,10 +7,17 @@ turns out not to be the object ends the transfer with a refusal instead of its l
 message and is dropped from the cache. A refusal is a typed rejection the requester
 surfaces as a hydration failure — never a completed transfer of bytes the reference does
 not name, and never bytes for a grant this holder was not handed.
+
+A transfer arrives over the root relay or over a connection the requester dialed, and
+every frame of it answers over the carriage it arrived on: a session belongs to the
+carriage that opened it, and frames for it from any other are dropped. A dialed
+connection also proves which node dialed it, so its fetch is served only when the
+connection's certificate covers the host control named for the grant's requester.
 """
 
 import asyncio
 import logging
+import time
 from typing import Any, BinaryIO
 
 from shared.content import (
@@ -32,6 +39,7 @@ from shared.content.wire import (
     KIND_REJECT,
 )
 from shared.network.frame_stream import FrameSink
+from shared.network.mtls_listener import PeerContext
 from shared.network.relay_frame import RelayFrame, RelayFrameKind
 from shared.network.session import FramedRelaySession, RelaySessionRole
 
@@ -74,6 +82,9 @@ class ContentHolder:
         self._stall_timeout_sec = stall_timeout_sec
         self._logger = logger or logging.getLogger("content-holder")
         self._sessions: dict[str, FramedRelaySession] = {}
+        self._carriages: dict[str, FrameSink] = {}
+        self._peers: dict[str, PeerContext] = {}
+        self._requesters: dict[str, tuple[str, float]] = {}
         self._serves: dict[str, asyncio.Task[None]] = {}
         self._in_transfer: dict[str, str] = {}
         self._serving: frozenset[str] = frozenset()
@@ -99,14 +110,37 @@ class ContentHolder:
             self._in_transfer[session_id] = digest
         self._serving = frozenset(self._in_transfer.values())
 
-    def accept_grant(self, grant: ContentHydrationGrant) -> None:
-        """Register a grant control minted against this holder."""
+    def accept_grant(
+        self, grant: ContentHydrationGrant, requester_host: str | None = None
+    ) -> None:
+        """Register a grant control minted against this holder.
+
+        ``requester_host`` is the host control expects the requester's node to dial
+        from; a dialed fetch of this grant is served only to a certificate covering it.
+        """
+        now = time.time()
+        for grant_id, (_, expires_at) in list(self._requesters.items()):
+            if now > expires_at:
+                del self._requesters[grant_id]
+        if requester_host:
+            self._requesters[grant.grant_id] = (requester_host, grant.expires_at_epoch)
         self._gate.accept(grant)
         if (arrival := self._arrivals.get(grant.grant_id)) is not None:
             arrival.set()
 
-    async def on_frame(self, frame: RelayFrame) -> None:
-        """Route one inbound frame to its transfer, opening one on a fetch."""
+    async def on_frame(
+        self,
+        frame: RelayFrame,
+        sink: FrameSink | None = None,
+        peer: PeerContext | None = None,
+    ) -> None:
+        """Route one inbound frame to its transfer, opening one on a fetch.
+
+        ``sink`` is the dialed connection the frame arrived on, which also answers it,
+        and ``peer`` what its listener verified; a frame from the root relay has
+        neither.
+        """
+        carriage = sink or self._sink
         session = self._sessions.get(frame.session_id)
         if session is None:
             if frame.kind is not RelayFrameKind.DATA or frame.seq != 1:
@@ -116,16 +150,27 @@ class ContentHolder:
                 correlation_id=frame.correlation_id,
                 operation_id=frame.operation_id,
                 role=RelaySessionRole.TARGET,
-                sink=self._sink,
+                sink=carriage,
                 window_bytes=self._window_bytes,
             )
             self._sessions[frame.session_id] = session
+            self._carriages[frame.session_id] = carriage
+            if peer is not None:
+                self._peers[frame.session_id] = peer
             self._serves[frame.session_id] = asyncio.ensure_future(
                 self._serve(frame.session_id, session)
             )
+        elif self._carriages.get(frame.session_id) is not carriage:
+            return
         await session.on_frame(frame)
         if frame.kind is RelayFrameKind.CANCEL:
             self._reap(frame.session_id)
+
+    def drop_connection(self, sink: FrameSink) -> None:
+        """End every transfer a closed dialed connection was carrying."""
+        for session_id, carriage in list(self._carriages.items()):
+            if carriage is sink:
+                self._reap(session_id)
 
     async def _serve(self, session_id: str, session: FramedRelaySession) -> None:
         try:
@@ -154,6 +199,19 @@ class ContentHolder:
             )
             await session.send_wire(KIND_REJECT, reason="wrong_session")
             return
+        if (peer := self._peers.get(session_id)) is not None and peer.identities:
+            # The requester's host arrives beside the grant, so a dialed fetch that
+            # outruns the grant waits for it before the binding can be checked.
+            if grant.grant_id not in self._requesters:
+                await self._await_grant(grant.grant_id)
+            expected = self._requesters.get(grant.grant_id)
+            if expected is None or not peer.names.covers(expected[0]):
+                self._logger.warning(
+                    "refused content transfer %s: the dialer is not its requester",
+                    session_id,
+                )
+                await session.send_wire(KIND_REJECT, reason="wrong_requester")
+                return
         rejection = self._gate.admit(grant)
         if rejection is GrantRejection.UNKNOWN_GRANT and await self._await_grant(
             grant.grant_id
@@ -228,6 +286,8 @@ class ContentHolder:
 
     def _reap(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+        self._carriages.pop(session_id, None)
+        self._peers.pop(session_id, None)
         self._track(session_id, None)
         task = self._serves.pop(session_id, None)
         if task is not None and task is not asyncio.current_task() and not task.done():

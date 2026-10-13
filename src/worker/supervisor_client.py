@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.content import ContentReference
+from shared.content.carriage import ContentRouteObservation
 from shared.grpc.supervisor.v1 import supervisor_pb2, supervisor_pb2_grpc
 from shared.resident.reports import (
     ResidentBootstrapAck,
@@ -971,11 +972,22 @@ class SupervisorClient:
         )
 
     def push_content_hydration_request(
-        self, reference: dict[str, Any], task_id: str
+        self, reference: dict[str, Any], task_id: str, peer_only: bool = False
     ) -> None:
-        """Ask control to authorize hydrating one object for one task."""
+        """Ask control to authorize hydrating one object for one task, carried over a
+        peer transport only when ``peer_only``."""
         self._push_event(
-            "CONTENT_HYDRATION_REQUEST", {"reference": reference, "task_id": task_id}
+            "CONTENT_HYDRATION_REQUEST",
+            {"reference": reference, "task_id": task_id, "peer_only": peer_only},
+        )
+
+    def push_content_route_observation(
+        self, observation: ContentRouteObservation
+    ) -> None:
+        """Report one dialed content transfer's classified path evidence to control."""
+        self._push_event(
+            "CONTENT_ROUTE_OBSERVATION",
+            {"observation": observation.model_dump(mode="json")},
         )
 
     def push_content_access_request(

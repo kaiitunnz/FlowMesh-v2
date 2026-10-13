@@ -5,6 +5,14 @@ exact reference, and control answers with a grant naming the holder it resolved 
 typed denial. With a grant in hand the worker opens the transfer and streams the object
 from that holder into a file, hashing as it goes, and hands the file back only once its
 bytes verify against the reference; a transfer that fails leaves no file behind.
+
+Control resolves how the transfer is carried and sends that beside the grant: over the
+root relay, or over a connection this worker dials to the holder or the holder's node.
+A dial that fails sends nothing, so the same grant still goes over the relay where the
+read may use it. Once a fetch may have reached the holder its grant may be spent, so a
+transfer that breaks after that is retried only under a fresh grant, a bounded number of
+times. A caller that will read the store rather than the relay asks for a peer
+transport only, and control then refuses a transfer the relay alone could carry.
 Nothing here decides that the worker may read the object — control does, against the
 consumer binding that entitles it — and nothing here recreates an outcome, re-resolves
 an input, or releases a credit when a transfer fails: an unavailable holder is a typed
@@ -20,6 +28,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from shared.content import (
+    ContentCarriagePlan,
     ContentHydrationError,
     ContentHydrationGrant,
     ContentReference,
@@ -38,8 +47,11 @@ from shared.network.relay_frame import RelayFrame
 from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.utils.atomic import temp_path
 
-# Asks the control plane to authorize hydrating one reference for one task.
-RequestGrant = Callable[[ContentReference, str], None]
+from .peer import ContentPeerDialer, PeerConnection, PeerUnreachable
+
+# Asks the control plane to authorize hydrating one reference for one task, over a peer
+# transport only when the flag is set.
+RequestGrant = Callable[[ContentReference, str, bool], None]
 
 # Reports the objects this worker holds, each by its scope and digest, to the holder
 # directory. One call carries a whole report so a periodic re-report is one message.
@@ -52,7 +64,11 @@ _WRITE_BUFFER_BYTES = 1 << 20
 # Keyed by the object a request waits on: control answers a grant or a typed denial
 # naming that same reference, so an answer finds its request by what it is about.
 _WaitKey = tuple[str, str]
-_Answer = asyncio.Future["ContentHydrationGrant | str"]
+_Granted = tuple[ContentHydrationGrant, ContentCarriagePlan | None]
+_Answer = asyncio.Future["_Granted | str"]
+
+# A transfer that broke after its fetch is tried again under one fresh grant at most.
+_TRANSFER_ATTEMPTS = 2
 
 
 class GrantDenied(ContentHydrationError):
@@ -69,10 +85,12 @@ class ContentHydrationClient:
         request_grant: RequestGrant,
         transfer_timeout_sec: float = 60.0,
         window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES,
+        dialer: ContentPeerDialer | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._sink = sink
         self._request_grant = request_grant
+        self._dialer = dialer
         # Every wait here is bounded by how long a transfer may go without progress,
         # never by how long it takes: a large object over a slow link runs as long as
         # its frames keep arriving.
@@ -92,26 +110,87 @@ class ContentHydrationClient:
         self._last_progress = time.monotonic()
 
     async def hydrate_to_file(
-        self, reference: ContentReference, task_id: str, staging: Path
+        self,
+        reference: ContentReference,
+        task_id: str,
+        staging: Path,
+        peer_only: bool = False,
     ) -> Path:
         """Fetch one object from whichever holder control resolves into a new file in
-        ``staging``, and return the file once its bytes verify."""
+        ``staging``, and return the file once its bytes verify.
+
+        With ``peer_only`` the transfer is carried only over a peer transport, and a
+        grant control could route only over the root relay fails the read instead.
+        """
         self._progressed()
-        grant = await self._grant_for(reference, task_id)
+        for attempt in range(_TRANSFER_ATTEMPTS):
+            grant, carriage = await self._grant_for(reference, task_id, peer_only)
+            connection = await self._dial(carriage)
+            if connection is None and peer_only:
+                # Nothing was sent, so the grant is unspent and lapses at the holder.
+                raise ContentHydrationError(
+                    f"no peer transport reaches a holder of {reference.content_digest}"
+                )
+            try:
+                return await self._transfer_into(grant, staging, connection)
+            except ContentHydrationError:
+                if connection is None or attempt + 1 == _TRANSFER_ATTEMPTS:
+                    raise
+                self._logger.info(
+                    "content transfer %s over %s failed; asking for a fresh grant",
+                    grant.transfer_session_id,
+                    carriage.transport if carriage is not None else "relay",
+                )
+        raise AssertionError("unreachable")
+
+    async def _dial(
+        self, carriage: ContentCarriagePlan | None
+    ) -> PeerConnection | None:
+        """The connection a plan routes over, or None for the root relay."""
+        if (
+            carriage is None
+            or not carriage.dialed
+            or not carriage.fresh()
+            or self._dialer is None
+        ):
+            return None
+        try:
+            return await self._dialer.open(carriage, self._progressed)
+        except PeerUnreachable:
+            return None
+
+    async def _transfer_into(
+        self,
+        grant: ContentHydrationGrant,
+        staging: Path,
+        connection: PeerConnection | None,
+    ) -> Path:
         session = FramedRelaySession(
             session_id=grant.transfer_session_id,
             correlation_id=grant.grant_id,
             role=RelaySessionRole.ORIGIN,
-            sink=self._sink,
+            sink=connection or self._sink,
             window_bytes=self._window_bytes,
         )
-        self._sessions[grant.transfer_session_id] = session
+        if connection is None:
+            self._sessions[grant.transfer_session_id] = session
+        else:
+            connection.attach(session)
         target = temp_path(staging)
         served = False
         try:
             await self._transfer(session, grant, target)
             served = True
+            self._logger.info(
+                "content %s carried over %s",
+                grant.reference.content_digest,
+                "a dialed peer connection" if connection else "the root relay",
+            )
             return target
+        except OSError as exc:
+            raise ContentHydrationError(
+                f"content transfer {grant.transfer_session_id} lost its carriage"
+            ) from exc
         finally:
             if not served:
                 target.unlink(missing_ok=True)
@@ -122,10 +201,12 @@ class ContentHydrationClient:
                 with contextlib.suppress(Exception):
                     await session.cancel()
             self._sessions.pop(grant.transfer_session_id, None)
+            if connection is not None:
+                await connection.aclose()
 
     async def _grant_for(
-        self, reference: ContentReference, task_id: str
-    ) -> ContentHydrationGrant:
+        self, reference: ContentReference, task_id: str, peer_only: bool
+    ) -> _Granted:
         """Ask control to authorize this read, and wait for its answer.
 
         Each request waits on its own answer because a grant is good for one transfer:
@@ -138,7 +219,7 @@ class ContentHydrationClient:
         waiting.append(pending)
         # Armed before the request goes up, so an answer that comes straight back finds
         # a waiter rather than arriving at nobody.
-        self._request_grant(reference, task_id)
+        self._request_grant(reference, task_id, peer_only)
         try:
             answer = await asyncio.wait_for(pending, self._timeout)
         except TimeoutError as exc:
@@ -188,15 +269,20 @@ class ContentHydrationClient:
                 elif kind != KIND_HEAD:
                     raise ContentHydrationError("unexpected content transfer message")
 
-    def deliver_grant(self, grant: ContentHydrationGrant) -> None:
-        """Hand a control-minted grant to the request waiting for its object."""
+    def deliver_grant(
+        self,
+        grant: ContentHydrationGrant,
+        carriage: ContentCarriagePlan | None = None,
+    ) -> None:
+        """Hand a control-minted grant, and how control routed it, to the request
+        waiting for its object."""
         self._progressed()
         self._settle(
             (
                 grant.reference.authorization_scope,
                 grant.reference.content_digest,
             ),
-            grant,
+            (grant, carriage),
         )
 
     def deliver_denial(self, reference: ContentReference, reason: str) -> None:
@@ -204,7 +290,7 @@ class ContentHydrationClient:
         self._progressed()
         self._settle((reference.authorization_scope, reference.content_digest), reason)
 
-    def _settle(self, key: _WaitKey, answer: ContentHydrationGrant | str) -> None:
+    def _settle(self, key: _WaitKey, answer: _Granted | str) -> None:
         """Hand one answer to the longest-waiting request for that object."""
         waiting = self._waiters.get(key)
         while waiting:
@@ -225,7 +311,11 @@ class ContentHydrationClient:
             self._waiters.pop(key, None)
 
     async def on_frame(self, frame: RelayFrame) -> None:
-        """Route one inbound frame into the transfer waiting for it."""
+        """Route one relayed frame into the transfer waiting for it.
+
+        A transfer carried over a dialed connection reads only that connection, so a
+        relayed frame naming its session finds nothing here.
+        """
         session = self._sessions.get(frame.session_id)
         if session is not None:
             self._progressed()

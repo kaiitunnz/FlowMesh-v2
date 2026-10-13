@@ -24,7 +24,11 @@ class _Client:
         self.last_progress = time.monotonic()
 
     async def hydrate_to_file(
-        self, reference: ContentReference, task_id: str, staging: Path
+        self,
+        reference: ContentReference,
+        task_id: str,
+        staging: Path,
+        peer_only: bool = False,
     ) -> Path:
         deadline = time.monotonic() + self._duration_sec
         while time.monotonic() < deadline:
@@ -40,7 +44,7 @@ def _lane(tmp_path, client: _Client) -> ContentLaneHost:
     lane = ContentLaneHost(
         store=WorkerContentCache(tmp_path / "content"),
         push_frame=lambda frame: None,
-        request_grant=lambda reference, task_id: None,
+        request_grant=lambda reference, task_id, peer_only: None,
         worker_id="wkr-1",
         generation=1,
         transfer_timeout_sec=_STALL,

@@ -23,7 +23,7 @@ def _lane(tmp_path, reports: _Reports, **kwargs) -> ContentLaneHost:
             tmp_path / "content", retain_sec=kwargs.pop("retain", 900.0)
         ),
         push_frame=lambda frame: None,
-        request_grant=lambda reference, task_id: None,
+        request_grant=lambda reference, task_id, peer_only: None,
         worker_id="wkr-1",
         generation=2,
         announce=reports,

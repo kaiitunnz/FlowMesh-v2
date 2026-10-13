@@ -6,6 +6,11 @@ blocks on the result, while the interrupt-monitor thread marshals every control 
 a grant for a transfer this worker requested, a grant against content it holds, a data
 frame — onto the same loop. Produced frames leave as ``CONTENT_FRAME`` events over the
 authenticated attachment, which the supervisor bridges onward opaquely.
+
+Where the deployment carries content over peer transports, the lane also serves its own
+content listener on this loop, so a transfer a requester dials here is read, answered
+and closed without crossing to another thread, and it dials the holders control routes
+its own transfers to.
 """
 
 import asyncio
@@ -13,6 +18,7 @@ import concurrent.futures
 import contextlib
 import logging
 import shutil
+import socket
 import threading
 import time
 from collections.abc import Callable, Coroutine, Iterator
@@ -21,21 +27,54 @@ from typing import Any
 
 from shared.content import (
     OCTET_STREAM,
+    ContentCarriagePlan,
     ContentHydrationError,
     ContentHydrationGrant,
     ContentReference,
 )
+from shared.content.carriage import ContentRouteObservation
 from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
-from shared.network.frame_stream import WireFrameSink
+from shared.network.frame_stream import FrameSink, PeerPurpose, WireFrameSink
+from shared.network.mtls import MutualTlsMaterial, client_context
+from shared.network.mtls_listener import (
+    ConnectionHandler,
+    MutualTlsFrameListener,
+    PeerContext,
+)
 from shared.network.relay_frame import CONTENT_FRAME_KIND, RelayDirection, RelayFrame
+from shared.schemas.network import RouteObservationOutcome
 from shared.utils.atomic import write_replacing
 
 from .client import AnnounceHolding, ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
+from .peer import ContentPeerDialer
 from .store import WorkerContentCache
 
 # A lane busy sending waits on the event stream; a re-registration waits this long.
 _REBIND_WAIT_SEC = 30.0
+
+# Reports one dialed transfer's path evidence to control.
+ReportPath = Callable[[ContentRouteObservation], None]
+
+
+class _HolderConnection(ConnectionHandler):
+    """Hands one dialed connection's frames to the holder, answering over it."""
+
+    def __init__(self, holder: ContentHolder, sink: FrameSink, peer: PeerContext):
+        self._holder = holder
+        self._sink = sink
+        self._peer = peer
+
+    async def on_frame(self, frame: RelayFrame) -> None:
+        await self._holder.on_frame(frame, self._sink, self._peer)
+
+    def close(self) -> None:
+        self._holder.drop_connection(self._sink)
+
+
+def _is_registered_origin(identities: frozenset[str]) -> bool:
+    """Whether the dialer holds an identity the deployment CA issued."""
+    return bool(identities)
 
 
 class ContentLaneHost:
@@ -53,6 +92,11 @@ class ContentLaneHost:
         window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES,
         announce: AnnounceHolding | None = None,
         holder_report_ttl_sec: float = 300.0,
+        peer_enabled: bool = False,
+        peer_material: MutualTlsMaterial | None = None,
+        listener_sock: socket.socket | None = None,
+        connect_budget_sec: float = 5.0,
+        report_path: ReportPath | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._store = store
@@ -64,6 +108,12 @@ class ContentLaneHost:
         self._window_bytes = window_bytes
         self._announce = announce
         self._holder_report_ttl_sec = holder_report_ttl_sec
+        self._peer_enabled = peer_enabled
+        self._peer_material = peer_material
+        self._listener_sock = listener_sock
+        self._connect_budget_sec = connect_budget_sec
+        self._report_path = report_path
+        self._listener: MutualTlsFrameListener | None = None
         self._logger = logger or logging.getLogger("content-lane-host")
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -92,14 +142,53 @@ class ContentLaneHost:
             stall_timeout_sec=self._transfer_timeout_sec,
             logger=self._logger,
         )
+        dialer = None
+        if self._peer_enabled:
+            dialer = ContentPeerDialer(
+                ssl_context=(
+                    client_context(self._peer_material)
+                    if self._peer_material is not None
+                    else None
+                ),
+                connect_budget_sec=self._connect_budget_sec,
+                observe=self._observe_path,
+                logger=self._logger,
+            )
         self._client = ContentHydrationClient(
             sink=sink,
             request_grant=self._request_grant,
             transfer_timeout_sec=self._transfer_timeout_sec,
             window_bytes=self._window_bytes,
+            dialer=dialer,
             logger=self._logger,
         )
+        if self._listener_sock is not None:
+            holder = self._holder
+            self._listener = MutualTlsFrameListener(
+                material=self._peer_material,
+                handler=lambda sink, peer: _HolderConnection(holder, sink, peer),
+                admits=_is_registered_origin,
+                purposes=frozenset({PeerPurpose.CONTENT}),
+                logger=self._logger,
+            )
+            await self._listener.start_on_socket(self._listener_sock)
         self._sweep = asyncio.ensure_future(self._keep_held_reachable())
+
+    def _observe_path(
+        self, carriage: ContentCarriagePlan, outcome: RouteObservationOutcome
+    ) -> None:
+        if self._report_path is None:
+            return
+        try:
+            self._report_path(
+                ContentRouteObservation(
+                    transfer_session_id=carriage.transfer_session_id,
+                    transport=carriage.transport,
+                    outcome=outcome.value,
+                )
+            )
+        except Exception:
+            self._logger.warning("could not report a content path", exc_info=True)
 
     def read_local(self, reference: ContentReference) -> bytes:
         """This worker's own verified copy of an object."""
@@ -116,26 +205,40 @@ class ContentLaneHost:
             "content %s read from the local cache", reference.content_digest
         )
 
-    def read_peer(self, reference: ContentReference, task_id: str) -> bytes:
+    def read_peer(
+        self, reference: ContentReference, task_id: str, peer_only: bool = False
+    ) -> bytes:
         """An object's verified bytes from the peer control resolves, kept here too;
-        the copy is announced by whoever asked for the read."""
-        with self._from_peer(reference, task_id) as verified:
+        the copy is announced by whoever asked for the read.
+
+        With ``peer_only`` the read is carried only over a peer transport, never the
+        root relay.
+        """
+        with self._from_peer(reference, task_id, peer_only) as verified:
             return verified.read_bytes()
 
-    def copy_peer(self, reference: ContentReference, task_id: str, dest: Path) -> None:
+    def copy_peer(
+        self,
+        reference: ContentReference,
+        task_id: str,
+        dest: Path,
+        peer_only: bool = False,
+    ) -> None:
         """An object's verified bytes from a peer copied to ``dest``, kept here too."""
-        with self._from_peer(reference, task_id) as verified:
+        with self._from_peer(reference, task_id, peer_only) as verified:
             _copy_file(verified, dest)
 
     @contextlib.contextmanager
-    def _from_peer(self, reference: ContentReference, task_id: str) -> Iterator[Path]:
+    def _from_peer(
+        self, reference: ContentReference, task_id: str, peer_only: bool
+    ) -> Iterator[Path]:
         """The verified file a peer transfer lands in, taken into the cache once the
         caller has read it.
 
         The caller reads the transfer's own file rather than the cached copy, which an
         eviction is free to remove the moment it is adopted.
         """
-        verified = self._transfer(reference, task_id)
+        verified = self._transfer(reference, task_id, peer_only)
         try:
             yield verified
             self._logger.info(
@@ -152,13 +255,15 @@ class ContentLaneHost:
         finally:
             verified.unlink(missing_ok=True)
 
-    def _transfer(self, reference: ContentReference, task_id: str) -> Path:
+    def _transfer(
+        self, reference: ContentReference, task_id: str, peer_only: bool
+    ) -> Path:
         if self._client is None:
             raise RuntimeError("content lane is not started")
         client = self._client
         staging = self._store.staging_dir(reference.authorization_scope)
         transfer = self._call(
-            lambda: client.hydrate_to_file(reference, task_id, staging)
+            lambda: client.hydrate_to_file(reference, task_id, staging, peer_only)
         )
         # The client bounds each wait by the stall timeout, so a transfer that keeps
         # making progress runs as long as it needs. This is the backstop for a lane
@@ -286,8 +391,14 @@ class ContentLaneHost:
 
     def _on_grant(self, frame: dict[str, Any]) -> None:
         if self._client is not None:
+            carriage = frame.get("carriage")
             self._client.deliver_grant(
-                ContentHydrationGrant.model_validate(frame["grant"])
+                ContentHydrationGrant.model_validate(frame["grant"]),
+                (
+                    ContentCarriagePlan.model_validate(carriage)
+                    if carriage is not None
+                    else None
+                ),
             )
 
     def _on_denial(self, frame: dict[str, Any]) -> None:
@@ -300,7 +411,8 @@ class ContentLaneHost:
     def _on_serve_grant(self, frame: dict[str, Any]) -> None:
         if self._holder is not None:
             self._holder.accept_grant(
-                ContentHydrationGrant.model_validate(frame["grant"])
+                ContentHydrationGrant.model_validate(frame["grant"]),
+                frame.get("requester_host") or None,
             )
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
@@ -330,6 +442,9 @@ class ContentLaneHost:
 
         if self._sweep is not None:
             self._loop.call_soon_threadsafe(self._sweep.cancel)
+        if self._listener is not None:
+            with contextlib.suppress(Exception):
+                self._call(self._listener.stop).result(timeout=min(5.0, left()))
         if self._holder is not None:
             with contextlib.suppress(Exception):
                 self._call(self._holder.aclose).result(timeout=min(5.0, left()))

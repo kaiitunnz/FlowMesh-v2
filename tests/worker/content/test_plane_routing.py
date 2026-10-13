@@ -23,12 +23,19 @@ _LARGE = 64
 
 
 class _Lane:
-    """A cache lane holding nothing locally, whose peer has whatever it is given."""
+    """A cache lane holding nothing locally, whose peer has whatever it is given.
 
-    def __init__(self, peer: dict[str, bytes] | None = None) -> None:
+    A peer named in ``dialed`` is reached over a peer transport; any other is reached
+    over the root relay only, which a peer-only read refuses.
+    """
+
+    def __init__(
+        self, peer: dict[str, bytes] | None = None, dialed: frozenset[str] = frozenset()
+    ) -> None:
         # What the peer holds, by digest.
         self.peer = peer or {}
-        self.peer_reads: list[ContentReference] = []
+        self.dialed = dialed
+        self.peer_reads: list[tuple[ContentReference, bool]] = []
         self.kept: list[ContentReference] = []
 
     def read_local(self, reference: ContentReference) -> bytes:
@@ -37,14 +44,24 @@ class _Lane:
     def copy_local(self, reference: ContentReference, dest: Path) -> None:
         raise ContentHydrationError("not held")
 
-    def read_peer(self, reference: ContentReference, task_id: str) -> bytes:
-        self.peer_reads.append(reference)
+    def read_peer(
+        self, reference: ContentReference, task_id: str, peer_only: bool = False
+    ) -> bytes:
+        self.peer_reads.append((reference, peer_only))
         if reference.content_digest not in self.peer:
             raise ContentHydrationError("no holder")
+        if peer_only and reference.content_digest not in self.dialed:
+            raise ContentHydrationError("no peer transport")
         return self.peer[reference.content_digest]
 
-    def copy_peer(self, reference: ContentReference, task_id: str, dest: Path) -> None:
-        dest.write_bytes(self.read_peer(reference, task_id))
+    def copy_peer(
+        self,
+        reference: ContentReference,
+        task_id: str,
+        dest: Path,
+        peer_only: bool = False,
+    ) -> None:
+        dest.write_bytes(self.read_peer(reference, task_id, peer_only))
 
     def keep(self, scope: str, data: bytes, *, media_type: str = "") -> Any:
         reference = reference_for(scope, data, media_type=media_type)
@@ -97,7 +114,7 @@ def test_a_small_object_is_read_from_a_peer_before_the_store(tmp_path) -> None:
     announced: list[Sequence[Any]] = []
 
     assert _plane(store, lane, announced).hydrate("tsk-1", reference) == b"small"
-    assert lane.peer_reads == [reference]
+    assert lane.peer_reads == [(reference, False)]
     # The copy the peer read leaves here is announced for the next reader.
     assert announced == [[("org", reference.content_digest)]]
 
@@ -110,9 +127,27 @@ def test_a_large_object_is_read_from_the_store_not_relayed(tmp_path) -> None:
     announced: list[Sequence[Any]] = []
 
     assert _plane(store, lane, announced).hydrate("tsk-1", reference) == data
-    assert lane.peer_reads == []
+    # The peer is asked over a peer transport only, which no route offers here.
+    assert lane.peer_reads == [(reference, True)]
     # A store read leaves a copy here for the next reader, and says so.
     assert lane.kept == [reference]
+    assert announced == [[("org", reference.content_digest)]]
+
+
+@pytest.mark.parametrize("how", ["hydrate", "hydrate_to"])
+def test_a_large_object_a_peer_transport_reaches_is_read_before_the_store(
+    tmp_path, how: str
+) -> None:
+    data = b"x" * _LARGE
+    reference = reference_for("org", data)
+    lane = _Lane(
+        {reference.content_digest: data}, frozenset({reference.content_digest})
+    )
+    announced: list[Sequence[Any]] = []
+    plane = _plane(_DownStore(), lane, announced)
+
+    assert _read(plane.for_task("tsk-1", "org"), reference, how, tmp_path) == data
+    assert lane.peer_reads == [(reference, True)]
     assert announced == [[("org", reference.content_digest)]]
 
 
@@ -122,7 +157,7 @@ def test_a_large_object_is_relayed_while_the_store_is_down() -> None:
     lane = _Lane({reference.content_digest: data})
 
     assert _plane(_DownStore(), lane, []).hydrate("tsk-1", reference) == data
-    assert lane.peer_reads == [reference]
+    assert lane.peer_reads == [(reference, True), (reference, False)]
 
 
 def test_a_large_object_no_peer_holds_fails_as_the_outage_it_is() -> None:
@@ -151,7 +186,7 @@ def test_a_file_hydration_routes_as_a_read_does(tmp_path) -> None:
     _plane(store, lane, []).hydrate_to("tsk-1", reference, dest)
 
     assert dest.read_bytes() == data
-    assert lane.peer_reads == []
+    assert lane.peer_reads == [(reference, True)]
     assert lane.kept == [reference]
 
 
@@ -254,7 +289,7 @@ def test_a_large_object_is_relayed_to_a_task_with_no_live_access(
     )
 
     assert _read(plane.for_task("tsk-1", "org"), reference, how, tmp_path) == data
-    assert lane.peer_reads == [reference]
+    assert lane.peer_reads == [(reference, True), (reference, False)]
 
 
 def test_a_copy_that_fails_verification_mid_read_leaves_the_next_open_to_the_store(

@@ -185,6 +185,14 @@ class FramedRelaySession:
         self._recv_seq = frame.seq
         self._recv.put_nowait(frame.payload)
 
+    def abort(self) -> None:
+        """End the session here when its carriage is gone, telling the peer nothing.
+
+        A blocked receiver wakes at once, as it does on a cancel, rather than waiting
+        out its timeout for frames a closed connection will never deliver.
+        """
+        self._cancelled.set()
+
     async def cancel(self) -> None:
         """Signal the peer to reap this session and wake a blocked receiver here."""
         self._cancelled.set()
