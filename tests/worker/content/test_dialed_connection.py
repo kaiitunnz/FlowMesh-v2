@@ -1,24 +1,18 @@
-"""One dialed content connection carries one transfer, and how it ends is classified.
+"""How a dialed content connection ends is classified.
 
-The holder closes the connection after the transfer it carried, and the requester
-reports what the path did: a connection that ends before its transfer does is a network
-failure, classified by how it ended.
+The requester reports what the path did: a connection that ends before its transfer
+does is a network failure, classified by how it ended.
 """
 
 import asyncio
 import ssl
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from shared.content import ContentPeerRoute
-from shared.network.mtls_listener import ConnectionFrameSink
-from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.schemas.network import RouteObservationOutcome, Transport
-from worker.content import ContentHolder, WorkerContentCache
-from worker.content import holder as holder_module
 from worker.content.peer import PeerConnection
 
 
@@ -34,43 +28,6 @@ class _Writer:
 
     def close(self) -> None:
         self.closed = True
-
-
-class _Dialed(ConnectionFrameSink):
-    """A dialed connection the holder answers over, recording its close."""
-
-    def __init__(self) -> None:
-        self.writer = _Writer()
-        super().__init__(self.writer)  # type: ignore[arg-type]
-
-
-def _fetch(session_id: str) -> RelayFrame:
-    return RelayFrame(
-        kind=RelayFrameKind.DATA,
-        session_id=session_id,
-        direction=RelayDirection.ORIGIN_TO_TARGET,
-        seq=1,
-        payload=b"not a fetch",
-    )
-
-
-@pytest.mark.asyncio
-async def test_the_holder_closes_a_dialed_connection_after_its_transfer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(holder_module, "_DIALED_CLOSE_GRACE_SEC", 0.05)
-    holder = ContentHolder(
-        store=WorkerContentCache(tmp_path),
-        sink=_Dialed(),
-        holder_id="wkr-1",
-        generation=1,
-    )
-    dialed = _Dialed()
-    await holder.on_frame(_fetch("rly-1"), dialed)
-    async with asyncio.timeout(5.0):
-        while not dialed.writer.closed:
-            await asyncio.sleep(0.01)
-    await holder.aclose()
 
 
 async def _ended_with(

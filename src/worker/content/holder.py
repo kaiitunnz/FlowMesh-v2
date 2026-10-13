@@ -40,7 +40,7 @@ from shared.content.wire import (
     REJECT_WRONG_REQUESTER,
 )
 from shared.network.frame_stream import FrameSink
-from shared.network.mtls_listener import ConnectionFrameSink, PeerContext
+from shared.network.mtls_listener import PeerContext
 from shared.network.relay_frame import RelayFrame, RelayFrameKind
 from shared.network.session import FramedRelaySession, RelaySessionRole
 
@@ -58,10 +58,6 @@ _GRANT_ARRIVAL_WAIT_SEC = 2.0
 # eviction. A serve that makes no progress for this long is given up, so a peer that
 # goes quiet costs one transfer, while one that keeps reading runs as long as it needs.
 _STALL_TIMEOUT_SEC = 60.0
-
-
-# How long a dialed connection outlives the transfer it carried.
-_DIALED_CLOSE_GRACE_SEC = 5.0
 
 
 class ContentHolder:
@@ -302,15 +298,7 @@ class ContentHolder:
 
     def _reap(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
-        if isinstance(
-            carriage := self._carriages.pop(session_id, None), ConnectionFrameSink
-        ):
-            # A dialed connection carries one transfer, so it closes after it. The
-            # requester normally closes it first; closing at once would reset the grants
-            # it still has in flight.
-            asyncio.get_running_loop().call_later(
-                _DIALED_CLOSE_GRACE_SEC, carriage.close
-            )
+        self._carriages.pop(session_id, None)
         self._peers.pop(session_id, None)
         self._track(session_id, None)
         task = self._serves.pop(session_id, None)

@@ -71,9 +71,9 @@ class PeerConnection:
                 await write_relay_frame(self._writer, frame)
         except (OSError, FrameStreamError) as exc:
             if frame.kind is RelayFrameKind.WINDOW:
-                # The holder closes the connection once it has sent its last frame, so
-                # the grant for that frame can find it gone; the read side alone
-                # decides whether the transfer was lost.
+                # The far end may close the connection after its last frame, so the
+                # grant for that frame can find it gone; the read side alone decides
+                # whether the transfer was lost.
                 return
             self._lose(exc)
             raise
