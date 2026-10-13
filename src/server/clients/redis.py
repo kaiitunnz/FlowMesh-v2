@@ -363,6 +363,20 @@ def resident_relay_client(cfg: RedisConfig) -> async_redis.Redis:
     )
 
 
+def resident_relay_sync_client(cfg: RedisConfig) -> redis.Redis:
+    """A blocking client on the relay's Redis, for control-plane writes made off-loop.
+
+    A relay session's routing record lands where the bridges that route its frames
+    read it.
+    """
+    url, ssl_kwargs = _deployment_connection(
+        cfg.resident_relay_url, cfg, SyncSSLConnection
+    )
+    return redis.from_url(
+        url, decode_responses=True, **_keepalive_kwargs(), **ssl_kwargs
+    )
+
+
 def supervisor_state_client(cfg: RedisConfig) -> async_redis.Redis:
     """Build an async client on the supervisor state store."""
     url, kwargs = _supervisor_state_connection(cfg, AsyncSSLConnection)
