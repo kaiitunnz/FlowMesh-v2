@@ -1,11 +1,13 @@
 """Which content a task is bound to read, and the result it is bound to."""
 
 import logging
+import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from shared.content import ContentReference
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from shared.tasks.result_binding import (
     BindingKind,
     ResultBinding,
@@ -340,6 +342,71 @@ class ContentBindings:
             record.result_skip = skip
             return
         record.result_reference = self.accepted_reference(record, reference)
+
+    def bind_artifacts_locked(
+        self,
+        record: TaskRecord,
+        bindings: Sequence[ArtifactBinding],
+        dispatch_id: str | None,
+    ) -> list[ArtifactBinding]:
+        """Accept a task's reported publications; returns those newly accepted.
+
+        The first publication of a revision and name stands: the same bytes again
+        change nothing, and different bytes are refused rather than replacing it. An
+        archive is accepted only over a tree of the same revision already accepted.
+        """
+        published_at = ts_to_iso(time.time())
+        accepted: list[ArtifactBinding] = []
+        ordered = sorted(bindings, key=lambda b: b.kind is ArtifactKind.ARCHIVE)
+        for binding in ordered:
+            if not self._publishable(record, binding):
+                continue
+            if (existing := record.artifacts.get(binding.key)) is not None:
+                if not existing.same_publication(binding):
+                    self._logger.warning(
+                        "Task %s published %s at %s as %s, which already names %s; "
+                        "keeping the first",
+                        record.task_id,
+                        binding.name,
+                        binding.revision,
+                        binding.reference.content_digest,
+                        existing.reference.content_digest,
+                    )
+                continue
+            stamped = binding.accepted(dispatch_id, published_at)
+            record.artifacts[binding.key] = stamped
+            record.unwritten_artifacts.append(stamped)
+            record.has_artifacts = True
+            accepted.append(stamped)
+        return accepted
+
+    def _publishable(self, record: TaskRecord, binding: ArtifactBinding) -> bool:
+        scopes = {binding.reference.authorization_scope}
+        if binding.largest is not None:
+            scopes.add(binding.largest.authorization_scope)
+        if scopes != {record.org_id}:
+            self._logger.error(
+                "Task %s published %s outside its scope %s; not binding it",
+                record.task_id,
+                binding.name,
+                record.org_id,
+            )
+            return False
+        if binding.kind is ArtifactKind.ARCHIVE:
+            tree = record.artifacts.get((binding.revision, binding.of or ""))
+            if (
+                tree is None
+                or tree.kind is not ArtifactKind.TREE
+                or tree.reference.identity != binding.reference.identity
+            ):
+                self._logger.error(
+                    "Task %s published archive %s over no tree %s it published",
+                    record.task_id,
+                    binding.name,
+                    binding.of,
+                )
+                return False
+        return True
 
     def accepted_reference(
         self, record: TaskRecord, reference: ContentReference | None

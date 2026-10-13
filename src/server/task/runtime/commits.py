@@ -504,6 +504,8 @@ class TransitionCommitter:
         """Report each committed resident task that ended, file the completion notice
         of a terminal, and release the worker of each dispatch the commit ended."""
         self._observe_resident_locked(records)
+        for persisted in records:
+            persisted.record.unwritten_artifacts.clear()
         if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
             self._actions.file_locked(workflow_id, Settled(workflow_id))
         self._reservations.release_ended_dispatches_locked(

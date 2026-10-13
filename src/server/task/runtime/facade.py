@@ -49,6 +49,7 @@ from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.schemas.result.binding import upstream_value
 from shared.tasks import TaskEnvelopeTemplate
+from shared.tasks.artifact_binding import ArtifactBinding
 from shared.tasks.credentials import set_spec_values
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
 from shared.tasks.specs import ModelBindingMode, TaskSpecBase
@@ -208,6 +209,8 @@ from .reports import (
     LOSS_EFFECTS,
     failed_task_can_retry,
     in_flight_usage,
+    reported_artifacts,
+    reported_child_artifacts,
     reported_child_references,
     reported_reference,
     reset_to_pending,
@@ -1077,6 +1080,7 @@ class TaskRuntime:
                 )
                 self._cv.notify_all()
             restored.append(workflow_id)
+        await self._restore_artifacts(restored)
         with self._transition():
             self._merges.restore_merges_locked()
             self._resident_tasks.seed_dispatched_resident_locked()
@@ -1095,6 +1099,23 @@ class TaskRuntime:
                 "Rehydrated %d workflow(s) from durable state", len(restored)
             )
         return restored
+
+    async def _restore_artifacts(self, workflow_ids: Sequence[str]) -> None:
+        """Load the artifact catalog of each restored task that published one."""
+        with self._lock:
+            task_ids = [
+                record.task_id
+                for workflow_id in workflow_ids
+                for record in self._tasks.of_workflow(workflow_id)
+                if record.has_artifacts
+            ]
+        if not task_ids:
+            return
+        catalogs = await self._workflow_registry.artifact_bindings_many_async(task_ids)
+        with self._lock:
+            for task_id, bindings in catalogs.items():
+                if (record := self._tasks.get(task_id)) is not None:
+                    record.artifacts = bindings
 
     async def _load_stored_workflow(self, workflow_id: str) -> (
         tuple[
@@ -4471,6 +4492,8 @@ class TaskRuntime:
     ) -> SettleOutcome:
         reference = reported_reference(payload.get("result_reference"))
         child_references = reported_child_references(payload)
+        artifacts = reported_artifacts(payload.get("artifacts"))
+        child_artifacts = reported_child_artifacts(payload)
         fanout = self._prefetch_fanout(task_id, reference, skip)
         finished_ts = parse_iso_ts(str(payload.get("finished_at") or ts))
         maybe_started = payload.get("started_at")
@@ -4630,6 +4653,7 @@ class TaskRuntime:
             record.merged_children = None
             record.merged_dispatch_worker = None
             self._content_bindings.bind_result_locked(record, reference, skip)
+            self._bind_reported_artifacts_locked(record, artifacts, dispatch_id)
             if usage is not None:
                 record.usages.append(usage)
 
@@ -4659,6 +4683,10 @@ class TaskRuntime:
             )
             record.merged_children = settled_children or None
             for merged_child in settled_children:
+                if (child_record := self._tasks.get(merged_child)) is not None:
+                    self._bind_reported_artifacts_locked(
+                        child_record, child_artifacts.get(merged_child, []), dispatch_id
+                    )
                 ready_children.extend(
                     self._merges.finalize_merged_child_success_locked(
                         merged_child,
@@ -4686,6 +4714,20 @@ class TaskRuntime:
                 self._cv.notify_all()
 
             return settle_outcome(effect, record, settled_children, usages)
+
+    def _bind_reported_artifacts_locked(
+        self,
+        record: TaskRecord,
+        artifacts: list[ArtifactBinding] | None,
+        dispatch_id: str | None,
+    ) -> None:
+        if artifacts is None:
+            self._logger.error(
+                "Task %s reported artifacts that do not parse; binding none",
+                record.task_id,
+            )
+            return
+        self._content_bindings.bind_artifacts_locked(record, artifacts, dispatch_id)
 
     def _finish_success_locked(
         self, record: TaskRecord, fanout: FanoutRead | None

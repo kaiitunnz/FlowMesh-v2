@@ -180,6 +180,11 @@ def task_state_key(task_id: str) -> str:
     return f"task:{task_id}:state"
 
 
+def task_artifacts_key(task_id: str) -> str:
+    """The hash of a task's published artifacts, one field per revision and name."""
+    return f"task:{task_id}:artifacts"
+
+
 def worker_key(worker_id: str) -> str:
     return f"worker:{worker_id}"
 

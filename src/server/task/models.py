@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, computed_field
 
 from shared.content import ContentReference
 from shared.tasks import TaskEnvelopeTemplate, TaskType
+from shared.tasks.artifact_binding import ArtifactBinding
 from shared.tasks.worker_message import HardwareUsage
 
 from ..orchestration.tool_dispatch import FacadeTurnGroup
@@ -315,6 +316,23 @@ class TaskRecord(BaseModel):
     result_skip: dict[str, Any] | None = Field(
         default=None,
         description="Why a conditional task settled without running, when it did.",
+        exclude=True,
+    )
+    has_artifacts: bool = Field(
+        default=False,
+        description="Whether the task has published an artifact.",
+        exclude=True,
+    )
+    artifacts: dict[tuple[str, str], ArtifactBinding] = Field(
+        default_factory=dict,
+        description="The task's published artifacts by revision and name, as its "
+        "catalog holds them.",
+        exclude=True,
+    )
+    unwritten_artifacts: list[ArtifactBinding] = Field(
+        default_factory=list,
+        description="Accepted artifacts the task's next record write adds to its "
+        "catalog.",
         exclude=True,
     )
     credential_refs: dict[str, str] | None = Field(

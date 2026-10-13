@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from shared.content import ContentReference
+from shared.tasks.artifact_binding import ArtifactBinding
 
 from ..models import (
     SETTLING_TASK_STATUSES,
@@ -26,6 +27,29 @@ def reported_reference(raw: Any) -> ContentReference | None:
         return ContentReference.model_validate(raw)
     except ValidationError:
         return None
+
+
+def reported_artifacts(raw: Any) -> list[ArtifactBinding] | None:
+    """The artifacts a worker reported publishing, or None for a report that does
+    not parse."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return None
+    try:
+        return [ArtifactBinding.model_validate(item) for item in raw]
+    except ValidationError:
+        return None
+
+
+def reported_child_artifacts(
+    payload: dict[str, Any],
+) -> dict[str, list[ArtifactBinding] | None]:
+    """The artifacts a merged dispatch reported for its children, by child."""
+    raw = payload.get("child_artifacts") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(child_id): reported_artifacts(items) for child_id, items in raw.items()}
 
 
 def reset_to_pending(record: TaskRecord) -> None:

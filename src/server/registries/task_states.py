@@ -75,6 +75,8 @@ class PersistedTask(BaseModel):
             reference.model_dump(mode="json") if reference is not None else None
         )
         data["record"]["result_skip"] = self.record.result_skip
+        # And whether its artifact catalog has anything a restart must load.
+        data["record"]["has_artifacts"] = self.record.has_artifacts
         # And which worker a merged dispatch went to, which tells a later report of
         # that worker's failure apart from the task's own.
         data["record"]["merged_dispatch_worker"] = self.record.merged_dispatch_worker
