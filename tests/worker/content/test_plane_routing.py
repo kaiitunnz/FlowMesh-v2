@@ -102,7 +102,7 @@ def _plane(
         cast(Any, lane),
         cast(Any, _Access(store)),
         announce=announced.append,
-        peer_max_bytes=_LARGE,
+        relay_max_bytes=_LARGE,
     )
 
 
@@ -285,7 +285,7 @@ def test_a_large_object_is_relayed_to_a_task_with_no_live_access(
     reference = reference_for("org", data)
     lane = _Lane({reference.content_digest: data})
     plane = WorkerContentPlane(
-        cast(Any, lane), cast(Any, _NoAccess()), peer_max_bytes=_LARGE
+        cast(Any, lane), cast(Any, _NoAccess()), relay_max_bytes=_LARGE
     )
 
     assert _read(plane.for_task("tsk-1", "org"), reference, how, tmp_path) == data

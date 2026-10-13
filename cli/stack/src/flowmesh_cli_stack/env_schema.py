@@ -942,11 +942,11 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=65536,
                 ),
                 EnvVar(
-                    "CONTENT_PEER_TRANSFER_MAX_BYTES",
+                    "CONTENT_RELAY_TRANSFER_MAX_BYTES",
                     "67108864",
                     description=(
-                        "Objects this size or larger read from the store before the "
-                        "root relay while it is reachable (0 = relay first)."
+                        "Size from which reads prefer the store to the root relay "
+                        "(0 = relay first)."
                     ),
                     var_type=EnvVarType.INT,
                     min_value=0,

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.content.config import (
-    DEFAULT_PEER_TRANSFER_MAX_BYTES,
+    DEFAULT_RELAY_TRANSFER_MAX_BYTES,
     DEFAULT_TRANSFER_WINDOW_BYTES,
     ObjectStoreConfig,
 )
@@ -66,7 +66,7 @@ class WorkerConfig:
     object_store: ObjectStoreConfig
     content_transfer_timeout_sec: float
     content_transfer_window_bytes: int
-    content_peer_transfer_max_bytes: int
+    content_relay_transfer_max_bytes: int
     results_mount_source: str | None
     hb_interval_sec: int
     hb_ttl_sec: int
@@ -315,8 +315,8 @@ class WorkerConfig:
                     "CONTENT_TRANSFER_WINDOW_BYTES", DEFAULT_TRANSFER_WINDOW_BYTES
                 ),
             ),
-            content_peer_transfer_max_bytes=parse_int_env(
-                "CONTENT_PEER_TRANSFER_MAX_BYTES", DEFAULT_PEER_TRANSFER_MAX_BYTES
+            content_relay_transfer_max_bytes=parse_int_env(
+                "CONTENT_RELAY_TRANSFER_MAX_BYTES", DEFAULT_RELAY_TRANSFER_MAX_BYTES
             ),
             results_mount_source=results_mount_source,
             hb_interval_sec=hb_interval,

@@ -380,8 +380,8 @@ class WorkerAdapter(ABC):
             "CONTENT_TRANSFER_WINDOW_BYTES": to_env_str(
                 env.CONTENT_TRANSFER_WINDOW_BYTES
             ),
-            "CONTENT_PEER_TRANSFER_MAX_BYTES": to_env_str(
-                env.CONTENT_PEER_TRANSFER_MAX_BYTES
+            "CONTENT_RELAY_TRANSFER_MAX_BYTES": to_env_str(
+                env.CONTENT_RELAY_TRANSFER_MAX_BYTES
             ),
             "CONTENT_STORE_PART_BYTES": to_env_str(env.CONTENT_STORE_PART_BYTES),
             "CONTENT_STORE_UPLOAD_CONCURRENCY": to_env_str(

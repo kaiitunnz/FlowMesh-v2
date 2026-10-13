@@ -520,7 +520,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   transfer bypasses the root; a holder reached that way is preferred, at any object
   size. Otherwise the transfer runs over the network plane's relay under its own
   namespace, so the root bridges opaque frames and never holds, assembles, or resolves
-  the payload; an object of `CONTENT_PEER_TRANSFER_MAX_BYTES` or more is relayed only
+  the payload; an object of `CONTENT_RELAY_TRANSFER_MAX_BYTES` or more is relayed only
   while the store cannot be reached, and read from the store first otherwise. A dialed
   transfer is served only to a connection whose certificate covers the requester node's
   advertised host. A refused, expired, or replayed grant, an evicted copy, a holder that

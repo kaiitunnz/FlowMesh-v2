@@ -375,7 +375,7 @@ def _build_content_plane(
             if cfg.server_base_url
             else None
         ),
-        peer_max_bytes=cfg.content_peer_transfer_max_bytes,
+        relay_max_bytes=cfg.content_relay_transfer_max_bytes,
         logger=logger,
     )
 

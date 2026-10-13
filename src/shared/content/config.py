@@ -22,10 +22,10 @@ MIN_PART_BYTES = 5 << 20
 MAX_PART_BYTES = 5 << 30
 DEFAULT_PART_BYTES = 16 << 20
 DEFAULT_UPLOAD_CONCURRENCY = 4
-# How much of a peer transfer may be in flight, and the object size from which a worker
-# reads the shared store before a peer.
+# How much of a content transfer may be in flight, and the object size from which a
+# worker reads the shared store before the root relay.
 DEFAULT_TRANSFER_WINDOW_BYTES = 1 << 20
-DEFAULT_PEER_TRANSFER_MAX_BYTES = 64 << 20
+DEFAULT_RELAY_TRANSFER_MAX_BYTES = 64 << 20
 
 
 def _colocated_endpoint() -> str:

@@ -35,7 +35,7 @@ from shared.content import (
     ContentUnavailable,
     FabricObjectStore,
 )
-from shared.content.config import DEFAULT_PEER_TRANSFER_MAX_BYTES
+from shared.content.config import DEFAULT_RELAY_TRANSFER_MAX_BYTES
 from shared.outcome import (
     FabricContentStore,
     FinalizationIndexClient,
@@ -64,14 +64,14 @@ class WorkerContentPlane:
         *,
         announce: AnnounceHolding | None = None,
         finalizations: FinalizationIndexClient | None = None,
-        peer_max_bytes: int = DEFAULT_PEER_TRANSFER_MAX_BYTES,
+        relay_max_bytes: int = DEFAULT_RELAY_TRANSFER_MAX_BYTES,
         logger: logging.Logger | None = None,
     ) -> None:
         self._lane = lane
         self._access = access
         self._announce = announce
         self._finalizations = finalizations
-        self._peer_max_bytes = peer_max_bytes
+        self._relay_max_bytes = relay_max_bytes
         self._logger = logger or logging.getLogger("content-plane")
 
     def for_task(self, task_id: str, scope: str) -> "TaskContentStore":
@@ -275,7 +275,9 @@ class WorkerContentPlane:
         size the store is read first. This weighs cost only: an object of any size is
         relayed while the store cannot be reached.
         """
-        return self._peer_max_bytes <= 0 or reference.size_bytes < self._peer_max_bytes
+        return (
+            self._relay_max_bytes <= 0 or reference.size_bytes < self._relay_max_bytes
+        )
 
     def _relay_during[T](self, outage: ContentStoreError, read: Callable[[], T]) -> T:
         """A peer's copy while the store is down or out of the task's reach.
