@@ -73,6 +73,14 @@ class RelayWorkerBridge:
         """Publish worker frames on the up stream of the node's new id."""
         self._node_id = node_id
 
+    @property
+    def node_id(self) -> str:
+        return self._node_id
+
+    async def session(self, session_id: str) -> dict[str, str]:
+        """The control-written routing record of one session, empty when it has none."""
+        return await self._sessions.load(session_id)
+
     def bind_peer(self, session_id: str, sink: FrameSink) -> None:
         """Answer one session's worker frames over the connection its origin dialed.
 

@@ -19,6 +19,7 @@ from server.supervisor.services.peer_listener import NodePeerListener
 from shared.network.frame_stream import (
     MAX_PROBE_BYTES,
     FrameStreamError,
+    PeerPurpose,
     ProbeFrame,
     read_relay_frame,
     read_stream_frame,
@@ -76,7 +77,7 @@ async def _node_listener(
     listener = NodePeerListener(
         endpoint="127.0.0.1:0",
         material=material,
-        bridge=cast(Any, bridge),
+        bridges={PeerPurpose.RESIDENT: cast(Any, bridge)},
     )
     await listener.start()
     return listener

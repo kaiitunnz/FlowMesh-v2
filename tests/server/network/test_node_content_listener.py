@@ -1,0 +1,160 @@
+"""A node's peer listener hands each dialed session to the uplink of its purpose.
+
+A content session reaches the content uplink only when control routed it to this node,
+for a dialer whose certificate covers the host control named for its requester.
+"""
+
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from typing import Any, cast
+
+import pytest
+
+from server.supervisor.services.peer_listener import NodePeerListener
+from shared.network.frame_stream import PeerPurpose, write_relay_frame
+from shared.network.mtls import MutualTlsMaterial, client_context
+from shared.network.peer_dial import PeerAcceptError, open_accepted_connection
+from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
+from tests.support.certs import TestCa as _TestCa
+from tests.support.certs import new_ca
+
+_REQUESTER_HOST = "10.0.0.7"
+
+
+class _Uplink:
+    """One namespace's bridge: control's routing records, and what reached it."""
+
+    def __init__(self, node_id: str, records: dict[str, dict[str, str]]) -> None:
+        self.node_id = node_id
+        self._records = records
+        self.frames: list[RelayFrame] = []
+        self.bound: list[str] = []
+
+    async def session(self, session_id: str) -> dict[str, str]:
+        return self._records.get(session_id, {})
+
+    def bind_peer(self, session_id: str, sink: Any) -> None:
+        self.bound.append(session_id)
+
+    def release_peer(self, session_id: str, sink: Any) -> None:
+        return None
+
+    async def on_frame(self, frame: RelayFrame) -> None:
+        self.frames.append(frame)
+
+
+def _frame(session_id: str) -> RelayFrame:
+    return RelayFrame(
+        kind=RelayFrameKind.DATA,
+        session_id=session_id,
+        correlation_id="chg-1",
+        operation_id="",
+        direction=RelayDirection.ORIGIN_TO_TARGET,
+        seq=1,
+        payload=b"fetch",
+    )
+
+
+@contextlib.asynccontextmanager
+async def _listener(
+    ca: _TestCa, bridges: dict[PeerPurpose, _Uplink]
+) -> AsyncIterator[str]:
+    listener = NodePeerListener(
+        endpoint="127.0.0.1:0",
+        material=ca.material("node-b", "127.0.0.1"),
+        bridges=cast(Any, bridges),
+    )
+    await listener.start()
+    try:
+        yield f"127.0.0.1:{listener.port}"
+    finally:
+        await listener.stop()
+
+
+async def _send(
+    endpoint: str,
+    dialer: MutualTlsMaterial,
+    purpose: PeerPurpose,
+    session_id: str,
+) -> None:
+    reader, writer = await open_accepted_connection(
+        endpoint, client_context(dialer), 5.0, purpose
+    )
+    await write_relay_frame(writer, _frame(session_id))
+    with contextlib.suppress(asyncio.TimeoutError, ConnectionError):
+        await asyncio.wait_for(reader.read(), 0.5)
+    writer.close()
+
+
+@pytest.fixture(scope="module")
+def ca() -> _TestCa:
+    return new_ca()
+
+
+def _records() -> dict[str, dict[str, str]]:
+    return {
+        "rly-here": {"target_node": "nde-b", "origin_host": _REQUESTER_HOST},
+        "rly-elsewhere": {"target_node": "nde-c", "origin_host": _REQUESTER_HOST},
+    }
+
+
+def test_a_content_session_reaches_only_the_content_uplink(ca: _TestCa) -> None:
+    content = _Uplink("nde-b", _records())
+    resident = _Uplink("nde-b", {})
+
+    async def run() -> None:
+        bridges = {PeerPurpose.CONTENT: content, PeerPurpose.RESIDENT: resident}
+        async with _listener(ca, bridges) as endpoint:
+            requester = ca.material("node-a", _REQUESTER_HOST)
+            await _send(endpoint, requester, PeerPurpose.CONTENT, "rly-here")
+            await _send(endpoint, requester, PeerPurpose.RESIDENT, "rly-resident")
+
+    asyncio.run(run())
+    assert [frame.session_id for frame in content.frames] == ["rly-here"]
+    assert [frame.session_id for frame in resident.frames] == ["rly-resident"]
+
+
+@pytest.mark.parametrize(
+    ("session_id", "dialer"),
+    [
+        ("rly-elsewhere", "requester"),
+        ("rly-unknown", "requester"),
+        ("rly-here", "other-node"),
+        ("rly-here", "common-name-only"),
+    ],
+)
+def test_a_content_session_not_routed_to_this_dialer_reaches_nothing(
+    ca: _TestCa, session_id: str, dialer: str
+) -> None:
+    content = _Uplink("nde-b", _records())
+    material = {
+        "requester": ca.material("node-a", _REQUESTER_HOST),
+        "other-node": ca.material("node-c", "10.0.0.9"),
+        "common-name-only": ca.named_material(_REQUESTER_HOST, "node-c.example"),
+    }[dialer]
+
+    async def run() -> None:
+        async with _listener(ca, {PeerPurpose.CONTENT: content}) as endpoint:
+            await _send(endpoint, material, PeerPurpose.CONTENT, session_id)
+
+    asyncio.run(run())
+    assert content.frames == [] and content.bound == []
+
+
+def test_a_node_without_a_content_uplink_refuses_a_content_dialer(
+    ca: _TestCa,
+) -> None:
+    async def run() -> None:
+        resident = _Uplink("nde-b", {})
+        async with _listener(ca, {PeerPurpose.RESIDENT: resident}) as endpoint:
+            with pytest.raises(PeerAcceptError) as refused:
+                await open_accepted_connection(
+                    endpoint,
+                    client_context(ca.material("node-a", _REQUESTER_HOST)),
+                    5.0,
+                    PeerPurpose.CONTENT,
+                )
+            assert refused.value.outcome is None
+
+    asyncio.run(run())

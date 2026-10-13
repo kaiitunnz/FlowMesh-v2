@@ -12,6 +12,7 @@ from queue import Empty as QueueEmpty
 from queue import Full as QueueFull
 from threading import Lock, Thread
 
+from shared.network.frame_stream import PeerPurpose
 from shared.network.mtls import (
     MutualTlsMaterial,
     MutualTlsMaterialError,
@@ -348,6 +349,7 @@ def _run_supervisor(
     from ..clients import RedisClient
     from ..clients.redis import resident_relay_client, supervisor_state_sync_client
     from ..network.reverse_relay import BinaryRedis
+    from ..network.worker_bridge import RelayWorkerBridge
     from ..registries.node import NodeRegistry
     from ..registries.worker import WorkerRegistry as WorkerRecords
     from ..utils.logging import get_logger as _get_logger
@@ -515,16 +517,19 @@ def _run_supervisor(
         ),
     )
 
-    peer_listener: NodePeerListener | None = None
-    if (
-        resident_bridge is not None
-        and network_cfg.peer.enabled
-        and network_cfg.peer.node_listener_url
+    peer_bridges: dict[PeerPurpose, RelayWorkerBridge] = {}
+    if resident_bridge is not None:
+        peer_bridges[PeerPurpose.RESIDENT] = resident_bridge
+    if node_relays is not None and (
+        content_bridge := node_relays.bridge(CONTENT_NAMESPACE)
     ):
+        peer_bridges[PeerPurpose.CONTENT] = content_bridge
+    peer_listener: NodePeerListener | None = None
+    if peer_bridges and network_cfg.peer.enabled and network_cfg.peer.node_listener_url:
         peer_listener = NodePeerListener(
             endpoint=network_cfg.peer.node_listener_url,
             material=peer_material,
-            bridge=resident_bridge,
+            bridges=peer_bridges,
             logger=logger,
         )
 
