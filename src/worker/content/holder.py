@@ -210,7 +210,18 @@ class ContentHolder:
             if grant.grant_id not in self._requesters:
                 await self._await_grant(grant.grant_id)
             expected = self._requesters.get(grant.grant_id)
-            if expected is None or not peer.names.covers(expected[0]):
+            if expected is None:
+                # The grant never arrived, which says nothing about the dialer's path.
+                self._logger.warning(
+                    "refused content transfer %s: %s",
+                    session_id,
+                    GrantRejection.UNKNOWN_GRANT.value,
+                )
+                await session.send_wire(
+                    KIND_REJECT, reason=GrantRejection.UNKNOWN_GRANT.value
+                )
+                return
+            if not peer.names.covers(expected[0]):
                 self._logger.warning(
                     "refused content transfer %s: the dialer is not its requester",
                     session_id,

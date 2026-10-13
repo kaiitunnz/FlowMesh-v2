@@ -262,6 +262,20 @@ async def test_a_grant_redeemed_from_another_node_releases_nothing(
 
 
 @pytest.mark.asyncio
+async def test_a_grant_that_never_reaches_the_holder_demotes_nothing(
+    tmp_path, ca: _TestCa, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _fabric(tmp_path, ca) as fabric:
+        reference = fabric.cache.write("org", b"payload")
+        monkeypatch.setattr(fabric.holder, "accept_grant", lambda *_: None)
+
+        with pytest.raises(ContentHydrationError, match="unknown_grant"):
+            await fabric.read(reference, peer_only=True)
+
+    assert "tls_failure" not in fabric.observed
+
+
+@pytest.mark.asyncio
 async def test_a_common_name_matching_the_requester_host_is_not_its_binding(
     tmp_path, ca: _TestCa
 ) -> None:
