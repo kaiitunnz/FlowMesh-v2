@@ -7,6 +7,7 @@ mutual TLS; the root relay both ends fall back to is an in-process pair of sinks
 import asyncio
 import contextlib
 import socket
+import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -54,10 +55,12 @@ class _ToPeer:
 class _SlowFile:
     """A held copy that reads one chunk at a time, slowly."""
 
-    def __init__(self, fh: BinaryIO) -> None:
+    def __init__(self, fh: BinaryIO, reading: threading.Event) -> None:
         self._fh = fh
+        self._reading = reading
 
     def read(self, size: int = -1) -> bytes:
+        self._reading.set()
         time.sleep(0.02)
         return self._fh.read(size)
 
@@ -69,10 +72,14 @@ class _SlowFile:
 
 
 class _SlowCache(WorkerContentCache):
-    """A cache whose held copies read slowly."""
+    """A cache whose held copies read slowly, signalling once one is being read."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.reading = threading.Event()
 
     def open_pinned(self, reference: ContentReference) -> BinaryIO:
-        return cast(BinaryIO, _SlowFile(super().open_pinned(reference)))
+        return cast(BinaryIO, _SlowFile(super().open_pinned(reference), self.reading))
 
 
 class _Fabric:
@@ -303,7 +310,8 @@ async def test_a_holder_lost_mid_transfer_fails_the_read_promptly(
         reference = fabric.cache.write("org", data)
 
         async def lose_holder() -> None:
-            await asyncio.sleep(0.3)
+            # Lose the holder once its transfer is under way.
+            await asyncio.to_thread(cast(_SlowCache, fabric.cache).reading.wait, 5.0)
             await fabric.listener.stop()
 
         loss = asyncio.ensure_future(lose_holder())

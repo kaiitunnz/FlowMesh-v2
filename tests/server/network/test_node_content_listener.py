@@ -210,8 +210,9 @@ def test_a_holder_that_ends_ends_the_content_connections_to_it_at_once(
             await write_relay_frame(lost, _frame("rly-to-h"))
             await write_relay_frame(kept, _frame("rly-to-g"))
             await write_relay_frame(res, _frame("rly-to-h"))
-            while len(content.frames) < 2 or not resident.frames:
-                await asyncio.sleep(0.01)
+            async with asyncio.timeout(5.0):
+                while len(content.frames) < 2 or not resident.frames:
+                    await asyncio.sleep(0.01)
 
             await asyncio.to_thread(listener.release_worker, "wkr-h")
 
@@ -250,7 +251,6 @@ def test_a_content_session_to_a_worker_that_ended_reaches_nothing(
         await listener.start()
         try:
             await asyncio.to_thread(listener.release_worker, "wkr-h")
-            await asyncio.sleep(0.05)
             await _send(
                 f"127.0.0.1:{listener.port}",
                 ca.material("node-a", _REQUESTER_HOST),
@@ -366,7 +366,6 @@ def test_a_worker_id_registered_again_is_admitted_again(ca: _TestCa) -> None:
         try:
             listener.release_worker("wkr-h")
             listener.admit_worker("wkr-h")
-            await asyncio.sleep(0.05)
             await _send(endpoint, requester, PeerPurpose.CONTENT, "rly-to-h")
         finally:
             await listener.stop()

@@ -290,14 +290,14 @@ if IS_ROOT_NODE:
     _relay_redis: BinaryRedis | None = None
     CONTENT_BRIDGE: RootRendezvousBridge | None = None
     SSH_BRIDGE: RootRendezvousBridge | None = None
+    # One connection pool on the relay's Redis, for the bridges and the routing records
+    # control writes for them.
+    _relay_client = resident_relay_client(config.redis)
     if config.orchestration.network.enabled:
         NETWORK_PLANE = NetworkPlane(
             config.orchestration.network, NODE_REGISTRY, logger
         )
-        _relay_redis = cast(
-            BinaryRedis,
-            resident_relay_client(config.redis),
-        )
+        _relay_redis = cast(BinaryRedis, _relay_client)
         RESIDENT_BRIDGE = RootRendezvousBridge.for_keyspace(
             _relay_redis, RESIDENT_RELAY_KEYSPACE, logger
         )
@@ -341,9 +341,6 @@ if IS_ROOT_NODE:
             runtime=RUNTIME,
             sessions=RelaySessionStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
             resident_cfg=config.orchestration.resident,
-            worker_directly_routable=(
-                config.orchestration.network.worker_directly_routable
-            ),
             root_node_id=lambda: ROOT_NODE_ID,
             edge_id=SERVE_EDGE_STREAM_ID,
         )
@@ -445,8 +442,7 @@ if IS_ROOT_NODE:
             authorizes=RUNTIME.content_binding_authorizes,
             grant_ttl_sec=config.content_store.grant_ttl_sec,
             sessions=ContentTransferSessions(
-                resident_relay_client(config.redis),
-                ttl_sec=config.content_store.grant_ttl_sec * 10,
+                _relay_client, ttl_sec=config.content_store.grant_ttl_sec * 10
             ),
             network=NETWORK_PLANE,
             logger=logger,
