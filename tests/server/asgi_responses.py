@@ -13,6 +13,7 @@ class Served:
     status: int
     headers: dict[str, str]
     body: bytes
+    sends_after_disconnect: int = 0
 
 
 class ClientGone(OSError):
@@ -23,9 +24,11 @@ async def serve(
     response: Response,
     headers: dict[str, str] | None = None,
     abort_after_chunks: int | None = None,
+    silent_disconnect: bool = False,
 ) -> Served:
     """Send ``response`` for a GET carrying ``headers``; with ``abort_after_chunks``
-    the client disconnects once that many body chunks have arrived."""
+    the client disconnects once that many body chunks have arrived. A send after the
+    disconnect raises, or with ``silent_disconnect`` is dropped as uvicorn drops it."""
     scope = {
         "type": "http",
         "method": "GET",
@@ -35,7 +38,7 @@ async def serve(
             for name, value in (headers or {}).items()
         ],
     }
-    sent: dict[str, Any] = {"chunks": []}
+    sent: dict[str, Any] = {"chunks": [], "after": 0}
     requested = False
     gone = anyio.Event()
 
@@ -60,11 +63,17 @@ async def serve(
                 and len(sent["chunks"]) >= abort_after_chunks
             ):
                 gone.set()
-                raise ClientGone("client disconnected")
+                if not silent_disconnect:
+                    raise ClientGone("client disconnected")
+                sent["after"] += 1
+                await anyio.sleep(0)
+                return
             sent["chunks"].append(message.get("body", b""))
 
     try:
         await response(scope, receive, send)
     finally:
         gone.set()
-    return Served(sent["status"], sent["headers"], b"".join(sent["chunks"]))
+    return Served(
+        sent["status"], sent["headers"], b"".join(sent["chunks"]), sent["after"]
+    )

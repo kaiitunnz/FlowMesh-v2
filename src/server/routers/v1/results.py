@@ -4,12 +4,12 @@ import logging
 import mimetypes
 import os
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from functools import partial
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from anyio import to_thread
+from anyio import CancelScope, create_task_group, to_thread
 from fastapi import (
     APIRouter,
     Depends,
@@ -570,8 +570,23 @@ class ArtifactResponse(Response):
         self.init_headers(headers)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # A send after the client is gone does not fail, so the response stops on the
+        # disconnect itself rather than reading the rest of the object for no one.
         try:
-            await self._respond(scope, receive, send)
+            async with create_task_group() as group:
+
+                async def until_done(step: Callable[[], Awaitable[None]]) -> None:
+                    await step()
+                    group.cancel_scope.cancel()
+
+                group.start_soon(
+                    until_done, partial(self._respond, scope, receive, send)
+                )
+                await until_done(partial(_disconnected, receive))
+        except BaseExceptionGroup as failed:
+            if len(failed.exceptions) == 1:
+                raise failed.exceptions[0] from None
+            raise
         finally:
             if self._release is not None:
                 self._release()
@@ -608,7 +623,8 @@ class ArtifactResponse(Response):
         finally:
             close = getattr(chunks, "close", None)
             if close is not None:
-                await to_thread.run_sync(close)
+                with CancelScope(shield=True):
+                    await to_thread.run_sync(close)
 
     def _range_applies(self, if_range: str | None) -> bool:
         return if_range is None or if_range in (
@@ -658,6 +674,11 @@ class ArtifactResponse(Response):
 
 async def _no_receive() -> Message:
     return {"type": "http.disconnect"}
+
+
+async def _disconnected(receive: Receive) -> None:
+    while (await receive())["type"] != "http.disconnect":
+        pass
 
 
 class _MalformedRange(ValueError):

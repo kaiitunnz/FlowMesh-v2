@@ -12,6 +12,7 @@ import tracemalloc
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import pytest
 from fastapi import HTTPException, status
 
@@ -543,7 +544,7 @@ async def test_an_archive_streams_in_bounded_memory(
                 received += len(message["body"])
 
         async def receive() -> Any:
-            return {"type": "http.request"}
+            await anyio.sleep_forever()
 
         await response({"type": "http", "method": "GET", "headers": []}, receive, send)
         _, peak = tracemalloc.get_traced_memory()
@@ -552,3 +553,24 @@ async def test_an_archive_streams_in_bounded_memory(
 
     assert received > 48 << 20
     assert peak < 16 << 20
+
+
+@pytest.mark.anyio
+async def test_an_archive_stops_when_its_client_goes_away(
+    tmp_path: Path, runtime: _Runtime
+) -> None:
+    big = tmp_path / "big" / "artifacts"
+    (big / "model").mkdir(parents=True)
+    (big / "model" / "weights.bin").write_bytes(b"\x01" * (48 << 20))
+    publisher = ArtifactPublisher(runtime.store, "org")
+    bindings = publisher.publish_final(big, {"model.tar.gz": "model"})
+    runtime.bindings["tsk-1"] = {b.key: b for b in bindings}
+
+    served = await serve(
+        await _download(runtime, "model.tar.gz"),
+        abort_after_chunks=1,
+        silent_disconnect=True,
+    )
+
+    assert served.sends_after_disconnect <= 2
+    assert results_router._STREAMS._held == 0
